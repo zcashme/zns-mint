@@ -1,0 +1,27 @@
+[package]
+name = "zns-signer"
+description = "ZNS Orchard note construction + commitment verification (the crypto core; future in-enclave signer)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zns-core = { workspace = true }
+zns-verify = { workspace = true }
+# circuit = halo2 proving; unsafe-zns = rcm/psi overrides. The only crate that
+# pulls the proving stack — keep it that way.
+orchard = { workspace = true, features = ["unsafe-zns", "circuit"] }
+zcash_primitives = { workspace = true }
+zcash_protocol = { workspace = true }
+pasta_curves = { workspace = true }
+blake2b_simd = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+zip32 = { workspace = true }
+
+[lints]
+workspace = true

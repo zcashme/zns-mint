@@ -1,0 +1,19 @@
+[package]
+name = "zns-core"
+description = "Shared ZNS types: memo parsing, registry error, SQLite persistence — no crypto."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zns-auth = { workspace = true }      # RegistryError wraps AuthError
+zns-verify = { workspace = true }    # memo uses the canonical Action enum
+rusqlite = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

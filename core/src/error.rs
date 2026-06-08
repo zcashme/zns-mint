@@ -1,0 +1,45 @@
+use thiserror::Error;
+
+/// All errors that can be produced by the registry.
+#[derive(Debug, Error)]
+pub enum RegistryError {
+    /// A memo field did not conform to the ZNS grammar.
+    #[error("invalid ZNS memo: {0}")]
+    InvalidMemo(String),
+
+    /// A name string failed validation (empty, too long, bad chars, …).
+    #[error("invalid name '{0}': {1}")]
+    InvalidName(String, String),
+
+    /// The fee attached to a CLAIM was below the minimum.
+    #[error("insufficient fee: got {got} zatoshis, need {need}")]
+    InsufficientFee { got: u64, need: u64 },
+
+    /// The name is already claimed (and no prior tip was found to chain from).
+    #[error("name '{0}' is already registered")]
+    AlreadyClaimed(String),
+
+    /// The name has no existing record (UPDATE/RELEASE with unknown name).
+    #[error("name '{0}' is not registered")]
+    NotFound(String),
+
+    /// OTP/confirm auth failed.
+    #[error("auth error: {0}")]
+    Auth(#[from] zns_auth::error::AuthError),
+
+    /// An Orchard builder error occurred during note construction.
+    #[error("note build error: {0}")]
+    Build(String),
+
+    /// SQLite persistence error.
+    #[error("database error: {0}")]
+    Db(#[from] rusqlite::Error),
+
+    /// gRPC broadcast error.
+    #[error("broadcast error: {0}")]
+    Broadcast(String),
+
+    /// General I/O or internal error.
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}

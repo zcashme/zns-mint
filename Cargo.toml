@@ -1,0 +1,120 @@
+[workspace]
+members = ["auth", "core", "signer", "host"]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85.1"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/zechariah/zns"
+publish = false
+
+[workspace.dependencies]
+# ── internal crates ────────────────────────────────────────────────
+zns-auth   = { path = "auth" }
+zns-core   = { path = "core" }
+zns-signer = { path = "signer" }
+zns-host   = { path = "host" }
+
+# ── sibling repos (ZNS workspace neighbours) ───────────────────────
+# host owns its chain I/O directly via zcash_client_backend's lightwalletd
+# proto (see host/src/{grpc,scanner}.rs); seer-sync is no longer a dependency.
+zns-verify = { path = "../zns-verify" }
+
+# ── Zcash / Orchard stack ──────────────────────────────────────────
+# orchard resolves to the zns-orchard fork via [patch.crates-io] below;
+# the unsafe-zns / circuit features are added per-crate that needs them.
+orchard          = { version = "0.14", default-features = false }
+zcash_primitives = "0.28"
+zcash_protocol   = "0.9"
+zcash_keys       = { version = "0.14", default-features = false, features = ["orchard"] }
+zcash_note_encryption = "0.4.1"
+# lightwalletd gRPC transport (proto client) — replaces seer-sync for host's
+# chain I/O (broadcast + intake scan). `*-transport` pulls the tonic Channel;
+# `*-tls-webpki-roots` covers public servers; local regtest uses plaintext http.
+zcash_client_backend = { version = "0.23", default-features = false, features = [
+    "lightwalletd-tonic-transport",
+    "lightwalletd-tonic-tls-webpki-roots",
+    "orchard",
+] }
+
+# ── crypto ─────────────────────────────────────────────────────────
+pasta_curves = "0.5"
+blake2b_simd = "1"
+rand         = "0.8"
+
+# ── runtime / persistence / errors ─────────────────────────────────
+tokio     = { version = "1" }
+rusqlite  = { version = "0.32", features = ["bundled"] }
+serde     = { version = "1", features = ["derive"] }
+uuid      = { version = "1.1", features = ["v4"] }
+thiserror = "1"
+anyhow    = "1"
+
+# ── dev ────────────────────────────────────────────────────────────
+zip32 = "0.2"
+
+# ── planned: declared catalog, inert until a member opts in with ────
+#    `foo.workspace = true`. Versions are best-effort and confirmed when wired.
+#  daemon shell / control plane / resilience
+tokio-graceful-shutdown = "0.15"
+tower                   = "0.4.13"
+tonic                   = "0.14"
+jsonrpsee               = "0.24"
+tower-governor          = "0.4"
+#  config + safe hot-reload
+config   = "0.15"
+arc-swap = "1"
+notify   = "8"
+garde    = "0.20"
+#  caching / secrets / constant-time
+moka    = { version = "0.12", features = ["future"] }
+secrecy = "0.10"
+zeroize = "1"
+subtle  = "2.5"
+#  threshold signing (FROST fallback) + spend witnesses
+reddsa                = "0.5"
+shardtree             = "0.6"
+incrementalmerkletree = "0.8"
+#  observability
+tracing                     = "0.1"
+tracing-subscriber          = { version = "0.3", features = ["env-filter"] }
+metrics                     = "0.24"
+metrics-exporter-prometheus = "0.16"
+sd-notify                   = "0.4"
+#  test
+proptest  = "1"
+insta     = "1"
+criterion = "0.5"
+tempfile  = "3"
+
+[patch.crates-io]
+# zns-orchard is a drop-in for upstream orchard 0.13 (same package name
+# "orchard"), enabling the ZNS unsafe-zns rcm/psi overrides.
+orchard = { path = "../zns-orchard" }
+
+# ── Profiles ───────────────────────────────────────────────────────
+# Crypto crates at opt-level 3 even in dev, or halo2 proving is unusably
+# slow. Inert for any member that does not pull them in (e.g. zns-core).
+[profile.dev.package.halo2_proofs]
+opt-level = 3
+[profile.dev.package.halo2_gadgets]
+opt-level = 3
+[profile.dev.package.pasta_curves]
+opt-level = 3
+[profile.dev.package.blake2b_simd]
+opt-level = 3
+[profile.dev.package.ff]
+opt-level = 3
+[profile.dev.package.group]
+opt-level = 3
+[profile.dev.package.bls12_381]
+opt-level = 3
+[profile.dev.package.equihash]
+opt-level = 3
+[profile.dev.package.zcash_proofs]
+opt-level = 3
+
+[workspace.lints.rust]
+unsafe_code = "deny"
