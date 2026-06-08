@@ -9,7 +9,8 @@
 
 use std::time::Duration;
 
-use zns_mint::{scan_incoming_all, MintContext, ProcessResult, Registry, ScannerConfig};
+use orchard::keys::{FullViewingKey, Scope, SpendingKey};
+use zns_mint::{scan_incoming_all, GrpcClient, MintContext, ProcessResult, Registry, ScannerConfig};
 
 /// How often to poll lightwalletd for new blocks.
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
@@ -17,11 +18,11 @@ const POLL_INTERVAL: Duration = Duration::from_secs(15);
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // TODO: load from the `config` crate (file + ZNS_* env), init tracing+metrics.
-    let cfg = DaemonConfig::placeholder();
+    let cfg = DaemonConfig::from_env()?;
 
     let registry = Registry::new(&cfg.db_path, &cfg.lwd_url)?;
     let scanner = cfg.scanner();
-    let ctx = cfg.mint_context()?;
+    let grpc = GrpcClient::new(&cfg.lwd_url);
 
     eprintln!(
         "zns-mint: polling {} every {}s (db: {})",
@@ -33,6 +34,16 @@ async fn main() -> anyhow::Result<()> {
     let mut tick = tokio::time::interval(POLL_INTERVAL);
     loop {
         tick.tick().await;
+
+        // Stamp this round's mints with the current chain tip.
+        let tip = match grpc.tip_height().await {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("zns-mint: tip query failed: {e:#}");
+                continue;
+            }
+        };
+        let ctx = cfg.mint_context(tip);
 
         let notes = match scan_incoming_all(&scanner).await {
             Ok(notes) => notes,
@@ -57,42 +68,99 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Daemon configuration. Currently hard-coded placeholders; the `config` crate
-/// (file + `ZNS_*` env) populates this at boot.
+/// Daemon configuration. Sourced from `ZNS_*` env for now; the `config` crate
+/// (file + env, hot-reload) replaces this.
 struct DaemonConfig {
     db_path: String,
     lwd_url: String,
-    ufvk: String,
     network: zcash_protocol::consensus::Network,
     birthday: u32,
+    /// 32-byte zip32 seed the registry Orchard key is derived from.
+    seed: [u8; 32],
 }
 
 impl DaemonConfig {
-    fn placeholder() -> Self {
-        Self {
-            db_path: "zns-mint.sqlite".into(),
-            lwd_url: "http://127.0.0.1:9067".into(),
-            ufvk: String::new(),
-            network: zcash_protocol::consensus::Network::MainNetwork,
-            birthday: 0,
+    fn from_env() -> anyhow::Result<Self> {
+        let lwd_url =
+            std::env::var("ZNS_LWD_URL").unwrap_or_else(|_| "http://127.0.0.1:9067".into());
+        let network = match std::env::var("ZNS_NETWORK").as_deref() {
+            Ok("main") | Err(_) => zcash_protocol::consensus::Network::MainNetwork,
+            Ok(_) => zcash_protocol::consensus::Network::TestNetwork,
+        };
+        let birthday = std::env::var("ZNS_BIRTHDAY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        // TODO: load the seed from a secret store (zeroized), never plain env in
+        // production. A zero seed is deterministic — fine only for regtest.
+        let seed = match std::env::var("ZNS_SPEND_SEED") {
+            Ok(hex) => decode_seed(&hex)?,
+            Err(_) => {
+                eprintln!("zns-mint: WARNING — ZNS_SPEND_SEED unset, using a zero seed (regtest only)");
+                [0u8; 32]
+            }
+        };
+
+        Ok(Self {
+            db_path: std::env::var("ZNS_DB_PATH").unwrap_or_else(|_| "zns-mint.sqlite".into()),
+            lwd_url,
+            network,
+            birthday,
+            seed,
+        })
+    }
+
+    /// Coin type for zip32 derivation: 133 mainnet, 1 test/regtest.
+    fn coin_type(&self) -> u32 {
+        match self.network {
+            zcash_protocol::consensus::Network::MainNetwork => 133,
+            _ => 1,
         }
+    }
+
+    fn registry_fvk(&self) -> FullViewingKey {
+        let sk = SpendingKey::from_zip32_seed(&self.seed, self.coin_type(), zip32::AccountId::ZERO)
+            .expect("valid zip32 seed");
+        FullViewingKey::from(&sk)
     }
 
     fn scanner(&self) -> ScannerConfig {
         ScannerConfig {
-            ufvk: self.ufvk.clone(),
+            registry_fvk: self.registry_fvk(),
             network: self.network,
             birthday: self.birthday,
             lwd_url: self.lwd_url.clone(),
         }
     }
 
-    /// Build the Orchard key material the registry mints under.
-    ///
-    /// TODO: derive the registry FVK + recipient from the configured spend seed
-    /// (over the signer boundary), and source the anchor + tip height from the
-    /// scanner's note-state DB rather than the empty-tree default.
-    fn mint_context(&self) -> anyhow::Result<MintContext> {
-        anyhow::bail!("mint_context: registry key material not configured yet")
+    /// Build the per-round mint context. Value-0 Name Notes need only the
+    /// registry key, an empty-tree anchor, and the current height — no treasury.
+    /// `treasury` stays `None` until note-state lands, so UPDATE/RELEASE relays
+    /// surface a clear "no treasury funding configured" error.
+    fn mint_context(&self, tip_height: u32) -> MintContext {
+        let registry_fvk = self.registry_fvk();
+        let recipient = registry_fvk.address_at(0u32, Scope::External);
+        MintContext {
+            registry_fvk,
+            recipient,
+            anchor: orchard::tree::Anchor::empty_tree(),
+            height: tip_height,
+            expiry_height: 0,
+            network: self.network,
+            treasury: None,
+        }
     }
+}
+
+/// Decode a 64-char hex string into a 32-byte seed.
+fn decode_seed(hex: &str) -> anyhow::Result<[u8; 32]> {
+    let hex = hex.trim();
+    anyhow::ensure!(hex.len() == 64, "ZNS_SPEND_SEED must be 64 hex chars (32 bytes)");
+    let mut seed = [0u8; 32];
+    for (i, byte) in seed.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .map_err(|e| anyhow::anyhow!("invalid hex in ZNS_SPEND_SEED: {e}"))?;
+    }
+    Ok(seed)
 }

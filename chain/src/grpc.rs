@@ -7,7 +7,7 @@
 
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_client_backend::proto::service::{
-    compact_tx_streamer_client::CompactTxStreamerClient, RawTransaction,
+    compact_tx_streamer_client::CompactTxStreamerClient, ChainSpec, RawTransaction,
 };
 
 use zns_core::RegistryError;
@@ -62,6 +62,20 @@ impl GrpcClient {
     /// Create a client pointing at the default local zebrad/regtest endpoint.
     pub fn default_local() -> Self {
         Self::new(DEFAULT_GRPC_ADDR)
+    }
+
+    /// Return the current chain tip height via `GetLatestBlock`.
+    ///
+    /// The minting path records this as the Name Note's block height and uses it
+    /// to stamp the action log.
+    pub async fn tip_height(&self) -> Result<u32, RegistryError> {
+        let mut client = connect(&self.lwd_url).await?;
+        let block = client
+            .get_latest_block(ChainSpec {})
+            .await
+            .map_err(|e| RegistryError::Broadcast(format!("get_latest_block: {e}")))?
+            .into_inner();
+        Ok(block.height as u32)
     }
 
     /// Broadcast a serialised transaction via `SendTransaction`.

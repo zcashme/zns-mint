@@ -21,7 +21,6 @@ use zcash_client_backend::proto::{
     compact_formats::CompactOrchardAction,
     service::{BlockId, BlockRange, ChainSpec, TxFilter},
 };
-use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_note_encryption::{batch, try_note_decryption, EphemeralKeyBytes};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
@@ -30,11 +29,13 @@ use crate::grpc;
 
 /// Configuration for the scanner.
 pub struct ScannerConfig {
-    /// The Unified Full Viewing Key of the registry address (`addr_reg`).
-    pub ufvk: String,
+    /// The registry's Orchard Full Viewing Key (`addr_reg`). The registry is
+    /// Orchard-only, so we hold the FVK directly rather than round-tripping a
+    /// Unified FVK string.
+    pub registry_fvk: orchard::keys::FullViewingKey,
     /// The Zcash network to scan.
     pub network: Network,
-    /// Block height to start scanning from (the UFVK's "birthday").
+    /// Block height to start scanning from (the key's "birthday").
     pub birthday: u32,
     /// Lightwalletd URL, e.g. `"http://127.0.0.1:9067"` or `"https://zec.rocks:443"`.
     pub lwd_url: String,
@@ -71,7 +72,7 @@ where
     // Separate client for full-transaction fetches while the block stream runs.
     let mut fetch_client = client.clone();
 
-    let ivk = orchard_ivk(&config.network, &config.ufvk)?;
+    let ivk = orchard_ivk(&config.registry_fvk);
 
     let tip = client
         .get_latest_block(ChainSpec {})
@@ -166,13 +167,8 @@ pub async fn scan_incoming_all(config: &ScannerConfig) -> anyhow::Result<Vec<Inc
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Decode the registry UFVK and prepare its external Orchard incoming viewing key.
-fn orchard_ivk(network: &Network, ufvk: &str) -> anyhow::Result<PreparedIncomingViewingKey> {
-    let ufvk = UnifiedFullViewingKey::decode(network, ufvk)
-        .map_err(|e| anyhow!("UFVK decode failed: {e}"))?;
-    let fvk = ufvk
-        .orchard()
-        .ok_or_else(|| anyhow!("UFVK has no Orchard component"))?;
-    Ok(PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External)))
+fn orchard_ivk(fvk: &orchard::keys::FullViewingKey) -> PreparedIncomingViewingKey {
+    PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External))
 }
 
 /// Convert a proto [`CompactOrchardAction`] into an orchard [`CompactAction`].
@@ -239,18 +235,14 @@ mod regtest {
     use super::*;
     use orchard::keys::{FullViewingKey, SpendingKey};
     use zcash_client_backend::proto::service::ChainSpec;
-    use zcash_keys::keys::UnifiedFullViewingKey;
 
     const LWD: &str = "http://127.0.0.1:9067";
 
-    /// A throwaway registry UFVK (owns nothing on the chain — we only exercise
+    /// A throwaway registry FVK (owns nothing on the chain — we only exercise
     /// the connect + stream + trial-decrypt pipeline).
-    fn registry_ufvk(network: &Network) -> String {
+    fn registry_fvk() -> FullViewingKey {
         let sk = SpendingKey::from_zip32_seed(&[0x42u8; 32], 1, zip32::AccountId::ZERO).unwrap();
-        let fvk = FullViewingKey::from(&sk);
-        UnifiedFullViewingKey::new(None, Some(fvk))
-            .unwrap()
-            .encode(network)
+        FullViewingKey::from(&sk)
     }
 
     #[tokio::test]
@@ -270,7 +262,6 @@ mod regtest {
     #[ignore = "needs a local regtest lightwalletd on :9067"]
     async fn scan_pipeline_runs() {
         let network = Network::TestNetwork;
-        let ufvk = registry_ufvk(&network);
 
         let mut client = grpc::connect(LWD).await.expect("connect");
         let tip = client
@@ -281,7 +272,12 @@ mod regtest {
             .height as u32;
         let birthday = tip.saturating_sub(300);
 
-        let cfg = ScannerConfig { ufvk, network, birthday, lwd_url: LWD.to_string() };
+        let cfg = ScannerConfig {
+            registry_fvk: registry_fvk(),
+            network,
+            birthday,
+            lwd_url: LWD.to_string(),
+        };
         let mut count = 0usize;
         scan_incoming(&cfg, |batch| {
             count += batch.len();

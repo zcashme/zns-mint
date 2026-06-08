@@ -9,9 +9,9 @@ publish = false
 
 [dependencies]
 zns-core = { workspace = true }
-# orchard types in the scanned-note API; trial-decryption drives intake.
+# orchard types in the scanned-note API; trial-decryption drives intake. The
+# registry is Orchard-only, so the scanner takes a bare FVK — no zcash_keys/UFVK.
 orchard = { workspace = true, features = ["unsafe-zns"] }
-zcash_keys = { workspace = true }
 zcash_primitives = { workspace = true }
 zcash_protocol = { workspace = true }
 # lightwalletd gRPC transport: zcash_client_backend supplies the proto client +
@@ -23,8 +23,9 @@ tonic = { workspace = true, features = ["transport", "tls-ring", "tls-webpki-roo
 anyhow = { workspace = true }
 
 [dev-dependencies]
-# `test-dependencies` exposes UnifiedFullViewingKey::new for the regtest smoke tests.
-zcash_keys = { workspace = true, features = ["test-dependencies"] }
+# Regtest smoke tests derive a throwaway FVK and run the async scan pipeline.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+zip32 = { workspace = true }
 
 [lints]
 workspace = true
