@@ -1,4 +1,4 @@
-//! `zns-mintd` — the ZNS minting daemon.
+//! `zns-mint` — the ZNS minting daemon.
 //!
 //! Boot-and-run-forever: load config, construct the [`Registry`], run subsystems
 //! (scanner → minter → broadcaster, plus auth-gc and the RPC control plane)
@@ -6,7 +6,7 @@
 //! `ZNS_*` env. The supervision tree (`tokio-graceful-shutdown`) and control
 //! plane (`jsonrpsee`) are wired as those subsystems land; this is the scaffold.
 
-use zns_host::Registry;
+use zns_mint::Registry;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -19,6 +19,6 @@ async fn main() -> anyhow::Result<()> {
     //   broadcast — tonic → zebrad, with tower timeout/retry
     //   auth-gc   — OTP session expiry
     //   rpc       — jsonrpsee status / rescan / mempool
-    eprintln!("zns-mintd: scaffold up — subsystems not yet wired");
+    eprintln!("zns-mint: scaffold up — subsystems not yet wired");
     Ok(())
 }

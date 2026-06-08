@@ -1,5 +1,5 @@
 [workspace]
-members = ["auth", "core", "signer", "host"]
+members = ["core", "state", "chain", "signer", "auth", "mint"]
 resolver = "2"
 
 [workspace.package]
@@ -12,13 +12,21 @@ publish = false
 
 [workspace.dependencies]
 # ── internal crates ────────────────────────────────────────────────
-zns-auth   = { path = "auth" }
+# core   — domain types (action, memo, error), no crypto/io
+# state  — SQLite persistence (cf. zebra-state)
+# chain  — chain I/O: lightwalletd intake + zebrad broadcast (cf. zebra-network)
+# signer — crypto core: derive (ψ, rcm), build/verify the Orchard action
+# auth   — OTP challenge-response
+# mint   — the daemon: registry orchestration + the zns-mint binary (cf. zebrad)
 zns-core   = { path = "core" }
+zns-state  = { path = "state" }
+zns-chain  = { path = "chain" }
 zns-signer = { path = "signer" }
-zns-host   = { path = "host" }
+zns-auth   = { path = "auth" }
+zns-mint   = { path = "mint" }
 
 # ── sibling repos (ZNS workspace neighbours) ───────────────────────
-# The mint depends on no ZNS sibling repos. host owns its chain I/O via
+# The mint depends on no ZNS sibling repos. chain owns its I/O via
 # zcash_client_backend's lightwalletd proto (not seer-sync), and the registry
 # derives (ψ, rcm) with its own code (signer/derive.rs), independent of the
 # zns-verify kernel so producer and verifier can cross-check each other.

@@ -1,45 +1,28 @@
 [package]
-name = "zns-host"
-description = "ZNS minting daemon: chain/mempool sync, registry orchestration, and the zns-mintd binary."
+name = "zns-chain"
+description = "ZNS chain I/O: lightwalletd compact-block intake scan and zebrad gRPC broadcast."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
 
-[lib]
-name = "zns_host"
-path = "src/lib.rs"
-
-[[bin]]
-name = "zns-mintd"
-path = "src/bin/zns-mintd.rs"
-
 [dependencies]
 zns-core = { workspace = true }
-zns-signer = { workspace = true }
-zns-auth = { workspace = true }
-# orchard types appear in MintContext's public API; circuit arrives transitively
-# via zns-signer (this is the minting daemon, so that is expected).
+# orchard types in the scanned-note API; trial-decryption drives intake.
 orchard = { workspace = true, features = ["unsafe-zns"] }
-zcash_protocol = { workspace = true }
 zcash_keys = { workspace = true }
 zcash_primitives = { workspace = true }
+zcash_protocol = { workspace = true }
 # lightwalletd gRPC transport: zcash_client_backend supplies the proto client +
 # message types; tonic supplies the Channel (plaintext for regtest, TLS for
 # public servers). zcash_note_encryption drives Orchard trial-decryption.
 zcash_client_backend = { workspace = true }
-# treasury note-state core (scanning + shardtree witnesses for self-funded fees)
-zcash_client_sqlite = { workspace = true }
-shardtree = { workspace = true }
 zcash_note_encryption = { workspace = true }
 tonic = { workspace = true, features = ["transport", "tls-ring", "tls-webpki-roots"] }
-rusqlite = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 anyhow = { workspace = true }
 
 [dev-dependencies]
-zip32 = { workspace = true }
 # `test-dependencies` exposes UnifiedFullViewingKey::new for the regtest smoke tests.
 zcash_keys = { workspace = true, features = ["test-dependencies"] }
 

@@ -1,0 +1,16 @@
+[package]
+name = "zns-state"
+description = "ZNS registry persistence: the SQLite name-record store and (soon) the minted-action log."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zns-core = { workspace = true }   # RegistryError, shared domain types
+rusqlite = { workspace = true }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

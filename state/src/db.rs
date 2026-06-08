@@ -14,7 +14,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::error::RegistryError;
+use zns_core::RegistryError;
 
 /// A row from `name_records`.
 #[derive(Debug, Clone)]

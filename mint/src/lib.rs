@@ -1,30 +1,27 @@
-//! `zns-registry` — ZcashName (ZNS) minting and registry logic.
+//! `zns-mint` — the ZNS minting daemon: registry orchestration.
 //!
 //! # Overview
 //!
-//! The [`Registry`] struct is the top-level entry point.  It:
+//! The [`Registry`] struct is the orchestration core — it wires the other
+//! crates together, the way `zebrad` composes Zebra's services. It:
 //!
-//! 1. Scans incoming Orchard notes addressed to `addr_reg` over lightwalletd's
-//!    compact-block proto (standard ZIP-212; see [`scanner`]).
-//! 2. Parses ZNS memos from those notes (see [`memo`]).
+//! 1. Reads incoming Orchard notes addressed to the registry over lightwalletd
+//!    (`zns_chain::scanner`).
+//! 2. Parses ZNS memos from those notes (`zns_core::memo`).
 //! 3. For **CLAIM**: verifies that the fee ≥ minimum and mints immediately.
 //! 4. For **UPDATE/RELEASE**: initiates OTP auth ([`zns_auth::AuthModule`]),
 //!    waits for a confirm note, then mints.
 //! 5. Mints Name Notes: the signer derives `(rcm, psi)` and builds the Orchard
-//!    action via the `zns-orchard` fork (see [`mint`]).
-//! 6. Persists per-name `rcm` tips in SQLite (see [`db`]).
-//! 7. Broadcasts transactions via zebrad gRPC (see [`grpc`]).
+//!    action via the `zns-orchard` fork (`zns_signer`).
+//! 6. Persists per-name `rcm` tips in SQLite (`zns_state`).
+//! 7. Broadcasts transactions via zebrad gRPC (`zns_chain::grpc`).
 
-// Host-owned modules (orchestration + chain I/O).
-pub mod grpc;
-pub mod scanner;
-
-// Flat API surface — re-export the shared `core` and crypto `signer` crates so
-// `zns_host::{parse_memo, build_name_note, NameRecord, ...}` keep resolving.
-pub use zns_core::{db, memo, parse_memo, Action, NameRecord, ParsedMemo, RegistryError, ZERO_PREV_RCM};
+// Flat API surface — re-export the domain, state, chain, and signer crates so
+// `zns_mint::{parse_memo, build_name_note, NameRecord, ...}` resolve in one place.
+pub use zns_core::{memo, parse_memo, Action, ParsedMemo, RegistryError, ZERO_PREV_RCM};
+pub use zns_state::{db, NameRecord};
 pub use zns_signer::{build_name_note, MintParams, MintResult};
-pub use grpc::GrpcClient;
-pub use scanner::{scan_incoming, IncomingNote, ScannerConfig};
+pub use zns_chain::{scan_incoming, GrpcClient, IncomingNote, ScannerConfig};
 
 use std::sync::Arc;
 

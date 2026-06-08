@@ -233,7 +233,7 @@ async fn fetch_transaction(
 // ── live regtest smoke tests ─────────────────────────────────────────────────
 //
 // Ignored by default (need a local lightwalletd on :9067). Run with:
-//   cargo test -p zns-host scanner::regtest -- --ignored --nocapture
+//   cargo test -p zns-chain scanner::regtest -- --ignored --nocapture
 #[cfg(test)]
 mod regtest {
     use super::*;

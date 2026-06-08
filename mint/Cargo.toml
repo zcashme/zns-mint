@@ -1,0 +1,37 @@
+[package]
+name = "zns-mint"
+description = "ZNS minting daemon: registry orchestration over chain intake, signer, and state."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "zns_mint"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zns-mint"
+path = "src/bin/zns-mint.rs"
+
+[dependencies]
+zns-core = { workspace = true }
+zns-state = { workspace = true }
+zns-chain = { workspace = true }
+zns-signer = { workspace = true }
+zns-auth = { workspace = true }
+# orchard types appear in MintContext's public API; circuit arrives transitively
+# via zns-signer (this is the minting daemon, so that is expected).
+orchard = { workspace = true, features = ["unsafe-zns"] }
+zcash_protocol = { workspace = true }
+# Registry holds the SQLite connection directly and calls zns-state's helpers.
+rusqlite = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+zip32 = { workspace = true }
+
+[lints]
+workspace = true
