@@ -21,7 +21,7 @@
 use std::collections::HashSet;
 
 use orchard::{tree::Anchor, tree::MerklePath, Address, Note};
-use zns_verify::Action;
+use zns_core::Action;
 
 // ── policy constants (attested in production) ────────────────────────────────
 

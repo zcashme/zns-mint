@@ -10,8 +10,8 @@
 //! 3. For **CLAIM**: verifies that the fee ≥ minimum and mints immediately.
 //! 4. For **UPDATE/RELEASE**: initiates OTP auth ([`zns_auth::AuthModule`]),
 //!    waits for a confirm note, then mints.
-//! 5. Mints Name Notes: computes `(rcm, psi)` via [`zns_verify::zns_psi_rcm`],
-//!    builds the Orchard action via the `zns-orchard` fork (see [`mint`]).
+//! 5. Mints Name Notes: the signer derives `(rcm, psi)` and builds the Orchard
+//!    action via the `zns-orchard` fork (see [`mint`]).
 //! 6. Persists per-name `rcm` tips in SQLite (see [`db`]).
 //! 7. Broadcasts transactions via zebrad gRPC (see [`grpc`]).
 
@@ -21,8 +21,8 @@ pub mod scanner;
 
 // Flat API surface — re-export the shared `core` and crypto `signer` crates so
 // `zns_host::{parse_memo, build_name_note, NameRecord, ...}` keep resolving.
-pub use zns_core::{db, memo, parse_memo, NameRecord, ParsedMemo, RegistryError};
-pub use zns_signer::{build_name_note, expected_cmx, verify_cmx, MintParams, MintResult};
+pub use zns_core::{db, memo, parse_memo, Action, NameRecord, ParsedMemo, RegistryError, ZERO_PREV_RCM};
+pub use zns_signer::{build_name_note, MintParams, MintResult};
 pub use grpc::GrpcClient;
 pub use scanner::{scan_incoming, IncomingNote, ScannerConfig};
 
@@ -31,7 +31,6 @@ use std::sync::Arc;
 use rusqlite::Connection;
 use tokio::sync::Mutex;
 use zns_auth::AuthModule;
-use zns_verify::ZERO_PREV_RCM;
 
 /// Minimum fee in zatoshis required for a CLAIM operation.
 pub const MIN_CLAIM_FEE_ZAT: u64 = 10_000; // 0.0001 ZEC
@@ -48,7 +47,9 @@ pub struct Registry {
     /// SQLite connection shared across the tokio runtime.
     db: Arc<Mutex<Connection>>,
     /// OTP challenge-response state for UPDATE / RELEASE.
-    auth: Arc<AuthModule>,
+    /// `AuthModule` is already `Clone` over an internal `Arc<Mutex<_>>`, so it
+    /// needs no wrapping here.
+    auth: AuthModule,
     /// lightwalletd gRPC endpoint (e.g. `"http://127.0.0.1:9067"`) used to
     /// broadcast minted Name Notes via `SendTransaction`.
     grpc_addr: String,
@@ -65,7 +66,7 @@ impl Registry {
         db::init_schema(&conn)?;
         Ok(Registry {
             db: Arc::new(Mutex::new(conn)),
-            auth: Arc::new(AuthModule::new()),
+            auth: AuthModule::new(),
             grpc_addr: grpc_addr.into(),
         })
     }
@@ -76,7 +77,7 @@ impl Registry {
         db::init_schema(&conn)?;
         Ok(Registry {
             db: Arc::new(Mutex::new(conn)),
-            auth: Arc::new(AuthModule::new()),
+            auth: AuthModule::new(),
             grpc_addr: "http://127.0.0.1:9067".into(),
         })
     }
@@ -156,14 +157,14 @@ impl Registry {
 
     async fn handle_action(
         &self,
-        action: zns_verify::Action,
+        action: zns_core::Action,
         name: &str,
         ua: &str,
         value_zat: u64,
         mint_ctx: &MintContext,
     ) -> Result<ActionOutcome, RegistryError> {
         match action {
-            zns_verify::Action::Claim => {
+            zns_core::Action::Claim => {
                 // 1. Verify fee.
                 if value_zat < MIN_CLAIM_FEE_ZAT {
                     return Err(RegistryError::InsufficientFee {
@@ -197,7 +198,7 @@ impl Registry {
                 })
             }
 
-            zns_verify::Action::Update | zns_verify::Action::Release => {
+            zns_core::Action::Update | zns_core::Action::Release => {
                 // Name must exist.
                 let record = {
                     let conn = self.db.lock().await;
@@ -208,8 +209,8 @@ impl Registry {
 
                 // Convert action for auth module.
                 let auth_action = match action {
-                    zns_verify::Action::Update => zns_auth::Action::Update,
-                    zns_verify::Action::Release => zns_auth::Action::Release,
+                    zns_core::Action::Update => zns_auth::Action::Update,
+                    zns_core::Action::Release => zns_auth::Action::Release,
                     _ => unreachable!(),
                 };
 
@@ -245,10 +246,10 @@ impl Registry {
             }
         };
 
-        // Convert auth action back to zns_verify action.
+        // Convert auth action back to zns_core action.
         let action = match challenge.action {
-            zns_auth::Action::Update => zns_verify::Action::Update,
-            zns_auth::Action::Release => zns_verify::Action::Release,
+            zns_auth::Action::Update => zns_core::Action::Update,
+            zns_auth::Action::Release => zns_core::Action::Release,
             zns_auth::Action::Claim => return Err(RegistryError::InvalidMemo(
                 "confirm for Claim is not valid".into(),
             )),
@@ -264,7 +265,7 @@ impl Registry {
         // Update or delete the DB record.
         {
             let conn = self.db.lock().await;
-            if action == zns_verify::Action::Release {
+            if action == zns_core::Action::Release {
                 db::delete_record(&conn, name)?;
             } else {
                 db::upsert_record(&conn, name, &result.new_rcm, ua, mint_ctx.height)?;
@@ -278,7 +279,7 @@ impl Registry {
     /// broadcast it via `grpc_addr` before the caller records the name.
     async fn do_mint(
         &self,
-        action: zns_verify::Action,
+        action: zns_core::Action,
         name: &str,
         ua: &str,
         prev_rcm: &[u8; 32],
@@ -346,7 +347,7 @@ pub enum ActionOutcome {
     /// A Name Note was minted (CLAIM or confirmed UPDATE/RELEASE).
     Minted {
         name: String,
-        action: zns_verify::Action,
+        action: zns_core::Action,
     },
     /// An OTP challenge was issued; waiting for the confirm note.
     ChallengeIssued { name: String, send_to: String },

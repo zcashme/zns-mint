@@ -18,9 +18,10 @@ zns-signer = { path = "signer" }
 zns-host   = { path = "host" }
 
 # ── sibling repos (ZNS workspace neighbours) ───────────────────────
-# host owns its chain I/O directly via zcash_client_backend's lightwalletd
-# proto (see host/src/{grpc,scanner}.rs); seer-sync is no longer a dependency.
-zns-verify = { path = "../zns-verify" }
+# The mint depends on no ZNS sibling repos. host owns its chain I/O via
+# zcash_client_backend's lightwalletd proto (not seer-sync), and the registry
+# derives (ψ, rcm) with its own code (signer/derive.rs), independent of the
+# zns-verify kernel so producer and verifier can cross-check each other.
 
 # ── Zcash / Orchard stack ──────────────────────────────────────────
 # orchard resolves to the zns-orchard fork via [patch.crates-io] below;

@@ -19,7 +19,6 @@ path = "src/bin/zns-mintd.rs"
 zns-core = { workspace = true }
 zns-signer = { workspace = true }
 zns-auth = { workspace = true }
-zns-verify = { workspace = true }
 # orchard types appear in MintContext's public API; circuit arrives transitively
 # via zns-signer (this is the minting daemon, so that is expected).
 orchard = { workspace = true, features = ["unsafe-zns"] }

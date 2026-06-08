@@ -5,11 +5,13 @@
 //! crate depend on this. It deliberately pulls in **no** orchard / halo2, so a
 //! light consumer (memo parsing, DB lookups) never compiles the proving stack.
 
+pub mod action;
 pub mod db;
 pub mod error;
 pub mod memo;
 pub mod store;
 
+pub use action::{Action, ZERO_PREV_RCM};
 pub use db::NameRecord;
 pub use error::RegistryError;
-pub use memo::{parse_memo, Action, ParsedMemo};
+pub use memo::{parse_memo, ParsedMemo};

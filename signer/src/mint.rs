@@ -1,6 +1,6 @@
 //! ZNS Name Note minting.
 //!
-//! Computes `(psi, rcm)` via [`zns_verify::zns_psi_rcm`], then constructs a
+//! Computes `(psi, rcm)` via [`crate::derive::zns_psi_rcm`], then constructs a
 //! fully-proven Orchard bundle using the `zns-orchard` fork's `add_zns_output`
 //! API.  The bundle is wrapped in a V5 [`Transaction`] and serialized to bytes
 //! suitable for broadcast.
@@ -30,9 +30,9 @@ use zcash_protocol::{
     consensus::{BlockHeight, BranchId},
     value::ZatBalance,
 };
-use zns_verify::{zns_psi_rcm, Action};
+use zns_core::{Action, RegistryError};
 
-use zns_core::RegistryError;
+use crate::derive::zns_psi_rcm;
 
 // ---------------------------------------------------------------------------
 // Proving key cache
@@ -429,7 +429,7 @@ pub fn derive_psi_rcm(
 }
 
 /// The `prev_rcm` sentinel for the first action (CLAIM) in a name's chain.
-pub use zns_verify::ZERO_PREV_RCM as CLAIM_PREV_RCM;
+pub use zns_core::ZERO_PREV_RCM as CLAIM_PREV_RCM;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -440,7 +440,7 @@ mod tests {
     use super::*;
     use orchard::keys::{FullViewingKey, SpendingKey};
     use zcash_protocol::consensus::BranchId;
-    use zns_verify::ZERO_PREV_RCM;
+    use zns_core::ZERO_PREV_RCM;
 
     /// Deterministic FVK for tests — uses a fixed zip32 seed.
     fn make_fvk() -> FullViewingKey {

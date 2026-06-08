@@ -9,7 +9,6 @@ publish = false
 
 [dependencies]
 zns-core = { workspace = true }
-zns-verify = { workspace = true }
 # circuit = halo2 proving; unsafe-zns = rcm/psi overrides. The only crate that
 # pulls the proving stack — keep it that way.
 orchard = { workspace = true, features = ["unsafe-zns", "circuit"] }

@@ -3233,7 +3233,6 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "zns-auth",
- "zns-verify",
 ]
 
 [[package]]
@@ -3256,7 +3255,6 @@ dependencies = [
  "zns-auth",
  "zns-core",
  "zns-signer",
- "zns-verify",
 ]
 
 [[package]]
@@ -3273,16 +3271,4 @@ dependencies = [
  "zeroize",
  "zip32",
  "zns-core",
- "zns-verify",
-]
-
-[[package]]
-name = "zns-verify"
-version = "0.0.1"
-dependencies = [
- "bitvec",
- "blake2b_simd",
- "group",
- "pasta_curves",
- "sinsemilla",
 ]

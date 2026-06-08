@@ -9,8 +9,8 @@
 //! "ZNS:confirm:alice:<nonce>"       → ParsedMemo::Confirm { name, nonce }
 //! ```
 
+use crate::action::Action;
 use crate::error::RegistryError;
-pub use zns_verify::Action;
 
 /// A fully-parsed ZNS memo.
 #[derive(Debug, Clone, PartialEq, Eq)]
