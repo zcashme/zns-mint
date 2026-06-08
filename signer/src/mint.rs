@@ -367,6 +367,50 @@ pub fn build_funded_mint(
     Ok(MintResult { new_rcm, new_psi, tx_bytes })
 }
 
+/// Build a **sweep** transaction: spend one treasury note and move its value,
+/// minus the fee, to the cold address. No Name Note, no change — the note is
+/// swept wholesale (`amount_zat = funding.value − fee`), so `value_balance`
+/// equals the fee. `cold_addr` is the policy constant; the caller is the
+/// policy-gated [`crate::sign::Signer`].
+pub fn build_sweep(
+    registry_fvk: &FullViewingKey,
+    spend_key: &SpendingKey,
+    cold_addr: Address,
+    funding: &FundingInput,
+    amount_zat: u64,
+    branch_id: BranchId,
+    expiry_height: u32,
+) -> Result<Vec<u8>, RegistryError> {
+    let ovk = Some(registry_fvk.to_ovk(Scope::External));
+    let mut builder = OrchardBuilder::new(BundleType::DEFAULT, funding.anchor);
+
+    builder
+        .add_spend(registry_fvk.clone(), funding.note.clone(), funding.merkle_path.clone())
+        .map_err(|e| RegistryError::Build(format!("add_spend: {e:?}")))?;
+    builder
+        .add_output(ovk, cold_addr, NoteValue::from_raw(amount_zat), [0u8; 512])
+        .map_err(|e| RegistryError::Build(format!("add_output(sweep): {e:?}")))?;
+
+    let mut rng = OsRng;
+    let (unauthorized, _meta) = builder
+        .build::<i64>(&mut rng)
+        .map_err(|e| RegistryError::Build(format!("build: {e:?}")))?
+        .ok_or_else(|| RegistryError::Build("builder produced an empty bundle".into()))?;
+
+    let orchard_digest: [u8; 32] = unauthorized.commitment().into();
+    let sighash = v5_shielded_sighash(branch_id, 0, expiry_height, &orchard_digest);
+
+    let proven = unauthorized
+        .create_proof(proving_key(), &mut rng)
+        .map_err(|e| RegistryError::Build(format!("create_proof: {e:?}")))?;
+    let ask = SpendAuthorizingKey::from(spend_key);
+    let authorized = proven
+        .apply_signatures(&mut rng, sighash, &[ask])
+        .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
+
+    orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)
+}
+
 // ---------------------------------------------------------------------------
 // Convenience helpers
 // ---------------------------------------------------------------------------

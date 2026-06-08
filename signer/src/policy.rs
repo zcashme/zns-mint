@@ -251,6 +251,11 @@ impl SpendGuard {
         self.swept_this_window_zat += amount_zat;
         Ok(())
     }
+
+    /// Undo a prior [`admit_sweep`] when the build failed.
+    pub fn rollback_sweep(&mut self, amount_zat: u64) {
+        self.swept_this_window_zat = self.swept_this_window_zat.saturating_sub(amount_zat);
+    }
 }
 
 #[cfg(test)]

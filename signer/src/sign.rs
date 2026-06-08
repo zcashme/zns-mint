@@ -20,8 +20,8 @@ use zeroize::Zeroizing;
 
 use zns_core::RegistryError;
 
-use crate::mint::{build_funded_mint, MintResult};
-use crate::policy::{MintProposal, PolicyError, SpendGuard, SpendPolicy};
+use crate::mint::{build_funded_mint, build_sweep, MintResult};
+use crate::policy::{FundingInput, MintProposal, PolicyError, SpendGuard, SpendPolicy};
 
 /// Why the signer refused (policy) or failed (build).
 #[derive(Debug)]
@@ -145,4 +145,57 @@ impl Signer {
             }
         }
     }
+
+    /// Author and sign an auto-sweep of one treasury note to the **cold
+    /// address** (`amount = funding.value − fee`). The destination is the policy
+    /// constant — a compromised host calling this can only move funds *to cold*,
+    /// never elsewhere — and the per-window value cap bounds the rate.
+    ///
+    /// Whether to sweep at all (and the target total) is the daemon's call via
+    /// [`SpendPolicy::evaluate_sweep`]; the signer enforces the fee + velocity
+    /// caps and the fixed destination.
+    pub fn sign_sweep(
+        &self,
+        funding: FundingInput,
+        fee_zat: u64,
+        branch_id: BranchId,
+        expiry_height: u32,
+    ) -> Result<SweepResult, SignError> {
+        if fee_zat > self.policy.max_fee_zat {
+            return Err(SignError::Policy(PolicyError::FeeTooHigh {
+                fee: fee_zat,
+                max: self.policy.max_fee_zat,
+            }));
+        }
+        let funding_value = funding.note.value().inner();
+        let amount = funding_value.checked_sub(fee_zat).ok_or(SignError::Policy(
+            PolicyError::InsufficientFunding { have: funding_value, need: fee_zat },
+        ))?;
+
+        self.guard.lock().expect("guard poisoned").admit_sweep(&self.policy, amount)?;
+
+        let sk = self.spending_key();
+        match build_sweep(
+            &self.fvk,
+            &sk,
+            self.policy.cold_addr,
+            &funding,
+            amount,
+            branch_id,
+            expiry_height,
+        ) {
+            Ok(tx_bytes) => Ok(SweepResult { tx_bytes, amount_zat: amount }),
+            Err(e) => {
+                self.guard.lock().expect("guard poisoned").rollback_sweep(amount);
+                Err(SignError::Build(e))
+            }
+        }
+    }
+}
+
+/// The result of a sweep: the signed transaction and how much went to cold.
+#[derive(Debug)]
+pub struct SweepResult {
+    pub tx_bytes: Vec<u8>,
+    pub amount_zat: u64,
 }
