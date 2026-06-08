@@ -8,7 +8,14 @@
 //! the host changing.
 
 pub mod mint;
+pub mod policy;
+pub mod sign;
 pub mod verify;
 
-pub use mint::{build_name_note, MintParams, MintResult};
+pub use mint::{build_funded_mint, build_name_note, MintParams, MintResult};
+pub use policy::{
+    validate_name, FundingInput, MintIntent, MintPlan, MintProposal, PolicyError, RequestId,
+    SpendGuard, SpendPolicy, SweepPlan,
+};
+pub use sign::{SignError, Signer};
 pub use verify::{expected_cmx, verify_cmx};

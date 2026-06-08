@@ -197,6 +197,7 @@ pub struct MintParams<'a> {
 
 /// The output of a successful mint: the derived cryptographic parameters and
 /// a serialized V5 Orchard-only transaction ready for broadcast.
+#[derive(Debug)]
 pub struct MintResult {
     /// The new `rcm` — caller stores this as `tip_rcm` for future chaining.
     pub new_rcm: [u8; 32],
@@ -285,6 +286,85 @@ pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, RegistryErr
         new_psi,
         tx_bytes,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Funded mint — the production path (self-funds the fee from a treasury note)
+// ---------------------------------------------------------------------------
+
+use orchard::keys::{SpendAuthorizingKey, SpendingKey};
+
+use crate::policy::{FundingInput, MintPlan};
+
+/// Build a **self-funded** Name Note transaction: spend one treasury note to
+/// cover the fee, emit the value-0 Name Note, and return the change to the
+/// registry. Unlike [`build_name_note`], the funding spend is real, so it
+/// requires a valid witness (`funding`) and a spend-auth signature (`spend_key`).
+///
+/// `recipient` is the registry self-address — the *only* place value lands
+/// (Name Note + change). The caller is the policy-gated [`crate::sign::Signer`],
+/// which authors `plan` and supplies `funding` from the WalletDb note-state.
+pub fn build_funded_mint(
+    registry_fvk: &FullViewingKey,
+    spend_key: &SpendingKey,
+    recipient: Address,
+    funding: &FundingInput,
+    plan: &MintPlan,
+    branch_id: BranchId,
+    expiry_height: u32,
+) -> Result<MintResult, RegistryError> {
+    // 1. Derive (psi, rcm) from the registration tuple — signer-authored, never
+    //    host-supplied.
+    let (psi, rcm) = zns_psi_rcm(
+        plan.action.as_bytes(),
+        plan.name.as_bytes(),
+        plan.ua.as_bytes(),
+        &plan.prev_rcm,
+    );
+    let new_rcm: [u8; 32] = rcm.to_repr();
+    let new_psi: [u8; 32] = psi.to_repr();
+
+    let ovk = Some(registry_fvk.to_ovk(Scope::External));
+    let mut builder = OrchardBuilder::new(BundleType::DEFAULT, funding.anchor);
+
+    // 2. Funding spend (pays the fee). Anchor must match the witness root.
+    builder
+        .add_spend(registry_fvk.clone(), funding.note.clone(), funding.merkle_path.clone())
+        .map_err(|e| RegistryError::Build(format!("add_spend: {e:?}")))?;
+
+    // 3. The Name Note (value 0) to the registry self-address.
+    builder
+        .add_zns_output(ovk.clone(), recipient, NoteValue::from_raw(0), [0u8; 512], rcm, psi)
+        .map_err(|e| RegistryError::Build(format!("add_zns_output: {e:?}")))?;
+
+    // 4. Change back to the registry. value_balance = funding − 0 − change = fee.
+    if plan.change_zat > 0 {
+        builder
+            .add_output(ovk, recipient, NoteValue::from_raw(plan.change_zat), [0u8; 512])
+            .map_err(|e| RegistryError::Build(format!("add_output(change): {e:?}")))?;
+    }
+
+    let mut rng = OsRng;
+    let (unauthorized, _meta) = builder
+        .build::<i64>(&mut rng)
+        .map_err(|e| RegistryError::Build(format!("build: {e:?}")))?
+        .ok_or_else(|| RegistryError::Build("builder produced an empty bundle".into()))?;
+
+    let orchard_digest: [u8; 32] = unauthorized.commitment().into();
+    let sighash = v5_shielded_sighash(branch_id, 0, expiry_height, &orchard_digest);
+
+    let proven = unauthorized
+        .create_proof(proving_key(), &mut rng)
+        .map_err(|e| RegistryError::Build(format!("create_proof: {e:?}")))?;
+
+    // Real funding spend → needs a spend-auth signature from the registry key.
+    let ask = SpendAuthorizingKey::from(spend_key);
+    let authorized = proven
+        .apply_signatures(&mut rng, sighash, &[ask])
+        .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
+
+    let tx_bytes = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)?;
+    Ok(MintResult { new_rcm, new_psi, tx_bytes })
 }
 
 // ---------------------------------------------------------------------------

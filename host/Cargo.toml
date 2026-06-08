@@ -30,6 +30,9 @@ zcash_primitives = { workspace = true }
 # message types; tonic supplies the Channel (plaintext for regtest, TLS for
 # public servers). zcash_note_encryption drives Orchard trial-decryption.
 zcash_client_backend = { workspace = true }
+# treasury note-state core (scanning + shardtree witnesses for self-funded fees)
+zcash_client_sqlite = { workspace = true }
+shardtree = { workspace = true }
 zcash_note_encryption = { workspace = true }
 tonic = { workspace = true, features = ["transport", "tls-ring", "tls-webpki-roots"] }
 rusqlite = { workspace = true }
