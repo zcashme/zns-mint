@@ -25,6 +25,8 @@ zns-auth = { workspace = true }
 # via zns-signer (this is the minting daemon, so that is expected).
 orchard = { workspace = true, features = ["unsafe-zns"] }
 zcash_protocol = { workspace = true }
+# Parse a name owner's Unified Address → Orchard receiver for the OTP relay.
+zcash_keys = { workspace = true }
 # Registry holds the SQLite connection directly and calls zns-state's helpers.
 rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }

@@ -436,6 +436,68 @@ pub fn build_sweep(
     Ok(tx_bytes)
 }
 
+/// Build a **memo-send** transaction: spend one treasury note, deliver a small
+/// dust output carrying `memo` to `recipient`, and return the change to the
+/// registry. This is how the registry relays an OTP nonce to a name's current
+/// owner (`ZNS:challenge:<name>:<nonce>`) so they can confirm an UPDATE/RELEASE.
+///
+/// No Name Note is minted — this is a pure value+memo carrier. `value_balance`
+/// equals the fee (`funding.value − dust − change`). `change_addr` is the
+/// registry self-address; the caller is the policy-gated [`crate::sign::Signer`].
+#[allow(clippy::too_many_arguments)]
+pub fn build_memo_send(
+    registry_fvk: &FullViewingKey,
+    spend_key: &SpendingKey,
+    recipient: Address,
+    change_addr: Address,
+    funding: &FundingInput,
+    dust_zat: u64,
+    change_zat: u64,
+    memo: [u8; 512],
+    branch_id: BranchId,
+    expiry_height: u32,
+) -> Result<Vec<u8>, RegistryError> {
+    let ovk = Some(registry_fvk.to_ovk(Scope::External));
+    let mut builder = OrchardBuilder::new(BundleType::DEFAULT, funding.anchor);
+
+    // 1. Funding spend (covers dust + fee). Anchor must match the witness root.
+    builder
+        .add_spend(registry_fvk.clone(), funding.note.clone(), funding.merkle_path.clone())
+        .map_err(|e| RegistryError::Build(format!("add_spend: {e:?}")))?;
+
+    // 2. The dust output to the owner, carrying the challenge memo.
+    builder
+        .add_output(ovk.clone(), recipient, NoteValue::from_raw(dust_zat), memo)
+        .map_err(|e| RegistryError::Build(format!("add_output(memo): {e:?}")))?;
+
+    // 3. Change back to the registry.
+    if change_zat > 0 {
+        builder
+            .add_output(ovk, change_addr, NoteValue::from_raw(change_zat), [0u8; 512])
+            .map_err(|e| RegistryError::Build(format!("add_output(change): {e:?}")))?;
+    }
+
+    let mut rng = OsRng;
+    let (unauthorized, _meta) = builder
+        .build::<i64>(&mut rng)
+        .map_err(|e| RegistryError::Build(format!("build: {e:?}")))?
+        .ok_or_else(|| RegistryError::Build("builder produced an empty bundle".into()))?;
+
+    let orchard_digest: [u8; 32] = unauthorized.commitment().into();
+    let sighash = v5_shielded_sighash(branch_id, 0, expiry_height, &orchard_digest);
+
+    let proven = unauthorized
+        .create_proof(proving_key(), &mut rng)
+        .map_err(|e| RegistryError::Build(format!("create_proof: {e:?}")))?;
+    let ask = SpendAuthorizingKey::from(spend_key);
+    let authorized = proven
+        .apply_signatures(&mut rng, sighash, &[ask])
+        .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
+
+    let (tx_bytes, _txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)?;
+    Ok(tx_bytes)
+}
+
 // ---------------------------------------------------------------------------
 // Convenience helpers
 // ---------------------------------------------------------------------------

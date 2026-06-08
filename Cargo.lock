@@ -3145,6 +3145,7 @@ dependencies = [
  "orchard",
  "rusqlite",
  "tokio",
+ "zcash_keys",
  "zcash_protocol",
  "zip32",
  "zns-auth",

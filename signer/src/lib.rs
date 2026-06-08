@@ -15,7 +15,9 @@ pub mod policy;
 pub mod sign;
 
 pub use derive::{zns_psi_rcm, ZNS_DOMAIN_TAG};
-pub use mint::{build_funded_mint, build_name_note, build_sweep, MintParams, MintResult};
+pub use mint::{
+    build_funded_mint, build_memo_send, build_name_note, build_sweep, MintParams, MintResult,
+};
 pub use policy::{
     validate_name, FundingInput, MintIntent, MintPlan, MintProposal, PolicyError, RequestId,
     SpendGuard, SpendPolicy, SweepPlan,

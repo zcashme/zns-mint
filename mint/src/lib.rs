@@ -219,7 +219,7 @@ impl Registry {
                     .new_challenge(name, auth_action, ua, &record.ua)
                     .await?;
 
-                self.relay_challenge(name, &send_to, &nonce).await?;
+                self.relay_challenge(name, &send_to, &nonce, mint_ctx).await?;
 
                 Ok(ActionOutcome::ChallengeIssued {
                     name: name.into(),
@@ -295,7 +295,7 @@ impl Registry {
             registry_fvk: ctx.registry_fvk.clone(),
             anchor: ctx.anchor,
             branch_id: zcash_protocol::consensus::BranchId::Nu6,
-            expiry_height: 0,
+            expiry_height: ctx.expiry_height,
         })?;
 
         // Broadcast the serialized V5 transaction before the caller records the
@@ -329,23 +329,59 @@ impl Registry {
     /// `ZNS:challenge:<name>:<nonce>` memo. Without this the owner never learns
     /// the nonce and UPDATE / RELEASE can never be confirmed.
     ///
-    /// The send is a funded note to `owner_ua` carrying the challenge memo; the
-    /// funded-memo-send builder over the signer boundary is the remaining piece
-    /// (tracked in `zns_signer`), so for now we encode + route and surface the
-    /// memo to the caller.
+    /// The relay is a funded dust output to `owner_ua` carrying the challenge
+    /// memo, authored over the signer boundary via [`zns_signer::build_memo_send`]
+    /// and broadcast through `grpc_addr`. It requires treasury spend material
+    /// (`ctx.treasury`); without it the challenge cannot be delivered.
     async fn relay_challenge(
         &self,
         name: &str,
         owner_ua: &str,
         nonce: &str,
+        ctx: &MintContext,
     ) -> Result<(), RegistryError> {
-        let memo = memo::encode_challenge(name, nonce);
-        let _memo_bytes = memo::encode_memo_bytes(&memo)?;
-        // TODO(signer): build_memo_send(funding, owner_ua, dust, memo_bytes) →
-        // tx_bytes, then GrpcClient::broadcast. Requires parsing `owner_ua`
-        // (UnifiedAddress → orchard receiver) and a treasury funding note.
-        let _ = (owner_ua,);
+        let memo_text = memo::encode_challenge(name, nonce);
+        let memo_bytes = memo::encode_memo_bytes(&memo_text)?;
+        let recipient = parse_orchard_recipient(owner_ua, ctx.network)?;
+
+        let treasury = ctx.treasury.as_ref().ok_or_else(|| {
+            RegistryError::Broadcast(
+                "cannot relay OTP challenge: no treasury funding configured".into(),
+            )
+        })?;
+
+        let tx_bytes = zns_signer::build_memo_send(
+            &ctx.registry_fvk,
+            &treasury.spend_key,
+            recipient,
+            treasury.change_addr,
+            &treasury.funding,
+            treasury.dust_zat,
+            treasury.change_zat,
+            memo_bytes,
+            zcash_protocol::consensus::BranchId::Nu6,
+            ctx.expiry_height,
+        )?;
+
+        GrpcClient::new(&self.grpc_addr).broadcast(tx_bytes).await?;
         Ok(())
+    }
+}
+
+/// Parse a name owner's Unified Address string into its Orchard receiver, which
+/// the registry needs to address the OTP relay note.
+fn parse_orchard_recipient(
+    ua: &str,
+    network: zcash_protocol::consensus::Network,
+) -> Result<orchard::Address, RegistryError> {
+    use zcash_keys::address::Address;
+    match Address::decode(&network, ua) {
+        Some(Address::Unified(addr)) => addr.orchard().copied().ok_or_else(|| {
+            RegistryError::InvalidMemo(format!("UA has no Orchard receiver: {ua}"))
+        }),
+        _ => Err(RegistryError::InvalidMemo(format!(
+            "owner address is not a valid Unified Address: {ua}"
+        ))),
     }
 }
 
@@ -370,6 +406,31 @@ pub struct MintContext {
     pub anchor: orchard::tree::Anchor,
     /// The current Zcash block height (used for DB records).
     pub height: u32,
+    /// Block height at which built transactions expire (0 = no expiry).
+    pub expiry_height: u32,
+    /// The network the registry operates on — needed to decode owner UAs.
+    pub network: zcash_protocol::consensus::Network,
+    /// Treasury spend material for funded sends (the OTP challenge relay).
+    /// `None` until the daemon wires note-state; relays then fail with a clear
+    /// "no treasury funding configured" error rather than silently no-op'ing.
+    /// Behind an `Arc` because [`zns_signer::FundingInput`] is not `Clone`.
+    pub treasury: Option<Arc<Treasury>>,
+}
+
+/// Treasury spend material the registry needs to author a funded send (today,
+/// the OTP challenge relay via [`zns_signer::build_memo_send`]). The daemon
+/// selects `funding` from note-state and supplies the registry spend key.
+pub struct Treasury {
+    /// The registry Orchard spend key (authorizes the funding spend).
+    pub spend_key: orchard::keys::SpendingKey,
+    /// Where change returns — the registry self-address.
+    pub change_addr: orchard::Address,
+    /// The treasury note being spent, with its witness.
+    pub funding: zns_signer::FundingInput,
+    /// Dust value carried to the recipient alongside the memo.
+    pub dust_zat: u64,
+    /// Change returned to the registry (`funding.value − dust − fee`).
+    pub change_zat: u64,
 }
 
 /// The outcome of processing a single incoming note.
@@ -417,6 +478,9 @@ mod tests {
             recipient,
             anchor: Anchor::empty_tree(),
             height: 2_000_000,
+            expiry_height: 0,
+            network: zcash_protocol::consensus::Network::MainNetwork,
+            treasury: None,
         }
     }
 
