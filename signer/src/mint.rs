@@ -127,12 +127,13 @@ fn v5_shielded_sighash(
 // ---------------------------------------------------------------------------
 
 /// Wrap an `orchard::bundle::Bundle<Authorized, i64>` in a V5 transaction and
-/// return the serialized bytes ready for broadcast.
+/// return the serialized bytes plus the ZIP-244 txid (the canonical on-chain
+/// identifier, stored in the minted-action log).
 fn orchard_bundle_to_tx_bytes(
     bundle: orchard::bundle::Bundle<orchard::bundle::Authorized, i64>,
     consensus_branch_id: BranchId,
     expiry_height: u32,
-) -> Result<Vec<u8>, RegistryError> {
+) -> Result<(Vec<u8>, [u8; 32]), RegistryError> {
     // Convert value_balance: i64 → ZatBalance (required by zcash_primitives serializer).
     let bundle_zat = bundle
         .try_map_value_balance::<ZatBalance, _, _>(|v: i64| ZatBalance::from_i64(v))
@@ -155,12 +156,15 @@ fn orchard_bundle_to_tx_bytes(
         .freeze()
         .map_err(|e| RegistryError::Build(format!("freeze: {e}")))?;
 
+    // The ZIP-244 txid is fixed once the tx is frozen.
+    let txid: [u8; 32] = *tx.txid().as_ref();
+
     // Serialize using the Transaction::write() entry point.
     let mut bytes = Vec::new();
     tx.write(&mut bytes)
         .map_err(|e| RegistryError::Build(format!("serialize: {e}")))?;
 
-    Ok(bytes)
+    Ok((bytes, txid))
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +207,12 @@ pub struct MintResult {
     pub new_rcm: [u8; 32],
     /// The new `psi` — kept for diagnostic / test purposes.
     pub new_psi: [u8; 32],
+    /// The Name Note's extracted note commitment (`cmx`) — the on-chain
+    /// commitment recorded in the minted-action log.
+    pub cmx: [u8; 32],
+    /// The ZIP-244 txid of the broadcast transaction — the canonical identifier
+    /// recorded in the minted-action log.
+    pub txid: [u8; 32],
     /// Serialized V5 transaction bytes ready for broadcast via `sendrawtransaction`.
     pub tx_bytes: Vec<u8>,
 }
@@ -246,11 +256,15 @@ pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, RegistryErr
 
     let mut rng = OsRng;
 
-    // 4. Build the unauthorized bundle.
-    let (unauthorized_bundle, _meta) = builder
+    // 4. Build the unauthorized bundle.  `meta` maps our output index to its
+    //    (shuffled) action index so we can recover the Name Note's `cmx`.
+    let (unauthorized_bundle, meta) = builder
         .build::<i64>(&mut rng)
         .map_err(|e| RegistryError::Build(format!("build: {e:?}")))?
         .ok_or_else(|| RegistryError::Build("builder produced an empty bundle".into()))?;
+    let name_note_action = meta
+        .output_action_index(0)
+        .ok_or_else(|| RegistryError::Build("Name Note output missing from bundle".into()))?;
 
     // 5. Compute the sighash BEFORE proving.
     //
@@ -277,13 +291,18 @@ pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, RegistryErr
         .apply_signatures(&mut rng, sighash, &[])
         .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
 
-    // 8. Serialize the transaction.
-    let tx_bytes =
+    // 8. Recover the Name Note commitment, then serialize the transaction.
+    let cmx: [u8; 32] = authorized_bundle.actions()[name_note_action]
+        .cmx()
+        .to_bytes();
+    let (tx_bytes, txid) =
         orchard_bundle_to_tx_bytes(authorized_bundle, params.branch_id, params.expiry_height)?;
 
     Ok(MintResult {
         new_rcm,
         new_psi,
+        cmx,
+        txid,
         tx_bytes,
     })
 }
@@ -345,10 +364,14 @@ pub fn build_funded_mint(
     }
 
     let mut rng = OsRng;
-    let (unauthorized, _meta) = builder
+    let (unauthorized, meta) = builder
         .build::<i64>(&mut rng)
         .map_err(|e| RegistryError::Build(format!("build: {e:?}")))?
         .ok_or_else(|| RegistryError::Build("builder produced an empty bundle".into()))?;
+    // The Name Note is output 0 (the funding spend is a spend, not an output).
+    let name_note_action = meta
+        .output_action_index(0)
+        .ok_or_else(|| RegistryError::Build("Name Note output missing from bundle".into()))?;
 
     let orchard_digest: [u8; 32] = unauthorized.commitment().into();
     let sighash = v5_shielded_sighash(branch_id, 0, expiry_height, &orchard_digest);
@@ -363,8 +386,9 @@ pub fn build_funded_mint(
         .apply_signatures(&mut rng, sighash, &[ask])
         .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
 
-    let tx_bytes = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)?;
-    Ok(MintResult { new_rcm, new_psi, tx_bytes })
+    let cmx: [u8; 32] = authorized.actions()[name_note_action].cmx().to_bytes();
+    let (tx_bytes, txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)?;
+    Ok(MintResult { new_rcm, new_psi, cmx, txid, tx_bytes })
 }
 
 /// Build a **sweep** transaction: spend one treasury note and move its value,
@@ -408,7 +432,8 @@ pub fn build_sweep(
         .apply_signatures(&mut rng, sighash, &[ask])
         .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
 
-    orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)
+    let (tx_bytes, _txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)?;
+    Ok(tx_bytes)
 }
 
 // ---------------------------------------------------------------------------

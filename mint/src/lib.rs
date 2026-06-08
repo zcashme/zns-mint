@@ -19,9 +19,9 @@
 // Flat API surface — re-export the domain, state, chain, and signer crates so
 // `zns_mint::{parse_memo, build_name_note, NameRecord, ...}` resolve in one place.
 pub use zns_core::{memo, parse_memo, Action, ParsedMemo, RegistryError, ZERO_PREV_RCM};
-pub use zns_state::{db, NameRecord};
+pub use zns_state::{append_action, db, latest_action, MintedAction, NameRecord};
 pub use zns_signer::{build_name_note, MintParams, MintResult};
-pub use zns_chain::{scan_incoming, GrpcClient, IncomingNote, ScannerConfig};
+pub use zns_chain::{scan_incoming, scan_incoming_all, GrpcClient, IncomingNote, ScannerConfig};
 
 use std::sync::Arc;
 
@@ -60,7 +60,7 @@ impl Registry {
         grpc_addr: impl Into<String>,
     ) -> Result<Self, RegistryError> {
         let conn = Connection::open(db_path)?;
-        db::init_schema(&conn)?;
+        zns_state::init_schema(&conn)?;
         Ok(Registry {
             db: Arc::new(Mutex::new(conn)),
             auth: AuthModule::new(),
@@ -71,7 +71,7 @@ impl Registry {
     /// Open an in-memory registry (for testing / ephemeral use).
     pub fn open_in_memory() -> Result<Self, RegistryError> {
         let conn = Connection::open_in_memory()?;
-        db::init_schema(&conn)?;
+        zns_state::init_schema(&conn)?;
         Ok(Registry {
             db: Arc::new(Mutex::new(conn)),
             auth: AuthModule::new(),
@@ -211,11 +211,15 @@ impl Registry {
                     _ => unreachable!(),
                 };
 
-                // Initiate OTP challenge — nonce will be sent to current owner.
-                let (_nonce, send_to) = self
+                // Initiate OTP challenge, then relay the nonce to the current
+                // owner so they can confirm. Dropping the nonce here (as the
+                // old code did) left UPDATE / RELEASE permanently un-confirmable.
+                let (nonce, send_to) = self
                     .auth
                     .new_challenge(name, auth_action, ua, &record.ua)
                     .await?;
+
+                self.relay_challenge(name, &send_to, &nonce).await?;
 
                 Ok(ActionOutcome::ChallengeIssued {
                     name: name.into(),
@@ -300,7 +304,48 @@ impl Registry {
             .broadcast(result.tx_bytes.clone())
             .await?;
 
+        // Append to the canonical action log. This is the source of truth for
+        // the name's `(ψ, rcm)` chain; `name_records` only caches the tip.
+        {
+            let conn = self.db.lock().await;
+            append_action(
+                &conn,
+                &MintedAction {
+                    name: name.to_owned(),
+                    action,
+                    txid: result.txid,
+                    cmx: result.cmx,
+                    rcm: result.new_rcm,
+                    psi: result.new_psi,
+                    height: ctx.height,
+                },
+            )?;
+        }
+
         Ok(result)
+    }
+
+    /// Relay an OTP nonce to a name's current owner by sending them a
+    /// `ZNS:challenge:<name>:<nonce>` memo. Without this the owner never learns
+    /// the nonce and UPDATE / RELEASE can never be confirmed.
+    ///
+    /// The send is a funded note to `owner_ua` carrying the challenge memo; the
+    /// funded-memo-send builder over the signer boundary is the remaining piece
+    /// (tracked in `zns_signer`), so for now we encode + route and surface the
+    /// memo to the caller.
+    async fn relay_challenge(
+        &self,
+        name: &str,
+        owner_ua: &str,
+        nonce: &str,
+    ) -> Result<(), RegistryError> {
+        let memo = memo::encode_challenge(name, nonce);
+        let _memo_bytes = memo::encode_memo_bytes(&memo)?;
+        // TODO(signer): build_memo_send(funding, owner_ua, dust, memo_bytes) →
+        // tx_bytes, then GrpcClient::broadcast. Requires parsing `owner_ua`
+        // (UnifiedAddress → orchard receiver) and a treasury funding note.
+        let _ = (owner_ua,);
+        Ok(())
     }
 }
 

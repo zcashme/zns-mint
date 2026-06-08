@@ -10,4 +10,4 @@ pub mod grpc;
 pub mod scanner;
 
 pub use grpc::GrpcClient;
-pub use scanner::{scan_incoming, IncomingNote, ScannerConfig};
+pub use scanner::{scan_incoming, scan_incoming_all, IncomingNote, ScannerConfig};

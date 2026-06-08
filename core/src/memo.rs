@@ -135,9 +135,53 @@ fn validate_name(name: &str) -> Result<(), RegistryError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Outbound memos (registry → owner)
+// ---------------------------------------------------------------------------
+
+/// The verb the registry uses to relay an OTP nonce to a name's current owner
+/// for UPDATE / RELEASE. The owner echoes it back as `ZNS:confirm:<name>:<nonce>`
+/// (see [`ParsedMemo::Confirm`]). This closes the auth loop: without sending
+/// this memo the owner never learns the nonce and can never confirm.
+pub const CHALLENGE_VERB: &str = "challenge";
+
+/// The fixed ZIP-302 memo size, in bytes.
+pub const MEMO_SIZE: usize = 512;
+
+/// Build the outbound OTP challenge memo: `ZNS:challenge:<name>:<nonce>`.
+pub fn encode_challenge(name: &str, nonce: &str) -> String {
+    format!("ZNS:{CHALLENGE_VERB}:{name}:{nonce}")
+}
+
+/// Encode memo `text` into a fixed [`MEMO_SIZE`]-byte, zero-padded ZIP-302 memo.
+///
+/// Returns [`RegistryError::InvalidMemo`] if the text does not fit.
+pub fn encode_memo_bytes(text: &str) -> Result<[u8; MEMO_SIZE], RegistryError> {
+    let bytes = text.as_bytes();
+    if bytes.len() > MEMO_SIZE {
+        return Err(RegistryError::InvalidMemo(format!(
+            "memo too long: {} bytes (max {MEMO_SIZE})",
+            bytes.len()
+        )));
+    }
+    let mut memo = [0u8; MEMO_SIZE];
+    memo[..bytes.len()].copy_from_slice(bytes);
+    Ok(memo)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn challenge_roundtrips_through_padding() {
+        let text = encode_challenge("alice", "deadbeef");
+        assert_eq!(text, "ZNS:challenge:alice:deadbeef");
+        let memo = encode_memo_bytes(&text).unwrap();
+        // Parsing the zero-padded form recovers the original string.
+        let trimmed = strip_trailing_zeros(&memo);
+        assert_eq!(std::str::from_utf8(trimmed).unwrap(), text);
+    }
 
     #[test]
     fn claim() {
