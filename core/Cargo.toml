@@ -9,6 +9,9 @@ publish = false
 
 [dependencies]
 zns-auth = { workspace = true }      # RegistryError wraps AuthError
+# ZcashNetwork (Main/Test/Regtest) implements consensus::Parameters. Light —
+# no orchard/halo2, so core stays out of the proving stack.
+zcash_protocol = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

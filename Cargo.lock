@@ -3038,6 +3038,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "thiserror 1.0.69",
+ "zcash_protocol",
  "zns-auth",
 ]
 

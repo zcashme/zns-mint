@@ -20,6 +20,31 @@ async fn main() -> anyhow::Result<()> {
     // TODO: load from the `config` crate (file + ZNS_* env), init tracing+metrics.
     let cfg = DaemonConfig::from_env()?;
 
+    // `zns-mint address` prints the registry Unified Address (addr_reg) and
+    // exits — operators fund this and senders address CLAIM notes to it.
+    if std::env::args().nth(1).as_deref() == Some("address") {
+        println!("{}", cfg.registry_ua()?);
+        return Ok(());
+    }
+
+    // `zns-mint scan` does one intake scan and prints the ZNS notes found at
+    // addr_reg, without minting — a read-only check that intake works.
+    if std::env::args().nth(1).as_deref() == Some("scan") {
+        let notes = scan_incoming_all(&cfg.scanner()).await?;
+        eprintln!(
+            "zns-mint: scanned from height {} → {} note(s) at addr_reg",
+            cfg.birthday,
+            notes.len()
+        );
+        for n in &notes {
+            match zns_mint::parse_memo(&n.memo) {
+                Ok(m) => println!("  {} zat @h{}: {:?}", n.value_zat, n.height, m),
+                Err(_) => println!("  {} zat @h{}: (non-ZNS memo)", n.value_zat, n.height),
+            }
+        }
+        return Ok(());
+    }
+
     let registry = Registry::new(&cfg.db_path, &cfg.lwd_url)?;
     let scanner = cfg.scanner();
     let grpc = GrpcClient::new(&cfg.lwd_url);
@@ -73,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
 struct DaemonConfig {
     db_path: String,
     lwd_url: String,
-    network: zcash_protocol::consensus::Network,
+    network: zns_mint::ZcashNetwork,
     birthday: u32,
     /// 32-byte zip32 seed the registry Orchard key is derived from.
     seed: [u8; 32],
@@ -83,9 +108,10 @@ impl DaemonConfig {
     fn from_env() -> anyhow::Result<Self> {
         let lwd_url =
             std::env::var("ZNS_LWD_URL").unwrap_or_else(|_| "http://127.0.0.1:9067".into());
-        let network = match std::env::var("ZNS_NETWORK").as_deref() {
-            Ok("main") | Err(_) => zcash_protocol::consensus::Network::MainNetwork,
-            Ok(_) => zcash_protocol::consensus::Network::TestNetwork,
+        let network = match std::env::var("ZNS_NETWORK") {
+            Ok(name) => zns_mint::ZcashNetwork::from_name(&name)
+                .ok_or_else(|| anyhow::anyhow!("unknown ZNS_NETWORK '{name}'"))?,
+            Err(_) => zns_mint::ZcashNetwork::Main,
         };
         let birthday = std::env::var("ZNS_BIRTHDAY")
             .ok()
@@ -114,7 +140,7 @@ impl DaemonConfig {
     /// Coin type for zip32 derivation: 133 mainnet, 1 test/regtest.
     fn coin_type(&self) -> u32 {
         match self.network {
-            zcash_protocol::consensus::Network::MainNetwork => 133,
+            zns_mint::ZcashNetwork::Main => 133,
             _ => 1,
         }
     }
@@ -123,6 +149,14 @@ impl DaemonConfig {
         let sk = SpendingKey::from_zip32_seed(&self.seed, self.coin_type(), zip32::AccountId::ZERO)
             .expect("valid zip32 seed");
         FullViewingKey::from(&sk)
+    }
+
+    /// The registry's Orchard-only Unified Address (`addr_reg`) for this network.
+    fn registry_ua(&self) -> anyhow::Result<String> {
+        let addr = self.registry_fvk().address_at(0u32, Scope::External);
+        let ua = zcash_keys::address::UnifiedAddress::from_receivers(Some(addr), None, None)
+            .ok_or_else(|| anyhow::anyhow!("could not build a Unified Address"))?;
+        Ok(ua.encode(&self.network))
     }
 
     fn scanner(&self) -> ScannerConfig {

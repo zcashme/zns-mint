@@ -23,7 +23,8 @@ use zcash_client_backend::proto::{
 };
 use zcash_note_encryption::{batch, try_note_decryption, EphemeralKeyBytes};
 use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
+use zcash_protocol::consensus::{BlockHeight, BranchId};
+use zns_core::ZcashNetwork;
 
 use crate::grpc;
 
@@ -33,8 +34,8 @@ pub struct ScannerConfig {
     /// Orchard-only, so we hold the FVK directly rather than round-tripping a
     /// Unified FVK string.
     pub registry_fvk: orchard::keys::FullViewingKey,
-    /// The Zcash network to scan.
-    pub network: Network,
+    /// The Zcash network to scan (drives branch resolution for tx parsing).
+    pub network: ZcashNetwork,
     /// Block height to start scanning from (the key's "birthday").
     pub birthday: u32,
     /// Lightwalletd URL, e.g. `"http://127.0.0.1:9067"` or `"https://zec.rocks:443"`.
@@ -261,7 +262,7 @@ mod regtest {
     #[tokio::test]
     #[ignore = "needs a local regtest lightwalletd on :9067"]
     async fn scan_pipeline_runs() {
-        let network = Network::TestNetwork;
+        let network = ZcashNetwork::Regtest;
 
         let mut client = grpc::connect(LWD).await.expect("connect");
         let tip = client

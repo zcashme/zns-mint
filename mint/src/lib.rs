@@ -18,7 +18,7 @@
 
 // Flat API surface — re-export the domain, state, chain, and signer crates so
 // `zns_mint::{parse_memo, build_name_note, NameRecord, ...}` resolve in one place.
-pub use zns_core::{memo, parse_memo, Action, ParsedMemo, RegistryError, ZERO_PREV_RCM};
+pub use zns_core::{memo, parse_memo, Action, ParsedMemo, RegistryError, ZcashNetwork, ZERO_PREV_RCM};
 pub use zns_state::{append_action, db, latest_action, MintedAction, NameRecord};
 pub use zns_signer::{build_name_note, MintParams, MintResult};
 pub use zns_chain::{scan_incoming, scan_incoming_all, GrpcClient, IncomingNote, ScannerConfig};
@@ -372,7 +372,7 @@ impl Registry {
 /// the registry needs to address the OTP relay note.
 fn parse_orchard_recipient(
     ua: &str,
-    network: zcash_protocol::consensus::Network,
+    network: zns_core::ZcashNetwork,
 ) -> Result<orchard::Address, RegistryError> {
     use zcash_keys::address::Address;
     match Address::decode(&network, ua) {
@@ -409,7 +409,7 @@ pub struct MintContext {
     /// Block height at which built transactions expire (0 = no expiry).
     pub expiry_height: u32,
     /// The network the registry operates on — needed to decode owner UAs.
-    pub network: zcash_protocol::consensus::Network,
+    pub network: zns_core::ZcashNetwork,
     /// Treasury spend material for funded sends (the OTP challenge relay).
     /// `None` until the daemon wires note-state; relays then fail with a clear
     /// "no treasury funding configured" error rather than silently no-op'ing.
@@ -479,7 +479,7 @@ mod tests {
             anchor: Anchor::empty_tree(),
             height: 2_000_000,
             expiry_height: 0,
-            network: zcash_protocol::consensus::Network::MainNetwork,
+            network: zns_core::ZcashNetwork::Main,
             treasury: None,
         }
     }

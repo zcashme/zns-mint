@@ -8,7 +8,9 @@
 pub mod action;
 pub mod error;
 pub mod memo;
+pub mod network;
 
 pub use action::{Action, ZERO_PREV_RCM};
 pub use error::RegistryError;
 pub use memo::{parse_memo, ParsedMemo};
+pub use network::ZcashNetwork;
