@@ -182,7 +182,24 @@ impl DaemonConfig {
             height: tip_height,
             expiry_height: 0,
             network: self.network,
+            circuit_version: self.circuit_version(),
             treasury: None,
+        }
+    }
+
+    /// Orchard circuit version for the target chain. Our regtest zebrad is at
+    /// NU6 (NU6.2 not activated), so it validates with the pre-NU6.2 circuit;
+    /// mainnet/testnet use the fixed post-NU6.2 circuit. Override with
+    /// `ZNS_CIRCUIT=insecure|fixed`.
+    fn circuit_version(&self) -> orchard::circuit::OrchardCircuitVersion {
+        use orchard::circuit::OrchardCircuitVersion::*;
+        match std::env::var("ZNS_CIRCUIT").as_deref() {
+            Ok("insecure") => InsecurePreNu6_2,
+            Ok("fixed") => FixedPostNu6_2,
+            _ => match self.network {
+                zns_mint::ZcashNetwork::Regtest => InsecurePreNu6_2,
+                _ => FixedPostNu6_2,
+            },
         }
     }
 }

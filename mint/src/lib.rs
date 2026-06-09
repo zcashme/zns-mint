@@ -296,6 +296,7 @@ impl Registry {
             anchor: ctx.anchor,
             branch_id: zcash_protocol::consensus::BranchId::Nu6,
             expiry_height: ctx.expiry_height,
+            circuit_version: ctx.circuit_version,
         })?;
 
         // Broadcast the serialized V5 transaction before the caller records the
@@ -410,6 +411,9 @@ pub struct MintContext {
     pub expiry_height: u32,
     /// The network the registry operates on — needed to decode owner UAs.
     pub network: zns_core::ZcashNetwork,
+    /// Orchard circuit version to prove against — must match the target chain's
+    /// active upgrade (NU6 → `InsecurePreNu6_2`; NU6.2+ → `FixedPostNu6_2`).
+    pub circuit_version: orchard::circuit::OrchardCircuitVersion,
     /// Treasury spend material for funded sends (the OTP challenge relay).
     /// `None` until the daemon wires note-state; relays then fail with a clear
     /// "no treasury funding configured" error rather than silently no-op'ing.
@@ -480,6 +484,7 @@ mod tests {
             height: 2_000_000,
             expiry_height: 0,
             network: zns_core::ZcashNetwork::Main,
+            circuit_version: orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
             treasury: None,
         }
     }

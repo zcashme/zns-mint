@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use blake2b_simd::Params;
 use orchard::{
     builder::{Builder as OrchardBuilder, BundleType},
-    circuit::ProvingKey,
+    circuit::{OrchardCircuitVersion, ProvingKey},
     keys::{FullViewingKey, Scope},
     tree::Anchor,
     value::NoteValue,
@@ -38,10 +38,27 @@ use crate::derive::zns_psi_rcm;
 // Proving key cache
 // ---------------------------------------------------------------------------
 
-static PROVING_KEY: OnceLock<ProvingKey> = OnceLock::new();
+// Orchard 0.14 ships two circuits with distinct verifying keys: the fixed
+// post-NU6.2 circuit (`build()` default) and the historical pre-NU6.2 circuit.
+// A chain validates with the VK for its active upgrade, so we must prove with
+// the version matching the target chain (e.g. a NU6 regtest needs the insecure
+// pre-NU6.2 key, or it rejects with "could not validate orchard proof").
+static PK_FIXED: OnceLock<ProvingKey> = OnceLock::new();
+static PK_INSECURE: OnceLock<ProvingKey> = OnceLock::new();
 
+/// The proving key for `version`, built once and cached.
+pub(crate) fn proving_key_for(version: OrchardCircuitVersion) -> &'static ProvingKey {
+    match version {
+        OrchardCircuitVersion::FixedPostNu6_2 => PK_FIXED.get_or_init(ProvingKey::build),
+        OrchardCircuitVersion::InsecurePreNu6_2 => {
+            PK_INSECURE.get_or_init(|| ProvingKey::build_for_version(version))
+        }
+    }
+}
+
+/// Default proving key (fixed post-NU6.2) — used by the funded/sweep paths.
 fn proving_key() -> &'static ProvingKey {
-    PROVING_KEY.get_or_init(ProvingKey::build)
+    proving_key_for(OrchardCircuitVersion::FixedPostNu6_2)
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +214,9 @@ pub struct MintParams<'a> {
     pub branch_id: BranchId,
     /// Block height at which the transaction expires.  Set to 0 for no expiry.
     pub expiry_height: u32,
+    /// Which Orchard circuit to prove against — must match the target chain's
+    /// active upgrade (NU6 → `InsecurePreNu6_2`; NU6.2+ → `FixedPostNu6_2`).
+    pub circuit_version: OrchardCircuitVersion,
 }
 
 /// The output of a successful mint: the derived cryptographic parameters and
@@ -239,9 +259,12 @@ pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, RegistryErr
     let new_rcm: [u8; 32] = rcm.to_repr();
     let new_psi: [u8; 32] = psi.to_repr();
 
-    // 3. Build the Orchard action using the ZNS override path.
+    // 3. Build the Orchard action using the ZNS override path. The builder must
+    //    carry the circuit version so its actions synthesize against the proving
+    //    key we use below (a NU6 chain needs the insecure pre-NU6.2 circuit).
     let ovk = Some(params.registry_fvk.to_ovk(Scope::External));
-    let mut builder = OrchardBuilder::new(BundleType::DEFAULT, params.anchor);
+    let mut builder =
+        OrchardBuilder::new_for_version(BundleType::DEFAULT, params.anchor, params.circuit_version);
 
     builder
         .add_zns_output(
@@ -280,9 +303,9 @@ pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, RegistryErr
         &orchard_digest,
     );
 
-    // 6. Create the ZK proof.
+    // 6. Create the ZK proof under the circuit version the target chain expects.
     let proven_bundle = unauthorized_bundle
-        .create_proof(proving_key(), &mut rng)
+        .create_proof(proving_key_for(params.circuit_version), &mut rng)
         .map_err(|e| RegistryError::Build(format!("create_proof: {e:?}")))?;
 
     // 7. Apply signatures.  No spend authorizing keys are needed for a
@@ -552,6 +575,7 @@ mod tests {
             anchor: Anchor::empty_tree(),
             branch_id: BranchId::Nu6,
             expiry_height: 0,
+            circuit_version: OrchardCircuitVersion::InsecurePreNu6_2,
         }
     }
 
@@ -587,6 +611,7 @@ mod tests {
             anchor: Anchor::empty_tree(),
             branch_id: BranchId::Nu6,
             expiry_height: 0,
+            circuit_version: OrchardCircuitVersion::InsecurePreNu6_2,
         })
         .unwrap();
 
