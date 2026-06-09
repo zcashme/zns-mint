@@ -18,9 +18,9 @@ use zns_mint::{
 /// How often to poll lightwalletd for new blocks.
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
 
-/// How many blocks back to take the spend anchor — far enough to be well
-/// confirmed, well within the Orchard anchor window.
-const ANCHOR_CONFIRMATIONS: u32 = 10;
+/// How many blocks back to take the spend anchor — confirmed, well within the
+/// Orchard anchor window. Override with `ZNS_ANCHOR_CONFIRMATIONS`.
+const ANCHOR_CONFIRMATIONS: u32 = 3;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
