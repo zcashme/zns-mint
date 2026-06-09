@@ -126,10 +126,12 @@ fn v5_shielded_sighash(
         .to_state()
         .finalize();
 
-    // 3. Sapling digest — empty bundle ("ZcTxSaplinHash")
+    // 3. Sapling digest — empty bundle. ZIP-244 personalization is
+    //    "ZTxIdSaplingHash" (16 bytes); the prior "ZcTxSaplinHash\0\0" was wrong,
+    //    which corrupted the sighash and invalidated every signature.
     let sapling_digest = Params::new()
         .hash_length(32)
-        .personal(b"ZcTxSaplinHash\0\0")
+        .personal(b"ZTxIdSaplingHash")
         .to_state()
         .finalize();
 
@@ -443,6 +445,12 @@ pub fn build_funded_mint(
 
     let cmx: [u8; 32] = authorized.actions()[name_note_action].cmx().to_bytes();
     let (tx_bytes, txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)?;
+
+    // Diagnostic: dump the raw tx so a stock-orchard verifier (no fork patch)
+    // can check the proof under the genuine crates.io VK.
+    if let Ok(path) = std::env::var("ZNS_DUMP_TX") {
+        let _ = std::fs::write(&path, &tx_bytes);
+    }
 
     // Round-trip self-check: re-read the serialized tx and verify the proof on
     // the DESERIALISED bundle (as a node would), to catch serialization drift
