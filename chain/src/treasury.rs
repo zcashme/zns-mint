@@ -22,6 +22,7 @@ use orchard::{
 };
 use zcash_client_backend::proto::service::{BlockId, BlockRange};
 use zcash_note_encryption::batch;
+use zcash_primitives::merkle_tree::read_commitment_tree;
 
 use crate::{grpc, scanner::parse_orchard, ScannerConfig};
 
@@ -40,8 +41,14 @@ pub struct SpendableNote {
     pub anchor: Anchor,
 }
 
-/// Scan the Orchard commitment tree from genesis to `anchor_height`, find a
-/// registry-owned note worth at least `min_value_zat`, and build its witness.
+/// Find a registry-owned note worth at least `min_value_zat` somewhere in
+/// `[start_height, anchor_height]` and build its spend witness anchored at
+/// `anchor_height`.
+///
+/// The commitment tree is seeded from the `GetTreeState` frontier just before
+/// `start_height` (so we only replay the window, not the whole chain — essential
+/// on testnet/mainnet). The funding note must therefore land at/after
+/// `start_height`; set the daemon birthday below where the registry was funded.
 ///
 /// Returns `None` if no eligible note exists. Note: this does not yet track
 /// nullifiers, so it can return an already-spent note; the daemon must avoid
@@ -49,6 +56,7 @@ pub struct SpendableNote {
 pub async fn select_funding(
     config: &ScannerConfig,
     min_value_zat: u64,
+    start_height: u32,
     anchor_height: u32,
 ) -> anyhow::Result<Option<SpendableNote>> {
     let ivk = PreparedIncomingViewingKey::new(&config.registry_fvk.to_ivk(Scope::External));
@@ -56,9 +64,28 @@ pub async fn select_funding(
         .await
         .map_err(|e| anyhow!("connect to {}: {e:?}", config.lwd_url))?;
 
+    // Seed the tree from the frontier just before the window, so the positions
+    // of leaves we append match the real chain tree.
+    let mut tree: CommitmentTree<MerkleHashOrchard, ORCHARD_DEPTH> = if start_height > 1 {
+        let state = client
+            .get_tree_state(BlockId { height: (start_height - 1) as u64, hash: vec![] })
+            .await
+            .context("get_tree_state")?
+            .into_inner();
+        if state.orchard_tree.is_empty() {
+            CommitmentTree::empty()
+        } else {
+            let bytes = hex::decode(state.orchard_tree.trim()).context("decode orchard tree")?;
+            read_commitment_tree::<MerkleHashOrchard, _, ORCHARD_DEPTH>(&bytes[..])
+                .context("read orchard tree frontier")?
+        }
+    } else {
+        CommitmentTree::empty()
+    };
+
     let mut stream = client
         .get_block_range(BlockRange {
-            start: Some(BlockId { height: 1, hash: vec![] }),
+            start: Some(BlockId { height: start_height as u64, hash: vec![] }),
             end: Some(BlockId { height: anchor_height as u64, hash: vec![] }),
             pool_types: vec![],
         })
@@ -66,7 +93,6 @@ pub async fn select_funding(
         .context("get_block_range")?
         .into_inner();
 
-    let mut tree: CommitmentTree<MerkleHashOrchard, ORCHARD_DEPTH> = CommitmentTree::empty();
     // Once a note is chosen we hold its witness and keep extending it with every
     // subsequent leaf, in lock-step with the tree.
     let mut chosen: Option<(Note, u64, IncrementalWitness<MerkleHashOrchard, ORCHARD_DEPTH>)> = None;

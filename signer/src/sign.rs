@@ -137,6 +137,7 @@ impl Signer {
             &plan,
             branch_id,
             expiry_height,
+            orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
         ) {
             Ok(result) => Ok(result),
             Err(e) => {

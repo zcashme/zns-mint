@@ -3049,6 +3049,7 @@ name = "zns-mint"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "hex",
  "orchard",
  "rusqlite",
  "tokio",

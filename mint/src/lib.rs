@@ -319,6 +319,7 @@ impl Registry {
                     &plan,
                     zcash_protocol::consensus::BranchId::Nu6,
                     ctx.expiry_height,
+                    ctx.circuit_version,
                 )?
             }
             None => build_name_note(MintParams {

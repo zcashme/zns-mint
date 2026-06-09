@@ -90,11 +90,12 @@ async fn main() -> anyhow::Result<()> {
         // fee and build its witness, anchored a few blocks back (well confirmed).
         let anchor_height = tip.saturating_sub(ANCHOR_CONFIRMATIONS);
         let mut ctx = cfg.mint_context(tip);
-        match select_funding(&scanner, MINT_FEE_ZAT, anchor_height).await {
+        match select_funding(&scanner, MINT_FEE_ZAT, cfg.birthday, anchor_height).await {
             Ok(Some(sn)) => {
                 eprintln!(
-                    "zns-mint: funding note {} zat, anchor @h{anchor_height}",
-                    sn.value_zat
+                    "zns-mint: funding note {} zat, anchor @h{anchor_height} = {}",
+                    sn.value_zat,
+                    hex::encode(sn.anchor.to_bytes()),
                 );
                 ctx.treasury = Some(std::sync::Arc::new(Treasury {
                     spend_key: cfg.spend_key(),
@@ -218,15 +219,21 @@ impl DaemonConfig {
         }
     }
 
-    /// Orchard circuit version to prove against. `FixedPostNu6_2` is what
-    /// orchard 0.14 uses for all current proving and verification, so it is the
-    /// default for every network; `InsecurePreNu6_2` only reconstructs the
-    /// historical VK. Override with `ZNS_CIRCUIT=insecure|fixed`.
+    /// Orchard circuit version to prove against — must match the circuit the
+    /// target chain validates with for its active upgrade. The NU6.2 fix swapped
+    /// the circuit/VK: a chain at NU6 (NU6.2 not yet active) verifies with
+    /// `InsecurePreNu6_2`; only post-NU6.2 chains use `FixedPostNu6_2`. Our
+    /// regtest is at NU6, so it needs the insecure circuit. Override with
+    /// `ZNS_CIRCUIT=insecure|fixed`.
     fn circuit_version(&self) -> orchard::circuit::OrchardCircuitVersion {
         use orchard::circuit::OrchardCircuitVersion::*;
         match std::env::var("ZNS_CIRCUIT").as_deref() {
+            Ok("fixed") => FixedPostNu6_2,
             Ok("insecure") => InsecurePreNu6_2,
-            _ => FixedPostNu6_2,
+            _ => match self.network {
+                zns_mint::ZcashNetwork::Regtest => InsecurePreNu6_2,
+                _ => FixedPostNu6_2,
+            },
         }
     }
 }

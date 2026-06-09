@@ -33,6 +33,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 anyhow = { workspace = true }
 # The daemon derives the registry Orchard key from a configured zip32 seed.
 zip32 = { workspace = true }
+hex = "0.4"
 
 [lints]
 workspace = true

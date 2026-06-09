@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use blake2b_simd::Params;
 use orchard::{
     builder::{Builder as OrchardBuilder, BundleType},
-    circuit::{OrchardCircuitVersion, ProvingKey},
+    circuit::{OrchardCircuitVersion, ProvingKey, VerifyingKey},
     keys::{FullViewingKey, Scope},
     tree::Anchor,
     value::NoteValue,
@@ -59,6 +59,19 @@ pub(crate) fn proving_key_for(version: OrchardCircuitVersion) -> &'static Provin
 /// Default proving key (fixed post-NU6.2) — used by the funded/sweep paths.
 fn proving_key() -> &'static ProvingKey {
     proving_key_for(OrchardCircuitVersion::FixedPostNu6_2)
+}
+
+/// Verifying keys, for self-checking a bundle before broadcast under the same
+/// circuit version it was proved (and that the target chain validates with).
+static VK_FIXED: OnceLock<VerifyingKey> = OnceLock::new();
+static VK_INSECURE: OnceLock<VerifyingKey> = OnceLock::new();
+fn verifying_key_for(version: OrchardCircuitVersion) -> &'static VerifyingKey {
+    match version {
+        OrchardCircuitVersion::FixedPostNu6_2 => VK_FIXED.get_or_init(VerifyingKey::build),
+        OrchardCircuitVersion::InsecurePreNu6_2 => {
+            VK_INSECURE.get_or_init(|| VerifyingKey::build_for_version(version))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +360,7 @@ use crate::policy::{FundingInput, MintPlan};
 /// `recipient` is the registry self-address — the *only* place value lands
 /// (Name Note + change). The caller is the policy-gated [`crate::sign::Signer`],
 /// which authors `plan` and supplies `funding` from the WalletDb note-state.
+#[allow(clippy::too_many_arguments)]
 pub fn build_funded_mint(
     registry_fvk: &FullViewingKey,
     spend_key: &SpendingKey,
@@ -355,6 +369,7 @@ pub fn build_funded_mint(
     plan: &MintPlan,
     branch_id: BranchId,
     expiry_height: u32,
+    circuit_version: OrchardCircuitVersion,
 ) -> Result<MintResult, RegistryError> {
     // 1. Derive (psi, rcm) from the registration tuple — signer-authored, never
     //    host-supplied.
@@ -368,7 +383,8 @@ pub fn build_funded_mint(
     let new_psi: [u8; 32] = psi.to_repr();
 
     let ovk = Some(registry_fvk.to_ovk(Scope::External));
-    let mut builder = OrchardBuilder::new(BundleType::DEFAULT, funding.anchor);
+    let mut builder =
+        OrchardBuilder::new_for_version(BundleType::DEFAULT, funding.anchor, circuit_version);
 
     // 2. Funding spend (pays the fee). Anchor must match the witness root.
     builder
@@ -376,9 +392,18 @@ pub fn build_funded_mint(
         .map_err(|e| RegistryError::Build(format!("add_spend: {e:?}")))?;
 
     // 3. The Name Note (value 0) to the registry self-address.
-    builder
-        .add_zns_output(ovk.clone(), recipient, NoteValue::from_raw(0), [0u8; 512], rcm, psi)
-        .map_err(|e| RegistryError::Build(format!("add_zns_output: {e:?}")))?;
+    //    Diagnostic: ZNS_VANILLA_OUTPUT swaps the rcm/psi-overridden ZNS output
+    //    for a standard value-0 output, to test whether the override is what a
+    //    node rejects (everything else — spend, witness, fee — is identical).
+    if std::env::var("ZNS_VANILLA_OUTPUT").is_ok() {
+        builder
+            .add_output(ovk.clone(), recipient, NoteValue::from_raw(0), [0u8; 512])
+            .map_err(|e| RegistryError::Build(format!("add_output(vanilla): {e:?}")))?;
+    } else {
+        builder
+            .add_zns_output(ovk.clone(), recipient, NoteValue::from_raw(0), [0u8; 512], rcm, psi)
+            .map_err(|e| RegistryError::Build(format!("add_zns_output: {e:?}")))?;
+    }
 
     // 4. Change back to the registry. value_balance = funding − 0 − change = fee.
     if plan.change_zat > 0 {
@@ -401,7 +426,7 @@ pub fn build_funded_mint(
     let sighash = v5_shielded_sighash(branch_id, 0, expiry_height, &orchard_digest);
 
     let proven = unauthorized
-        .create_proof(proving_key(), &mut rng)
+        .create_proof(proving_key_for(circuit_version), &mut rng)
         .map_err(|e| RegistryError::Build(format!("create_proof: {e:?}")))?;
 
     // Real funding spend → needs a spend-auth signature from the registry key.
@@ -410,8 +435,26 @@ pub fn build_funded_mint(
         .apply_signatures(&mut rng, sighash, &[ask])
         .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
 
+    // Self-check the proof under the same circuit version the target chain
+    // validates with, to localise validation failures to here vs. the node.
+    authorized
+        .verify_proof(verifying_key_for(circuit_version))
+        .map_err(|e| RegistryError::Build(format!("self-verify failed: {e:?}")))?;
+
     let cmx: [u8; 32] = authorized.actions()[name_note_action].cmx().to_bytes();
     let (tx_bytes, txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)?;
+
+    // Round-trip self-check: re-read the serialized tx and verify the proof on
+    // the DESERIALISED bundle (as a node would), to catch serialization drift
+    // between what we proved and what we broadcast.
+    let readback = Transaction::read(&tx_bytes[..], branch_id)
+        .map_err(|e| RegistryError::Build(format!("readback parse: {e}")))?;
+    readback
+        .orchard_bundle()
+        .ok_or_else(|| RegistryError::Build("readback: no orchard bundle".into()))?
+        .verify_proof(verifying_key_for(circuit_version))
+        .map_err(|e| RegistryError::Build(format!("readback verify failed: {e:?}")))?;
+
     Ok(MintResult { new_rcm, new_psi, cmx, txid, tx_bytes })
 }
 
