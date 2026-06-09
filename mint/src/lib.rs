@@ -20,8 +20,11 @@
 // `zns_mint::{parse_memo, build_name_note, NameRecord, ...}` resolve in one place.
 pub use zns_core::{memo, parse_memo, Action, ParsedMemo, RegistryError, ZcashNetwork, ZERO_PREV_RCM};
 pub use zns_state::{append_action, db, latest_action, MintedAction, NameRecord};
-pub use zns_signer::{build_name_note, MintParams, MintResult};
-pub use zns_chain::{scan_incoming, scan_incoming_all, GrpcClient, IncomingNote, ScannerConfig};
+pub use zns_signer::{build_name_note, FundingInput, MintParams, MintResult};
+pub use zns_chain::{
+    scan_incoming, scan_incoming_all, select_funding, GrpcClient, IncomingNote, ScannerConfig,
+    SpendableNote,
+};
 
 use std::sync::Arc;
 
@@ -31,6 +34,10 @@ use zns_auth::AuthModule;
 
 /// Minimum fee in zatoshis required for a CLAIM operation.
 pub const MIN_CLAIM_FEE_ZAT: u64 = 10_000; // 0.0001 ZEC
+
+/// ZIP-317 fee for a funded mint / relay (1 spend + ≤2 outputs ⇒ 2 logical
+/// actions ⇒ 5000 × 2). Also the conventional dust value carried to a recipient.
+pub const MINT_FEE_ZAT: u64 = 10_000;
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -286,18 +293,47 @@ impl Registry {
         prev_rcm: &[u8; 32],
         ctx: &MintContext,
     ) -> Result<MintResult, RegistryError> {
-        let result = build_name_note(MintParams {
-            action,
-            name,
-            ua,
-            prev_rcm: *prev_rcm,
-            recipient: ctx.recipient,
-            registry_fvk: ctx.registry_fvk.clone(),
-            anchor: ctx.anchor,
-            branch_id: zcash_protocol::consensus::BranchId::Nu6,
-            expiry_height: ctx.expiry_height,
-            circuit_version: ctx.circuit_version,
-        })?;
+        // Self-funded mint when a treasury note is available: spend it to pay the
+        // ZIP-317 fee, returning change to the registry. This is the consensus
+        // path — a real spend with a real anchor/witness. Without treasury, fall
+        // back to the unfunded value-0 note (won't pass stock consensus; testing).
+        let result = match ctx.treasury.as_ref() {
+            Some(treasury) => {
+                let funding_value = treasury.funding.note.value().inner();
+                let change_zat = funding_value.checked_sub(MINT_FEE_ZAT).ok_or(
+                    RegistryError::InsufficientFee { got: funding_value, need: MINT_FEE_ZAT },
+                )?;
+                let plan = zns_signer::MintPlan {
+                    action,
+                    name: name.to_owned(),
+                    ua: ua.to_owned(),
+                    prev_rcm: *prev_rcm,
+                    fee_zat: MINT_FEE_ZAT,
+                    change_zat,
+                };
+                zns_signer::build_funded_mint(
+                    &ctx.registry_fvk,
+                    &treasury.spend_key,
+                    ctx.recipient,
+                    &treasury.funding,
+                    &plan,
+                    zcash_protocol::consensus::BranchId::Nu6,
+                    ctx.expiry_height,
+                )?
+            }
+            None => build_name_note(MintParams {
+                action,
+                name,
+                ua,
+                prev_rcm: *prev_rcm,
+                recipient: ctx.recipient,
+                registry_fvk: ctx.registry_fvk.clone(),
+                anchor: ctx.anchor,
+                branch_id: zcash_protocol::consensus::BranchId::Nu6,
+                expiry_height: ctx.expiry_height,
+                circuit_version: ctx.circuit_version,
+            })?,
+        };
 
         // Broadcast the serialized V5 transaction before the caller records the
         // name, so a failed broadcast never leaves a phantom DB record.
@@ -351,14 +387,23 @@ impl Registry {
             )
         })?;
 
+        // Carry a dust output to the owner; fee + dust come off the funding note,
+        // the rest returns to the registry.
+        let funding_value = treasury.funding.note.value().inner();
+        let change_zat = funding_value
+            .checked_sub(MINT_FEE_ZAT + MINT_FEE_ZAT)
+            .ok_or(RegistryError::InsufficientFee {
+                got: funding_value,
+                need: MINT_FEE_ZAT + MINT_FEE_ZAT,
+            })?;
         let tx_bytes = zns_signer::build_memo_send(
             &ctx.registry_fvk,
             &treasury.spend_key,
             recipient,
-            treasury.change_addr,
+            ctx.recipient,
             &treasury.funding,
-            treasury.dust_zat,
-            treasury.change_zat,
+            MINT_FEE_ZAT, // dust to the owner
+            change_zat,
             memo_bytes,
             zcash_protocol::consensus::BranchId::Nu6,
             ctx.expiry_height,
@@ -421,20 +466,15 @@ pub struct MintContext {
     pub treasury: Option<Arc<Treasury>>,
 }
 
-/// Treasury spend material the registry needs to author a funded send (today,
-/// the OTP challenge relay via [`zns_signer::build_memo_send`]). The daemon
-/// selects `funding` from note-state and supplies the registry spend key.
+/// Treasury spend material: a registry note (with its witness) plus the spend
+/// key, used to author funded transactions — the self-funded mint and the OTP
+/// challenge relay. The daemon selects `funding` from note-state. Change always
+/// returns to `MintContext::recipient` (the registry self-address).
 pub struct Treasury {
     /// The registry Orchard spend key (authorizes the funding spend).
     pub spend_key: orchard::keys::SpendingKey,
-    /// Where change returns — the registry self-address.
-    pub change_addr: orchard::Address,
-    /// The treasury note being spent, with its witness.
+    /// The treasury note being spent, with its Merkle witness and anchor.
     pub funding: zns_signer::FundingInput,
-    /// Dust value carried to the recipient alongside the memo.
-    pub dust_zat: u64,
-    /// Change returned to the registry (`funding.value − dust − fee`).
-    pub change_zat: u64,
 }
 
 /// The outcome of processing a single incoming note.

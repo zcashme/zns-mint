@@ -10,7 +10,10 @@
 use std::time::Duration;
 
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
-use zns_mint::{scan_incoming_all, GrpcClient, MintContext, ProcessResult, Registry, ScannerConfig};
+use zns_mint::{
+    scan_incoming_all, select_funding, FundingInput, GrpcClient, MintContext, ProcessResult,
+    Registry, ScannerConfig, Treasury, MINT_FEE_ZAT,
+};
 
 /// How often to poll lightwalletd for new blocks.
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
@@ -72,19 +75,6 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
         };
-        // Mint against a real, recent Orchard root (a few blocks back, so it is
-        // well confirmed) — consensus rejects the empty-tree anchor.
-        let anchor_height = tip.saturating_sub(ANCHOR_CONFIRMATIONS);
-        let anchor = match grpc.orchard_anchor(anchor_height).await {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("zns-mint: anchor fetch failed at h{anchor_height}: {e:#}");
-                continue;
-            }
-        };
-        let mut ctx = cfg.mint_context(tip);
-        ctx.anchor = anchor;
-
         let notes = match scan_incoming_all(&scanner).await {
             Ok(notes) => notes,
             Err(e) => {
@@ -94,6 +84,29 @@ async fn main() -> anyhow::Result<()> {
         };
         if notes.is_empty() {
             continue;
+        }
+
+        // There is something to mint: select a treasury note to self-fund the
+        // fee and build its witness, anchored a few blocks back (well confirmed).
+        let anchor_height = tip.saturating_sub(ANCHOR_CONFIRMATIONS);
+        let mut ctx = cfg.mint_context(tip);
+        match select_funding(&scanner, MINT_FEE_ZAT, anchor_height).await {
+            Ok(Some(sn)) => {
+                eprintln!(
+                    "zns-mint: funding note {} zat, anchor @h{anchor_height}",
+                    sn.value_zat
+                );
+                ctx.treasury = Some(std::sync::Arc::new(Treasury {
+                    spend_key: cfg.spend_key(),
+                    funding: FundingInput {
+                        note: sn.note,
+                        merkle_path: sn.merkle_path,
+                        anchor: sn.anchor,
+                    },
+                }));
+            }
+            Ok(None) => eprintln!("zns-mint: no treasury note ≥ fee — mint will be unfunded"),
+            Err(e) => eprintln!("zns-mint: funding selection failed: {e:#}"),
         }
 
         for result in registry.process_notes(&notes, &ctx).await {
@@ -160,10 +173,13 @@ impl DaemonConfig {
         }
     }
 
+    fn spend_key(&self) -> SpendingKey {
+        SpendingKey::from_zip32_seed(&self.seed, self.coin_type(), zip32::AccountId::ZERO)
+            .expect("valid zip32 seed")
+    }
+
     fn registry_fvk(&self) -> FullViewingKey {
-        let sk = SpendingKey::from_zip32_seed(&self.seed, self.coin_type(), zip32::AccountId::ZERO)
-            .expect("valid zip32 seed");
-        FullViewingKey::from(&sk)
+        FullViewingKey::from(&self.spend_key())
     }
 
     /// The registry's Orchard-only Unified Address (`addr_reg`) for this network.

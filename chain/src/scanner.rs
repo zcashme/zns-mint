@@ -173,7 +173,7 @@ fn orchard_ivk(fvk: &orchard::keys::FullViewingKey) -> PreparedIncomingViewingKe
 }
 
 /// Convert a proto [`CompactOrchardAction`] into an orchard [`CompactAction`].
-fn parse_orchard(p: &CompactOrchardAction) -> Option<CompactAction> {
+pub(crate) fn parse_orchard(p: &CompactOrchardAction) -> Option<CompactAction> {
     let nf: [u8; 32] = p.nullifier[..].try_into().ok()?;
     let nf = Option::from(Nullifier::from_bytes(&nf))?;
     let cmx: [u8; 32] = p.cmx[..].try_into().ok()?;

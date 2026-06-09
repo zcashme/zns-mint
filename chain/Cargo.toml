@@ -22,6 +22,8 @@ zcash_note_encryption = { workspace = true }
 tonic = { workspace = true, features = ["transport", "tls-ring", "tls-webpki-roots"] }
 # decode lightwalletd's hex-encoded commitment tree (GetTreeState → anchor)
 hex = "0.4"
+# build a spend witness for a treasury note by replaying the commitment tree
+incrementalmerkletree = { workspace = true }
 anyhow = { workspace = true }
 
 [dev-dependencies]
