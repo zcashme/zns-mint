@@ -317,7 +317,7 @@ impl Registry {
                     ctx.recipient,
                     &treasury.funding,
                     &plan,
-                    zcash_protocol::consensus::BranchId::Nu6,
+                    ctx.branch_id,
                     ctx.expiry_height,
                     ctx.circuit_version,
                 )?
@@ -330,7 +330,7 @@ impl Registry {
                 recipient: ctx.recipient,
                 registry_fvk: ctx.registry_fvk.clone(),
                 anchor: ctx.anchor,
-                branch_id: zcash_protocol::consensus::BranchId::Nu6,
+                branch_id: ctx.branch_id,
                 expiry_height: ctx.expiry_height,
                 circuit_version: ctx.circuit_version,
             })?,
@@ -406,7 +406,7 @@ impl Registry {
             MINT_FEE_ZAT, // dust to the owner
             change_zat,
             memo_bytes,
-            zcash_protocol::consensus::BranchId::Nu6,
+            ctx.branch_id,
             ctx.expiry_height,
         )?;
 
@@ -460,6 +460,9 @@ pub struct MintContext {
     /// Orchard circuit version to prove against — must match the target chain's
     /// active upgrade (NU6 → `InsecurePreNu6_2`; NU6.2+ → `FixedPostNu6_2`).
     pub circuit_version: orchard::circuit::OrchardCircuitVersion,
+    /// Consensus branch id for the target chain's active upgrade (e.g. `Nu6` for
+    /// a NU6 chain, `Nu6_2` post-NU6.2). Embedded in the tx + the sighash.
+    pub branch_id: zcash_protocol::consensus::BranchId,
     /// Treasury spend material for funded sends (the OTP challenge relay).
     /// `None` until the daemon wires note-state; relays then fail with a clear
     /// "no treasury funding configured" error rather than silently no-op'ing.
@@ -526,6 +529,7 @@ mod tests {
             expiry_height: 0,
             network: zns_core::ZcashNetwork::Main,
             circuit_version: orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
+            branch_id: zcash_protocol::consensus::BranchId::Nu6,
             treasury: None,
         }
     }

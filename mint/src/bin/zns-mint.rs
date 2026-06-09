@@ -207,6 +207,13 @@ impl DaemonConfig {
     fn mint_context(&self, tip_height: u32) -> MintContext {
         let registry_fvk = self.registry_fvk();
         let recipient = registry_fvk.address_at(0u32, Scope::External);
+        // Branch id for the active upgrade at the tip — `ZcashNetwork` carries the
+        // activation heights, so this resolves Nu6 on regtest and Nu6_2 on a
+        // post-NU6.2 testnet automatically.
+        let branch_id = zcash_protocol::consensus::BranchId::for_height(
+            &self.network,
+            zcash_protocol::consensus::BlockHeight::from_u32(tip_height),
+        );
         MintContext {
             registry_fvk,
             recipient,
@@ -215,6 +222,7 @@ impl DaemonConfig {
             expiry_height: 0,
             network: self.network,
             circuit_version: self.circuit_version(),
+            branch_id,
             treasury: None,
         }
     }
