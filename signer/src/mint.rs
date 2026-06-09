@@ -394,18 +394,9 @@ pub fn build_funded_mint(
         .map_err(|e| RegistryError::Build(format!("add_spend: {e:?}")))?;
 
     // 3. The Name Note (value 0) to the registry self-address.
-    //    Diagnostic: ZNS_VANILLA_OUTPUT swaps the rcm/psi-overridden ZNS output
-    //    for a standard value-0 output, to test whether the override is what a
-    //    node rejects (everything else — spend, witness, fee — is identical).
-    if std::env::var("ZNS_VANILLA_OUTPUT").is_ok() {
-        builder
-            .add_output(ovk.clone(), recipient, NoteValue::from_raw(0), [0u8; 512])
-            .map_err(|e| RegistryError::Build(format!("add_output(vanilla): {e:?}")))?;
-    } else {
-        builder
-            .add_zns_output(ovk.clone(), recipient, NoteValue::from_raw(0), [0u8; 512], rcm, psi)
-            .map_err(|e| RegistryError::Build(format!("add_zns_output: {e:?}")))?;
-    }
+    builder
+        .add_zns_output(ovk.clone(), recipient, NoteValue::from_raw(0), [0u8; 512], rcm, psi)
+        .map_err(|e| RegistryError::Build(format!("add_zns_output: {e:?}")))?;
 
     // 4. Change back to the registry. value_balance = funding − 0 − change = fee.
     if plan.change_zat > 0 {
@@ -445,12 +436,6 @@ pub fn build_funded_mint(
 
     let cmx: [u8; 32] = authorized.actions()[name_note_action].cmx().to_bytes();
     let (tx_bytes, txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)?;
-
-    // Diagnostic: dump the raw tx so a stock-orchard verifier (no fork patch)
-    // can check the proof under the genuine crates.io VK.
-    if let Ok(path) = std::env::var("ZNS_DUMP_TX") {
-        let _ = std::fs::write(&path, &tx_bytes);
-    }
 
     // Round-trip self-check: re-read the serialized tx and verify the proof on
     // the DESERIALISED bundle (as a node would), to catch serialization drift
