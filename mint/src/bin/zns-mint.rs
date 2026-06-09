@@ -229,19 +229,14 @@ impl DaemonConfig {
 
     /// Orchard circuit version to prove against — must match the circuit the
     /// target chain validates with for its active upgrade. The NU6.2 fix swapped
-    /// the circuit/VK: a chain at NU6 (NU6.2 not yet active) verifies with
-    /// `InsecurePreNu6_2`; only post-NU6.2 chains use `FixedPostNu6_2`. Our
-    /// regtest is at NU6, so it needs the insecure circuit. Override with
-    /// `ZNS_CIRCUIT=insecure|fixed`.
+    /// the circuit/VK: pre-NU6.2 chains verify with `InsecurePreNu6_2`, post-NU6.2
+    /// with `FixedPostNu6_2`. Testnet and our NU6.2 regtest are both post-NU6.2,
+    /// so default to fixed. Override with `ZNS_CIRCUIT=insecure|fixed`.
     fn circuit_version(&self) -> orchard::circuit::OrchardCircuitVersion {
         use orchard::circuit::OrchardCircuitVersion::*;
         match std::env::var("ZNS_CIRCUIT").as_deref() {
-            Ok("fixed") => FixedPostNu6_2,
             Ok("insecure") => InsecurePreNu6_2,
-            _ => match self.network {
-                zns_mint::ZcashNetwork::Regtest => InsecurePreNu6_2,
-                _ => FixedPostNu6_2,
-            },
+            _ => FixedPostNu6_2,
         }
     }
 }

@@ -46,8 +46,9 @@ impl Parameters for ZcashNetwork {
         match self {
             ZcashNetwork::Main => MAIN_NETWORK.activation_height(nu),
             ZcashNetwork::Test => TEST_NETWORK.activation_height(nu),
-            // Regtest: everything up to NU6 is live from block 1 (matches zebra's
-            // Regtest, which reports Overwinter…NU6 active at height 1).
+            // Regtest: Overwinter…NU6 at height 1, then NU6.1 at 20 and NU6.2 at
+            // 22 — matching our NU6.2 regtest zebrad.toml. So BranchId::for_height
+            // resolves Nu6_2 at the tip (and the circuit is the fixed post-NU6.2).
             ZcashNetwork::Regtest => match nu {
                 NetworkUpgrade::Overwinter
                 | NetworkUpgrade::Sapling
@@ -56,6 +57,8 @@ impl Parameters for ZcashNetwork {
                 | NetworkUpgrade::Canopy
                 | NetworkUpgrade::Nu5
                 | NetworkUpgrade::Nu6 => Some(BlockHeight::from_u32(1)),
+                NetworkUpgrade::Nu6_1 => Some(BlockHeight::from_u32(20)),
+                NetworkUpgrade::Nu6_2 => Some(BlockHeight::from_u32(22)),
                 _ => None,
             },
         }
