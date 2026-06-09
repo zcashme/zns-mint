@@ -261,7 +261,8 @@ pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, RegistryErr
 
     // 3. Build the Orchard action using the ZNS override path. The builder must
     //    carry the circuit version so its actions synthesize against the proving
-    //    key we use below (a NU6 chain needs the insecure pre-NU6.2 circuit).
+    //    key used below. `params.anchor` must be a real, recent Orchard tree
+    //    root — consensus checks the bundle anchor against known roots.
     let ovk = Some(params.registry_fvk.to_ovk(Scope::External));
     let mut builder =
         OrchardBuilder::new_for_version(BundleType::DEFAULT, params.anchor, params.circuit_version);

@@ -3019,6 +3019,7 @@ name = "zns-chain"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "hex",
  "orchard",
  "tokio",
  "tonic",

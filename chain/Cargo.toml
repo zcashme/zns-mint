@@ -20,6 +20,8 @@ zcash_protocol = { workspace = true }
 zcash_client_backend = { workspace = true }
 zcash_note_encryption = { workspace = true }
 tonic = { workspace = true, features = ["transport", "tls-ring", "tls-webpki-roots"] }
+# decode lightwalletd's hex-encoded commitment tree (GetTreeState → anchor)
+hex = "0.4"
 anyhow = { workspace = true }
 
 [dev-dependencies]

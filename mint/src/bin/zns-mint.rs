@@ -15,6 +15,10 @@ use zns_mint::{scan_incoming_all, GrpcClient, MintContext, ProcessResult, Regist
 /// How often to poll lightwalletd for new blocks.
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
 
+/// How many blocks back to take the spend anchor — far enough to be well
+/// confirmed, well within the Orchard anchor window.
+const ANCHOR_CONFIRMATIONS: u32 = 10;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // TODO: load from the `config` crate (file + ZNS_* env), init tracing+metrics.
@@ -68,7 +72,18 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
         };
-        let ctx = cfg.mint_context(tip);
+        // Mint against a real, recent Orchard root (a few blocks back, so it is
+        // well confirmed) — consensus rejects the empty-tree anchor.
+        let anchor_height = tip.saturating_sub(ANCHOR_CONFIRMATIONS);
+        let anchor = match grpc.orchard_anchor(anchor_height).await {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("zns-mint: anchor fetch failed at h{anchor_height}: {e:#}");
+                continue;
+            }
+        };
+        let mut ctx = cfg.mint_context(tip);
+        ctx.anchor = anchor;
 
         let notes = match scan_incoming_all(&scanner).await {
             Ok(notes) => notes,
@@ -187,19 +202,15 @@ impl DaemonConfig {
         }
     }
 
-    /// Orchard circuit version for the target chain. Our regtest zebrad is at
-    /// NU6 (NU6.2 not activated), so it validates with the pre-NU6.2 circuit;
-    /// mainnet/testnet use the fixed post-NU6.2 circuit. Override with
-    /// `ZNS_CIRCUIT=insecure|fixed`.
+    /// Orchard circuit version to prove against. `FixedPostNu6_2` is what
+    /// orchard 0.14 uses for all current proving and verification, so it is the
+    /// default for every network; `InsecurePreNu6_2` only reconstructs the
+    /// historical VK. Override with `ZNS_CIRCUIT=insecure|fixed`.
     fn circuit_version(&self) -> orchard::circuit::OrchardCircuitVersion {
         use orchard::circuit::OrchardCircuitVersion::*;
         match std::env::var("ZNS_CIRCUIT").as_deref() {
             Ok("insecure") => InsecurePreNu6_2,
-            Ok("fixed") => FixedPostNu6_2,
-            _ => match self.network {
-                zns_mint::ZcashNetwork::Regtest => InsecurePreNu6_2,
-                _ => FixedPostNu6_2,
-            },
+            _ => FixedPostNu6_2,
         }
     }
 }

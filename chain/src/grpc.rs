@@ -5,10 +5,12 @@
 //! former `seer-sync` dependency. Plaintext for `http://` (a local regtest
 //! zebrad/lightwalletd); TLS with webpki roots for `https://` (public servers).
 
+use orchard::tree::{Anchor, MerkleHashOrchard};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_client_backend::proto::service::{
-    compact_tx_streamer_client::CompactTxStreamerClient, ChainSpec, RawTransaction,
+    compact_tx_streamer_client::CompactTxStreamerClient, BlockId, ChainSpec, RawTransaction,
 };
+use zcash_primitives::merkle_tree::read_commitment_tree;
 
 use zns_core::RegistryError;
 
@@ -76,6 +78,26 @@ impl GrpcClient {
             .map_err(|e| RegistryError::Broadcast(format!("get_latest_block: {e}")))?
             .into_inner();
         Ok(block.height as u32)
+    }
+
+    /// Fetch the Orchard note-commitment-tree root at `height` for use as a
+    /// spend anchor. Consensus checks a bundle's anchor against known roots, so
+    /// the registry must mint against a real recent root (not the empty tree).
+    ///
+    /// Reads lightwalletd's `GetTreeState`, deserialises the Orchard commitment
+    /// tree frontier, and returns its root.
+    pub async fn orchard_anchor(&self, height: u32) -> Result<Anchor, RegistryError> {
+        let mut client = connect(&self.lwd_url).await?;
+        let state = client
+            .get_tree_state(BlockId { height: height as u64, hash: vec![] })
+            .await
+            .map_err(|e| RegistryError::Broadcast(format!("get_tree_state: {e}")))?
+            .into_inner();
+        let bytes = hex::decode(state.orchard_tree.trim())
+            .map_err(|e| RegistryError::Broadcast(format!("decode orchard tree: {e}")))?;
+        let tree = read_commitment_tree::<MerkleHashOrchard, _, 32>(&bytes[..])
+            .map_err(|e| RegistryError::Broadcast(format!("read orchard tree: {e}")))?;
+        Ok(Anchor::from(tree.root()))
     }
 
     /// Broadcast a serialised transaction via `SendTransaction`.
