@@ -38,6 +38,7 @@ orchard          = { version = "0.14", default-features = false }
 zcash_primitives = "0.28"
 zcash_protocol   = "0.9"
 zcash_keys       = { version = "0.14", default-features = false, features = ["orchard"] }
+zcash_address    = "0.12"
 zcash_note_encryption = "0.4.1"
 # lightwalletd gRPC transport (proto client) — replaces seer-sync for host's
 # chain I/O (broadcast + intake scan). `*-transport` pulls the tonic Channel;

@@ -59,7 +59,6 @@ impl Parameters for ZcashNetwork {
                 | NetworkUpgrade::Nu6 => Some(BlockHeight::from_u32(1)),
                 NetworkUpgrade::Nu6_1 => Some(BlockHeight::from_u32(20)),
                 NetworkUpgrade::Nu6_2 => Some(BlockHeight::from_u32(22)),
-                _ => None,
             },
         }
     }

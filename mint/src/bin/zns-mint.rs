@@ -34,6 +34,13 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // `zns-mint viewkey` prints addr_reg's Unified *Incoming* Viewing Key —
+    // the published key (DESIGN.md §7) every resolver scans with.
+    if std::env::args().nth(1).as_deref() == Some("viewkey") {
+        println!("{}", cfg.registry_uivk()?);
+        return Ok(());
+    }
+
     // `zns-mint scan` does one intake scan and prints the ZNS notes found at
     // addr_reg, without minting — a read-only check that intake works.
     if std::env::args().nth(1).as_deref() == Some("scan") {
@@ -189,6 +196,18 @@ impl DaemonConfig {
         let ua = zcash_keys::address::UnifiedAddress::from_receivers(Some(addr), None, None)
             .ok_or_else(|| anyhow::anyhow!("could not build a Unified Address"))?;
         Ok(ua.encode(&self.network))
+    }
+
+    /// addr_reg's Unified Incoming Viewing Key — the published key
+    /// (`DESIGN.md §7`): resolvers scan with it; it cannot spend.
+    fn registry_uivk(&self) -> anyhow::Result<String> {
+        use zcash_address::unified::{Encoding, Ivk, Uivk};
+        use zcash_protocol::consensus::Parameters as _;
+
+        let ivk = self.registry_fvk().to_ivk(Scope::External).to_bytes();
+        let uivk = Uivk::try_from_items(vec![Ivk::Orchard(ivk)])
+            .map_err(|e| anyhow::anyhow!("building UIVK: {e:?}"))?;
+        Ok(uivk.encode(&self.network.network_type()))
     }
 
     fn scanner(&self) -> ScannerConfig {

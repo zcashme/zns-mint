@@ -3053,6 +3053,7 @@ dependencies = [
  "orchard",
  "rusqlite",
  "tokio",
+ "zcash_address",
  "zcash_keys",
  "zcash_protocol",
  "zip32",
