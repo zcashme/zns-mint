@@ -28,6 +28,8 @@ pub use zns_chain::{
     ScannerConfig, SpendableNote,
 };
 
+pub mod rpc;
+
 use std::sync::Arc;
 
 use rusqlite::Connection;
@@ -95,6 +97,13 @@ impl Registry {
     pub async fn lookup(&self, name: &str) -> Result<Option<NameRecord>, RegistryError> {
         let conn = self.db.lock().await;
         db::get_record(&conn, name)
+    }
+
+    /// Registry table counts for the control plane's `status` method.
+    pub async fn stats(&self) -> Result<RegistryStats, RegistryError> {
+        let conn = self.db.lock().await;
+        let (names, pending_challenges, mint_intents) = db::table_counts(&conn)?;
+        Ok(RegistryStats { names, pending_challenges, mint_intents })
     }
 
     /// Drop notes the intake ledger has already settled. Lets the daemon skip
@@ -220,7 +229,7 @@ impl Registry {
             let conn = self.db.lock().await;
             if let Err(e) = db::mark_processed(&conn, &note.txid, note.output_index) {
                 // Non-fatal: the note reprocesses next poll, idempotently.
-                eprintln!("zns-mint: intake ledger write failed: {e}");
+                tracing::warn!("intake ledger write failed: {e}");
             }
         }
         result
@@ -484,16 +493,14 @@ impl Registry {
         for intent in intents {
             let name = &intent.minted.name;
             if grpc.transaction_exists(&intent.minted.txid).await? {
-                eprintln!(
-                    "zns-mint: reconciling {name:?} — broadcast tx {} found on chain, \
-                     replaying persistence",
-                    hex::encode(intent.minted.txid)
+                tracing::warn!(
+                    name,
+                    txid = hex::encode(intent.minted.txid),
+                    "reconciling: broadcast tx found on chain, replaying persistence"
                 );
                 self.persist_mint(&intent.minted, &intent.ua).await?;
             } else if intent.expiry_height > 0 && tip_height > intent.expiry_height {
-                eprintln!(
-                    "zns-mint: dropping mint intent for {name:?} — tx expired unmined"
-                );
+                tracing::warn!(name, "dropping mint intent — tx expired unmined");
                 let conn = self.db.lock().await;
                 db::delete_intent(&conn, name)?;
             }
@@ -663,6 +670,17 @@ impl Treasury {
             anchor: self.funding.anchor,
         }
     }
+}
+
+/// Registry table counts, served by the control plane's `status` method.
+#[derive(Debug, Clone, Copy)]
+pub struct RegistryStats {
+    /// Currently registered names.
+    pub names: u64,
+    /// Pending (unconfirmed, unexpired-or-not-yet-purged) OTP challenges.
+    pub pending_challenges: u64,
+    /// In-flight mint intents awaiting persistence or reconciliation.
+    pub mint_intents: u64,
 }
 
 /// The outcome of processing a single incoming note.

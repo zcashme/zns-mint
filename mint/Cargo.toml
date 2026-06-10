@@ -32,9 +32,13 @@ zcash_address = { workspace = true }
 rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 # The daemon derives the registry Orchard key from a configured zip32 seed.
 zip32 = { workspace = true }
 hex = "0.4"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+jsonrpsee = { workspace = true }
 
 [lints]
 workspace = true

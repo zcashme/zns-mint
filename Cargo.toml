@@ -74,7 +74,7 @@ zip32 = "0.2"
 tokio-graceful-shutdown = "0.15"
 tower                   = "0.4.13"
 tonic                   = "0.14"
-jsonrpsee               = "0.24"
+jsonrpsee               = { version = "0.26", features = ["server", "macros"] }
 tower-governor          = "0.4"
 #  config + safe hot-reload
 config   = "0.15"

@@ -30,7 +30,14 @@ const TX_EXPIRY_BLOCKS: u32 = 40;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // TODO: load from the `config` crate (file + ZNS_* env), init tracing+metrics.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    // TODO: load from the `config` crate (file + ZNS_* env).
     let cfg = DaemonConfig::from_env()?;
 
     // `zns-mint address` prints the registry Unified Address (addr_reg) and
@@ -72,12 +79,21 @@ async fn main() -> anyhow::Result<()> {
     // the mint path. The daemon proposes intent; the signer authors and signs.
     let signer = Arc::new(cfg.signer()?);
 
-    eprintln!(
-        "zns-mint: polling {} every {}s (db: {})",
-        cfg.lwd_url,
-        POLL_INTERVAL.as_secs(),
-        cfg.db_path,
+    tracing::info!(
+        lwd = cfg.lwd_url,
+        every_s = POLL_INTERVAL.as_secs(),
+        db = cfg.db_path,
+        "polling"
     );
+
+    // Control plane: health + status, read-only by construction.
+    let status = Arc::new(tokio::sync::RwLock::new(zns_mint::rpc::ChainStatus::default()));
+    let rpc_addr =
+        std::env::var("ZNS_RPC_ADDR").unwrap_or_else(|_| "127.0.0.1:8081".into());
+    tokio::spawn(zns_mint::rpc::serve(
+        rpc_addr,
+        zns_mint::rpc::RpcContext { registry: registry.clone(), status: status.clone() },
+    ));
 
     let mut tick = tokio::time::interval(POLL_INTERVAL);
     loop {
@@ -90,19 +106,27 @@ async fn main() -> anyhow::Result<()> {
         let tip = match grpc.tip_height().await {
             Ok(h) => h,
             Err(e) => {
-                eprintln!("zns-mint: tip query failed: {e:#}");
+                tracing::warn!("tip query failed: {e:#}");
                 continue;
             }
         };
+        {
+            let mut s = status.write().await;
+            s.tip_height = tip;
+            s.last_poll_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+        }
         // Resolve any mints a crash left between broadcast and persistence.
         if let Err(e) = registry.reconcile_intents(&grpc, tip).await {
-            eprintln!("zns-mint: intent reconciliation failed: {e:#}");
+            tracing::error!("intent reconciliation failed: {e:#}");
             continue; // don't mint over an unresolved intent
         }
         let notes = match scan_incoming_all(&scanner).await {
             Ok(notes) => notes,
             Err(e) => {
-                eprintln!("zns-mint: scan error: {e:#}");
+                tracing::warn!("scan error: {e:#}");
                 continue; // transient — retry on the next tick
             }
         };
@@ -119,13 +143,15 @@ async fn main() -> anyhow::Result<()> {
         match select_funding(&scanner, FUNDING_MIN_ZAT, cfg.birthday, anchor_height).await {
             Ok(selection) => {
                 ctx.hot_balance_zat = selection.spendable_total_zat;
+                status.write().await.spendable_zat = selection.spendable_total_zat;
                 match selection.note {
                     Some(sn) => {
-                        eprintln!(
-                            "zns-mint: funding note {} zat of {} spendable, anchor @h{anchor_height} = {}",
-                            sn.value_zat,
-                            selection.spendable_total_zat,
-                            hex::encode(sn.anchor.to_bytes()),
+                        tracing::info!(
+                            note_zat = sn.value_zat,
+                            spendable_zat = selection.spendable_total_zat,
+                            anchor_height,
+                            anchor = hex::encode(sn.anchor.to_bytes()),
+                            "funding selected"
                         );
                         ctx.treasury = Some(Arc::new(Treasury {
                             funding: FundingInput {
@@ -135,22 +161,20 @@ async fn main() -> anyhow::Result<()> {
                             },
                         }));
                     }
-                    None => eprintln!(
-                        "zns-mint: no treasury note ≥ floor ({} zat spendable) — spends deferred",
-                        selection.spendable_total_zat
+                    None => tracing::warn!(
+                        spendable_zat = selection.spendable_total_zat,
+                        "no treasury note ≥ floor — spends deferred"
                     ),
                 }
             }
-            Err(e) => eprintln!("zns-mint: funding selection failed: {e:#}"),
+            Err(e) => tracing::warn!("funding selection failed: {e:#}"),
         }
 
         for result in registry.process_notes(&notes, &ctx).await {
             match result {
-                ProcessResult::Ok(outcome) => eprintln!("zns-mint: {outcome:?}"),
-                ProcessResult::Skipped(why) => eprintln!("zns-mint: skipped ({why})"),
-                ProcessResult::Err(name, err) => {
-                    eprintln!("zns-mint: error on '{name}': {err}")
-                }
+                ProcessResult::Ok(outcome) => tracing::info!("{outcome:?}"),
+                ProcessResult::Skipped(why) => tracing::debug!("skipped ({why})"),
+                ProcessResult::Err(name, err) => tracing::warn!(name, "{err}"),
             }
         }
     }
@@ -186,7 +210,7 @@ impl DaemonConfig {
         let seed = match std::env::var("ZNS_SPEND_SEED") {
             Ok(hex) => decode_seed(&hex)?,
             Err(_) => {
-                eprintln!("zns-mint: WARNING — ZNS_SPEND_SEED unset, using a zero seed (regtest only)");
+                tracing::warn!("ZNS_SPEND_SEED unset — using a zero seed (regtest only)");
                 [0u8; 32]
             }
         };

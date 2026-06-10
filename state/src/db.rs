@@ -151,6 +151,17 @@ pub fn delete_intent(conn: &Connection, name: &str) -> Result<(), RegistryError>
     Ok(())
 }
 
+/// Row counts for the daemon's status surface:
+/// `(name_records, pending_challenges, mint_intents)`.
+pub fn table_counts(conn: &Connection) -> Result<(u64, u64, u64), RegistryError> {
+    let count = |table: &str| -> Result<u64, rusqlite::Error> {
+        // Table names are the compile-time constants below, never user input.
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get::<_, i64>(0))
+            .map(|n| n as u64)
+    };
+    Ok((count("name_records")?, count("pending_challenges")?, count("mint_intents")?))
+}
+
 fn row_to_intent(row: &rusqlite::Row) -> rusqlite::Result<PendingMint> {
     let to32 = |v: Vec<u8>, col| v.try_into().map_err(|_| rusqlite::Error::IntegralValueOutOfRange(col, 0));
     let action = zns_core::Action::from_bytes(row.get::<_, String>(1)?.as_bytes())
