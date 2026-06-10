@@ -41,18 +41,22 @@ pub struct SpendableNote {
     pub anchor: Anchor,
 }
 
-/// Find a registry-owned note worth at least `min_value_zat` somewhere in
-/// `[start_height, anchor_height]` and build its spend witness anchored at
-/// `anchor_height`.
+/// Find an **unspent** registry-owned note worth at least `min_value_zat`
+/// somewhere in `[start_height, anchor_height]` and build its spend witness
+/// anchored at `anchor_height`.
 ///
 /// The commitment tree is seeded from the `GetTreeState` frontier just before
 /// `start_height` (so we only replay the window, not the whole chain — essential
 /// on testnet/mainnet). The funding note must therefore land at/after
 /// `start_height`; set the daemon birthday below where the registry was funded.
 ///
-/// Returns `None` if no eligible note exists. Note: this does not yet track
-/// nullifiers, so it can return an already-spent note; the daemon must avoid
-/// double-spends until nullifier tracking lands.
+/// Spentness: every compact action carries the nullifier of the note it
+/// spends, so the same window scan collects all spends; a candidate whose
+/// nullifier (computed under the registry FVK) has appeared is excluded.
+/// A spend *below* the window can't be seen — acceptable under the same
+/// "birthday below funding" rule the frontier already imposes.
+///
+/// Returns `None` if no eligible unspent note exists.
 pub async fn select_funding(
     config: &ScannerConfig,
     min_value_zat: u64,
@@ -93,9 +97,14 @@ pub async fn select_funding(
         .context("get_block_range")?
         .into_inner();
 
-    // Once a note is chosen we hold its witness and keep extending it with every
-    // subsequent leaf, in lock-step with the tree.
-    let mut chosen: Option<(Note, u64, IncrementalWitness<MerkleHashOrchard, ORCHARD_DEPTH>)> = None;
+    // Every eligible registry note becomes a candidate whose witness is
+    // extended in lock-step with the tree; every action's nullifier is
+    // collected so spent candidates can be excluded at the end. (A "pick the
+    // first and stop tracking" scheme cannot work: the spend that disqualifies
+    // a candidate may appear later in the stream.)
+    type Witness = IncrementalWitness<MerkleHashOrchard, ORCHARD_DEPTH>;
+    let mut candidates: Vec<(Note, u64, Witness, [u8; 32])> = Vec::new();
+    let mut spent: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
 
     while let Some(block) = stream.message().await.context("block stream")? {
         for tx in &block.vtx {
@@ -113,10 +122,11 @@ pub async fn select_funding(
             let hits = batch::try_compact_note_decryption(std::slice::from_ref(&ivk), &inputs);
 
             for (i, action) in actions.iter().enumerate() {
-                let leaf = MerkleHashOrchard::from_cmx(&action.cmx());
+                // The action spends some prior note; record its nullifier.
+                spent.insert(action.nullifier().to_bytes());
 
-                // Extend the witness with leaves that come after the chosen note.
-                if let Some((_, _, witness)) = chosen.as_mut() {
+                let leaf = MerkleHashOrchard::from_cmx(&action.cmx());
+                for (_, _, witness, _) in candidates.iter_mut() {
                     witness
                         .append(leaf)
                         .map_err(|_| anyhow!("witness append failed (tree full)"))?;
@@ -124,28 +134,29 @@ pub async fn select_funding(
                 tree.append(leaf)
                     .map_err(|_| anyhow!("tree append failed (tree full)"))?;
 
-                // First eligible registry note: witness the leaf we just added.
-                if chosen.is_none() {
-                    if let Some(((note, _addr), _ivk_idx)) = hits.get(i).cloned().flatten() {
-                        if note.value().inner() >= min_value_zat {
-                            let witness = IncrementalWitness::from_tree(tree.clone())
-                                .ok_or_else(|| anyhow!("cannot witness an empty tree"))?;
-                            let value = note.value().inner();
-                            chosen = Some((note, value, witness));
-                        }
+                // Eligible registry note: witness the leaf we just added.
+                if let Some(((note, _addr), _ivk_idx)) = hits.get(i).cloned().flatten() {
+                    if note.value().inner() >= min_value_zat {
+                        let witness = IncrementalWitness::from_tree(tree.clone())
+                            .ok_or_else(|| anyhow!("cannot witness an empty tree"))?;
+                        let value = note.value().inner();
+                        let nf = note.nullifier(&config.registry_fvk).to_bytes();
+                        candidates.push((note, value, witness, nf));
                     }
                 }
             }
         }
     }
 
-    Ok(chosen.map(|(note, value_zat, witness)| {
-        let path = witness.path().expect("witnessed note always has a path");
-        SpendableNote {
-            note,
-            value_zat,
-            merkle_path: MerklePath::from(path),
-            anchor: Anchor::from(witness.root()),
-        }
-    }))
+    Ok(candidates.into_iter().find(|(_, _, _, nf)| !spent.contains(nf)).map(
+        |(note, value_zat, witness, _)| {
+            let path = witness.path().expect("witnessed note always has a path");
+            SpendableNote {
+                note,
+                value_zat,
+                merkle_path: MerklePath::from(path),
+                anchor: Anchor::from(witness.root()),
+            }
+        },
+    ))
 }
