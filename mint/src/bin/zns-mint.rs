@@ -12,7 +12,7 @@ use std::time::Duration;
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use zns_mint::{
     scan_incoming_all, select_funding, FundingInput, GrpcClient, MintContext, ProcessResult,
-    Registry, ScannerConfig, Treasury, MINT_FEE_ZAT,
+    Registry, ScannerConfig, Treasury, FUNDING_MIN_ZAT,
 };
 
 /// How often to poll lightwalletd for new blocks.
@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
         // fee and build its witness, anchored a few blocks back (well confirmed).
         let anchor_height = tip.saturating_sub(ANCHOR_CONFIRMATIONS);
         let mut ctx = cfg.mint_context(tip);
-        match select_funding(&scanner, MINT_FEE_ZAT, cfg.birthday, anchor_height).await {
+        match select_funding(&scanner, FUNDING_MIN_ZAT, cfg.birthday, anchor_height).await {
             Ok(Some(sn)) => {
                 eprintln!(
                     "zns-mint: funding note {} zat, anchor @h{anchor_height} = {}",

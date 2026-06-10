@@ -43,3 +43,24 @@ pub enum RegistryError {
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
+
+impl RegistryError {
+    /// Whether retrying the same input can ever succeed. Permanent failures
+    /// (the note's memo, value, or auth state can never change) settle the
+    /// note in the intake ledger; transient ones (infrastructure) leave it
+    /// for the next rescan.
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            RegistryError::InvalidMemo(_)
+            | RegistryError::InvalidName(_, _)
+            | RegistryError::InsufficientFee { .. }
+            | RegistryError::AlreadyClaimed(_)
+            | RegistryError::NotFound(_)
+            | RegistryError::Auth(_) => true,
+            RegistryError::Build(_)
+            | RegistryError::Db(_)
+            | RegistryError::Broadcast(_)
+            | RegistryError::Other(_) => false,
+        }
+    }
+}

@@ -39,7 +39,46 @@ pub fn init_schema(conn: &Connection) -> Result<(), RegistryError> {
              ua         TEXT    NOT NULL,
              height     INTEGER NOT NULL,
              created_at INTEGER NOT NULL
-         );",
+         );
+         -- Intake ledger: notes the daemon has settled (acted on, or rejected
+         -- for a reason that can never change). The intake scan is stateless
+         -- and replays history every poll; without this, an UPDATE request
+         -- re-issues a fresh OTP challenge each poll, churning the nonce the
+         -- owner is trying to echo back.
+         CREATE TABLE IF NOT EXISTS processed_notes (
+             txid         BLOB    NOT NULL,
+             output_index INTEGER NOT NULL,
+             PRIMARY KEY (txid, output_index)
+         ) WITHOUT ROWID;",
+    )?;
+    Ok(())
+}
+
+/// Whether the intake note `(txid, output_index)` has already been settled.
+pub fn is_processed(
+    conn: &Connection,
+    txid: &[u8; 32],
+    output_index: u32,
+) -> Result<bool, RegistryError> {
+    let hit: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM processed_notes WHERE txid = ?1 AND output_index = ?2",
+            params![txid.as_slice(), output_index],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(hit.is_some())
+}
+
+/// Settle an intake note: it will be skipped on every future rescan.
+pub fn mark_processed(
+    conn: &Connection,
+    txid: &[u8; 32],
+    output_index: u32,
+) -> Result<(), RegistryError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO processed_notes (txid, output_index) VALUES (?1, ?2)",
+        params![txid.as_slice(), output_index],
     )?;
     Ok(())
 }

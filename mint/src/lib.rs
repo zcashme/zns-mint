@@ -39,6 +39,12 @@ pub const MIN_CLAIM_FEE_ZAT: u64 = 10_000; // 0.0001 ZEC
 /// actions ⇒ 5000 × 2). Also the conventional dust value carried to a recipient.
 pub const MINT_FEE_ZAT: u64 = 10_000;
 
+/// Minimum value a treasury funding note must hold: the costliest single
+/// spend is the OTP challenge relay (fee + dust to the owner = 2 × fee). A
+/// floor of one fee would let the selector pick a user's own dust note and
+/// then fail the relay with `InsufficientFee`.
+pub const FUNDING_MIN_ZAT: u64 = 2 * MINT_FEE_ZAT;
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
@@ -109,12 +115,18 @@ impl Registry {
         notes: &[IncomingNote],
         mint_ctx: &MintContext,
     ) -> Vec<ProcessResult> {
+        // The poll's treasury note funds exactly one spend (a mint or a
+        // challenge relay) — it is consumed by `take()` at the spend site.
+        // Later spend-needing actions in the same batch are deferred: the
+        // intake rescan re-surfaces them next poll, when a fresh funding
+        // note (typically this spend's confirmed change) is selectable.
+        let mut treasury = mint_ctx.treasury.clone();
         let mut results = Vec::new();
         for note in notes {
             if !note.is_received {
                 continue; // skip OVK-recovered sent notes
             }
-            let res = self.process_note(note, mint_ctx).await;
+            let res = self.process_note(note, mint_ctx, &mut treasury).await;
             results.push(res);
         }
         results
@@ -124,52 +136,93 @@ impl Registry {
         &self,
         note: &IncomingNote,
         mint_ctx: &MintContext,
+        treasury: &mut Option<Arc<Treasury>>,
     ) -> ProcessResult {
-        let parsed = match parse_memo(&note.memo) {
-            Ok(m) => m,
-            Err(e) => {
-                return ProcessResult::Skipped(format!("memo parse error: {e}"));
+        // Intake ledger: the scan is stateless and replays history every
+        // poll, so each note is settled exactly once. (A ledger read failure
+        // fails open — reprocessing is safe, the handlers are idempotent.)
+        {
+            let conn = self.db.lock().await;
+            if db::is_processed(&conn, &note.txid, note.output_index).unwrap_or(false) {
+                return ProcessResult::Skipped("already settled".into());
             }
-        };
+        }
 
-        match &parsed {
+        // Dispatch, deciding whether this outcome *settles* the note: yes for
+        // success and for permanent rejections (nothing about the note can
+        // change); no for transient failures and treasury deferral, which the
+        // next rescan retries.
+        let (result, settled) = match &parse_memo(&note.memo) {
+            // Not a ZNS memo, or one that breaks the grammar — permanent.
+            Err(e) => (ProcessResult::Skipped(format!("memo parse error: {e}")), true),
+
             // A memo carrying the prev_rcm witness is the registry's own Name
             // Note canonical form (DESIGN.md §6) — our past mint seen again on
             // rescan, never a user request. Likewise a challenge is our own
-            // outbound OTP. Both are skipped, not re-processed.
-            ParsedMemo::Action { prev_rcm: Some(_), name, .. } => {
-                ProcessResult::Skipped(format!("registry-authored Name Note memo for {name:?}"))
+            // outbound OTP. Both settle without action.
+            Ok(ParsedMemo::Action { prev_rcm: Some(_), name, .. }) => (
+                ProcessResult::Skipped(format!("registry-authored Name Note memo for {name:?}")),
+                true,
+            ),
+            Ok(ParsedMemo::Challenge { name, .. }) => (
+                ProcessResult::Skipped(format!("registry-authored challenge memo for {name:?}")),
+                true,
+            ),
+
+            // Every dispatch below ends in a spend (mint or challenge relay);
+            // once the poll's treasury note is consumed, defer the rest. (No
+            // treasury *configured* is different — that mode still validates
+            // and falls through to the unfunded paths.)
+            Ok(ParsedMemo::Action { name, prev_rcm: None, .. })
+            | Ok(ParsedMemo::Confirm { name, .. })
+                if treasury.is_none() && mint_ctx.treasury.is_some() =>
+            {
+                (
+                    ProcessResult::Skipped(format!(
+                        "treasury consumed this poll — {name:?} deferred to the next rescan"
+                    )),
+                    false,
+                )
             }
-            ParsedMemo::Challenge { name, .. } => {
-                ProcessResult::Skipped(format!("registry-authored challenge memo for {name:?}"))
-            }
-            ParsedMemo::Action {
-                action,
-                name,
-                ua,
-                prev_rcm: None,
-            } => {
+
+            Ok(ParsedMemo::Action { action, name, ua, prev_rcm: None }) => {
                 match self
-                    .handle_action(*action, name, ua, note.value_zat, mint_ctx)
+                    .handle_action(*action, name, ua, note.value_zat, mint_ctx, treasury)
                     .await
                 {
-                    Ok(outcome) => ProcessResult::Ok(outcome),
-                    Err(e) => ProcessResult::Err(name.clone(), e.to_string()),
+                    Ok(outcome) => (ProcessResult::Ok(outcome), true),
+                    Err(e) => {
+                        let settled = e.is_permanent();
+                        (ProcessResult::Err(name.clone(), e.to_string()), settled)
+                    }
                 }
             }
-            ParsedMemo::Confirm { name, nonce } => {
-                match self.handle_confirm(name, nonce, mint_ctx).await {
-                    Ok(outcome) => ProcessResult::Ok(outcome),
-                    Err(e) => ProcessResult::Err(name.clone(), e.to_string()),
+            Ok(ParsedMemo::Confirm { name, nonce }) => {
+                match self.handle_confirm(name, nonce, mint_ctx, treasury).await {
+                    Ok(outcome) => (ProcessResult::Ok(outcome), true),
+                    Err(e) => {
+                        let settled = e.is_permanent();
+                        (ProcessResult::Err(name.clone(), e.to_string()), settled)
+                    }
                 }
+            }
+        };
+
+        if settled {
+            let conn = self.db.lock().await;
+            if let Err(e) = db::mark_processed(&conn, &note.txid, note.output_index) {
+                // Non-fatal: the note reprocesses next poll, idempotently.
+                eprintln!("zns-mint: intake ledger write failed: {e}");
             }
         }
+        result
     }
 
     // -----------------------------------------------------------------------
     // Internal action handlers
     // -----------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_action(
         &self,
         action: zns_core::Action,
@@ -177,6 +230,7 @@ impl Registry {
         ua: &str,
         value_zat: u64,
         mint_ctx: &MintContext,
+        treasury: &mut Option<Arc<Treasury>>,
     ) -> Result<ActionOutcome, RegistryError> {
         match action {
             zns_core::Action::Claim => {
@@ -198,7 +252,7 @@ impl Registry {
 
                 // 3. Mint the Name Note.
                 let result = self
-                    .do_mint(action, name, ua, &ZERO_PREV_RCM, mint_ctx)
+                    .do_mint(action, name, ua, &ZERO_PREV_RCM, mint_ctx, treasury)
                     .await?;
 
                 // 4. Persist the new record.
@@ -237,7 +291,7 @@ impl Registry {
                     .new_challenge(name, auth_action, ua, &record.ua)
                     .await?;
 
-                self.relay_challenge(name, &send_to, &nonce, mint_ctx).await?;
+                self.relay_challenge(name, &send_to, &nonce, mint_ctx, treasury).await?;
 
                 Ok(ActionOutcome::ChallengeIssued {
                     name: name.into(),
@@ -252,6 +306,7 @@ impl Registry {
         name: &str,
         nonce: &str,
         mint_ctx: &MintContext,
+        treasury: &mut Option<Arc<Treasury>>,
     ) -> Result<ActionOutcome, RegistryError> {
         // Verify the OTP.
         let challenge = self.auth.verify_confirm(name, nonce).await?;
@@ -278,7 +333,7 @@ impl Registry {
 
         // Mint the Name Note.
         let result = self
-            .do_mint(action, name, ua, &prev_rcm, mint_ctx)
+            .do_mint(action, name, ua, &prev_rcm, mint_ctx, treasury)
             .await?;
 
         // Update or delete the DB record.
@@ -303,12 +358,15 @@ impl Registry {
         ua: &str,
         prev_rcm: &[u8; 32],
         ctx: &MintContext,
+        treasury: &mut Option<Arc<Treasury>>,
     ) -> Result<MintResult, RegistryError> {
         // Self-funded mint when a treasury note is available: spend it to pay the
         // ZIP-317 fee, returning change to the registry. This is the consensus
-        // path — a real spend with a real anchor/witness. Without treasury, fall
-        // back to the unfunded value-0 note (won't pass stock consensus; testing).
-        let result = match ctx.treasury.as_ref() {
+        // path — a real spend with a real anchor/witness. The note is consumed
+        // here (`take`) so a later action in the same poll cannot double-spend
+        // it. Without treasury, fall back to the unfunded value-0 note (won't
+        // pass stock consensus; testing).
+        let result = match treasury.take() {
             Some(treasury) => {
                 let funding_value = treasury.funding.note.value().inner();
                 let change_zat = funding_value.checked_sub(MINT_FEE_ZAT).ok_or(
@@ -388,12 +446,14 @@ impl Registry {
         owner_ua: &str,
         nonce: &str,
         ctx: &MintContext,
+        treasury: &mut Option<Arc<Treasury>>,
     ) -> Result<(), RegistryError> {
         let memo_text = memo::encode_challenge(name, nonce);
         let memo_bytes = memo::encode_memo_bytes(&memo_text)?;
         let recipient = parse_orchard_recipient(owner_ua, ctx.network)?;
 
-        let treasury = ctx.treasury.as_ref().ok_or_else(|| {
+        // Consume the poll's funding note (`take`) — see `do_mint`.
+        let treasury = treasury.take().ok_or_else(|| {
             RegistryError::Broadcast(
                 "cannot relay OTP challenge: no treasury funding configured".into(),
             )
