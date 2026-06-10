@@ -9,6 +9,7 @@ use orchard::tree::{Anchor, MerkleHashOrchard};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_client_backend::proto::service::{
     compact_tx_streamer_client::CompactTxStreamerClient, BlockId, ChainSpec, RawTransaction,
+    TxFilter,
 };
 use zcash_primitives::merkle_tree::read_commitment_tree;
 
@@ -118,5 +119,27 @@ impl GrpcClient {
             )));
         }
         Ok(())
+    }
+
+    /// Whether the chain (or mempool) knows `txid` — the mint-intent
+    /// reconciliation probe. `Ok(false)` only for a definitive not-found;
+    /// transport failures surface as errors so reconciliation can't mistake
+    /// an outage for "the mint never landed".
+    pub async fn transaction_exists(&self, txid: &[u8; 32]) -> Result<bool, RegistryError> {
+        let mut client = connect(&self.lwd_url).await?;
+        match client
+            .get_transaction(TxFilter { block: None, index: 0, hash: txid.to_vec() })
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(false),
+            // lightwalletd wraps zebra's "no such transaction" in Unknown.
+            Err(status)
+                if status.message().contains("No such mempool or main chain transaction") =>
+            {
+                Ok(false)
+            }
+            Err(status) => Err(RegistryError::Broadcast(format!("GetTransaction: {status}"))),
+        }
     }
 }

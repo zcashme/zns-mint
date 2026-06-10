@@ -105,7 +105,21 @@ where
             let Ok(txid) = <[u8; 32]>::try_from(&ctx.txid[..]) else {
                 continue;
             };
-            let actions: Vec<CompactAction> = ctx.actions.iter().filter_map(parse_orchard).collect();
+            // Parse failures are errors, not skips: a dropped action would
+            // shift every later enumerate() index, mis-attributing memos to
+            // the wrong note. Consensus-valid data always parses.
+            let actions: Vec<CompactAction> = ctx
+                .actions
+                .iter()
+                .map(|a| {
+                    parse_orchard(a).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "unparseable compact Orchard action in tx {}",
+                            hex::encode(txid)
+                        )
+                    })
+                })
+                .collect::<anyhow::Result<_>>()?;
             if actions.is_empty() {
                 continue;
             }
@@ -221,10 +235,12 @@ async fn fetch_transaction(
         .await
         .context("get_transaction")?
         .into_inner();
-    match Transaction::read(&raw.data[..], branch) {
-        Ok(tx) => Ok(Some(tx)),
-        Err(_) => Ok(None),
-    }
+    // A parse failure must propagate (transient — the poll retries), never
+    // degrade to "no memo": that would settle real requests permanently as
+    // memo-parse errors if a branch-id mismatch or parser bug ever slipped in.
+    let tx = Transaction::read(&raw.data[..], branch)
+        .with_context(|| format!("parse tx {} under {branch:?}", hex::encode(txid)))?;
+    Ok(Some(tx))
 }
 
 // ── live regtest smoke tests ─────────────────────────────────────────────────

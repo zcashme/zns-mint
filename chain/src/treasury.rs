@@ -121,7 +121,17 @@ pub async fn select_funding(
 
     while let Some(block) = stream.message().await.context("block stream")? {
         for tx in &block.vtx {
-            let actions: Vec<CompactAction> = tx.actions.iter().filter_map(parse_orchard).collect();
+            // Parse failures are errors, not skips: a dropped action here
+            // would desync the rebuilt commitment tree from the real chain
+            // tree, yielding an anchor consensus rejects.
+            let actions: Vec<CompactAction> = tx
+                .actions
+                .iter()
+                .map(|a| {
+                    parse_orchard(a)
+                        .ok_or_else(|| anyhow!("unparseable compact Orchard action in funding scan"))
+                })
+                .collect::<anyhow::Result<_>>()?;
             if actions.is_empty() {
                 continue;
             }

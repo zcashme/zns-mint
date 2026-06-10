@@ -221,6 +221,12 @@ pub fn encode_name_note(
     prev_rcm: &[u8; 32],
 ) -> Result<[u8; MEMO_SIZE], RegistryError> {
     validate_name(name)?;
+    // Unreachable from the inbound parser (it can't produce a ua containing
+    // the field separator), but this is the canonical memo — keep the
+    // invariant local rather than inherited.
+    if ua.contains(':') {
+        return Err(RegistryError::InvalidMemo("ua contains the field separator ':'".into()));
+    }
     let verb = match action {
         Action::Claim => "claim",
         Action::Update => "update",

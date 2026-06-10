@@ -23,6 +23,11 @@ const POLL_INTERVAL: Duration = Duration::from_secs(15);
 /// Orchard anchor window. Override with `ZNS_ANCHOR_CONFIRMATIONS`.
 const ANCHOR_CONFIRMATIONS: u32 = 3;
 
+/// Built transactions expire this many blocks after the tip (ZIP-203). Bounded
+/// expiry is what lets crash reconciliation declare an unmined intent dead
+/// instead of holding it open forever.
+const TX_EXPIRY_BLOCKS: u32 = 40;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // TODO: load from the `config` crate (file + ZNS_* env), init tracing+metrics.
@@ -89,6 +94,11 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
         };
+        // Resolve any mints a crash left between broadcast and persistence.
+        if let Err(e) = registry.reconcile_intents(&grpc, tip).await {
+            eprintln!("zns-mint: intent reconciliation failed: {e:#}");
+            continue; // don't mint over an unresolved intent
+        }
         let notes = match scan_incoming_all(&scanner).await {
             Ok(notes) => notes,
             Err(e) => {
@@ -96,6 +106,8 @@ async fn main() -> anyhow::Result<()> {
                 continue; // transient — retry on the next tick
             }
         };
+        // Quiet poll = everything already settled; skip the funding rescan.
+        let notes = registry.unsettled(notes).await;
         if notes.is_empty() {
             continue;
         }
@@ -271,7 +283,9 @@ impl DaemonConfig {
             hot_balance_zat: 0,
             anchor: orchard::tree::Anchor::empty_tree(),
             height: tip_height,
-            expiry_height: 0,
+            // Bounded expiry (ZIP-203) so crash reconciliation can declare an
+            // unmined intent dead once the chain passes this height.
+            expiry_height: tip_height + TX_EXPIRY_BLOCKS,
             network: self.network,
             circuit_version: self.circuit_version(),
             branch_id,

@@ -3008,10 +3008,9 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 name = "zns-auth"
 version = "0.0.1"
 dependencies = [
- "serde",
  "thiserror 1.0.69",
- "tokio",
  "uuid",
+ "zns-core",
 ]
 
 [[package]]
@@ -3041,7 +3040,6 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "zcash_protocol",
- "zns-auth",
 ]
 
 [[package]]
@@ -3087,5 +3085,6 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "rusqlite",
+ "zns-auth",
  "zns-core",
 ]
