@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
                 .as_secs();
         }
         // Resolve any mints a crash left between broadcast and persistence.
-        if let Err(e) = registry.reconcile_intents(&grpc, tip).await {
+        if let Err(e) = registry.reconcile_intents(&grpc, &signer, tip).await {
             tracing::error!("intent reconciliation failed: {e:#}");
             continue; // don't mint over an unresolved intent
         }

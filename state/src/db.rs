@@ -76,9 +76,25 @@ pub fn init_schema(conn: &Connection) -> Result<(), RegistryError> {
              rcm           BLOB    NOT NULL,
              psi           BLOB    NOT NULL,
              height        INTEGER NOT NULL,
-             expiry_height INTEGER NOT NULL
+             expiry_height INTEGER NOT NULL,
+             -- the intake note that triggered the mint; dropping a dead
+             -- intent releases this id from the signer's replay set
+             request_txid  BLOB    NOT NULL,
+             request_idx   INTEGER NOT NULL
          );",
     )?;
+    // Migrate pre-`request_*` intent tables in place (the zeroed default is
+    // only a placeholder; such intents simply release nothing on drop).
+    for ddl in [
+        "ALTER TABLE mint_intents ADD COLUMN request_txid BLOB NOT NULL DEFAULT x'0000000000000000000000000000000000000000000000000000000000000000'",
+        "ALTER TABLE mint_intents ADD COLUMN request_idx INTEGER NOT NULL DEFAULT 0",
+    ] {
+        match conn.execute(ddl, []) {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("duplicate column name") => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
     Ok(())
 }
 
@@ -98,6 +114,9 @@ pub struct PendingMint {
     /// The transaction's expiry height (0 = never expires; such an intent is
     /// only ever resolved by finding the tx).
     pub expiry_height: u32,
+    /// The intake note `(txid, output_index)` that triggered this mint —
+    /// released from the signer's replay set if the intent dies.
+    pub request: ([u8; 32], u32),
 }
 
 /// Record a mint intent before broadcasting it. At most one in-flight mint
@@ -106,8 +125,9 @@ pub struct PendingMint {
 pub fn put_intent(conn: &Connection, intent: &PendingMint) -> Result<(), RegistryError> {
     conn.execute(
         "INSERT OR REPLACE INTO mint_intents
-             (name, action, ua, txid, cmx, rcm, psi, height, expiry_height)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (name, action, ua, txid, cmx, rcm, psi, height, expiry_height,
+              request_txid, request_idx)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             intent.minted.name,
             std::str::from_utf8(intent.minted.action.as_bytes()).expect("ascii"),
@@ -118,6 +138,8 @@ pub fn put_intent(conn: &Connection, intent: &PendingMint) -> Result<(), Registr
             intent.minted.psi.as_slice(),
             intent.minted.height,
             intent.expiry_height,
+            intent.request.0.as_slice(),
+            intent.request.1,
         ],
     )?;
     Ok(())
@@ -126,7 +148,8 @@ pub fn put_intent(conn: &Connection, intent: &PendingMint) -> Result<(), Registr
 /// The in-flight mint for `name`, if any.
 pub fn get_intent(conn: &Connection, name: &str) -> Result<Option<PendingMint>, RegistryError> {
     conn.query_row(
-        "SELECT name, action, ua, txid, cmx, rcm, psi, height, expiry_height
+        "SELECT name, action, ua, txid, cmx, rcm, psi, height, expiry_height,
+                request_txid, request_idx
          FROM mint_intents WHERE name = ?1",
         params![name],
         row_to_intent,
@@ -138,7 +161,9 @@ pub fn get_intent(conn: &Connection, name: &str) -> Result<Option<PendingMint>, 
 /// Every in-flight mint — the reconciliation work list.
 pub fn list_intents(conn: &Connection) -> Result<Vec<PendingMint>, RegistryError> {
     let mut stmt = conn.prepare(
-        "SELECT name, action, ua, txid, cmx, rcm, psi, height, expiry_height FROM mint_intents",
+        "SELECT name, action, ua, txid, cmx, rcm, psi, height, expiry_height,
+                request_txid, request_idx
+         FROM mint_intents",
     )?;
     let rows = stmt.query_map([], row_to_intent)?.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
@@ -178,6 +203,7 @@ fn row_to_intent(row: &rusqlite::Row) -> rusqlite::Result<PendingMint> {
         },
         ua: row.get(2)?,
         expiry_height: row.get(8)?,
+        request: (to32(row.get(9)?, 9)?, row.get(10)?),
     })
 }
 

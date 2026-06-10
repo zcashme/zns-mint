@@ -448,12 +448,23 @@ impl Registry {
                     minted: minted_action(name, action, &result, ctx.height),
                     ua: ua.to_owned(),
                     expiry_height: ctx.expiry_height,
+                    request: (request.txid, request.action_index),
                 },
             )?;
         }
-        GrpcClient::new(&self.grpc_addr)
-            .broadcast(result.tx_bytes.clone())
-            .await?;
+        if let Err(e) = GrpcClient::new(&self.grpc_addr).broadcast(result.tx_bytes.clone()).await {
+            // A definitive node rejection means the tx was never admitted:
+            // clear the intent and release the request now (a retry can
+            // re-sign immediately, e.g. after funding contention clears).
+            // Ambiguous failures — timeouts, transport errors — leave the
+            // intent for reconciliation: the tx may still be in flight.
+            if e.to_string().contains("node rejected tx") {
+                let conn = self.db.lock().await;
+                let _ = db::delete_intent(&conn, name);
+                ctx.signer.release_request(request);
+            }
+            return Err(e);
+        }
 
         Ok(result)
     }
@@ -484,6 +495,7 @@ impl Registry {
     pub async fn reconcile_intents(
         &self,
         grpc: &GrpcClient,
+        signer: &Signer,
         tip_height: u32,
     ) -> Result<(), RegistryError> {
         let intents = {
@@ -501,6 +513,12 @@ impl Registry {
                 self.persist_mint(&intent.minted, &intent.ua).await?;
             } else if intent.expiry_height > 0 && tip_height > intent.expiry_height {
                 tracing::warn!(name, "dropping mint intent — tx expired unmined");
+                // The signed tx is provably dead — release the triggering
+                // request from the replay set so its retry can sign again.
+                signer.release_request(RequestId {
+                    txid: intent.request.0,
+                    action_index: intent.request.1,
+                });
                 let conn = self.db.lock().await;
                 db::delete_intent(&conn, name)?;
             }
@@ -786,37 +804,132 @@ mod tests {
         assert!(reg.lookup("alice").await.unwrap().is_none());
     }
 
+    // ---- live regtest harness (run with --ignored against the local stack) ----
+
+    const LWD: &str = "http://127.0.0.1:9067";
+
+    /// A real regtest UA for the harness names' owner — the OTP relay must
+    /// decode it to address the challenge note (any valid regtest UA works;
+    /// this is the local zingo test wallet's).
+    const OWNER_UA: &str = "uregtest14d076f9t0er37srnxj0eyf4m7rg697mpe6uh3lg0pv0crcqq69tlp929n2ulngvdzr2j2jxj3gwcw7wfw4v8m9lyw03fhd6s0gz8rp42";
+
+    /// A live-stack [`MintContext`]: the zero-seed regtest registry identity
+    /// (the daemon's), treasury-funded from the chain via real funding
+    /// selection. Returns the context and the tip it was anchored at.
+    async fn live_context() -> (MintContext, u32) {
+        let seed = [0u8; 32];
+        let sk = SpendingKey::from_zip32_seed(&seed, 1, zip32::AccountId::ZERO).unwrap();
+        let fvk = FullViewingKey::from(&sk);
+        let registry_addr = fvk.address_at(0u32, Scope::External);
+        let policy = SpendPolicy {
+            registry_addr,
+            cold_addr: registry_addr,
+            max_fee_zat: MINT_FEE_ZAT,
+            target_float_zat: 0,
+            high_watermark_zat: u64::MAX,
+            low_watermark_zat: 0,
+            max_mints_per_window: u32::MAX,
+            max_swept_per_window_zat: 0,
+        };
+        let signer = Arc::new(Signer::new(seed, 1, zip32::AccountId::ZERO, policy).unwrap());
+
+        let grpc = GrpcClient::new(LWD);
+        let tip = grpc.tip_height().await.expect("live regtest stack on :9067");
+        let scanner = ScannerConfig {
+            registry_fvk: fvk,
+            network: zns_core::ZcashNetwork::Regtest,
+            birthday: 0,
+            lwd_url: LWD.into(),
+        };
+        let selection = select_funding(&scanner, FUNDING_MIN_ZAT, 0, tip.saturating_sub(3))
+            .await
+            .expect("funding scan");
+        let sn = selection.note.expect("registry funded on the regtest chain");
+
+        let branch_id = zcash_protocol::consensus::BranchId::for_height(
+            &zns_core::ZcashNetwork::Regtest,
+            zcash_protocol::consensus::BlockHeight::from_u32(tip),
+        );
+        let ctx = MintContext {
+            signer,
+            hot_balance_zat: selection.spendable_total_zat,
+            anchor: Anchor::empty_tree(),
+            height: tip,
+            expiry_height: tip + 40,
+            network: zns_core::ZcashNetwork::Regtest,
+            circuit_version: orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
+            branch_id,
+            treasury: Some(Arc::new(Treasury {
+                funding: FundingInput {
+                    note: sn.note,
+                    merkle_path: sn.merkle_path,
+                    anchor: sn.anchor,
+                },
+            })),
+        };
+        (ctx, tip)
+    }
+
+    /// Drive one request through a funded mint, retrying funding contention:
+    /// a prior broadcast may still sit unmined in the mempool, where its
+    /// spend is invisible to the compact-block funding scan — wait for a
+    /// block and re-select. Each attempt uses a fresh synthetic request id
+    /// (the in-process replay set only releases via intent reconciliation).
+    async fn process_funded(
+        reg: &Registry,
+        txid_base: u8,
+        memo_text: &str,
+        value_zat: u64,
+    ) -> ProcessResult {
+        for attempt in 0..8u8 {
+            let (ctx, tip) = live_context().await;
+            let note = request_note(txid_base + attempt, tip, memo_text, value_zat);
+            let r = reg.process_notes(&[note], &ctx).await.remove(0);
+            let contended = matches!(&r, ProcessResult::Err(_, e)
+                if e.contains("already spent")
+                    || e.contains("duplicate nullifier")
+                    || e.contains("same effects"));
+            if !contended {
+                return r;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        panic!("funding contention never cleared after 8 attempts")
+    }
+
+    fn request_note(txid_byte: u8, height: u32, memo_text: &str, value_zat: u64) -> IncomingNote {
+        let mut memo = vec![0u8; 512];
+        memo[..memo_text.len()].copy_from_slice(memo_text.as_bytes());
+        IncomingNote {
+            txid: [txid_byte; 32],
+            height,
+            output_index: 0,
+            memo,
+            value_zat,
+            is_received: true,
+        }
+    }
+
     #[tokio::test]
-    #[ignore = "broadcasts via the unfunded mint path, which zebra's mempool now rejects \
-                under ZIP-317 (unpaid actions); needs a funded-treasury fixture — covered \
-                by the regtest e2e harness"]
+    #[ignore = "live regtest e2e: needs zebrad + lightwalletd on :9067 with the funded \
+                zero-seed registry; spends real treasury notes (shared! run single-threaded: \
+                cargo test -p zns-mint -- --ignored --test-threads=1)."]
     async fn claim_and_lookup() {
         let reg = Registry::open_in_memory().unwrap();
-        let ctx = make_context();
+        let tip = GrpcClient::new(LWD).tip_height().await.expect("live regtest stack");
 
-        let note = IncomingNote {
-            txid: [0u8; 32],
-            height: 2_000_000,
-            output_index: 0,
-            memo: {
-                let mut m = vec![0u8; 512];
-                let s = b"ZNS:claim:alice:u1xxx";
-                m[..s.len()].copy_from_slice(s);
-                m
-            },
-            value_zat: MIN_CLAIM_FEE_ZAT,
-            is_received: true,
-        };
-
-        let results = reg.process_notes(&[note], &ctx).await;
-        assert_eq!(results.len(), 1);
+        // Unique per run — the chain remembers, even though the registry DB
+        // is fresh in-memory.
+        let name = format!("harness{tip}");
+        let result =
+            process_funded(&reg, 0x70, &format!("ZNS:claim:{name}:u1xxx"), MIN_CLAIM_FEE_ZAT)
+                .await;
         assert!(
-            matches!(results[0], ProcessResult::Ok(ActionOutcome::Minted { .. })),
-            "got: {:?}",
-            results[0]
+            matches!(result, ProcessResult::Ok(ActionOutcome::Minted { .. })),
+            "got: {result:?}"
         );
 
-        let rec = reg.lookup("alice").await.unwrap().unwrap();
+        let rec = reg.lookup(&name).await.unwrap().unwrap();
         assert_eq!(rec.ua, "u1xxx");
     }
 
@@ -868,48 +981,40 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "broadcasts via the unfunded mint path, which zebra's mempool now rejects \
-                under ZIP-317 (unpaid actions); needs a funded-treasury fixture — covered \
-                by the regtest e2e harness"]
+    #[ignore = "live regtest e2e: needs zebrad + lightwalletd on :9067 with the funded \
+                zero-seed registry; spends real treasury notes (shared! run single-threaded: \
+                cargo test -p zns-mint -- --ignored --test-threads=1)."]
     async fn update_issues_challenge() {
         let reg = Registry::open_in_memory().unwrap();
-        let ctx = make_context();
+        let tip = GrpcClient::new(LWD).tip_height().await.expect("live regtest stack");
+        let name = format!("harnessu{tip}");
 
-        // First, claim the name.
-        let claim = IncomingNote {
-            txid: [0u8; 32],
-            height: 2_000_000,
-            output_index: 0,
-            memo: {
-                let mut m = vec![0u8; 512];
-                let s = b"ZNS:claim:alice:u1old";
-                m[..s.len()].copy_from_slice(s);
-                m
-            },
-            value_zat: MIN_CLAIM_FEE_ZAT,
-            is_received: true,
-        };
-        reg.process_notes(&[claim], &ctx).await;
+        // Phase 1: claim a unique name (consumes a treasury note).
+        let result =
+            process_funded(&reg, 0x80, &format!("ZNS:claim:{name}:{OWNER_UA}"), MIN_CLAIM_FEE_ZAT)
+                .await;
+        assert!(
+            matches!(result, ProcessResult::Ok(ActionOutcome::Minted { .. })),
+            "claim: {result:?}"
+        );
 
-        // Then request an update.
-        let update = IncomingNote {
-            txid: [1u8; 32],
-            height: 2_000_001,
-            output_index: 0,
-            memo: {
-                let mut m = vec![0u8; 512];
-                let s = b"ZNS:update:alice:u1new";
-                m[..s.len()].copy_from_slice(s);
-                m
-            },
-            value_zat: 0,
-            is_received: true,
-        };
-        let results = reg.process_notes(&[update], &ctx).await;
-        assert!(matches!(
-            results[0],
-            ProcessResult::Ok(ActionOutcome::ChallengeIssued { .. })
-        ));
+        // Phase 2: the update triggers a funded OTP relay — the retry loop
+        // rides out the claim's change still being unmined.
+        let result = process_funded(
+            &reg,
+            0x90,
+            &format!("ZNS:update:{name}:{OWNER_UA}"),
+            MIN_MUTATION_FEE_ZAT,
+        )
+        .await;
+        assert!(
+            matches!(result, ProcessResult::Ok(ActionOutcome::ChallengeIssued { .. })),
+            "update: {result:?}"
+        );
+
+        // The challenge is durable: it survives in the registry DB.
+        let stats = reg.stats().await.unwrap();
+        assert_eq!(stats.pending_challenges, 1);
     }
 
     #[tokio::test]

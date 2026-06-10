@@ -104,6 +104,21 @@ impl Signer {
         self.guard.lock().expect("guard poisoned").roll_window();
     }
 
+    /// Release a request from the replay set because its signed transaction
+    /// is **provably dead** (expired unmined — decided by intent
+    /// reconciliation, the only place that can know). Without this, a
+    /// broadcast that never lands permanently burns the request: the replay
+    /// set records at sign time, but the mint isn't *done* until it persists.
+    ///
+    /// Trust note: a lying host calling this only re-enables a mint the
+    /// policy already permits, with the same deterministic `(ψ, rcm)` — the
+    /// replay set is defense-in-depth against accidental double-signing, not
+    /// the chain's integrity boundary (a forked name chain is publicly
+    /// visible to every scanner).
+    pub fn release_request(&self, id: RequestId) {
+        self.guard.lock().expect("guard poisoned").rollback_mint(id);
+    }
+
     /// Re-derive the spending key transiently for one signature. It lives only
     /// on the stack for the duration of the call; the seed is the sole resident
     /// secret.
