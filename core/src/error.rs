@@ -23,9 +23,11 @@ pub enum RegistryError {
     #[error("name '{0}' is not registered")]
     NotFound(String),
 
-    /// OTP/confirm auth failed.
+    /// OTP/confirm auth failed (the stringified `zns_auth::AuthError` — kept
+    /// as a string so the domain core does not depend on the auth crate;
+    /// layering runs auth → core, not the reverse).
     #[error("auth error: {0}")]
-    Auth(#[from] zns_auth::error::AuthError),
+    Auth(String),
 
     /// The signer's policy gate refused. `permanent` carries the gate's
     /// verdict class across the crate boundary: a bad name or a replay can

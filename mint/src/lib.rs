@@ -32,7 +32,6 @@ use std::sync::Arc;
 
 use rusqlite::Connection;
 use tokio::sync::Mutex;
-use zns_auth::AuthModule;
 
 /// Minimum fee in zatoshis required for a CLAIM operation.
 pub const MIN_CLAIM_FEE_ZAT: u64 = 10_000; // 0.0001 ZEC
@@ -60,12 +59,10 @@ pub const MIN_MUTATION_FEE_ZAT: u64 = 2 * MINT_FEE_ZAT;
 /// Cheaply cloneable — the inner state is behind `Arc`s.
 #[derive(Clone)]
 pub struct Registry {
-    /// SQLite connection shared across the tokio runtime.
+    /// SQLite connection shared across the tokio runtime. Also holds the
+    /// durable OTP challenge state (`pending_challenges`) — a daemon restart
+    /// must not void a mutation mid-flow.
     db: Arc<Mutex<Connection>>,
-    /// OTP challenge-response state for UPDATE / RELEASE.
-    /// `AuthModule` is already `Clone` over an internal `Arc<Mutex<_>>`, so it
-    /// needs no wrapping here.
-    auth: AuthModule,
     /// lightwalletd gRPC endpoint (e.g. `"http://127.0.0.1:9067"`) used to
     /// broadcast minted Name Notes via `SendTransaction`.
     grpc_addr: String,
@@ -80,22 +77,14 @@ impl Registry {
     ) -> Result<Self, RegistryError> {
         let conn = Connection::open(db_path)?;
         zns_state::init_schema(&conn)?;
-        Ok(Registry {
-            db: Arc::new(Mutex::new(conn)),
-            auth: AuthModule::new(),
-            grpc_addr: grpc_addr.into(),
-        })
+        Ok(Registry { db: Arc::new(Mutex::new(conn)), grpc_addr: grpc_addr.into() })
     }
 
     /// Open an in-memory registry (for testing / ephemeral use).
     pub fn open_in_memory() -> Result<Self, RegistryError> {
         let conn = Connection::open_in_memory()?;
         zns_state::init_schema(&conn)?;
-        Ok(Registry {
-            db: Arc::new(Mutex::new(conn)),
-            auth: AuthModule::new(),
-            grpc_addr: "http://127.0.0.1:9067".into(),
-        })
+        Ok(Registry { db: Arc::new(Mutex::new(conn)), grpc_addr: "http://127.0.0.1:9067".into() })
     }
 
     // -----------------------------------------------------------------------
@@ -106,6 +95,17 @@ impl Registry {
     pub async fn lookup(&self, name: &str) -> Result<Option<NameRecord>, RegistryError> {
         let conn = self.db.lock().await;
         db::get_record(&conn, name)
+    }
+
+    /// Drop notes the intake ledger has already settled. Lets the daemon skip
+    /// the O(chain) funding rescan on quiet polls — once any historical note
+    /// exists, the raw scan is never empty, but the *unsettled* set usually is.
+    pub async fn unsettled(&self, notes: Vec<IncomingNote>) -> Vec<IncomingNote> {
+        let conn = self.db.lock().await;
+        notes
+            .into_iter()
+            .filter(|n| !db::is_processed(&conn, &n.txid, n.output_index).unwrap_or(false))
+            .collect()
     }
 
     // -----------------------------------------------------------------------
@@ -259,16 +259,12 @@ impl Registry {
                     }
                 }
 
-                // 3. Mint the Name Note.
+                // 3. Mint the Name Note, then commit its persistence atomically.
                 let result = self
                     .do_mint(action, name, ua, &ZERO_PREV_RCM, request, mint_ctx, treasury)
                     .await?;
-
-                // 4. Persist the new record.
-                {
-                    let conn = self.db.lock().await;
-                    db::upsert_record(&conn, name, &result.new_rcm, ua, mint_ctx.height)?;
-                }
+                self.persist_mint(&minted_action(name, action, &result, mint_ctx.height), ua)
+                    .await?;
 
                 Ok(ActionOutcome::Minted {
                     name: name.into(),
@@ -297,26 +293,24 @@ impl Registry {
                     })?
                 };
 
-                // Convert action for auth module.
-                let auth_action = match action {
-                    zns_core::Action::Update => zns_auth::Action::Update,
-                    zns_core::Action::Release => zns_auth::Action::Release,
-                    _ => unreachable!(),
-                };
+                // Initiate the OTP challenge: persist it durably *first* (a
+                // failed relay retries with a fresh challenge next poll; a
+                // relayed nonce that was never persisted would be
+                // unconfirmable), then relay the nonce to the current owner.
+                let challenge = zns_auth::new_challenge(name, action, ua, mint_ctx.height)
+                    .map_err(|e| RegistryError::Auth(e.to_string()))?;
+                {
+                    let conn = self.db.lock().await;
+                    db::purge_expired_challenges(&conn, mint_ctx.height)?;
+                    db::put_challenge(&conn, &challenge)?;
+                }
 
-                // Initiate OTP challenge, then relay the nonce to the current
-                // owner so they can confirm. Dropping the nonce here (as the
-                // old code did) left UPDATE / RELEASE permanently un-confirmable.
-                let (nonce, send_to) = self
-                    .auth
-                    .new_challenge(name, auth_action, ua, &record.ua)
+                self.relay_challenge(name, &record.ua, &challenge.nonce, request, mint_ctx, treasury)
                     .await?;
-
-                self.relay_challenge(name, &send_to, &nonce, request, mint_ctx, treasury).await?;
 
                 Ok(ActionOutcome::ChallengeIssued {
                     name: name.into(),
-                    send_to,
+                    send_to: record.ua,
                 })
             }
         }
@@ -330,8 +324,17 @@ impl Registry {
         mint_ctx: &MintContext,
         treasury: &mut Option<Arc<Treasury>>,
     ) -> Result<ActionOutcome, RegistryError> {
-        // Verify the OTP.
-        let challenge = self.auth.verify_confirm(name, nonce).await?;
+        // Verify the OTP against the durable challenge — *without* consuming
+        // it: a transient mint failure below must leave the challenge intact
+        // for the retry (the confirm note stays unsettled), or the user's
+        // mutation dies permanently on a broadcast hiccup.
+        let challenge = {
+            let conn = self.db.lock().await;
+            db::get_challenge(&conn, name)?
+        }
+        .ok_or_else(|| RegistryError::Auth(format!("no pending challenge for name '{name}'")))?;
+        zns_auth::verify(&challenge, nonce, mint_ctx.height)
+            .map_err(|e| RegistryError::Auth(e.to_string()))?;
 
         // Look up the current record (for prev_rcm).
         let prev_rcm = {
@@ -342,31 +345,16 @@ impl Registry {
             }
         };
 
-        // Convert auth action back to zns_core action.
-        let action = match challenge.action {
-            zns_auth::Action::Update => zns_core::Action::Update,
-            zns_auth::Action::Release => zns_core::Action::Release,
-            zns_auth::Action::Claim => return Err(RegistryError::InvalidMemo(
-                "confirm for Claim is not valid".into(),
-            )),
-        };
-
+        let action = challenge.action;
         let ua = &challenge.ua_new;
 
-        // Mint the Name Note.
+        // Mint the Name Note, then commit record + challenge consumption +
+        // intent clearance in one transaction — a duplicate confirm after
+        // this point finds no challenge and cannot re-mint.
         let result = self
             .do_mint(action, name, ua, &prev_rcm, request, mint_ctx, treasury)
             .await?;
-
-        // Update or delete the DB record.
-        {
-            let conn = self.db.lock().await;
-            if action == zns_core::Action::Release {
-                db::delete_record(&conn, name)?;
-            } else {
-                db::upsert_record(&conn, name, &result.new_rcm, ua, mint_ctx.height)?;
-            }
-        }
+        self.persist_mint(&minted_action(name, action, &result, mint_ctx.height), ua).await?;
 
         Ok(ActionOutcome::Minted { name: name.into(), action })
     }
@@ -384,6 +372,18 @@ impl Registry {
         ctx: &MintContext,
         treasury: &mut Option<Arc<Treasury>>,
     ) -> Result<MintResult, RegistryError> {
+        // A surviving intent means a prior attempt may have broadcast but not
+        // persisted — minting again would fork the name's rcm chain. Transient:
+        // poll-start reconciliation resolves the intent either way.
+        {
+            let conn = self.db.lock().await;
+            if db::get_intent(&conn, name)?.is_some() {
+                return Err(RegistryError::Broadcast(format!(
+                    "mint intent for {name:?} pending reconciliation"
+                )));
+            }
+        }
+
         // Self-funded mint when a treasury note is available: the host
         // proposes pure *intent* and the policy-gated signer authors,
         // validates, and signs the spend (fee cap, low-watermark pause,
@@ -425,31 +425,80 @@ impl Registry {
             })?,
         };
 
-        // Broadcast the serialized V5 transaction before the caller records the
-        // name, so a failed broadcast never leaves a phantom DB record.
+        // Crash-window protocol: write the intent, THEN broadcast. The caller
+        // commits persistence (and deletes the intent) via [`Self::persist_mint`];
+        // a crash anywhere between broadcast and that commit leaves the intent
+        // for poll-start reconciliation to replay — never a re-mint. A failed
+        // broadcast leaves an intent that reconciliation drops once the tx's
+        // expiry passes unmined.
+        {
+            let conn = self.db.lock().await;
+            db::put_intent(
+                &conn,
+                &db::PendingMint {
+                    minted: minted_action(name, action, &result, ctx.height),
+                    ua: ua.to_owned(),
+                    expiry_height: ctx.expiry_height,
+                },
+            )?;
+        }
         GrpcClient::new(&self.grpc_addr)
             .broadcast(result.tx_bytes.clone())
             .await?;
 
-        // Append to the canonical action log. This is the source of truth for
-        // the name's `(ψ, rcm)` chain; `name_records` only caches the tip.
-        {
-            let conn = self.db.lock().await;
-            append_action(
-                &conn,
-                &MintedAction {
-                    name: name.to_owned(),
-                    action,
-                    txid: result.txid,
-                    cmx: result.cmx,
-                    rcm: result.new_rcm,
-                    psi: result.new_psi,
-                    height: ctx.height,
-                },
-            )?;
-        }
-
         Ok(result)
+    }
+
+    /// Commit a broadcast mint in one transaction: append to the canonical
+    /// action log (the source of truth for the `(ψ, rcm)` chain), fold the
+    /// `name_records` cache, consume any pending challenge, and clear the
+    /// intent. One atomic step shared by CLAIM, confirmed mutations, and
+    /// crash reconciliation — partial persistence cannot exist.
+    async fn persist_mint(&self, minted: &MintedAction, ua: &str) -> Result<(), RegistryError> {
+        let conn = self.db.lock().await;
+        let tx = conn.unchecked_transaction()?;
+        append_action(&tx, minted)?;
+        match minted.action {
+            zns_core::Action::Release => db::delete_record(&tx, &minted.name)?,
+            _ => db::upsert_record(&tx, &minted.name, &minted.rcm, ua, minted.height)?,
+        }
+        db::delete_challenge(&tx, &minted.name)?;
+        db::delete_intent(&tx, &minted.name)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Resolve any mint intents that survived a crash: an intent whose txid
+    /// the chain knows is replayed into [`Self::persist_mint`]; one whose tx
+    /// expired unmined is dropped (the triggering request note was never
+    /// settled, so it retries naturally). In-flight intents are left alone.
+    pub async fn reconcile_intents(
+        &self,
+        grpc: &GrpcClient,
+        tip_height: u32,
+    ) -> Result<(), RegistryError> {
+        let intents = {
+            let conn = self.db.lock().await;
+            db::list_intents(&conn)?
+        };
+        for intent in intents {
+            let name = &intent.minted.name;
+            if grpc.transaction_exists(&intent.minted.txid).await? {
+                eprintln!(
+                    "zns-mint: reconciling {name:?} — broadcast tx {} found on chain, \
+                     replaying persistence",
+                    hex::encode(intent.minted.txid)
+                );
+                self.persist_mint(&intent.minted, &intent.ua).await?;
+            } else if intent.expiry_height > 0 && tip_height > intent.expiry_height {
+                eprintln!(
+                    "zns-mint: dropping mint intent for {name:?} — tx expired unmined"
+                );
+                let conn = self.db.lock().await;
+                db::delete_intent(&conn, name)?;
+            }
+        }
+        Ok(())
     }
 
     /// Relay an OTP nonce to a name's current owner by sending them a
@@ -498,6 +547,24 @@ impl Registry {
 
         GrpcClient::new(&self.grpc_addr).broadcast(tx_bytes).await?;
         Ok(())
+    }
+}
+
+/// The action-log row for a freshly built mint.
+fn minted_action(
+    name: &str,
+    action: zns_core::Action,
+    result: &MintResult,
+    height: u32,
+) -> MintedAction {
+    MintedAction {
+        name: name.to_owned(),
+        action,
+        txid: result.txid,
+        cmx: result.cmx,
+        rcm: result.new_rcm,
+        psi: result.new_psi,
+        height,
     }
 }
 

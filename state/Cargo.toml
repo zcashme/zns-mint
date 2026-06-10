@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 zns-core = { workspace = true }   # RegistryError, shared domain types
+zns-auth = { workspace = true }   # PendingChallenge (persisted here)
 rusqlite = { workspace = true }
 anyhow = { workspace = true }
 
