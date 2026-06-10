@@ -3069,6 +3069,7 @@ name = "zns-signer"
 version = "0.0.1"
 dependencies = [
  "blake2b_simd",
+ "hex",
  "orchard",
  "pasta_curves",
  "rand",

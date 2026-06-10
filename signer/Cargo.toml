@@ -23,5 +23,7 @@ serde = { workspace = true }
 zip32 = { workspace = true }
 zeroize = { workspace = true }
 
+hex = "0.4"
+
 [lints]
 workspace = true

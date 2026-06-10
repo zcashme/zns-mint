@@ -150,8 +150,13 @@ fn decode_prev_rcm(s: &str) -> Result<[u8; 32], RegistryError> {
 }
 
 /// Validate a ZNS name: non-empty, ≤ 63 bytes, ASCII lowercase alphanumeric
-/// plus hyphens (no leading/trailing hyphen).
-fn validate_name(name: &str) -> Result<(), RegistryError> {
+/// plus hyphens (no leading/trailing hyphen) — the DNS-label rule, byte-
+/// identical to the kernel's (`zns_verify::memo::validate_name`).
+///
+/// This is the **authoritative producer-side validator**: the signer's policy
+/// gate delegates here, so the parser and the gate can never disagree about
+/// which names exist.
+pub fn validate_name(name: &str) -> Result<(), RegistryError> {
     if name.is_empty() {
         return Err(RegistryError::InvalidName(
             name.into(),

@@ -27,6 +27,18 @@ pub enum RegistryError {
     #[error("auth error: {0}")]
     Auth(#[from] zns_auth::error::AuthError),
 
+    /// The signer's policy gate refused. `permanent` carries the gate's
+    /// verdict class across the crate boundary: a bad name or a replay can
+    /// never succeed; a velocity cap or low-watermark pause clears on its
+    /// own, so the intake retries it.
+    #[error("policy refused: {reason}")]
+    Policy {
+        /// The gate's rejection, stringified.
+        reason: String,
+        /// Whether retrying the same request can ever succeed.
+        permanent: bool,
+    },
+
     /// An Orchard builder error occurred during note construction.
     #[error("note build error: {0}")]
     Build(String),
@@ -57,6 +69,7 @@ impl RegistryError {
             | RegistryError::AlreadyClaimed(_)
             | RegistryError::NotFound(_)
             | RegistryError::Auth(_) => true,
+            RegistryError::Policy { permanent, .. } => *permanent,
             RegistryError::Build(_)
             | RegistryError::Db(_)
             | RegistryError::Broadcast(_)

@@ -12,4 +12,4 @@ pub mod treasury;
 
 pub use grpc::GrpcClient;
 pub use scanner::{scan_incoming, scan_incoming_all, IncomingNote, ScannerConfig};
-pub use treasury::{select_funding, SpendableNote};
+pub use treasury::{select_funding, FundingSelection, SpendableNote};

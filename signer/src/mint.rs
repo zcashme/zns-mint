@@ -56,11 +56,6 @@ pub(crate) fn proving_key_for(version: OrchardCircuitVersion) -> &'static Provin
     }
 }
 
-/// Default proving key (fixed post-NU6.2) — used by the funded/sweep paths.
-fn proving_key() -> &'static ProvingKey {
-    proving_key_for(OrchardCircuitVersion::FixedPostNu6_2)
-}
-
 /// Verifying keys, for self-checking a bundle before broadcast under the same
 /// circuit version it was proved (and that the target chain validates with).
 static VK_FIXED: OnceLock<VerifyingKey> = OnceLock::new();
@@ -165,6 +160,7 @@ fn orchard_bundle_to_tx_bytes(
     bundle: orchard::bundle::Bundle<orchard::bundle::Authorized, i64>,
     consensus_branch_id: BranchId,
     expiry_height: u32,
+    sighash: &[u8; 32],
 ) -> Result<(Vec<u8>, [u8; 32]), RegistryError> {
     // Convert value_balance: i64 → ZatBalance (required by zcash_primitives serializer).
     let bundle_zat = bundle
@@ -190,6 +186,21 @@ fn orchard_bundle_to_tx_bytes(
 
     // The ZIP-244 txid is fixed once the tx is frozen.
     let txid: [u8; 32] = *tx.txid().as_ref();
+
+    // ZIP-244 invariant: with no transparent inputs (true of every tx we
+    // build), the signature digest equals the txid. A mismatch means the
+    // hand-rolled `v5_shielded_sighash` drifted from the serializer — the
+    // exact bug class behind the historic "ZcTxSaplinHash" typo — and the
+    // signatures are over the wrong message; the chain would reject the tx.
+    // Fail at build time instead.
+    if txid != *sighash {
+        return Err(RegistryError::Build(format!(
+            "sighash/txid mismatch (ZIP-244): sighash {} != txid {} — \
+             v5_shielded_sighash disagrees with the serializer",
+            hex::encode(sighash),
+            hex::encode(txid),
+        )));
+    }
 
     // Serialize using the Transaction::write() entry point.
     let mut bytes = Vec::new();
@@ -332,8 +343,12 @@ pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, RegistryErr
     let cmx: [u8; 32] = authorized_bundle.actions()[name_note_action]
         .cmx()
         .to_bytes();
-    let (tx_bytes, txid) =
-        orchard_bundle_to_tx_bytes(authorized_bundle, params.branch_id, params.expiry_height)?;
+    let (tx_bytes, txid) = orchard_bundle_to_tx_bytes(
+        authorized_bundle,
+        params.branch_id,
+        params.expiry_height,
+        &sighash,
+    )?;
 
     Ok(MintResult {
         new_rcm,
@@ -436,7 +451,7 @@ pub fn build_funded_mint(
         .map_err(|e| RegistryError::Build(format!("self-verify failed: {e:?}")))?;
 
     let cmx: [u8; 32] = authorized.actions()[name_note_action].cmx().to_bytes();
-    let (tx_bytes, txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)?;
+    let (tx_bytes, txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
 
     // Round-trip self-check: re-read the serialized tx and verify the proof on
     // the DESERIALISED bundle (as a node would), to catch serialization drift
@@ -457,6 +472,7 @@ pub fn build_funded_mint(
 /// swept wholesale (`amount_zat = funding.value − fee`), so `value_balance`
 /// equals the fee. `cold_addr` is the policy constant; the caller is the
 /// policy-gated [`crate::sign::Signer`].
+#[allow(clippy::too_many_arguments)]
 pub fn build_sweep(
     registry_fvk: &FullViewingKey,
     spend_key: &SpendingKey,
@@ -465,9 +481,11 @@ pub fn build_sweep(
     amount_zat: u64,
     branch_id: BranchId,
     expiry_height: u32,
+    circuit_version: OrchardCircuitVersion,
 ) -> Result<Vec<u8>, RegistryError> {
     let ovk = Some(registry_fvk.to_ovk(Scope::External));
-    let mut builder = OrchardBuilder::new(BundleType::DEFAULT, funding.anchor);
+    let mut builder =
+        OrchardBuilder::new_for_version(BundleType::DEFAULT, funding.anchor, circuit_version);
 
     builder
         .add_spend(registry_fvk.clone(), funding.note, funding.merkle_path.clone())
@@ -486,14 +504,14 @@ pub fn build_sweep(
     let sighash = v5_shielded_sighash(branch_id, 0, expiry_height, &orchard_digest);
 
     let proven = unauthorized
-        .create_proof(proving_key(), &mut rng)
+        .create_proof(proving_key_for(circuit_version), &mut rng)
         .map_err(|e| RegistryError::Build(format!("create_proof: {e:?}")))?;
     let ask = SpendAuthorizingKey::from(spend_key);
     let authorized = proven
         .apply_signatures(rng, sighash, &[ask])
         .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
 
-    let (tx_bytes, _txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)?;
+    let (tx_bytes, _txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
     Ok(tx_bytes)
 }
 
@@ -517,9 +535,11 @@ pub fn build_memo_send(
     memo: [u8; 512],
     branch_id: BranchId,
     expiry_height: u32,
+    circuit_version: OrchardCircuitVersion,
 ) -> Result<Vec<u8>, RegistryError> {
     let ovk = Some(registry_fvk.to_ovk(Scope::External));
-    let mut builder = OrchardBuilder::new(BundleType::DEFAULT, funding.anchor);
+    let mut builder =
+        OrchardBuilder::new_for_version(BundleType::DEFAULT, funding.anchor, circuit_version);
 
     // 1. Funding spend (covers dust + fee). Anchor must match the witness root.
     builder
@@ -548,14 +568,14 @@ pub fn build_memo_send(
     let sighash = v5_shielded_sighash(branch_id, 0, expiry_height, &orchard_digest);
 
     let proven = unauthorized
-        .create_proof(proving_key(), &mut rng)
+        .create_proof(proving_key_for(circuit_version), &mut rng)
         .map_err(|e| RegistryError::Build(format!("create_proof: {e:?}")))?;
     let ask = SpendAuthorizingKey::from(spend_key);
     let authorized = proven
         .apply_signatures(rng, sighash, &[ask])
         .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
 
-    let (tx_bytes, _txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)?;
+    let (tx_bytes, _txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
     Ok(tx_bytes)
 }
 

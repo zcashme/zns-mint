@@ -20,10 +20,12 @@
 // `zns_mint::{parse_memo, build_name_note, NameRecord, ...}` resolve in one place.
 pub use zns_core::{memo, parse_memo, Action, ParsedMemo, RegistryError, ZcashNetwork, ZERO_PREV_RCM};
 pub use zns_state::{append_action, db, latest_action, MintedAction, NameRecord};
-pub use zns_signer::{build_name_note, FundingInput, MintParams, MintResult};
+pub use zns_signer::{
+    build_name_note, FundingInput, MintParams, MintResult, RequestId, Signer, SpendPolicy,
+};
 pub use zns_chain::{
-    scan_incoming, scan_incoming_all, select_funding, GrpcClient, IncomingNote, ScannerConfig,
-    SpendableNote,
+    scan_incoming, scan_incoming_all, select_funding, FundingSelection, GrpcClient, IncomingNote,
+    ScannerConfig, SpendableNote,
 };
 
 use std::sync::Arc;
@@ -44,6 +46,10 @@ pub const MINT_FEE_ZAT: u64 = 10_000;
 /// floor of one fee would let the selector pick a user's own dust note and
 /// then fail the relay with `InsufficientFee`.
 pub const FUNDING_MIN_ZAT: u64 = 2 * MINT_FEE_ZAT;
+
+/// Minimum fee for an UPDATE / RELEASE request — covers the funded OTP relay
+/// it triggers (fee + dust), so mutations can't drain the treasury.
+pub const MIN_MUTATION_FEE_ZAT: u64 = 2 * MINT_FEE_ZAT;
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -186,8 +192,9 @@ impl Registry {
             }
 
             Ok(ParsedMemo::Action { action, name, ua, prev_rcm: None }) => {
+                let request = RequestId { txid: note.txid, action_index: note.output_index };
                 match self
-                    .handle_action(*action, name, ua, note.value_zat, mint_ctx, treasury)
+                    .handle_action(*action, name, ua, note.value_zat, request, mint_ctx, treasury)
                     .await
                 {
                     Ok(outcome) => (ProcessResult::Ok(outcome), true),
@@ -198,7 +205,8 @@ impl Registry {
                 }
             }
             Ok(ParsedMemo::Confirm { name, nonce }) => {
-                match self.handle_confirm(name, nonce, mint_ctx, treasury).await {
+                let request = RequestId { txid: note.txid, action_index: note.output_index };
+                match self.handle_confirm(name, nonce, request, mint_ctx, treasury).await {
                     Ok(outcome) => (ProcessResult::Ok(outcome), true),
                     Err(e) => {
                         let settled = e.is_permanent();
@@ -229,6 +237,7 @@ impl Registry {
         name: &str,
         ua: &str,
         value_zat: u64,
+        request: RequestId,
         mint_ctx: &MintContext,
         treasury: &mut Option<Arc<Treasury>>,
     ) -> Result<ActionOutcome, RegistryError> {
@@ -252,7 +261,7 @@ impl Registry {
 
                 // 3. Mint the Name Note.
                 let result = self
-                    .do_mint(action, name, ua, &ZERO_PREV_RCM, mint_ctx, treasury)
+                    .do_mint(action, name, ua, &ZERO_PREV_RCM, request, mint_ctx, treasury)
                     .await?;
 
                 // 4. Persist the new record.
@@ -268,6 +277,18 @@ impl Registry {
             }
 
             zns_core::Action::Update | zns_core::Action::Release => {
+                // 1. Verify fee. A mutation costs the treasury a funded relay
+                //    (fee + dust, and the dust lands at the *owner's* UA) —
+                //    free mutations would let an attacker updating their own
+                //    name drain the treasury at one relay per poll while
+                //    recouping the dust.
+                if value_zat < MIN_MUTATION_FEE_ZAT {
+                    return Err(RegistryError::InsufficientFee {
+                        got: value_zat,
+                        need: MIN_MUTATION_FEE_ZAT,
+                    });
+                }
+
                 // Name must exist.
                 let record = {
                     let conn = self.db.lock().await;
@@ -291,7 +312,7 @@ impl Registry {
                     .new_challenge(name, auth_action, ua, &record.ua)
                     .await?;
 
-                self.relay_challenge(name, &send_to, &nonce, mint_ctx, treasury).await?;
+                self.relay_challenge(name, &send_to, &nonce, request, mint_ctx, treasury).await?;
 
                 Ok(ActionOutcome::ChallengeIssued {
                     name: name.into(),
@@ -305,6 +326,7 @@ impl Registry {
         &self,
         name: &str,
         nonce: &str,
+        request: RequestId,
         mint_ctx: &MintContext,
         treasury: &mut Option<Arc<Treasury>>,
     ) -> Result<ActionOutcome, RegistryError> {
@@ -333,7 +355,7 @@ impl Registry {
 
         // Mint the Name Note.
         let result = self
-            .do_mint(action, name, ua, &prev_rcm, mint_ctx, treasury)
+            .do_mint(action, name, ua, &prev_rcm, request, mint_ctx, treasury)
             .await?;
 
         // Update or delete the DB record.
@@ -351,53 +373,51 @@ impl Registry {
 
     /// Build the Name Note (computing `(rcm, psi)` and the Orchard action) and
     /// broadcast it via `grpc_addr` before the caller records the name.
+    #[allow(clippy::too_many_arguments)]
     async fn do_mint(
         &self,
         action: zns_core::Action,
         name: &str,
         ua: &str,
         prev_rcm: &[u8; 32],
+        request: RequestId,
         ctx: &MintContext,
         treasury: &mut Option<Arc<Treasury>>,
     ) -> Result<MintResult, RegistryError> {
-        // Self-funded mint when a treasury note is available: spend it to pay the
-        // ZIP-317 fee, returning change to the registry. This is the consensus
-        // path — a real spend with a real anchor/witness. The note is consumed
-        // here (`take`) so a later action in the same poll cannot double-spend
-        // it. Without treasury, fall back to the unfunded value-0 note (won't
-        // pass stock consensus; testing).
+        // Self-funded mint when a treasury note is available: the host
+        // proposes pure *intent* and the policy-gated signer authors,
+        // validates, and signs the spend (fee cap, low-watermark pause,
+        // replay set, velocity cap — zns_signer::policy). The note is
+        // consumed here (`take`) so a later action in the same poll cannot
+        // double-spend it. Without treasury, fall back to the unfunded
+        // value-0 note (won't pass stock consensus; testing).
         let result = match treasury.take() {
             Some(treasury) => {
-                let funding_value = treasury.funding.note.value().inner();
-                let change_zat = funding_value.checked_sub(MINT_FEE_ZAT).ok_or(
-                    RegistryError::InsufficientFee { got: funding_value, need: MINT_FEE_ZAT },
-                )?;
-                let plan = zns_signer::MintPlan {
+                let intent = zns_signer::MintIntent {
                     action,
                     name: name.to_owned(),
                     ua: ua.to_owned(),
                     prev_rcm: *prev_rcm,
                     fee_zat: MINT_FEE_ZAT,
-                    change_zat,
+                    request_id: request,
                 };
-                zns_signer::build_funded_mint(
-                    &ctx.registry_fvk,
-                    &treasury.spend_key,
-                    ctx.recipient,
-                    &treasury.funding,
-                    &plan,
-                    ctx.branch_id,
-                    ctx.expiry_height,
-                    ctx.circuit_version,
-                )?
+                ctx.signer
+                    .sign_mint(
+                        zns_signer::MintProposal { intent, funding: treasury.funding_input() },
+                        ctx.hot_balance_zat,
+                        ctx.branch_id,
+                        ctx.expiry_height,
+                        ctx.circuit_version,
+                    )
+                    .map_err(registry_err)?
             }
             None => build_name_note(MintParams {
                 action,
                 name,
                 ua,
                 prev_rcm: *prev_rcm,
-                recipient: ctx.recipient,
-                registry_fvk: ctx.registry_fvk.clone(),
+                recipient: ctx.signer.registry_address(),
+                registry_fvk: ctx.signer.fvk().clone(),
                 anchor: ctx.anchor,
                 branch_id: ctx.branch_id,
                 expiry_height: ctx.expiry_height,
@@ -436,15 +456,18 @@ impl Registry {
     /// `ZNS:challenge:<name>:<nonce>` memo. Without this the owner never learns
     /// the nonce and UPDATE / RELEASE can never be confirmed.
     ///
-    /// The relay is a funded dust output to `owner_ua` carrying the challenge
-    /// memo, authored over the signer boundary via [`zns_signer::build_memo_send`]
-    /// and broadcast through `grpc_addr`. It requires treasury spend material
-    /// (`ctx.treasury`); without it the challenge cannot be delivered.
+    /// The relay goes through the signer's bounded exception
+    /// ([`zns_signer::Signer::sign_relay`]): dust + fee are policy-capped, the
+    /// triggering request is replay-protected, and a velocity slot is
+    /// consumed. It requires treasury spend material; without it the
+    /// challenge cannot be delivered.
+    #[allow(clippy::too_many_arguments)]
     async fn relay_challenge(
         &self,
         name: &str,
         owner_ua: &str,
         nonce: &str,
+        request: RequestId,
         ctx: &MintContext,
         treasury: &mut Option<Arc<Treasury>>,
     ) -> Result<(), RegistryError> {
@@ -459,30 +482,41 @@ impl Registry {
             )
         })?;
 
-        // Carry a dust output to the owner; fee + dust come off the funding note,
-        // the rest returns to the registry.
-        let funding_value = treasury.funding.note.value().inner();
-        let change_zat = funding_value
-            .checked_sub(MINT_FEE_ZAT + MINT_FEE_ZAT)
-            .ok_or(RegistryError::InsufficientFee {
-                got: funding_value,
-                need: MINT_FEE_ZAT + MINT_FEE_ZAT,
-            })?;
-        let tx_bytes = zns_signer::build_memo_send(
-            &ctx.registry_fvk,
-            &treasury.spend_key,
-            recipient,
-            ctx.recipient,
-            &treasury.funding,
-            MINT_FEE_ZAT, // dust to the owner
-            change_zat,
-            memo_bytes,
-            ctx.branch_id,
-            ctx.expiry_height,
-        )?;
+        let tx_bytes = ctx
+            .signer
+            .sign_relay(
+                recipient,
+                memo_bytes,
+                treasury.funding_input(),
+                request,
+                ctx.hot_balance_zat,
+                ctx.branch_id,
+                ctx.expiry_height,
+                ctx.circuit_version,
+            )
+            .map_err(registry_err)?;
 
         GrpcClient::new(&self.grpc_addr).broadcast(tx_bytes).await?;
         Ok(())
+    }
+}
+
+/// Carry a [`zns_signer::SignError`] across the crate boundary, preserving
+/// the permanence class the intake ledger settles on.
+fn registry_err(e: zns_signer::SignError) -> RegistryError {
+    use zns_signer::{PolicyError, SignError};
+    match e {
+        SignError::Build(e) => e,
+        SignError::Policy(p) => {
+            let permanent = matches!(
+                p,
+                PolicyError::NameInvalid(_)
+                    | PolicyError::EmptyUa
+                    | PolicyError::FeeTooHigh { .. }
+                    | PolicyError::Replay(_)
+            );
+            RegistryError::Policy { reason: format!("{p:?}"), permanent }
+        }
     }
 }
 
@@ -508,17 +542,19 @@ fn parse_orchard_recipient(
 // ---------------------------------------------------------------------------
 
 /// Contextual data the caller supplies to [`Registry::process_notes`] /
-/// [`Registry::do_mint`] — the Orchard key material and current block height.
+/// [`Registry::do_mint`] — the signing authority and current block height.
 ///
 /// These are intentionally not stored inside [`Registry`] so that the registry
 /// can be used with different key configurations at runtime (e.g. hot-swap,
 /// testing).
 #[derive(Clone)]
 pub struct MintContext {
-    /// Full Viewing Key of the registry Orchard address.
-    pub registry_fvk: orchard::keys::FullViewingKey,
-    /// The registry's Orchard recipient address (self-send for Name Notes).
-    pub recipient: orchard::Address,
+    /// The policy-gated signing authority. The only path to a signature; the
+    /// registry proposes intent, never touches key material.
+    pub signer: Arc<zns_signer::Signer>,
+    /// Current spendable treasury balance, for the signer's low-watermark
+    /// pause. The daemon refreshes it each poll from funding selection.
+    pub hot_balance_zat: u64,
     /// Orchard commitment-tree anchor.  A value-0 Name Note only requires the
     /// empty-tree anchor (`Anchor::empty_tree()`).
     pub anchor: orchard::tree::Anchor,
@@ -534,22 +570,32 @@ pub struct MintContext {
     /// Consensus branch id for the target chain's active upgrade (e.g. `Nu6` for
     /// a NU6 chain, `Nu6_2` post-NU6.2). Embedded in the tx + the sighash.
     pub branch_id: zcash_protocol::consensus::BranchId,
-    /// Treasury spend material for funded sends (the OTP challenge relay).
-    /// `None` until the daemon wires note-state; relays then fail with a clear
-    /// "no treasury funding configured" error rather than silently no-op'ing.
-    /// Behind an `Arc` because [`zns_signer::FundingInput`] is not `Clone`.
+    /// Treasury spend material for funded sends. `None` means unfunded mode
+    /// (testing); relays then fail with a clear "no treasury funding
+    /// configured" error rather than silently no-op'ing. Behind an `Arc`
+    /// because [`zns_signer::FundingInput`] is not `Clone`.
     pub treasury: Option<Arc<Treasury>>,
 }
 
-/// Treasury spend material: a registry note (with its witness) plus the spend
-/// key, used to author funded transactions — the self-funded mint and the OTP
-/// challenge relay. The daemon selects `funding` from note-state. Change always
-/// returns to `MintContext::recipient` (the registry self-address).
+/// Treasury spend material: a registry note with its witness and anchor,
+/// selected by the daemon from note-state. **No key material** — signing
+/// authority lives exclusively in the [`zns_signer::Signer`]. Change always
+/// returns to the registry self-address (a policy constant).
 pub struct Treasury {
-    /// The registry Orchard spend key (authorizes the funding spend).
-    pub spend_key: orchard::keys::SpendingKey,
     /// The treasury note being spent, with its Merkle witness and anchor.
     pub funding: zns_signer::FundingInput,
+}
+
+impl Treasury {
+    /// An owned [`zns_signer::FundingInput`] for a proposal (the note and
+    /// anchor are `Copy`; only the witness clones).
+    pub fn funding_input(&self) -> zns_signer::FundingInput {
+        zns_signer::FundingInput {
+            note: self.funding.note,
+            merkle_path: self.funding.merkle_path.clone(),
+            anchor: self.funding.anchor,
+        }
+    }
 }
 
 /// The outcome of processing a single incoming note.
@@ -591,10 +637,23 @@ mod tests {
         let seed = [0x42u8; 32];
         let sk = SpendingKey::from_zip32_seed(&seed, 133, zip32::AccountId::ZERO).unwrap();
         let fvk = FullViewingKey::from(&sk);
-        let recipient = fvk.address_at(0u32, Scope::External);
+        let registry_addr = fvk.address_at(0u32, Scope::External);
+        // A permissive policy: these tests exercise registry orchestration,
+        // not the gate (the gate has its own tests in zns-signer).
+        let policy = SpendPolicy {
+            registry_addr,
+            cold_addr: registry_addr,
+            max_fee_zat: MINT_FEE_ZAT,
+            target_float_zat: 0,
+            high_watermark_zat: u64::MAX,
+            low_watermark_zat: 0,
+            max_mints_per_window: u32::MAX,
+            max_swept_per_window_zat: 0,
+        };
+        let signer = Arc::new(Signer::new(seed, 133, zip32::AccountId::ZERO, policy).unwrap());
         MintContext {
-            registry_fvk: fvk,
-            recipient,
+            signer,
+            hot_balance_zat: 1_000_000,
             anchor: Anchor::empty_tree(),
             height: 2_000_000,
             expiry_height: 0,

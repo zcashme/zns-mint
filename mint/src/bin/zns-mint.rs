@@ -7,12 +7,13 @@
 //! `ZNS_*` env. A `tokio-graceful-shutdown` supervision tree and a `jsonrpsee`
 //! control plane land on top of this loop; this is the intake→dispatch core.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use zns_mint::{
     scan_incoming_all, select_funding, FundingInput, GrpcClient, MintContext, ProcessResult,
-    Registry, ScannerConfig, Treasury, FUNDING_MIN_ZAT,
+    Registry, ScannerConfig, Signer, SpendPolicy, Treasury, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
 };
 
 /// How often to poll lightwalletd for new blocks.
@@ -62,6 +63,9 @@ async fn main() -> anyhow::Result<()> {
     let registry = Registry::new(&cfg.db_path, &cfg.lwd_url)?;
     let scanner = cfg.scanner();
     let grpc = GrpcClient::new(&cfg.lwd_url);
+    // The policy-gated signing authority — the only holder of key material on
+    // the mint path. The daemon proposes intent; the signer authors and signs.
+    let signer = Arc::new(cfg.signer()?);
 
     eprintln!(
         "zns-mint: polling {} every {}s (db: {})",
@@ -73,6 +77,9 @@ async fn main() -> anyhow::Result<()> {
     let mut tick = tokio::time::interval(POLL_INTERVAL);
     loop {
         tick.tick().await;
+        // One poll = one velocity window (with take-once treasury, at most one
+        // spend lands per poll anyway; the cap matters once that changes).
+        signer.roll_window();
 
         // Stamp this round's mints with the current chain tip.
         let tip = match grpc.tip_height().await {
@@ -96,24 +103,32 @@ async fn main() -> anyhow::Result<()> {
         // There is something to mint: select a treasury note to self-fund the
         // fee and build its witness, anchored a few blocks back (well confirmed).
         let anchor_height = tip.saturating_sub(ANCHOR_CONFIRMATIONS);
-        let mut ctx = cfg.mint_context(tip);
+        let mut ctx = cfg.mint_context(tip, signer.clone());
         match select_funding(&scanner, FUNDING_MIN_ZAT, cfg.birthday, anchor_height).await {
-            Ok(Some(sn)) => {
-                eprintln!(
-                    "zns-mint: funding note {} zat, anchor @h{anchor_height} = {}",
-                    sn.value_zat,
-                    hex::encode(sn.anchor.to_bytes()),
-                );
-                ctx.treasury = Some(std::sync::Arc::new(Treasury {
-                    spend_key: cfg.spend_key(),
-                    funding: FundingInput {
-                        note: sn.note,
-                        merkle_path: sn.merkle_path,
-                        anchor: sn.anchor,
-                    },
-                }));
+            Ok(selection) => {
+                ctx.hot_balance_zat = selection.spendable_total_zat;
+                match selection.note {
+                    Some(sn) => {
+                        eprintln!(
+                            "zns-mint: funding note {} zat of {} spendable, anchor @h{anchor_height} = {}",
+                            sn.value_zat,
+                            selection.spendable_total_zat,
+                            hex::encode(sn.anchor.to_bytes()),
+                        );
+                        ctx.treasury = Some(Arc::new(Treasury {
+                            funding: FundingInput {
+                                note: sn.note,
+                                merkle_path: sn.merkle_path,
+                                anchor: sn.anchor,
+                            },
+                        }));
+                    }
+                    None => eprintln!(
+                        "zns-mint: no treasury note ≥ floor ({} zat spendable) — spends deferred",
+                        selection.spendable_total_zat
+                    ),
+                }
             }
-            Ok(None) => eprintln!("zns-mint: no treasury note ≥ fee — mint will be unfunded"),
             Err(e) => eprintln!("zns-mint: funding selection failed: {e:#}"),
         }
 
@@ -223,9 +238,27 @@ impl DaemonConfig {
     /// registry key, an empty-tree anchor, and the current height — no treasury.
     /// `treasury` stays `None` until note-state lands, so UPDATE/RELEASE relays
     /// surface a clear "no treasury funding configured" error.
-    fn mint_context(&self, tip_height: u32) -> MintContext {
-        let registry_fvk = self.registry_fvk();
-        let recipient = registry_fvk.address_at(0u32, Scope::External);
+    /// The signing authority: the spend seed behind the policy gate. Default
+    /// bounds are deliberately conservative; a config file refines them later.
+    fn signer(&self) -> anyhow::Result<Signer> {
+        let registry_addr = self.registry_fvk().address_at(0u32, Scope::External);
+        let policy = SpendPolicy {
+            registry_addr,
+            // Sweeps are not wired in the daemon yet; cold = self keeps the
+            // constant harmless until a real cold address is configured.
+            cold_addr: registry_addr,
+            max_fee_zat: MINT_FEE_ZAT,
+            target_float_zat: 0,
+            high_watermark_zat: u64::MAX, // never suggest a sweep
+            low_watermark_zat: 2 * MINT_FEE_ZAT, // pause when even a relay can't fund
+            max_mints_per_window: 4,
+            max_swept_per_window_zat: 0, // sweeps disabled
+        };
+        Signer::new(self.seed, self.coin_type(), zip32::AccountId::ZERO, policy)
+            .map_err(|e| anyhow::anyhow!("constructing signer: {e}"))
+    }
+
+    fn mint_context(&self, tip_height: u32, signer: Arc<Signer>) -> MintContext {
         // Branch id for the active upgrade at the tip — `ZcashNetwork` carries the
         // activation heights, so this resolves Nu6 on regtest and Nu6_2 on a
         // post-NU6.2 testnet automatically.
@@ -234,8 +267,8 @@ impl DaemonConfig {
             zcash_protocol::consensus::BlockHeight::from_u32(tip_height),
         );
         MintContext {
-            registry_fvk,
-            recipient,
+            signer,
+            hot_balance_zat: 0,
             anchor: orchard::tree::Anchor::empty_tree(),
             height: tip_height,
             expiry_height: 0,

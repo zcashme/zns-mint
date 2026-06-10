@@ -41,6 +41,16 @@ pub struct SpendableNote {
     pub anchor: Anchor,
 }
 
+/// The outcome of funding selection: the chosen unspent note (if any meets
+/// the floor) plus the total unspent registry balance seen in the window —
+/// the *hot balance* the signer's low-watermark gate runs against.
+pub struct FundingSelection {
+    /// The first unspent note worth at least the floor, with its witness.
+    pub note: Option<SpendableNote>,
+    /// Sum of every unspent registry note in the window (floor or not).
+    pub spendable_total_zat: u64,
+}
+
 /// Find an **unspent** registry-owned note worth at least `min_value_zat`
 /// somewhere in `[start_height, anchor_height]` and build its spend witness
 /// anchored at `anchor_height`.
@@ -62,7 +72,7 @@ pub async fn select_funding(
     min_value_zat: u64,
     start_height: u32,
     anchor_height: u32,
-) -> anyhow::Result<Option<SpendableNote>> {
+) -> anyhow::Result<FundingSelection> {
     let ivk = PreparedIncomingViewingKey::new(&config.registry_fvk.to_ivk(Scope::External));
     let mut client = grpc::connect(&config.lwd_url)
         .await
@@ -105,6 +115,9 @@ pub async fn select_funding(
     type Witness = IncrementalWitness<MerkleHashOrchard, ORCHARD_DEPTH>;
     let mut candidates: Vec<(Note, u64, Witness, [u8; 32])> = Vec::new();
     let mut spent: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    // Every registry-owned note (no witness — value/nullifier only), for the
+    // hot-balance total.
+    let mut owned: Vec<(u64, [u8; 32])> = Vec::new();
 
     while let Some(block) = stream.message().await.context("block stream")? {
         for tx in &block.vtx {
@@ -136,11 +149,12 @@ pub async fn select_funding(
 
                 // Eligible registry note: witness the leaf we just added.
                 if let Some(((note, _addr), _ivk_idx)) = hits.get(i).cloned().flatten() {
-                    if note.value().inner() >= min_value_zat {
+                    let value = note.value().inner();
+                    let nf = note.nullifier(&config.registry_fvk).to_bytes();
+                    owned.push((value, nf));
+                    if value >= min_value_zat {
                         let witness = IncrementalWitness::from_tree(tree.clone())
                             .ok_or_else(|| anyhow!("cannot witness an empty tree"))?;
-                        let value = note.value().inner();
-                        let nf = note.nullifier(&config.registry_fvk).to_bytes();
                         candidates.push((note, value, witness, nf));
                     }
                 }
@@ -148,7 +162,9 @@ pub async fn select_funding(
         }
     }
 
-    Ok(candidates.into_iter().find(|(_, _, _, nf)| !spent.contains(nf)).map(
+    let spendable_total_zat =
+        owned.iter().filter(|(_, nf)| !spent.contains(nf)).map(|(v, _)| v).sum();
+    let note = candidates.into_iter().find(|(_, _, _, nf)| !spent.contains(nf)).map(
         |(note, value_zat, witness, _)| {
             let path = witness.path().expect("witnessed note always has a path");
             SpendableNote {
@@ -158,5 +174,6 @@ pub async fn select_funding(
                 anchor: Anchor::from(witness.root()),
             }
         },
-    ))
+    );
+    Ok(FundingSelection { note, spendable_total_zat })
 }

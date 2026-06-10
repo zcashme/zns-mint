@@ -179,27 +179,19 @@ impl SpendPolicy {
     }
 }
 
-/// Registry name rules: 1–62 chars, lowercase ASCII letters/digits/hyphen, no
-/// leading/trailing/double hyphen. (Mirrors the SPEC name grammar; the signer
-/// enforces it so a bad name never reaches a commitment.)
+/// The relay's fee/dust unit, mirroring the daemon's ZIP-317 fee. The signer
+/// caps each at `min(max_fee_zat, RELAY_UNIT_ZAT)` so one policy knob bounds
+/// the relay leak (see `Signer::sign_relay`).
+pub const RELAY_UNIT_ZAT: u64 = 10_000;
+
+/// Registry name rules — delegates to the producer's **authoritative**
+/// validator (`zns_core::memo::validate_name`, the DNS-label rule the kernel
+/// mirrors byte-for-byte), so the gate and the parser can never disagree
+/// about which names exist. A second rule set here would mean names the
+/// parser accepts start failing the day the gate is wired.
 pub fn validate_name(name: &str) -> Result<(), PolicyError> {
-    let n = name.len();
-    if n == 0 {
-        return Err(PolicyError::NameInvalid("empty"));
-    }
-    if n > 62 {
-        return Err(PolicyError::NameInvalid("too long (max 62)"));
-    }
-    if name.starts_with('-') || name.ends_with('-') {
-        return Err(PolicyError::NameInvalid("leading/trailing hyphen"));
-    }
-    if name.contains("--") {
-        return Err(PolicyError::NameInvalid("double hyphen"));
-    }
-    if !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
-        return Err(PolicyError::NameInvalid("illegal character"));
-    }
-    Ok(())
+    zns_core::memo::validate_name(name)
+        .map_err(|_| PolicyError::NameInvalid("violates the registry name grammar"))
 }
 
 // ── stateful guard: replay + velocity ────────────────────────────────────────
@@ -283,14 +275,18 @@ mod tests {
     }
 
     #[test]
-    fn name_rules() {
+    fn name_rules_match_the_canonical_validator() {
+        // The DNS-label rule (zns_core::memo::validate_name): ≤ 63 bytes,
+        // a-z 0-9 -, no edge hyphens. Interior double hyphens are legal.
         assert!(validate_name("alice").is_ok());
         assert!(validate_name("a-b-1").is_ok());
-        assert_eq!(validate_name(""), Err(PolicyError::NameInvalid("empty")));
-        assert_eq!(validate_name("-a"), Err(PolicyError::NameInvalid("leading/trailing hyphen")));
-        assert_eq!(validate_name("a--b"), Err(PolicyError::NameInvalid("double hyphen")));
-        assert_eq!(validate_name("Alice"), Err(PolicyError::NameInvalid("illegal character")));
-        assert!(validate_name(&"x".repeat(63)).is_err());
+        assert!(validate_name("a--b").is_ok());
+        assert!(validate_name(&"x".repeat(63)).is_ok());
+        assert!(validate_name("").is_err());
+        assert!(validate_name("-a").is_err());
+        assert!(validate_name("a-").is_err());
+        assert!(validate_name("Alice").is_err());
+        assert!(validate_name(&"x".repeat(64)).is_err());
     }
 
     fn intent(fee: u64) -> MintIntent {

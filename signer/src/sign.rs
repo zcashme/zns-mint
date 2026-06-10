@@ -20,8 +20,12 @@ use zeroize::Zeroizing;
 
 use zns_core::RegistryError;
 
-use crate::mint::{build_funded_mint, build_sweep, MintResult};
-use crate::policy::{FundingInput, MintProposal, PolicyError, SpendGuard, SpendPolicy};
+use orchard::circuit::OrchardCircuitVersion;
+
+use crate::mint::{build_funded_mint, build_memo_send, build_sweep, MintResult};
+use crate::policy::{
+    FundingInput, MintProposal, PolicyError, RequestId, SpendGuard, SpendPolicy,
+};
 
 /// Why the signer refused (policy) or failed (build).
 #[derive(Debug)]
@@ -118,6 +122,7 @@ impl Signer {
         hot_balance_zat: u64,
         branch_id: BranchId,
         expiry_height: u32,
+        circuit_version: OrchardCircuitVersion,
     ) -> Result<MintResult, SignError> {
         // Pure policy gate first — cheap rejects without mutating state.
         let funding_value = proposal.funding.note.value().inner();
@@ -137,11 +142,71 @@ impl Signer {
             &plan,
             branch_id,
             expiry_height,
-            orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
+            circuit_version,
         ) {
             Ok(result) => Ok(result),
             Err(e) => {
                 self.guard.lock().expect("guard poisoned").rollback_mint(id);
+                Err(SignError::Build(e))
+            }
+        }
+    }
+
+    /// Author and sign an OTP challenge relay: a dust note carrying the
+    /// challenge memo to the name owner's UA, change back to the registry.
+    ///
+    /// This is the **one bounded exception** to "value only ever lands at the
+    /// registry or cold": the recipient is host-supplied (the owner UA from
+    /// the name record). The bound: dust and fee are each capped at
+    /// `max_fee_zat`, the relay consumes a mint velocity slot, and the
+    /// triggering request note is replay-protected — so a fully compromised
+    /// host can leak at most `2 × max_fee × max_mints_per_window` per window,
+    /// griefing the float, never draining it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_relay(
+        &self,
+        recipient: Address,
+        memo: [u8; 512],
+        funding: FundingInput,
+        request_id: RequestId,
+        hot_balance_zat: u64,
+        branch_id: BranchId,
+        expiry_height: u32,
+        circuit_version: OrchardCircuitVersion,
+    ) -> Result<Vec<u8>, SignError> {
+        // The dust mirrors the fee (one policy knob bounds both).
+        let fee = self.policy.max_fee_zat.min(crate::policy::RELAY_UNIT_ZAT);
+        let dust = fee;
+        if hot_balance_zat < self.policy.low_watermark_zat {
+            return Err(SignError::Policy(PolicyError::BelowLowWatermark {
+                balance: hot_balance_zat,
+                low: self.policy.low_watermark_zat,
+            }));
+        }
+        let funding_value = funding.note.value().inner();
+        let change = funding_value.checked_sub(fee + dust).ok_or(SignError::Policy(
+            PolicyError::InsufficientFunding { have: funding_value, need: fee + dust },
+        ))?;
+
+        self.guard.lock().expect("guard poisoned").admit_mint(&self.policy, request_id)?;
+
+        let sk = self.spending_key();
+        match build_memo_send(
+            &self.fvk,
+            &sk,
+            recipient,
+            self.registry_address(),
+            &funding,
+            dust,
+            change,
+            memo,
+            branch_id,
+            expiry_height,
+            circuit_version,
+        ) {
+            Ok(tx_bytes) => Ok(tx_bytes),
+            Err(e) => {
+                self.guard.lock().expect("guard poisoned").rollback_mint(request_id);
                 Err(SignError::Build(e))
             }
         }
@@ -161,6 +226,7 @@ impl Signer {
         fee_zat: u64,
         branch_id: BranchId,
         expiry_height: u32,
+        circuit_version: OrchardCircuitVersion,
     ) -> Result<SweepResult, SignError> {
         if fee_zat > self.policy.max_fee_zat {
             return Err(SignError::Policy(PolicyError::FeeTooHigh {
@@ -184,6 +250,7 @@ impl Signer {
             amount,
             branch_id,
             expiry_height,
+            circuit_version,
         ) {
             Ok(tx_bytes) => Ok(SweepResult { tx_bytes, amount_zat: amount }),
             Err(e) => {
