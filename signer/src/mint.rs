@@ -282,15 +282,13 @@ pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, RegistryErr
     let mut builder =
         OrchardBuilder::new_for_version(BundleType::DEFAULT, params.anchor, params.circuit_version);
 
+    // The Name Note carries its canonical memo (DESIGN.md §6) — including the
+    // prev_rcm witness, which is what resolvers index from and what makes the
+    // note's binding verifiable standalone.
+    let memo =
+        zns_core::memo::encode_name_note(params.action, params.name, params.ua, &params.prev_rcm)?;
     builder
-        .add_zns_output(
-            ovk,
-            params.recipient,
-            NoteValue::from_raw(0),
-            [0u8; 512],
-            rcm,
-            psi,
-        )
+        .add_zns_output(ovk, params.recipient, NoteValue::from_raw(0), memo, rcm, psi)
         .map_err(|e| RegistryError::Build(format!("{e:?}")))?;
 
     let mut rng = OsRng;
@@ -327,7 +325,7 @@ pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, RegistryErr
     // 7. Apply signatures.  No spend authorizing keys are needed for a
     //    value-0 output-only bundle (no dummy spends require signing here).
     let authorized_bundle = proven_bundle
-        .apply_signatures(&mut rng, sighash, &[])
+        .apply_signatures(rng, sighash, &[])
         .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
 
     // 8. Recover the Name Note commitment, then serialize the transaction.
@@ -390,12 +388,15 @@ pub fn build_funded_mint(
 
     // 2. Funding spend (pays the fee). Anchor must match the witness root.
     builder
-        .add_spend(registry_fvk.clone(), funding.note.clone(), funding.merkle_path.clone())
+        .add_spend(registry_fvk.clone(), funding.note, funding.merkle_path.clone())
         .map_err(|e| RegistryError::Build(format!("add_spend: {e:?}")))?;
 
-    // 3. The Name Note (value 0) to the registry self-address.
+    // 3. The Name Note (value 0) to the registry self-address, carrying its
+    //    canonical memo (DESIGN.md §6) with the prev_rcm witness.
+    let memo =
+        zns_core::memo::encode_name_note(plan.action, &plan.name, &plan.ua, &plan.prev_rcm)?;
     builder
-        .add_zns_output(ovk.clone(), recipient, NoteValue::from_raw(0), [0u8; 512], rcm, psi)
+        .add_zns_output(ovk.clone(), recipient, NoteValue::from_raw(0), memo, rcm, psi)
         .map_err(|e| RegistryError::Build(format!("add_zns_output: {e:?}")))?;
 
     // 4. Change back to the registry. value_balance = funding − 0 − change = fee.
@@ -425,7 +426,7 @@ pub fn build_funded_mint(
     // Real funding spend → needs a spend-auth signature from the registry key.
     let ask = SpendAuthorizingKey::from(spend_key);
     let authorized = proven
-        .apply_signatures(&mut rng, sighash, &[ask])
+        .apply_signatures(rng, sighash, &[ask])
         .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
 
     // Self-check the proof under the same circuit version the target chain
@@ -469,7 +470,7 @@ pub fn build_sweep(
     let mut builder = OrchardBuilder::new(BundleType::DEFAULT, funding.anchor);
 
     builder
-        .add_spend(registry_fvk.clone(), funding.note.clone(), funding.merkle_path.clone())
+        .add_spend(registry_fvk.clone(), funding.note, funding.merkle_path.clone())
         .map_err(|e| RegistryError::Build(format!("add_spend: {e:?}")))?;
     builder
         .add_output(ovk, cold_addr, NoteValue::from_raw(amount_zat), [0u8; 512])
@@ -489,7 +490,7 @@ pub fn build_sweep(
         .map_err(|e| RegistryError::Build(format!("create_proof: {e:?}")))?;
     let ask = SpendAuthorizingKey::from(spend_key);
     let authorized = proven
-        .apply_signatures(&mut rng, sighash, &[ask])
+        .apply_signatures(rng, sighash, &[ask])
         .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
 
     let (tx_bytes, _txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)?;
@@ -522,7 +523,7 @@ pub fn build_memo_send(
 
     // 1. Funding spend (covers dust + fee). Anchor must match the witness root.
     builder
-        .add_spend(registry_fvk.clone(), funding.note.clone(), funding.merkle_path.clone())
+        .add_spend(registry_fvk.clone(), funding.note, funding.merkle_path.clone())
         .map_err(|e| RegistryError::Build(format!("add_spend: {e:?}")))?;
 
     // 2. The dust output to the owner, carrying the challenge memo.
@@ -551,7 +552,7 @@ pub fn build_memo_send(
         .map_err(|e| RegistryError::Build(format!("create_proof: {e:?}")))?;
     let ask = SpendAuthorizingKey::from(spend_key);
     let authorized = proven
-        .apply_signatures(&mut rng, sighash, &[ask])
+        .apply_signatures(rng, sighash, &[ask])
         .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
 
     let (tx_bytes, _txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height)?;
