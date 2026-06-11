@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use zns_mint::{
-    scan_incoming_all, select_funding, FundingInput, GrpcClient, MintContext, ProcessResult,
-    Registry, ScannerConfig, Signer, SpendPolicy, Treasury, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
+    scan_incoming_all, FundingInput, GrpcClient, MintContext, NoteState, ProcessResult, Registry,
+    ScannerConfig, Signer, SpendPolicy, Treasury, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
 };
 
 /// How often to poll lightwalletd for new blocks.
@@ -74,6 +74,9 @@ async fn main() -> anyhow::Result<()> {
 
     let registry = Registry::new(&cfg.db_path, &cfg.lwd_url)?;
     let scanner = cfg.scanner();
+    // Treasury note-state: a view-only WalletDb over the registry FVK. It owns
+    // scanning, witnesses, reorg rewind, and note selection for the spend side.
+    let mut notestate = NoteState::open(&cfg.wallet_db_path, &scanner).await?;
     let grpc = GrpcClient::new(&cfg.lwd_url);
     // The policy-gated signing authority — the only holder of key material on
     // the mint path. The daemon proposes intent; the signer authors and signs.
@@ -136,38 +139,41 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        // There is something to mint: select a treasury note to self-fund the
-        // fee and build its witness, anchored a few blocks back (well confirmed).
-        let anchor_height = tip.saturating_sub(ANCHOR_CONFIRMATIONS);
+        // There is something to mint: bring the treasury wallet to the tip,
+        // then pick a note to self-fund the fee, with its witness anchored
+        // a few blocks back (well confirmed).
         let mut ctx = cfg.mint_context(tip, signer.clone());
-        match select_funding(&scanner, FUNDING_MIN_ZAT, cfg.birthday, anchor_height).await {
-            Ok(selection) => {
-                ctx.hot_balance_zat = selection.spendable_total_zat;
-                status.write().await.spendable_zat = selection.spendable_total_zat;
-                match selection.note {
-                    Some(sn) => {
-                        tracing::info!(
-                            note_zat = sn.value_zat,
+        if let Err(e) = notestate.sync().await {
+            tracing::warn!("treasury sync failed: {e:#}");
+        } else {
+            match notestate.select_funding(FUNDING_MIN_ZAT, ANCHOR_CONFIRMATIONS) {
+                Ok(selection) => {
+                    ctx.hot_balance_zat = selection.spendable_total_zat;
+                    status.write().await.spendable_zat = selection.spendable_total_zat;
+                    match selection.note {
+                        Some(sn) => {
+                            tracing::info!(
+                                note_zat = sn.value_zat,
+                                spendable_zat = selection.spendable_total_zat,
+                                anchor = hex::encode(sn.anchor.to_bytes()),
+                                "funding selected"
+                            );
+                            ctx.treasury = Some(Arc::new(Treasury {
+                                funding: FundingInput {
+                                    note: sn.note,
+                                    merkle_path: sn.merkle_path,
+                                    anchor: sn.anchor,
+                                },
+                            }));
+                        }
+                        None => tracing::warn!(
                             spendable_zat = selection.spendable_total_zat,
-                            anchor_height,
-                            anchor = hex::encode(sn.anchor.to_bytes()),
-                            "funding selected"
-                        );
-                        ctx.treasury = Some(Arc::new(Treasury {
-                            funding: FundingInput {
-                                note: sn.note,
-                                merkle_path: sn.merkle_path,
-                                anchor: sn.anchor,
-                            },
-                        }));
+                            "no treasury note ≥ floor — spends deferred"
+                        ),
                     }
-                    None => tracing::warn!(
-                        spendable_zat = selection.spendable_total_zat,
-                        "no treasury note ≥ floor — spends deferred"
-                    ),
                 }
+                Err(e) => tracing::warn!("funding selection failed: {e:#}"),
             }
-            Err(e) => tracing::warn!("funding selection failed: {e:#}"),
         }
 
         for result in registry.process_notes(&notes, &ctx).await {
@@ -184,8 +190,10 @@ async fn main() -> anyhow::Result<()> {
 /// (file + env, hot-reload) replaces this.
 struct DaemonConfig {
     db_path: String,
+    /// Treasury note-state (WalletDb) sqlite — separate from the registry db.
+    wallet_db_path: String,
     lwd_url: String,
-    network: zns_mint::ZcashNetwork,
+    network: zcash_protocol::consensus::Network,
     birthday: u32,
     /// 32-byte zip32 seed the registry Orchard key is derived from.
     seed: [u8; 32],
@@ -195,10 +203,10 @@ impl DaemonConfig {
     fn from_env() -> anyhow::Result<Self> {
         let lwd_url =
             std::env::var("ZNS_LWD_URL").unwrap_or_else(|_| "http://127.0.0.1:9067".into());
-        let network = match std::env::var("ZNS_NETWORK") {
-            Ok(name) => zns_mint::ZcashNetwork::from_name(&name)
-                .ok_or_else(|| anyhow::anyhow!("unknown ZNS_NETWORK '{name}'"))?,
-            Err(_) => zns_mint::ZcashNetwork::Main,
+        let network = match std::env::var("ZNS_NETWORK").as_deref() {
+            Ok("test") | Ok("testnet") => zcash_protocol::consensus::Network::TestNetwork,
+            Ok("main") | Ok("mainnet") | Err(_) => zcash_protocol::consensus::Network::MainNetwork,
+            Ok(other) => anyhow::bail!("unknown ZNS_NETWORK '{other}'"),
         };
         let birthday = std::env::var("ZNS_BIRTHDAY")
             .ok()
@@ -206,17 +214,19 @@ impl DaemonConfig {
             .unwrap_or(0);
 
         // TODO: load the seed from a secret store (zeroized), never plain env in
-        // production. A zero seed is deterministic — fine only for regtest.
+        // production. A zero seed is deterministic — fine only for testing.
         let seed = match std::env::var("ZNS_SPEND_SEED") {
             Ok(hex) => decode_seed(&hex)?,
             Err(_) => {
-                tracing::warn!("ZNS_SPEND_SEED unset — using a zero seed (regtest only)");
+                tracing::warn!("ZNS_SPEND_SEED unset — using a zero seed (testing only)");
                 [0u8; 32]
             }
         };
 
         Ok(Self {
             db_path: std::env::var("ZNS_DB_PATH").unwrap_or_else(|_| "zns-mint.sqlite".into()),
+            wallet_db_path: std::env::var("ZNS_WALLET_DB")
+                .unwrap_or_else(|_| "zns-wallet.sqlite".into()),
             lwd_url,
             network,
             birthday,
@@ -224,11 +234,11 @@ impl DaemonConfig {
         })
     }
 
-    /// Coin type for zip32 derivation: 133 mainnet, 1 test/regtest.
+    /// Coin type for zip32 derivation: 133 mainnet, 1 testnet (SLIP-44).
     fn coin_type(&self) -> u32 {
         match self.network {
-            zns_mint::ZcashNetwork::Main => 133,
-            _ => 1,
+            zcash_protocol::consensus::Network::MainNetwork => 133,
+            zcash_protocol::consensus::Network::TestNetwork => 1,
         }
     }
 
@@ -295,9 +305,9 @@ impl DaemonConfig {
     }
 
     fn mint_context(&self, tip_height: u32, signer: Arc<Signer>) -> MintContext {
-        // Branch id for the active upgrade at the tip — `ZcashNetwork` carries the
-        // activation heights, so this resolves Nu6 on regtest and Nu6_2 on a
-        // post-NU6.2 testnet automatically.
+        // Branch id for the active upgrade at the tip — `Network` carries the
+        // activation heights, so this resolves the right upgrade (e.g. Nu6_2 on
+        // a post-NU6.2 testnet) automatically.
         let branch_id = zcash_protocol::consensus::BranchId::for_height(
             &self.network,
             zcash_protocol::consensus::BlockHeight::from_u32(tip_height),
@@ -320,7 +330,7 @@ impl DaemonConfig {
     /// Orchard circuit version to prove against — must match the circuit the
     /// target chain validates with for its active upgrade. The NU6.2 fix swapped
     /// the circuit/VK: pre-NU6.2 chains verify with `InsecurePreNu6_2`, post-NU6.2
-    /// with `FixedPostNu6_2`. Testnet and our NU6.2 regtest are both post-NU6.2,
+    /// with `FixedPostNu6_2`. Testnet is post-NU6.2,
     /// so default to fixed. Override with `ZNS_CIRCUIT=insecure|fixed`.
     fn circuit_version(&self) -> orchard::circuit::OrchardCircuitVersion {
         use orchard::circuit::OrchardCircuitVersion::*;

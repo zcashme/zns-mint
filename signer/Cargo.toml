@@ -22,8 +22,7 @@ serde = { workspace = true }
 # seed memory-only.
 zip32 = { workspace = true }
 zeroize = { workspace = true }
-
-hex = "0.4"
+hex = { workspace = true }
 
 [lints]
 workspace = true

@@ -35,7 +35,7 @@ anyhow = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 # The daemon derives the registry Orchard key from a configured zip32 seed.
 zip32 = { workspace = true }
-hex = "0.4"
+hex = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 jsonrpsee = { workspace = true }

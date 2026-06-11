@@ -21,9 +21,17 @@ zcash_client_backend = { workspace = true }
 zcash_note_encryption = { workspace = true }
 tonic = { workspace = true, features = ["transport", "tls-ring", "tls-webpki-roots"] }
 # decode lightwalletd's hex-encoded commitment tree (GetTreeState → anchor)
-hex = "0.4"
-# build a spend witness for a treasury note by replaying the commitment tree
-incrementalmerkletree = { workspace = true }
+hex = { workspace = true }
+# Treasury note-state: WalletDb owns scanning, shardtree witnesses, reorg
+# rewind, and note selection; `sync::run` drives it. rusqlite names the
+# connection type in WalletDb's generics; zcash_keys wraps the registry FVK
+# as the UFVK account import wants; async-trait is the BlockCache contract.
+zcash_client_sqlite = { workspace = true }
+zcash_keys = { workspace = true }
+zcash_address = { workspace = true }
+rusqlite = { workspace = true }
+rand = { workspace = true }
+async-trait = { workspace = true }
 anyhow = { workspace = true }
 
 [dev-dependencies]

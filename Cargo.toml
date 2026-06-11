@@ -33,13 +33,15 @@ zcash_protocol   = "0.9"
 zcash_keys       = { version = "0.14", default-features = false, features = ["orchard"] }
 zcash_address    = "0.12"
 zcash_note_encryption = "0.4.1"
-# lightwalletd gRPC transport (proto client) — replaces seer-sync for host's
-# chain I/O (broadcast + intake scan). `*-transport` pulls the tonic Channel;
-# `*-tls-webpki-roots` covers public servers; local regtest uses plaintext http.
+# lightwalletd gRPC transport (proto client): the tonic Channel for intake +
+# broadcast, plus `sync` for the wallet sync driver (`sync::run`) behind the
+# treasury note-state. `*-tls-webpki-roots` covers public servers; local
+# regtest uses plaintext http.
 zcash_client_backend = { version = "0.23", default-features = false, features = [
     "lightwalletd-tonic-transport",
     "lightwalletd-tonic-tls-webpki-roots",
     "orchard",
+    "sync",
 ] }
 # Treasury note-state core: WalletDb owns scanning, shardtree witnesses, reorg
 # rewind, and note selection for self-funding mint fees (see DESIGN — spend side).
@@ -51,12 +53,14 @@ blake2b_simd = "1"
 rand         = "0.8"
 
 # ── runtime / persistence / errors ─────────────────────────────────
-tokio     = { version = "1" }
-rusqlite  = { version = "0.37", features = ["bundled"] }
+tokio       = { version = "1" }
+async-trait = "0.1" # the BlockCache contract in zcash_client_backend::sync
+rusqlite    = { version = "0.37", features = ["bundled"] }
 serde     = { version = "1", features = ["derive"] }
 uuid      = { version = "1.1", features = ["v4"] }
 thiserror = "1"
 anyhow    = "1"
+hex       = "0.4"
 
 # ── dev ────────────────────────────────────────────────────────────
 zip32 = "0.2"

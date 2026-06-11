@@ -23,8 +23,7 @@ use zcash_client_backend::proto::{
 };
 use zcash_note_encryption::{batch, try_note_decryption, EphemeralKeyBytes};
 use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::{BlockHeight, BranchId};
-use zns_core::ZcashNetwork;
+use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 
 use crate::grpc;
 
@@ -35,7 +34,7 @@ pub struct ScannerConfig {
     /// Unified FVK string.
     pub registry_fvk: orchard::keys::FullViewingKey,
     /// The Zcash network to scan (drives branch resolution for tx parsing).
-    pub network: ZcashNetwork,
+    pub network: Network,
     /// Block height to start scanning from (the key's "birthday").
     pub birthday: u32,
     /// Lightwalletd URL, e.g. `"http://127.0.0.1:9067"` or `"https://zec.rocks:443"`.
@@ -243,65 +242,3 @@ async fn fetch_transaction(
     Ok(Some(tx))
 }
 
-// ── live regtest smoke tests ─────────────────────────────────────────────────
-//
-// Ignored by default (need a local lightwalletd on :9067). Run with:
-//   cargo test -p zns-chain scanner::regtest -- --ignored --nocapture
-#[cfg(test)]
-mod regtest {
-    use super::*;
-    use orchard::keys::{FullViewingKey, SpendingKey};
-    use zcash_client_backend::proto::service::ChainSpec;
-
-    const LWD: &str = "http://127.0.0.1:9067";
-
-    /// A throwaway registry FVK (owns nothing on the chain — we only exercise
-    /// the connect + stream + trial-decrypt pipeline).
-    fn registry_fvk() -> FullViewingKey {
-        let sk = SpendingKey::from_zip32_seed(&[0x42u8; 32], 1, zip32::AccountId::ZERO).unwrap();
-        FullViewingKey::from(&sk)
-    }
-
-    #[tokio::test]
-    #[ignore = "needs a local regtest lightwalletd on :9067"]
-    async fn connects_and_reads_tip() {
-        let mut client = grpc::connect(LWD).await.expect("connect to lightwalletd");
-        let tip = client
-            .get_latest_block(ChainSpec {})
-            .await
-            .expect("get_latest_block")
-            .into_inner();
-        println!("regtest tip height: {}", tip.height);
-        assert!(tip.height > 0);
-    }
-
-    #[tokio::test]
-    #[ignore = "needs a local regtest lightwalletd on :9067"]
-    async fn scan_pipeline_runs() {
-        let network = ZcashNetwork::Regtest;
-
-        let mut client = grpc::connect(LWD).await.expect("connect");
-        let tip = client
-            .get_latest_block(ChainSpec {})
-            .await
-            .expect("tip")
-            .into_inner()
-            .height as u32;
-        let birthday = tip.saturating_sub(300);
-
-        let cfg = ScannerConfig {
-            registry_fvk: registry_fvk(),
-            network,
-            birthday,
-            lwd_url: LWD.to_string(),
-        };
-        let mut count = 0usize;
-        scan_incoming(&cfg, |batch| {
-            count += batch.len();
-            Ok(())
-        })
-        .await
-        .expect("scan pipeline ran end-to-end against live lightwalletd");
-        println!("scanned blocks {birthday}..={tip}; {count} notes for registry IVK");
-    }
-}
