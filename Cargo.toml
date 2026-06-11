@@ -7,7 +7,6 @@ version = "0.0.1"
 edition = "2021"
 rust-version = "1.85.1"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/zechariah/zns"
 publish = false
 
 [workspace.dependencies]
@@ -24,12 +23,6 @@ zns-chain  = { path = "chain" }
 zns-signer = { path = "signer" }
 zns-auth   = { path = "auth" }
 zns-mint   = { path = "mint" }
-
-# ── sibling repos (ZNS workspace neighbours) ───────────────────────
-# The mint depends on no ZNS sibling repos. chain owns its I/O via
-# zcash_client_backend's lightwalletd proto (not seer-sync), and the registry
-# derives (ψ, rcm) with its own code (signer/derive.rs), independent of the
-# zns-verify kernel so producer and verifier can cross-check each other.
 
 # ── Zcash / Orchard stack ──────────────────────────────────────────
 # orchard resolves to the zns-orchard fork via [patch.crates-io] below;
@@ -103,7 +96,7 @@ criterion = "0.5"
 tempfile  = "3"
 
 [patch.crates-io]
-# zns-orchard is a drop-in for upstream orchard 0.13 (same package name
+# zns-orchard is a drop-in for upstream orchard 0.14 (same package name
 # "orchard"), enabling the ZNS unsafe-zns rcm/psi overrides.
 orchard = { path = "../zns-orchard" }
 

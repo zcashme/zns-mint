@@ -1,6 +1,6 @@
 [package]
 name = "zns-core"
-description = "Shared ZNS types: memo parsing, registry error, SQLite persistence — no crypto."
+description = "Shared ZNS types: action, memo parsing, registry error — no crypto, no I/O."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
