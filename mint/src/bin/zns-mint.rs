@@ -28,6 +28,9 @@ const ANCHOR_CONFIRMATIONS: u32 = 3;
 /// instead of holding it open forever.
 const TX_EXPIRY_BLOCKS: u32 = 40;
 
+/// Control-plane (health/status RPC) bind address.
+const RPC_ADDR: &str = "127.0.0.1:8081";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -91,10 +94,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Control plane: health + status, read-only by construction.
     let status = Arc::new(tokio::sync::RwLock::new(zns_registry::rpc::ChainStatus::default()));
-    let rpc_addr =
-        std::env::var("ZNS_RPC_ADDR").unwrap_or_else(|_| "127.0.0.1:8081".into());
     tokio::spawn(zns_registry::rpc::serve(
-        rpc_addr,
+        RPC_ADDR.to_string(),
         zns_registry::rpc::RpcContext { registry: registry.clone(), status: status.clone() },
     ));
 
@@ -203,11 +204,14 @@ impl DaemonConfig {
     fn from_env() -> anyhow::Result<Self> {
         let lwd_url =
             std::env::var("ZNS_LWD_URL").unwrap_or_else(|_| "http://127.0.0.1:9067".into());
-        let network = match std::env::var("ZNS_NETWORK").as_deref() {
-            Ok("test") | Ok("testnet") => zcash_protocol::consensus::Network::TestNetwork,
-            Ok("main") | Ok("mainnet") | Err(_) => zcash_protocol::consensus::Network::MainNetwork,
-            Ok(other) => anyhow::bail!("unknown ZNS_NETWORK '{other}'"),
-        };
+        // Network is a build-time choice (the `testnet` feature), not runtime
+        // config — which network a binary talks to should be fixed at build
+        // and covered by the same attestation as everything else, not
+        // switchable by whoever launches the process.
+        #[cfg(feature = "testnet")]
+        let network = zcash_protocol::consensus::Network::TestNetwork;
+        #[cfg(not(feature = "testnet"))]
+        let network = zcash_protocol::consensus::Network::MainNetwork;
         let birthday = std::env::var("ZNS_BIRTHDAY")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -328,16 +332,12 @@ impl DaemonConfig {
     }
 
     /// Orchard circuit version to prove against — must match the circuit the
-    /// target chain validates with for its active upgrade. The NU6.2 fix swapped
-    /// the circuit/VK: pre-NU6.2 chains verify with `InsecurePreNu6_2`, post-NU6.2
-    /// with `FixedPostNu6_2`. Testnet is post-NU6.2,
-    /// so default to fixed. Override with `ZNS_CIRCUIT=insecure|fixed`.
+    /// target chain validates with for its active upgrade. The NU6.2 fix
+    /// swapped the circuit/VK: pre-NU6.2 chains verify with
+    /// `InsecurePreNu6_2`, post-NU6.2 with `FixedPostNu6_2`. Every live
+    /// network (mainnet and testnet) is now post-NU6.2.
     fn circuit_version(&self) -> orchard::circuit::OrchardCircuitVersion {
-        use orchard::circuit::OrchardCircuitVersion::*;
-        match std::env::var("ZNS_CIRCUIT").as_deref() {
-            Ok("insecure") => InsecurePreNu6_2,
-            _ => FixedPostNu6_2,
-        }
+        orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2
     }
 }
 

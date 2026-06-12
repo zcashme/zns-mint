@@ -15,6 +15,11 @@ path = "src/lib.rs"
 name = "zns-mint"
 path = "src/bin/zns-mint.rs"
 
+[features]
+# Build against Zcash testnet instead of mainnet. A build-time choice so the
+# active network is part of the binary's measurement, not runtime-switchable.
+testnet = []
+
 [dependencies]
 zns-core = { workspace = true }
 zns-state = { workspace = true }
