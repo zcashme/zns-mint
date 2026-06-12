@@ -1,9 +1,5 @@
 //! lightwalletd gRPC client — connection + transaction broadcast.
 //!
-//! Host owns its chain I/O now: this uses `zcash_client_backend`'s generated
-//! `CompactTxStreamer` proto client over a tonic [`Channel`], replacing the
-//! former `seer-sync` dependency. Always TLS (webpki roots) — no plaintext
-//! transport is supported.
 
 use orchard::tree::{Anchor, MerkleHashOrchard};
 use thiserror::Error;
@@ -28,11 +24,15 @@ pub enum GrpcError {
     #[error("invalid lightwalletd url: {0}")]
     InvalidUrl(#[from] http::uri::InvalidUri),
 
-    #[error("lightwalletd transport: {0}")]
+    #[error("lightwalletd transport: {}", error_chain(.0))]
     Transport(#[from] tonic::transport::Error),
 
     #[error("{call}: {source}")]
-    Rpc { call: &'static str, #[source] source: tonic::Status },
+    Rpc {
+        call: &'static str,
+        #[source]
+        source: tonic::Status,
+    },
 
     #[error("node rejected transaction (code {code}): {message}")]
     Rejected { code: i32, message: String },
@@ -44,9 +44,24 @@ pub enum GrpcError {
     TreeDecode(#[from] std::io::Error),
 }
 
+/// `tonic::transport::Error`'s `Display` is a fixed, contextless string (e.g.
+/// "transport error") — the actual cause (DNS failure, connection refused,
+/// TLS handshake failure, ...) lives only in its `source()` chain. Join the
+/// whole chain so the message is useful in logs.
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut source = e.source();
+    while let Some(s) = source {
+        parts.push(s.to_string());
+        source = s.source();
+    }
+    parts.join(": ")
+}
+
 /// Connect to a lightwalletd endpoint over TLS (webpki roots).
 pub async fn connect(url: &str) -> Result<LwdClient, GrpcError> {
-    let endpoint = Channel::from_shared(url.to_owned())?.tls_config(ClientTlsConfig::new().with_webpki_roots())?;
+    let endpoint = Channel::from_shared(url.to_owned())?
+        .tls_config(ClientTlsConfig::new().with_webpki_roots())?;
     let channel = endpoint.connect().await?;
     Ok(CompactTxStreamerClient::new(channel))
 }
@@ -65,7 +80,9 @@ impl GrpcClient {
     /// Create a client pointing at `lwd_url`
     /// (e.g. `"http://127.0.0.1:9067"` or `"https://zec.rocks:443"`).
     pub fn new(lwd_url: impl Into<String>) -> Self {
-        GrpcClient { lwd_url: lwd_url.into() }
+        GrpcClient {
+            lwd_url: lwd_url.into(),
+        }
     }
 
     /// Return the current chain tip height via `GetLatestBlock`.
@@ -74,7 +91,10 @@ impl GrpcClient {
         let block = client
             .get_latest_block(ChainSpec {})
             .await
-            .map_err(|source| GrpcError::Rpc { call: "get_latest_block", source })?
+            .map_err(|source| GrpcError::Rpc {
+                call: "get_latest_block",
+                source,
+            })?
             .into_inner();
         Ok(block.height as u32)
     }
@@ -84,9 +104,15 @@ impl GrpcClient {
     pub async fn orchard_anchor(&self, height: u32) -> Result<Anchor, GrpcError> {
         let mut client = connect(&self.lwd_url).await?;
         let state = client
-            .get_tree_state(BlockId { height: height as u64, hash: vec![] })
+            .get_tree_state(BlockId {
+                height: height as u64,
+                hash: vec![],
+            })
             .await
-            .map_err(|source| GrpcError::Rpc { call: "get_tree_state", source })?
+            .map_err(|source| GrpcError::Rpc {
+                call: "get_tree_state",
+                source,
+            })?
             .into_inner();
         let bytes = hex::decode(state.orchard_tree.trim())?;
         let tree = read_commitment_tree::<MerkleHashOrchard, _, 32>(&bytes[..])?;
@@ -97,12 +123,21 @@ impl GrpcClient {
     pub async fn broadcast(&self, raw_tx: RawTx) -> Result<(), GrpcError> {
         let mut client = connect(&self.lwd_url).await?;
         let resp = client
-            .send_transaction(RawTransaction { data: raw_tx, height: 0 })
+            .send_transaction(RawTransaction {
+                data: raw_tx,
+                height: 0,
+            })
             .await
-            .map_err(|source| GrpcError::Rpc { call: "send_transaction", source })?
+            .map_err(|source| GrpcError::Rpc {
+                call: "send_transaction",
+                source,
+            })?
             .into_inner();
         if resp.error_code != 0 {
-            return Err(GrpcError::Rejected { code: resp.error_code, message: resp.error_message });
+            return Err(GrpcError::Rejected {
+                code: resp.error_code,
+                message: resp.error_message,
+            });
         }
         Ok(())
     }
@@ -114,18 +149,27 @@ impl GrpcClient {
     pub async fn transaction_exists(&self, txid: &[u8; 32]) -> Result<bool, GrpcError> {
         let mut client = connect(&self.lwd_url).await?;
         match client
-            .get_transaction(TxFilter { block: None, index: 0, hash: txid.to_vec() })
+            .get_transaction(TxFilter {
+                block: None,
+                index: 0,
+                hash: txid.to_vec(),
+            })
             .await
         {
             Ok(_) => Ok(true),
             Err(status) if status.code() == tonic::Code::NotFound => Ok(false),
             // lightwalletd wraps zebra's "no such transaction" in Unknown.
             Err(status)
-                if status.message().contains("No such mempool or main chain transaction") =>
+                if status
+                    .message()
+                    .contains("No such mempool or main chain transaction") =>
             {
                 Ok(false)
             }
-            Err(source) => Err(GrpcError::Rpc { call: "get_transaction", source }),
+            Err(source) => Err(GrpcError::Rpc {
+                call: "get_transaction",
+                source,
+            }),
         }
     }
 }
