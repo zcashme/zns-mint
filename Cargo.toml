@@ -11,18 +11,18 @@ publish = false
 
 [workspace.dependencies]
 # ── internal crates ────────────────────────────────────────────────
-# core   — domain types (action, memo, error), no crypto/io
-# state  — SQLite persistence (cf. zebra-state)
-# chain  — chain I/O: lightwalletd intake + zebrad broadcast (cf. zebra-network)
-# signer — crypto core: derive (ψ, rcm), build/verify the Orchard action
-# auth   — OTP challenge-response
-# mint   — the daemon: registry orchestration + the zns-mint binary (cf. zebrad)
-zns-core   = { path = "core" }
-zns-state  = { path = "state" }
-zns-chain  = { path = "chain" }
-zns-signer = { path = "signer" }
-zns-auth   = { path = "auth" }
-zns-mint   = { path = "mint" }
+# core     — domain types (action, memo, error), no crypto/io
+# state    — SQLite persistence (cf. zebra-state)
+# chain    — chain I/O: lightwalletd intake + zebrad broadcast (cf. zebra-network)
+# mint     — crypto core: derive (ψ, rcm), build/prove the Orchard Name Note
+# auth     — OTP challenge-response
+# registry — the daemon: registry orchestration + the zns-mint binary (cf. zebrad)
+zns-core     = { path = "core" }
+zns-state    = { path = "state" }
+zns-chain    = { path = "chain" }
+zns-mint     = { path = "signer" }
+zns-auth     = { path = "auth" }
+zns-registry = { path = "mint" }
 
 # ── Zcash / Orchard stack ──────────────────────────────────────────
 # orchard resolves to the zns-orchard fork via [patch.crates-io] below;

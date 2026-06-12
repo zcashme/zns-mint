@@ -1,8 +1,8 @@
-//! `zns-signer` — ZNS Orchard note construction, proving, and the spend gate.
+//! `zns-mint` — ZNS Orchard note construction, proving, and the spend gate.
 //!
 //! The cryptographic core and the only crate that pulls the orchard `circuit`
-//! (halo2) proving stack. It is the **in-enclave signer**: it owns the spend
-//! key and authorizes mints/sweeps under [`policy::SpendPolicy`].
+//! (halo2) proving stack. It owns the spend key and authorizes mints/sweeps
+//! under [`policy::SpendPolicy`].
 //!
 //! It derives `(ψ, rcm)` with its own [`derive`] implementation and does **not**
 //! depend on `zns-verify` — the registry (producer) and the verification kernel

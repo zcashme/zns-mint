@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
-use zns_mint::{
+use zns_registry::{
     scan_incoming_all, FundingInput, GrpcClient, MintContext, NoteState, ProcessResult, Registry,
     ScannerConfig, Signer, SpendPolicy, Treasury, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
 };
@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
             notes.len()
         );
         for n in &notes {
-            match zns_mint::parse_memo(&n.memo) {
+            match zns_registry::parse_memo(&n.memo) {
                 Ok(m) => println!("  {} zat @h{}: {:?}", n.value_zat, n.height, m),
                 Err(_) => println!("  {} zat @h{}: (non-ZNS memo)", n.value_zat, n.height),
             }
@@ -90,12 +90,12 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Control plane: health + status, read-only by construction.
-    let status = Arc::new(tokio::sync::RwLock::new(zns_mint::rpc::ChainStatus::default()));
+    let status = Arc::new(tokio::sync::RwLock::new(zns_registry::rpc::ChainStatus::default()));
     let rpc_addr =
         std::env::var("ZNS_RPC_ADDR").unwrap_or_else(|_| "127.0.0.1:8081".into());
-    tokio::spawn(zns_mint::rpc::serve(
+    tokio::spawn(zns_registry::rpc::serve(
         rpc_addr,
-        zns_mint::rpc::RpcContext { registry: registry.clone(), status: status.clone() },
+        zns_registry::rpc::RpcContext { registry: registry.clone(), status: status.clone() },
     ));
 
     let mut tick = tokio::time::interval(POLL_INTERVAL);

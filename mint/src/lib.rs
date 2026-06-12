@@ -1,9 +1,9 @@
-//! `zns-mint` — the ZNS minting daemon: registry orchestration.
+//! `zns-registry` — the ZNS registry daemon: orchestration.
 //!
 //! # Overview
 //!
-//! The [`Registry`] struct is the orchestration core — it wires the other
-//! crates together, the way `zebrad` composes Zebra's services. It:
+//! The [`Registry`] struct wires the other crates together, the way `zebrad`
+//! composes Zebra's services. It:
 //!
 //! 1. Reads incoming Orchard notes addressed to the registry over lightwalletd
 //!    (`zns_chain::scanner`).
@@ -11,16 +11,16 @@
 //! 3. For **CLAIM**: verifies that the fee ≥ minimum and mints immediately.
 //! 4. For **UPDATE/RELEASE**: initiates OTP auth ([`zns_auth::AuthModule`]),
 //!    waits for a confirm note, then mints.
-//! 5. Mints Name Notes: the signer derives `(rcm, psi)` and builds the Orchard
-//!    action via the `zns-orchard` fork (`zns_signer`).
+//! 5. Mints Name Notes: `zns_mint` derives `(rcm, psi)` and builds the Orchard
+//!    action via the `zns-orchard` fork.
 //! 6. Persists per-name `rcm` tips in SQLite (`zns_state`).
 //! 7. Broadcasts transactions via zebrad gRPC (`zns_chain::grpc`).
 
-// Flat API surface — re-export the domain, state, chain, and signer crates so
-// `zns_mint::{parse_memo, build_name_note, NameRecord, ...}` resolve in one place.
+// Flat API surface — re-export the domain, state, chain, and mint crates so
+// `zns_registry::{parse_memo, build_name_note, NameRecord, ...}` resolve in one place.
 pub use zns_core::{memo, parse_memo, Action, ParsedMemo, RegistryError, ZERO_PREV_RCM};
 pub use zns_state::{append_action, db, latest_action, MintedAction, NameRecord};
-pub use zns_signer::{
+pub use zns_mint::{
     build_name_note, FundingInput, MintParams, MintResult, RequestId, Signer, SpendPolicy,
 };
 pub use zns_chain::{
@@ -396,13 +396,13 @@ impl Registry {
         // Self-funded mint when a treasury note is available: the host
         // proposes pure *intent* and the policy-gated signer authors,
         // validates, and signs the spend (fee cap, low-watermark pause,
-        // replay set, velocity cap — zns_signer::policy). The note is
+        // replay set, velocity cap — zns_mint::policy). The note is
         // consumed here (`take`) so a later action in the same poll cannot
         // double-spend it. Without treasury, fall back to the unfunded
         // value-0 note (won't pass stock consensus; testing).
         let result = match treasury.take() {
             Some(treasury) => {
-                let intent = zns_signer::MintIntent {
+                let intent = zns_mint::MintIntent {
                     action,
                     name: name.to_owned(),
                     ua: ua.to_owned(),
@@ -412,7 +412,7 @@ impl Registry {
                 };
                 ctx.signer
                     .sign_mint(
-                        zns_signer::MintProposal { intent, funding: treasury.funding_input() },
+                        zns_mint::MintProposal { intent, funding: treasury.funding_input() },
                         ctx.hot_balance_zat,
                         ctx.branch_id,
                         ctx.expiry_height,
@@ -531,7 +531,7 @@ impl Registry {
     /// the nonce and UPDATE / RELEASE can never be confirmed.
     ///
     /// The relay goes through the signer's bounded exception
-    /// ([`zns_signer::Signer::sign_relay`]): dust + fee are policy-capped, the
+    /// ([`zns_mint::Signer::sign_relay`]): dust + fee are policy-capped, the
     /// triggering request is replay-protected, and a velocity slot is
     /// consumed. It requires treasury spend material; without it the
     /// challenge cannot be delivered.
@@ -593,10 +593,10 @@ fn minted_action(
     }
 }
 
-/// Carry a [`zns_signer::SignError`] across the crate boundary, preserving
+/// Carry a [`zns_mint::SignError`] across the crate boundary, preserving
 /// the permanence class the intake ledger settles on.
-fn registry_err(e: zns_signer::SignError) -> RegistryError {
-    use zns_signer::{PolicyError, SignError};
+fn registry_err(e: zns_mint::SignError) -> RegistryError {
+    use zns_mint::{PolicyError, SignError};
     match e {
         SignError::Build(e) => e,
         SignError::Policy(p) => {
@@ -643,7 +643,7 @@ fn parse_orchard_recipient(
 pub struct MintContext {
     /// The policy-gated signing authority. The only path to a signature; the
     /// registry proposes intent, never touches key material.
-    pub signer: Arc<zns_signer::Signer>,
+    pub signer: Arc<zns_mint::Signer>,
     /// Current spendable treasury balance, for the signer's low-watermark
     /// pause. The daemon refreshes it each poll from funding selection.
     pub hot_balance_zat: u64,
@@ -665,24 +665,24 @@ pub struct MintContext {
     /// Treasury spend material for funded sends. `None` means unfunded mode
     /// (testing); relays then fail with a clear "no treasury funding
     /// configured" error rather than silently no-op'ing. Behind an `Arc`
-    /// because [`zns_signer::FundingInput`] is not `Clone`.
+    /// because [`zns_mint::FundingInput`] is not `Clone`.
     pub treasury: Option<Arc<Treasury>>,
 }
 
 /// Treasury spend material: a registry note with its witness and anchor,
 /// selected by the daemon from note-state. **No key material** — signing
-/// authority lives exclusively in the [`zns_signer::Signer`]. Change always
+/// authority lives exclusively in the [`zns_mint::Signer`]. Change always
 /// returns to the registry self-address (a policy constant).
 pub struct Treasury {
     /// The treasury note being spent, with its Merkle witness and anchor.
-    pub funding: zns_signer::FundingInput,
+    pub funding: zns_mint::FundingInput,
 }
 
 impl Treasury {
-    /// An owned [`zns_signer::FundingInput`] for a proposal (the note and
+    /// An owned [`zns_mint::FundingInput`] for a proposal (the note and
     /// anchor are `Copy`; only the witness clones).
-    pub fn funding_input(&self) -> zns_signer::FundingInput {
-        zns_signer::FundingInput {
+    pub fn funding_input(&self) -> zns_mint::FundingInput {
+        zns_mint::FundingInput {
             note: self.funding.note,
             merkle_path: self.funding.merkle_path.clone(),
             anchor: self.funding.anchor,

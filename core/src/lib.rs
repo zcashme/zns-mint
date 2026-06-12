@@ -1,7 +1,7 @@
 //! `zns-core` — shared ZNS domain types with no cryptographic dependencies.
 //!
 //! Holds the action kinds, the memo parser, and the cross-cutting
-//! [`RegistryError`]. Persistence lives in `zns-state`; crypto in `zns-signer`.
+//! [`RegistryError`]. Persistence lives in `zns-state`; crypto in `zns-mint`.
 //! It deliberately pulls in **no** orchard / halo2, so a light consumer (memo
 //! parsing, action types) never compiles the proving stack.
 

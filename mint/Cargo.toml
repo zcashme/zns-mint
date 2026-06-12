@@ -1,6 +1,6 @@
 [package]
-name = "zns-mint"
-description = "ZNS minting daemon: registry orchestration over chain intake, signer, and state."
+name = "zns-registry"
+description = "ZNS registry daemon: orchestrates chain intake, minting, auth, and state."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 publish = false
 
 [lib]
-name = "zns_mint"
+name = "zns_registry"
 path = "src/lib.rs"
 
 [[bin]]
@@ -19,10 +19,10 @@ path = "src/bin/zns-mint.rs"
 zns-core = { workspace = true }
 zns-state = { workspace = true }
 zns-chain = { workspace = true }
-zns-signer = { workspace = true }
+zns-mint = { workspace = true }
 zns-auth = { workspace = true }
 # orchard types appear in MintContext's public API; circuit arrives transitively
-# via zns-signer (this is the minting daemon, so that is expected).
+# via zns-mint (this is the registry daemon, so that is expected).
 orchard = { workspace = true, features = ["unsafe-zns"] }
 zcash_protocol = { workspace = true }
 # Parse a name owner's Unified Address → Orchard receiver for the OTP relay.

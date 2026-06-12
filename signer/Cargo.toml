@@ -1,6 +1,6 @@
 [package]
-name = "zns-signer"
-description = "ZNS Orchard note construction + commitment verification (the crypto core; future in-enclave signer)."
+name = "zns-mint"
+description = "ZNS Orchard note construction, proving, and the spend gate — the cryptographic mint core."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
