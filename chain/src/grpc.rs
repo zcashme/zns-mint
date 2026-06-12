@@ -157,15 +157,10 @@ impl GrpcClient {
             .await
         {
             Ok(_) => Ok(true),
+            // lightwalletd's GetTransaction returns NotFound for any
+            // getrawtransaction RPC error, including zcashd's "No such
+            // mempool or main chain transaction" for a missing tx.
             Err(status) if status.code() == tonic::Code::NotFound => Ok(false),
-            // lightwalletd wraps zebra's "no such transaction" in Unknown.
-            Err(status)
-                if status
-                    .message()
-                    .contains("No such mempool or main chain transaction") =>
-            {
-                Ok(false)
-            }
             Err(source) => Err(GrpcError::Rpc {
                 call: "get_transaction",
                 source,
