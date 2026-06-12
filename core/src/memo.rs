@@ -23,7 +23,7 @@
 //! rescan instead of treating them as actions to mint.
 
 use crate::action::Action;
-use crate::error::RegistryError;
+use crate::error::MemoError;
 
 /// A fully-parsed ZNS memo.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,11 +57,11 @@ impl ParsedMemo {
 ///
 /// The memo may be zero-padded at the end (as per ZIP 302); trailing zero
 /// bytes are stripped before parsing.
-pub fn parse_memo(raw: &[u8]) -> Result<ParsedMemo, RegistryError> {
+pub fn parse_memo(raw: &[u8]) -> Result<ParsedMemo, MemoError> {
     // Strip trailing NUL padding (ZIP 302 §3).
     let trimmed = strip_trailing_zeros(raw);
     let text = std::str::from_utf8(trimmed)
-        .map_err(|_| RegistryError::InvalidMemo("non-UTF-8 bytes".into()))?;
+        .map_err(|_| MemoError::InvalidMemo("non-UTF-8 bytes".into()))?;
     parse_memo_str(text)
 }
 
@@ -70,19 +70,19 @@ fn strip_trailing_zeros(b: &[u8]) -> &[u8] {
     &b[..last_non_zero]
 }
 
-fn parse_memo_str(text: &str) -> Result<ParsedMemo, RegistryError> {
+fn parse_memo_str(text: &str) -> Result<ParsedMemo, MemoError> {
     // `split` (never `splitn`): strictness is load-bearing — a lenient parser
     // that absorbs or ignores trailing fields would read a different `ua`
     // from the same memo than the verification kernel does.
     let parts: Vec<&str> = text.split(':').collect();
 
     if parts[0] != "ZNS" {
-        return Err(RegistryError::InvalidMemo(
+        return Err(MemoError::InvalidMemo(
             "does not start with 'ZNS:'".into(),
         ));
     }
     if parts.len() < 3 || parts.len() > 5 {
-        return Err(RegistryError::InvalidMemo(format!(
+        return Err(MemoError::InvalidMemo(format!(
             "wrong field count: {}",
             parts.len()
         )));
@@ -94,9 +94,9 @@ fn parse_memo_str(text: &str) -> Result<ParsedMemo, RegistryError> {
 
     // A fifth field is always the Name Note form's prev_rcm witness.
     let prev_rcm = parts.get(4).map(|s| decode_prev_rcm(s)).transpose()?;
-    let arg = |what: &str| -> Result<String, RegistryError> {
+    let arg = |what: &str| -> Result<String, MemoError> {
         match parts.get(3) {
-            Some(&"") | None => Err(RegistryError::InvalidMemo(format!("missing {what}"))),
+            Some(&"") | None => Err(MemoError::InvalidMemo(format!("missing {what}"))),
             Some(a) => Ok((*a).to_owned()),
         }
     };
@@ -115,24 +115,24 @@ fn parse_memo_str(text: &str) -> Result<ParsedMemo, RegistryError> {
             (5, Some(_)) if parts[3].is_empty() => {
                 Ok(ParsedMemo::Action { action: Action::Release, name, ua: String::new(), prev_rcm })
             }
-            _ => Err(RegistryError::InvalidMemo("release: wrong field count".into())),
+            _ => Err(MemoError::InvalidMemo("release: wrong field count".into())),
         },
         "challenge" if prev_rcm.is_none() => {
             Ok(ParsedMemo::Challenge { name, nonce: arg("nonce")? })
         }
         "confirm" if prev_rcm.is_none() => Ok(ParsedMemo::Confirm { name, nonce: arg("nonce")? }),
         "challenge" | "confirm" => {
-            Err(RegistryError::InvalidMemo(format!("{verb}: wrong field count")))
+            Err(MemoError::InvalidMemo(format!("{verb}: wrong field count")))
         }
-        other => Err(RegistryError::InvalidMemo(format!(
+        other => Err(MemoError::InvalidMemo(format!(
             "unknown verb '{other}'"
         ))),
     }
 }
 
 /// Decode a `prev_rcm` field: exactly 64 lowercase hex chars.
-fn decode_prev_rcm(s: &str) -> Result<[u8; 32], RegistryError> {
-    let bad = || RegistryError::InvalidMemo("prev_rcm: not 64 lowercase hex chars".into());
+fn decode_prev_rcm(s: &str) -> Result<[u8; 32], MemoError> {
+    let bad = || MemoError::InvalidMemo("prev_rcm: not 64 lowercase hex chars".into());
     let bytes = s.as_bytes();
     if bytes.len() != 64 {
         return Err(bad());
@@ -156,28 +156,28 @@ fn decode_prev_rcm(s: &str) -> Result<[u8; 32], RegistryError> {
 /// This is the **authoritative producer-side validator**: the signer's policy
 /// gate delegates here, so the parser and the gate can never disagree about
 /// which names exist.
-pub fn validate_name(name: &str) -> Result<(), RegistryError> {
+pub fn validate_name(name: &str) -> Result<(), MemoError> {
     if name.is_empty() {
-        return Err(RegistryError::InvalidName(
+        return Err(MemoError::InvalidName(
             name.into(),
             "empty name".into(),
         ));
     }
     if name.len() > 63 {
-        return Err(RegistryError::InvalidName(
+        return Err(MemoError::InvalidName(
             name.into(),
             "exceeds 63-byte limit".into(),
         ));
     }
     if name.starts_with('-') || name.ends_with('-') {
-        return Err(RegistryError::InvalidName(
+        return Err(MemoError::InvalidName(
             name.into(),
             "leading or trailing hyphen".into(),
         ));
     }
     for c in name.chars() {
         if !matches!(c, 'a'..='z' | '0'..='9' | '-') {
-            return Err(RegistryError::InvalidName(
+            return Err(MemoError::InvalidName(
                 name.into(),
                 format!("invalid character '{c}'"),
             ));
@@ -219,13 +219,13 @@ pub fn encode_name_note(
     name: &str,
     ua: &str,
     prev_rcm: &[u8; 32],
-) -> Result<[u8; MEMO_SIZE], RegistryError> {
+) -> Result<[u8; MEMO_SIZE], MemoError> {
     validate_name(name)?;
     // Unreachable from the inbound parser (it can't produce a ua containing
     // the field separator), but this is the canonical memo — keep the
     // invariant local rather than inherited.
     if ua.contains(':') {
-        return Err(RegistryError::InvalidMemo("ua contains the field separator ':'".into()));
+        return Err(MemoError::InvalidMemo("ua contains the field separator ':'".into()));
     }
     let verb = match action {
         Action::Claim => "claim",
@@ -238,11 +238,11 @@ pub fn encode_name_note(
 
 /// Encode memo `text` into a fixed [`MEMO_SIZE`]-byte, zero-padded ZIP-302 memo.
 ///
-/// Returns [`RegistryError::InvalidMemo`] if the text does not fit.
-pub fn encode_memo_bytes(text: &str) -> Result<[u8; MEMO_SIZE], RegistryError> {
+/// Returns [`MemoError::InvalidMemo`] if the text does not fit.
+pub fn encode_memo_bytes(text: &str) -> Result<[u8; MEMO_SIZE], MemoError> {
     let bytes = text.as_bytes();
     if bytes.len() > MEMO_SIZE {
-        return Err(RegistryError::InvalidMemo(format!(
+        return Err(MemoError::InvalidMemo(format!(
             "memo too long: {} bytes (max {MEMO_SIZE})",
             bytes.len()
         )));

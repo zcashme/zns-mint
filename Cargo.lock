@@ -3512,8 +3512,6 @@ dependencies = [
 name = "zns-core"
 version = "0.0.1"
 dependencies = [
- "anyhow",
- "rusqlite",
  "serde",
  "thiserror 1.0.69",
 ]
@@ -3523,29 +3521,6 @@ name = "zns-mint"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "hex",
- "jsonrpsee",
- "orchard",
- "rusqlite",
- "serde",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "zcash_address",
- "zcash_keys",
- "zcash_protocol",
- "zip32",
- "zns-auth",
- "zns-chain",
- "zns-core",
- "zns-signer",
- "zns-state",
-]
-
-[[package]]
-name = "zns-signer"
-version = "0.0.1"
-dependencies = [
  "blake2b_simd",
  "hex",
  "orchard",
@@ -3560,11 +3535,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "zns-registry"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "hex",
+ "jsonrpsee",
+ "orchard",
+ "rusqlite",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zcash_address",
+ "zcash_keys",
+ "zcash_protocol",
+ "zip32",
+ "zns-auth",
+ "zns-chain",
+ "zns-core",
+ "zns-mint",
+ "zns-state",
+]
+
+[[package]]
 name = "zns-state"
 version = "0.0.1"
 dependencies = [
  "anyhow",
  "rusqlite",
+ "thiserror 1.0.69",
  "zns-auth",
  "zns-core",
 ]

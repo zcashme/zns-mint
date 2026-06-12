@@ -8,10 +8,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
-zns-core = { workspace = true }   # RegistryError, shared domain types
+zns-core = { workspace = true }
 zns-auth = { workspace = true }   # PendingChallenge (persisted here)
 rusqlite = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

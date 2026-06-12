@@ -8,10 +8,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
-rusqlite = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 
 [lints]
 workspace = true

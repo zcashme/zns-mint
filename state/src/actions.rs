@@ -7,7 +7,8 @@
 //! cached for O(1) lookup.
 
 use rusqlite::{params, Connection};
-use zns_core::{Action, RegistryError};
+use zns_core::Action;
+use crate::error::StateError;
 
 /// One minted Orchard action in a name's `(ψ, rcm)` chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +30,7 @@ pub struct MintedAction {
 }
 
 /// Initialise the minted-action log schema (idempotent).
-pub fn init_actions_schema(conn: &Connection) -> Result<(), RegistryError> {
+pub fn init_actions_schema(conn: &Connection) -> Result<(), StateError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS name_actions (
              id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,7 +49,7 @@ pub fn init_actions_schema(conn: &Connection) -> Result<(), RegistryError> {
 }
 
 /// Append a minted action to the log, returning its rowid.
-pub fn append_action(conn: &Connection, a: &MintedAction) -> Result<i64, RegistryError> {
+pub fn append_action(conn: &Connection, a: &MintedAction) -> Result<i64, StateError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -72,7 +73,7 @@ pub fn append_action(conn: &Connection, a: &MintedAction) -> Result<i64, Registr
 }
 
 /// Return every action recorded for `name`, oldest first (i.e. CLAIM → … → tip).
-pub fn actions_for(conn: &Connection, name: &str) -> Result<Vec<MintedAction>, RegistryError> {
+pub fn actions_for(conn: &Connection, name: &str) -> Result<Vec<MintedAction>, StateError> {
     let mut stmt = conn.prepare(
         "SELECT name, action, txid, cmx, rcm, psi, height
          FROM name_actions WHERE name = ?1 ORDER BY id ASC",
@@ -86,7 +87,7 @@ pub fn actions_for(conn: &Connection, name: &str) -> Result<Vec<MintedAction>, R
 }
 
 /// Return the most recently minted action for `name`, or `None` if untracked.
-pub fn latest_action(conn: &Connection, name: &str) -> Result<Option<MintedAction>, RegistryError> {
+pub fn latest_action(conn: &Connection, name: &str) -> Result<Option<MintedAction>, StateError> {
     let mut stmt = conn.prepare(
         "SELECT name, action, txid, cmx, rcm, psi, height
          FROM name_actions WHERE name = ?1 ORDER BY id DESC LIMIT 1",
@@ -102,7 +103,7 @@ pub fn latest_action(conn: &Connection, name: &str) -> Result<Option<MintedActio
 /// access; the inner one is our own validation (action verb, blob lengths).
 fn row_to_action(
     row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<Result<MintedAction, RegistryError>> {
+) -> rusqlite::Result<Result<MintedAction, StateError>> {
     let name: String = row.get(0)?;
     let action_str: String = row.get(1)?;
     let txid: Vec<u8> = row.get(2)?;
@@ -113,7 +114,7 @@ fn row_to_action(
 
     Ok((|| {
         let action = Action::from_bytes(action_str.as_bytes()).ok_or_else(|| {
-            RegistryError::Other(anyhow::anyhow!("corrupt action verb '{action_str}' in db"))
+            StateError::Other(anyhow::anyhow!("corrupt action verb '{action_str}' in db"))
         })?;
         Ok(MintedAction {
             name,
@@ -127,9 +128,9 @@ fn row_to_action(
     })())
 }
 
-fn blob32(b: &[u8], field: &str) -> Result<[u8; 32], RegistryError> {
+fn blob32(b: &[u8], field: &str) -> Result<[u8; 32], StateError> {
     b.try_into()
-        .map_err(|_| RegistryError::Other(anyhow::anyhow!("corrupt {field}: expected 32 bytes, got {}", b.len())))
+        .map_err(|_| StateError::Other(anyhow::anyhow!("corrupt {field}: expected 32 bytes, got {}", b.len())))
 }
 
 #[cfg(test)]

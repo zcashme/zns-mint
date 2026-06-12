@@ -6,8 +6,8 @@
 //! notes; only the Name Notes the registry *mints* are non-standard), then
 //! fetches the full transaction to recover the memo (compact blocks omit it).
 //!
-//! Scope: receive-side only. Spends of the registry's own notes are not tracked
-//! here — that belongs to the (future) note-state core.
+//! Scope: receive-side intake only. Spends of the registry's own notes are
+//! tracked by the [`crate::treasury`] note-state (`WalletDb`).
 
 use anyhow::{anyhow, Context as _};
 

@@ -12,6 +12,7 @@
 
 use std::sync::OnceLock;
 
+use anyhow::{anyhow, bail, Context as _};
 use blake2b_simd::Params;
 use orchard::{
     builder::{Builder as OrchardBuilder, BundleType},
@@ -30,7 +31,7 @@ use zcash_protocol::{
     consensus::{BlockHeight, BranchId},
     value::ZatBalance,
 };
-use zns_core::{Action, RegistryError};
+use zns_core::Action;
 
 use crate::derive::zns_psi_rcm;
 
@@ -38,11 +39,6 @@ use crate::derive::zns_psi_rcm;
 // Proving key cache
 // ---------------------------------------------------------------------------
 
-// Orchard 0.14 ships two circuits with distinct verifying keys: the fixed
-// post-NU6.2 circuit (`build()` default) and the historical pre-NU6.2 circuit.
-// A chain validates with the VK for its active upgrade, so we must prove with
-// the version matching the target chain (e.g. a NU6 regtest needs the insecure
-// pre-NU6.2 key, or it rejects with "could not validate orchard proof").
 static PK_FIXED: OnceLock<ProvingKey> = OnceLock::new();
 static PK_INSECURE: OnceLock<ProvingKey> = OnceLock::new();
 
@@ -56,8 +52,6 @@ pub(crate) fn proving_key_for(version: OrchardCircuitVersion) -> &'static Provin
     }
 }
 
-/// Verifying keys, for self-checking a bundle before broadcast under the same
-/// circuit version it was proved (and that the target chain validates with).
 static VK_FIXED: OnceLock<VerifyingKey> = OnceLock::new();
 static VK_INSECURE: OnceLock<VerifyingKey> = OnceLock::new();
 fn verifying_key_for(version: OrchardCircuitVersion) -> &'static VerifyingKey {
@@ -72,21 +66,6 @@ fn verifying_key_for(version: OrchardCircuitVersion) -> &'static VerifyingKey {
 // ---------------------------------------------------------------------------
 // Sighash helper — V5 shielded-only (no transparent, no sapling)
 // ---------------------------------------------------------------------------
-//
-// ZIP 244 defines the V5 signature digest as:
-//   BLAKE2b-256(personal = "ZcashTxHash_" || branch_id_le32,
-//     header_digest || transparent_digest || sapling_digest || orchard_digest)
-//
-// For a shielded-only transaction:
-//   header_digest      = BLAKE2b-256("ZTxIdHeadersHash",
-//                          version_header_le32 || version_group_id_le32 ||
-//                          branch_id_le32 || lock_time_le32 || expiry_height_le32)
-//   transparent_digest = BLAKE2b-256("ZTxIdTranspaHash")   [empty — no inputs]
-//   sapling_digest     = BLAKE2b-256("ZcTxSaplinHash")     [empty — no spends/outputs]
-//   orchard_digest     = bundle.commitment().0             [already computed]
-//
-// This matches the private `to_hash` + `hash_header_txid_data` + `hash_transparent_txid_data`
-// functions in zcash_primitives::transaction::txid, which are not public.
 
 fn v5_shielded_sighash(
     branch_id: BranchId,
@@ -94,43 +73,32 @@ fn v5_shielded_sighash(
     expiry_height: u32,
     orchard_digest: &[u8; 32],
 ) -> [u8; 32] {
-    // 1. Header digest  ("ZTxIdHeadersHash")
     let header_digest = {
         let mut h = Params::new()
             .hash_length(32)
             .personal(b"ZTxIdHeadersHash")
             .to_state();
-        // header (version | overwintered bit)
         h.update(&TxVersion::V5.header().to_le_bytes());
-        // version group id
         h.update(&TxVersion::V5.version_group_id().to_le_bytes());
-        // consensus branch id
         let bid: u32 = branch_id.into();
         h.update(&bid.to_le_bytes());
-        // lock_time
         h.update(&lock_time.to_le_bytes());
-        // expiry_height
         h.update(&expiry_height.to_le_bytes());
         h.finalize()
     };
 
-    // 2. Transparent digest — empty bundle ("ZTxIdTranspaHash")
     let transparent_digest = Params::new()
         .hash_length(32)
         .personal(b"ZTxIdTranspaHash")
         .to_state()
         .finalize();
 
-    // 3. Sapling digest — empty bundle. ZIP-244 personalization is
-    //    "ZTxIdSaplingHash" (16 bytes); the prior "ZcTxSaplinHash\0\0" was wrong,
-    //    which corrupted the sighash and invalidated every signature.
     let sapling_digest = Params::new()
         .hash_length(32)
         .personal(b"ZTxIdSaplingHash")
         .to_state()
         .finalize();
 
-    // 4. Combine into the tx hash / sighash ("ZcashTxHash_" || branch_id_le32)
     let mut personal = [0u8; 16];
     personal[..12].copy_from_slice(b"ZcashTxHash_");
     personal[12..].copy_from_slice(&u32::from(branch_id).to_le_bytes());
@@ -153,59 +121,44 @@ fn v5_shielded_sighash(
 // Transaction wrapper
 // ---------------------------------------------------------------------------
 
-/// Wrap an `orchard::bundle::Bundle<Authorized, i64>` in a V5 transaction and
-/// return the serialized bytes plus the ZIP-244 txid (the canonical on-chain
-/// identifier, stored in the minted-action log).
 fn orchard_bundle_to_tx_bytes(
     bundle: orchard::bundle::Bundle<orchard::bundle::Authorized, i64>,
     consensus_branch_id: BranchId,
     expiry_height: u32,
     sighash: &[u8; 32],
-) -> Result<(Vec<u8>, [u8; 32]), RegistryError> {
-    // Convert value_balance: i64 → ZatBalance (required by zcash_primitives serializer).
+) -> anyhow::Result<(Vec<u8>, [u8; 32])> {
     let bundle_zat = bundle
         .try_map_value_balance::<ZatBalance, _, _>(|v: i64| ZatBalance::from_i64(v))
-        .map_err(|e| RegistryError::Build(format!("value_balance out of range: {e:?}")))?;
+        .map_err(|e| anyhow!("value_balance out of range: {e:?}"))?;
 
-    // Wrap in TransactionData (no transparent, no sprout, no sapling).
     let tx_data: TransactionData<TxAuthorized> = TransactionData::from_parts(
         TxVersion::V5,
         consensus_branch_id,
-        0, // lock_time
+        0,
         BlockHeight::from_u32(expiry_height),
-        None, // transparent_bundle
-        None, // sprout_bundle
-        None, // sapling_bundle
+        None,
+        None,
+        None,
         Some(bundle_zat),
     );
 
-    // Freeze computes the txid via the ZIP-244 digest and returns a Transaction.
     let tx: Transaction = tx_data
         .freeze()
-        .map_err(|e| RegistryError::Build(format!("freeze: {e}")))?;
+        .map_err(|e| anyhow!("freeze: {e}"))?;
 
-    // The ZIP-244 txid is fixed once the tx is frozen.
     let txid: [u8; 32] = *tx.txid().as_ref();
 
-    // ZIP-244 invariant: with no transparent inputs (true of every tx we
-    // build), the signature digest equals the txid. A mismatch means the
-    // hand-rolled `v5_shielded_sighash` drifted from the serializer — the
-    // exact bug class behind the historic "ZcTxSaplinHash" typo — and the
-    // signatures are over the wrong message; the chain would reject the tx.
-    // Fail at build time instead.
     if txid != *sighash {
-        return Err(RegistryError::Build(format!(
+        bail!(
             "sighash/txid mismatch (ZIP-244): sighash {} != txid {} — \
              v5_shielded_sighash disagrees with the serializer",
             hex::encode(sighash),
             hex::encode(txid),
-        )));
+        );
     }
 
-    // Serialize using the Transaction::write() entry point.
     let mut bytes = Vec::new();
-    tx.write(&mut bytes)
-        .map_err(|e| RegistryError::Build(format!("serialize: {e}")))?;
+    tx.write(&mut bytes).context("serialize")?;
 
     Ok((bytes, txid))
 }
@@ -216,50 +169,25 @@ fn orchard_bundle_to_tx_bytes(
 
 /// Parameters needed to mint a single Name Note.
 pub struct MintParams<'a> {
-    /// The ZNS lifecycle action being performed.
     pub action: Action,
-    /// The human-readable name being claimed/updated/released.
     pub name: &'a str,
-    /// The Unified Address being bound to the name (empty for Release).
     pub ua: &'a str,
-    /// The `rcm` of the previous Name Note in this name's chain.
-    /// Use [`CLAIM_PREV_RCM`] for the initial CLAIM.
     pub prev_rcm: [u8; 32],
-    /// The address that will receive the Name Note (registry self-address).
     pub recipient: Address,
-    /// Full Viewing Key of the registry — used to derive the OVK.
     pub registry_fvk: FullViewingKey,
-    /// Orchard Merkle anchor to use.  For value-0 notes an empty-tree anchor
-    /// is sufficient (the circuit allows `v_old = 0 OR root = anchor`).
     pub anchor: Anchor,
-    /// Consensus branch ID to embed in the transaction.
-    ///
-    /// Use `BranchId::Nu6` for current mainnet (activated at height 2_726_400)
-    /// or `BranchId::Nu6_1` (activated at height 3_536_500 on mainnet).
-    /// Defaults to `BranchId::Nu6` when the caller uses [`build_name_note`].
     pub branch_id: BranchId,
-    /// Block height at which the transaction expires.  Set to 0 for no expiry.
     pub expiry_height: u32,
-    /// Which Orchard circuit to prove against — must match the target chain's
-    /// active upgrade (NU6 → `InsecurePreNu6_2`; NU6.2+ → `FixedPostNu6_2`).
     pub circuit_version: OrchardCircuitVersion,
 }
 
-/// The output of a successful mint: the derived cryptographic parameters and
-/// a serialized V5 Orchard-only transaction ready for broadcast.
+/// The output of a successful mint.
 #[derive(Debug)]
 pub struct MintResult {
-    /// The new `rcm` — caller stores this as `tip_rcm` for future chaining.
     pub new_rcm: [u8; 32],
-    /// The new `psi` — kept for diagnostic / test purposes.
     pub new_psi: [u8; 32],
-    /// The Name Note's extracted note commitment (`cmx`) — the on-chain
-    /// commitment recorded in the minted-action log.
     pub cmx: [u8; 32],
-    /// The ZIP-244 txid of the broadcast transaction — the canonical identifier
-    /// recorded in the minted-action log.
     pub txid: [u8; 32],
-    /// Serialized V5 transaction bytes ready for broadcast via `sendrawtransaction`.
     pub tx_bytes: Vec<u8>,
 }
 
@@ -267,13 +195,7 @@ pub struct MintResult {
 // Core mint function
 // ---------------------------------------------------------------------------
 
-/// Construct a ZNS Name Note, generate an Orchard proof, and return the
-/// serialized transaction ready for broadcast.
-///
-/// This function is computationally expensive on the first call because
-/// [`ProvingKey::build()`] must run.  Subsequent calls reuse the cached key.
-pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, RegistryError> {
-    // 1. Derive (psi, rcm) deterministically from the ZNS registration tuple.
+pub fn build_name_note(params: MintParams<'_>) -> anyhow::Result<MintResult> {
     let (psi, rcm) = zns_psi_rcm(
         params.action.as_bytes(),
         params.name.as_bytes(),
@@ -281,65 +203,45 @@ pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, RegistryErr
         &params.prev_rcm,
     );
 
-    // 2. Encode for storage.  `.to_repr()` is provided by the `PrimeField` trait.
     let new_rcm: [u8; 32] = rcm.to_repr();
     let new_psi: [u8; 32] = psi.to_repr();
 
-    // 3. Build the Orchard action using the ZNS override path. The builder must
-    //    carry the circuit version so its actions synthesize against the proving
-    //    key used below. `params.anchor` must be a real, recent Orchard tree
-    //    root — consensus checks the bundle anchor against known roots.
     let ovk = Some(params.registry_fvk.to_ovk(Scope::External));
     let mut builder =
         OrchardBuilder::new_for_version(BundleType::DEFAULT, params.anchor, params.circuit_version);
 
-    // The Name Note carries its canonical memo (DESIGN.md §6) — including the
-    // prev_rcm witness, which is what resolvers index from and what makes the
-    // note's binding verifiable standalone.
     let memo =
         zns_core::memo::encode_name_note(params.action, params.name, params.ua, &params.prev_rcm)?;
     builder
         .add_zns_output(ovk, params.recipient, NoteValue::from_raw(0), memo, rcm, psi)
-        .map_err(|e| RegistryError::Build(format!("{e:?}")))?;
+        .map_err(|e| anyhow!("{e:?}"))?;
 
     let mut rng = OsRng;
 
-    // 4. Build the unauthorized bundle.  `meta` maps our output index to its
-    //    (shuffled) action index so we can recover the Name Note's `cmx`.
     let (unauthorized_bundle, meta) = builder
         .build::<i64>(&mut rng)
-        .map_err(|e| RegistryError::Build(format!("build: {e:?}")))?
-        .ok_or_else(|| RegistryError::Build("builder produced an empty bundle".into()))?;
+        .map_err(|e| anyhow!("build: {e:?}"))?
+        .ok_or_else(|| anyhow!("builder produced an empty bundle"))?;
     let name_note_action = meta
         .output_action_index(0)
-        .ok_or_else(|| RegistryError::Build("Name Note output missing from bundle".into()))?;
+        .ok_or_else(|| anyhow!("Name Note output missing from bundle"))?;
 
-    // 5. Compute the sighash BEFORE proving.
-    //
-    // The orchard_digest (bundle.commitment()) does not depend on the proof or
-    // signatures — it only covers the action data (nullifiers, cmx, ciphertexts,
-    // flags, value_balance, anchor).  This lets us compute the sighash from the
-    // unauthorized bundle and feed it to apply_signatures.
     let orchard_digest: [u8; 32] = unauthorized_bundle.commitment().into();
     let sighash = v5_shielded_sighash(
         params.branch_id,
-        0, // lock_time
+        0,
         params.expiry_height,
         &orchard_digest,
     );
 
-    // 6. Create the ZK proof under the circuit version the target chain expects.
     let proven_bundle = unauthorized_bundle
         .create_proof(proving_key_for(params.circuit_version), &mut rng)
-        .map_err(|e| RegistryError::Build(format!("create_proof: {e:?}")))?;
+        .map_err(|e| anyhow!("create_proof: {e:?}"))?;
 
-    // 7. Apply signatures.  No spend authorizing keys are needed for a
-    //    value-0 output-only bundle (no dummy spends require signing here).
     let authorized_bundle = proven_bundle
         .apply_signatures(rng, sighash, &[])
-        .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
+        .map_err(|e| anyhow!("apply_signatures: {e:?}"))?;
 
-    // 8. Recover the Name Note commitment, then serialize the transaction.
     let cmx: [u8; 32] = authorized_bundle.actions()[name_note_action]
         .cmx()
         .to_bytes();
@@ -350,31 +252,17 @@ pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, RegistryErr
         &sighash,
     )?;
 
-    Ok(MintResult {
-        new_rcm,
-        new_psi,
-        cmx,
-        txid,
-        tx_bytes,
-    })
+    Ok(MintResult { new_rcm, new_psi, cmx, txid, tx_bytes })
 }
 
 // ---------------------------------------------------------------------------
-// Funded mint — the production path (self-funds the fee from a treasury note)
+// Funded mint
 // ---------------------------------------------------------------------------
 
 use orchard::keys::{SpendAuthorizingKey, SpendingKey};
 
 use crate::policy::{FundingInput, MintPlan};
 
-/// Build a **self-funded** Name Note transaction: spend one treasury note to
-/// cover the fee, emit the value-0 Name Note, and return the change to the
-/// registry. Unlike [`build_name_note`], the funding spend is real, so it
-/// requires a valid witness (`funding`) and a spend-auth signature (`spend_key`).
-///
-/// `recipient` is the registry self-address — the *only* place value lands
-/// (Name Note + change). The caller is the policy-gated [`crate::sign::Signer`],
-/// which authors `plan` and supplies `funding` from the WalletDb note-state.
 #[allow(clippy::too_many_arguments)]
 pub fn build_funded_mint(
     registry_fvk: &FullViewingKey,
@@ -385,9 +273,7 @@ pub fn build_funded_mint(
     branch_id: BranchId,
     expiry_height: u32,
     circuit_version: OrchardCircuitVersion,
-) -> Result<MintResult, RegistryError> {
-    // 1. Derive (psi, rcm) from the registration tuple — signer-authored, never
-    //    host-supplied.
+) -> anyhow::Result<MintResult> {
     let (psi, rcm) = zns_psi_rcm(
         plan.action.as_bytes(),
         plan.name.as_bytes(),
@@ -401,77 +287,62 @@ pub fn build_funded_mint(
     let mut builder =
         OrchardBuilder::new_for_version(BundleType::DEFAULT, funding.anchor, circuit_version);
 
-    // 2. Funding spend (pays the fee). Anchor must match the witness root.
     builder
         .add_spend(registry_fvk.clone(), funding.note, funding.merkle_path.clone())
-        .map_err(|e| RegistryError::Build(format!("add_spend: {e:?}")))?;
+        .map_err(|e| anyhow!("add_spend: {e:?}"))?;
 
-    // 3. The Name Note (value 0) to the registry self-address, carrying its
-    //    canonical memo (DESIGN.md §6) with the prev_rcm witness.
     let memo =
         zns_core::memo::encode_name_note(plan.action, &plan.name, &plan.ua, &plan.prev_rcm)?;
     builder
         .add_zns_output(ovk.clone(), recipient, NoteValue::from_raw(0), memo, rcm, psi)
-        .map_err(|e| RegistryError::Build(format!("add_zns_output: {e:?}")))?;
+        .map_err(|e| anyhow!("add_zns_output: {e:?}"))?;
 
-    // 4. Change back to the registry. value_balance = funding − 0 − change = fee.
     if plan.change_zat > 0 {
         builder
             .add_output(ovk, recipient, NoteValue::from_raw(plan.change_zat), [0u8; 512])
-            .map_err(|e| RegistryError::Build(format!("add_output(change): {e:?}")))?;
+            .map_err(|e| anyhow!("add_output(change): {e:?}"))?;
     }
 
     let mut rng = OsRng;
     let (unauthorized, meta) = builder
         .build::<i64>(&mut rng)
-        .map_err(|e| RegistryError::Build(format!("build: {e:?}")))?
-        .ok_or_else(|| RegistryError::Build("builder produced an empty bundle".into()))?;
-    // The Name Note is output 0 (the funding spend is a spend, not an output).
+        .map_err(|e| anyhow!("build: {e:?}"))?
+        .ok_or_else(|| anyhow!("builder produced an empty bundle"))?;
     let name_note_action = meta
         .output_action_index(0)
-        .ok_or_else(|| RegistryError::Build("Name Note output missing from bundle".into()))?;
+        .ok_or_else(|| anyhow!("Name Note output missing from bundle"))?;
 
     let orchard_digest: [u8; 32] = unauthorized.commitment().into();
     let sighash = v5_shielded_sighash(branch_id, 0, expiry_height, &orchard_digest);
 
     let proven = unauthorized
         .create_proof(proving_key_for(circuit_version), &mut rng)
-        .map_err(|e| RegistryError::Build(format!("create_proof: {e:?}")))?;
+        .map_err(|e| anyhow!("create_proof: {e:?}"))?;
 
-    // Real funding spend → needs a spend-auth signature from the registry key.
     let ask = SpendAuthorizingKey::from(spend_key);
     let authorized = proven
         .apply_signatures(rng, sighash, &[ask])
-        .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
+        .map_err(|e| anyhow!("apply_signatures: {e:?}"))?;
 
-    // Self-check the proof under the same circuit version the target chain
-    // validates with, to localise validation failures to here vs. the node.
     authorized
         .verify_proof(verifying_key_for(circuit_version))
-        .map_err(|e| RegistryError::Build(format!("self-verify failed: {e:?}")))?;
+        .map_err(|e| anyhow!("self-verify failed: {e:?}"))?;
 
     let cmx: [u8; 32] = authorized.actions()[name_note_action].cmx().to_bytes();
     let (tx_bytes, txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
 
-    // Round-trip self-check: re-read the serialized tx and verify the proof on
-    // the DESERIALISED bundle (as a node would), to catch serialization drift
-    // between what we proved and what we broadcast.
     let readback = Transaction::read(&tx_bytes[..], branch_id)
-        .map_err(|e| RegistryError::Build(format!("readback parse: {e}")))?;
+        .map_err(|e| anyhow!("readback parse: {e}"))?;
     readback
         .orchard_bundle()
-        .ok_or_else(|| RegistryError::Build("readback: no orchard bundle".into()))?
+        .ok_or_else(|| anyhow!("readback: no orchard bundle"))?
         .verify_proof(verifying_key_for(circuit_version))
-        .map_err(|e| RegistryError::Build(format!("readback verify failed: {e:?}")))?;
+        .map_err(|e| anyhow!("readback verify failed: {e:?}"))?;
 
     Ok(MintResult { new_rcm, new_psi, cmx, txid, tx_bytes })
 }
 
-/// Build a **sweep** transaction: spend one treasury note and move its value,
-/// minus the fee, to the cold address. No Name Note, no change — the note is
-/// swept wholesale (`amount_zat = funding.value − fee`), so `value_balance`
-/// equals the fee. `cold_addr` is the policy constant; the caller is the
-/// policy-gated [`crate::sign::Signer`].
+/// Build a sweep transaction to the cold address.
 #[allow(clippy::too_many_arguments)]
 pub fn build_sweep(
     registry_fvk: &FullViewingKey,
@@ -482,47 +353,40 @@ pub fn build_sweep(
     branch_id: BranchId,
     expiry_height: u32,
     circuit_version: OrchardCircuitVersion,
-) -> Result<Vec<u8>, RegistryError> {
+) -> anyhow::Result<Vec<u8>> {
     let ovk = Some(registry_fvk.to_ovk(Scope::External));
     let mut builder =
         OrchardBuilder::new_for_version(BundleType::DEFAULT, funding.anchor, circuit_version);
 
     builder
         .add_spend(registry_fvk.clone(), funding.note, funding.merkle_path.clone())
-        .map_err(|e| RegistryError::Build(format!("add_spend: {e:?}")))?;
+        .map_err(|e| anyhow!("add_spend: {e:?}"))?;
     builder
         .add_output(ovk, cold_addr, NoteValue::from_raw(amount_zat), [0u8; 512])
-        .map_err(|e| RegistryError::Build(format!("add_output(sweep): {e:?}")))?;
+        .map_err(|e| anyhow!("add_output(sweep): {e:?}"))?;
 
     let mut rng = OsRng;
     let (unauthorized, _meta) = builder
         .build::<i64>(&mut rng)
-        .map_err(|e| RegistryError::Build(format!("build: {e:?}")))?
-        .ok_or_else(|| RegistryError::Build("builder produced an empty bundle".into()))?;
+        .map_err(|e| anyhow!("build: {e:?}"))?
+        .ok_or_else(|| anyhow!("builder produced an empty bundle"))?;
 
     let orchard_digest: [u8; 32] = unauthorized.commitment().into();
     let sighash = v5_shielded_sighash(branch_id, 0, expiry_height, &orchard_digest);
 
     let proven = unauthorized
         .create_proof(proving_key_for(circuit_version), &mut rng)
-        .map_err(|e| RegistryError::Build(format!("create_proof: {e:?}")))?;
+        .map_err(|e| anyhow!("create_proof: {e:?}"))?;
     let ask = SpendAuthorizingKey::from(spend_key);
     let authorized = proven
         .apply_signatures(rng, sighash, &[ask])
-        .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
+        .map_err(|e| anyhow!("apply_signatures: {e:?}"))?;
 
     let (tx_bytes, _txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
     Ok(tx_bytes)
 }
 
-/// Build a **memo-send** transaction: spend one treasury note, deliver a small
-/// dust output carrying `memo` to `recipient`, and return the change to the
-/// registry. This is how the registry relays an OTP nonce to a name's current
-/// owner (`ZNS:challenge:<name>:<nonce>`) so they can confirm an UPDATE/RELEASE.
-///
-/// No Name Note is minted — this is a pure value+memo carrier. `value_balance`
-/// equals the fee (`funding.value − dust − change`). `change_addr` is the
-/// registry self-address; the caller is the policy-gated [`crate::sign::Signer`].
+/// Build a memo-send transaction (OTP challenge relay).
 #[allow(clippy::too_many_arguments)]
 pub fn build_memo_send(
     registry_fvk: &FullViewingKey,
@@ -536,44 +400,41 @@ pub fn build_memo_send(
     branch_id: BranchId,
     expiry_height: u32,
     circuit_version: OrchardCircuitVersion,
-) -> Result<Vec<u8>, RegistryError> {
+) -> anyhow::Result<Vec<u8>> {
     let ovk = Some(registry_fvk.to_ovk(Scope::External));
     let mut builder =
         OrchardBuilder::new_for_version(BundleType::DEFAULT, funding.anchor, circuit_version);
 
-    // 1. Funding spend (covers dust + fee). Anchor must match the witness root.
     builder
         .add_spend(registry_fvk.clone(), funding.note, funding.merkle_path.clone())
-        .map_err(|e| RegistryError::Build(format!("add_spend: {e:?}")))?;
+        .map_err(|e| anyhow!("add_spend: {e:?}"))?;
 
-    // 2. The dust output to the owner, carrying the challenge memo.
     builder
         .add_output(ovk.clone(), recipient, NoteValue::from_raw(dust_zat), memo)
-        .map_err(|e| RegistryError::Build(format!("add_output(memo): {e:?}")))?;
+        .map_err(|e| anyhow!("add_output(memo): {e:?}"))?;
 
-    // 3. Change back to the registry.
     if change_zat > 0 {
         builder
             .add_output(ovk, change_addr, NoteValue::from_raw(change_zat), [0u8; 512])
-            .map_err(|e| RegistryError::Build(format!("add_output(change): {e:?}")))?;
+            .map_err(|e| anyhow!("add_output(change): {e:?}"))?;
     }
 
     let mut rng = OsRng;
     let (unauthorized, _meta) = builder
         .build::<i64>(&mut rng)
-        .map_err(|e| RegistryError::Build(format!("build: {e:?}")))?
-        .ok_or_else(|| RegistryError::Build("builder produced an empty bundle".into()))?;
+        .map_err(|e| anyhow!("build: {e:?}"))?
+        .ok_or_else(|| anyhow!("builder produced an empty bundle"))?;
 
     let orchard_digest: [u8; 32] = unauthorized.commitment().into();
     let sighash = v5_shielded_sighash(branch_id, 0, expiry_height, &orchard_digest);
 
     let proven = unauthorized
         .create_proof(proving_key_for(circuit_version), &mut rng)
-        .map_err(|e| RegistryError::Build(format!("create_proof: {e:?}")))?;
+        .map_err(|e| anyhow!("create_proof: {e:?}"))?;
     let ask = SpendAuthorizingKey::from(spend_key);
     let authorized = proven
         .apply_signatures(rng, sighash, &[ask])
-        .map_err(|e| RegistryError::Build(format!("apply_signatures: {e:?}")))?;
+        .map_err(|e| anyhow!("apply_signatures: {e:?}"))?;
 
     let (tx_bytes, _txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
     Ok(tx_bytes)
@@ -583,10 +444,6 @@ pub fn build_memo_send(
 // Convenience helpers
 // ---------------------------------------------------------------------------
 
-/// Derive the Orchard `(psi, rcm)` pair for a given registration event.
-///
-/// Thin public wrapper around [`zns_psi_rcm`] for use by callers that need
-/// to verify an existing note without constructing a full bundle.
 pub fn derive_psi_rcm(
     action: Action,
     name: &str,
@@ -596,7 +453,6 @@ pub fn derive_psi_rcm(
     zns_psi_rcm(action.as_bytes(), name.as_bytes(), ua.as_bytes(), prev_rcm)
 }
 
-/// The `prev_rcm` sentinel for the first action (CLAIM) in a name's chain.
 pub use zns_core::ZERO_PREV_RCM as CLAIM_PREV_RCM;
 
 // ---------------------------------------------------------------------------
@@ -610,7 +466,6 @@ mod tests {
     use zcash_protocol::consensus::BranchId;
     use zns_core::ZERO_PREV_RCM;
 
-    /// Deterministic FVK for tests — uses a fixed zip32 seed.
     fn make_fvk() -> FullViewingKey {
         let seed = [0x42u8; 32];
         let sk = SpendingKey::from_zip32_seed(&seed, 133, zip32::AccountId::ZERO).unwrap();
@@ -620,11 +475,7 @@ mod tests {
     fn test_params<'a>(fvk: FullViewingKey, name: &'a str, ua: &'a str, prev_rcm: [u8; 32]) -> MintParams<'a> {
         let recipient = fvk.address_at(0u32, Scope::External);
         MintParams {
-            action: if prev_rcm == ZERO_PREV_RCM {
-                Action::Claim
-            } else {
-                Action::Update
-            },
+            action: if prev_rcm == ZERO_PREV_RCM { Action::Claim } else { Action::Update },
             name,
             ua,
             prev_rcm,
@@ -641,24 +492,16 @@ mod tests {
     fn build_name_note_claim() {
         let fvk = make_fvk();
         let result = build_name_note(test_params(fvk, "alice", "u1xxx", ZERO_PREV_RCM)).unwrap();
-
         assert_ne!(result.new_rcm, [0u8; 32]);
         assert_ne!(result.new_psi, [0u8; 32]);
-        // A minimal V5 transaction is at least a few hundred bytes.
         assert!(!result.tx_bytes.is_empty());
-        // V5 starts with the version header word 0x00000005 | 0x80000000 = 0x80000005 (LE).
-        // zcash_primitives writes (version | overwintered_bit) then version_group_id.
-        // The first byte of a V5 tx is 0x05.
         assert_eq!(result.tx_bytes[0], 0x05, "expected V5 tx first byte");
     }
 
     #[test]
     fn chained_rcm_differs() {
         let fvk = make_fvk();
-
-        let claim =
-            build_name_note(test_params(fvk.clone(), "alice", "u1xxx", ZERO_PREV_RCM)).unwrap();
-
+        let claim = build_name_note(test_params(fvk.clone(), "alice", "u1xxx", ZERO_PREV_RCM)).unwrap();
         let update = build_name_note(MintParams {
             action: Action::Update,
             name: "alice",
@@ -670,9 +513,7 @@ mod tests {
             branch_id: BranchId::Nu6,
             expiry_height: 0,
             circuit_version: OrchardCircuitVersion::InsecurePreNu6_2,
-        })
-        .unwrap();
-
+        }).unwrap();
         assert_ne!(claim.new_rcm, update.new_rcm);
         assert_ne!(claim.tx_bytes, update.tx_bytes);
     }
@@ -681,8 +522,6 @@ mod tests {
     fn tx_bytes_start_with_v5_header() {
         let fvk = make_fvk();
         let result = build_name_note(test_params(fvk, "bob", "u1yyy", ZERO_PREV_RCM)).unwrap();
-        // V5 version header: overwintered (bit 31) | version 5 => little-endian 0x80000005
-        // Bytes: [0x05, 0x00, 0x00, 0x80]
         assert_eq!(&result.tx_bytes[..4], &[0x05, 0x00, 0x00, 0x80]);
     }
 }

@@ -18,7 +18,7 @@
 
 // Flat API surface — re-export the domain, state, chain, and mint crates so
 // `zns_registry::{parse_memo, build_name_note, NameRecord, ...}` resolve in one place.
-pub use zns_core::{memo, parse_memo, Action, ParsedMemo, RegistryError, ZERO_PREV_RCM};
+pub use zns_core::{memo, parse_memo, Action, MemoError, ParsedMemo, ZERO_PREV_RCM};
 pub use zns_state::{append_action, db, latest_action, MintedAction, NameRecord};
 pub use zns_mint::{
     build_name_note, FundingInput, MintParams, MintResult, RequestId, Signer, SpendPolicy,
@@ -29,6 +29,54 @@ pub use zns_chain::{
 };
 
 pub mod rpc;
+
+// ---------------------------------------------------------------------------
+// Registry error type (lives here — it spans all layers)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum RegistryError {
+    #[error("insufficient fee: got {got} zat, need {need} zat")]
+    InsufficientFee { got: u64, need: u64 },
+    #[error("name already claimed: {0}")]
+    AlreadyClaimed(String),
+    #[error("name not found: {0}")]
+    NotFound(String),
+    #[error("auth error: {0}")]
+    Auth(String),
+    #[error("broadcast: {0}")]
+    Broadcast(String),
+    #[error("policy: {reason}")]
+    Policy { reason: String, permanent: bool },
+    #[error("invalid memo: {0}")]
+    InvalidMemo(String),
+    #[error(transparent)]
+    Db(#[from] zns_state::StateError),
+    #[error(transparent)]
+    Memo(#[from] zns_core::MemoError),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl From<rusqlite::Error> for RegistryError {
+    fn from(e: rusqlite::Error) -> Self {
+        RegistryError::Db(zns_state::StateError::Db(e))
+    }
+}
+
+impl RegistryError {
+    pub fn is_permanent(&self) -> bool {
+        match self {
+            Self::InsufficientFee { .. }
+            | Self::AlreadyClaimed(_)
+            | Self::NotFound(_)
+            | Self::Auth(_)
+            | Self::InvalidMemo(_) => true,
+            Self::Policy { permanent, .. } => *permanent,
+            Self::Broadcast(_) | Self::Db(_) | Self::Other(_) | Self::Memo(_) => false,
+        }
+    }
+}
 
 use std::sync::Arc;
 
@@ -96,7 +144,7 @@ impl Registry {
     /// Look up a registered name.  Returns `None` if the name is unknown.
     pub async fn lookup(&self, name: &str) -> Result<Option<NameRecord>, RegistryError> {
         let conn = self.db.lock().await;
-        db::get_record(&conn, name)
+        db::get_record(&conn, name).map_err(Into::into)
     }
 
     /// Registry table counts for the control plane's `status` method.
@@ -463,7 +511,7 @@ impl Registry {
                 let _ = db::delete_intent(&conn, name);
                 ctx.signer.release_request(request);
             }
-            return Err(e);
+            return Err(e.into());
         }
 
         Ok(result)
@@ -598,7 +646,7 @@ fn minted_action(
 fn registry_err(e: zns_mint::SignError) -> RegistryError {
     use zns_mint::{PolicyError, SignError};
     match e {
-        SignError::Build(e) => e,
+        SignError::Build(e) => RegistryError::Other(e),
         SignError::Policy(p) => {
             let permanent = matches!(
                 p,

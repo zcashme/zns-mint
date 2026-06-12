@@ -14,7 +14,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use zns_core::RegistryError;
+use crate::error::StateError;
 
 /// A row from `name_records`.
 #[derive(Debug, Clone)]
@@ -30,7 +30,7 @@ pub struct NameRecord {
 }
 
 /// Initialise the database schema (idempotent).
-pub fn init_schema(conn: &Connection) -> Result<(), RegistryError> {
+pub fn init_schema(conn: &Connection) -> Result<(), StateError> {
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          CREATE TABLE IF NOT EXISTS name_records (
@@ -122,7 +122,7 @@ pub struct PendingMint {
 /// Record a mint intent before broadcasting it. At most one in-flight mint
 /// per name (`INSERT OR REPLACE` — the guard in the mint path prevents a
 /// replacement while one is genuinely pending).
-pub fn put_intent(conn: &Connection, intent: &PendingMint) -> Result<(), RegistryError> {
+pub fn put_intent(conn: &Connection, intent: &PendingMint) -> Result<(), StateError> {
     conn.execute(
         "INSERT OR REPLACE INTO mint_intents
              (name, action, ua, txid, cmx, rcm, psi, height, expiry_height,
@@ -146,7 +146,7 @@ pub fn put_intent(conn: &Connection, intent: &PendingMint) -> Result<(), Registr
 }
 
 /// The in-flight mint for `name`, if any.
-pub fn get_intent(conn: &Connection, name: &str) -> Result<Option<PendingMint>, RegistryError> {
+pub fn get_intent(conn: &Connection, name: &str) -> Result<Option<PendingMint>, StateError> {
     conn.query_row(
         "SELECT name, action, ua, txid, cmx, rcm, psi, height, expiry_height,
                 request_txid, request_idx
@@ -159,7 +159,7 @@ pub fn get_intent(conn: &Connection, name: &str) -> Result<Option<PendingMint>, 
 }
 
 /// Every in-flight mint — the reconciliation work list.
-pub fn list_intents(conn: &Connection) -> Result<Vec<PendingMint>, RegistryError> {
+pub fn list_intents(conn: &Connection) -> Result<Vec<PendingMint>, StateError> {
     let mut stmt = conn.prepare(
         "SELECT name, action, ua, txid, cmx, rcm, psi, height, expiry_height,
                 request_txid, request_idx
@@ -171,14 +171,14 @@ pub fn list_intents(conn: &Connection) -> Result<Vec<PendingMint>, RegistryError
 
 /// Remove the intent for `name` (idempotent) — in the same transaction as the
 /// mint's persistence.
-pub fn delete_intent(conn: &Connection, name: &str) -> Result<(), RegistryError> {
+pub fn delete_intent(conn: &Connection, name: &str) -> Result<(), StateError> {
     conn.execute("DELETE FROM mint_intents WHERE name = ?1", params![name])?;
     Ok(())
 }
 
 /// Row counts for the daemon's status surface:
 /// `(name_records, pending_challenges, mint_intents)`.
-pub fn table_counts(conn: &Connection) -> Result<(u64, u64, u64), RegistryError> {
+pub fn table_counts(conn: &Connection) -> Result<(u64, u64, u64), StateError> {
     let count = |table: &str| -> Result<u64, rusqlite::Error> {
         // Table names are the compile-time constants below, never user input.
         conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get::<_, i64>(0))
@@ -216,12 +216,12 @@ fn row_to_intent(row: &rusqlite::Row) -> rusqlite::Result<PendingMint> {
 pub fn put_challenge(
     conn: &Connection,
     c: &zns_auth::PendingChallenge,
-) -> Result<(), RegistryError> {
+) -> Result<(), StateError> {
     let action = match c.action {
         zns_core::Action::Update => "update",
         zns_core::Action::Release => "release",
         zns_core::Action::Claim => {
-            return Err(RegistryError::Auth("claim challenges do not exist".into()))
+            return Err(StateError::Other(anyhow::anyhow!("claim challenges do not exist")))
         }
     };
     conn.execute(
@@ -237,7 +237,7 @@ pub fn put_challenge(
 pub fn get_challenge(
     conn: &Connection,
     name: &str,
-) -> Result<Option<zns_auth::PendingChallenge>, RegistryError> {
+) -> Result<Option<zns_auth::PendingChallenge>, StateError> {
     conn.query_row(
         "SELECT name, action, ua_new, nonce, expires_height
          FROM pending_challenges WHERE name = ?1",
@@ -263,7 +263,7 @@ pub fn get_challenge(
 
 /// Delete the pending challenge for `name` (idempotent). Callers completing a
 /// mint run this on the same connection/transaction as the record update.
-pub fn delete_challenge(conn: &Connection, name: &str) -> Result<(), RegistryError> {
+pub fn delete_challenge(conn: &Connection, name: &str) -> Result<(), StateError> {
     conn.execute("DELETE FROM pending_challenges WHERE name = ?1", params![name])?;
     Ok(())
 }
@@ -273,7 +273,7 @@ pub fn delete_challenge(conn: &Connection, name: &str) -> Result<(), RegistryErr
 pub fn purge_expired_challenges(
     conn: &Connection,
     current_height: u32,
-) -> Result<(), RegistryError> {
+) -> Result<(), StateError> {
     conn.execute(
         "DELETE FROM pending_challenges WHERE expires_height < ?1",
         params![current_height],
@@ -286,7 +286,7 @@ pub fn is_processed(
     conn: &Connection,
     txid: &[u8; 32],
     output_index: u32,
-) -> Result<bool, RegistryError> {
+) -> Result<bool, StateError> {
     let hit: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM processed_notes WHERE txid = ?1 AND output_index = ?2",
@@ -302,7 +302,7 @@ pub fn mark_processed(
     conn: &Connection,
     txid: &[u8; 32],
     output_index: u32,
-) -> Result<(), RegistryError> {
+) -> Result<(), StateError> {
     conn.execute(
         "INSERT OR IGNORE INTO processed_notes (txid, output_index) VALUES (?1, ?2)",
         params![txid.as_slice(), output_index],
@@ -311,7 +311,7 @@ pub fn mark_processed(
 }
 
 /// Retrieve a name record, returning `None` if the name is not registered.
-pub fn get_record(conn: &Connection, name: &str) -> Result<Option<NameRecord>, RegistryError> {
+pub fn get_record(conn: &Connection, name: &str) -> Result<Option<NameRecord>, StateError> {
     let row = conn
         .query_row(
             "SELECT name, tip_rcm, ua, height FROM name_records WHERE name = ?1",
@@ -332,7 +332,7 @@ pub fn get_record(conn: &Connection, name: &str) -> Result<Option<NameRecord>, R
         None => Ok(None),
         Some((name, tip_rcm_bytes, ua, height)) => {
             let tip_rcm = bytes_to_array32(&tip_rcm_bytes).map_err(|e| {
-                RegistryError::Other(anyhow::anyhow!("corrupt tip_rcm in db: {e}"))
+                StateError::Other(anyhow::anyhow!("corrupt tip_rcm in db: {e}"))
             })?;
             Ok(Some(NameRecord {
                 name,
@@ -351,7 +351,7 @@ pub fn upsert_record(
     tip_rcm: &[u8; 32],
     ua: &str,
     height: u32,
-) -> Result<(), RegistryError> {
+) -> Result<(), StateError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -370,7 +370,7 @@ pub fn upsert_record(
 }
 
 /// Delete a name record (called after a successful RELEASE mint).
-pub fn delete_record(conn: &Connection, name: &str) -> Result<(), RegistryError> {
+pub fn delete_record(conn: &Connection, name: &str) -> Result<(), StateError> {
     conn.execute(
         "DELETE FROM name_records WHERE name = ?1",
         params![name],

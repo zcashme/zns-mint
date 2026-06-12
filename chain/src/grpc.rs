@@ -5,6 +5,7 @@
 //! former `seer-sync` dependency. Plaintext for `http://` (a local regtest
 //! zebrad/lightwalletd); TLS with webpki roots for `https://` (public servers).
 
+use anyhow::{anyhow, bail, Context as _};
 use orchard::tree::{Anchor, MerkleHashOrchard};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_client_backend::proto::service::{
@@ -12,8 +13,6 @@ use zcash_client_backend::proto::service::{
     TxFilter,
 };
 use zcash_primitives::merkle_tree::read_commitment_tree;
-
-use zns_core::RegistryError;
 
 /// gRPC endpoint for a local zebrad node (default for regtest).
 pub const DEFAULT_GRPC_ADDR: &str = "http://127.0.0.1:9067";
@@ -28,20 +27,20 @@ pub type LwdClient = CompactTxStreamerClient<Channel>;
 ///
 /// TLS (webpki roots) for `https://`; plaintext otherwise, so a local regtest
 /// `http://127.0.0.1:9067` needs no certificates.
-pub async fn connect(url: &str) -> Result<LwdClient, RegistryError> {
+pub async fn connect(url: &str) -> anyhow::Result<LwdClient> {
     let endpoint = Channel::from_shared(url.to_owned())
-        .map_err(|e| RegistryError::Broadcast(format!("invalid lwd url {url}: {e}")))?;
+        .map_err(|e| anyhow!("invalid lwd url {url}: {e}"))?;
     let endpoint = if url.starts_with("https://") {
         endpoint
             .tls_config(ClientTlsConfig::new().with_webpki_roots())
-            .map_err(|e| RegistryError::Broadcast(format!("tls config for {url}: {e}")))?
+            .with_context(|| format!("tls config for {url}"))?
     } else {
         endpoint
     };
     let channel = endpoint
         .connect()
         .await
-        .map_err(|e| RegistryError::Broadcast(format!("connect to {url}: {e}")))?;
+        .with_context(|| format!("connect to {url}"))?;
     Ok(CompactTxStreamerClient::new(channel))
 }
 
@@ -68,55 +67,46 @@ impl GrpcClient {
     }
 
     /// Return the current chain tip height via `GetLatestBlock`.
-    ///
-    /// The minting path records this as the Name Note's block height and uses it
-    /// to stamp the action log.
-    pub async fn tip_height(&self) -> Result<u32, RegistryError> {
+    pub async fn tip_height(&self) -> anyhow::Result<u32> {
         let mut client = connect(&self.lwd_url).await?;
         let block = client
             .get_latest_block(ChainSpec {})
             .await
-            .map_err(|e| RegistryError::Broadcast(format!("get_latest_block: {e}")))?
+            .context("get_latest_block")?
             .into_inner();
         Ok(block.height as u32)
     }
 
     /// Fetch the Orchard note-commitment-tree root at `height` for use as a
-    /// spend anchor. Consensus checks a bundle's anchor against known roots, so
-    /// the registry must mint against a real recent root (not the empty tree).
-    ///
-    /// Reads lightwalletd's `GetTreeState`, deserialises the Orchard commitment
-    /// tree frontier, and returns its root.
-    pub async fn orchard_anchor(&self, height: u32) -> Result<Anchor, RegistryError> {
+    /// spend anchor.
+    pub async fn orchard_anchor(&self, height: u32) -> anyhow::Result<Anchor> {
         let mut client = connect(&self.lwd_url).await?;
         let state = client
             .get_tree_state(BlockId { height: height as u64, hash: vec![] })
             .await
-            .map_err(|e| RegistryError::Broadcast(format!("get_tree_state: {e}")))?
+            .context("get_tree_state")?
             .into_inner();
         let bytes = hex::decode(state.orchard_tree.trim())
-            .map_err(|e| RegistryError::Broadcast(format!("decode orchard tree: {e}")))?;
+            .context("decode orchard tree")?;
         let tree = read_commitment_tree::<MerkleHashOrchard, _, 32>(&bytes[..])
-            .map_err(|e| RegistryError::Broadcast(format!("read orchard tree: {e}")))?;
+            .context("read orchard tree")?;
         Ok(Anchor::from(tree.root()))
     }
 
     /// Broadcast a serialised transaction via `SendTransaction`.
-    ///
-    /// Returns [`RegistryError::Broadcast`] if the connection fails or the node
-    /// returns a non-zero `errorCode`.
-    pub async fn broadcast(&self, raw_tx: RawTx) -> Result<(), RegistryError> {
+    pub async fn broadcast(&self, raw_tx: RawTx) -> anyhow::Result<()> {
         let mut client = connect(&self.lwd_url).await?;
         let resp = client
             .send_transaction(RawTransaction { data: raw_tx, height: 0 })
             .await
-            .map_err(|e| RegistryError::Broadcast(e.to_string()))?
+            .context("send_transaction")?
             .into_inner();
         if resp.error_code != 0 {
-            return Err(RegistryError::Broadcast(format!(
+            bail!(
                 "node rejected tx (code {}): {}",
-                resp.error_code, resp.error_message
-            )));
+                resp.error_code,
+                resp.error_message
+            );
         }
         Ok(())
     }
@@ -125,7 +115,7 @@ impl GrpcClient {
     /// reconciliation probe. `Ok(false)` only for a definitive not-found;
     /// transport failures surface as errors so reconciliation can't mistake
     /// an outage for "the mint never landed".
-    pub async fn transaction_exists(&self, txid: &[u8; 32]) -> Result<bool, RegistryError> {
+    pub async fn transaction_exists(&self, txid: &[u8; 32]) -> anyhow::Result<bool> {
         let mut client = connect(&self.lwd_url).await?;
         match client
             .get_transaction(TxFilter { block: None, index: 0, hash: txid.to_vec() })
@@ -139,7 +129,7 @@ impl GrpcClient {
             {
                 Ok(false)
             }
-            Err(status) => Err(RegistryError::Broadcast(format!("GetTransaction: {status}"))),
+            Err(status) => Err(anyhow!("GetTransaction: {status}")),
         }
     }
 }

@@ -18,8 +18,6 @@ use orchard::{
 use zcash_protocol::consensus::BranchId;
 use zeroize::Zeroizing;
 
-use zns_core::RegistryError;
-
 use orchard::circuit::OrchardCircuitVersion;
 
 use crate::mint::{build_funded_mint, build_memo_send, build_sweep, MintResult};
@@ -33,7 +31,7 @@ pub enum SignError {
     /// The proposal violated policy — the signer refused before building.
     Policy(PolicyError),
     /// Policy passed but bundle construction / proving failed.
-    Build(RegistryError),
+    Build(anyhow::Error),
 }
 
 impl From<PolicyError> for SignError {
@@ -75,9 +73,9 @@ impl Signer {
         coin_type: u32,
         account: zip32::AccountId,
         policy: SpendPolicy,
-    ) -> Result<Self, RegistryError> {
+    ) -> anyhow::Result<Self> {
         let sk = SpendingKey::from_zip32_seed(&seed, coin_type, account)
-            .map_err(|e| RegistryError::Build(format!("invalid registry seed: {e:?}")))?;
+            .map_err(|e| anyhow::anyhow!("invalid registry seed: {e:?}"))?;
         let fvk = FullViewingKey::from(&sk);
         Ok(Self {
             seed: Zeroizing::new(seed),

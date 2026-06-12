@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 zns-core = { workspace = true }
 # orchard types in the scanned-note API; trial-decryption drives intake. The
-# registry is Orchard-only, so the scanner takes a bare FVK — no zcash_keys/UFVK.
+# registry is Orchard-only, so the scanner takes a bare FVK.
 orchard = { workspace = true, features = ["unsafe-zns"] }
 zcash_primitives = { workspace = true }
 zcash_protocol = { workspace = true }
@@ -24,8 +24,9 @@ tonic = { workspace = true, features = ["transport", "tls-ring", "tls-webpki-roo
 hex = { workspace = true }
 # Treasury note-state: WalletDb owns scanning, shardtree witnesses, reorg
 # rewind, and note selection; `sync::run` drives it. rusqlite names the
-# connection type in WalletDb's generics; zcash_keys wraps the registry FVK
-# as the UFVK account import wants; async-trait is the BlockCache contract.
+# connection type in WalletDb's generics; zcash_keys/zcash_address wrap the
+# registry FVK as the UFVK account import wants; async-trait is the
+# BlockCache contract.
 zcash_client_sqlite = { workspace = true }
 zcash_keys = { workspace = true }
 zcash_address = { workspace = true }
