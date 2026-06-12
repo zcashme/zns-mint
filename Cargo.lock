@@ -3332,6 +3332,7 @@ dependencies = [
  "rand_core 0.6.4",
  "redjubjub",
  "sapling-crypto",
+ "secp256k1",
  "sha2 0.10.9",
  "zcash_encoding",
  "zcash_note_encryption",
@@ -3568,4 +3569,22 @@ dependencies = [
  "thiserror 1.0.69",
  "zns-auth",
  "zns-core",
+]
+
+[[package]]
+name = "zns-tools"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "blake2b_simd",
+ "bs58",
+ "hex",
+ "rand 0.8.6",
+ "secp256k1",
+ "sha2 0.10.9",
+ "zcash_address",
+ "zcash_primitives",
+ "zcash_protocol",
+ "zcash_script",
+ "zcash_transparent",
 ]
