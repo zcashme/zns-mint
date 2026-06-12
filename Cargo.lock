@@ -3490,13 +3490,15 @@ dependencies = [
 name = "zns-chain"
 version = "0.0.1"
 dependencies = [
- "anyhow",
  "async-trait",
  "hex",
+ "http",
+ "incrementalmerkletree",
  "orchard",
  "rand 0.8.6",
  "rusqlite",
- "tokio",
+ "shardtree",
+ "thiserror 1.0.69",
  "tonic",
  "zcash_address",
  "zcash_client_backend",
@@ -3505,7 +3507,6 @@ dependencies = [
  "zcash_note_encryption",
  "zcash_primitives",
  "zcash_protocol",
- "zip32",
  "zns-core",
 ]
 

@@ -15,11 +15,13 @@ orchard = { workspace = true, features = ["unsafe-zns"] }
 zcash_primitives = { workspace = true }
 zcash_protocol = { workspace = true }
 # lightwalletd gRPC transport: zcash_client_backend supplies the proto client +
-# message types; tonic supplies the Channel (plaintext for regtest, TLS for
-# public servers). zcash_note_encryption drives Orchard trial-decryption.
+# message types; tonic supplies the Channel. zcash_note_encryption drives
+# Orchard trial-decryption.
 zcash_client_backend = { workspace = true }
 zcash_note_encryption = { workspace = true }
 tonic = { workspace = true, features = ["transport", "tls-ring", "tls-webpki-roots"] }
+# names tonic's `Channel::from_shared` error type for `GrpcError`
+http = { workspace = true }
 # decode lightwalletd's hex-encoded commitment tree (GetTreeState → anchor)
 hex = { workspace = true }
 # Treasury note-state: WalletDb owns scanning, shardtree witnesses, reorg
@@ -33,12 +35,10 @@ zcash_address = { workspace = true }
 rusqlite = { workspace = true }
 rand = { workspace = true }
 async-trait = { workspace = true }
-anyhow = { workspace = true }
-
-[dev-dependencies]
-# Regtest smoke tests derive a throwaway FVK and run the async scan pipeline.
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-zip32 = { workspace = true }
+# orchard shard-store error type for TreasuryError's shardtree variant
+shardtree = { workspace = true }
+incrementalmerkletree = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

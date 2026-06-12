@@ -24,8 +24,8 @@ pub use zns_mint::{
     build_name_note, FundingInput, MintParams, MintResult, RequestId, Signer, SpendPolicy,
 };
 pub use zns_chain::{
-    scan_incoming, scan_incoming_all, FundingSelection, GrpcClient, IncomingNote, NoteState,
-    ScannerConfig, SpendableNote,
+    scan_incoming, scan_incoming_all, FundingSelection, GrpcClient, GrpcError, IncomingNote,
+    NoteState, ScannerConfig, SpendableNote,
 };
 
 pub mod rpc;
@@ -55,6 +55,8 @@ pub enum RegistryError {
     #[error(transparent)]
     Memo(#[from] zns_core::MemoError),
     #[error(transparent)]
+    Grpc(#[from] GrpcError),
+    #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
@@ -73,7 +75,7 @@ impl RegistryError {
             | Self::Auth(_)
             | Self::InvalidMemo(_) => true,
             Self::Policy { permanent, .. } => *permanent,
-            Self::Broadcast(_) | Self::Db(_) | Self::Other(_) | Self::Memo(_) => false,
+            Self::Broadcast(_) | Self::Db(_) | Self::Other(_) | Self::Memo(_) | Self::Grpc(_) => false,
         }
     }
 }
@@ -506,7 +508,7 @@ impl Registry {
             // re-sign immediately, e.g. after funding contention clears).
             // Ambiguous failures — timeouts, transport errors — leave the
             // intent for reconciliation: the tx may still be in flight.
-            if e.to_string().contains("node rejected tx") {
+            if matches!(e, GrpcError::Rejected { .. }) {
                 let conn = self.db.lock().await;
                 let _ = db::delete_intent(&conn, name);
                 ctx.signer.release_request(request);

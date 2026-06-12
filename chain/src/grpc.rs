@@ -2,11 +2,11 @@
 //!
 //! Host owns its chain I/O now: this uses `zcash_client_backend`'s generated
 //! `CompactTxStreamer` proto client over a tonic [`Channel`], replacing the
-//! former `seer-sync` dependency. Plaintext for `http://` (a local regtest
-//! zebrad/lightwalletd); TLS with webpki roots for `https://` (public servers).
+//! former `seer-sync` dependency. Always TLS (webpki roots) — no plaintext
+//! transport is supported.
 
-use anyhow::{anyhow, bail, Context as _};
 use orchard::tree::{Anchor, MerkleHashOrchard};
+use thiserror::Error;
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_client_backend::proto::service::{
     compact_tx_streamer_client::CompactTxStreamerClient, BlockId, ChainSpec, RawTransaction,
@@ -20,24 +20,34 @@ pub type RawTx = Vec<u8>;
 /// The lightwalletd `CompactTxStreamer` client over a tonic channel.
 pub type LwdClient = CompactTxStreamerClient<Channel>;
 
-/// Connect to a lightwalletd endpoint.
-///
-/// TLS (webpki roots) for `https://`; plaintext otherwise, so a local regtest
-/// `http://127.0.0.1:9067` needs no certificates.
-pub async fn connect(url: &str) -> anyhow::Result<LwdClient> {
-    let endpoint = Channel::from_shared(url.to_owned())
-        .map_err(|e| anyhow!("invalid lwd url {url}: {e}"))?;
-    let endpoint = if url.starts_with("https://") {
-        endpoint
-            .tls_config(ClientTlsConfig::new().with_webpki_roots())
-            .with_context(|| format!("tls config for {url}"))?
-    } else {
-        endpoint
-    };
-    let channel = endpoint
-        .connect()
-        .await
-        .with_context(|| format!("connect to {url}"))?;
+/// Errors from talking to a lightwalletd endpoint — connection, RPC, and
+/// orchard-tree-state decoding. Pure transport: no domain (scan/treasury)
+/// concerns.
+#[derive(Debug, Error)]
+pub enum GrpcError {
+    #[error("invalid lightwalletd url: {0}")]
+    InvalidUrl(#[from] http::uri::InvalidUri),
+
+    #[error("lightwalletd transport: {0}")]
+    Transport(#[from] tonic::transport::Error),
+
+    #[error("{call}: {source}")]
+    Rpc { call: &'static str, #[source] source: tonic::Status },
+
+    #[error("node rejected transaction (code {code}): {message}")]
+    Rejected { code: i32, message: String },
+
+    #[error("hex-decoding orchard tree state: {0}")]
+    Hex(#[from] hex::FromHexError),
+
+    #[error("decoding orchard tree state: {0}")]
+    TreeDecode(#[from] std::io::Error),
+}
+
+/// Connect to a lightwalletd endpoint over TLS (webpki roots).
+pub async fn connect(url: &str) -> Result<LwdClient, GrpcError> {
+    let endpoint = Channel::from_shared(url.to_owned())?.tls_config(ClientTlsConfig::new().with_webpki_roots())?;
+    let channel = endpoint.connect().await?;
     Ok(CompactTxStreamerClient::new(channel))
 }
 
@@ -59,46 +69,40 @@ impl GrpcClient {
     }
 
     /// Return the current chain tip height via `GetLatestBlock`.
-    pub async fn tip_height(&self) -> anyhow::Result<u32> {
+    pub async fn tip_height(&self) -> Result<u32, GrpcError> {
         let mut client = connect(&self.lwd_url).await?;
         let block = client
             .get_latest_block(ChainSpec {})
             .await
-            .context("get_latest_block")?
+            .map_err(|source| GrpcError::Rpc { call: "get_latest_block", source })?
             .into_inner();
         Ok(block.height as u32)
     }
 
     /// Fetch the Orchard note-commitment-tree root at `height` for use as a
     /// spend anchor.
-    pub async fn orchard_anchor(&self, height: u32) -> anyhow::Result<Anchor> {
+    pub async fn orchard_anchor(&self, height: u32) -> Result<Anchor, GrpcError> {
         let mut client = connect(&self.lwd_url).await?;
         let state = client
             .get_tree_state(BlockId { height: height as u64, hash: vec![] })
             .await
-            .context("get_tree_state")?
+            .map_err(|source| GrpcError::Rpc { call: "get_tree_state", source })?
             .into_inner();
-        let bytes = hex::decode(state.orchard_tree.trim())
-            .context("decode orchard tree")?;
-        let tree = read_commitment_tree::<MerkleHashOrchard, _, 32>(&bytes[..])
-            .context("read orchard tree")?;
+        let bytes = hex::decode(state.orchard_tree.trim())?;
+        let tree = read_commitment_tree::<MerkleHashOrchard, _, 32>(&bytes[..])?;
         Ok(Anchor::from(tree.root()))
     }
 
     /// Broadcast a serialised transaction via `SendTransaction`.
-    pub async fn broadcast(&self, raw_tx: RawTx) -> anyhow::Result<()> {
+    pub async fn broadcast(&self, raw_tx: RawTx) -> Result<(), GrpcError> {
         let mut client = connect(&self.lwd_url).await?;
         let resp = client
             .send_transaction(RawTransaction { data: raw_tx, height: 0 })
             .await
-            .context("send_transaction")?
+            .map_err(|source| GrpcError::Rpc { call: "send_transaction", source })?
             .into_inner();
         if resp.error_code != 0 {
-            bail!(
-                "node rejected tx (code {}): {}",
-                resp.error_code,
-                resp.error_message
-            );
+            return Err(GrpcError::Rejected { code: resp.error_code, message: resp.error_message });
         }
         Ok(())
     }
@@ -107,7 +111,7 @@ impl GrpcClient {
     /// reconciliation probe. `Ok(false)` only for a definitive not-found;
     /// transport failures surface as errors so reconciliation can't mistake
     /// an outage for "the mint never landed".
-    pub async fn transaction_exists(&self, txid: &[u8; 32]) -> anyhow::Result<bool> {
+    pub async fn transaction_exists(&self, txid: &[u8; 32]) -> Result<bool, GrpcError> {
         let mut client = connect(&self.lwd_url).await?;
         match client
             .get_transaction(TxFilter { block: None, index: 0, hash: txid.to_vec() })
@@ -121,7 +125,7 @@ impl GrpcClient {
             {
                 Ok(false)
             }
-            Err(status) => Err(anyhow!("GetTransaction: {status}")),
+            Err(source) => Err(GrpcError::Rpc { call: "get_transaction", source }),
         }
     }
 }

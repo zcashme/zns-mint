@@ -9,7 +9,7 @@
 //! Scope: receive-side intake only. Spends of the registry's own notes are
 //! tracked by the [`crate::treasury`] note-state (`WalletDb`).
 
-use anyhow::{anyhow, Context as _};
+use std::convert::Infallible;
 
 use orchard::{
     keys::{PreparedIncomingViewingKey, Scope},
@@ -17,6 +17,7 @@ use orchard::{
     note_encryption::{CompactAction, OrchardDomain},
     Action,
 };
+use thiserror::Error;
 use zcash_client_backend::proto::{
     compact_formats::CompactOrchardAction,
     service::{BlockId, BlockRange, ChainSpec, TxFilter},
@@ -25,7 +26,28 @@ use zcash_note_encryption::{batch, try_note_decryption, EphemeralKeyBytes};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 
-use crate::grpc;
+use crate::grpc::{self, GrpcError};
+
+/// Errors scanning `addr_reg` for incoming Name Note requests.
+#[derive(Debug, Error)]
+pub enum ScanError {
+    #[error(transparent)]
+    Grpc(#[from] GrpcError),
+
+    #[error("unparseable compact Orchard action in tx {txid}")]
+    UnparseableAction { txid: String },
+
+    #[error("parsing tx {txid} under {branch:?}: {source}")]
+    ParseTransaction {
+        txid: String,
+        branch: BranchId,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error(transparent)]
+    Callback(Box<dyn std::error::Error + Send + Sync>),
+}
 
 /// Configuration for the scanner.
 pub struct ScannerConfig {
@@ -62,13 +84,12 @@ pub struct IncomingNote {
 /// once per block that contains notes addressed to the registry UFVK.
 ///
 /// Receive-side, single pass (no reorg rewind — the daemon re-runs to advance).
-pub async fn scan_incoming<F>(config: &ScannerConfig, mut callback: F) -> anyhow::Result<()>
+pub async fn scan_incoming<F, E>(config: &ScannerConfig, mut callback: F) -> Result<(), ScanError>
 where
-    F: FnMut(Vec<IncomingNote>) -> anyhow::Result<()>,
+    F: FnMut(Vec<IncomingNote>) -> Result<(), E>,
+    E: std::error::Error + Send + Sync + 'static,
 {
-    let mut client = grpc::connect(&config.lwd_url)
-        .await
-        .map_err(|e| anyhow!("connect to {}: {e}", config.lwd_url))?;
+    let mut client = grpc::connect(&config.lwd_url).await?;
     // Separate client for full-transaction fetches while the block stream runs.
     let mut fetch_client = client.clone();
 
@@ -77,7 +98,7 @@ where
     let tip = client
         .get_latest_block(ChainSpec {})
         .await
-        .context("get_latest_block")?
+        .map_err(|source| GrpcError::Rpc { call: "get_latest_block", source })?
         .into_inner()
         .height as u32;
     if config.birthday > tip {
@@ -92,10 +113,14 @@ where
             pool_types: vec![],
         })
         .await
-        .context("get_block_range")?
+        .map_err(|source| GrpcError::Rpc { call: "get_block_range", source })?
         .into_inner();
 
-    while let Some(block) = stream.message().await.context("block stream")? {
+    while let Some(block) = stream
+        .message()
+        .await
+        .map_err(|source| GrpcError::Rpc { call: "block stream", source })?
+    {
         let height = block.height as u32;
 
         // (txid, action_index, value_zat) for every action that IVK-decrypts.
@@ -111,14 +136,10 @@ where
                 .actions
                 .iter()
                 .map(|a| {
-                    parse_orchard(a).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "unparseable compact Orchard action in tx {}",
-                            hex::encode(txid)
-                        )
-                    })
+                    parse_orchard(a)
+                        .ok_or_else(|| ScanError::UnparseableAction { txid: hex::encode(txid) })
                 })
-                .collect::<anyhow::Result<_>>()?;
+                .collect::<Result<_, ScanError>>()?;
             if actions.is_empty() {
                 continue;
             }
@@ -158,7 +179,7 @@ where
                 is_received: true,
             });
         }
-        callback(batch_out)?;
+        callback(batch_out).map_err(|e| ScanError::Callback(Box::new(e)))?;
     }
 
     Ok(())
@@ -168,9 +189,9 @@ where
 ///
 /// Convenience wrapper around [`scan_incoming`]; for large ranges prefer the
 /// callback form to bound memory.
-pub async fn scan_incoming_all(config: &ScannerConfig) -> anyhow::Result<Vec<IncomingNote>> {
+pub async fn scan_incoming_all(config: &ScannerConfig) -> Result<Vec<IncomingNote>, ScanError> {
     let mut all = Vec::new();
-    scan_incoming(config, |batch| {
+    scan_incoming(config, |batch| -> Result<(), Infallible> {
         all.extend(batch);
         Ok(())
     })
@@ -224,7 +245,7 @@ async fn fetch_transaction(
     client: &mut grpc::LwdClient,
     txid: &[u8; 32],
     branch: BranchId,
-) -> anyhow::Result<Option<Transaction>> {
+) -> Result<Option<Transaction>, ScanError> {
     let raw = client
         .get_transaction(TxFilter {
             block: None,
@@ -232,13 +253,13 @@ async fn fetch_transaction(
             hash: txid.to_vec(),
         })
         .await
-        .context("get_transaction")?
+        .map_err(|source| GrpcError::Rpc { call: "get_transaction", source })?
         .into_inner();
     // A parse failure must propagate (transient — the poll retries), never
     // degrade to "no memo": that would settle real requests permanently as
     // memo-parse errors if a branch-id mismatch or parser bug ever slipped in.
     let tx = Transaction::read(&raw.data[..], branch)
-        .with_context(|| format!("parse tx {} under {branch:?}", hex::encode(txid)))?;
+        .map_err(|source| ScanError::ParseTransaction { txid: hex::encode(txid), branch, source })?;
     Ok(Some(tx))
 }
 

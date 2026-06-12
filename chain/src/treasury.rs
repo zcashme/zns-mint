@@ -20,10 +20,10 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Mutex;
 
-use anyhow::{anyhow, Context as _};
 use async_trait::async_trait;
 use orchard::tree::{Anchor, MerklePath};
 use rand::rngs::OsRng;
+use thiserror::Error;
 use zcash_address::unified::{Encoding as _, Fvk, Ufvk};
 use zcash_client_backend::{
     data_api::{
@@ -38,9 +38,58 @@ use zcash_client_backend::{
 };
 use zcash_client_sqlite::{util::SystemClock, wallet::init::init_wallet_db, AccountUuid, WalletDb};
 use zcash_keys::keys::UnifiedFullViewingKey;
-use zcash_protocol::{consensus::Network, value::Zatoshis, ShieldedProtocol};
+use zcash_protocol::{
+    consensus::{BlockHeight, Network},
+    value::Zatoshis,
+    ShieldedProtocol,
+};
 
-use crate::{grpc, ScannerConfig};
+use crate::grpc::{self, GrpcError};
+use crate::ScannerConfig;
+
+/// Errors operating the registry's treasury note-state (the `WalletDb` over
+/// `addr_reg`'s view-only account).
+#[derive(Debug, Error)]
+pub enum TreasuryError {
+    #[error(transparent)]
+    Grpc(#[from] GrpcError),
+
+    #[error("opening wallet database: {0}")]
+    Open(#[from] rusqlite::Error),
+
+    #[error("initializing wallet database: {0}")]
+    Init(String),
+
+    #[error("wallet database: {0}")]
+    WalletDb(#[from] zcash_client_sqlite::error::SqliteClientError),
+
+    #[error("orchard commitment tree: {0}")]
+    ShardTree(#[from] shardtree::error::ShardTreeError<zcash_client_sqlite::wallet::commitment_tree::Error>),
+
+    #[error("wallet sync: {0}")]
+    Sync(String),
+
+    #[error("decoding account birthday height: {0}")]
+    BirthdayHeight(#[from] std::num::TryFromIntError),
+
+    #[error("decoding account birthday tree state: {0}")]
+    BirthdayDecode(#[from] std::io::Error),
+
+    #[error("invalid funding floor: {0}")]
+    Balance(#[from] zcash_protocol::value::BalanceError),
+
+    #[error("parsing registry UFVK container: {0}")]
+    UfvkContainer(#[from] zcash_address::unified::ParseError),
+
+    #[error("decoding registry UFVK: {0}")]
+    Ufvk(#[from] zcash_keys::keys::DecodingError),
+
+    #[error("no orchard checkpoint at anchor height {0:?}")]
+    MissingCheckpoint(BlockHeight),
+
+    #[error("no witness for note at position {0:?}")]
+    MissingWitness(incrementalmerkletree::Position),
+}
 
 /// Compact blocks per `sync::run` download/scan batch.
 const SYNC_BATCH_SIZE: u32 = 1_000;
@@ -79,12 +128,11 @@ pub struct NoteState {
 impl NoteState {
     /// Open (or create) the wallet database at `wallet_db` and ensure the
     /// registry account exists, imported view-only at the configured birthday.
-    pub async fn open(wallet_db: impl AsRef<Path>, config: &ScannerConfig) -> anyhow::Result<Self> {
-        let mut db = WalletDb::for_path(wallet_db, config.network, SystemClock, OsRng)
-            .context("open wallet db")?;
-        init_wallet_db(&mut db, None).map_err(|e| anyhow!("init wallet db: {e}"))?;
+    pub async fn open(wallet_db: impl AsRef<Path>, config: &ScannerConfig) -> Result<Self, TreasuryError> {
+        let mut db = WalletDb::for_path(wallet_db, config.network, SystemClock, OsRng)?;
+        init_wallet_db(&mut db, None).map_err(|e| TreasuryError::Init(e.to_string()))?;
 
-        let account = match db.get_account_ids().context("list wallet accounts")?.first() {
+        let account = match db.get_account_ids()?.first() {
             Some(id) => *id,
             None => {
                 let birthday = birthday(config).await?;
@@ -92,18 +140,15 @@ impl NoteState {
                 // container parse; the from-parts constructors are test- or
                 // frost-gated.
                 let ufvk =
-                    Ufvk::try_from_items(vec![Fvk::Orchard(config.registry_fvk.to_bytes())])
-                        .map_err(|e| anyhow!("ufvk container: {e:?}"))?;
-                let ufvk = UnifiedFullViewingKey::parse(&ufvk)
-                    .map_err(|e| anyhow!("ufvk parse: {e:?}"))?;
+                    Ufvk::try_from_items(vec![Fvk::Orchard(config.registry_fvk.to_bytes())])?;
+                let ufvk = UnifiedFullViewingKey::parse(&ufvk)?;
                 db.import_account_ufvk(
                     "zns-registry",
                     &ufvk,
                     &birthday,
                     AccountPurpose::ViewOnly,
                     None,
-                )
-                .context("import registry account")?
+                )?
                 .id()
             }
         };
@@ -120,13 +165,11 @@ impl NoteState {
     /// Bring the wallet to the chain tip: download new compact blocks from
     /// lightwalletd and scan them. Incremental — a quiet poll is one round
     /// trip — and it is also where reorg rewind happens.
-    pub async fn sync(&mut self) -> anyhow::Result<()> {
-        let mut client = grpc::connect(&self.lwd_url)
-            .await
-            .map_err(|e| anyhow!("connect to {}: {e:?}", self.lwd_url))?;
+    pub async fn sync(&mut self) -> Result<(), TreasuryError> {
+        let mut client = grpc::connect(&self.lwd_url).await?;
         sync::run(&mut client, &self.network, &self.cache, &mut self.db, SYNC_BATCH_SIZE)
             .await
-            .map_err(|e| anyhow!("wallet sync: {e}"))
+            .map_err(|e| TreasuryError::Sync(e.to_string()))
     }
 
     /// Find a spendable registry note worth at least `min_value_zat` and build
@@ -138,44 +181,36 @@ impl NoteState {
         &mut self,
         min_value_zat: u64,
         min_confirmations: u32,
-    ) -> anyhow::Result<FundingSelection> {
+    ) -> Result<FundingSelection, TreasuryError> {
         let min_confirmations =
             NonZeroU32::new(min_confirmations.max(1)).expect("max(1) is nonzero");
         let policy = ConfirmationsPolicy::new_symmetrical(min_confirmations);
 
         let spendable_total_zat = self
             .db
-            .get_wallet_summary(policy)
-            .context("wallet summary")?
+            .get_wallet_summary(policy)?
             .as_ref()
             .and_then(|s| s.account_balances().get(&self.account))
             .map(|b| u64::from(b.orchard_balance().spendable_value()))
             .unwrap_or(0);
 
         // No blocks scanned yet → nothing spendable.
-        let Some((target_height, anchor_height)) = self
-            .db
-            .get_target_and_anchor_heights(min_confirmations)
-            .context("target/anchor heights")?
+        let Some((target_height, anchor_height)) =
+            self.db.get_target_and_anchor_heights(min_confirmations)?
         else {
             return Ok(FundingSelection { note: None, spendable_total_zat });
         };
 
         // Selection targets a *sum*; the mint spends a single input, so the
         // note itself must meet the floor.
-        let notes = self
-            .db
-            .select_spendable_notes(
-                self.account,
-                TargetValue::AtLeast(
-                    Zatoshis::from_u64(min_value_zat).map_err(|e| anyhow!("floor: {e:?}"))?,
-                ),
-                &[ShieldedProtocol::Orchard],
-                target_height,
-                policy,
-                &[],
-            )
-            .context("select spendable notes")?;
+        let notes = self.db.select_spendable_notes(
+            self.account,
+            TargetValue::AtLeast(Zatoshis::from_u64(min_value_zat)?),
+            &[ShieldedProtocol::Orchard],
+            target_height,
+            policy,
+            &[],
+        )?;
         let Some(received) =
             notes.orchard().iter().find(|n| n.note().value().inner() >= min_value_zat)
         else {
@@ -183,14 +218,14 @@ impl NoteState {
         };
 
         let position = received.note_commitment_tree_position();
-        let (path, root) = self.db.with_orchard_tree_mut::<_, _, anyhow::Error>(|tree| {
+        let (path, root) = self.db.with_orchard_tree_mut::<_, _, TreasuryError>(|tree| {
             let root = tree
                 .root_at_checkpoint_id(&anchor_height)?
-                .ok_or_else(|| anyhow!("no orchard checkpoint at anchor height {anchor_height}"))?;
+                .ok_or(TreasuryError::MissingCheckpoint(anchor_height))?;
             let path = tree
                 .witness_at_checkpoint_id_caching(position, &anchor_height)?
-                .ok_or_else(|| anyhow!("no witness for note at {position:?}"))?;
-            Ok::<_, anyhow::Error>((path, root))
+                .ok_or(TreasuryError::MissingWitness(position))?;
+            Ok((path, root))
         })?;
 
         Ok(FundingSelection {
@@ -208,19 +243,17 @@ impl NoteState {
 /// Fetch the tree state just below the configured birthday and turn it into
 /// the wallet's [`AccountBirthday`]. The birthday is the height *after* the
 /// anchoring tree state, so it floors at 2 — fund the registry above that.
-async fn birthday(config: &ScannerConfig) -> anyhow::Result<AccountBirthday> {
+async fn birthday(config: &ScannerConfig) -> Result<AccountBirthday, TreasuryError> {
     let prior = config.birthday.max(2) - 1;
-    let mut client = grpc::connect(&config.lwd_url)
-        .await
-        .map_err(|e| anyhow!("connect to {}: {e:?}", config.lwd_url))?;
+    let mut client = grpc::connect(&config.lwd_url).await?;
     let treestate = client
         .get_tree_state(BlockId { height: prior as u64, hash: vec![] })
         .await
-        .context("get_tree_state for birthday")?
+        .map_err(|source| GrpcError::Rpc { call: "get_tree_state", source })?
         .into_inner();
     AccountBirthday::from_treestate(treestate, None).map_err(|e| match e {
-        BirthdayError::HeightInvalid(e) => anyhow!("account birthday height: {e}"),
-        BirthdayError::Decode(e) => anyhow!("account birthday tree state: {e}"),
+        BirthdayError::HeightInvalid(e) => TreasuryError::BirthdayHeight(e),
+        BirthdayError::Decode(e) => TreasuryError::BirthdayDecode(e),
     })
 }
 
