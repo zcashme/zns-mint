@@ -97,6 +97,13 @@ impl Signer {
         &self.fvk
     }
 
+    /// The active spend policy — the daemon consults this to decide whether a
+    /// sweep is due ([`SpendPolicy::evaluate_sweep`]); the signer is what
+    /// enforces it.
+    pub fn policy(&self) -> &SpendPolicy {
+        &self.policy
+    }
+
     /// Advance the velocity window (call once per block/epoch).
     pub fn roll_window(&self) {
         self.guard.lock().expect("guard poisoned").roll_window();
