@@ -1,9 +1,7 @@
-//! `zns-core` — shared ZNS domain types with no cryptographic dependencies.
+//! ZNS domain types (action kinds, memo format) — parse memos without
+//! pulling the proving stack.
 //!
-//! Holds the action kinds, the memo parser, and the cross-cutting
 //! Persistence lives in `zns-state`; crypto in `zns-mint`.
-//! It deliberately pulls in **no** orchard / halo2, so a light consumer (memo
-//! parsing, action types) never compiles the proving stack.
 
 pub mod action;
 pub mod error;

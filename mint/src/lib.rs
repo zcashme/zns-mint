@@ -134,7 +134,7 @@ impl Registry {
     pub fn open_in_memory() -> Result<Self, RegistryError> {
         let conn = Connection::open_in_memory()?;
         zns_state::init_schema(&conn)?;
-        Ok(Registry { db: Arc::new(Mutex::new(conn)), grpc_addr: "http://127.0.0.1:9067".into() })
+        Ok(Registry { db: Arc::new(Mutex::new(conn)), grpc_addr: "https://zec.rocks:443".into() })
     }
 
     // -----------------------------------------------------------------------

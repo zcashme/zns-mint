@@ -14,9 +14,6 @@ use zcash_client_backend::proto::service::{
 };
 use zcash_primitives::merkle_tree::read_commitment_tree;
 
-/// gRPC endpoint for a local zebrad node (default for regtest).
-pub const DEFAULT_GRPC_ADDR: &str = "http://127.0.0.1:9067";
-
 /// A raw, serialised Zcash transaction ready for broadcast.
 pub type RawTx = Vec<u8>;
 
@@ -59,11 +56,6 @@ impl GrpcClient {
     /// (e.g. `"http://127.0.0.1:9067"` or `"https://zec.rocks:443"`).
     pub fn new(lwd_url: impl Into<String>) -> Self {
         GrpcClient { lwd_url: lwd_url.into() }
-    }
-
-    /// Create a client pointing at the default local zebrad/regtest endpoint.
-    pub fn default_local() -> Self {
-        Self::new(DEFAULT_GRPC_ADDR)
     }
 
     /// Return the current chain tip height via `GetLatestBlock`.

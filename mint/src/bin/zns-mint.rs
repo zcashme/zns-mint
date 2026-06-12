@@ -31,6 +31,27 @@ const TX_EXPIRY_BLOCKS: u32 = 40;
 /// Control-plane (health/status RPC) bind address.
 const RPC_ADDR: &str = "127.0.0.1:8081";
 
+/// Cold-vault destination for hot→cold sweeps, as a Unified Address string.
+/// Baked into source — like the rest of `SpendPolicy` — so the sweep
+/// destination is covered by the same reproducible-build/attestation story
+/// as the code itself, not settable by whoever launches the process.
+///
+/// Empty until a real cold vault address exists. While empty, `signer()`
+/// falls back to `cold_addr == registry_addr` and force-disables sweeps
+/// (`HIGH_WATERMARK_ZAT`/`MAX_SWEPT_PER_WINDOW_ZAT` are not applied).
+const COLD_ADDR_UA: &str = "";
+
+/// Once the hot balance exceeds this, a sweep is due
+/// ([`SpendPolicy::evaluate_sweep`]).
+const HIGH_WATERMARK_ZAT: u64 = 10 * MINT_FEE_ZAT;
+
+/// Sweep aims to bring the hot balance back down toward this.
+const TARGET_FLOAT_ZAT: u64 = 4 * MINT_FEE_ZAT;
+
+/// Hard cap on zatoshis swept to cold per velocity window — bounds the rate
+/// regardless of how large a single selected note is.
+const MAX_SWEPT_PER_WINDOW_ZAT: u64 = 1_000_000_000;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -40,8 +61,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    // TODO: load from the `config` crate (file + ZNS_* env).
-    let cfg = DaemonConfig::from_env()?;
+    let cfg = DaemonConfig::load()?;
 
     // `zns-mint address` prints the registry Unified Address (addr_reg) and
     // exits — operators fund this and senders address CLAIM notes to it.
@@ -187,8 +207,10 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Daemon configuration. Sourced from `ZNS_*` env for now; the `config` crate
-/// (file + env, hot-reload) replaces this.
+/// Daemon configuration. Every value is a build-time constant — covered by the
+/// same attestation as everything else, not switchable by whoever launches the
+/// process. The `config` crate (file + env, hot-reload) is for later, if a
+/// genuinely runtime-variable setting ever shows up.
 struct DaemonConfig {
     db_path: String,
     /// Treasury note-state (WalletDb) sqlite — separate from the registry db.
@@ -201,9 +223,7 @@ struct DaemonConfig {
 }
 
 impl DaemonConfig {
-    fn from_env() -> anyhow::Result<Self> {
-        let lwd_url =
-            std::env::var("ZNS_LWD_URL").unwrap_or_else(|_| "http://127.0.0.1:9067".into());
+    fn load() -> anyhow::Result<Self> {
         // Network is a build-time choice (the `testnet` feature), not runtime
         // config — which network a binary talks to should be fixed at build
         // and covered by the same attestation as everything else, not
@@ -212,28 +232,19 @@ impl DaemonConfig {
         let network = zcash_protocol::consensus::Network::TestNetwork;
         #[cfg(not(feature = "testnet"))]
         let network = zcash_protocol::consensus::Network::MainNetwork;
-        let birthday = std::env::var("ZNS_BIRTHDAY")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
 
-        // TODO: load the seed from a secret store (zeroized), never plain env in
-        // production. A zero seed is deterministic — fine only for testing.
-        let seed = match std::env::var("ZNS_SPEND_SEED") {
-            Ok(hex) => decode_seed(&hex)?,
-            Err(_) => {
-                tracing::warn!("ZNS_SPEND_SEED unset — using a zero seed (testing only)");
-                [0u8; 32]
-            }
-        };
+        // TODO: load the seed from a secret store (zeroized) instead of a
+        // baked-in constant. A zero seed is deterministic — fine only for
+        // testing.
+        tracing::warn!("using a zero spend seed (testing only)");
+        let seed = [0u8; 32];
 
         Ok(Self {
-            db_path: std::env::var("ZNS_DB_PATH").unwrap_or_else(|_| "zns-mint.sqlite".into()),
-            wallet_db_path: std::env::var("ZNS_WALLET_DB")
-                .unwrap_or_else(|_| "zns-wallet.sqlite".into()),
-            lwd_url,
+            db_path: "zns-mint.sqlite".into(),
+            wallet_db_path: "zns-wallet.sqlite".into(),
+            lwd_url: "https://zec.rocks:443".into(),
             network,
-            birthday,
+            birthday: 0,
             seed,
         })
     }
@@ -292,17 +303,26 @@ impl DaemonConfig {
     /// bounds are deliberately conservative; a config file refines them later.
     fn signer(&self) -> anyhow::Result<Signer> {
         let registry_addr = self.registry_fvk().address_at(0u32, Scope::External);
+
+        // cold_addr == registry_addr (the COLD_ADDR_UA-unset fallback) keeps
+        // sweeps a harmless no-op: force the thresholds that would trigger
+        // one off, regardless of the constants above.
+        let cold_addr = if COLD_ADDR_UA.is_empty() {
+            registry_addr
+        } else {
+            parse_orchard_address(COLD_ADDR_UA, self.network)?
+        };
+        let sweeps_enabled = cold_addr != registry_addr;
+
         let policy = SpendPolicy {
             registry_addr,
-            // Sweeps are not wired in the daemon yet; cold = self keeps the
-            // constant harmless until a real cold address is configured.
-            cold_addr: registry_addr,
+            cold_addr,
             max_fee_zat: MINT_FEE_ZAT,
-            target_float_zat: 0,
-            high_watermark_zat: u64::MAX, // never suggest a sweep
+            target_float_zat: TARGET_FLOAT_ZAT,
+            high_watermark_zat: if sweeps_enabled { HIGH_WATERMARK_ZAT } else { u64::MAX },
             low_watermark_zat: 2 * MINT_FEE_ZAT, // pause when even a relay can't fund
             max_mints_per_window: 4,
-            max_swept_per_window_zat: 0, // sweeps disabled
+            max_swept_per_window_zat: if sweeps_enabled { MAX_SWEPT_PER_WINDOW_ZAT } else { 0 },
         };
         Signer::new(self.seed, self.coin_type(), zip32::AccountId::ZERO, policy)
             .map_err(|e| anyhow::anyhow!("constructing signer: {e}"))
@@ -341,14 +361,18 @@ impl DaemonConfig {
     }
 }
 
-/// Decode a 64-char hex string into a 32-byte seed.
-fn decode_seed(hex: &str) -> anyhow::Result<[u8; 32]> {
-    let hex = hex.trim();
-    anyhow::ensure!(hex.len() == 64, "ZNS_SPEND_SEED must be 64 hex chars (32 bytes)");
-    let mut seed = [0u8; 32];
-    for (i, byte) in seed.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|e| anyhow::anyhow!("invalid hex in ZNS_SPEND_SEED: {e}"))?;
+/// Parse a Unified Address string into its Orchard receiver — used to decode
+/// `COLD_ADDR_UA`.
+fn parse_orchard_address(
+    ua: &str,
+    network: zcash_protocol::consensus::Network,
+) -> anyhow::Result<orchard::Address> {
+    use zcash_keys::address::Address;
+    match Address::decode(&network, ua) {
+        Some(Address::Unified(addr)) => addr
+            .orchard()
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("COLD_ADDR_UA has no Orchard receiver: {ua}")),
+        _ => anyhow::bail!("COLD_ADDR_UA is not a valid Unified Address: {ua}"),
     }
-    Ok(seed)
 }
