@@ -27,7 +27,9 @@ pub use zns_mint::{
     build_name_note, FundingInput, MintParams, MintResult, RequestId, Signer, SpendPolicy,
 };
 pub use zns_state::{
-    append_action, db, latest_action, FundingSelection, MintedAction, NameRecord, NoteState,
+    affected_names, append_action, db, delete_actions_above, delete_intents_above,
+    delete_processed_above, last_processed_height, latest_action, processed_hash_at_height,
+    rebuild_records_after_reorg, FundingSelection, MintedAction, NameRecord, NoteState,
     SpendableNote, TreasuryConfig,
 };
 
@@ -333,7 +335,13 @@ impl Registry {
 
         if settled {
             let conn = self.db.lock().await;
-            if let Err(e) = db::mark_processed(&conn, &note.txid, note.output_index) {
+            if let Err(e) = db::mark_processed(
+                &conn,
+                &note.txid,
+                note.output_index,
+                note.height,
+                &note.block_hash,
+            ) {
                 // Non-fatal: the note reprocesses next poll, idempotently.
                 tracing::warn!("intake ledger write failed: {e}");
             }
@@ -656,6 +664,88 @@ impl Registry {
         Ok(())
     }
 
+    /// Detect a chain reorg and roll back any registry state that was based on
+    /// the orphaned branch.
+    ///
+    /// Returns `Ok(Some(reorg_height))` if a reorg was handled, `Ok(None)` if
+    /// the chain and our ledger still agree. The caller should skip minting for
+    /// this poll if a reorg was detected, to give the rolled-back notes a
+    /// chance to reappear on the canonical chain.
+    pub async fn handle_reorg(
+        &self,
+        grpc: &GrpcClient,
+        signer: &Signer,
+        tip_height: u32,
+    ) -> Result<Option<u32>, RegistryError> {
+        let conn = self.db.lock().await;
+
+        let Some(last_height) = db::last_processed_height(&conn)? else {
+            return Ok(None);
+        };
+
+        // If our last settled height is above the tip, the chain has definitely
+        // reorganized away from our view.
+        let reorg_height = if last_height > tip_height {
+            tip_height.saturating_add(1)
+        } else {
+            let Some(stored_hash) = db::processed_hash_at_height(&conn, last_height)? else {
+                return Ok(None);
+            };
+            let current_hash = grpc.block_hash(last_height).await?;
+            if stored_hash == current_hash {
+                return Ok(None);
+            }
+
+            // Walk back until we find a height whose hash still matches.
+            let mut h = last_height;
+            loop {
+                let Some(stored) = db::processed_hash_at_height(&conn, h)? else {
+                    // No stored hash this low — everything above is orphaned.
+                    break 0;
+                };
+                let current = grpc.block_hash(h).await?;
+                if stored == current {
+                    // The reorg starts at the next height.
+                    break h.saturating_add(1);
+                }
+                if h == 0 {
+                    break 0;
+                }
+                h -= 1;
+            }
+        };
+
+        // Collect affected names and in-flight intents before we start deleting.
+        let names = affected_names(&conn, reorg_height)?;
+        let intents = db::list_intents(&conn)?;
+
+        let tx = conn.unchecked_transaction()?;
+
+        // Release signer replay slots for intents we are about to drop.
+        for intent in &intents {
+            if intent.minted.height >= reorg_height {
+                signer.release_request(RequestId {
+                    txid: intent.request.0,
+                    action_index: intent.request.1,
+                });
+            }
+        }
+
+        db::delete_intents_above(&tx, reorg_height)?;
+        db::delete_processed_above(&tx, reorg_height)?;
+        delete_actions_above(&tx, reorg_height)?;
+        rebuild_records_after_reorg(&tx, &names)?;
+
+        tx.commit()?;
+
+        tracing::warn!(
+            reorg_height,
+            affected_names = names.len(),
+            "chain reorg detected: rolled back registry state"
+        );
+        Ok(Some(reorg_height))
+    }
+
     /// Relay an OTP nonce to a name's current owner by sending them a
     /// `ZNS:challenge:<name>:<nonce>` memo. Without this the owner never learns
     /// the nonce and UPDATE / RELEASE can never be confirmed.
@@ -916,6 +1006,7 @@ mod tests {
         let note = |s: &[u8]| IncomingNote {
             txid: [9u8; 32],
             height: 2_000_000,
+            block_hash: [0u8; 32],
             output_index: 0,
             memo: {
                 let mut m = vec![0u8; 512];
@@ -956,6 +1047,7 @@ mod tests {
         let note = IncomingNote {
             txid: [0u8; 32],
             height: 2_000_000,
+            block_hash: [0u8; 32],
             output_index: 0,
             memo: {
                 let mut m = vec![0u8; 512];
@@ -980,6 +1072,7 @@ mod tests {
         let make_claim = || IncomingNote {
             txid: [0u8; 32],
             height: 2_000_000,
+            block_hash: [0u8; 32],
             output_index: 0,
             memo: {
                 let mut m = vec![0u8; 512];
@@ -1005,6 +1098,7 @@ mod tests {
         let note = IncomingNote {
             txid: [0u8; 32],
             height: 2_000_000,
+            block_hash: [0u8; 32],
             output_index: 0,
             memo: {
                 let mut m = vec![0u8; 512];
@@ -1029,6 +1123,7 @@ mod tests {
         let note = IncomingNote {
             txid: [0u8; 32],
             height: 2_000_000,
+            block_hash: [0u8; 32],
             output_index: 0,
             memo: {
                 let mut m = vec![0u8; 512];

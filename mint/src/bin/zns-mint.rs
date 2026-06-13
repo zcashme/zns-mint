@@ -148,6 +148,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_default()
                 .as_secs();
         }
+        // Detect and recover from chain reorganizations before we process any
+        // new notes. A reorg rolls back processed_notes, name_actions,
+        // name_records, and mint_intents above the common ancestor.
+        match registry.handle_reorg(&grpc, &signer, tip).await {
+            Ok(Some(reorg_height)) => {
+                tracing::warn!(
+                    reorg_height,
+                    "reorg handled; resuming poll on canonical chain"
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!("reorg handling failed: {e:#}");
+                continue;
+            }
+        }
+
         // Resolve any mints a crash left between broadcast and persistence.
         if let Err(e) = registry.reconcile_intents(&grpc, &signer, tip).await {
             tracing::error!("intent reconciliation failed: {e:#}");

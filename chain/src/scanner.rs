@@ -69,6 +69,8 @@ pub struct IncomingNote {
     /// For mempool notes this is the height at which the tx was observed
     /// (typically the current chain tip) and may be zero if unknown.
     pub height: u32,
+    /// Block hash of the containing block. All zeros for mempool notes.
+    pub block_hash: [u8; 32],
     /// Action index within the transaction's Orchard bundle.
     pub output_index: u32,
     /// Note value in zatoshis.
@@ -106,6 +108,7 @@ where
         source,
     })? {
         let height = block.height as u32;
+        let block_hash: [u8; 32] = block.hash[..].try_into().unwrap_or([0u8; 32]);
 
         // (txid, action_index, value_zat) for every action that IVK-decrypts.
         let mut hits: Vec<([u8; 32], usize, u64)> = Vec::new();
@@ -158,6 +161,7 @@ where
             batch_out.push(IncomingNote {
                 txid,
                 height,
+                block_hash,
                 output_index: idx as u32,
                 value_zat: value,
                 memo,
@@ -253,6 +257,7 @@ pub async fn scan_mempool(
         out.push(IncomingNote {
             txid,
             height: current_height,
+            block_hash: [0u8; 32],
             output_index: idx as u32,
             value_zat: value,
             memo,

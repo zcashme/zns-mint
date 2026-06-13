@@ -48,6 +48,8 @@ pub fn init_schema(conn: &Connection) -> Result<(), StateError> {
          CREATE TABLE IF NOT EXISTS processed_notes (
              txid         BLOB    NOT NULL,
              output_index INTEGER NOT NULL,
+             block_height INTEGER NOT NULL,
+             block_hash   BLOB    NOT NULL,
              PRIMARY KEY (txid, output_index)
          ) WITHOUT ROWID;
          -- Pending OTP challenges (zns-auth::PendingChallenge), durable so a
@@ -88,6 +90,8 @@ pub fn init_schema(conn: &Connection) -> Result<(), StateError> {
     for ddl in [
         "ALTER TABLE mint_intents ADD COLUMN request_txid BLOB NOT NULL DEFAULT x'0000000000000000000000000000000000000000000000000000000000000000'",
         "ALTER TABLE mint_intents ADD COLUMN request_idx INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE processed_notes ADD COLUMN block_height INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE processed_notes ADD COLUMN block_hash BLOB NOT NULL DEFAULT x'0000000000000000000000000000000000000000000000000000000000000000'",
     ] {
         match conn.execute(ddl, []) {
             Ok(_) => {}
@@ -165,7 +169,9 @@ pub fn list_intents(conn: &Connection) -> Result<Vec<PendingMint>, StateError> {
                 request_txid, request_idx
          FROM mint_intents",
     )?;
-    let rows = stmt.query_map([], row_to_intent)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = stmt
+        .query_map([], row_to_intent)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -176,19 +182,67 @@ pub fn delete_intent(conn: &Connection, name: &str) -> Result<(), StateError> {
     Ok(())
 }
 
+/// Delete every mint intent at or above `height` — used during reorg rewind.
+pub fn delete_intents_above(conn: &Connection, height: u32) -> Result<(), StateError> {
+    conn.execute(
+        "DELETE FROM mint_intents WHERE height >= ?1",
+        params![height],
+    )?;
+    Ok(())
+}
+
+/// Rebuild `name_records` for `names` after orphaned actions have been
+/// deleted.
+///
+/// For each name, the tip is set from the latest remaining action, or the
+/// record is deleted if the name has no remaining actions. Must be called
+/// inside an existing transaction so the rollback is atomic with the action
+/// and intent deletions.
+pub fn rebuild_records_after_reorg(conn: &Connection, names: &[String]) -> Result<(), StateError> {
+    for name in names {
+        match crate::actions::latest_action(conn, name)? {
+            Some(action) => {
+                let ua = if action.action == zns_core::Action::Release {
+                    String::new()
+                } else {
+                    // The action log does not store the UA, so we cannot
+                    // perfectly reconstruct it here. Release leaves the name
+                    // deleted; for claim/update we keep the existing cached UA
+                    // if there is one, otherwise leave a placeholder.
+                    get_record(conn, name)?.map(|r| r.ua).unwrap_or_default()
+                };
+                upsert_record(conn, name, &action.rcm, &ua, action.height)?;
+            }
+            None => {
+                delete_record(conn, name)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Row counts for the daemon's status surface:
 /// `(name_records, pending_challenges, mint_intents)`.
 pub fn table_counts(conn: &Connection) -> Result<(u64, u64, u64), StateError> {
     let count = |table: &str| -> Result<u64, rusqlite::Error> {
         // Table names are the compile-time constants below, never user input.
-        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get::<_, i64>(0))
-            .map(|n| n as u64)
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .map(|n| n as u64)
     };
-    Ok((count("name_records")?, count("pending_challenges")?, count("mint_intents")?))
+    Ok((
+        count("name_records")?,
+        count("pending_challenges")?,
+        count("mint_intents")?,
+    ))
 }
 
 fn row_to_intent(row: &rusqlite::Row) -> rusqlite::Result<PendingMint> {
-    let to32 = |v: Vec<u8>, col| v.try_into().map_err(|_| rusqlite::Error::IntegralValueOutOfRange(col, 0));
+    let to32 = |v: Vec<u8>, col| {
+        v.try_into()
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(col, 0))
+    };
     let action = zns_core::Action::from_bytes(row.get::<_, String>(1)?.as_bytes())
         .ok_or(rusqlite::Error::IntegralValueOutOfRange(1, 0))?;
     Ok(PendingMint {
@@ -213,15 +267,14 @@ fn row_to_intent(row: &rusqlite::Row) -> rusqlite::Result<PendingMint> {
 
 /// Store (or replace — a retried request supersedes) the pending challenge
 /// for its name.
-pub fn put_challenge(
-    conn: &Connection,
-    c: &zns_auth::PendingChallenge,
-) -> Result<(), StateError> {
+pub fn put_challenge(conn: &Connection, c: &zns_auth::PendingChallenge) -> Result<(), StateError> {
     let action = match c.action {
         zns_core::Action::Update => "update",
         zns_core::Action::Release => "release",
         zns_core::Action::Claim => {
-            return Err(StateError::Other(anyhow::anyhow!("claim challenges do not exist")))
+            return Err(StateError::Invariant(
+                "claim challenges do not exist".into(),
+            ))
         }
     };
     conn.execute(
@@ -264,16 +317,16 @@ pub fn get_challenge(
 /// Delete the pending challenge for `name` (idempotent). Callers completing a
 /// mint run this on the same connection/transaction as the record update.
 pub fn delete_challenge(conn: &Connection, name: &str) -> Result<(), StateError> {
-    conn.execute("DELETE FROM pending_challenges WHERE name = ?1", params![name])?;
+    conn.execute(
+        "DELETE FROM pending_challenges WHERE name = ?1",
+        params![name],
+    )?;
     Ok(())
 }
 
 /// Drop every challenge that expired before `current_height` — run on each
 /// new challenge so the table cannot grow without bound under request spam.
-pub fn purge_expired_challenges(
-    conn: &Connection,
-    current_height: u32,
-) -> Result<(), StateError> {
+pub fn purge_expired_challenges(conn: &Connection, current_height: u32) -> Result<(), StateError> {
     conn.execute(
         "DELETE FROM pending_challenges WHERE expires_height < ?1",
         params![current_height],
@@ -302,10 +355,66 @@ pub fn mark_processed(
     conn: &Connection,
     txid: &[u8; 32],
     output_index: u32,
+    block_height: u32,
+    block_hash: &[u8; 32],
 ) -> Result<(), StateError> {
     conn.execute(
-        "INSERT OR IGNORE INTO processed_notes (txid, output_index) VALUES (?1, ?2)",
-        params![txid.as_slice(), output_index],
+        "INSERT OR IGNORE INTO processed_notes (txid, output_index, block_height, block_hash)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            txid.as_slice(),
+            output_index,
+            block_height,
+            block_hash.as_slice(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// The highest block height for which we have any settled note with a known
+/// block hash. `None` means there are no tracked processed notes yet.
+pub fn last_processed_height(conn: &Connection) -> Result<Option<u32>, StateError> {
+    let height: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(block_height) FROM processed_notes
+             WHERE block_hash != x'0000000000000000000000000000000000000000000000000000000000000000'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(height.map(|h| h as u32))
+}
+
+/// The block hash recorded for settled notes at `height`.
+pub fn processed_hash_at_height(
+    conn: &Connection,
+    height: u32,
+) -> Result<Option<[u8; 32]>, StateError> {
+    let hash: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT block_hash FROM processed_notes WHERE block_height = ?1 LIMIT 1",
+            params![height],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match hash {
+        None => Ok(None),
+        Some(bytes) => bytes_to_array32(&bytes)
+            .map(Some)
+            .map_err(|e| StateError::CorruptRow {
+                table: "processed_notes",
+                field: "block_hash",
+                detail: e,
+            }),
+    }
+}
+
+/// Delete every settled note at or above `height` — used after detecting a
+/// reorg at `height`.
+pub fn delete_processed_above(conn: &Connection, height: u32) -> Result<(), StateError> {
+    conn.execute(
+        "DELETE FROM processed_notes WHERE block_height >= ?1",
+        params![height],
     )?;
     Ok(())
 }
@@ -331,8 +440,10 @@ pub fn get_record(conn: &Connection, name: &str) -> Result<Option<NameRecord>, S
     match row {
         None => Ok(None),
         Some((name, tip_rcm_bytes, ua, height)) => {
-            let tip_rcm = bytes_to_array32(&tip_rcm_bytes).map_err(|e| {
-                StateError::Other(anyhow::anyhow!("corrupt tip_rcm in db: {e}"))
+            let tip_rcm = bytes_to_array32(&tip_rcm_bytes).map_err(|e| StateError::CorruptRow {
+                table: "name_records",
+                field: "tip_rcm",
+                detail: e,
             })?;
             Ok(Some(NameRecord {
                 name,
@@ -371,10 +482,7 @@ pub fn upsert_record(
 
 /// Delete a name record (called after a successful RELEASE mint).
 pub fn delete_record(conn: &Connection, name: &str) -> Result<(), StateError> {
-    conn.execute(
-        "DELETE FROM name_records WHERE name = ?1",
-        params![name],
-    )?;
+    conn.execute("DELETE FROM name_records WHERE name = ?1", params![name])?;
     Ok(())
 }
 
@@ -390,7 +498,9 @@ mod tests {
 
     fn open() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        init_schema(&conn).unwrap();
+        // Use the crate-level schema init so both the registry tables and the
+        // action log exist.
+        crate::init_schema(&conn).unwrap();
         conn
     }
 
@@ -430,5 +540,86 @@ mod tests {
         upsert_record(&conn, "alice", &[0u8; 32], "u1xxx", 100).unwrap();
         delete_record(&conn, "alice").unwrap();
         assert!(get_record(&conn, "alice").unwrap().is_none());
+    }
+
+    #[test]
+    fn processed_notes_track_height_and_hash() {
+        let conn = open();
+        let txid = [1u8; 32];
+        let hash10 = [10u8; 32];
+        let hash20 = [20u8; 32];
+
+        mark_processed(&conn, &txid, 0, 10, &hash10).unwrap();
+        assert_eq!(last_processed_height(&conn).unwrap(), Some(10));
+        assert_eq!(processed_hash_at_height(&conn, 10).unwrap(), Some(hash10));
+
+        mark_processed(&conn, &txid, 1, 20, &hash20).unwrap();
+        assert_eq!(last_processed_height(&conn).unwrap(), Some(20));
+        assert_eq!(processed_hash_at_height(&conn, 20).unwrap(), Some(hash20));
+    }
+
+    #[test]
+    fn delete_processed_above_reorg_height() {
+        let conn = open();
+        let h10 = [10u8; 32];
+        let h20 = [20u8; 32];
+        mark_processed(&conn, &[1u8; 32], 0, 10, &h10).unwrap();
+        mark_processed(&conn, &[2u8; 32], 0, 20, &h20).unwrap();
+
+        delete_processed_above(&conn, 15).unwrap();
+        assert!(is_processed(&conn, &[1u8; 32], 0).unwrap());
+        assert!(!is_processed(&conn, &[2u8; 32], 0).unwrap());
+        assert_eq!(last_processed_height(&conn).unwrap(), Some(10));
+    }
+
+    #[test]
+    fn rebuild_records_after_reorg_rolls_tip_back() {
+        let conn = open();
+        let claim_rcm = [0x11u8; 32];
+        let update_rcm = [0x22u8; 32];
+
+        // Simulate claim at height 10, update at height 20.
+        crate::actions::append_action(
+            &conn,
+            &crate::MintedAction {
+                name: "alice".into(),
+                action: zns_core::Action::Claim,
+                txid: [1u8; 32],
+                cmx: [0u8; 32],
+                rcm: claim_rcm,
+                psi: [0u8; 32],
+                height: 10,
+            },
+        )
+        .unwrap();
+        upsert_record(&conn, "alice", &claim_rcm, "u1old", 10).unwrap();
+
+        crate::actions::append_action(
+            &conn,
+            &crate::MintedAction {
+                name: "alice".into(),
+                action: zns_core::Action::Update,
+                txid: [2u8; 32],
+                cmx: [0u8; 32],
+                rcm: update_rcm,
+                psi: [0u8; 32],
+                height: 20,
+            },
+        )
+        .unwrap();
+        upsert_record(&conn, "alice", &update_rcm, "u1new", 20).unwrap();
+
+        // Reorg at height 20 removes the update.
+        let tx = conn.unchecked_transaction().unwrap();
+        crate::actions::delete_actions_above(&tx, 20).unwrap();
+        rebuild_records_after_reorg(&tx, &["alice".into()]).unwrap();
+        tx.commit().unwrap();
+
+        let rec = get_record(&conn, "alice").unwrap().unwrap();
+        assert_eq!(rec.tip_rcm, claim_rcm);
+        assert_eq!(rec.height, 10);
+        // The action log does not store the UA, so the best-effort rebuild
+        // keeps the previously-cached UA rather than reverting it.
+        assert_eq!(rec.ua, "u1new");
     }
 }

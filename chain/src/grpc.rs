@@ -174,6 +174,26 @@ impl GrpcClient {
         Ok(stream)
     }
 
+    /// Return the block hash at `height`.
+    pub async fn block_hash(&self, height: u32) -> Result<[u8; 32], GrpcError> {
+        let mut stream = self.block_range(height, height).await?;
+        let block = stream
+            .message()
+            .await
+            .map_err(|source| GrpcError::Rpc {
+                call: "get_block_range",
+                source,
+            })?
+            .ok_or_else(|| GrpcError::Rpc {
+                call: "get_block_range",
+                source: tonic::Status::not_found("block not found"),
+            })?;
+        block.hash[..].try_into().map_err(|_| GrpcError::Rpc {
+            call: "get_block_range",
+            source: tonic::Status::internal("invalid block hash length"),
+        })
+    }
+
     /// Fetch the current mempool as a list of compact transactions.
     ///
     /// The caller is responsible for trial-decrypting and fetching full txs for

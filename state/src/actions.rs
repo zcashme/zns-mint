@@ -6,9 +6,9 @@
 //! handling, and audit. The tip in `name_records` is just the latest row here,
 //! cached for O(1) lookup.
 
+use crate::error::StateError;
 use rusqlite::{params, Connection};
 use zns_core::Action;
-use crate::error::StateError;
 
 /// One minted Orchard action in a name's `(ψ, rcm)` chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,11 +99,26 @@ pub fn latest_action(conn: &Connection, name: &str) -> Result<Option<MintedActio
     }
 }
 
+/// Delete every minted action at or above `height` — used during reorg rewind.
+pub fn delete_actions_above(conn: &Connection, height: u32) -> Result<(), StateError> {
+    conn.execute(
+        "DELETE FROM name_actions WHERE height >= ?1",
+        params![height],
+    )?;
+    Ok(())
+}
+
+/// All distinct names that have any action at or above `height`.
+pub fn affected_names(conn: &Connection, min_height: u32) -> Result<Vec<String>, StateError> {
+    let mut stmt = conn.prepare("SELECT DISTINCT name FROM name_actions WHERE height >= ?1")?;
+    let rows = stmt.query_map(params![min_height], |row| row.get::<_, String>(0))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
 /// Decode one `name_actions` row. The outer `Result` is rusqlite's column
 /// access; the inner one is our own validation (action verb, blob lengths).
-fn row_to_action(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<Result<MintedAction, StateError>> {
+fn row_to_action(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MintedAction, StateError>> {
     let name: String = row.get(0)?;
     let action_str: String = row.get(1)?;
     let txid: Vec<u8> = row.get(2)?;
@@ -113,9 +128,12 @@ fn row_to_action(
     let height: u32 = row.get(6)?;
 
     Ok((|| {
-        let action = Action::from_bytes(action_str.as_bytes()).ok_or_else(|| {
-            StateError::Other(anyhow::anyhow!("corrupt action verb '{action_str}' in db"))
-        })?;
+        let action =
+            Action::from_bytes(action_str.as_bytes()).ok_or_else(|| StateError::CorruptRow {
+                table: "name_actions",
+                field: "action",
+                detail: format!("unrecognized verb '{action_str}'"),
+            })?;
         Ok(MintedAction {
             name,
             action,
@@ -128,9 +146,12 @@ fn row_to_action(
     })())
 }
 
-fn blob32(b: &[u8], field: &str) -> Result<[u8; 32], StateError> {
-    b.try_into()
-        .map_err(|_| StateError::Other(anyhow::anyhow!("corrupt {field}: expected 32 bytes, got {}", b.len())))
+fn blob32(b: &[u8], field: &'static str) -> Result<[u8; 32], StateError> {
+    b.try_into().map_err(|_| StateError::CorruptRow {
+        table: "name_actions",
+        field,
+        detail: format!("expected 32 bytes, got {}", b.len()),
+    })
 }
 
 #[cfg(test)]

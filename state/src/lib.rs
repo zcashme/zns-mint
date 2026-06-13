@@ -15,8 +15,14 @@ pub mod db;
 pub mod error;
 pub mod treasury;
 
-pub use actions::{actions_for, append_action, latest_action, MintedAction};
-pub use db::{delete_record, get_record, upsert_record, NameRecord};
+pub use actions::{
+    actions_for, affected_names, append_action, delete_actions_above, latest_action, MintedAction,
+};
+pub use db::{
+    delete_intents_above, delete_processed_above, delete_record, get_record, last_processed_height,
+    mark_processed, processed_hash_at_height, rebuild_records_after_reorg, upsert_record,
+    NameRecord,
+};
 pub use error::StateError;
 pub use treasury::{FundingSelection, NoteState, SpendableNote, TreasuryConfig, TreasuryError};
 
