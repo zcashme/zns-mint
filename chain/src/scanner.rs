@@ -66,6 +66,8 @@ pub struct IncomingNote {
     /// Transaction ID (internal byte order, as the chain returns it).
     pub txid: [u8; 32],
     /// Block height the containing transaction was mined in.
+    /// For mempool notes this is the height at which the tx was observed
+    /// (typically the current chain tip) and may be zero if unknown.
     pub height: u32,
     /// Action index within the transaction's Orchard bundle.
     pub output_index: u32,
@@ -75,6 +77,9 @@ pub struct IncomingNote {
     pub memo: Vec<u8>,
     /// Always `true`: only IVK-decrypted (received) notes are surfaced.
     pub is_received: bool,
+    /// `true` if this note was observed in a mined block.
+    /// Mempool notes are `false` and must not be settled until confirmed.
+    pub confirmed: bool,
 }
 
 /// Scan from `config.birthday` to the current chain tip, invoking `callback`
@@ -96,11 +101,10 @@ where
 
     let mut stream = client.block_range(config.birthday, tip).await?;
 
-    while let Some(block) = stream
-        .message()
-        .await
-        .map_err(|source| GrpcError::Rpc { call: "block stream", source })?
-    {
+    while let Some(block) = stream.message().await.map_err(|source| GrpcError::Rpc {
+        call: "block stream",
+        source,
+    })? {
         let height = block.height as u32;
 
         // (txid, action_index, value_zat) for every action that IVK-decrypts.
@@ -116,8 +120,9 @@ where
                 .actions
                 .iter()
                 .map(|a| {
-                    parse_orchard(a)
-                        .ok_or_else(|| ScanError::UnparseableAction { txid: hex::encode(txid) })
+                    parse_orchard(a).ok_or_else(|| ScanError::UnparseableAction {
+                        txid: hex::encode(txid),
+                    })
                 })
                 .collect::<Result<_, ScanError>>()?;
             if actions.is_empty() {
@@ -157,6 +162,7 @@ where
                 value_zat: value,
                 memo,
                 is_received: true,
+                confirmed: true,
             });
         }
         callback(batch_out).map_err(|e| ScanError::Callback(Box::new(e)))?;
@@ -177,6 +183,85 @@ pub async fn scan_incoming_all(config: &ScannerConfig) -> Result<Vec<IncomingNot
     })
     .await?;
     Ok(all)
+}
+
+/// Scan the current mempool for ZNS notes addressed to `addr_reg`.
+///
+/// Mempool notes are **unconfirmed**. They are returned with `confirmed: false`
+/// so the caller can monitor them without settling them. `current_height` is
+/// used only for branch-id resolution and bookkeeping; mempool txs have no
+/// stable block height yet.
+pub async fn scan_mempool(
+    config: &ScannerConfig,
+    current_height: u32,
+) -> Result<Vec<IncomingNote>, ScanError> {
+    let client = GrpcClient::new(&config.lwd_url);
+    let ivk = orchard_ivk(&config.registry_ivk);
+
+    let compact_txs = client.mempool_compact_txs().await?;
+    if compact_txs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Mempool txs are intended for the next block, so resolve the branch for
+    // the current tip. This is an approximation; a future branch activation
+    // between tip and next block is handled by the next poll's re-parse.
+    let branch = BranchId::for_height(&config.network, BlockHeight::from_u32(current_height));
+
+    let mut hits: Vec<([u8; 32], usize, u64)> = Vec::new();
+    for ctx in &compact_txs {
+        let Ok(txid) = <[u8; 32]>::try_from(&ctx.txid[..]) else {
+            continue;
+        };
+        let actions: Vec<CompactAction> = ctx
+            .actions
+            .iter()
+            .map(|a| {
+                parse_orchard(a).ok_or_else(|| ScanError::UnparseableAction {
+                    txid: hex::encode(txid),
+                })
+            })
+            .collect::<Result<_, ScanError>>()?;
+        if actions.is_empty() {
+            continue;
+        }
+        for (i, hit) in try_compact_orchard(&ivk, actions).into_iter().enumerate() {
+            if let Some(value) = hit {
+                hits.push((txid, i, value));
+            }
+        }
+    }
+    if hits.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::with_capacity(hits.len());
+    let mut last_txid: Option<[u8; 32]> = None;
+    let mut tx: Option<Transaction> = None;
+    for (txid, idx, value) in hits {
+        if last_txid != Some(txid) {
+            tx = fetch_transaction(&client, &txid, branch).await?;
+            last_txid = Some(txid);
+        }
+        let memo = tx
+            .as_ref()
+            .and_then(|t| t.orchard_bundle())
+            .and_then(|b| b.actions().get(idx))
+            .and_then(|action| decrypt_memo(action, &ivk))
+            .unwrap_or_default();
+
+        out.push(IncomingNote {
+            txid,
+            height: current_height,
+            output_index: idx as u32,
+            value_zat: value,
+            memo,
+            is_received: true,
+            confirmed: false,
+        });
+    }
+
+    Ok(out)
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -230,8 +315,10 @@ async fn fetch_transaction(
     // A parse failure must propagate (transient — the poll retries), never
     // degrade to "no memo": that would settle real requests permanently as
     // memo-parse errors if a branch-id mismatch or parser bug ever slipped in.
-    let tx = Transaction::read(&raw[..], branch)
-        .map_err(|source| ScanError::ParseTransaction { txid: hex::encode(txid), branch, source })?;
+    let tx = Transaction::read(&raw[..], branch).map_err(|source| ScanError::ParseTransaction {
+        txid: hex::encode(txid),
+        branch,
+        source,
+    })?;
     Ok(Some(tx))
 }
-

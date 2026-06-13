@@ -18,16 +18,17 @@
 
 // Flat API surface — re-export the domain, state, chain, and mint crates so
 // `zns_registry::{parse_memo, build_name_note, NameRecord, ...}` resolve in one place.
-pub use zns_core::{memo, parse_memo, Action, MemoError, ParsedMemo, ZERO_PREV_RCM};
-pub use zns_state::{
-    append_action, db, latest_action, FundingSelection, MintedAction, NameRecord, NoteState,
-    SpendableNote, TreasuryConfig,
+pub use zns_chain::{
+    scan_incoming, scan_incoming_all, scan_mempool, GrpcClient, GrpcError, IncomingNote,
+    ScannerConfig,
 };
+pub use zns_core::{memo, parse_memo, Action, MemoError, ParsedMemo, ZERO_PREV_RCM};
 pub use zns_mint::{
     build_name_note, FundingInput, MintParams, MintResult, RequestId, Signer, SpendPolicy,
 };
-pub use zns_chain::{
-    scan_incoming, scan_incoming_all, GrpcClient, GrpcError, IncomingNote, ScannerConfig,
+pub use zns_state::{
+    append_action, db, latest_action, FundingSelection, MintedAction, NameRecord, NoteState,
+    SpendableNote, TreasuryConfig,
 };
 
 pub mod rpc;
@@ -59,7 +60,13 @@ pub enum RegistryError {
     #[error(transparent)]
     Grpc(#[from] GrpcError),
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Sign(#[from] zns_mint::SignError),
+    #[error(transparent)]
+    Build(#[from] zns_mint::BuildError),
+    #[error("config: {0}")]
+    Config(String),
+    #[error("rpc: {0}")]
+    Rpc(String),
 }
 
 impl From<rusqlite::Error> for RegistryError {
@@ -75,9 +82,16 @@ impl RegistryError {
             | Self::AlreadyClaimed(_)
             | Self::NotFound(_)
             | Self::Auth(_)
-            | Self::InvalidMemo(_) => true,
+            | Self::InvalidMemo(_)
+            | Self::Config(_)
+            | Self::Rpc(_) => true,
             Self::Policy { permanent, .. } => *permanent,
-            Self::Broadcast(_) | Self::Db(_) | Self::Other(_) | Self::Memo(_) | Self::Grpc(_) => false,
+            Self::Broadcast(_)
+            | Self::Db(_)
+            | Self::Memo(_)
+            | Self::Grpc(_)
+            | Self::Sign(_)
+            | Self::Build(_) => false,
         }
     }
 }
@@ -125,20 +139,23 @@ pub struct Registry {
 impl Registry {
     /// Open (or create) the registry database at `db_path` and return a new
     /// [`Registry`] pointing at `grpc_addr` for transaction broadcast.
-    pub fn new(
-        db_path: &str,
-        grpc_addr: impl Into<String>,
-    ) -> Result<Self, RegistryError> {
+    pub fn new(db_path: &str, grpc_addr: impl Into<String>) -> Result<Self, RegistryError> {
         let conn = Connection::open(db_path)?;
         zns_state::init_schema(&conn)?;
-        Ok(Registry { db: Arc::new(Mutex::new(conn)), grpc_addr: grpc_addr.into() })
+        Ok(Registry {
+            db: Arc::new(Mutex::new(conn)),
+            grpc_addr: grpc_addr.into(),
+        })
     }
 
     /// Open an in-memory registry (for testing / ephemeral use).
     pub fn open_in_memory() -> Result<Self, RegistryError> {
         let conn = Connection::open_in_memory()?;
         zns_state::init_schema(&conn)?;
-        Ok(Registry { db: Arc::new(Mutex::new(conn)), grpc_addr: "https://zec.rocks:443".into() })
+        Ok(Registry {
+            db: Arc::new(Mutex::new(conn)),
+            grpc_addr: "https://zec.rocks:443".into(),
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -155,7 +172,11 @@ impl Registry {
     pub async fn stats(&self) -> Result<RegistryStats, RegistryError> {
         let conn = self.db.lock().await;
         let (names, pending_challenges, mint_intents) = db::table_counts(&conn)?;
-        Ok(RegistryStats { names, pending_challenges, mint_intents })
+        Ok(RegistryStats {
+            names,
+            pending_challenges,
+            mint_intents,
+        })
     }
 
     /// Drop notes the intake ledger has already settled. Lets the daemon skip
@@ -221,13 +242,20 @@ impl Registry {
         // next rescan retries.
         let (result, settled) = match &parse_memo(&note.memo) {
             // Not a ZNS memo, or one that breaks the grammar — permanent.
-            Err(e) => (ProcessResult::Skipped(format!("memo parse error: {e}")), true),
+            Err(e) => (
+                ProcessResult::Skipped(format!("memo parse error: {e}")),
+                true,
+            ),
 
             // A memo carrying the prev_rcm witness is the registry's own Name
             // Note canonical form (DESIGN.md §6) — our past mint seen again on
             // rescan, never a user request. Likewise a challenge is our own
             // outbound OTP. Both settle without action.
-            Ok(ParsedMemo::Action { prev_rcm: Some(_), name, .. }) => (
+            Ok(ParsedMemo::Action {
+                prev_rcm: Some(_),
+                name,
+                ..
+            }) => (
                 ProcessResult::Skipped(format!("registry-authored Name Note memo for {name:?}")),
                 true,
             ),
@@ -240,7 +268,11 @@ impl Registry {
             // once the poll's treasury note is consumed, defer the rest. (No
             // treasury *configured* is different — that mode still validates
             // and falls through to the unfunded paths.)
-            Ok(ParsedMemo::Action { name, prev_rcm: None, .. })
+            Ok(ParsedMemo::Action {
+                name,
+                prev_rcm: None,
+                ..
+            })
             | Ok(ParsedMemo::Confirm { name, .. })
                 if treasury.is_none() && mint_ctx.treasury.is_some() =>
             {
@@ -252,10 +284,26 @@ impl Registry {
                 )
             }
 
-            Ok(ParsedMemo::Action { action, name, ua, prev_rcm: None }) => {
-                let request = RequestId { txid: note.txid, action_index: note.output_index };
+            Ok(ParsedMemo::Action {
+                action,
+                name,
+                ua,
+                prev_rcm: None,
+            }) => {
+                let request = RequestId {
+                    txid: note.txid,
+                    action_index: note.output_index,
+                };
                 match self
-                    .handle_action(*action, name, ua, note.value_zat, request, mint_ctx, treasury)
+                    .handle_action(
+                        *action,
+                        name,
+                        ua,
+                        note.value_zat,
+                        request,
+                        mint_ctx,
+                        treasury,
+                    )
                     .await
                 {
                     Ok(outcome) => (ProcessResult::Ok(outcome), true),
@@ -266,8 +314,14 @@ impl Registry {
                 }
             }
             Ok(ParsedMemo::Confirm { name, nonce }) => {
-                let request = RequestId { txid: note.txid, action_index: note.output_index };
-                match self.handle_confirm(name, nonce, request, mint_ctx, treasury).await {
+                let request = RequestId {
+                    txid: note.txid,
+                    action_index: note.output_index,
+                };
+                match self
+                    .handle_confirm(name, nonce, request, mint_ctx, treasury)
+                    .await
+                {
                     Ok(outcome) => (ProcessResult::Ok(outcome), true),
                     Err(e) => {
                         let settled = e.is_permanent();
@@ -322,7 +376,15 @@ impl Registry {
 
                 // 3. Mint the Name Note, then commit its persistence atomically.
                 let result = self
-                    .do_mint(action, name, ua, &ZERO_PREV_RCM, request, mint_ctx, treasury)
+                    .do_mint(
+                        action,
+                        name,
+                        ua,
+                        &ZERO_PREV_RCM,
+                        request,
+                        mint_ctx,
+                        treasury,
+                    )
                     .await?;
                 self.persist_mint(&minted_action(name, action, &result, mint_ctx.height), ua)
                     .await?;
@@ -349,9 +411,8 @@ impl Registry {
                 // Name must exist.
                 let record = {
                     let conn = self.db.lock().await;
-                    db::get_record(&conn, name)?.ok_or_else(|| {
-                        RegistryError::NotFound(name.into())
-                    })?
+                    db::get_record(&conn, name)?
+                        .ok_or_else(|| RegistryError::NotFound(name.into()))?
                 };
 
                 // Initiate the OTP challenge: persist it durably *first* (a
@@ -366,8 +427,15 @@ impl Registry {
                     db::put_challenge(&conn, &challenge)?;
                 }
 
-                self.relay_challenge(name, &record.ua, &challenge.nonce, request, mint_ctx, treasury)
-                    .await?;
+                self.relay_challenge(
+                    name,
+                    &record.ua,
+                    &challenge.nonce,
+                    request,
+                    mint_ctx,
+                    treasury,
+                )
+                .await?;
 
                 Ok(ActionOutcome::ChallengeIssued {
                     name: name.into(),
@@ -415,9 +483,13 @@ impl Registry {
         let result = self
             .do_mint(action, name, ua, &prev_rcm, request, mint_ctx, treasury)
             .await?;
-        self.persist_mint(&minted_action(name, action, &result, mint_ctx.height), ua).await?;
+        self.persist_mint(&minted_action(name, action, &result, mint_ctx.height), ua)
+            .await?;
 
-        Ok(ActionOutcome::Minted { name: name.into(), action })
+        Ok(ActionOutcome::Minted {
+            name: name.into(),
+            action,
+        })
     }
 
     /// Build the Name Note (computing `(rcm, psi)` and the Orchard action) and
@@ -464,7 +536,10 @@ impl Registry {
                 };
                 ctx.signer
                     .sign_mint(
-                        zns_mint::MintProposal { intent, funding: treasury.funding_input() },
+                        zns_mint::MintProposal {
+                            intent,
+                            funding: treasury.funding_input(),
+                        },
                         ctx.hot_balance_zat,
                         ctx.branch_id,
                         ctx.expiry_height,
@@ -504,7 +579,10 @@ impl Registry {
                 },
             )?;
         }
-        if let Err(e) = GrpcClient::new(&self.grpc_addr).broadcast(result.tx_bytes.clone()).await {
+        if let Err(e) = GrpcClient::new(&self.grpc_addr)
+            .broadcast(result.tx_bytes.clone())
+            .await
+        {
             // A definitive node rejection means the tx was never admitted:
             // clear the intent and release the request now (a retry can
             // re-sign immediately, e.g. after funding contention clears).
@@ -650,7 +728,8 @@ fn minted_action(
 fn registry_err(e: zns_mint::SignError) -> RegistryError {
     use zns_mint::{PolicyError, SignError};
     match e {
-        SignError::Build(e) => RegistryError::Other(e),
+        SignError::Build(e) => RegistryError::Build(e),
+        SignError::InvalidSeed(s) => RegistryError::Config(format!("invalid signer seed: {s}")),
         SignError::Policy(p) => {
             let permanent = matches!(
                 p,
@@ -659,7 +738,10 @@ fn registry_err(e: zns_mint::SignError) -> RegistryError {
                     | PolicyError::FeeTooHigh { .. }
                     | PolicyError::Replay(_)
             );
-            RegistryError::Policy { reason: format!("{p:?}"), permanent }
+            RegistryError::Policy {
+                reason: format!("{p:?}"),
+                permanent,
+            }
         }
     }
 }
@@ -672,9 +754,10 @@ fn parse_orchard_recipient(
 ) -> Result<orchard::Address, RegistryError> {
     use zcash_keys::address::Address;
     match Address::decode(&network, ua) {
-        Some(Address::Unified(addr)) => addr.orchard().copied().ok_or_else(|| {
-            RegistryError::InvalidMemo(format!("UA has no Orchard receiver: {ua}"))
-        }),
+        Some(Address::Unified(addr)) => addr
+            .orchard()
+            .copied()
+            .ok_or_else(|| RegistryError::InvalidMemo(format!("UA has no Orchard receiver: {ua}"))),
         _ => Err(RegistryError::InvalidMemo(format!(
             "owner address is not a valid Unified Address: {ua}"
         ))),
@@ -841,21 +924,29 @@ mod tests {
             },
             value_zat: MIN_CLAIM_FEE_ZAT,
             is_received: true,
+            confirmed: true,
         };
 
         // Our own Name Note seen again on rescan: 5-field canonical form.
         let name_note = format!("ZNS:claim:alice:u1xxx:{}", "a".repeat(64));
         let results = reg
-            .process_notes(&[note(name_note.as_bytes()), note(b"ZNS:challenge:alice:beef")], &ctx)
+            .process_notes(
+                &[
+                    note(name_note.as_bytes()),
+                    note(b"ZNS:challenge:alice:beef"),
+                ],
+                &ctx,
+            )
             .await;
         assert!(
-            results.iter().all(|r| matches!(r, ProcessResult::Skipped(_))),
+            results
+                .iter()
+                .all(|r| matches!(r, ProcessResult::Skipped(_))),
             "got: {results:?}"
         );
         // And nothing was registered.
         assert!(reg.lookup("alice").await.unwrap().is_none());
     }
-
 
     #[tokio::test]
     async fn claim_insufficient_fee() {
@@ -874,6 +965,7 @@ mod tests {
             },
             value_zat: 1, // too low
             is_received: true,
+            confirmed: true,
         };
 
         let results = reg.process_notes(&[note], &ctx).await;
@@ -897,13 +989,13 @@ mod tests {
             },
             value_zat: MIN_CLAIM_FEE_ZAT,
             is_received: true,
+            confirmed: true,
         };
 
         reg.process_notes(&[make_claim()], &ctx).await;
         let results = reg.process_notes(&[make_claim()], &ctx).await;
         assert!(matches!(results[0], ProcessResult::Err(_, _)));
     }
-
 
     #[tokio::test]
     async fn non_zns_memo_skipped() {
@@ -922,6 +1014,7 @@ mod tests {
             },
             value_zat: 100_000,
             is_received: true,
+            confirmed: true,
         };
 
         let results = reg.process_notes(&[note], &ctx).await;
@@ -945,6 +1038,7 @@ mod tests {
             },
             value_zat: MIN_CLAIM_FEE_ZAT,
             is_received: false, // OVK-recovered sent note
+            confirmed: true,
         };
 
         let results = reg.process_notes(&[note], &ctx).await;

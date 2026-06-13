@@ -23,6 +23,8 @@ pub struct ChainStatus {
     pub tip_height: u32,
     /// Spendable treasury balance at the last funding selection.
     pub spendable_zat: u64,
+    /// Number of ZNS notes seen in the mempool at the last poll.
+    pub mempool_notes: u64,
     /// Unix seconds of the last completed poll (0 = none yet).
     pub last_poll_unix: u64,
 }
@@ -34,6 +36,8 @@ pub struct StatusResult {
     pub tip_height: u32,
     /// Spendable treasury balance in zatoshis.
     pub spendable_zat: u64,
+    /// Number of ZNS notes seen in the mempool at the last poll.
+    pub mempool_notes: u64,
     /// Unix seconds of the last completed poll.
     pub last_poll_unix: u64,
     /// Currently registered names.
@@ -81,6 +85,7 @@ impl MintApiServer for RpcContext {
         Ok(StatusResult {
             tip_height: chain.tip_height,
             spendable_zat: chain.spendable_zat,
+            mempool_notes: chain.mempool_notes,
             last_poll_unix: chain.last_poll_unix,
             names: stats.names,
             pending_challenges: stats.pending_challenges,
@@ -90,8 +95,11 @@ impl MintApiServer for RpcContext {
 }
 
 /// Serve the control plane on `addr` until the server stops.
-pub async fn serve(addr: String, ctx: RpcContext) -> anyhow::Result<()> {
-    let server = Server::builder().build(&addr).await?;
+pub async fn serve(addr: String, ctx: RpcContext) -> Result<(), crate::RegistryError> {
+    let server = Server::builder()
+        .build(&addr)
+        .await
+        .map_err(|e| crate::RegistryError::Rpc(format!("failed to bind RPC server: {e}")))?;
     let handle = server.start(ctx.into_rpc());
     tracing::info!("control plane listening on {addr}");
     handle.stopped().await;

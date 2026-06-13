@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use zns_registry::{
-    scan_incoming_all, FundingInput, GrpcClient, MintContext, NoteState, ProcessResult, Registry,
-    ScannerConfig, Signer, SpendPolicy, Treasury, TreasuryConfig, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
+    scan_incoming_all, scan_mempool, FundingInput, GrpcClient, MintContext, NoteState,
+    ProcessResult, Registry, ScannerConfig, Signer, SpendPolicy, Treasury, TreasuryConfig,
+    FUNDING_MIN_ZAT, MINT_FEE_ZAT,
 };
 
 /// How often to poll lightwalletd for new blocks.
@@ -53,7 +54,7 @@ const TARGET_FLOAT_ZAT: u64 = 4 * MINT_FEE_ZAT;
 const MAX_SWEPT_PER_WINDOW_ZAT: u64 = 1_000_000_000;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -61,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cfg = DaemonConfig::load()?;
+    let cfg = DaemonConfig::load();
 
     // `zns-mint address` prints the registry Unified Address (addr_reg) and
     // exits — operators fund this and senders address CLAIM notes to it.
@@ -113,10 +114,15 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Control plane: health + status, read-only by construction.
-    let status = Arc::new(tokio::sync::RwLock::new(zns_registry::rpc::ChainStatus::default()));
+    let status = Arc::new(tokio::sync::RwLock::new(
+        zns_registry::rpc::ChainStatus::default(),
+    ));
     tokio::spawn(zns_registry::rpc::serve(
         RPC_ADDR.to_string(),
-        zns_registry::rpc::RpcContext { registry: registry.clone(), status: status.clone() },
+        zns_registry::rpc::RpcContext {
+            registry: registry.clone(),
+            status: status.clone(),
+        },
     ));
 
     let mut tick = tokio::time::interval(POLL_INTERVAL);
@@ -155,6 +161,37 @@ async fn main() -> anyhow::Result<()> {
             }
         };
         let notes = registry.unsettled(notes).await;
+
+        // Monitor the mempool for unconfirmed ZNS notes. We deliberately act
+        // only on `confirm` memos from the mempool — those are the OTP auth
+        // response and the UX win is meaningful. Claims/updates stay block-
+        // gated because they carry fees the registry must actually receive.
+        let mut mempool_confirms = Vec::new();
+        match scan_mempool(&scanner, tip).await {
+            Ok(mempool) => {
+                status.write().await.mempool_notes = mempool.len() as u64;
+                for n in mempool {
+                    match zns_registry::parse_memo(&n.memo) {
+                        Ok(zns_registry::ParsedMemo::Confirm { ref name, .. }) => {
+                            tracing::info!(
+                                txid = hex::encode(n.txid),
+                                name,
+                                "mempool confirm note — will act on it"
+                            );
+                            mempool_confirms.push(n);
+                        }
+                        Ok(m) => tracing::debug!(
+                            txid = hex::encode(n.txid),
+                            value = n.value_zat,
+                            ?m,
+                            "mempool ZNS note (ignored until mined)"
+                        ),
+                        Err(_) => {}
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("mempool scan failed: {e:#}"),
+        }
 
         // Bring the treasury wallet to the tip and pick a note to self-fund
         // fees, with its witness anchored a few blocks back (well
@@ -231,12 +268,18 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        // Combine mined, unsettled notes with unconfirmed mempool confirms.
+        // Mempool confirms are processed once per txid; if they later mine,
+        // the intake ledger will skip them as already settled.
+        let mut to_process = notes;
+        to_process.extend(mempool_confirms);
+
         // Quiet poll = everything already settled; nothing left to mint.
-        if notes.is_empty() {
+        if to_process.is_empty() {
             continue;
         }
 
-        for result in registry.process_notes(&notes, &ctx).await {
+        for result in registry.process_notes(&to_process, &ctx).await {
             match result {
                 ProcessResult::Ok(outcome) => tracing::info!("{outcome:?}"),
                 ProcessResult::Skipped(why) => tracing::debug!("skipped ({why})"),
@@ -248,8 +291,9 @@ async fn main() -> anyhow::Result<()> {
 
 /// Daemon configuration. Every value is a build-time constant — covered by the
 /// same attestation as everything else, not switchable by whoever launches the
-/// process. The `config` crate (file + env, hot-reload) is for later, if a
-/// genuinely runtime-variable setting ever shows up.
+/// process. There is no runtime config file; operational values (lwd URL, DB
+/// path, poll interval, policy thresholds) are baked in so the binary's
+/// behavior is fixed at build time.
 struct DaemonConfig {
     db_path: String,
     /// Treasury note-state (WalletDb) sqlite — separate from the registry db.
@@ -262,7 +306,7 @@ struct DaemonConfig {
 }
 
 impl DaemonConfig {
-    fn load() -> anyhow::Result<Self> {
+    fn load() -> Self {
         // Network is a build-time choice (the `testnet` feature), not runtime
         // config — which network a binary talks to should be fixed at build
         // and covered by the same attestation as everything else, not
@@ -278,14 +322,14 @@ impl DaemonConfig {
         tracing::warn!("using a zero spend seed (testing only)");
         let seed = [0u8; 32];
 
-        Ok(Self {
+        Self {
             db_path: "zns-mint.sqlite".into(),
             wallet_db_path: "zns-wallet.sqlite".into(),
             lwd_url: "https://zec.rocks:443".into(),
             network,
             birthday: 0,
             seed,
-        })
+        }
     }
 
     /// Coin type for zip32 derivation: 133 mainnet, 1 testnet (SLIP-44).
@@ -306,22 +350,24 @@ impl DaemonConfig {
     }
 
     /// The registry's Orchard-only Unified Address (`addr_reg`) for this network.
-    fn registry_ua(&self) -> anyhow::Result<String> {
+    fn registry_ua(&self) -> Result<String, zns_registry::RegistryError> {
         let addr = self.registry_fvk().address_at(0u32, Scope::External);
         let ua = zcash_keys::address::UnifiedAddress::from_receivers(Some(addr), None, None)
-            .ok_or_else(|| anyhow::anyhow!("could not build a Unified Address"))?;
+            .ok_or_else(|| {
+                zns_registry::RegistryError::Config("could not build a Unified Address".into())
+            })?;
         Ok(ua.encode(&self.network))
     }
 
     /// addr_reg's Unified Incoming Viewing Key — the published key
     /// (`DESIGN.md §7`): resolvers scan with it; it cannot spend.
-    fn registry_uivk(&self) -> anyhow::Result<String> {
+    fn registry_uivk(&self) -> Result<String, zns_registry::RegistryError> {
         use zcash_address::unified::{Encoding, Ivk, Uivk};
         use zcash_protocol::consensus::Parameters as _;
 
         let ivk = self.registry_fvk().to_ivk(Scope::External).to_bytes();
         let uivk = Uivk::try_from_items(vec![Ivk::Orchard(ivk)])
-            .map_err(|e| anyhow::anyhow!("building UIVK: {e:?}"))?;
+            .map_err(|e| zns_registry::RegistryError::Config(format!("building UIVK: {e:?}")))?;
         Ok(uivk.encode(&self.network.network_type()))
     }
 
@@ -351,7 +397,7 @@ impl DaemonConfig {
     /// surface a clear "no treasury funding configured" error.
     /// The signing authority: the spend seed behind the policy gate. Default
     /// bounds are deliberately conservative; a config file refines them later.
-    fn signer(&self) -> anyhow::Result<Signer> {
+    fn signer(&self) -> Result<Signer, zns_registry::RegistryError> {
         let registry_addr = self.registry_fvk().address_at(0u32, Scope::External);
 
         // cold_addr == registry_addr (the COLD_ADDR_UA-unset fallback) keeps
@@ -369,13 +415,21 @@ impl DaemonConfig {
             cold_addr,
             max_fee_zat: MINT_FEE_ZAT,
             target_float_zat: TARGET_FLOAT_ZAT,
-            high_watermark_zat: if sweeps_enabled { HIGH_WATERMARK_ZAT } else { u64::MAX },
+            high_watermark_zat: if sweeps_enabled {
+                HIGH_WATERMARK_ZAT
+            } else {
+                u64::MAX
+            },
             low_watermark_zat: 2 * MINT_FEE_ZAT, // pause when even a relay can't fund
             max_mints_per_window: 4,
-            max_swept_per_window_zat: if sweeps_enabled { MAX_SWEPT_PER_WINDOW_ZAT } else { 0 },
+            max_swept_per_window_zat: if sweeps_enabled {
+                MAX_SWEPT_PER_WINDOW_ZAT
+            } else {
+                0
+            },
         };
         Signer::new(self.seed, self.coin_type(), zip32::AccountId::ZERO, policy)
-            .map_err(|e| anyhow::anyhow!("constructing signer: {e}"))
+            .map_err(|e| zns_registry::RegistryError::Config(format!("constructing signer: {e}")))
     }
 
     fn mint_context(&self, tip_height: u32, signer: Arc<Signer>) -> MintContext {
@@ -416,13 +470,16 @@ impl DaemonConfig {
 fn parse_orchard_address(
     ua: &str,
     network: zcash_protocol::consensus::Network,
-) -> anyhow::Result<orchard::Address> {
+) -> Result<orchard::Address, zns_registry::RegistryError> {
     use zcash_keys::address::Address;
     match Address::decode(&network, ua) {
-        Some(Address::Unified(addr)) => addr
-            .orchard()
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("COLD_ADDR_UA has no Orchard receiver: {ua}")),
-        _ => anyhow::bail!("COLD_ADDR_UA is not a valid Unified Address: {ua}"),
+        Some(Address::Unified(addr)) => addr.orchard().copied().ok_or_else(|| {
+            zns_registry::RegistryError::Config(format!(
+                "COLD_ADDR_UA has no Orchard receiver: {ua}"
+            ))
+        }),
+        _ => Err(zns_registry::RegistryError::Config(format!(
+            "COLD_ADDR_UA is not a valid Unified Address: {ua}"
+        ))),
     }
 }

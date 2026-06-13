@@ -5,10 +5,10 @@ use orchard::tree::{Anchor, MerkleHashOrchard};
 use thiserror::Error;
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_client_backend::proto::{
-    compact_formats::CompactBlock,
+    compact_formats::{CompactBlock, CompactTx},
     service::{
         compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
-        RawTransaction, TxFilter,
+        GetMempoolTxRequest, RawTransaction, TxFilter,
     },
 };
 use zcash_primitives::merkle_tree::read_commitment_tree;
@@ -154,24 +154,69 @@ impl GrpcClient {
         let mut client = connect(&self.lwd_url).await?;
         let stream = client
             .get_block_range(BlockRange {
-                start: Some(BlockId { height: start as u64, hash: vec![] }),
-                end: Some(BlockId { height: end as u64, hash: vec![] }),
+                start: Some(BlockId {
+                    height: start as u64,
+                    hash: vec![],
+                }),
+                end: Some(BlockId {
+                    height: end as u64,
+                    hash: vec![],
+                }),
                 // empty = all shielded pools (callers filter to their pool of interest)
                 pool_types: vec![],
             })
             .await
-            .map_err(|source| GrpcError::Rpc { call: "get_block_range", source })?
+            .map_err(|source| GrpcError::Rpc {
+                call: "get_block_range",
+                source,
+            })?
             .into_inner();
         Ok(stream)
+    }
+
+    /// Fetch the current mempool as a list of compact transactions.
+    ///
+    /// The caller is responsible for trial-decrypting and fetching full txs for
+    /// any outputs of interest.
+    pub async fn mempool_compact_txs(&self) -> Result<Vec<CompactTx>, GrpcError> {
+        let mut client = connect(&self.lwd_url).await?;
+        let mut stream = client
+            .get_mempool_tx(GetMempoolTxRequest {
+                exclude_txid_suffixes: vec![],
+                // empty = legacy/all shielded pools
+                pool_types: vec![],
+            })
+            .await
+            .map_err(|source| GrpcError::Rpc {
+                call: "get_mempool_tx",
+                source,
+            })?
+            .into_inner();
+
+        let mut out = Vec::new();
+        while let Some(tx) = stream.message().await.map_err(|source| GrpcError::Rpc {
+            call: "mempool stream",
+            source,
+        })? {
+            out.push(tx);
+        }
+        Ok(out)
     }
 
     /// Fetch a transaction's raw serialised bytes by txid.
     pub async fn fetch_transaction(&self, txid: &[u8; 32]) -> Result<RawTx, GrpcError> {
         let mut client = connect(&self.lwd_url).await?;
         let raw = client
-            .get_transaction(TxFilter { block: None, index: 0, hash: txid.to_vec() })
+            .get_transaction(TxFilter {
+                block: None,
+                index: 0,
+                hash: txid.to_vec(),
+            })
             .await
-            .map_err(|source| GrpcError::Rpc { call: "get_transaction", source })?
+            .map_err(|source| GrpcError::Rpc {
+                call: "get_transaction",
+                source,
+            })?
             .into_inner();
         Ok(raw.data)
     }
