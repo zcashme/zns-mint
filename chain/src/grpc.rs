@@ -4,9 +4,12 @@
 use orchard::tree::{Anchor, MerkleHashOrchard};
 use thiserror::Error;
 use tonic::transport::{Channel, ClientTlsConfig};
-use zcash_client_backend::proto::service::{
-    compact_tx_streamer_client::CompactTxStreamerClient, BlockId, ChainSpec, RawTransaction,
-    TxFilter,
+use zcash_client_backend::proto::{
+    compact_formats::CompactBlock,
+    service::{
+        compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
+        RawTransaction, TxFilter,
+    },
 };
 use zcash_primitives::merkle_tree::read_commitment_tree;
 
@@ -140,6 +143,37 @@ impl GrpcClient {
             });
         }
         Ok(())
+    }
+
+    /// Stream compact blocks in `[start, end]` (inclusive), all shielded pools.
+    pub async fn block_range(
+        &self,
+        start: u32,
+        end: u32,
+    ) -> Result<tonic::Streaming<CompactBlock>, GrpcError> {
+        let mut client = connect(&self.lwd_url).await?;
+        let stream = client
+            .get_block_range(BlockRange {
+                start: Some(BlockId { height: start as u64, hash: vec![] }),
+                end: Some(BlockId { height: end as u64, hash: vec![] }),
+                // empty = all shielded pools (callers filter to their pool of interest)
+                pool_types: vec![],
+            })
+            .await
+            .map_err(|source| GrpcError::Rpc { call: "get_block_range", source })?
+            .into_inner();
+        Ok(stream)
+    }
+
+    /// Fetch a transaction's raw serialised bytes by txid.
+    pub async fn fetch_transaction(&self, txid: &[u8; 32]) -> Result<RawTx, GrpcError> {
+        let mut client = connect(&self.lwd_url).await?;
+        let raw = client
+            .get_transaction(TxFilter { block: None, index: 0, hash: txid.to_vec() })
+            .await
+            .map_err(|source| GrpcError::Rpc { call: "get_transaction", source })?
+            .into_inner();
+        Ok(raw.data)
     }
 
     /// Whether the chain (or mempool) knows `txid` — the mint-intent

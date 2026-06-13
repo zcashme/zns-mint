@@ -18,15 +18,12 @@ use orchard::{
     Action,
 };
 use thiserror::Error;
-use zcash_client_backend::proto::{
-    compact_formats::CompactOrchardAction,
-    service::{BlockId, BlockRange, ChainSpec, TxFilter},
-};
+use zcash_client_backend::proto::compact_formats::CompactOrchardAction;
 use zcash_note_encryption::{batch, try_note_decryption, EphemeralKeyBytes};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 
-use crate::grpc::{self, GrpcError};
+use crate::grpc::{GrpcClient, GrpcError};
 
 /// Errors scanning `addr_reg` for incoming Name Note requests.
 #[derive(Debug, Error)]
@@ -89,32 +86,15 @@ where
     F: FnMut(Vec<IncomingNote>) -> Result<(), E>,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let mut client = grpc::connect(&config.lwd_url).await?;
-    // Separate client for full-transaction fetches while the block stream runs.
-    let mut fetch_client = client.clone();
-
+    let client = GrpcClient::new(&config.lwd_url);
     let ivk = orchard_ivk(&config.registry_ivk);
 
-    let tip = client
-        .get_latest_block(ChainSpec {})
-        .await
-        .map_err(|source| GrpcError::Rpc { call: "get_latest_block", source })?
-        .into_inner()
-        .height as u32;
+    let tip = client.tip_height().await?;
     if config.birthday > tip {
         return Ok(());
     }
 
-    let mut stream = client
-        .get_block_range(BlockRange {
-            start: Some(BlockId { height: config.birthday as u64, hash: vec![] }),
-            end: Some(BlockId { height: tip as u64, hash: vec![] }),
-            // empty = all shielded pools (we filter to Orchard ourselves)
-            pool_types: vec![],
-        })
-        .await
-        .map_err(|source| GrpcError::Rpc { call: "get_block_range", source })?
-        .into_inner();
+    let mut stream = client.block_range(config.birthday, tip).await?;
 
     while let Some(block) = stream
         .message()
@@ -160,7 +140,7 @@ where
         let mut tx: Option<Transaction> = None;
         for (txid, idx, value) in hits {
             if last_txid != Some(txid) {
-                tx = fetch_transaction(&mut fetch_client, &txid, branch).await?;
+                tx = fetch_transaction(&client, &txid, branch).await?;
                 last_txid = Some(txid);
             }
             let memo = tx
@@ -242,23 +222,15 @@ fn decrypt_memo<A>(action: &Action<A>, ivk: &PreparedIncomingViewingKey) -> Opti
 
 /// Fetch and parse a full transaction by txid.
 async fn fetch_transaction(
-    client: &mut grpc::LwdClient,
+    client: &GrpcClient,
     txid: &[u8; 32],
     branch: BranchId,
 ) -> Result<Option<Transaction>, ScanError> {
-    let raw = client
-        .get_transaction(TxFilter {
-            block: None,
-            index: 0,
-            hash: txid.to_vec(),
-        })
-        .await
-        .map_err(|source| GrpcError::Rpc { call: "get_transaction", source })?
-        .into_inner();
+    let raw = client.fetch_transaction(txid).await?;
     // A parse failure must propagate (transient — the poll retries), never
     // degrade to "no memo": that would settle real requests permanently as
     // memo-parse errors if a branch-id mismatch or parser bug ever slipped in.
-    let tx = Transaction::read(&raw.data[..], branch)
+    let tx = Transaction::read(&raw[..], branch)
         .map_err(|source| ScanError::ParseTransaction { txid: hex::encode(txid), branch, source })?;
     Ok(Some(tx))
 }
