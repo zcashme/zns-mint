@@ -13,7 +13,7 @@ use std::time::Duration;
 use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use zns_registry::{
     scan_incoming_all, FundingInput, GrpcClient, MintContext, NoteState, ProcessResult, Registry,
-    ScannerConfig, Signer, SpendPolicy, Treasury, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
+    ScannerConfig, Signer, SpendPolicy, Treasury, TreasuryConfig, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
 };
 
 /// How often to poll lightwalletd for new blocks.
@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
     let scanner = cfg.scanner();
     // Treasury note-state: a view-only WalletDb over the registry FVK. It owns
     // scanning, witnesses, reorg rewind, and note selection for the spend side.
-    let mut notestate = NoteState::open(&cfg.wallet_db_path, &scanner).await?;
+    let mut notestate = NoteState::open(&cfg.wallet_db_path, &cfg.treasury_config()).await?;
     let grpc = GrpcClient::new(&cfg.lwd_url);
     // The policy-gated signing authority — the only holder of key material on
     // the mint path. The daemon proposes intent; the signer authors and signs.
@@ -154,15 +154,12 @@ async fn main() -> anyhow::Result<()> {
                 continue; // transient — retry on the next tick
             }
         };
-        // Quiet poll = everything already settled; skip the funding rescan.
         let notes = registry.unsettled(notes).await;
-        if notes.is_empty() {
-            continue;
-        }
 
-        // There is something to mint: bring the treasury wallet to the tip,
-        // then pick a note to self-fund the fee, with its witness anchored
-        // a few blocks back (well confirmed).
+        // Bring the treasury wallet to the tip and pick a note to self-fund
+        // fees, with its witness anchored a few blocks back (well
+        // confirmed). Runs every tick — independent of mint activity —
+        // because the sweep check below needs a current hot balance.
         let mut ctx = cfg.mint_context(tip, signer.clone());
         if let Err(e) = notestate.sync().await {
             tracing::warn!("treasury sync failed: {e:#}");
@@ -195,6 +192,48 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Err(e) => tracing::warn!("funding selection failed: {e:#}"),
             }
+        }
+
+        // Sweep check: if the hot balance is over the high watermark, drain
+        // this poll's selected note to cold before anything else can spend
+        // it. On any failure, give the note back so a relay/mint can still
+        // use it this round.
+        if let Some(plan) = signer.policy().evaluate_sweep(ctx.hot_balance_zat) {
+            if let Some(treasury) = ctx.treasury.take() {
+                match signer.sign_sweep(
+                    treasury.funding_input(),
+                    MINT_FEE_ZAT,
+                    ctx.branch_id,
+                    ctx.expiry_height,
+                    ctx.circuit_version,
+                ) {
+                    Ok(result) => match grpc.broadcast(result.tx_bytes).await {
+                        Ok(()) => tracing::info!(
+                            amount_zat = result.amount_zat,
+                            target_zat = plan.amount_zat,
+                            "sweep broadcast"
+                        ),
+                        Err(e) => {
+                            tracing::warn!("sweep broadcast failed: {e:#}");
+                            ctx.treasury = Some(treasury);
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("sweep sign failed: {e}");
+                        ctx.treasury = Some(treasury);
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    spendable_zat = ctx.hot_balance_zat,
+                    "sweep due but no treasury note selected — deferred"
+                );
+            }
+        }
+
+        // Quiet poll = everything already settled; nothing left to mint.
+        if notes.is_empty() {
+            continue;
         }
 
         for result in registry.process_notes(&notes, &ctx).await {
@@ -288,6 +327,17 @@ impl DaemonConfig {
 
     fn scanner(&self) -> ScannerConfig {
         ScannerConfig {
+            registry_fvk: self.registry_fvk(),
+            network: self.network,
+            birthday: self.birthday,
+            lwd_url: self.lwd_url.clone(),
+        }
+    }
+
+    /// Config for the registry's treasury wallet (`zns_state::NoteState`) —
+    /// holds the full FVK (with `nk`), unlike [`Self::scanner`].
+    fn treasury_config(&self) -> TreasuryConfig {
+        TreasuryConfig {
             registry_fvk: self.registry_fvk(),
             network: self.network,
             birthday: self.birthday,

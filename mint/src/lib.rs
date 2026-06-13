@@ -19,13 +19,15 @@
 // Flat API surface — re-export the domain, state, chain, and mint crates so
 // `zns_registry::{parse_memo, build_name_note, NameRecord, ...}` resolve in one place.
 pub use zns_core::{memo, parse_memo, Action, MemoError, ParsedMemo, ZERO_PREV_RCM};
-pub use zns_state::{append_action, db, latest_action, MintedAction, NameRecord};
+pub use zns_state::{
+    append_action, db, latest_action, FundingSelection, MintedAction, NameRecord, NoteState,
+    SpendableNote, TreasuryConfig,
+};
 pub use zns_mint::{
     build_name_note, FundingInput, MintParams, MintResult, RequestId, Signer, SpendPolicy,
 };
 pub use zns_chain::{
-    scan_incoming, scan_incoming_all, FundingSelection, GrpcClient, GrpcError, IncomingNote,
-    NoteState, ScannerConfig, SpendableNote,
+    scan_incoming, scan_incoming_all, GrpcClient, GrpcError, IncomingNote, ScannerConfig,
 };
 
 pub mod rpc;

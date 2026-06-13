@@ -8,8 +8,6 @@
 
 pub mod grpc;
 pub mod scanner;
-pub mod treasury;
 
 pub use grpc::{GrpcClient, GrpcError};
 pub use scanner::{scan_incoming, scan_incoming_all, IncomingNote, ScanError, ScannerConfig};
-pub use treasury::{FundingSelection, NoteState, SpendableNote, TreasuryError};

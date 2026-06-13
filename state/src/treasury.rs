@@ -43,9 +43,22 @@ use zcash_protocol::{
     value::Zatoshis,
     ShieldedProtocol,
 };
+use zns_chain::GrpcError;
 
-use crate::grpc::{self, GrpcError};
-use crate::ScannerConfig;
+/// Configuration for the registry's treasury note-state.
+pub struct TreasuryConfig {
+    /// The registry's Orchard Full Viewing Key (`addr_reg`), including the
+    /// nullifier-deriving key — needed to track which of the wallet's notes
+    /// have been spent. The registry is Orchard-only, so we hold the FVK
+    /// directly rather than round-tripping a Unified FVK string.
+    pub registry_fvk: orchard::keys::FullViewingKey,
+    /// The Zcash network the wallet tracks.
+    pub network: Network,
+    /// Block height to import the account at (the key's "birthday").
+    pub birthday: u32,
+    /// Lightwalletd URL, e.g. `"http://127.0.0.1:9067"` or `"https://zec.rocks:443"`.
+    pub lwd_url: String,
+}
 
 /// Errors operating the registry's treasury note-state (the `WalletDb` over
 /// `addr_reg`'s view-only account).
@@ -128,7 +141,7 @@ pub struct NoteState {
 impl NoteState {
     /// Open (or create) the wallet database at `wallet_db` and ensure the
     /// registry account exists, imported view-only at the configured birthday.
-    pub async fn open(wallet_db: impl AsRef<Path>, config: &ScannerConfig) -> Result<Self, TreasuryError> {
+    pub async fn open(wallet_db: impl AsRef<Path>, config: &TreasuryConfig) -> Result<Self, TreasuryError> {
         let mut db = WalletDb::for_path(wallet_db, config.network, SystemClock, OsRng)?;
         init_wallet_db(&mut db, None).map_err(|e| TreasuryError::Init(e.to_string()))?;
 
@@ -166,7 +179,7 @@ impl NoteState {
     /// lightwalletd and scan them. Incremental — a quiet poll is one round
     /// trip — and it is also where reorg rewind happens.
     pub async fn sync(&mut self) -> Result<(), TreasuryError> {
-        let mut client = grpc::connect(&self.lwd_url).await?;
+        let mut client = zns_chain::grpc::connect(&self.lwd_url).await?;
         sync::run(&mut client, &self.network, &self.cache, &mut self.db, SYNC_BATCH_SIZE)
             .await
             .map_err(|e| TreasuryError::Sync(e.to_string()))
@@ -243,9 +256,9 @@ impl NoteState {
 /// Fetch the tree state just below the configured birthday and turn it into
 /// the wallet's [`AccountBirthday`]. The birthday is the height *after* the
 /// anchoring tree state, so it floors at 2 — fund the registry above that.
-async fn birthday(config: &ScannerConfig) -> Result<AccountBirthday, TreasuryError> {
+async fn birthday(config: &TreasuryConfig) -> Result<AccountBirthday, TreasuryError> {
     let prior = config.birthday.max(2) - 1;
-    let mut client = grpc::connect(&config.lwd_url).await?;
+    let mut client = zns_chain::grpc::connect(&config.lwd_url).await?;
     let treestate = client
         .get_tree_state(BlockId { height: prior as u64, hash: vec![] })
         .await

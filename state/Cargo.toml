@@ -10,9 +10,26 @@ publish = false
 [dependencies]
 zns-core = { workspace = true }
 zns-auth = { workspace = true }   # PendingChallenge (persisted here)
+# treasury: lightwalletd transport for sync::run (grpc::connect, GrpcError).
+zns-chain = { workspace = true }
 rusqlite = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+# treasury note-state: WalletDb owns scanning, shardtree witnesses, reorg
+# rewind, and note selection; `sync::run` drives it. zcash_keys/zcash_address
+# wrap the registry FVK as the UFVK account import wants; async-trait is the
+# BlockCache contract.
+orchard = { workspace = true, features = ["unsafe-zns"] }
+zcash_protocol = { workspace = true }
+zcash_client_backend = { workspace = true }
+zcash_client_sqlite = { workspace = true }
+zcash_keys = { workspace = true }
+zcash_address = { workspace = true }
+rand = { workspace = true }
+async-trait = { workspace = true }
+# orchard shard-store error type for TreasuryError's shardtree variant
+shardtree = { workspace = true }
+incrementalmerkletree = { workspace = true }
 
 [lints]
 workspace = true

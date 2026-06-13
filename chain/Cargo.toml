@@ -24,20 +24,6 @@ tonic = { workspace = true, features = ["transport", "tls-ring", "tls-webpki-roo
 http = { workspace = true }
 # decode lightwalletd's hex-encoded commitment tree (GetTreeState → anchor)
 hex = { workspace = true }
-# Treasury note-state: WalletDb owns scanning, shardtree witnesses, reorg
-# rewind, and note selection; `sync::run` drives it. rusqlite names the
-# connection type in WalletDb's generics; zcash_keys/zcash_address wrap the
-# registry FVK as the UFVK account import wants; async-trait is the
-# BlockCache contract.
-zcash_client_sqlite = { workspace = true }
-zcash_keys = { workspace = true }
-zcash_address = { workspace = true }
-rusqlite = { workspace = true }
-rand = { workspace = true }
-async-trait = { workspace = true }
-# orchard shard-store error type for TreasuryError's shardtree variant
-shardtree = { workspace = true }
-incrementalmerkletree = { workspace = true }
 thiserror = { workspace = true }
 
 [lints]
