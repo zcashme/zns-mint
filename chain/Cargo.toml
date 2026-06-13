@@ -9,9 +9,10 @@ publish = false
 
 [dependencies]
 zns-core = { workspace = true }
-# orchard types in the scanned-note API; trial-decryption drives intake. The
-# registry is Orchard-only, so the scanner takes a bare FVK.
-orchard = { workspace = true, features = ["unsafe-zns"] }
+# orchard types in the scanned-note API: IncomingViewingKey drives trial
+# decryption of incoming request notes (standard ZIP-212, no unsafe-zns needed
+# — that's only for the Name Notes the registry itself mints).
+orchard = { workspace = true }
 zcash_primitives = { workspace = true }
 zcash_protocol = { workspace = true }
 # lightwalletd gRPC transport: zcash_client_backend supplies the proto client +

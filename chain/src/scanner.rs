@@ -12,7 +12,7 @@
 use std::convert::Infallible;
 
 use orchard::{
-    keys::{PreparedIncomingViewingKey, Scope},
+    keys::PreparedIncomingViewingKey,
     note::{ExtractedNoteCommitment, Nullifier},
     note_encryption::{CompactAction, OrchardDomain},
     Action,
@@ -51,10 +51,10 @@ pub enum ScanError {
 
 /// Configuration for the scanner.
 pub struct ScannerConfig {
-    /// The registry's Orchard Full Viewing Key (`addr_reg`). The registry is
-    /// Orchard-only, so we hold the FVK directly rather than round-tripping a
-    /// Unified FVK string.
-    pub registry_fvk: orchard::keys::FullViewingKey,
+    /// The registry's external-scope Orchard Incoming Viewing Key (`addr_reg`).
+    /// IVK-only: the scanner trial-decrypts incoming request notes, which never
+    /// requires a nullifier key.
+    pub registry_ivk: orchard::keys::IncomingViewingKey,
     /// The Zcash network to scan (drives branch resolution for tx parsing).
     pub network: Network,
     /// Block height to start scanning from (the key's "birthday").
@@ -93,7 +93,7 @@ where
     // Separate client for full-transaction fetches while the block stream runs.
     let mut fetch_client = client.clone();
 
-    let ivk = orchard_ivk(&config.registry_fvk);
+    let ivk = orchard_ivk(&config.registry_ivk);
 
     let tip = client
         .get_latest_block(ChainSpec {})
@@ -201,9 +201,9 @@ pub async fn scan_incoming_all(config: &ScannerConfig) -> Result<Vec<IncomingNot
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/// Decode the registry UFVK and prepare its external Orchard incoming viewing key.
-fn orchard_ivk(fvk: &orchard::keys::FullViewingKey) -> PreparedIncomingViewingKey {
-    PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External))
+/// Prepare the registry's incoming viewing key for trial decryption.
+fn orchard_ivk(ivk: &orchard::keys::IncomingViewingKey) -> PreparedIncomingViewingKey {
+    PreparedIncomingViewingKey::new(ivk)
 }
 
 /// Convert a proto [`CompactOrchardAction`] into an orchard [`CompactAction`].

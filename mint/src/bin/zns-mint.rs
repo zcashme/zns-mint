@@ -327,7 +327,7 @@ impl DaemonConfig {
 
     fn scanner(&self) -> ScannerConfig {
         ScannerConfig {
-            registry_fvk: self.registry_fvk(),
+            registry_ivk: self.registry_fvk().to_ivk(Scope::External),
             network: self.network,
             birthday: self.birthday,
             lwd_url: self.lwd_url.clone(),
