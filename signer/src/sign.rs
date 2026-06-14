@@ -287,20 +287,24 @@ pub struct SweepResult {
     pub amount_zat: u64,
 }
 
-/// === Dev / test boundary helpers (the *only* place the dev zero seed appears) ===
+/// === Test harness boundary helpers (the *only* place the test zero seed appears) ===
 /// 
 /// The orchestrator (zns-registry binary / host) must never see or hold the raw
 /// spend seed. All derivation and secret material stays inside this crate.
 /// These functions exist so the host can get the public view material it needs
 /// (for CLI and scanner/treasury setup) and construct a Signer for signing
 /// without ever receiving seed bytes.
+///
+/// In the current test harness the seed is the well-known zero value.
+/// In production the equivalent construction inside this crate will derive
+/// the seed from the TEE (sealed data + measurement). The host API stays the same.
 
 impl Signer {
-    /// Development-only constructor.
-    /// The spend seed is derived *inside* this crate. The caller only supplies
-    /// the (public) policy parameters. In production the equivalent construction
-    /// happens inside the TEE from sealed/derived material.
-    pub fn new_dev(policy: SpendPolicy) -> Result<Self, SignError> {
+    /// Test-harness constructor.
+    /// The spend seed is derived *inside* this crate from the known test value.
+    /// The caller only supplies the (public) policy parameters.
+    /// In production the equivalent happens inside the TEE.
+    pub fn new_test(policy: SpendPolicy) -> Result<Self, SignError> {
         let seed = [0u8; 32];
         let coin_type = 133;
         let account = zip32::AccountId::ZERO;
@@ -334,20 +338,20 @@ impl Signer {
     }
 }
 
-/// Pure view material for the dev key. The host can call these for
+/// Pure view material for the test harness key. The host can call these for
 /// "zns-mint address", "viewkey", and scanner/treasury setup.
-pub fn dev_registry_address() -> Address {
+pub fn test_registry_address() -> Address {
     let seed = [0u8; 32];
     let sk = SpendingKey::from_zip32_seed(&seed, 133, zip32::AccountId::ZERO)
-        .expect("dev seed is always valid");
+        .expect("test seed is always valid");
     let fvk = FullViewingKey::from(&sk);
     fvk.address_at(0u32, Scope::External)
 }
 
-pub fn dev_orchard_ivk() -> orchard::keys::IncomingViewingKey {
+pub fn test_orchard_ivk() -> orchard::keys::IncomingViewingKey {
     let seed = [0u8; 32];
     let sk = SpendingKey::from_zip32_seed(&seed, 133, zip32::AccountId::ZERO)
-        .expect("dev seed is always valid");
+        .expect("test seed is always valid");
     let fvk = FullViewingKey::from(&sk);
     fvk.to_ivk(Scope::External)
 }

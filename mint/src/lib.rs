@@ -1,20 +1,5 @@
 //! `zns-registry` — ZNS name registry orchestration.
 //!
-//! This crate is the "wiring" layer. It is *not* "the registry" itself.
-//!
-//! - [`Registry`] (from the store module) = local persisted name bindings +
-//!   action history + intake ledger + challenges + intent tracking. This is
-//!   the honest persisted view of the name service. It owns a DB but knows
-//!   nothing about lightwalletd addresses or broadcasting.
-//!
-//! - [`Processor`] = the thing that applies the ZNS protocol rules (fees,
-//!   claim vs. mutation, OTP challenge issuance, atomic mint + persist,
-//!   reorg, crash reconciliation). It takes a `Registry` + a `MintContext` +
-//!   a `GrpcClient` (broadcast) explicitly on the operations that need them.
-//!
-//! The goal is to keep a small, honest core for the name data and a separate,
-//! focused coordinator for the flows — no god module that is simultaneously
-//! "the DB + the RPC target + all the rules".
 
 // ---------------------------------------------------------------------------
 // Convenience re-exports (flat surface the rest of the workspace likes)
@@ -26,7 +11,7 @@ pub use zns_chain::{
 };
 pub use zns_core::{memo, parse_memo, Action, MemoError, ParsedMemo, ZERO_PREV_RCM};
 pub use zns_mint::{
-    build_name_note, dev_orchard_ivk, dev_registry_address, FundingInput, MintParams, MintResult,
+    build_name_note, test_orchard_ivk, test_registry_address, FundingInput, MintParams, MintResult,
     RequestId, Signer, SpendPolicy,
 };
 pub use zns_state::{
@@ -70,9 +55,9 @@ mod tests {
     use std::sync::Arc;
 
     fn make_context() -> MintContext {
-        // Tests go through the signer crate boundary (new_dev). The seed never
+        // Tests go through the signer crate boundary. The seed never
         // appears in this (host) crate.
-        let registry_addr = dev_registry_address();
+        let registry_addr = test_registry_address();
         let policy = SpendPolicy {
             registry_addr,
             cold_addr: registry_addr,
@@ -83,7 +68,7 @@ mod tests {
             max_mints_per_window: u32::MAX,
             max_swept_per_window_zat: 0,
         };
-        let signer = Arc::new(Signer::new_dev(policy).unwrap());
+        let signer = Arc::new(Signer::new_test(policy).unwrap());
         MintContext {
             signer,
             hot_balance_zat: 1_000_000,

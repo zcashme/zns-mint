@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use zns_registry::{
-    dev_orchard_ivk, dev_registry_address, scan_incoming_all, scan_mempool, FundingInput,
+    test_orchard_ivk, test_registry_address, scan_incoming_all, scan_mempool, FundingInput,
     GrpcClient, MintContext, NoteState, ProcessResult, Processor, Registry, ScannerConfig,
     Signer, SpendPolicy, Treasury, TreasuryConfig, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
 };
@@ -344,7 +344,7 @@ impl DaemonConfig {
     /// The registry's Orchard-only Unified Address (`addr_reg`) for this network.
     /// Delegates to the signer crate boundary so the host never sees spend seed material.
     fn registry_ua(&self) -> Result<String, zns_registry::RegistryError> {
-        let addr = dev_registry_address();
+        let addr = test_registry_address();
         let ua = zcash_keys::address::UnifiedAddress::from_receivers(Some(addr), None, None)
             .ok_or_else(|| {
                 zns_registry::RegistryError::Config("could not build a Unified Address".into())
@@ -359,7 +359,7 @@ impl DaemonConfig {
         use zcash_address::unified::{Encoding, Ivk, Uivk};
         use zcash_protocol::consensus::Parameters as _;
 
-        let ivk_bytes = dev_orchard_ivk().to_bytes();
+        let ivk_bytes = test_orchard_ivk().to_bytes();
         let uivk = Uivk::try_from_items(vec![Ivk::Orchard(ivk_bytes)])
             .map_err(|e| zns_registry::RegistryError::Config(format!("building UIVK: {e:?}")))?;
         Ok(uivk.encode(&self.network.network_type()))
@@ -367,7 +367,7 @@ impl DaemonConfig {
 
     fn scanner(&self) -> ScannerConfig {
         ScannerConfig {
-            registry_ivk: dev_orchard_ivk(),
+            registry_ivk: test_orchard_ivk(),
             network: self.network,
             birthday: self.birthday,
             lwd_url: self.lwd_url.clone(),
@@ -375,14 +375,14 @@ impl DaemonConfig {
     }
 
     /// Config for the registry's treasury wallet (`zns_state::NoteState`).
-    /// The FVK is obtained by asking a dev Signer (seed derivation stays inside
+    /// The FVK is obtained by asking a test-harness Signer (seed derivation stays inside
     /// the signer crate).
     fn treasury_config(&self) -> TreasuryConfig {
-        // Temporary dev Signer just to extract the FVK. The real long-lived
+        // Temporary test-harness Signer just to extract the FVK. The real long-lived
         // signer for signing is created later via the same boundary.
-        let dev_signer = Signer::new_dev(SpendPolicy {
-            registry_addr: dev_registry_address(),
-            cold_addr: dev_registry_address(),
+        let test_signer = Signer::new_test(SpendPolicy {
+            registry_addr: test_registry_address(),
+            cold_addr: test_registry_address(),
             max_fee_zat: MINT_FEE_ZAT,
             target_float_zat: 0,
             high_watermark_zat: u64::MAX,
@@ -390,10 +390,10 @@ impl DaemonConfig {
             max_mints_per_window: u32::MAX,
             max_swept_per_window_zat: 0,
         })
-        .expect("dev signer for FVK");
+        .expect("test signer for FVK");
 
         TreasuryConfig {
-            registry_fvk: dev_signer.fvk().clone(),
+            registry_fvk: test_signer.fvk().clone(),
             network: self.network,
             birthday: self.birthday,
             lwd_url: self.lwd_url.clone(),
@@ -401,9 +401,10 @@ impl DaemonConfig {
     }
 
     /// Build the signing authority.
-    /// The raw spend seed is derived inside the signer crate only (via new_dev).
+    /// The raw spend seed is derived inside the signer crate only (via new_test).
+    /// The host never sees the seed bytes.
     fn signer(&self) -> Result<Signer, zns_registry::RegistryError> {
-        let registry_addr = dev_registry_address();
+        let registry_addr = test_registry_address();
 
         // cold_addr == registry_addr (the COLD_ADDR_UA-unset fallback) keeps
         // sweeps a harmless no-op.
@@ -433,7 +434,7 @@ impl DaemonConfig {
             },
         };
 
-        Signer::new_dev(policy)
+        Signer::new_test(policy)
             .map_err(|e| zns_registry::RegistryError::Config(format!("constructing signer: {e}")))
     }
 
