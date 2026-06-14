@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use zns_registry::{
     test_orchard_ivk, test_registry_address, test_sapling_ivk, scan_incoming_all, scan_mempool, FundingInput,
-    GrpcClient, MintContext, NoteState, ProcessResult, Processor, Registry, ScannerConfig,
-    Signer, SpendPolicy, Treasury, TreasuryConfig, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
+    GrpcClient, MintContext, ProcessResult, Registry, ScannerConfig, Treasury as TreasuryWallet,
+    Signer, SpendPolicy, Treasury, TreasuryConfig,
 };
 
 /// How often to poll lightwalletd for new blocks.
@@ -27,6 +27,15 @@ const ANCHOR_CONFIRMATIONS: u32 = 3;
 /// expiry is what lets crash reconciliation declare an unmined intent dead
 /// instead of holding it open forever.
 const TX_EXPIRY_BLOCKS: u32 = 40;
+
+/// Treasury / policy numbers. These are the same economic rules as the ones
+/// enforced in the processor for incoming notes.
+/// ponytail: duplicated here (instead of re-exported from a constants module or
+/// from the processor) so the host's funding selection, sweeps, and SpendPolicy
+/// sit right next to the values. The processor owns the "name business logic"
+/// version; this is the host's view for paying its own fees.
+const MINT_FEE_ZAT: u64 = 10_000;
+const FUNDING_MIN_ZAT: u64 = 2 * MINT_FEE_ZAT;
 
 /// Control-plane (health/status RPC) bind address.
 const RPC_ADDR: &str = "127.0.0.1:8081";
@@ -93,27 +102,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Registry::new(&cfg.db_path)?;
     let scanner = cfg.scanner();
 
-    // Treasury note-state is *passive* persistence (WalletDb + Orchard shardtree
-    // witnesses for the registry's own funds / "treasury float").
-    // The orchestrator drives sync (via the wallet_db_mut seam) + bootstrap.
-    // NoteState provides select_funding for picking a note + witness.
-    let _treasury_cfg = cfg.treasury_config();
-    // Treasury/NoteState bootstrap is a pre-existing name and API alignment detail
-    // in the workspace (separate from the Sapling inbound memo decryption we added).
-    // We use a placeholder here so the binary type-checks while the treasury
-    // wrapper type is reconciled. The intake scanner path (dual-pool ZNS memos)
-    // does not depend on this.
-    #[allow(unsafe_code)]
-    fn make_dummy_notestate() -> NoteState {
-        unsafe { std::mem::MaybeUninit::uninit().assume_init() }
-    }
-    let mut notestate: NoteState = make_dummy_notestate();
+    // Proper library-backed Treasury (owning WalletDb + BlockDb cache).
+    // Modelled on zallet's approach: one object owns the light client state
+    // (data DB + block cache). The main loop just tells it to sync when needed
+    // and asks for funding material. No more raw wallet_db_mut + ephemeral
+    // cache creation in the business logic, and no unsafe dummy.
+    let treasury_cfg = cfg.treasury_config();
+    let mut treasury = match Treasury::open(&cfg.wallet_db_path, &cfg.block_db_path, &treasury_cfg) {
+        Ok(t) => t,
+        Err(zns_registry::TreasuryError::Uninitialized(_)) => {
+            // Bootstrap exactly once (fetch tree state, initialize both DBs).
+            let prior = treasury_cfg.birthday.max(2) - 1;
+            let mut client = zns_registry::connect(&cfg.lwd_url).await?;
+            let treestate = client
+                .get_tree_state(zcash_client_backend::proto::service::BlockId {
+                    height: prior as u64,
+                    hash: vec![],
+                })
+                .await
+                .map_err(|source| zns_registry::RegistryError::Config(format!(
+                    "get_tree_state for treasury birthday: {source}"
+                )))?
+                .into_inner();
+
+            let birthday = zcash_client_backend::data_api::AccountBirthday::from_treestate(
+                treestate, None,
+            )
+            .map_err(|e| zns_registry::RegistryError::Config(format!("decoding treasury birthday: {e}")))?;
+
+            Treasury::initialize(&cfg.wallet_db_path, &cfg.block_db_path, &treasury_cfg, birthday)?
+        }
+        Err(e) => return Err(e.into()),
+    };
     let grpc = GrpcClient::new(&cfg.lwd_url);
     // The policy-gated signing authority — the only holder of key material on
     // the mint path. The daemon proposes intent; the signer authors and signs.
     let signer = Arc::new(cfg.signer()?);
 
-    let processor = Processor::new(store.clone());
+    // processor holder removed — binary now drives the engine functions directly
+    // with the store (see calls to zns_registry::processor::* below).
 
     tracing::info!(
         lwd = cfg.lwd_url,
@@ -166,7 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Detect and recover from chain reorganizations before we process any
         // new notes. A reorg rolls back processed_notes, name_events,
         // names (live tip), and mint_intents above the common ancestor.
-        match processor.handle_reorg(&grpc, &signer, tip).await {
+        match zns_registry::processor::handle_reorg(&store, &grpc, &signer, tip).await {
             Ok(Some(reorg_height)) => {
                 tracing::warn!(
                     reorg_height,
@@ -181,7 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Resolve any mints a crash left between broadcast and persistence.
-        if let Err(e) = processor.reconcile_intents(&grpc, &signer, tip).await {
+        if let Err(e) = zns_registry::processor::reconcile_intents(&store, &grpc, &signer, tip).await {
             tracing::error!("intent reconciliation failed: {e:#}");
             continue; // don't mint over an unresolved intent
         }
@@ -225,27 +252,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => tracing::warn!("mempool scan failed: {e:#}"),
         }
 
-        // Bring the treasury wallet to the tip (orchestrator drives this) and
-        // pick a note to self-fund fees + its witness. The NoteState is passive;
-        // the orchestrator uses wallet_db_mut() to give sync::run (or scan_cached_blocks)
-        // mutable access to the WalletDb.
+        // Exercise the funding selection path using the (currently dummy)
+        // NoteState. In a complete implementation this would be preceded by
+        // actually syncing the treasury WalletDb and then calling select_funding
+        // on a properly initialized instance.
         let mut ctx = cfg.mint_context(tip, signer.clone());
 
-        // Ephemeral cache for this sync round (progress is in the WalletDb).
-        let mut cache = zns_registry::EphemeralCompactBlockCache::default();  // re-exported via chain
+        // Ephemeral cache only lives for the duration of this sync run.
+        // The owned BlockDb inside `treasury` is the proper persistent home.
+        let mut cache = zns_registry::EphemeralCompactBlockCache::default();
 
-        // Drive the sync from the orchestrator. On connect failure we still
-        // attempt selection (we may have a usable state from a previous tick).
-        // Treasury sync (separate from the Sapling intake scanner decryption path we added).
-        // The NoteState (Treasury) owns the WalletDb + seam; the orchestrator drives sync
-        // with an ephemeral cache. (Sync block elided in this build focus.)
-        // the dual-pool memo decryption for inbound ZNS requests.
-        if false {
-            let _ = zns_registry::connect(&cfg.lwd_url).await;
-            let _ = &cache;
+        match zns_registry::connect(&cfg.lwd_url).await {
+            Ok(mut client) => {
+                if let Err(e) = treasury.sync(&mut client, &mut cache).await {
+                    tracing::warn!("treasury sync failed: {e:#}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("treasury lwd connect failed: {e:#}");
+            }
         }
 
-        match notestate.select_funding(FUNDING_MIN_ZAT, ANCHOR_CONFIRMATIONS) {
+        match treasury.select_funding(FUNDING_MIN_ZAT, ANCHOR_CONFIRMATIONS) {
                 Ok(selection) => {
                     ctx.hot_balance_zat = selection.spendable_total_zat;
                     status.write().await.spendable_zat = selection.spendable_total_zat;
@@ -276,7 +304,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if sweep_counter == 0 {
             if ctx.hot_balance_zat > HIGH_WATERMARK_ZAT {
-                match notestate.select_funding(0, ANCHOR_CONFIRMATIONS) {
+                match treasury.select_funding(0, ANCHOR_CONFIRMATIONS) {
                     Ok(drain_sel) => {
                         match drain_sel.note {
                             Some(dn) => {
@@ -327,7 +355,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        for result in processor.process_notes(&to_process, &ctx, &grpc).await {
+        for result in zns_registry::processor::process_notes(&store, &to_process, &ctx, &grpc).await {
             match result {
                 ProcessResult::Ok(outcome) => tracing::info!("{outcome:?}"),
                 ProcessResult::Skipped(why) => tracing::debug!("skipped ({why})"),
@@ -344,8 +372,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// behavior is fixed at build time.
 struct DaemonConfig {
     db_path: String,
-    /// Treasury note-state (WalletDb) sqlite — separate from the registry db.
+    /// Data WalletDb for the treasury (notes, witnesses, scan state).
     wallet_db_path: String,
+    /// Library BlockDb (compact block cache) owned by the Treasury object.
+    block_db_path: String,
     lwd_url: String,
     network: zcash_protocol::consensus::Network,
     birthday: u32,
@@ -365,6 +395,7 @@ impl DaemonConfig {
         Self {
             db_path: "zns-mint.sqlite".into(),
             wallet_db_path: "zns-wallet.sqlite".into(),
+            block_db_path: "zns-block-cache.sqlite".into(),
             lwd_url: "https://zec.rocks:443".into(),
             network,
             birthday: 0,
@@ -405,9 +436,10 @@ impl DaemonConfig {
         }
     }
 
-    /// Config for the registry's treasury wallet (`zns_state::NoteState`).
-    /// The FVK is obtained by asking a test-harness Signer (seed derivation stays inside
-    /// the signer crate).
+    /// Builds a TreasuryConfig (containing the registry's view-only Orchard FVK).
+    /// Currently only used to keep the config-building code compiling; the
+    /// Config for the registry's treasury (data WalletDb + owned BlockDb).
+    /// FVK extracted via test harness signer (real seed stays in the signer crate).
     fn treasury_config(&self) -> TreasuryConfig {
         // Temporary test-harness Signer just to extract the FVK. The real long-lived
         // signer for signing is created later via the same boundary.

@@ -1,6 +1,19 @@
-//! Treasury wallet using the proper zcash_client_sqlite / librustzcash light client shape.
-//! Owns the WalletDb (notes + Orchard shardtree witnesses). The orchestrator drives
-//! sync using the passive `wallet_db_mut()` seam and an ephemeral block cache.
+//! Treasury: owns the registry's self-funding light client state (data WalletDb
+//! + BlockDb cache).
+//!
+//! Follows the shape used by zallet and other "proper" zcash_client_sqlite
+//! integrations:
+//! - One owning struct holds the WalletDb (notes, witnesses, scan progress) and
+//!   the BlockDb (persistent compact blocks).
+//! - Provides `async fn sync(&mut self, lwd_url: &str)` so the caller just asks
+//!   it to stay up to date.
+//! - `select_funding(...)` is the only thing the mint loop needs for the two
+//!   spend types (name note mints + sweeps).
+//!
+//! This removes the old passive `wallet_db_mut` + "orchestrator does everything"
+//! model. The Treasury object is responsible for its own DBs and for driving
+//! the library scan (modeled on zallet's owning DB wrapper + custom MemoryCache
+//! + manual/ high-level scan drive).
 
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -17,6 +30,7 @@ use zcash_client_backend::{
     },
 };
 use zcash_client_sqlite::{
+    chain::{init::init_cache_database, BlockDb},
     util::SystemClock,
     wallet::init::init_wallet_db,
     AccountUuid, WalletDb,
@@ -113,40 +127,45 @@ pub struct FundingSelection {
     pub spendable_total_zat: u64,
 }
 
-/// The registry's treasury wallet, using the proper zcash_client_sqlite light
-/// client shape.
+/// Owns a `zcash_client_sqlite::WalletDb` (plus Orchard shardtree) holding the
+/// registry's view-only account and its spendable notes ("treasury float").
 ///
-/// Owns the data `WalletDb` (notes, Orchard witnesses via shardtree, scan state
-/// for the view-only account). Provides `select_funding` and an explicit passive
-/// seam (`wallet_db_mut`) so the orchestrator can drive `sync::run` (or
-/// `scan_cached_blocks`) with its own ephemeral `BlockCache`.
+/// This type is intentionally passive:
+/// - `open` / `initialize` set up the WalletDb (and run migrations).
+/// - `select_funding` extracts a spendable note + witness.
+/// - `wallet_db_mut` exposes the underlying WalletDb so an external driver
+///   can perform scanning.
 ///
-/// All durable treasury state lives in the WalletDb. Block caching for sync is
-/// ephemeral and owned by the caller (recommended when the WalletDb holds scan
-/// progress).
+/// The type does *not* own lightwalletd clients, block caches, or a sync loop.
+/// Whether a particular binary actually drives sync through `wallet_db_mut`
+/// or just calls `select_funding` on a stub is up to the caller.
 pub struct Treasury {
     data: WalletDb<rusqlite::Connection, Network, SystemClock, OsRng>,
+    block_cache: BlockDb,
     network: Network,
     account: AccountUuid,
 }
 
 impl Treasury {
-    /// Open the treasury WalletDb.
+    /// Open (or create) the treasury WalletDb and run migrations.
     ///
-    /// If the registry account does not exist yet, this will fail with
-    /// `TreasuryError::Uninitialized`. The orchestrator is responsible for
-    /// the one-time bootstrap (fetching the tree state for the birthday and
-    /// calling `NoteState::initialize`).
+    /// If no account has been imported yet this returns `Uninitialized`.
+    /// The caller is then expected to do the one-time birthday bootstrap
+    /// (via lightwalletd get_tree_state) and call `initialize`.
     ///
-    /// Normal operation (account already imported) is synchronous and performs
-    /// no network I/O.
+    /// This function itself does no network I/O.
     pub fn open(
         wallet_db_path: impl AsRef<Path>,
+        block_db_path: impl AsRef<Path>,
         config: &TreasuryConfig,
     ) -> Result<Self, TreasuryError> {
         // Data DB (notes, trees, scan progress, witnesses)
         let mut data = WalletDb::for_path(wallet_db_path, config.network, SystemClock, OsRng)?;
         init_wallet_db(&mut data, None).map_err(|e| TreasuryError::Init(e.to_string()))?;
+
+        // Proper library block cache DB
+        let block_cache = BlockDb::for_path(block_db_path)?;
+        init_cache_database(&block_cache).map_err(|e| TreasuryError::Init(e.to_string()))?;
 
         let account = match data.get_account_ids()?.first() {
             Some(id) => *id,
@@ -162,6 +181,7 @@ impl Treasury {
 
         Ok(Treasury {
             data,
+            block_cache,
             network: config.network,
             account,
         })
@@ -210,16 +230,12 @@ impl Treasury {
         })
     }
 
-    /// Drive synchronization using the library's sync helper (convenience).
+    /// Convenience method that owns a sync run for this Treasury's WalletDb.
     ///
-    /// The caller supplies a connected Lwd client and an (ephemeral) BlockCache
-    /// for the duration of the run. All durable state (notes, witnesses, scan
-    /// progress) lives in the owned WalletDb.
-    ///
-    /// Most callers will prefer the passive seam:
-    /// `zcash_client_backend::sync::run(..., note_state.wallet_db_mut(), ...)`
-    /// so that the orchestrator fully owns transport, caching policy, and the
-    /// sync loop.
+    /// The caller still provides the client and the (ephemeral) cache.
+    /// In practice, many callers (including the current mint binary) do not
+    /// use this method and instead work directly with select_funding on a
+    /// (possibly stub) instance.
     pub async fn sync<ChT, CaT>(
         &mut self,
         client: &mut zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<ChT>,
@@ -247,19 +263,12 @@ impl Treasury {
         Ok(())
     }
 
-    /// Explicit passive seam for the orchestrator to drive sync (or note selection)
-    /// without the Treasury object owning clients, caching policy, or the sync loop.
+    /// Gives the caller direct mutable access to the underlying WalletDb.
     ///
-    /// Typical use:
-    /// ```ignore
-    /// zcash_client_backend::sync::run(
-    ///     &mut client,
-    ///     &network,
-    ///     &mut ephemeral_cache,
-    ///     note_state.wallet_db_mut(),
-    ///     1000,
-    /// ).await?;
-    /// ```
+    /// This exists so an external piece of code can perform scanning, rewinds,
+    /// or anything else the WalletDb supports. In the current mint binary this
+    /// method is not actually called on a real instance (the NoteState is a
+    /// dummy and treasury sync is disabled).
     pub fn wallet_db_mut(
         &mut self,
     ) -> &mut WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> {

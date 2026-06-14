@@ -1,4 +1,5 @@
-//! `zns-registry` — ZNS name registry orchestration.
+//! `zns-mint` (library surface) — ZNS registry orchestration.
+//! The `zns-mint` binary is built from src/bin/zns-mint.rs.
 //!
 
 // ---------------------------------------------------------------------------
@@ -10,19 +11,18 @@ pub use zns_chain::{
     GrpcClient, GrpcError, IncomingNote, ScannerConfig,
 };
 pub use zns_core::{memo, parse_memo, Action, MemoError, ParsedMemo, ZERO_PREV_RCM};
-pub use zns_mint::{
+pub use zns_signer::{
     build_name_note, test_orchard_ivk, test_registry_address, test_sapling_ivk, FundingInput, MintParams, MintResult,
     RequestId, Signer, SpendPolicy,
 };
 pub use zns_state::{
-    FundingSelection, MintedAction, Name, NoteState, SpendableNote, TreasuryConfig, TreasuryError,
+    FundingSelection, MintedAction, Name, SpendableNote, Treasury as TreasuryWallet, TreasuryConfig, TreasuryError,
 };
 
 // ---------------------------------------------------------------------------
 // Our own modules (the actual modularity)
 // ---------------------------------------------------------------------------
 
-pub mod constants;
 pub mod error;
 pub mod processor;
 pub mod rpc;
@@ -37,9 +37,6 @@ pub use processor::Processor;
 pub use store::Registry;
 pub use types::{ActionOutcome, MintContext, ProcessResult, RegistryStats, Treasury};
 
-// Re-export the fee constants at the crate root for ergonomics (same as before).
-pub use constants::{FUNDING_MIN_ZAT, MINT_FEE_ZAT, MIN_CLAIM_FEE_ZAT, MIN_MUTATION_FEE_ZAT};
-
 // ---------------------------------------------------------------------------
 // Basic tests exercising the new modular surface (processor + store split)
 // The old god-module tests have been migrated here.
@@ -53,6 +50,11 @@ mod tests {
         tree::Anchor,
     };
     use std::sync::Arc;
+
+    // Test values for the attested fee rules (same numbers as processor).
+    // ponytail: local to the test so we don't need the old re-export surface.
+    const MIN_CLAIM_FEE_ZAT: u64 = 10_000;
+    const MINT_FEE_ZAT: u64 = 10_000;
 
     fn make_context() -> MintContext {
         // Tests go through the signer crate boundary. The seed never

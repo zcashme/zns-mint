@@ -38,10 +38,11 @@ pub mod treasury;
 
 pub use treasury::{FundingSelection, SpendableNote, Treasury, TreasuryConfig, TreasuryError};
 
-/// Temporary compatibility alias for treasury wallet state (used by the orchestrator
-/// for the hot treasury that funds mint fees). The actual implementation may live
-/// under a different name in treasury.rs; this lets the higher layers compile while
-/// the name is reconciled.
+/// Compatibility alias.
+///
+/// Most of the "NoteState owns the seam and the orchestrator drives sync"
+/// story is aspirational. In the current mint binary this is a dummy
+/// uninitialized value and the real sync path is disabled.
 pub type NoteState = treasury::Treasury;
 
 pub use actions::{
