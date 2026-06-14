@@ -8,8 +8,11 @@
 
 pub mod grpc;
 pub mod scanner;
+pub mod wallet_sync;
 
 pub use grpc::{GrpcClient, GrpcError};
 pub use scanner::{
     scan_incoming, scan_incoming_all, scan_mempool, IncomingNote, ScanError, ScannerConfig,
 };
+pub use wallet_sync::EphemeralCompactBlockCache;
+pub use grpc::connect;

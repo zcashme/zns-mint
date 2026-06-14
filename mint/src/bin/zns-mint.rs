@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use zns_registry::{
-    test_orchard_ivk, test_registry_address, scan_incoming_all, scan_mempool, FundingInput,
+    test_orchard_ivk, test_registry_address, test_sapling_ivk, scan_incoming_all, scan_mempool, FundingInput,
     GrpcClient, MintContext, NoteState, ProcessResult, Processor, Registry, ScannerConfig,
     Signer, SpendPolicy, Treasury, TreasuryConfig, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
 };
@@ -92,9 +92,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let store = Registry::new(&cfg.db_path)?;
     let scanner = cfg.scanner();
-    // Treasury note-state: a view-only WalletDb over the registry FVK. It owns
-    // scanning, witnesses, reorg rewind, and note selection for the spend side.
-    let mut notestate = NoteState::open(&cfg.wallet_db_path, &cfg.treasury_config()).await?;
+
+    // Treasury note-state is *passive* persistence (a separate WalletDb + orchard
+    // witnesses for the registry's own funds). The orchestrator here is
+    // responsible for driving sync and one-time bootstrap. NoteState provides
+    // `wallet_db_mut()` as the seam and `select_funding` for note picking.
+    let treasury_cfg = cfg.treasury_config();
+    let mut notestate = match NoteState::open(&cfg.wallet_db_path, &treasury_cfg) {
+        Ok(ns) => ns,
+        Err(zns_registry::TreasuryError::Uninitialized(_)) => {
+            // One-time bootstrap: fetch the tree state just before our birthday
+            // and initialize the view-only account. This is orchestrator work,
+            // not something the state object does for itself.
+            let prior = treasury_cfg.birthday.max(2) - 1;
+            let mut client = zns_registry::connect(&cfg.lwd_url).await?;
+            let treestate = client
+                .get_tree_state(zcash_client_backend::proto::service::BlockId {
+                    height: prior as u64,
+                    hash: vec![],
+                })
+                .await
+                .map_err(|source| zns_registry::RegistryError::Config(format!(
+                    "get_tree_state for treasury birthday: {source}"
+                )))?
+                .into_inner();
+
+            let birthday = zcash_client_backend::data_api::AccountBirthday::from_treestate(
+                treestate, None,
+            )
+            .map_err(|e| zns_registry::RegistryError::Config(format!(
+                "decoding treasury birthday"
+            )))?;
+
+            NoteState::initialize(&cfg.wallet_db_path, &treasury_cfg, birthday)?
+        }
+        Err(e) => return Err(e.into()),
+    };
     let grpc = GrpcClient::new(&cfg.lwd_url);
     // The policy-gated signing authority — the only holder of key material on
     // the mint path. The daemon proposes intent; the signer authors and signs.
@@ -206,15 +239,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => tracing::warn!("mempool scan failed: {e:#}"),
         }
 
-        // Bring the treasury wallet to the tip and pick a note to self-fund
-        // fees, with its witness anchored a few blocks back (well
-        // confirmed). Runs every tick — independent of mint activity —
-        // because the sweep check below needs a current hot balance.
+        // Bring the treasury wallet to the tip (orchestrator drives this) and
+        // pick a note to self-fund fees + its witness. The NoteState is passive;
+        // we use wallet_db_mut() to give sync::run access to the WalletDb.
         let mut ctx = cfg.mint_context(tip, signer.clone());
-        if let Err(e) = notestate.sync().await {
-            tracing::warn!("treasury sync failed: {e:#}");
-        } else {
-            match notestate.select_funding(FUNDING_MIN_ZAT, ANCHOR_CONFIRMATIONS) {
+
+        // Ephemeral cache for this sync round (progress is in the WalletDb).
+        let mut cache = zns_registry::EphemeralCompactBlockCache::default();  // re-exported via chain
+
+        // Drive the sync from the orchestrator. On connect failure we still
+        // attempt selection (we may have a usable state from a previous tick).
+        match zns_registry::connect(&cfg.lwd_url).await {
+            Ok(mut client) => {
+                if let Err(e) = zcash_client_backend::sync::run(
+                    &mut client,
+                    &cfg.network,
+                    &mut cache,
+                    notestate.wallet_db_mut(),
+                    1_000,
+                )
+                .await
+                {
+                    tracing::warn!("treasury sync failed: {e:#}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("treasury lwd connect failed: {e:#}");
+            }
+        }
+
+        match notestate.select_funding(FUNDING_MIN_ZAT, ANCHOR_CONFIRMATIONS) {
                 Ok(selection) => {
                     ctx.hot_balance_zat = selection.spendable_total_zat;
                     status.write().await.spendable_zat = selection.spendable_total_zat;
@@ -242,7 +296,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(e) => tracing::warn!("funding selection failed: {e:#}"),
             }
-        }
 
         // Sweep check: if the hot balance is over the high watermark, drain
         // this poll's selected note to cold before anything else can spend
@@ -363,6 +416,10 @@ impl DaemonConfig {
     fn scanner(&self) -> ScannerConfig {
         ScannerConfig {
             registry_ivk: test_orchard_ivk(),
+            // Internal Sapling IVK for trial-decrypting ZNS memos sent via Sapling
+            // (to the registry's unadvertised Sapling address derived from the same
+            // seed). The public "address" and "viewkey" commands remain Orchard-only.
+            sapling_ivk: Some(test_sapling_ivk()),
             network: self.network,
             birthday: self.birthday,
             lwd_url: self.lwd_url.clone(),
@@ -390,7 +447,6 @@ impl DaemonConfig {
             registry_fvk: test_signer.fvk().clone(),
             network: self.network,
             birthday: self.birthday,
-            lwd_url: self.lwd_url.clone(),
         }
     }
 

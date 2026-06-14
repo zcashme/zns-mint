@@ -1,26 +1,18 @@
 //! Treasury note-state: the registry's wallet.
 
-use std::collections::BTreeMap;
 use std::num::NonZeroU32;
-use std::ops::Range;
 use std::path::Path;
-use std::sync::Mutex;
 
-use async_trait::async_trait;
 use orchard::tree::{Anchor, MerklePath};
 use rand::rngs::OsRng;
 use thiserror::Error;
 use zcash_address::unified::{Encoding as _, Fvk, Ufvk};
 use zcash_client_backend::{
     data_api::{
-        chain::{error as chain_error, BlockCache, BlockSource},
-        scanning::ScanRange,
         wallet::ConfirmationsPolicy,
-        Account as _, AccountBirthday, AccountPurpose, BirthdayError, InputSource as _,
+        Account as _, AccountBirthday, AccountPurpose, InputSource as _,
         TargetValue, WalletCommitmentTrees as _, WalletRead as _, WalletWrite as _,
     },
-    proto::{compact_formats::CompactBlock, service::BlockId},
-    sync,
 };
 use zcash_client_sqlite::{util::SystemClock, wallet::init::init_wallet_db, AccountUuid, WalletDb};
 use zcash_keys::keys::UnifiedFullViewingKey;
@@ -29,9 +21,12 @@ use zcash_protocol::{
     value::Zatoshis,
     ShieldedProtocol,
 };
-use zns_chain::GrpcError;
 
 /// Configuration for the registry's treasury note-state.
+///
+/// This is *purely* the parameters needed to open (or create) the view-only
+/// WalletDb for the registry's own funds. Transport / syncing is the
+/// orchestrator's responsibility — do not put lwd URLs or clients here.
 pub struct TreasuryConfig {
     /// The registry's Orchard Full Viewing Key (`addr_reg`), including the
     /// nullifier-deriving key — needed to track which of the wallet's notes
@@ -42,17 +37,12 @@ pub struct TreasuryConfig {
     pub network: Network,
     /// Block height to import the account at (the key's "birthday").
     pub birthday: u32,
-    /// Lightwalletd URL, e.g. `"http://127.0.0.1:9067"` or `"https://zec.rocks:443"`.
-    pub lwd_url: String,
 }
 
 /// Errors operating the registry's treasury note-state (the `WalletDb` over
 /// `addr_reg`'s view-only account).
 #[derive(Debug, Error)]
 pub enum TreasuryError {
-    #[error(transparent)]
-    Grpc(#[from] GrpcError),
-
     #[error("opening wallet database: {0}")]
     Open(#[from] rusqlite::Error),
 
@@ -68,14 +58,11 @@ pub enum TreasuryError {
         shardtree::error::ShardTreeError<zcash_client_sqlite::wallet::commitment_tree::Error>,
     ),
 
-    #[error("wallet sync: {0}")]
-    Sync(String),
-
-    #[error("decoding account birthday height: {0}")]
-    BirthdayHeight(#[from] std::num::TryFromIntError),
-
-    #[error("decoding account birthday tree state: {0}")]
-    BirthdayDecode(#[from] std::io::Error),
+    /// The WalletDb exists but has no imported account for the registry FVK.
+    /// The orchestrator must perform one-time bootstrap (fetch tree state for
+    /// the birthday using chain helpers, then call `NoteState::initialize`).
+    #[error("treasury wallet uninitialized: {0}")]
+    Uninitialized(String),
 
     #[error("invalid funding floor: {0}")]
     Balance(#[from] zcash_protocol::value::BalanceError),
@@ -92,9 +79,6 @@ pub enum TreasuryError {
     #[error("no witness for note at position {0:?}")]
     MissingWitness(incrementalmerkletree::Position),
 }
-
-/// Compact blocks per `sync::run` download/scan batch.
-const SYNC_BATCH_SIZE: u32 = 1_000;
 
 /// A registry-owned Orchard note that can fund a mint, with its spend witness.
 pub struct SpendableNote {
@@ -119,18 +103,29 @@ pub struct FundingSelection {
 }
 
 /// The registry's note-state: a view-only `WalletDb` over the registry FVK.
+///
+/// This object owns the persisted treasury (spendable notes + orchard witnesses).
+/// It does **not** perform chain sync. The orchestrator (main loop / sync
+/// coordinator) is responsible for driving `zcash_client_backend::sync::run`
+/// against `wallet_db_mut()` and keeping the view up to date before calling
+/// `select_funding`.
 pub struct NoteState {
     db: WalletDb<rusqlite::Connection, Network, SystemClock, OsRng>,
-    cache: MemBlockCache,
     network: Network,
-    lwd_url: String,
     account: AccountUuid,
 }
 
 impl NoteState {
-    /// Open (or create) the wallet database at `wallet_db` and ensure the
-    /// registry account exists, imported view-only at the configured birthday.
-    pub async fn open(
+    /// Open the wallet database at `wallet_db`.
+    ///
+    /// If the registry account does not exist yet, this will fail with
+    /// `TreasuryError::Uninitialized`. The orchestrator is responsible for
+    /// the one-time bootstrap (fetching the tree state for the birthday and
+    /// calling a separate import helper, or constructing with a birthday).
+    ///
+    /// Normal operation (account already imported) is synchronous and performs
+    /// no network I/O.
+    pub fn open(
         wallet_db: impl AsRef<Path>,
         config: &TreasuryConfig,
     ) -> Result<Self, TreasuryError> {
@@ -140,47 +135,78 @@ impl NoteState {
         let account = match db.get_account_ids()?.first() {
             Some(id) => *id,
             None => {
-                let birthday = birthday(config).await?;
-                // The only stable public UFVK constructor is the ZIP 316
-                // container parse; the from-parts constructors are test- or
-                // frost-gated.
-                let ufvk =
-                    Ufvk::try_from_items(vec![Fvk::Orchard(config.registry_fvk.to_bytes())])?;
-                let ufvk = UnifiedFullViewingKey::parse(&ufvk)?;
-                db.import_account_ufvk(
-                    "zns-registry",
-                    &ufvk,
-                    &birthday,
-                    AccountPurpose::ViewOnly,
-                    None,
-                )?
-                .id()
+                // First run / uninitialized treasury wallet.
+                // The orchestrator must have supplied a pre-fetched AccountBirthday
+                // (via chain helper that talks to lightwalletd get_tree_state).
+                // We no longer do network I/O inside the "state" object.
+                return Err(TreasuryError::Uninitialized(
+                    "treasury wallet has no account — caller must supply AccountBirthday for initial import (see orchestrator bootstrap)".into(),
+                ));
             }
         };
 
         Ok(NoteState {
             db,
-            cache: MemBlockCache::default(),
             network: config.network,
-            lwd_url: config.lwd_url.clone(),
             account,
         })
     }
 
-    /// Bring the wallet to the chain tip: download new compact blocks from
-    /// lightwalletd and scan them. Incremental — a quiet poll is one round
-    /// trip — and it is also where reorg rewind happens.
-    pub async fn sync(&mut self) -> Result<(), TreasuryError> {
-        let mut client = zns_chain::grpc::connect(&self.lwd_url).await?;
-        sync::run(
-            &mut client,
-            &self.network,
-            &self.cache,
-            &mut self.db,
-            SYNC_BATCH_SIZE,
-        )
-        .await
-        .map_err(|e| TreasuryError::Sync(e.to_string()))
+    /// One-time initialization: create the view-only account in the WalletDb
+    /// using a pre-fetched `AccountBirthday`.
+    ///
+    /// The caller (orchestrator) is responsible for obtaining the `AccountBirthday`
+    /// by talking to lightwalletd (typically one `get_tree_state` call at the
+    /// height just before `config.birthday`). This method performs no I/O.
+    ///
+    /// After calling this, subsequent `open` calls on the same path will succeed.
+    pub fn initialize(
+        wallet_db: impl AsRef<Path>,
+        config: &TreasuryConfig,
+        birthday: AccountBirthday,
+    ) -> Result<Self, TreasuryError> {
+        let mut db = WalletDb::for_path(wallet_db, config.network, SystemClock, OsRng)?;
+        init_wallet_db(&mut db, None).map_err(|e| TreasuryError::Init(e.to_string()))?;
+
+        let account = if let Some(&id) = db.get_account_ids()?.first() {
+            // Already present — treat as success (idempotent bootstrap).
+            id
+        } else {
+            // The only stable public UFVK constructor is the ZIP 316 container parse.
+            let ufvk =
+                Ufvk::try_from_items(vec![Fvk::Orchard(config.registry_fvk.to_bytes())])?;
+            let ufvk = UnifiedFullViewingKey::parse(&ufvk)?;
+
+            db.import_account_ufvk(
+                "zns-registry",
+                &ufvk,
+                &birthday,
+                AccountPurpose::ViewOnly,
+                None,
+            )?
+            .id()
+        };
+
+        Ok(NoteState {
+            db,
+            network: config.network,
+            account,
+        })
+    }
+
+    /// Escape hatch for the orchestrator to drive synchronization.
+    ///
+    /// Returns a mutable handle to the underlying `WalletDb` so that an
+    /// external sync driver (e.g. `zcash_client_backend::sync::run` called
+    /// from the main poll loop or a dedicated coordinator) can feed it
+    /// compact blocks and advance the scan state + witnesses.
+    ///
+    /// `state` does **not** own clients, caches, or the sync loop. This is
+    /// the explicit seam.
+    pub fn wallet_db_mut(
+        &mut self,
+    ) -> &mut WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> {
+        &mut self.db
     }
 
     /// Find a spendable registry note worth at least `min_value_zat` and build
@@ -258,109 +284,5 @@ impl NoteState {
             }),
             spendable_total_zat,
         })
-    }
-}
-
-/// Fetch the tree state just below the configured birthday and turn it into
-/// the wallet's [`AccountBirthday`]. The birthday is the height *after* the
-/// anchoring tree state, so it floors at 2 — fund the registry above that.
-async fn birthday(config: &TreasuryConfig) -> Result<AccountBirthday, TreasuryError> {
-    let prior = config.birthday.max(2) - 1;
-    let mut client = zns_chain::grpc::connect(&config.lwd_url).await?;
-    let treestate = client
-        .get_tree_state(BlockId {
-            height: prior as u64,
-            hash: vec![],
-        })
-        .await
-        .map_err(|source| GrpcError::Rpc {
-            call: "get_tree_state",
-            source,
-        })?
-        .into_inner();
-    AccountBirthday::from_treestate(treestate, None).map_err(|e| match e {
-        BirthdayError::HeightInvalid(e) => TreasuryError::BirthdayHeight(e),
-        BirthdayError::Decode(e) => TreasuryError::BirthdayDecode(e),
-    })
-}
-
-/// In-memory compact-block cache for [`sync::run`]. Blocks live only between
-/// download and scan — the wallet db records scan progress, so nothing here
-/// needs to survive a restart.
-#[derive(Default)]
-struct MemBlockCache(Mutex<BTreeMap<u64, CompactBlock>>);
-
-fn range_bounds(range: &ScanRange) -> Range<u64> {
-    u64::from(u32::from(range.block_range().start))..u64::from(u32::from(range.block_range().end))
-}
-
-impl BlockSource for MemBlockCache {
-    type Error = std::convert::Infallible;
-
-    fn with_blocks<F, WalletErrT>(
-        &self,
-        from_height: Option<zcash_protocol::consensus::BlockHeight>,
-        limit: Option<usize>,
-        mut with_block: F,
-    ) -> Result<(), chain_error::Error<WalletErrT, Self::Error>>
-    where
-        F: FnMut(CompactBlock) -> Result<(), chain_error::Error<WalletErrT, Self::Error>>,
-    {
-        let blocks = self.0.lock().expect("block cache lock");
-        let from = from_height.map(|h| u64::from(u32::from(h))).unwrap_or(0);
-        for block in blocks
-            .range(from..)
-            .map(|(_, b)| b.clone())
-            .take(limit.unwrap_or(usize::MAX))
-        {
-            with_block(block)?;
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl BlockCache for MemBlockCache {
-    fn get_tip_height(
-        &self,
-        range: Option<&ScanRange>,
-    ) -> Result<Option<zcash_protocol::consensus::BlockHeight>, Self::Error> {
-        let blocks = self.0.lock().expect("block cache lock");
-        let tip = match range {
-            Some(range) => blocks
-                .range(range_bounds(range))
-                .next_back()
-                .map(|(h, _)| *h),
-            None => blocks.keys().next_back().copied(),
-        };
-        Ok(tip.map(|h| zcash_protocol::consensus::BlockHeight::from_u32(h as u32)))
-    }
-
-    async fn read(&self, range: &ScanRange) -> Result<Vec<CompactBlock>, Self::Error> {
-        let blocks = self.0.lock().expect("block cache lock");
-        Ok(blocks
-            .range(range_bounds(range))
-            .map(|(_, b)| b.clone())
-            .collect())
-    }
-
-    async fn insert(&self, compact_blocks: Vec<CompactBlock>) -> Result<(), Self::Error> {
-        let mut blocks = self.0.lock().expect("block cache lock");
-        for block in compact_blocks {
-            blocks.insert(block.height, block);
-        }
-        Ok(())
-    }
-
-    async fn delete(&self, range: ScanRange) -> Result<(), Self::Error> {
-        let mut blocks = self.0.lock().expect("block cache lock");
-        let keys: Vec<u64> = blocks
-            .range(range_bounds(&range))
-            .map(|(h, _)| *h)
-            .collect();
-        for key in keys {
-            blocks.remove(&key);
-        }
-        Ok(())
     }
 }

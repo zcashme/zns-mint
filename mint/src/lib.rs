@@ -6,16 +6,16 @@
 // ---------------------------------------------------------------------------
 
 pub use zns_chain::{
-    scan_incoming, scan_incoming_all, scan_mempool, GrpcClient, GrpcError, IncomingNote,
-    ScannerConfig,
+    connect, scan_incoming, scan_incoming_all, scan_mempool, EphemeralCompactBlockCache,
+    GrpcClient, GrpcError, IncomingNote, ScannerConfig,
 };
 pub use zns_core::{memo, parse_memo, Action, MemoError, ParsedMemo, ZERO_PREV_RCM};
 pub use zns_mint::{
-    build_name_note, test_orchard_ivk, test_registry_address, FundingInput, MintParams, MintResult,
+    build_name_note, test_orchard_ivk, test_registry_address, test_sapling_ivk, FundingInput, MintParams, MintResult,
     RequestId, Signer, SpendPolicy,
 };
 pub use zns_state::{
-    FundingSelection, MintedAction, Name, NoteState, SpendableNote, TreasuryConfig,
+    FundingSelection, MintedAction, Name, NoteState, SpendableNote, TreasuryConfig, TreasuryError,
 };
 
 // ---------------------------------------------------------------------------
@@ -103,6 +103,7 @@ mod tests {
             value_zat: MIN_CLAIM_FEE_ZAT,
             is_received: true,
             confirmed: true,
+            pool: zcash_protocol::ShieldedProtocol::Orchard,
         };
 
         let name_note = format!("ZNS:claim:alice:u1xxx:{}", "a".repeat(64));
@@ -148,6 +149,7 @@ mod tests {
             value_zat: 1,
             is_received: true,
             confirmed: true,
+            pool: zcash_protocol::ShieldedProtocol::Orchard,
         };
 
         let results = processor.process_notes(&[note], &ctx, &grpc).await;
@@ -175,6 +177,7 @@ mod tests {
             value_zat: MIN_CLAIM_FEE_ZAT,
             is_received: false,
             confirmed: true,
+            pool: zcash_protocol::ShieldedProtocol::Orchard,
         };
 
         let results = processor.process_notes(&[note], &ctx, &grpc).await;

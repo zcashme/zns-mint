@@ -10,14 +10,13 @@ publish = false
 [dependencies]
 zns-core = { workspace = true }
 zns-auth = { workspace = true }   # PendingChallenge (persisted here)
-# treasury: lightwalletd transport for sync::run (grpc::connect, GrpcError).
-zns-chain = { workspace = true }
+# treasury note-state is a separate WalletDb (plus its orchard shardtree) for the
+# registry's own spendable notes ("treasury float") used to self-fund mint fees
+# and OTP relays. It is *passive* — the orchestrator drives scanning and
+# bootstrap using the public `wallet_db_mut()` escape hatch + `initialize()`.
+# No lwd URLs, gRPC clients, or `sync::run` live in this crate.
 rusqlite = { workspace = true }
 thiserror = { workspace = true }
-# treasury note-state: WalletDb owns scanning, shardtree witnesses, reorg
-# rewind, and note selection; `sync::run` drives it. zcash_keys/zcash_address
-# wrap the registry FVK as the UFVK account import wants; async-trait is the
-# BlockCache contract.
 orchard = { workspace = true, features = ["unsafe-zns"] }
 zcash_protocol = { workspace = true }
 zcash_client_backend = { workspace = true }

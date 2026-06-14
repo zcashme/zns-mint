@@ -22,8 +22,14 @@
 //!
 //! [`treasury`] is the registry's *other* SQLite store — a `zcash_client_sqlite`
 //! `WalletDb` tracking the registry's own spendable notes (the treasury float)
-//! for self-funding mint fees. A separate database from `db`/`actions`, but the
-//! same kind of thing: persisted state this crate owns, not chain I/O.
+//! for self-funding mint fees. A separate database from `db`/`actions`.
+//!
+//! IMPORTANT: this module is *passive persistence only*. It opens the WalletDb,
+//! performs note selection + witness extraction, and provides an escape hatch
+//! (`NoteState::wallet_db_mut`) for an external driver. It does **not** own
+//! lightwalletd clients, perform sync, implement BlockCache, or contain any
+//! transport URLs. The main orchestrator (or a thin coordinator in `chain`)
+//! drives `sync::run` and bootstrap.
 
 pub mod actions;
 pub mod db;
