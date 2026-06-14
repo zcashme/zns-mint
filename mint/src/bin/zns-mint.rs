@@ -10,11 +10,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use orchard::keys::{FullViewingKey, Scope, SpendingKey};
 use zns_registry::{
-    scan_incoming_all, scan_mempool, FundingInput, GrpcClient, MintContext, NoteState,
-    ProcessResult, Registry, ScannerConfig, Signer, SpendPolicy, Treasury, TreasuryConfig,
-    FUNDING_MIN_ZAT, MINT_FEE_ZAT,
+    dev_orchard_ivk, dev_registry_address, dev_registry_uivk, scan_incoming_all, scan_mempool,
+    FundingInput, GrpcClient, MintContext, NoteState, ProcessResult, Processor, Registry,
+    ScannerConfig, Signer, SpendPolicy, Treasury, TreasuryConfig, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
 };
 
 /// How often to poll lightwalletd for new blocks.
@@ -96,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let registry = Registry::new(&cfg.db_path, &cfg.lwd_url)?;
+    let store = Registry::new(&cfg.db_path)?;
     let scanner = cfg.scanner();
     // Treasury note-state: a view-only WalletDb over the registry FVK. It owns
     // scanning, witnesses, reorg rewind, and note selection for the spend side.
@@ -105,6 +104,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The policy-gated signing authority — the only holder of key material on
     // the mint path. The daemon proposes intent; the signer authors and signs.
     let signer = Arc::new(cfg.signer()?);
+
+    let processor = Processor::new(store.clone());
 
     tracing::info!(
         lwd = cfg.lwd_url,
@@ -120,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(zns_registry::rpc::serve(
         RPC_ADDR.to_string(),
         zns_registry::rpc::RpcContext {
-            registry: registry.clone(),
+            registry: store.clone(),
             status: status.clone(),
         },
     ));
@@ -151,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Detect and recover from chain reorganizations before we process any
         // new notes. A reorg rolls back processed_notes, name_events,
         // names (live tip), and mint_intents above the common ancestor.
-        match registry.handle_reorg(&grpc, &signer, tip).await {
+        match processor.handle_reorg(&grpc, &signer, tip).await {
             Ok(Some(reorg_height)) => {
                 tracing::warn!(
                     reorg_height,
@@ -166,7 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Resolve any mints a crash left between broadcast and persistence.
-        if let Err(e) = registry.reconcile_intents(&grpc, &signer, tip).await {
+        if let Err(e) = processor.reconcile_intents(&grpc, &signer, tip).await {
             tracing::error!("intent reconciliation failed: {e:#}");
             continue; // don't mint over an unresolved intent
         }
@@ -177,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue; // transient — retry on the next tick
             }
         };
-        let notes = registry.unsettled(notes).await;
+        let notes = store.unsettled(notes).await;
 
         // Monitor the mempool for unconfirmed ZNS notes. We deliberately act
         // only on `confirm` memos from the mempool — those are the OTP auth
@@ -296,7 +297,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        for result in registry.process_notes(&to_process, &ctx).await {
+        for result in processor.process_notes(&to_process, &ctx, &grpc).await {
             match result {
                 ProcessResult::Ok(outcome) => tracing::info!("{outcome:?}"),
                 ProcessResult::Skipped(why) => tracing::debug!("skipped ({why})"),
@@ -318,8 +319,6 @@ struct DaemonConfig {
     lwd_url: String,
     network: zcash_protocol::consensus::Network,
     birthday: u32,
-    /// 32-byte zip32 seed the registry Orchard key is derived from.
-    seed: [u8; 32],
 }
 
 impl DaemonConfig {
@@ -333,42 +332,19 @@ impl DaemonConfig {
         #[cfg(not(feature = "testnet"))]
         let network = zcash_protocol::consensus::Network::MainNetwork;
 
-        // TODO: load the seed from a secret store (zeroized) instead of a
-        // baked-in constant. A zero seed is deterministic — fine only for
-        // testing.
-        tracing::warn!("using a zero spend seed (testing only)");
-        let seed = [0u8; 32];
-
         Self {
             db_path: "zns-mint.sqlite".into(),
             wallet_db_path: "zns-wallet.sqlite".into(),
             lwd_url: "https://zec.rocks:443".into(),
             network,
             birthday: 0,
-            seed,
         }
-    }
-
-    /// Coin type for zip32 derivation: 133 mainnet, 1 testnet (SLIP-44).
-    fn coin_type(&self) -> u32 {
-        match self.network {
-            zcash_protocol::consensus::Network::MainNetwork => 133,
-            zcash_protocol::consensus::Network::TestNetwork => 1,
-        }
-    }
-
-    fn spend_key(&self) -> SpendingKey {
-        SpendingKey::from_zip32_seed(&self.seed, self.coin_type(), zip32::AccountId::ZERO)
-            .expect("valid zip32 seed")
-    }
-
-    fn registry_fvk(&self) -> FullViewingKey {
-        FullViewingKey::from(&self.spend_key())
     }
 
     /// The registry's Orchard-only Unified Address (`addr_reg`) for this network.
+    /// Delegates to the signer crate boundary so the host never sees spend seed material.
     fn registry_ua(&self) -> Result<String, zns_registry::RegistryError> {
-        let addr = self.registry_fvk().address_at(0u32, Scope::External);
+        let addr = dev_registry_address();
         let ua = zcash_keys::address::UnifiedAddress::from_receivers(Some(addr), None, None)
             .ok_or_else(|| {
                 zns_registry::RegistryError::Config("could not build a Unified Address".into())
@@ -377,31 +353,40 @@ impl DaemonConfig {
     }
 
     /// addr_reg's Unified Incoming Viewing Key — the published key
-    /// (`DESIGN.md §7`): resolvers scan with it; it cannot spend.
+    /// (the one resolvers use to scan). Delegates to the signer crate.
     fn registry_uivk(&self) -> Result<String, zns_registry::RegistryError> {
-        use zcash_address::unified::{Encoding, Ivk, Uivk};
-        use zcash_protocol::consensus::Parameters as _;
-
-        let ivk = self.registry_fvk().to_ivk(Scope::External).to_bytes();
-        let uivk = Uivk::try_from_items(vec![Ivk::Orchard(ivk)])
-            .map_err(|e| zns_registry::RegistryError::Config(format!("building UIVK: {e:?}")))?;
-        Ok(uivk.encode(&self.network.network_type()))
+        dev_registry_uivk().map_err(|e| zns_registry::RegistryError::Config(format!("{e}")))
     }
 
     fn scanner(&self) -> ScannerConfig {
         ScannerConfig {
-            registry_ivk: self.registry_fvk().to_ivk(Scope::External),
+            registry_ivk: dev_orchard_ivk(),
             network: self.network,
             birthday: self.birthday,
             lwd_url: self.lwd_url.clone(),
         }
     }
 
-    /// Config for the registry's treasury wallet (`zns_state::NoteState`) —
-    /// holds the full FVK (with `nk`), unlike [`Self::scanner`].
+    /// Config for the registry's treasury wallet (`zns_state::NoteState`).
+    /// The FVK is obtained by asking a dev Signer (seed derivation stays inside
+    /// the signer crate).
     fn treasury_config(&self) -> TreasuryConfig {
+        // Temporary dev Signer just to extract the FVK. The real long-lived
+        // signer for signing is created later via the same boundary.
+        let dev_signer = Signer::new_dev(SpendPolicy {
+            registry_addr: dev_registry_address(),
+            cold_addr: dev_registry_address(),
+            max_fee_zat: MINT_FEE_ZAT,
+            target_float_zat: 0,
+            high_watermark_zat: u64::MAX,
+            low_watermark_zat: 0,
+            max_mints_per_window: u32::MAX,
+            max_swept_per_window_zat: 0,
+        })
+        .expect("dev signer for FVK");
+
         TreasuryConfig {
-            registry_fvk: self.registry_fvk(),
+            registry_fvk: dev_signer.fvk().clone(),
             network: self.network,
             birthday: self.birthday,
             lwd_url: self.lwd_url.clone(),
