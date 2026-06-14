@@ -25,11 +25,11 @@
 //! for self-funding mint fees. A separate database from `db`/`actions`.
 //!
 //! IMPORTANT: this module is *passive persistence only*. It opens the WalletDb,
-//! performs note selection + witness extraction, and provides an escape hatch
+//! performs note selection + witness extraction, and provides an explicit seam
 //! (`NoteState::wallet_db_mut`) for an external driver. It does **not** own
 //! lightwalletd clients, perform sync, implement BlockCache, or contain any
 //! transport URLs. The main orchestrator (or a thin coordinator in `chain`)
-//! drives `sync::run` and bootstrap.
+//! drives `sync::run` / `scan_cached_blocks` and bootstrap.
 
 pub mod actions;
 pub mod db;

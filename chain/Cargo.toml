@@ -28,7 +28,8 @@ http = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 # for EphemeralCompactBlockCache (the BlockCache/BlockSource contract used by
-# zcash_client_backend::sync::run when the orchestrator drives treasury sync)
+# zcash_client_backend::sync::run when the orchestrator drives treasury sync with
+# the passive NoteState / WalletDb seam)
 async-trait = { workspace = true }
 
 [lints]

@@ -168,26 +168,21 @@ impl Treasury {
     }
 
     /// One-time initialization: create the view-only account in the WalletDb
-    /// using a pre-fetched `AccountBirthday`. Also initializes the proper block cache DB.
+    /// using a pre-fetched `AccountBirthday`.
     ///
     /// The caller (orchestrator) is responsible for obtaining the `AccountBirthday`
     /// by talking to lightwalletd (typically one `get_tree_state` call at the
     /// height just before `config.birthday`). This method performs no I/O.
     ///
-    /// After calling this, subsequent `open` calls on the same paths will succeed.
+    /// After calling this, subsequent `open` calls on the same path will succeed.
     pub fn initialize(
         wallet_db_path: impl AsRef<Path>,
-        block_db_path: impl AsRef<Path>,
         config: &TreasuryConfig,
         birthday: AccountBirthday,
     ) -> Result<Self, TreasuryError> {
-        // Data DB
+        // Data DB (notes, trees, scan progress, witnesses)
         let mut data = WalletDb::for_path(wallet_db_path, config.network, SystemClock, OsRng)?;
         init_wallet_db(&mut data, None).map_err(|e| TreasuryError::Init(e.to_string()))?;
-
-        // Proper block cache DB
-        let block_cache = BlockDb::for_path(block_db_path)?;
-        init_cache_database(&block_cache).map_err(|e| TreasuryError::Init(e.to_string()))?;
 
         let account = if let Some(&id) = data.get_account_ids()?.first() {
             // Already present — treat as success (idempotent bootstrap).
@@ -210,21 +205,21 @@ impl Treasury {
 
         Ok(Treasury {
             data,
-            block_cache,
             network: config.network,
             account,
         })
     }
 
-    /// Drive synchronization using the library's sync helper.
+    /// Drive synchronization using the library's sync helper (convenience).
     ///
-    /// This is the proper entry point: the higher-level Treasury object owns
-    /// the data DB + block cache DB. The caller supplies a connected Lwd client
-    /// and the (ephemeral) BlockCache for the duration of the run. The block_cache
-    /// field is owned here as the start of using the library's proper cache shape
-    /// (zcash_client_sqlite::chain::BlockDb + init_cache_database).
+    /// The caller supplies a connected Lwd client and an (ephemeral) BlockCache
+    /// for the duration of the run. All durable state (notes, witnesses, scan
+    /// progress) lives in the owned WalletDb.
     ///
-    /// Follows the librustzcash pattern of an owning wallet object.
+    /// Most callers will prefer the passive seam:
+    /// `zcash_client_backend::sync::run(..., note_state.wallet_db_mut(), ...)`
+    /// so that the orchestrator fully owns transport, caching policy, and the
+    /// sync loop.
     pub async fn sync<ChT, CaT>(
         &mut self,
         client: &mut zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<ChT>,
@@ -238,11 +233,8 @@ impl Treasury {
         CaT: zcash_client_backend::data_api::chain::BlockCache,
         CaT::Error: std::error::Error + Send + Sync + 'static,
     {
-        // Note: we still delegate to the high-level run helper (the "stupid" convenience)
-        // inside the owned object. This is already a big improvement over leaking
-        // wallet_db_mut and calling run directly from the main poll loop.
-        // Future: drive with update_chain_tip + suggest_scan_ranges + scan_cached_blocks
-        // for more control, and wire the owned block_cache as persistent backing.
+        // Convenience wrapper. The orchestrator owns the cache (ephemeral is fine
+        // and recommended — see chain::wallet_sync::EphemeralCompactBlockCache).
         zcash_client_backend::sync::run(
             client,
             &self.network,
@@ -255,18 +247,30 @@ impl Treasury {
         Ok(())
     }
 
+    /// Explicit passive seam for the orchestrator to drive sync (or note selection)
+    /// without the Treasury object owning clients, caching policy, or the sync loop.
+    ///
+    /// Typical use:
+    /// ```ignore
+    /// zcash_client_backend::sync::run(
+    ///     &mut client,
+    ///     &network,
+    ///     &mut ephemeral_cache,
+    ///     note_state.wallet_db_mut(),
+    ///     1000,
+    /// ).await?;
+    /// ```
+    pub fn wallet_db_mut(
+        &mut self,
+    ) -> &mut WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> {
+        &mut self.data
+    }
+
     /// Find a spendable registry note worth at least `min_value_zat` and build
     /// its witness against the anchor `min_confirmations` blocks deep.
     ///
     /// Returns `note: None` (with the hot balance still reported) if the
     /// wallet has no sufficiently confirmed note worth the floor.
-    /// Access to the owned proper block cache DB (for future use in persistent
-    /// BlockCache implementation instead of pure ephemeral).
-    #[allow(dead_code)]
-    pub fn block_cache(&self) -> &BlockDb {
-        &self.block_cache
-    }
-
     pub fn select_funding(
         &mut self,
         min_value_zat: u64,

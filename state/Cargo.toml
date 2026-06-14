@@ -10,10 +10,11 @@ publish = false
 [dependencies]
 zns-core = { workspace = true }
 zns-auth = { workspace = true }   # PendingChallenge (persisted here)
-# treasury is a proper library-backed light client wallet (WalletDb data + BlockDb cache)
+# treasury is a library-backed light client wallet (WalletDb with Orchard shardtree)
 # for the registry's own spendable notes ("treasury float") used to self-fund mint fees.
-# The Treasury object owns the dbs and drives sync (clean async sync method).
-# Follows librustzcash higher-level ownership rather than passive raw DB + external mut seam.
+# The Treasury/NoteState object owns the WalletDb and exposes a passive seam
+# (wallet_db_mut) + select_funding. The orchestrator drives sync with an ephemeral
+# cache (see chain::wallet_sync::EphemeralCompactBlockCache).
 rusqlite = { workspace = true }
 thiserror = { workspace = true }
 orchard = { workspace = true, features = ["unsafe-zns"] }

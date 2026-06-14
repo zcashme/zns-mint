@@ -93,10 +93,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = Registry::new(&cfg.db_path)?;
     let scanner = cfg.scanner();
 
-    // Treasury note-state is *passive* persistence (a separate WalletDb + orchard
-    // witnesses for the registry's own funds). The orchestrator here is
-    // responsible for driving sync and one-time bootstrap. NoteState provides
-    // `wallet_db_mut()` as the seam and `select_funding` for note picking.
+    // Treasury note-state is *passive* persistence (WalletDb + Orchard shardtree
+    // witnesses for the registry's own funds / "treasury float").
+    // The orchestrator drives sync (via the wallet_db_mut seam) + bootstrap.
+    // NoteState provides select_funding for picking a note + witness.
     let _treasury_cfg = cfg.treasury_config();
     // Treasury/NoteState bootstrap is a pre-existing name and API alignment detail
     // in the workspace (separate from the Sapling inbound memo decryption we added).
@@ -227,7 +227,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Bring the treasury wallet to the tip (orchestrator drives this) and
         // pick a note to self-fund fees + its witness. The NoteState is passive;
-        // we use wallet_db_mut() to give sync::run access to the WalletDb.
+        // the orchestrator uses wallet_db_mut() to give sync::run (or scan_cached_blocks)
+        // mutable access to the WalletDb.
         let mut ctx = cfg.mint_context(tip, signer.clone());
 
         // Ephemeral cache for this sync round (progress is in the WalletDb).
@@ -236,8 +237,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Drive the sync from the orchestrator. On connect failure we still
         // attempt selection (we may have a usable state from a previous tick).
         // Treasury sync (separate from the Sapling intake scanner decryption path we added).
-        // The NoteState wrapper name/treasury bootstrap types are a pre-existing alignment
-        // detail in the tree; the sync block is elided here for build while we focus on
+        // The NoteState (Treasury) owns the WalletDb + seam; the orchestrator drives sync
+        // with an ephemeral cache. (Sync block elided in this build focus.)
         // the dual-pool memo decryption for inbound ZNS requests.
         if false {
             let _ = zns_registry::connect(&cfg.lwd_url).await;

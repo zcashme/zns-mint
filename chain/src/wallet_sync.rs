@@ -1,9 +1,10 @@
 //! Support for driving light client sync against a treasury (or other) WalletDb.
 //!
-//! The `state` crate is deliberately passive: it owns the WalletDb + selection
-//! logic and exposes `wallet_db_mut()` as an explicit seam. All responsibility
-//! for clients, polling, `sync::run`, and block caching lives in the
-//! orchestrator or here in the chain I/O crate.
+//! The `state` crate is deliberately passive: it owns the WalletDb (notes,
+//! shardtree witnesses, scan progress) and exposes `wallet_db_mut()` as an
+//! explicit seam. All responsibility for clients, polling, `sync::run` /
+//! `scan_cached_blocks`, and block caching (ephemeral is recommended) lives in
+//! the orchestrator or here in the chain I/O crate.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
