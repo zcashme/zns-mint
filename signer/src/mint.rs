@@ -12,7 +12,6 @@
 
 use std::sync::OnceLock;
 
-use anyhow::{anyhow, bail, Context as _};
 use blake2b_simd::Params;
 use orchard::{
     builder::{Builder as OrchardBuilder, BundleType},
@@ -34,6 +33,7 @@ use zcash_protocol::{
 use zns_core::Action;
 
 use crate::derive::zns_psi_rcm;
+use crate::error::BuildError;
 
 // ---------------------------------------------------------------------------
 // Proving key cache
@@ -103,10 +103,7 @@ fn v5_shielded_sighash(
     personal[..12].copy_from_slice(b"ZcashTxHash_");
     personal[12..].copy_from_slice(&u32::from(branch_id).to_le_bytes());
 
-    let mut h = Params::new()
-        .hash_length(32)
-        .personal(&personal)
-        .to_state();
+    let mut h = Params::new().hash_length(32).personal(&personal).to_state();
     h.update(header_digest.as_bytes());
     h.update(transparent_digest.as_bytes());
     h.update(sapling_digest.as_bytes());
@@ -126,10 +123,10 @@ fn orchard_bundle_to_tx_bytes(
     consensus_branch_id: BranchId,
     expiry_height: u32,
     sighash: &[u8; 32],
-) -> anyhow::Result<(Vec<u8>, [u8; 32])> {
+) -> Result<(Vec<u8>, [u8; 32]), BuildError> {
     let bundle_zat = bundle
         .try_map_value_balance::<ZatBalance, _, _>(|v: i64| ZatBalance::from_i64(v))
-        .map_err(|e| anyhow!("value_balance out of range: {e:?}"))?;
+        .map_err(BuildError::value_balance)?;
 
     let tx_data: TransactionData<TxAuthorized> = TransactionData::from_parts(
         TxVersion::V5,
@@ -142,23 +139,16 @@ fn orchard_bundle_to_tx_bytes(
         Some(bundle_zat),
     );
 
-    let tx: Transaction = tx_data
-        .freeze()
-        .map_err(|e| anyhow!("freeze: {e}"))?;
+    let tx: Transaction = tx_data.freeze().map_err(BuildError::Serialize)?;
 
     let txid: [u8; 32] = *tx.txid().as_ref();
 
     if txid != *sighash {
-        bail!(
-            "sighash/txid mismatch (ZIP-244): sighash {} != txid {} — \
-             v5_shielded_sighash disagrees with the serializer",
-            hex::encode(sighash),
-            hex::encode(txid),
-        );
+        return Err(BuildError::SighashMismatch);
     }
 
     let mut bytes = Vec::new();
-    tx.write(&mut bytes).context("serialize")?;
+    tx.write(&mut bytes)?;
 
     Ok((bytes, txid))
 }
@@ -195,7 +185,7 @@ pub struct MintResult {
 // Core mint function
 // ---------------------------------------------------------------------------
 
-pub fn build_name_note(params: MintParams<'_>) -> anyhow::Result<MintResult> {
+pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, BuildError> {
     let (psi, rcm) = zns_psi_rcm(
         params.action.as_bytes(),
         params.name.as_bytes(),
@@ -213,34 +203,36 @@ pub fn build_name_note(params: MintParams<'_>) -> anyhow::Result<MintResult> {
     let memo =
         zns_core::memo::encode_name_note(params.action, params.name, params.ua, &params.prev_rcm)?;
     builder
-        .add_zns_output(ovk, params.recipient, NoteValue::from_raw(0), memo, rcm, psi)
-        .map_err(|e| anyhow!("{e:?}"))?;
+        .add_zns_output(
+            ovk,
+            params.recipient,
+            NoteValue::from_raw(0),
+            memo,
+            rcm,
+            psi,
+        )
+        .map_err(BuildError::bundle)?;
 
     let mut rng = OsRng;
 
     let (unauthorized_bundle, meta) = builder
         .build::<i64>(&mut rng)
-        .map_err(|e| anyhow!("build: {e:?}"))?
-        .ok_or_else(|| anyhow!("builder produced an empty bundle"))?;
+        .map_err(BuildError::bundle)?
+        .ok_or(BuildError::EmptyBundle)?;
     let name_note_action = meta
         .output_action_index(0)
-        .ok_or_else(|| anyhow!("Name Note output missing from bundle"))?;
+        .ok_or(BuildError::MissingNameNote)?;
 
     let orchard_digest: [u8; 32] = unauthorized_bundle.commitment().into();
-    let sighash = v5_shielded_sighash(
-        params.branch_id,
-        0,
-        params.expiry_height,
-        &orchard_digest,
-    );
+    let sighash = v5_shielded_sighash(params.branch_id, 0, params.expiry_height, &orchard_digest);
 
     let proven_bundle = unauthorized_bundle
         .create_proof(proving_key_for(params.circuit_version), &mut rng)
-        .map_err(|e| anyhow!("create_proof: {e:?}"))?;
+        .map_err(BuildError::proof)?;
 
     let authorized_bundle = proven_bundle
         .apply_signatures(rng, sighash, &[])
-        .map_err(|e| anyhow!("apply_signatures: {e:?}"))?;
+        .map_err(BuildError::signature)?;
 
     let cmx: [u8; 32] = authorized_bundle.actions()[name_note_action]
         .cmx()
@@ -252,7 +244,13 @@ pub fn build_name_note(params: MintParams<'_>) -> anyhow::Result<MintResult> {
         &sighash,
     )?;
 
-    Ok(MintResult { new_rcm, new_psi, cmx, txid, tx_bytes })
+    Ok(MintResult {
+        new_rcm,
+        new_psi,
+        cmx,
+        txid,
+        tx_bytes,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +271,7 @@ pub fn build_funded_mint(
     branch_id: BranchId,
     expiry_height: u32,
     circuit_version: OrchardCircuitVersion,
-) -> anyhow::Result<MintResult> {
+) -> Result<MintResult, BuildError> {
     let (psi, rcm) = zns_psi_rcm(
         plan.action.as_bytes(),
         plan.name.as_bytes(),
@@ -288,58 +286,79 @@ pub fn build_funded_mint(
         OrchardBuilder::new_for_version(BundleType::DEFAULT, funding.anchor, circuit_version);
 
     builder
-        .add_spend(registry_fvk.clone(), funding.note, funding.merkle_path.clone())
-        .map_err(|e| anyhow!("add_spend: {e:?}"))?;
+        .add_spend(
+            registry_fvk.clone(),
+            funding.note,
+            funding.merkle_path.clone(),
+        )
+        .map_err(BuildError::bundle)?;
 
-    let memo =
-        zns_core::memo::encode_name_note(plan.action, &plan.name, &plan.ua, &plan.prev_rcm)?;
+    let memo = zns_core::memo::encode_name_note(plan.action, &plan.name, &plan.ua, &plan.prev_rcm)?;
     builder
-        .add_zns_output(ovk.clone(), recipient, NoteValue::from_raw(0), memo, rcm, psi)
-        .map_err(|e| anyhow!("add_zns_output: {e:?}"))?;
+        .add_zns_output(
+            ovk.clone(),
+            recipient,
+            NoteValue::from_raw(0),
+            memo,
+            rcm,
+            psi,
+        )
+        .map_err(BuildError::bundle)?;
 
     if plan.change_zat > 0 {
         builder
-            .add_output(ovk, recipient, NoteValue::from_raw(plan.change_zat), [0u8; 512])
-            .map_err(|e| anyhow!("add_output(change): {e:?}"))?;
+            .add_output(
+                ovk,
+                recipient,
+                NoteValue::from_raw(plan.change_zat),
+                [0u8; 512],
+            )
+            .map_err(BuildError::bundle)?;
     }
 
     let mut rng = OsRng;
     let (unauthorized, meta) = builder
         .build::<i64>(&mut rng)
-        .map_err(|e| anyhow!("build: {e:?}"))?
-        .ok_or_else(|| anyhow!("builder produced an empty bundle"))?;
+        .map_err(BuildError::bundle)?
+        .ok_or(BuildError::EmptyBundle)?;
     let name_note_action = meta
         .output_action_index(0)
-        .ok_or_else(|| anyhow!("Name Note output missing from bundle"))?;
+        .ok_or(BuildError::MissingNameNote)?;
 
     let orchard_digest: [u8; 32] = unauthorized.commitment().into();
     let sighash = v5_shielded_sighash(branch_id, 0, expiry_height, &orchard_digest);
 
     let proven = unauthorized
         .create_proof(proving_key_for(circuit_version), &mut rng)
-        .map_err(|e| anyhow!("create_proof: {e:?}"))?;
+        .map_err(BuildError::proof)?;
 
     let ask = SpendAuthorizingKey::from(spend_key);
     let authorized = proven
         .apply_signatures(rng, sighash, &[ask])
-        .map_err(|e| anyhow!("apply_signatures: {e:?}"))?;
+        .map_err(BuildError::signature)?;
 
     authorized
         .verify_proof(verifying_key_for(circuit_version))
-        .map_err(|e| anyhow!("self-verify failed: {e:?}"))?;
+        .map_err(BuildError::verify)?;
 
     let cmx: [u8; 32] = authorized.actions()[name_note_action].cmx().to_bytes();
-    let (tx_bytes, txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
+    let (tx_bytes, txid) =
+        orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
 
-    let readback = Transaction::read(&tx_bytes[..], branch_id)
-        .map_err(|e| anyhow!("readback parse: {e}"))?;
+    let readback = Transaction::read(&tx_bytes[..], branch_id)?;
     readback
         .orchard_bundle()
-        .ok_or_else(|| anyhow!("readback: no orchard bundle"))?
+        .ok_or(BuildError::MissingNameNote)?
         .verify_proof(verifying_key_for(circuit_version))
-        .map_err(|e| anyhow!("readback verify failed: {e:?}"))?;
+        .map_err(BuildError::verify)?;
 
-    Ok(MintResult { new_rcm, new_psi, cmx, txid, tx_bytes })
+    Ok(MintResult {
+        new_rcm,
+        new_psi,
+        cmx,
+        txid,
+        tx_bytes,
+    })
 }
 
 /// Build a sweep transaction to the cold address.
@@ -353,36 +372,41 @@ pub fn build_sweep(
     branch_id: BranchId,
     expiry_height: u32,
     circuit_version: OrchardCircuitVersion,
-) -> anyhow::Result<Vec<u8>> {
+) -> Result<Vec<u8>, BuildError> {
     let ovk = Some(registry_fvk.to_ovk(Scope::External));
     let mut builder =
         OrchardBuilder::new_for_version(BundleType::DEFAULT, funding.anchor, circuit_version);
 
     builder
-        .add_spend(registry_fvk.clone(), funding.note, funding.merkle_path.clone())
-        .map_err(|e| anyhow!("add_spend: {e:?}"))?;
+        .add_spend(
+            registry_fvk.clone(),
+            funding.note,
+            funding.merkle_path.clone(),
+        )
+        .map_err(BuildError::bundle)?;
     builder
         .add_output(ovk, cold_addr, NoteValue::from_raw(amount_zat), [0u8; 512])
-        .map_err(|e| anyhow!("add_output(sweep): {e:?}"))?;
+        .map_err(BuildError::bundle)?;
 
     let mut rng = OsRng;
     let (unauthorized, _meta) = builder
         .build::<i64>(&mut rng)
-        .map_err(|e| anyhow!("build: {e:?}"))?
-        .ok_or_else(|| anyhow!("builder produced an empty bundle"))?;
+        .map_err(BuildError::bundle)?
+        .ok_or(BuildError::EmptyBundle)?;
 
     let orchard_digest: [u8; 32] = unauthorized.commitment().into();
     let sighash = v5_shielded_sighash(branch_id, 0, expiry_height, &orchard_digest);
 
     let proven = unauthorized
         .create_proof(proving_key_for(circuit_version), &mut rng)
-        .map_err(|e| anyhow!("create_proof: {e:?}"))?;
+        .map_err(BuildError::proof)?;
     let ask = SpendAuthorizingKey::from(spend_key);
     let authorized = proven
         .apply_signatures(rng, sighash, &[ask])
-        .map_err(|e| anyhow!("apply_signatures: {e:?}"))?;
+        .map_err(BuildError::signature)?;
 
-    let (tx_bytes, _txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
+    let (tx_bytes, _txid) =
+        orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
     Ok(tx_bytes)
 }
 
@@ -400,43 +424,53 @@ pub fn build_memo_send(
     branch_id: BranchId,
     expiry_height: u32,
     circuit_version: OrchardCircuitVersion,
-) -> anyhow::Result<Vec<u8>> {
+) -> Result<Vec<u8>, BuildError> {
     let ovk = Some(registry_fvk.to_ovk(Scope::External));
     let mut builder =
         OrchardBuilder::new_for_version(BundleType::DEFAULT, funding.anchor, circuit_version);
 
     builder
-        .add_spend(registry_fvk.clone(), funding.note, funding.merkle_path.clone())
-        .map_err(|e| anyhow!("add_spend: {e:?}"))?;
+        .add_spend(
+            registry_fvk.clone(),
+            funding.note,
+            funding.merkle_path.clone(),
+        )
+        .map_err(BuildError::bundle)?;
 
     builder
         .add_output(ovk.clone(), recipient, NoteValue::from_raw(dust_zat), memo)
-        .map_err(|e| anyhow!("add_output(memo): {e:?}"))?;
+        .map_err(BuildError::bundle)?;
 
     if change_zat > 0 {
         builder
-            .add_output(ovk, change_addr, NoteValue::from_raw(change_zat), [0u8; 512])
-            .map_err(|e| anyhow!("add_output(change): {e:?}"))?;
+            .add_output(
+                ovk,
+                change_addr,
+                NoteValue::from_raw(change_zat),
+                [0u8; 512],
+            )
+            .map_err(BuildError::bundle)?;
     }
 
     let mut rng = OsRng;
     let (unauthorized, _meta) = builder
         .build::<i64>(&mut rng)
-        .map_err(|e| anyhow!("build: {e:?}"))?
-        .ok_or_else(|| anyhow!("builder produced an empty bundle"))?;
+        .map_err(BuildError::bundle)?
+        .ok_or(BuildError::EmptyBundle)?;
 
     let orchard_digest: [u8; 32] = unauthorized.commitment().into();
     let sighash = v5_shielded_sighash(branch_id, 0, expiry_height, &orchard_digest);
 
     let proven = unauthorized
         .create_proof(proving_key_for(circuit_version), &mut rng)
-        .map_err(|e| anyhow!("create_proof: {e:?}"))?;
+        .map_err(BuildError::proof)?;
     let ask = SpendAuthorizingKey::from(spend_key);
     let authorized = proven
         .apply_signatures(rng, sighash, &[ask])
-        .map_err(|e| anyhow!("apply_signatures: {e:?}"))?;
+        .map_err(BuildError::signature)?;
 
-    let (tx_bytes, _txid) = orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
+    let (tx_bytes, _txid) =
+        orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
     Ok(tx_bytes)
 }
 
@@ -472,10 +506,19 @@ mod tests {
         FullViewingKey::from(&sk)
     }
 
-    fn test_params<'a>(fvk: FullViewingKey, name: &'a str, ua: &'a str, prev_rcm: [u8; 32]) -> MintParams<'a> {
+    fn test_params<'a>(
+        fvk: FullViewingKey,
+        name: &'a str,
+        ua: &'a str,
+        prev_rcm: [u8; 32],
+    ) -> MintParams<'a> {
         let recipient = fvk.address_at(0u32, Scope::External);
         MintParams {
-            action: if prev_rcm == ZERO_PREV_RCM { Action::Claim } else { Action::Update },
+            action: if prev_rcm == ZERO_PREV_RCM {
+                Action::Claim
+            } else {
+                Action::Update
+            },
             name,
             ua,
             prev_rcm,
@@ -501,7 +544,8 @@ mod tests {
     #[test]
     fn chained_rcm_differs() {
         let fvk = make_fvk();
-        let claim = build_name_note(test_params(fvk.clone(), "alice", "u1xxx", ZERO_PREV_RCM)).unwrap();
+        let claim =
+            build_name_note(test_params(fvk.clone(), "alice", "u1xxx", ZERO_PREV_RCM)).unwrap();
         let update = build_name_note(MintParams {
             action: Action::Update,
             name: "alice",
@@ -513,7 +557,8 @@ mod tests {
             branch_id: BranchId::Nu6,
             expiry_height: 0,
             circuit_version: OrchardCircuitVersion::InsecurePreNu6_2,
-        }).unwrap();
+        })
+        .unwrap();
         assert_ne!(claim.new_rcm, update.new_rcm);
         assert_ne!(claim.tx_bytes, update.tx_bytes);
     }

@@ -1,9 +1,20 @@
 //! `zns-state` — ZNS registry persistence.
 //!
-//! Owns the SQLite stores: [`db`] holds `name_records` (current tip per name)
-//! and [`actions`] holds the append-only minted-action log. Split out of
-//! `zns-core` so the storage layer is its own crate (cf. `zebra-state`) and
-//! pure consumers of the domain types never link rusqlite.
+//! Owns the SQLite stores:
+//! - [`db`] holds the live `names` table (current tip binding per active name,
+//!   one row, O(1) by name) plus ancillary tables (processed_notes, challenges,
+//!   intents).
+//! - [`actions`] holds the append-only `name_events` history log (one row per
+//!   CLAIM/UPDATE/RELEASE). This is the source of truth for the `(ψ, rcm)`
+//!   chain and for reorg reconstruction.
+//!
+//! The split (live `names` + history `name_events`) keeps the hot path tiny
+//! while allowing the history to be pruned or archived independently if ever
+//! needed. Both are updated atomically with the other registry tables in the
+//! same transaction on mint or reorg.
+//!
+//! Split out of `zns-core` so the storage layer is its own crate (cf.
+//! `zebra-state`) and pure consumers of the domain types never link rusqlite.
 //!
 //! [`treasury`] is the registry's *other* SQLite store — a `zcash_client_sqlite`
 //! `WalletDb` tracking the registry's own spendable notes (the treasury float)
@@ -21,15 +32,51 @@ pub use actions::{
 pub use db::{
     delete_intents_above, delete_processed_above, delete_record, get_record, last_processed_height,
     mark_processed, processed_hash_at_height, rebuild_records_after_reorg, upsert_record,
-    NameRecord,
+    upsert_record_from_action, NameRecord,
 };
 pub use error::StateError;
 pub use treasury::{FundingSelection, NoteState, SpendableNote, TreasuryConfig, TreasuryError};
 
 use rusqlite::Connection;
 
-/// Initialise the full registry schema (idempotent): the name-record tip table
-/// and the append-only minted-action log.
+pub struct State {
+    conn: Connection,
+}
+
+impl State {
+    pub fn open(path: &str) -> Result<Self, StateError> {
+        let conn = Connection::open(path)?;
+        init_schema(&conn)?;
+        Ok(State { conn })
+    }
+
+    pub fn open_in_memory() -> Result<Self, StateError> {
+        let conn = Connection::open_in_memory()?;
+        init_schema(&conn)?;
+        Ok(State { conn })
+    }
+
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub fn apply_mint(&self, minted: &MintedAction) -> Result<(), StateError> {
+        let tx = self.conn.unchecked_transaction()?;
+        append_action(&tx, minted)?;
+        if minted.action == zns_core::Action::Release {
+            delete_record(&tx, &minted.name)?;
+        } else {
+            upsert_record_from_action(&tx, minted)?;
+        }
+        db::delete_challenge(&tx, &minted.name)?;
+        db::delete_intent(&tx, &minted.name)?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+/// Initialise the full registry schema (idempotent): the live `names` tip table,
+/// the append-only `name_events` history, and ancillary tables.
 pub fn init_schema(conn: &Connection) -> Result<(), StateError> {
     db::init_schema(conn)?;
     actions::init_actions_schema(conn)?;

@@ -35,8 +35,8 @@ zcash_address    = "0.12"
 zcash_note_encryption = "0.4.1"
 # lightwalletd gRPC transport (proto client): the tonic Channel for intake +
 # broadcast, plus `sync` for the wallet sync driver (`sync::run`) behind the
-# treasury note-state. `*-tls-webpki-roots` covers public servers; local
-# regtest uses plaintext http.
+# treasury note-state. `*-tls-webpki-roots` provides the TLS roots — all
+# connections are TLS.
 zcash_client_backend = { version = "0.23", default-features = false, features = [
     "lightwalletd-tonic-transport",
     "lightwalletd-tonic-tls-webpki-roots",
@@ -74,11 +74,6 @@ tonic                   = "0.14"
 http                    = "1"
 jsonrpsee               = { version = "0.26", features = ["server", "macros"] }
 tower-governor          = "0.4"
-#  config + safe hot-reload
-config   = "0.15"
-arc-swap = "1"
-notify   = "8"
-garde    = "0.20"
 #  caching / secrets / constant-time
 moka    = { version = "0.12", features = ["future"] }
 secrecy = "0.10"

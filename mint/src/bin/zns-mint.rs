@@ -149,8 +149,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .as_secs();
         }
         // Detect and recover from chain reorganizations before we process any
-        // new notes. A reorg rolls back processed_notes, name_actions,
-        // name_records, and mint_intents above the common ancestor.
+        // new notes. A reorg rolls back processed_notes, name_events,
+        // names (live tip), and mint_intents above the common ancestor.
         match registry.handle_reorg(&grpc, &signer, tip).await {
             Ok(Some(reorg_height)) => {
                 tracing::warn!(

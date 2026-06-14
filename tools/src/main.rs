@@ -49,11 +49,18 @@ const ZEBRAD_TOML: &str = "/Users/jules/ZcashNames/zebra-regtest/zebrad.toml";
 // ── BLAKE2b helper ────────────────────────────────────────────────────────────
 
 fn blake2b_256(personal: &[u8; 16]) -> blake2b_simd::State {
-    Blake2bParams::new().hash_length(32).personal(personal).to_state()
+    Blake2bParams::new()
+        .hash_length(32)
+        .personal(personal)
+        .to_state()
 }
 
 fn hash_finalize(state: blake2b_simd::State) -> [u8; 32] {
-    *state.finalize().as_bytes().first_chunk::<32>().expect("32-byte output")
+    *state
+        .finalize()
+        .as_bytes()
+        .first_chunk::<32>()
+        .expect("32-byte output")
 }
 
 // ── WIF encoding ─────────────────────────────────────────────────────────────
@@ -72,7 +79,9 @@ fn wif_encode(sk: &SecretKey) -> String {
 
 /// Decode a WIF private key (testnet, compressed).
 fn wif_decode(wif: &str) -> anyhow::Result<SecretKey> {
-    let raw = bs58::decode(wif).into_vec().map_err(|e| anyhow::anyhow!("bs58: {e}"))?;
+    let raw = bs58::decode(wif)
+        .into_vec()
+        .map_err(|e| anyhow::anyhow!("bs58: {e}"))?;
     anyhow::ensure!(raw.len() == 38, "WIF must be 38 bytes, got {}", raw.len());
     anyhow::ensure!(raw[0] == 0xEF, "wrong WIF version byte");
     anyhow::ensure!(raw[33] == 0x01, "expected compressed WIF");
@@ -244,10 +253,8 @@ impl TxSigHasher {
         };
 
         // S.3 empty Sapling + Orchard digests
-        let sapling_digest =
-            hash_finalize(blake2b_256(b"ZTxIdSaplingHash"));
-        let orchard_digest =
-            hash_finalize(blake2b_256(b"ZTxIdOrchardHash"));
+        let sapling_digest = hash_finalize(blake2b_256(b"ZTxIdSaplingHash"));
+        let orchard_digest = hash_finalize(blake2b_256(b"ZTxIdOrchardHash"));
 
         // Top-level sighash personalisation: "ZcashTxHash_" || branch_id_le
         let mut personal = [0u8; 16];
@@ -304,7 +311,13 @@ impl KeySet {
         let script_bytes = redeem_script.to_bytes();
         let p2sh_h160 = zcash_transparent::util::hash160::hash(&script_bytes);
 
-        Self { miner_sk, miner_pk, ms_keys, redeem_script, p2sh_h160 }
+        Self {
+            miner_sk,
+            miner_pk,
+            ms_keys,
+            redeem_script,
+            p2sh_h160,
+        }
     }
 
     fn print_keys(&self) {
@@ -314,7 +327,10 @@ impl KeySet {
         println!();
 
         for (i, (sk, pk)) in self.ms_keys.iter().enumerate() {
-            println!("═══ MULTISIG PARTICIPANT {} ══════════════════════════════════════════════", i + 1);
+            println!(
+                "═══ MULTISIG PARTICIPANT {} ══════════════════════════════════════════════",
+                i + 1
+            );
             println!("  WIF:    {}", wif_encode(sk));
             println!("  PubKey: {}", hex::encode(pk.serialize()));
         }
@@ -322,7 +338,10 @@ impl KeySet {
 
         println!("═══ 3-OF-5 P2SH COLD VAULT ══════════════════════════════════════════════");
         println!("  Address:       {}", p2sh_address(&self.p2sh_h160));
-        println!("  RedeemScript:  {}", hex::encode(self.redeem_script.to_bytes()));
+        println!(
+            "  RedeemScript:  {}",
+            hex::encode(self.redeem_script.to_bytes())
+        );
         println!();
     }
 }
@@ -338,7 +357,10 @@ fn cmd_keygen() -> anyhow::Result<()> {
     println!("✓  Updated zebrad.toml miner_address = \"{}\"", miner_addr);
     println!();
     println!("Next steps:");
-    println!("  1. Restart zebrad — it will mine new blocks to {}", miner_addr);
+    println!(
+        "  1. Restart zebrad — it will mine new blocks to {}",
+        miner_addr
+    );
     println!("  2. After 100 confirmations, send ZEC from that address to the P2SH vault");
     println!("  3. Run `zns-tools demo-sign <key1_wif> <key2_wif> <key3_wif> <txid> <vout> <value_zat> <dest_addr>`");
     Ok(())
@@ -346,8 +368,8 @@ fn cmd_keygen() -> anyhow::Result<()> {
 
 fn update_zebrad_toml(miner_addr: &str) -> anyhow::Result<()> {
     let path = Path::new(ZEBRAD_TOML);
-    let content = fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("read {}: {}", ZEBRAD_TOML, e))?;
+    let content =
+        fs::read_to_string(path).map_err(|e| anyhow::anyhow!("read {}: {}", ZEBRAD_TOML, e))?;
     let updated = content
         .lines()
         .map(|line| {
@@ -359,8 +381,7 @@ fn update_zebrad_toml(miner_addr: &str) -> anyhow::Result<()> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    fs::write(path, updated + "\n")
-        .map_err(|e| anyhow::anyhow!("write {}: {}", ZEBRAD_TOML, e))?;
+    fs::write(path, updated + "\n").map_err(|e| anyhow::anyhow!("write {}: {}", ZEBRAD_TOML, e))?;
     Ok(())
 }
 
@@ -376,32 +397,36 @@ fn update_zebrad_toml(miner_addr: &str) -> anyhow::Result<()> {
 
 fn cmd_demo_sign(args: &[String]) -> anyhow::Result<()> {
     // ── Argument parsing ──────────────────────────────────────────────────
-    let (wif1, wif2, wif3, txid_hex, vout, value_zat, dest_addr, expiry_height) =
-        if args.len() >= 8 {
-            (
-                &args[0], &args[1], &args[2],
-                args[3].clone(),
-                args[4].parse::<u32>()?,
-                args[5].parse::<u64>()?,
-                args[6].clone(),
-                args[7].parse::<u32>().unwrap_or(100),
-            )
-        } else if args.len() >= 3 {
-            // only keys provided — generate synthetic prevout + dummy dest
-            (
-                &args[0], &args[1], &args[2],
-                "0".repeat(64),
-                0u32,
-                50_000u64,
-                "".to_owned(),
-                100u32,
-            )
-        } else {
-            anyhow::bail!(
-                "Usage: zns-tools demo-sign <wif1> <wif2> <wif3> \
+    let (wif1, wif2, wif3, txid_hex, vout, value_zat, dest_addr, expiry_height) = if args.len() >= 8
+    {
+        (
+            &args[0],
+            &args[1],
+            &args[2],
+            args[3].clone(),
+            args[4].parse::<u32>()?,
+            args[5].parse::<u64>()?,
+            args[6].clone(),
+            args[7].parse::<u32>().unwrap_or(100),
+        )
+    } else if args.len() >= 3 {
+        // only keys provided — generate synthetic prevout + dummy dest
+        (
+            &args[0],
+            &args[1],
+            &args[2],
+            "0".repeat(64),
+            0u32,
+            50_000u64,
+            "".to_owned(),
+            100u32,
+        )
+    } else {
+        anyhow::bail!(
+            "Usage: zns-tools demo-sign <wif1> <wif2> <wif3> \
                  [<txid_hex> <vout> <value_zat> <dest_addr> [<expiry>]]"
-            );
-        };
+        );
+    };
 
     let secp = Secp256k1::new();
 
@@ -418,10 +443,16 @@ fn cmd_demo_sign(args: &[String]) -> anyhow::Result<()> {
     // they are only needed for the address commitment).
     let dummy_bytes: [[u8; 32]; 2] = [
         {
-            let mut b = [0u8; 32]; b[0] = 0xd4; b[1] = 0; b
+            let mut b = [0u8; 32];
+            b[0] = 0xd4;
+            b[1] = 0;
+            b
         },
         {
-            let mut b = [0u8; 32]; b[0] = 0xd5; b[1] = 1; b
+            let mut b = [0u8; 32];
+            b[0] = 0xd5;
+            b[1] = 1;
+            b
         },
     ];
     // Validate dummy bytes produce valid keys
@@ -453,11 +484,9 @@ fn cmd_demo_sign(args: &[String]) -> anyhow::Result<()> {
     }
     let outpoint = OutPoint::new(txid, vout);
 
-    let p2sh_script_pubkey: Script =
-        TransparentAddress::ScriptHash(p2sh_h160).script().into();
+    let p2sh_script_pubkey: Script = TransparentAddress::ScriptHash(p2sh_h160).script().into();
     let coin = TxOut::new(
-        Zatoshis::from_u64(value_zat)
-            .map_err(|_| anyhow::anyhow!("value_zat out of range"))?,
+        Zatoshis::from_u64(value_zat).map_err(|_| anyhow::anyhow!("value_zat out of range"))?,
         p2sh_script_pubkey,
     );
 
@@ -485,12 +514,13 @@ fn cmd_demo_sign(args: &[String]) -> anyhow::Result<()> {
     builder
         .add_output(
             &dest,
-            Zatoshis::from_u64(send_zat)
-                .map_err(|_| anyhow::anyhow!("send_zat out of range"))?,
+            Zatoshis::from_u64(send_zat).map_err(|_| anyhow::anyhow!("send_zat out of range"))?,
         )
         .map_err(|e| anyhow::anyhow!("add_output: {e:?}"))?;
 
-    let bundle = builder.build().ok_or_else(|| anyhow::anyhow!("empty bundle"))?;
+    let bundle = builder
+        .build()
+        .ok_or_else(|| anyhow::anyhow!("empty bundle"))?;
 
     // ── Pre-compute ZIP-244 sighash parts ─────────────────────────────────
     let hasher = TxSigHasher::new(&bundle, expiry_height);
@@ -513,7 +543,7 @@ fn cmd_demo_sign(args: &[String]) -> anyhow::Result<()> {
     for ecdsa_sig in [&ecdsa_sig1, &ecdsa_sig2, &ecdsa_sig3] {
         let mut push = ecdsa_sig.serialize_der().to_vec();
         push.push(0x01); // SIGHASH_ALL
-        // DER signatures are 70-72 bytes + 1 SIGHASH byte = 71-73 bytes, all < 0x4C
+                         // DER signatures are 70-72 bytes + 1 SIGHASH byte = 71-73 bytes, all < 0x4C
         ssig.push(push.len() as u8);
         ssig.extend_from_slice(&push);
     }
@@ -534,7 +564,11 @@ fn cmd_demo_sign(args: &[String]) -> anyhow::Result<()> {
     let prevout = bundle.vin[0].prevout().clone();
     let vout = bundle.vout.clone();
     let authorized_bundle = Bundle {
-        vin: vec![TxIn::<TrAuthorized>::from_parts(prevout, Script(Code(ssig)), u32::MAX)],
+        vin: vec![TxIn::<TrAuthorized>::from_parts(
+            prevout,
+            Script(Code(ssig)),
+            u32::MAX,
+        )],
         vout,
         authorization: TrAuthorized,
     };
@@ -550,9 +584,12 @@ fn cmd_demo_sign(args: &[String]) -> anyhow::Result<()> {
         None,
         None,
     );
-    let tx: Transaction = tx_data.freeze().map_err(|e| anyhow::anyhow!("freeze: {e}"))?;
+    let tx: Transaction = tx_data
+        .freeze()
+        .map_err(|e| anyhow::anyhow!("freeze: {e}"))?;
     let mut tx_bytes = Vec::new();
-    tx.write(&mut tx_bytes).map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
+    tx.write(&mut tx_bytes)
+        .map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
     let txid_bytes: [u8; 32] = *tx.txid().as_ref();
 
     println!();
@@ -567,8 +604,7 @@ fn cmd_demo_sign(args: &[String]) -> anyhow::Result<()> {
 
 /// Very minimal transparent address parser for the demo.
 fn parse_transparent_address(s: &str) -> anyhow::Result<TransparentAddress> {
-    let za = ZcashAddress::try_from_encoded(s)
-        .map_err(|e| anyhow::anyhow!("bad address: {e}"))?;
+    let za = ZcashAddress::try_from_encoded(s).map_err(|e| anyhow::anyhow!("bad address: {e}"))?;
     za.convert::<TransparentAddress>()
         .map_err(|e| anyhow::anyhow!("not a transparent address: {e:?}"))
 }

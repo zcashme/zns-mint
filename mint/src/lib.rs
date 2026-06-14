@@ -29,8 +29,8 @@ pub use zns_mint::{
 pub use zns_state::{
     affected_names, append_action, db, delete_actions_above, delete_intents_above,
     delete_processed_above, last_processed_height, latest_action, processed_hash_at_height,
-    rebuild_records_after_reorg, FundingSelection, MintedAction, NameRecord, NoteState,
-    SpendableNote, TreasuryConfig,
+    rebuild_records_after_reorg, upsert_record_from_action, FundingSelection, MintedAction,
+    NameRecord, NoteState, SpendableNote, TreasuryConfig,
 };
 
 pub mod rpc;
@@ -100,7 +100,6 @@ impl RegistryError {
 
 use std::sync::Arc;
 
-use rusqlite::Connection;
 use tokio::sync::Mutex;
 
 /// Minimum fee in zatoshis required for a CLAIM operation.
@@ -129,12 +128,7 @@ pub const MIN_MUTATION_FEE_ZAT: u64 = 2 * MINT_FEE_ZAT;
 /// Cheaply cloneable — the inner state is behind `Arc`s.
 #[derive(Clone)]
 pub struct Registry {
-    /// SQLite connection shared across the tokio runtime. Also holds the
-    /// durable OTP challenge state (`pending_challenges`) — a daemon restart
-    /// must not void a mutation mid-flow.
-    db: Arc<Mutex<Connection>>,
-    /// lightwalletd gRPC endpoint (e.g. `"http://127.0.0.1:9067"`) used to
-    /// broadcast minted Name Notes via `SendTransaction`.
+    state: Arc<Mutex<zns_state::State>>,
     grpc_addr: String,
 }
 
@@ -142,20 +136,18 @@ impl Registry {
     /// Open (or create) the registry database at `db_path` and return a new
     /// [`Registry`] pointing at `grpc_addr` for transaction broadcast.
     pub fn new(db_path: &str, grpc_addr: impl Into<String>) -> Result<Self, RegistryError> {
-        let conn = Connection::open(db_path)?;
-        zns_state::init_schema(&conn)?;
+        let state = zns_state::State::open(db_path)?;
         Ok(Registry {
-            db: Arc::new(Mutex::new(conn)),
+            state: Arc::new(Mutex::new(state)),
             grpc_addr: grpc_addr.into(),
         })
     }
 
     /// Open an in-memory registry (for testing / ephemeral use).
     pub fn open_in_memory() -> Result<Self, RegistryError> {
-        let conn = Connection::open_in_memory()?;
-        zns_state::init_schema(&conn)?;
+        let state = zns_state::State::open_in_memory()?;
         Ok(Registry {
-            db: Arc::new(Mutex::new(conn)),
+            state: Arc::new(Mutex::new(state)),
             grpc_addr: "https://zec.rocks:443".into(),
         })
     }
@@ -166,14 +158,14 @@ impl Registry {
 
     /// Look up a registered name.  Returns `None` if the name is unknown.
     pub async fn lookup(&self, name: &str) -> Result<Option<NameRecord>, RegistryError> {
-        let conn = self.db.lock().await;
-        db::get_record(&conn, name).map_err(Into::into)
+        let st = self.state.lock().await;
+        db::get_record(st.conn(), name).map_err(Into::into)
     }
 
     /// Registry table counts for the control plane's `status` method.
     pub async fn stats(&self) -> Result<RegistryStats, RegistryError> {
-        let conn = self.db.lock().await;
-        let (names, pending_challenges, mint_intents) = db::table_counts(&conn)?;
+        let st = self.state.lock().await;
+        let (names, pending_challenges, mint_intents) = db::table_counts(st.conn())?;
         Ok(RegistryStats {
             names,
             pending_challenges,
@@ -185,10 +177,10 @@ impl Registry {
     /// the O(chain) funding rescan on quiet polls — once any historical note
     /// exists, the raw scan is never empty, but the *unsettled* set usually is.
     pub async fn unsettled(&self, notes: Vec<IncomingNote>) -> Vec<IncomingNote> {
-        let conn = self.db.lock().await;
+        let st = self.state.lock().await;
         notes
             .into_iter()
-            .filter(|n| !db::is_processed(&conn, &n.txid, n.output_index).unwrap_or(false))
+            .filter(|n| !db::is_processed(st.conn(), &n.txid, n.output_index).unwrap_or(false))
             .collect()
     }
 
@@ -228,12 +220,9 @@ impl Registry {
         mint_ctx: &MintContext,
         treasury: &mut Option<Arc<Treasury>>,
     ) -> ProcessResult {
-        // Intake ledger: the scan is stateless and replays history every
-        // poll, so each note is settled exactly once. (A ledger read failure
-        // fails open — reprocessing is safe, the handlers are idempotent.)
         {
-            let conn = self.db.lock().await;
-            if db::is_processed(&conn, &note.txid, note.output_index).unwrap_or(false) {
+            let st = self.state.lock().await;
+            if db::is_processed(st.conn(), &note.txid, note.output_index).unwrap_or(false) {
                 return ProcessResult::Skipped("already settled".into());
             }
         }
@@ -334,15 +323,14 @@ impl Registry {
         };
 
         if settled {
-            let conn = self.db.lock().await;
+            let st = self.state.lock().await;
             if let Err(e) = db::mark_processed(
-                &conn,
+                st.conn(),
                 &note.txid,
                 note.output_index,
                 note.height,
                 &note.block_hash,
             ) {
-                // Non-fatal: the note reprocesses next poll, idempotently.
                 tracing::warn!("intake ledger write failed: {e}");
             }
         }
@@ -376,8 +364,8 @@ impl Registry {
 
                 // 2. Ensure name is not already taken.
                 {
-                    let conn = self.db.lock().await;
-                    if db::get_record(&conn, name)?.is_some() {
+                    let st = self.state.lock().await;
+                    if db::get_record(st.conn(), name)?.is_some() {
                         return Err(RegistryError::AlreadyClaimed(name.into()));
                     }
                 }
@@ -394,7 +382,14 @@ impl Registry {
                         treasury,
                     )
                     .await?;
-                self.persist_mint(&minted_action(name, action, &result, mint_ctx.height), ua)
+                self.persist_mint(&minted_action(
+                    name,
+                    action,
+                    ua,
+                    &result,
+                    mint_ctx.height,
+                    ZERO_PREV_RCM,
+                ))
                     .await?;
 
                 Ok(ActionOutcome::Minted {
@@ -418,8 +413,8 @@ impl Registry {
 
                 // Name must exist.
                 let record = {
-                    let conn = self.db.lock().await;
-                    db::get_record(&conn, name)?
+                    let st = self.state.lock().await;
+                    db::get_record(st.conn(), name)?
                         .ok_or_else(|| RegistryError::NotFound(name.into()))?
                 };
 
@@ -430,9 +425,9 @@ impl Registry {
                 let challenge = zns_auth::new_challenge(name, action, ua, mint_ctx.height)
                     .map_err(|e| RegistryError::Auth(e.to_string()))?;
                 {
-                    let conn = self.db.lock().await;
-                    db::purge_expired_challenges(&conn, mint_ctx.height)?;
-                    db::put_challenge(&conn, &challenge)?;
+                    let st = self.state.lock().await;
+                    db::purge_expired_challenges(st.conn(), mint_ctx.height)?;
+                    db::put_challenge(st.conn(), &challenge)?;
                 }
 
                 self.relay_challenge(
@@ -461,22 +456,17 @@ impl Registry {
         mint_ctx: &MintContext,
         treasury: &mut Option<Arc<Treasury>>,
     ) -> Result<ActionOutcome, RegistryError> {
-        // Verify the OTP against the durable challenge — *without* consuming
-        // it: a transient mint failure below must leave the challenge intact
-        // for the retry (the confirm note stays unsettled), or the user's
-        // mutation dies permanently on a broadcast hiccup.
         let challenge = {
-            let conn = self.db.lock().await;
-            db::get_challenge(&conn, name)?
+            let st = self.state.lock().await;
+            db::get_challenge(st.conn(), name)?
         }
         .ok_or_else(|| RegistryError::Auth(format!("no pending challenge for name '{name}'")))?;
         zns_auth::verify(&challenge, nonce, mint_ctx.height)
             .map_err(|e| RegistryError::Auth(e.to_string()))?;
 
-        // Look up the current record (for prev_rcm).
         let prev_rcm = {
-            let conn = self.db.lock().await;
-            match db::get_record(&conn, name)? {
+            let st = self.state.lock().await;
+            match db::get_record(st.conn(), name)? {
                 Some(rec) => rec.tip_rcm,
                 None => return Err(RegistryError::NotFound(name.into())),
             }
@@ -491,7 +481,14 @@ impl Registry {
         let result = self
             .do_mint(action, name, ua, &prev_rcm, request, mint_ctx, treasury)
             .await?;
-        self.persist_mint(&minted_action(name, action, &result, mint_ctx.height), ua)
+        self.persist_mint(&minted_action(
+            name,
+            action,
+            ua,
+            &result,
+            mint_ctx.height,
+            prev_rcm,
+        ))
             .await?;
 
         Ok(ActionOutcome::Minted {
@@ -513,12 +510,9 @@ impl Registry {
         ctx: &MintContext,
         treasury: &mut Option<Arc<Treasury>>,
     ) -> Result<MintResult, RegistryError> {
-        // A surviving intent means a prior attempt may have broadcast but not
-        // persisted — minting again would fork the name's rcm chain. Transient:
-        // poll-start reconciliation resolves the intent either way.
         {
-            let conn = self.db.lock().await;
-            if db::get_intent(&conn, name)?.is_some() {
+            let st = self.state.lock().await;
+            if db::get_intent(st.conn(), name)?.is_some() {
                 return Err(RegistryError::Broadcast(format!(
                     "mint intent for {name:?} pending reconciliation"
                 )));
@@ -569,19 +563,12 @@ impl Registry {
             })?,
         };
 
-        // Crash-window protocol: write the intent, THEN broadcast. The caller
-        // commits persistence (and deletes the intent) via [`Self::persist_mint`];
-        // a crash anywhere between broadcast and that commit leaves the intent
-        // for poll-start reconciliation to replay — never a re-mint. A failed
-        // broadcast leaves an intent that reconciliation drops once the tx's
-        // expiry passes unmined.
         {
-            let conn = self.db.lock().await;
+            let st = self.state.lock().await;
             db::put_intent(
-                &conn,
+                st.conn(),
                 &db::PendingMint {
-                    minted: minted_action(name, action, &result, ctx.height),
-                    ua: ua.to_owned(),
+                    minted: minted_action(name, action, ua, &result, ctx.height, *prev_rcm),
                     expiry_height: ctx.expiry_height,
                     request: (request.txid, request.action_index),
                 },
@@ -597,8 +584,8 @@ impl Registry {
             // Ambiguous failures — timeouts, transport errors — leave the
             // intent for reconciliation: the tx may still be in flight.
             if matches!(e, GrpcError::Rejected { .. }) {
-                let conn = self.db.lock().await;
-                let _ = db::delete_intent(&conn, name);
+                let st = self.state.lock().await;
+                let _ = db::delete_intent(st.conn(), name);
                 ctx.signer.release_request(request);
             }
             return Err(e.into());
@@ -609,16 +596,17 @@ impl Registry {
 
     /// Commit a broadcast mint in one transaction: append to the canonical
     /// action log (the source of truth for the `(ψ, rcm)` chain), fold the
-    /// `name_records` cache, consume any pending challenge, and clear the
+    /// Append the action to the canonical `name_events` history, then update
+    /// (or delete) the live `names` row, consume the challenge, and clear the
     /// intent. One atomic step shared by CLAIM, confirmed mutations, and
     /// crash reconciliation — partial persistence cannot exist.
-    async fn persist_mint(&self, minted: &MintedAction, ua: &str) -> Result<(), RegistryError> {
-        let conn = self.db.lock().await;
-        let tx = conn.unchecked_transaction()?;
+    async fn persist_mint(&self, minted: &MintedAction) -> Result<(), RegistryError> {
+        let st = self.state.lock().await;
+        let tx = st.conn().unchecked_transaction()?;
         append_action(&tx, minted)?;
         match minted.action {
             zns_core::Action::Release => db::delete_record(&tx, &minted.name)?,
-            _ => db::upsert_record(&tx, &minted.name, &minted.rcm, ua, minted.height)?,
+            _ => db::upsert_record_from_action(&tx, minted)?,
         }
         db::delete_challenge(&tx, &minted.name)?;
         db::delete_intent(&tx, &minted.name)?;
@@ -637,8 +625,8 @@ impl Registry {
         tip_height: u32,
     ) -> Result<(), RegistryError> {
         let intents = {
-            let conn = self.db.lock().await;
-            db::list_intents(&conn)?
+            let st = self.state.lock().await;
+            db::list_intents(st.conn())?
         };
         for intent in intents {
             let name = &intent.minted.name;
@@ -648,17 +636,15 @@ impl Registry {
                     txid = hex::encode(intent.minted.txid),
                     "reconciling: broadcast tx found on chain, replaying persistence"
                 );
-                self.persist_mint(&intent.minted, &intent.ua).await?;
+                self.persist_mint(&intent.minted).await?;
             } else if intent.expiry_height > 0 && tip_height > intent.expiry_height {
                 tracing::warn!(name, "dropping mint intent — tx expired unmined");
-                // The signed tx is provably dead — release the triggering
-                // request from the replay set so its retry can sign again.
                 signer.release_request(RequestId {
                     txid: intent.request.0,
                     action_index: intent.request.1,
                 });
-                let conn = self.db.lock().await;
-                db::delete_intent(&conn, name)?;
+                let st = self.state.lock().await;
+                db::delete_intent(st.conn(), name)?;
             }
         }
         Ok(())
@@ -677,9 +663,9 @@ impl Registry {
         signer: &Signer,
         tip_height: u32,
     ) -> Result<Option<u32>, RegistryError> {
-        let conn = self.db.lock().await;
+        let st = self.state.lock().await;
 
-        let Some(last_height) = db::last_processed_height(&conn)? else {
+        let Some(last_height) = db::last_processed_height(st.conn())? else {
             return Ok(None);
         };
 
@@ -688,7 +674,7 @@ impl Registry {
         let reorg_height = if last_height > tip_height {
             tip_height.saturating_add(1)
         } else {
-            let Some(stored_hash) = db::processed_hash_at_height(&conn, last_height)? else {
+            let Some(stored_hash) = db::processed_hash_at_height(st.conn(), last_height)? else {
                 return Ok(None);
             };
             let current_hash = grpc.block_hash(last_height).await?;
@@ -696,16 +682,13 @@ impl Registry {
                 return Ok(None);
             }
 
-            // Walk back until we find a height whose hash still matches.
             let mut h = last_height;
             loop {
-                let Some(stored) = db::processed_hash_at_height(&conn, h)? else {
-                    // No stored hash this low — everything above is orphaned.
+                let Some(stored) = db::processed_hash_at_height(st.conn(), h)? else {
                     break 0;
                 };
                 let current = grpc.block_hash(h).await?;
                 if stored == current {
-                    // The reorg starts at the next height.
                     break h.saturating_add(1);
                 }
                 if h == 0 {
@@ -715,13 +698,11 @@ impl Registry {
             }
         };
 
-        // Collect affected names and in-flight intents before we start deleting.
-        let names = affected_names(&conn, reorg_height)?;
-        let intents = db::list_intents(&conn)?;
+        let names = affected_names(st.conn(), reorg_height)?;
+        let intents = db::list_intents(st.conn())?;
 
-        let tx = conn.unchecked_transaction()?;
+        let tx = st.conn().unchecked_transaction()?;
 
-        // Release signer replay slots for intents we are about to drop.
         for intent in &intents {
             if intent.minted.height >= reorg_height {
                 signer.release_request(RequestId {
@@ -796,19 +777,26 @@ impl Registry {
 }
 
 /// The action-log row for a freshly built mint.
+/// `prev_rcm` is the input rcm used for this note's `(ψ, rcm)` derivation
+/// (ZERO for claim; prior tip's rcm for update/release). It is stored both
+/// in the history event and (for the live tip) in the `names` row.
 fn minted_action(
     name: &str,
     action: zns_core::Action,
+    ua: &str,
     result: &MintResult,
     height: u32,
+    prev_rcm: [u8; 32],
 ) -> MintedAction {
     MintedAction {
         name: name.to_owned(),
         action,
+        ua: ua.to_owned(),
         txid: result.txid,
         cmx: result.cmx,
         rcm: result.new_rcm,
         psi: result.new_psi,
+        prev_rcm,
         height,
     }
 }

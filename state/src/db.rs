@@ -1,22 +1,12 @@
 //! SQLite-backed name registry store.
 //!
-//! Schema:
-//!
-//! ```sql
-//! CREATE TABLE name_records (
-//!   name       TEXT     PRIMARY KEY,
-//!   tip_rcm    BLOB     NOT NULL,   -- 32 bytes: the rcm of the last Name Note
-//!   ua         TEXT     NOT NULL,   -- current Unified Address binding
-//!   height     INTEGER  NOT NULL,   -- block height at which this record was minted
-//!   created_at INTEGER  NOT NULL    -- Unix timestamp (seconds)
-//! );
-//! ```
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::StateError;
 
-/// A row from `name_records`.
+/// A row from the live `names` table (current tip binding for an active name).
+///
 #[derive(Debug, Clone)]
 pub struct NameRecord {
     pub name: String,
@@ -33,12 +23,19 @@ pub struct NameRecord {
 pub fn init_schema(conn: &Connection) -> Result<(), StateError> {
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
-         CREATE TABLE IF NOT EXISTS name_records (
-             name       TEXT    PRIMARY KEY NOT NULL,
-             tip_rcm    BLOB    NOT NULL,
-             ua         TEXT    NOT NULL,
-             height     INTEGER NOT NULL,
-             created_at INTEGER NOT NULL
+         -- Live tip per name (denormalized latest event from name_events).
+         -- One row per actively bound name. RELEASE removes the row; reorg may
+         -- restore an earlier binding or remove the row if the new tip is RELEASE.
+         CREATE TABLE IF NOT EXISTS names (
+             name     TEXT    PRIMARY KEY NOT NULL,
+             height   INTEGER NOT NULL,
+             action   TEXT    NOT NULL,
+             ua       TEXT    NOT NULL,
+             prev_rcm BLOB    NOT NULL,
+             rcm      BLOB    NOT NULL,
+             psi      BLOB    NOT NULL,
+             cmx      BLOB    NOT NULL,
+             txid     BLOB    NOT NULL
          );
          -- Intake ledger: notes the daemon has settled (acted on, or rejected
          -- for a reason that can never change). The intake scan is stateless
@@ -77,13 +74,18 @@ pub fn init_schema(conn: &Connection) -> Result<(), StateError> {
              cmx           BLOB    NOT NULL,
              rcm           BLOB    NOT NULL,
              psi           BLOB    NOT NULL,
+             prev_rcm      BLOB    NOT NULL,
              height        INTEGER NOT NULL,
              expiry_height INTEGER NOT NULL,
              -- the intake note that triggered the mint; dropping a dead
              -- intent releases this id from the signer's replay set
              request_txid  BLOB    NOT NULL,
-             request_idx   INTEGER NOT NULL
-         );",
+              request_idx   INTEGER NOT NULL
+          );
+          -- Hot-path indexes: reorg rewind and expiry purge operate on ranges.
+          CREATE INDEX IF NOT EXISTS idx_processed_notes_height ON processed_notes(block_height);
+          CREATE INDEX IF NOT EXISTS idx_mint_intents_height ON mint_intents(height);
+          CREATE INDEX IF NOT EXISTS idx_pending_challenges_expires ON pending_challenges(expires_height);",
     )?;
     // Migrate pre-`request_*` intent tables in place (the zeroed default is
     // only a placeholder; such intents simply release nothing on drop).
@@ -92,6 +94,9 @@ pub fn init_schema(conn: &Connection) -> Result<(), StateError> {
         "ALTER TABLE mint_intents ADD COLUMN request_idx INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE processed_notes ADD COLUMN block_height INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE processed_notes ADD COLUMN block_hash BLOB NOT NULL DEFAULT x'0000000000000000000000000000000000000000000000000000000000000000'",
+        // prev_rcm added when we started storing the full chain witness in
+        // MintedAction (and thus in durable intents for crash recovery).
+        "ALTER TABLE mint_intents ADD COLUMN prev_rcm BLOB NOT NULL DEFAULT x'0000000000000000000000000000000000000000000000000000000000000000'",
     ] {
         match conn.execute(ddl, []) {
             Ok(_) => {}
@@ -110,11 +115,10 @@ pub fn init_schema(conn: &Connection) -> Result<(), StateError> {
 /// persistence has not yet been committed.
 #[derive(Debug, Clone)]
 pub struct PendingMint {
-    /// Everything the action log records about the mint.
+    /// Everything the history event will record about the mint (incl. prev_rcm
+    /// chain link and the UA), plus the fields that will go into the live
+    /// `names` row once the intent is reconciled via persist_mint.
     pub minted: crate::MintedAction,
-    /// The UA being bound (empty for RELEASE) — needed to replay the record
-    /// update during reconciliation.
-    pub ua: String,
     /// The transaction's expiry height (0 = never expires; such an intent is
     /// only ever resolved by finding the tx).
     pub expiry_height: u32,
@@ -129,17 +133,18 @@ pub struct PendingMint {
 pub fn put_intent(conn: &Connection, intent: &PendingMint) -> Result<(), StateError> {
     conn.execute(
         "INSERT OR REPLACE INTO mint_intents
-             (name, action, ua, txid, cmx, rcm, psi, height, expiry_height,
+             (name, action, ua, txid, cmx, rcm, psi, prev_rcm, height, expiry_height,
               request_txid, request_idx)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             intent.minted.name,
             std::str::from_utf8(intent.minted.action.as_bytes()).expect("ascii"),
-            intent.ua,
+            intent.minted.ua,
             intent.minted.txid.as_slice(),
             intent.minted.cmx.as_slice(),
             intent.minted.rcm.as_slice(),
             intent.minted.psi.as_slice(),
+            intent.minted.prev_rcm.as_slice(),
             intent.minted.height,
             intent.expiry_height,
             intent.request.0.as_slice(),
@@ -152,7 +157,7 @@ pub fn put_intent(conn: &Connection, intent: &PendingMint) -> Result<(), StateEr
 /// The in-flight mint for `name`, if any.
 pub fn get_intent(conn: &Connection, name: &str) -> Result<Option<PendingMint>, StateError> {
     conn.query_row(
-        "SELECT name, action, ua, txid, cmx, rcm, psi, height, expiry_height,
+        "SELECT name, action, ua, txid, cmx, rcm, psi, prev_rcm, height, expiry_height,
                 request_txid, request_idx
          FROM mint_intents WHERE name = ?1",
         params![name],
@@ -165,7 +170,7 @@ pub fn get_intent(conn: &Connection, name: &str) -> Result<Option<PendingMint>, 
 /// Every in-flight mint — the reconciliation work list.
 pub fn list_intents(conn: &Connection) -> Result<Vec<PendingMint>, StateError> {
     let mut stmt = conn.prepare(
-        "SELECT name, action, ua, txid, cmx, rcm, psi, height, expiry_height,
+        "SELECT name, action, ua, txid, cmx, rcm, psi, prev_rcm, height, expiry_height,
                 request_txid, request_idx
          FROM mint_intents",
     )?;
@@ -191,27 +196,26 @@ pub fn delete_intents_above(conn: &Connection, height: u32) -> Result<(), StateE
     Ok(())
 }
 
-/// Rebuild `name_records` for `names` after orphaned actions have been
-/// deleted.
+/// Rebuild the live `names` table for the given `names` after orphaned
+/// events have been deleted from `name_events`.
 ///
-/// For each name, the tip is set from the latest remaining action, or the
-/// record is deleted if the name has no remaining actions. Must be called
-/// inside an existing transaction so the rollback is atomic with the action
-/// and intent deletions.
+/// For each name, the tip row in `names` is set from the latest remaining
+/// event (by height), or the row is deleted if no events remain or the new
+/// tip event is a RELEASE. Must be called inside an existing transaction so
+/// the rollback is atomic with the event/intent deletions.
 pub fn rebuild_records_after_reorg(conn: &Connection, names: &[String]) -> Result<(), StateError> {
     for name in names {
         match crate::actions::latest_action(conn, name)? {
+            Some(action) if action.action == zns_core::Action::Release => {
+                // The latest remaining event is a RELEASE: the name must not
+                // exist in the live tip table.
+                delete_record(conn, name)?;
+            }
             Some(action) => {
-                let ua = if action.action == zns_core::Action::Release {
-                    String::new()
-                } else {
-                    // The action log does not store the UA, so we cannot
-                    // perfectly reconstruct it here. Release leaves the name
-                    // deleted; for claim/update we keep the existing cached UA
-                    // if there is one, otherwise leave a placeholder.
-                    get_record(conn, name)?.map(|r| r.ua).unwrap_or_default()
-                };
-                upsert_record(conn, name, &action.rcm, &ua, action.height)?;
+                // Copy the latest surviving event (which carries its own
+                // prev_rcm + rcm + ua + ...) into the live `names` table.
+                // This gives O(1) name -> current binding + the chain witness.
+                upsert_record_from_action(conn, &action)?;
             }
             None => {
                 delete_record(conn, name)?;
@@ -222,7 +226,7 @@ pub fn rebuild_records_after_reorg(conn: &Connection, names: &[String]) -> Resul
 }
 
 /// Row counts for the daemon's status surface:
-/// `(name_records, pending_challenges, mint_intents)`.
+/// `(names (live count), pending_challenges, mint_intents)`.
 pub fn table_counts(conn: &Connection) -> Result<(u64, u64, u64), StateError> {
     let count = |table: &str| -> Result<u64, rusqlite::Error> {
         // Table names are the compile-time constants below, never user input.
@@ -232,7 +236,7 @@ pub fn table_counts(conn: &Connection) -> Result<(u64, u64, u64), StateError> {
         .map(|n| n as u64)
     };
     Ok((
-        count("name_records")?,
+        count("names")?,
         count("pending_challenges")?,
         count("mint_intents")?,
     ))
@@ -249,15 +253,16 @@ fn row_to_intent(row: &rusqlite::Row) -> rusqlite::Result<PendingMint> {
         minted: crate::MintedAction {
             name: row.get(0)?,
             action,
+            ua: row.get(2)?,
             txid: to32(row.get(3)?, 3)?,
             cmx: to32(row.get(4)?, 4)?,
             rcm: to32(row.get(5)?, 5)?,
             psi: to32(row.get(6)?, 6)?,
-            height: row.get(7)?,
+            prev_rcm: to32(row.get(7)?, 7)?,
+            height: row.get(8)?,
         },
-        ua: row.get(2)?,
-        expiry_height: row.get(8)?,
-        request: (to32(row.get(9)?, 9)?, row.get(10)?),
+        expiry_height: row.get(9)?,
+        request: (to32(row.get(10)?, 10)?, row.get(11)?),
     })
 }
 
@@ -423,13 +428,13 @@ pub fn delete_processed_above(conn: &Connection, height: u32) -> Result<(), Stat
 pub fn get_record(conn: &Connection, name: &str) -> Result<Option<NameRecord>, StateError> {
     let row = conn
         .query_row(
-            "SELECT name, tip_rcm, ua, height FROM name_records WHERE name = ?1",
+            "SELECT name, rcm, ua, height FROM names WHERE name = ?1",
             params![name],
             |row| {
-                let tip_rcm_bytes: Vec<u8> = row.get(1)?;
+                let rcm_bytes: Vec<u8> = row.get(1)?;
                 Ok((
                     row.get::<_, String>(0)?,
-                    tip_rcm_bytes,
+                    rcm_bytes,
                     row.get::<_, String>(2)?,
                     row.get::<_, u32>(3)?,
                 ))
@@ -439,10 +444,10 @@ pub fn get_record(conn: &Connection, name: &str) -> Result<Option<NameRecord>, S
 
     match row {
         None => Ok(None),
-        Some((name, tip_rcm_bytes, ua, height)) => {
-            let tip_rcm = bytes_to_array32(&tip_rcm_bytes).map_err(|e| StateError::CorruptRow {
-                table: "name_records",
-                field: "tip_rcm",
+        Some((name, rcm_bytes, ua, height)) => {
+            let tip_rcm = bytes_to_array32(&rcm_bytes).map_err(|e| StateError::CorruptRow {
+                table: "names",
+                field: "rcm",
                 detail: e,
             })?;
             Ok(Some(NameRecord {
@@ -455,7 +460,42 @@ pub fn get_record(conn: &Connection, name: &str) -> Result<Option<NameRecord>, S
     }
 }
 
-/// Insert or replace a name record (called after a successful mint).
+/// Insert or replace the live tip row in `names` from a full `MintedAction`
+/// (the latest event for the name). Used on successful non-RELEASE mint and
+/// during reorg reconstruction.
+pub fn upsert_record_from_action(
+    conn: &Connection,
+    a: &crate::MintedAction,
+) -> Result<(), StateError> {
+    conn.execute(
+        "INSERT INTO names (name, height, action, ua, prev_rcm, rcm, psi, cmx, txid)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(name) DO UPDATE SET
+             height   = excluded.height,
+             action   = excluded.action,
+             ua       = excluded.ua,
+             prev_rcm = excluded.prev_rcm,
+             rcm      = excluded.rcm,
+             psi      = excluded.psi,
+             cmx      = excluded.cmx,
+             txid     = excluded.txid",
+        params![
+            a.name,
+            a.height,
+            std::str::from_utf8(a.action.as_bytes()).expect("ascii"),
+            a.ua,
+            a.prev_rcm.as_slice(),
+            a.rcm.as_slice(),
+            a.psi.as_slice(),
+            a.cmx.as_slice(),
+            a.txid.as_slice(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Legacy 4-arg upsert kept only for a few internal tests during transition.
+/// Prefer `upsert_record_from_action`.
 pub fn upsert_record(
     conn: &Connection,
     name: &str,
@@ -463,26 +503,27 @@ pub fn upsert_record(
     ua: &str,
     height: u32,
 ) -> Result<(), StateError> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-
-    conn.execute(
-        "INSERT INTO name_records (name, tip_rcm, ua, height, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(name) DO UPDATE SET
-             tip_rcm    = excluded.tip_rcm,
-             ua         = excluded.ua,
-             height     = excluded.height",
-        params![name, tip_rcm.as_slice(), ua, height, now],
-    )?;
-    Ok(())
+    // Synthesize a minimal action row for the live table. prev_rcm/psi/cmx/txid
+    // are not observable via the NameRecord projection, so zeros are fine for
+    // tests that only care about get_record roundtrips of (rcm,ua,height).
+    let dummy = crate::MintedAction {
+        name: name.to_owned(),
+        action: zns_core::Action::Claim, // placeholder; not exposed in NameRecord
+        ua: ua.to_owned(),
+        txid: [0u8; 32],
+        cmx: [0u8; 32],
+        rcm: *tip_rcm,
+        psi: [0u8; 32],
+        prev_rcm: [0u8; 32],
+        height,
+    };
+    upsert_record_from_action(conn, &dummy)
 }
 
-/// Delete a name record (called after a successful RELEASE mint).
+/// Delete a name record (called after a successful RELEASE mint, or when a
+/// reorg leaves a RELEASE as the new tip).
 pub fn delete_record(conn: &Connection, name: &str) -> Result<(), StateError> {
-    conn.execute("DELETE FROM name_records WHERE name = ?1", params![name])?;
+    conn.execute("DELETE FROM names WHERE name = ?1", params![name])?;
     Ok(())
 }
 
@@ -584,10 +625,12 @@ mod tests {
             &crate::MintedAction {
                 name: "alice".into(),
                 action: zns_core::Action::Claim,
+                ua: "u1old".into(),
                 txid: [1u8; 32],
                 cmx: [0u8; 32],
                 rcm: claim_rcm,
                 psi: [0u8; 32],
+                prev_rcm: [0u8; 32],
                 height: 10,
             },
         )
@@ -599,10 +642,12 @@ mod tests {
             &crate::MintedAction {
                 name: "alice".into(),
                 action: zns_core::Action::Update,
+                ua: "u1new".into(),
                 txid: [2u8; 32],
                 cmx: [0u8; 32],
                 rcm: update_rcm,
                 psi: [0u8; 32],
+                prev_rcm: claim_rcm, // the claim's rcm is prev for the update
                 height: 20,
             },
         )
@@ -618,8 +663,171 @@ mod tests {
         let rec = get_record(&conn, "alice").unwrap().unwrap();
         assert_eq!(rec.tip_rcm, claim_rcm);
         assert_eq!(rec.height, 10);
-        // The action log does not store the UA, so the best-effort rebuild
-        // keeps the previously-cached UA rather than reverting it.
-        assert_eq!(rec.ua, "u1new");
+        // The action log now stores the UA, so reorg reconstruction is exact:
+        // the record reverts to the binding carried by the remaining claim.
+        assert_eq!(rec.ua, "u1old");
+    }
+
+    #[test]
+    fn rebuild_records_after_reorg_deletes_released_name() {
+        let conn = open();
+        let claim_rcm = [0x11u8; 32];
+        let release_rcm = [0x33u8; 32];
+
+        // Simulate claim at height 10, release at height 20.
+        crate::actions::append_action(
+            &conn,
+            &crate::MintedAction {
+                name: "alice".into(),
+                action: zns_core::Action::Claim,
+                ua: "u1old".into(),
+                txid: [1u8; 32],
+                cmx: [0u8; 32],
+                rcm: claim_rcm,
+                psi: [0u8; 32],
+                prev_rcm: [0u8; 32],
+                height: 10,
+            },
+        )
+        .unwrap();
+        upsert_record(&conn, "alice", &claim_rcm, "u1old", 10).unwrap();
+
+        crate::actions::append_action(
+            &conn,
+            &crate::MintedAction {
+                name: "alice".into(),
+                action: zns_core::Action::Release,
+                ua: String::new(),
+                txid: [2u8; 32],
+                cmx: [0u8; 32],
+                rcm: release_rcm,
+                psi: [0u8; 32],
+                prev_rcm: claim_rcm,
+                height: 20,
+            },
+        )
+        .unwrap();
+        delete_record(&conn, "alice").unwrap();
+
+        // A reorg whose first orphaned height is *above* the release leaves the
+        // release as the latest remaining action. Rebuild must delete the tip
+        // record rather than resurrect the name with an empty UA.
+        let tx = conn.unchecked_transaction().unwrap();
+        crate::actions::delete_actions_above(&tx, 21).unwrap();
+        rebuild_records_after_reorg(&tx, &["alice".into()]).unwrap();
+        tx.commit().unwrap();
+
+        // The name must be gone, not resurrected with an empty UA.
+        assert!(get_record(&conn, "alice").unwrap().is_none());
+    }
+
+    #[test]
+    fn intent_round_trip() {
+        let conn = open();
+        let minted = crate::MintedAction {
+            name: "alice".into(),
+            action: zns_core::Action::Claim,
+            ua: "u1xxx".into(),
+            txid: [1u8; 32],
+            cmx: [2u8; 32],
+            rcm: [3u8; 32],
+            psi: [4u8; 32],
+            prev_rcm: [0u8; 32],
+            height: 100,
+        };
+        let intent = PendingMint {
+            minted: minted.clone(),
+            expiry_height: 140,
+            request: ([5u8; 32], 7),
+        };
+        put_intent(&conn, &intent).unwrap();
+
+        let loaded = get_intent(&conn, "alice").unwrap().unwrap();
+        assert_eq!(loaded.minted, minted);
+        assert_eq!(loaded.expiry_height, 140);
+        assert_eq!(loaded.request, ([5u8; 32], 7));
+
+        let list = list_intents(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+
+        delete_intent(&conn, "alice").unwrap();
+        assert!(get_intent(&conn, "alice").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_intents_above_reorg_height() {
+        let conn = open();
+        let intent = |name: &str, height: u32| PendingMint {
+            minted: crate::MintedAction {
+                name: name.into(),
+                action: zns_core::Action::Claim,
+                ua: "u1x".into(),
+                txid: [height as u8; 32],
+                cmx: [0u8; 32],
+                rcm: [0u8; 32],
+                psi: [0u8; 32],
+                prev_rcm: [0u8; 32],
+                height,
+            },
+            expiry_height: height + 40,
+            request: ([0u8; 32], 0),
+        };
+        put_intent(&conn, &intent("alice", 100)).unwrap();
+        put_intent(&conn, &intent("bob", 200)).unwrap();
+
+        delete_intents_above(&conn, 200).unwrap();
+        assert!(get_intent(&conn, "bob").unwrap().is_none());
+        assert!(get_intent(&conn, "alice").unwrap().is_some());
+    }
+
+    #[test]
+    fn challenge_round_trip_and_purge() {
+        let conn = open();
+        let c = zns_auth::PendingChallenge {
+            name: "alice".into(),
+            action: zns_core::Action::Update,
+            ua_new: "u1new".into(),
+            nonce: "deadbeef".into(),
+            expires_height: 200,
+        };
+        put_challenge(&conn, &c).unwrap();
+
+        let loaded = get_challenge(&conn, "alice").unwrap().unwrap();
+        assert_eq!(loaded, c);
+
+        // At the exact expiry height the challenge is still valid; purge is
+        // conservative and only drops strictly expired rows.
+        purge_expired_challenges(&conn, 200).unwrap();
+        assert!(get_challenge(&conn, "alice").unwrap().is_some());
+
+        purge_expired_challenges(&conn, 201).unwrap();
+        assert!(get_challenge(&conn, "alice").unwrap().is_none());
+    }
+
+    #[test]
+    fn processed_notes_are_idempotent() {
+        let conn = open();
+        let txid = [1u8; 32];
+        let hash = [10u8; 32];
+        mark_processed(&conn, &txid, 0, 100, &hash).unwrap();
+        mark_processed(&conn, &txid, 0, 100, &hash).unwrap(); // idempotent
+        assert!(is_processed(&conn, &txid, 0).unwrap());
+        assert_eq!(last_processed_height(&conn).unwrap(), Some(100));
+    }
+
+    #[test]
+    fn claim_challenge_is_rejected() {
+        let conn = open();
+        let c = zns_auth::PendingChallenge {
+            name: "alice".into(),
+            action: zns_core::Action::Claim,
+            ua_new: "u1new".into(),
+            nonce: "nope".into(),
+            expires_height: 100,
+        };
+        assert!(matches!(
+            put_challenge(&conn, &c),
+            Err(StateError::Invariant(_))
+        ));
     }
 }

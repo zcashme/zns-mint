@@ -77,9 +77,7 @@ fn parse_memo_str(text: &str) -> Result<ParsedMemo, MemoError> {
     let parts: Vec<&str> = text.split(':').collect();
 
     if parts[0] != "ZNS" {
-        return Err(MemoError::InvalidMemo(
-            "does not start with 'ZNS:'".into(),
-        ));
+        return Err(MemoError::InvalidMemo("does not start with 'ZNS:'".into()));
     }
     if parts.len() < 3 || parts.len() > 5 {
         return Err(MemoError::InvalidMemo(format!(
@@ -103,30 +101,47 @@ fn parse_memo_str(text: &str) -> Result<ParsedMemo, MemoError> {
 
     match verb {
         "claim" | "update" => {
-            let action = if verb == "claim" { Action::Claim } else { Action::Update };
-            Ok(ParsedMemo::Action { action, name, ua: arg("ua")?, prev_rcm })
+            let action = if verb == "claim" {
+                Action::Claim
+            } else {
+                Action::Update
+            };
+            Ok(ParsedMemo::Action {
+                action,
+                name,
+                ua: arg("ua")?,
+                prev_rcm,
+            })
         }
         "release" => match (parts.len(), prev_rcm) {
             // Request form: exactly three fields.
-            (3, None) => {
-                Ok(ParsedMemo::Action { action: Action::Release, name, ua: String::new(), prev_rcm: None })
-            }
+            (3, None) => Ok(ParsedMemo::Action {
+                action: Action::Release,
+                name,
+                ua: String::new(),
+                prev_rcm: None,
+            }),
             // Name Note form: positional empty ua, then the witness.
-            (5, Some(_)) if parts[3].is_empty() => {
-                Ok(ParsedMemo::Action { action: Action::Release, name, ua: String::new(), prev_rcm })
-            }
+            (5, Some(_)) if parts[3].is_empty() => Ok(ParsedMemo::Action {
+                action: Action::Release,
+                name,
+                ua: String::new(),
+                prev_rcm,
+            }),
             _ => Err(MemoError::InvalidMemo("release: wrong field count".into())),
         },
-        "challenge" if prev_rcm.is_none() => {
-            Ok(ParsedMemo::Challenge { name, nonce: arg("nonce")? })
-        }
-        "confirm" if prev_rcm.is_none() => Ok(ParsedMemo::Confirm { name, nonce: arg("nonce")? }),
+        "challenge" if prev_rcm.is_none() => Ok(ParsedMemo::Challenge {
+            name,
+            nonce: arg("nonce")?,
+        }),
+        "confirm" if prev_rcm.is_none() => Ok(ParsedMemo::Confirm {
+            name,
+            nonce: arg("nonce")?,
+        }),
         "challenge" | "confirm" => {
             Err(MemoError::InvalidMemo(format!("{verb}: wrong field count")))
         }
-        other => Err(MemoError::InvalidMemo(format!(
-            "unknown verb '{other}'"
-        ))),
+        other => Err(MemoError::InvalidMemo(format!("unknown verb '{other}'"))),
     }
 }
 
@@ -158,10 +173,7 @@ fn decode_prev_rcm(s: &str) -> Result<[u8; 32], MemoError> {
 /// which names exist.
 pub fn validate_name(name: &str) -> Result<(), MemoError> {
     if name.is_empty() {
-        return Err(MemoError::InvalidName(
-            name.into(),
-            "empty name".into(),
-        ));
+        return Err(MemoError::InvalidName(name.into(), "empty name".into()));
     }
     if name.len() > 63 {
         return Err(MemoError::InvalidName(
@@ -225,7 +237,9 @@ pub fn encode_name_note(
     // the field separator), but this is the canonical memo — keep the
     // invariant local rather than inherited.
     if ua.contains(':') {
-        return Err(MemoError::InvalidMemo("ua contains the field separator ':'".into()));
+        return Err(MemoError::InvalidMemo(
+            "ua contains the field separator ':'".into(),
+        ));
     }
     let verb = match action {
         Action::Claim => "claim",
@@ -284,7 +298,12 @@ mod tests {
     }
 
     fn action(a: Action, name: &str, ua: &str, prev_rcm: Option<[u8; 32]>) -> ParsedMemo {
-        ParsedMemo::Action { action: a, name: name.into(), ua: ua.into(), prev_rcm }
+        ParsedMemo::Action {
+            action: a,
+            name: name.into(),
+            ua: ua.into(),
+            prev_rcm,
+        }
     }
 
     #[test]
@@ -308,9 +327,21 @@ mod tests {
     #[test]
     fn confirm_and_challenge() {
         let m = parse_memo_str("ZNS:confirm:alice:abc123").unwrap();
-        assert_eq!(m, ParsedMemo::Confirm { name: "alice".into(), nonce: "abc123".into() });
+        assert_eq!(
+            m,
+            ParsedMemo::Confirm {
+                name: "alice".into(),
+                nonce: "abc123".into()
+            }
+        );
         let m = parse_memo_str("ZNS:challenge:alice:abc123").unwrap();
-        assert_eq!(m, ParsedMemo::Challenge { name: "alice".into(), nonce: "abc123".into() });
+        assert_eq!(
+            m,
+            ParsedMemo::Challenge {
+                name: "alice".into(),
+                nonce: "abc123".into()
+            }
+        );
     }
 
     #[test]
@@ -359,6 +390,12 @@ mod tests {
         let mut raw = b"ZNS:claim:alice:u1x".to_vec();
         raw.resize(512, 0);
         let m = parse_memo(&raw).unwrap();
-        assert!(matches!(m, ParsedMemo::Action { action: Action::Claim, .. }));
+        assert!(matches!(
+            m,
+            ParsedMemo::Action {
+                action: Action::Claim,
+                ..
+            }
+        ));
     }
 }

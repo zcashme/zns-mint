@@ -77,7 +77,10 @@ pub enum TreasuryError {
     WalletDb(#[from] zcash_client_sqlite::error::SqliteClientError),
 
     #[error("orchard commitment tree: {0}")]
-    ShardTree(#[from] shardtree::error::ShardTreeError<zcash_client_sqlite::wallet::commitment_tree::Error>),
+    ShardTree(
+        #[from]
+        shardtree::error::ShardTreeError<zcash_client_sqlite::wallet::commitment_tree::Error>,
+    ),
 
     #[error("wallet sync: {0}")]
     Sync(String),
@@ -141,7 +144,10 @@ pub struct NoteState {
 impl NoteState {
     /// Open (or create) the wallet database at `wallet_db` and ensure the
     /// registry account exists, imported view-only at the configured birthday.
-    pub async fn open(wallet_db: impl AsRef<Path>, config: &TreasuryConfig) -> Result<Self, TreasuryError> {
+    pub async fn open(
+        wallet_db: impl AsRef<Path>,
+        config: &TreasuryConfig,
+    ) -> Result<Self, TreasuryError> {
         let mut db = WalletDb::for_path(wallet_db, config.network, SystemClock, OsRng)?;
         init_wallet_db(&mut db, None).map_err(|e| TreasuryError::Init(e.to_string()))?;
 
@@ -180,9 +186,15 @@ impl NoteState {
     /// trip — and it is also where reorg rewind happens.
     pub async fn sync(&mut self) -> Result<(), TreasuryError> {
         let mut client = zns_chain::grpc::connect(&self.lwd_url).await?;
-        sync::run(&mut client, &self.network, &self.cache, &mut self.db, SYNC_BATCH_SIZE)
-            .await
-            .map_err(|e| TreasuryError::Sync(e.to_string()))
+        sync::run(
+            &mut client,
+            &self.network,
+            &self.cache,
+            &mut self.db,
+            SYNC_BATCH_SIZE,
+        )
+        .await
+        .map_err(|e| TreasuryError::Sync(e.to_string()))
     }
 
     /// Find a spendable registry note worth at least `min_value_zat` and build
@@ -211,7 +223,10 @@ impl NoteState {
         let Some((target_height, anchor_height)) =
             self.db.get_target_and_anchor_heights(min_confirmations)?
         else {
-            return Ok(FundingSelection { note: None, spendable_total_zat });
+            return Ok(FundingSelection {
+                note: None,
+                spendable_total_zat,
+            });
         };
 
         // Selection targets a *sum*; the mint spends a single input, so the
@@ -224,22 +239,29 @@ impl NoteState {
             policy,
             &[],
         )?;
-        let Some(received) =
-            notes.orchard().iter().find(|n| n.note().value().inner() >= min_value_zat)
+        let Some(received) = notes
+            .orchard()
+            .iter()
+            .find(|n| n.note().value().inner() >= min_value_zat)
         else {
-            return Ok(FundingSelection { note: None, spendable_total_zat });
+            return Ok(FundingSelection {
+                note: None,
+                spendable_total_zat,
+            });
         };
 
         let position = received.note_commitment_tree_position();
-        let (path, root) = self.db.with_orchard_tree_mut::<_, _, TreasuryError>(|tree| {
-            let root = tree
-                .root_at_checkpoint_id(&anchor_height)?
-                .ok_or(TreasuryError::MissingCheckpoint(anchor_height))?;
-            let path = tree
-                .witness_at_checkpoint_id_caching(position, &anchor_height)?
-                .ok_or(TreasuryError::MissingWitness(position))?;
-            Ok((path, root))
-        })?;
+        let (path, root) = self
+            .db
+            .with_orchard_tree_mut::<_, _, TreasuryError>(|tree| {
+                let root = tree
+                    .root_at_checkpoint_id(&anchor_height)?
+                    .ok_or(TreasuryError::MissingCheckpoint(anchor_height))?;
+                let path = tree
+                    .witness_at_checkpoint_id_caching(position, &anchor_height)?
+                    .ok_or(TreasuryError::MissingWitness(position))?;
+                Ok((path, root))
+            })?;
 
         Ok(FundingSelection {
             note: Some(SpendableNote {
@@ -260,9 +282,15 @@ async fn birthday(config: &TreasuryConfig) -> Result<AccountBirthday, TreasuryEr
     let prior = config.birthday.max(2) - 1;
     let mut client = zns_chain::grpc::connect(&config.lwd_url).await?;
     let treestate = client
-        .get_tree_state(BlockId { height: prior as u64, hash: vec![] })
+        .get_tree_state(BlockId {
+            height: prior as u64,
+            hash: vec![],
+        })
         .await
-        .map_err(|source| GrpcError::Rpc { call: "get_tree_state", source })?
+        .map_err(|source| GrpcError::Rpc {
+            call: "get_tree_state",
+            source,
+        })?
         .into_inner();
     AccountBirthday::from_treestate(treestate, None).map_err(|e| match e {
         BirthdayError::HeightInvalid(e) => TreasuryError::BirthdayHeight(e),
@@ -294,7 +322,10 @@ impl BlockSource for MemBlockCache {
     {
         let blocks = self.0.lock().expect("block cache lock");
         let from = from_height.map(|h| u64::from(u32::from(h))).unwrap_or(0);
-        for block in blocks.range(from..).map(|(_, b)| b.clone()).take(limit.unwrap_or(usize::MAX))
+        for block in blocks
+            .range(from..)
+            .map(|(_, b)| b.clone())
+            .take(limit.unwrap_or(usize::MAX))
         {
             with_block(block)?;
         }
@@ -310,7 +341,10 @@ impl BlockCache for MemBlockCache {
     ) -> Result<Option<zcash_protocol::consensus::BlockHeight>, Self::Error> {
         let blocks = self.0.lock().expect("block cache lock");
         let tip = match range {
-            Some(range) => blocks.range(range_bounds(range)).next_back().map(|(h, _)| *h),
+            Some(range) => blocks
+                .range(range_bounds(range))
+                .next_back()
+                .map(|(h, _)| *h),
             None => blocks.keys().next_back().copied(),
         };
         Ok(tip.map(|h| zcash_protocol::consensus::BlockHeight::from_u32(h as u32)))
@@ -318,7 +352,10 @@ impl BlockCache for MemBlockCache {
 
     async fn read(&self, range: &ScanRange) -> Result<Vec<CompactBlock>, Self::Error> {
         let blocks = self.0.lock().expect("block cache lock");
-        Ok(blocks.range(range_bounds(range)).map(|(_, b)| b.clone()).collect())
+        Ok(blocks
+            .range(range_bounds(range))
+            .map(|(_, b)| b.clone())
+            .collect())
     }
 
     async fn insert(&self, compact_blocks: Vec<CompactBlock>) -> Result<(), Self::Error> {
@@ -331,7 +368,10 @@ impl BlockCache for MemBlockCache {
 
     async fn delete(&self, range: ScanRange) -> Result<(), Self::Error> {
         let mut blocks = self.0.lock().expect("block cache lock");
-        let keys: Vec<u64> = blocks.range(range_bounds(&range)).map(|(h, _)| *h).collect();
+        let keys: Vec<u64> = blocks
+            .range(range_bounds(&range))
+            .map(|(h, _)| *h)
+            .collect();
         for key in keys {
             blocks.remove(&key);
         }

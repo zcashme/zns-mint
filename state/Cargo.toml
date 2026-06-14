@@ -1,6 +1,6 @@
 [package]
 name = "zns-state"
-description = "ZNS registry persistence: the SQLite name-record store and (soon) the minted-action log."
+description = "ZNS registry persistence: live `names` (current tip) + `name_events` history, plus ancillary tables (challenges, intents, processed). Split design for O(1) live lookup + full audit/reorg history."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,6 @@ zns-auth = { workspace = true }   # PendingChallenge (persisted here)
 # treasury: lightwalletd transport for sync::run (grpc::connect, GrpcError).
 zns-chain = { workspace = true }
 rusqlite = { workspace = true }
-anyhow = { workspace = true }
 thiserror = { workspace = true }
 # treasury note-state: WalletDb owns scanning, shardtree witnesses, reorg
 # rewind, and note selection; `sync::run` drives it. zcash_keys/zcash_address

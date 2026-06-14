@@ -113,7 +113,10 @@ mod tests {
             verify(&c, &c.nonce, c.expires_height + 1).unwrap_err(),
             AuthError::Expired("alice".into())
         );
-        assert_eq!(verify(&c, "deadbeef", 100).unwrap_err(), AuthError::WrongNonce("alice".into()));
+        assert_eq!(
+            verify(&c, "deadbeef", 100).unwrap_err(),
+            AuthError::WrongNonce("alice".into())
+        );
     }
 
     #[test]

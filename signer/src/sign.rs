@@ -20,36 +20,9 @@ use zeroize::Zeroizing;
 
 use orchard::circuit::OrchardCircuitVersion;
 
+use crate::error::SignError;
 use crate::mint::{build_funded_mint, build_memo_send, build_sweep, MintResult};
-use crate::policy::{
-    FundingInput, MintProposal, PolicyError, RequestId, SpendGuard, SpendPolicy,
-};
-
-/// Why the signer refused (policy) or failed (build).
-#[derive(Debug)]
-pub enum SignError {
-    /// The proposal violated policy — the signer refused before building.
-    Policy(PolicyError),
-    /// Policy passed but bundle construction / proving failed.
-    Build(anyhow::Error),
-}
-
-impl From<PolicyError> for SignError {
-    fn from(e: PolicyError) -> Self {
-        SignError::Policy(e)
-    }
-}
-
-impl std::fmt::Display for SignError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SignError::Policy(e) => write!(f, "policy refused: {e:?}"),
-            SignError::Build(e) => write!(f, "build failed: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for SignError {}
+use crate::policy::{FundingInput, MintProposal, PolicyError, RequestId, SpendGuard, SpendPolicy};
 
 /// The registry signing authority. Cheap to share behind an `Arc`; the inner
 /// guard is mutex-protected.
@@ -73,9 +46,9 @@ impl Signer {
         coin_type: u32,
         account: zip32::AccountId,
         policy: SpendPolicy,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, SignError> {
         let sk = SpendingKey::from_zip32_seed(&seed, coin_type, account)
-            .map_err(|e| anyhow::anyhow!("invalid registry seed: {e:?}"))?;
+            .map_err(|e| SignError::InvalidSeed(format!("{e:?}")))?;
         let fvk = FullViewingKey::from(&sk);
         Ok(Self {
             seed: Zeroizing::new(seed),
@@ -146,12 +119,17 @@ impl Signer {
     ) -> Result<MintResult, SignError> {
         // Pure policy gate first — cheap rejects without mutating state.
         let funding_value = proposal.funding.note.value().inner();
-        let plan = self.policy.evaluate_mint(&proposal.intent, funding_value, hot_balance_zat)?;
+        let plan = self
+            .policy
+            .evaluate_mint(&proposal.intent, funding_value, hot_balance_zat)?;
 
         // Record (replay + velocity). Rolled back if the build fails so a
         // transient error neither burns the request nor a velocity slot.
         let id = proposal.intent.request_id;
-        self.guard.lock().expect("guard poisoned").admit_mint(&self.policy, id)?;
+        self.guard
+            .lock()
+            .expect("guard poisoned")
+            .admit_mint(&self.policy, id)?;
 
         let sk = self.spending_key();
         match build_funded_mint(
@@ -204,11 +182,17 @@ impl Signer {
             }));
         }
         let funding_value = funding.note.value().inner();
-        let change = funding_value.checked_sub(fee + dust).ok_or(SignError::Policy(
-            PolicyError::InsufficientFunding { have: funding_value, need: fee + dust },
-        ))?;
+        let change = funding_value
+            .checked_sub(fee + dust)
+            .ok_or(SignError::Policy(PolicyError::InsufficientFunding {
+                have: funding_value,
+                need: fee + dust,
+            }))?;
 
-        self.guard.lock().expect("guard poisoned").admit_mint(&self.policy, request_id)?;
+        self.guard
+            .lock()
+            .expect("guard poisoned")
+            .admit_mint(&self.policy, request_id)?;
 
         let sk = self.spending_key();
         match build_memo_send(
@@ -226,7 +210,10 @@ impl Signer {
         ) {
             Ok(tx_bytes) => Ok(tx_bytes),
             Err(e) => {
-                self.guard.lock().expect("guard poisoned").rollback_mint(request_id);
+                self.guard
+                    .lock()
+                    .expect("guard poisoned")
+                    .rollback_mint(request_id);
                 Err(SignError::Build(e))
             }
         }
@@ -256,10 +243,16 @@ impl Signer {
         }
         let funding_value = funding.note.value().inner();
         let amount = funding_value.checked_sub(fee_zat).ok_or(SignError::Policy(
-            PolicyError::InsufficientFunding { have: funding_value, need: fee_zat },
+            PolicyError::InsufficientFunding {
+                have: funding_value,
+                need: fee_zat,
+            },
         ))?;
 
-        self.guard.lock().expect("guard poisoned").admit_sweep(&self.policy, amount)?;
+        self.guard
+            .lock()
+            .expect("guard poisoned")
+            .admit_sweep(&self.policy, amount)?;
 
         let sk = self.spending_key();
         match build_sweep(
@@ -272,9 +265,15 @@ impl Signer {
             expiry_height,
             circuit_version,
         ) {
-            Ok(tx_bytes) => Ok(SweepResult { tx_bytes, amount_zat: amount }),
+            Ok(tx_bytes) => Ok(SweepResult {
+                tx_bytes,
+                amount_zat: amount,
+            }),
             Err(e) => {
-                self.guard.lock().expect("guard poisoned").rollback_sweep(amount);
+                self.guard
+                    .lock()
+                    .expect("guard poisoned")
+                    .rollback_sweep(amount);
                 Err(SignError::Build(e))
             }
         }

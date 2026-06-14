@@ -147,7 +147,10 @@ impl SpendPolicy {
             return Err(PolicyError::EmptyUa);
         }
         if intent.fee_zat > self.max_fee_zat {
-            return Err(PolicyError::FeeTooHigh { fee: intent.fee_zat, max: self.max_fee_zat });
+            return Err(PolicyError::FeeTooHigh {
+                fee: intent.fee_zat,
+                max: self.max_fee_zat,
+            });
         }
         if hot_balance_zat < self.low_watermark_zat {
             return Err(PolicyError::BelowLowWatermark {
@@ -156,7 +159,10 @@ impl SpendPolicy {
             });
         }
         let change = funding_value_zat.checked_sub(intent.fee_zat).ok_or(
-            PolicyError::InsufficientFunding { have: funding_value_zat, need: intent.fee_zat },
+            PolicyError::InsufficientFunding {
+                have: funding_value_zat,
+                need: intent.fee_zat,
+            },
         )?;
         Ok(MintPlan {
             action: intent.action,
@@ -236,7 +242,11 @@ impl SpendGuard {
     }
 
     /// Admit a sweep of `amount_zat` against the per-window value cap.
-    pub fn admit_sweep(&mut self, policy: &SpendPolicy, amount_zat: u64) -> Result<(), PolicyError> {
+    pub fn admit_sweep(
+        &mut self,
+        policy: &SpendPolicy,
+        amount_zat: u64,
+    ) -> Result<(), PolicyError> {
         if self.swept_this_window_zat.saturating_add(amount_zat) > policy.max_swept_per_window_zat {
             return Err(PolicyError::VelocityExceeded);
         }
@@ -296,7 +306,10 @@ mod tests {
             ua: "u1xxx".into(),
             prev_rcm: [0u8; 32],
             fee_zat: fee,
-            request_id: RequestId { txid: [0u8; 32], action_index: 0 },
+            request_id: RequestId {
+                txid: [0u8; 32],
+                action_index: 0,
+            },
         }
     }
 
@@ -323,11 +336,23 @@ mod tests {
             Err(PolicyError::BelowLowWatermark { .. })
         ));
         // illegal name.
-        let bad = MintIntent { name: "Alice".into(), ..intent(5_000) };
-        assert!(matches!(p.evaluate_mint(&bad, 50_000, 1_000_000), Err(PolicyError::NameInvalid(_))));
+        let bad = MintIntent {
+            name: "Alice".into(),
+            ..intent(5_000)
+        };
+        assert!(matches!(
+            p.evaluate_mint(&bad, 50_000, 1_000_000),
+            Err(PolicyError::NameInvalid(_))
+        ));
         // empty UA for a CLAIM.
-        let no_ua = MintIntent { ua: String::new(), ..intent(5_000) };
-        assert!(matches!(p.evaluate_mint(&no_ua, 50_000, 1_000_000), Err(PolicyError::EmptyUa)));
+        let no_ua = MintIntent {
+            ua: String::new(),
+            ..intent(5_000)
+        };
+        assert!(matches!(
+            p.evaluate_mint(&no_ua, 50_000, 1_000_000),
+            Err(PolicyError::EmptyUa)
+        ));
     }
 
     #[test]
@@ -335,15 +360,23 @@ mod tests {
         let p = policy();
         assert_eq!(p.evaluate_sweep(4_000_000), None); // below high watermark
         assert_eq!(p.evaluate_sweep(5_000_000), None); // at high watermark
-        // above: sweep down to target_float
-        assert_eq!(p.evaluate_sweep(8_000_000), Some(SweepPlan { amount_zat: 7_000_000 }));
+                                                       // above: sweep down to target_float
+        assert_eq!(
+            p.evaluate_sweep(8_000_000),
+            Some(SweepPlan {
+                amount_zat: 7_000_000
+            })
+        );
     }
 
     #[test]
     fn velocity_and_replay() {
         let p = policy();
         let mut g = SpendGuard::default();
-        let id = |n: u32| RequestId { txid: [0; 32], action_index: n };
+        let id = |n: u32| RequestId {
+            txid: [0; 32],
+            action_index: n,
+        };
 
         assert!(g.admit_mint(&p, id(0)).is_ok());
         assert_eq!(g.admit_mint(&p, id(0)), Err(PolicyError::Replay(id(0)))); // replay
@@ -360,6 +393,9 @@ mod tests {
         let p = policy();
         let mut g = SpendGuard::default();
         assert!(g.admit_sweep(&p, 6_000_000).is_ok());
-        assert_eq!(g.admit_sweep(&p, 5_000_000), Err(PolicyError::VelocityExceeded)); // 11M > 10M cap
+        assert_eq!(
+            g.admit_sweep(&p, 5_000_000),
+            Err(PolicyError::VelocityExceeded)
+        ); // 11M > 10M cap
     }
 }
