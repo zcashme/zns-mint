@@ -35,7 +35,10 @@ pub struct SpendPolicy {
     pub cold_addr: Address,
     /// Maximum fee the signer will pay for one mint (caps fee-burn griefing).
     pub max_fee_zat: u64,
-    /// Hot-float target a sweep reduces the balance toward.
+    /// (Legacy) Hot-float target. In the current host-controlled infrequent
+    /// drain model this is not used as a constraint — the host decides the
+    /// amount to drain purely via note selection when balance exceeds the
+    /// high watermark.
     pub target_float_zat: u64,
     /// Sweep to cold once the hot balance exceeds this.
     pub high_watermark_zat: u64,
@@ -99,13 +102,6 @@ pub struct MintPlan {
     pub fee_zat: u64,
     /// `funding.value − fee` (the Name Note is value 0), back to `registry_addr`.
     pub change_zat: u64,
-}
-
-/// An authorized sweep of excess float to the cold address.
-#[derive(Debug, PartialEq, Eq)]
-pub struct SweepPlan {
-    /// Amount to move to `cold_addr` (`balance − target_float`, velocity-capped).
-    pub amount_zat: u64,
 }
 
 // ── rejections ───────────────────────────────────────────────────────────────
@@ -173,14 +169,11 @@ impl SpendPolicy {
         })
     }
 
-    /// Decide whether to sweep excess float to cold. Returns `None` when the
-    /// balance is at or below the high watermark (nothing to do).
-    pub fn evaluate_sweep(&self, hot_balance_zat: u64) -> Option<SweepPlan> {
+    pub fn evaluate_sweep(&self, hot_balance_zat: u64) -> Option<u64> {
         if hot_balance_zat <= self.high_watermark_zat {
             return None;
         }
-        let amount = hot_balance_zat.saturating_sub(self.target_float_zat);
-        (amount > 0).then_some(SweepPlan { amount_zat: amount })
+        Some(hot_balance_zat)
     }
 }
 
@@ -342,15 +335,9 @@ mod tests {
     #[test]
     fn sweep_watermark() {
         let p = policy();
-        assert_eq!(p.evaluate_sweep(4_000_000), None); // below high watermark
-        assert_eq!(p.evaluate_sweep(5_000_000), None); // at high watermark
-                                                       // above: sweep down to target_float
-        assert_eq!(
-            p.evaluate_sweep(8_000_000),
-            Some(SweepPlan {
-                amount_zat: 7_000_000
-            })
-        );
+        assert_eq!(p.evaluate_sweep(4_000_000), None);
+        assert_eq!(p.evaluate_sweep(5_000_000), None);
+        assert_eq!(p.evaluate_sweep(8_000_000), Some(8_000_000));
     }
 
     #[test]

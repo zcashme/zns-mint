@@ -22,6 +22,6 @@ pub use mint::{
 };
 pub use policy::{
     validate_name, FundingInput, MintIntent, MintPlan, MintProposal, PolicyError, RequestId,
-    SpendGuard, SpendPolicy, SweepPlan,
+    SpendGuard, SpendPolicy,
 };
 pub use sign::{test_orchard_ivk, test_registry_address, Signer, SweepResult};

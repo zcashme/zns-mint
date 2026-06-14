@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use zns_registry::{
-    test_orchard_ivk, test_registry_address, test_sapling_ivk, scan_incoming_all, scan_mempool, FundingInput,
+    test_orchard_ivk, test_registry_address, scan_incoming_all, scan_mempool, FundingInput,
     GrpcClient, MintContext, NoteState, ProcessResult, Processor, Registry, ScannerConfig,
     Signer, SpendPolicy, Treasury, TreasuryConfig, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
 };
@@ -40,12 +40,12 @@ const RPC_ADDR: &str = "127.0.0.1:8081";
 /// falls back to `cold_addr == registry_addr` and force-disables sweeps.
 const COLD_ADDR_UA: &str = "";
 
-/// Once the hot balance exceeds this, a sweep is due
-/// ([`SpendPolicy::evaluate_sweep`]).
-const HIGH_WATERMARK_ZAT: u64 = 10 * MINT_FEE_ZAT;
+/// Threshold used by the host's infrequent (daily) drain decision.
+/// Only consider draining to cold once the hot treasury balance exceeds
+/// this amount (on the order of 1 ZEC or higher, as requested).
+const HIGH_WATERMARK_ZAT: u64 = 100_000_000; // 1 ZEC
 
-/// Sweep aims to bring the hot balance back down toward this.
-const TARGET_FLOAT_ZAT: u64 = 4 * MINT_FEE_ZAT;
+const SWEEP_CHECK_INTERVAL_TICKS: u32 = 86400 / 15;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -155,8 +155,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     let mut tick = tokio::time::interval(POLL_INTERVAL);
+
+    let mut sweep_counter: u32 = 0;
+
     loop {
         tick.tick().await;
+
+        sweep_counter = (sweep_counter + 1) % SWEEP_CHECK_INTERVAL_TICKS;
+
         // One poll = one velocity window (with take-once treasury, at most one
         // spend lands per poll anyway; the cap matters once that changes).
         signer.roll_window();
@@ -297,40 +303,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => tracing::warn!("funding selection failed: {e:#}"),
             }
 
-        // Sweep check: if the hot balance is over the high watermark, drain
-        // this poll's selected note to cold before anything else can spend
-        // it. On any failure, give the note back so a relay/mint can still
-        // use it this round.
-        if let Some(plan) = signer.policy().evaluate_sweep(ctx.hot_balance_zat) {
-            if let Some(treasury) = ctx.treasury.take() {
-                match signer.sign_sweep(
-                    treasury.funding_input(),
-                    MINT_FEE_ZAT,
-                    ctx.branch_id,
-                    ctx.expiry_height,
-                    ctx.circuit_version,
-                ) {
-                    Ok(result) => match grpc.broadcast(result.tx_bytes).await {
-                        Ok(()) => tracing::info!(
-                            amount_zat = result.amount_zat,
-                            target_zat = plan.amount_zat,
-                            "sweep broadcast"
-                        ),
-                        Err(e) => {
-                            tracing::warn!("sweep broadcast failed: {e:#}");
-                            ctx.treasury = Some(treasury);
+        if sweep_counter == 0 {
+            if ctx.hot_balance_zat > HIGH_WATERMARK_ZAT {
+                match notestate.select_funding(0, ANCHOR_CONFIRMATIONS) {
+                    Ok(drain_sel) => {
+                        match drain_sel.note {
+                            Some(dn) => {
+                                let drain_funding = FundingInput {
+                                    note: dn.note,
+                                    merkle_path: dn.merkle_path,
+                                    anchor: dn.anchor,
+                                };
+                                match signer.sign_sweep(
+                                    drain_funding,
+                                    MINT_FEE_ZAT,
+                                    ctx.branch_id,
+                                    ctx.expiry_height,
+                                    ctx.circuit_version,
+                                ) {
+                                    Ok(result) => match grpc.broadcast(result.tx_bytes).await {
+                                        Ok(()) => tracing::info!(
+                                            amount_zat = result.amount_zat,
+                                            "sweep broadcast"
+                                        ),
+                                        Err(e) => {
+                                            tracing::warn!("sweep broadcast failed: {e:#}");
+                                        }
+                                    },
+                                    Err(e) => {
+                                        tracing::warn!("sweep sign failed: {e}");
+                                    }
+                                }
+                            }
+                            None => tracing::warn!(
+                                "sweep due but no note available"
+                            ),
                         }
-                    },
-                    Err(e) => {
-                        tracing::warn!("sweep sign failed: {e}");
-                        ctx.treasury = Some(treasury);
                     }
+                    Err(e) => tracing::warn!("sweep funding selection failed: {e:#}"),
                 }
-            } else {
-                tracing::warn!(
-                    spendable_zat = ctx.hot_balance_zat,
-                    "sweep due but no treasury note selected — deferred"
-                );
             }
         }
 
@@ -416,10 +427,6 @@ impl DaemonConfig {
     fn scanner(&self) -> ScannerConfig {
         ScannerConfig {
             registry_ivk: test_orchard_ivk(),
-            // Internal Sapling IVK for trial-decrypting ZNS memos sent via Sapling
-            // (to the registry's unadvertised Sapling address derived from the same
-            // seed). The public "address" and "viewkey" commands remain Orchard-only.
-            sapling_ivk: Some(test_sapling_ivk()),
             network: self.network,
             birthday: self.birthday,
             lwd_url: self.lwd_url.clone(),
@@ -469,7 +476,7 @@ impl DaemonConfig {
             registry_addr,
             cold_addr,
             max_fee_zat: MINT_FEE_ZAT,
-            target_float_zat: TARGET_FLOAT_ZAT,
+            target_float_zat: 0,
             high_watermark_zat: if sweeps_enabled {
                 HIGH_WATERMARK_ZAT
             } else {

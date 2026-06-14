@@ -50,6 +50,7 @@ impl Signer {
         let sk = SpendingKey::from_zip32_seed(&seed, coin_type, account)
             .map_err(|e| SignError::InvalidSeed(format!("{e:?}")))?;
         let fvk = FullViewingKey::from(&sk);
+
         Ok(Self {
             seed: Zeroizing::new(seed),
             coin_type,
@@ -219,14 +220,9 @@ impl Signer {
         }
     }
 
-    /// Author and sign an auto-sweep of one treasury note to the **cold
-    /// address** (`amount = funding.value − fee`). The destination is the policy
-    /// constant — a compromised host calling this can only move funds *to cold*,
-    /// never elsewhere — and the per-window value cap bounds the rate.
-    ///
-    /// Whether to sweep at all (and the target total) is the daemon's call via
-    /// [`SpendPolicy::evaluate_sweep`]; the signer enforces the fee + velocity
-    /// caps and the fixed destination.
+    /// Author and sign an auto-sweep of one treasury note to the **cold address**.
+    /// Destination is always the policy's cold_addr. The host decides when and
+    /// how much.
     pub fn sign_sweep(
         &self,
         funding: FundingInput,

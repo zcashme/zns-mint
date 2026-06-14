@@ -3465,6 +3465,7 @@ dependencies = [
 name = "zns-chain"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "hex",
  "http",
  "orchard",
@@ -3517,6 +3518,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zcash_address",
+ "zcash_client_backend",
  "zcash_keys",
  "zcash_protocol",
  "zip32",
@@ -3544,6 +3546,5 @@ dependencies = [
  "zcash_keys",
  "zcash_protocol",
  "zns-auth",
- "zns-chain",
  "zns-core",
 ]

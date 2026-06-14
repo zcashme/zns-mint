@@ -28,6 +28,7 @@ zns-registry = { path = "mint" }
 # orchard resolves to the zns-orchard fork via [patch.crates-io] below;
 # the unsafe-zns / circuit features are added per-crate that needs them.
 orchard          = { version = "0.14", default-features = false }
+
 zcash_primitives = "0.28"
 zcash_protocol   = "0.9"
 zcash_keys       = { version = "0.14", default-features = false, features = ["orchard"] }

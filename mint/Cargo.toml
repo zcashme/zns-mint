@@ -33,6 +33,7 @@ zcash_protocol = { workspace = true }
 # Parse a name owner's Unified Address → Orchard receiver for the OTP relay.
 zcash_keys = { workspace = true }
 zcash_address = { workspace = true }
+zcash_client_backend = { workspace = true }
 # Registry holds the SQLite connection directly and calls zns-state's helpers.
 rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }

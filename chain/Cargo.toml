@@ -26,7 +26,6 @@ http = { workspace = true }
 # decode lightwalletd's hex-encoded commitment tree (GetTreeState → anchor)
 hex = { workspace = true }
 thiserror = { workspace = true }
-sapling.workspace = true
 # for EphemeralCompactBlockCache (the BlockCache/BlockSource contract used by
 # zcash_client_backend::sync::run when the orchestrator drives treasury sync)
 async-trait = { workspace = true }
