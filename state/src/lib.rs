@@ -1,17 +1,21 @@
 //! `zns-state` — ZNS registry persistence.
 //!
 //! Owns the SQLite stores:
-//! - [`db`] holds the live `names` table (current tip binding per active name,
-//!   one row, O(1) by name) plus ancillary tables (processed_notes, challenges,
-//!   intents).
-//! - [`actions`] holds the append-only `name_events` history log (one row per
+//! - [`db`] owns the live `names` table (fast current binding per active name,
+//!   plus the chain-head `rcm` for the next mutation) and ancillary tables
+//!   (processed_notes, challenges, intents).
+//! - [`actions`] owns the append-only `name_events` history log (one row per
 //!   CLAIM/UPDATE/RELEASE). This is the source of truth for the `(ψ, rcm)`
 //!   chain and for reorg reconstruction.
 //!
-//! The split (live `names` + history `name_events`) keeps the hot path tiny
-//! while allowing the history to be pruned or archived independently if ever
-//! needed. Both are updated atomically with the other registry tables in the
-//! same transaction on mint or reorg.
+//! The public API exposes a thin [`Name`] (just the name → UA binding) via
+//! `get_record` / `lookup`. Verification / chain data is available separately
+//! via `get_current_rcm`, `latest_action`, or `MintedAction`.
+//!
+//! The split (live `names` tip + history `name_events`) keeps the hot path
+//! tiny while allowing the history to be pruned or archived independently if
+//! ever needed. Both are updated atomically with the other registry tables in
+//! the same transaction on mint or reorg.
 //!
 //! Split out of `zns-core` so the storage layer is its own crate (cf.
 //! `zebra-state`) and pure consumers of the domain types never link rusqlite.
@@ -30,9 +34,9 @@ pub use actions::{
     actions_for, affected_names, append_action, delete_actions_above, latest_action, MintedAction,
 };
 pub use db::{
-    delete_intents_above, delete_processed_above, delete_record, get_record, last_processed_height,
-    mark_processed, processed_hash_at_height, rebuild_records_after_reorg, upsert_record,
-    upsert_record_from_action, NameRecord,
+    delete_intents_above, delete_processed_above, delete_record, get_current_rcm, get_record,
+    last_processed_height, mark_processed, processed_hash_at_height, rebuild_records_after_reorg,
+    upsert_record, upsert_record_from_action, Name,
 };
 pub use db::PendingMint;
 pub use error::StateError;
@@ -95,8 +99,21 @@ impl State {
         db::delete_intent(&self.conn, name)
     }
 
-    pub fn get_record(&self, name: &str) -> Result<Option<NameRecord>, StateError> {
+    /// Return the current public binding for a name (name + UA).
+    ///
+    /// This is the thin resolution record. Chain-head verification data
+    /// (the `rcm` needed as `prev_rcm` for the next mutation) is returned
+    /// separately by [`Self::get_current_rcm`].
+    pub fn get_record(&self, name: &str) -> Result<Option<Name>, StateError> {
         db::get_record(&self.conn, name)
+    }
+
+    /// Return the current chain-head `rcm` for a name (if registered).
+    ///
+    /// This is the value that must be used as `prev_rcm` when minting the
+    /// next UPDATE or RELEASE for the name.
+    pub fn get_current_rcm(&self, name: &str) -> Result<Option<[u8; 32]>, StateError> {
+        db::get_current_rcm(&self.conn, name)
     }
 
     pub fn table_counts(&self) -> Result<(u64, u64, u64), StateError> {

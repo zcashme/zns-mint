@@ -17,7 +17,7 @@
 //! 7. Broadcasts transactions via zebrad gRPC (`zns_chain::grpc`).
 
 // Flat API surface — re-export the domain, state, chain, and mint crates so
-// `zns_registry::{parse_memo, build_name_note, NameRecord, ...}` resolve in one place.
+// `zns_registry::{parse_memo, build_name_note, Name, ...}` resolve in one place.
 pub use zns_chain::{
     scan_incoming, scan_incoming_all, scan_mempool, GrpcClient, GrpcError, IncomingNote,
     ScannerConfig,
@@ -27,7 +27,7 @@ pub use zns_mint::{
     build_name_note, FundingInput, MintParams, MintResult, RequestId, Signer, SpendPolicy,
 };
 pub use zns_state::{
-    FundingSelection, MintedAction, NameRecord, NoteState, SpendableNote, TreasuryConfig,
+    FundingSelection, MintedAction, Name, NoteState, SpendableNote, TreasuryConfig,
 };
 
 pub mod rpc;
@@ -153,8 +153,13 @@ impl Registry {
     // Query API
     // -----------------------------------------------------------------------
 
-    /// Look up a registered name.  Returns `None` if the name is unknown.
-    pub async fn lookup(&self, name: &str) -> Result<Option<NameRecord>, RegistryError> {
+    /// Look up a registered name. Returns the thin public binding (`Name`)
+    /// containing only the name and its current Unified Address, or `None`
+    /// if the name is not registered.
+    ///
+    /// To obtain the verification chain-head (`rcm`) needed to perform an
+    /// UPDATE or RELEASE, use `get_current_rcm` (or the actions history).
+    pub async fn lookup(&self, name: &str) -> Result<Option<Name>, RegistryError> {
         let st = self.state.lock().await;
         st.get_record(name).map_err(Into::into)
     }
@@ -462,10 +467,8 @@ impl Registry {
 
         let prev_rcm = {
             let st = self.state.lock().await;
-            match st.get_record(name)? {
-                Some(rec) => rec.tip_rcm,
-                None => return Err(RegistryError::NotFound(name.into())),
-            }
+            st.get_current_rcm(name)?
+                .ok_or_else(|| RegistryError::NotFound(name.into()))?
         };
 
         let action = challenge.action;

@@ -5,18 +5,22 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::StateError;
 
-/// A row from the live `names` table (current tip binding for an active name).
+/// The public binding for a registered name: the name and the Unified Address
+/// it currently resolves to.
 ///
+/// This is the thin resolution record returned by `get_record` / `lookup`.
+/// It contains only the current name → UA mapping.
+///
+/// Verification data for the name (the current chain head `rcm`, the height
+/// of the last update, etc.) is not exposed here. It lives in the internal
+/// tip row and is available via `get_current_rcm`, `latest_action`, or
+/// `MintedAction` entries when you need to continue the `(ψ, rcm)` chain
+/// or perform reorg reconstruction.
 #[derive(Debug, Clone)]
-pub struct NameRecord {
+pub struct Name {
     pub name: String,
-    /// The `rcm` of the most recently minted Name Note for this name.
-    /// This becomes `prev_rcm` for the next UPDATE / RELEASE.
-    pub tip_rcm: [u8; 32],
     /// The current Unified Address bound to the name.
     pub ua: String,
-    /// The Zcash block height at which the record was last updated.
-    pub height: u32,
 }
 
 /// Initialise the database schema (idempotent).
@@ -424,38 +428,48 @@ pub fn delete_processed_above(conn: &Connection, height: u32) -> Result<(), Stat
     Ok(())
 }
 
-/// Retrieve a name record, returning `None` if the name is not registered.
-pub fn get_record(conn: &Connection, name: &str) -> Result<Option<NameRecord>, StateError> {
-    let row = conn
+/// Retrieve the current public binding (`Name`) for a name,
+/// returning `None` if the name is not registered.
+///
+/// This returns only the thin name → UA mapping. Use `get_current_rcm`
+/// (or the actions log) when you need the chain-head verification data.
+pub fn get_record(conn: &Connection, name: &str) -> Result<Option<Name>, StateError> {
+    conn.query_row(
+        "SELECT name, ua FROM names WHERE name = ?1",
+        params![name],
+        |row| {
+            Ok(Name {
+                name: row.get(0)?,
+                ua: row.get(1)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Return the current chain-head `rcm` for a name, if registered.
+///
+/// This is the verification value that must be supplied as `prev_rcm` when
+/// constructing the next UPDATE or RELEASE for this name.
+pub fn get_current_rcm(conn: &Connection, name: &str) -> Result<Option<[u8; 32]>, StateError> {
+    let rcm_bytes: Option<Vec<u8>> = conn
         .query_row(
-            "SELECT name, rcm, ua, height FROM names WHERE name = ?1",
+            "SELECT rcm FROM names WHERE name = ?1",
             params![name],
-            |row| {
-                let rcm_bytes: Vec<u8> = row.get(1)?;
-                Ok((
-                    row.get::<_, String>(0)?,
-                    rcm_bytes,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, u32>(3)?,
-                ))
-            },
+            |row| row.get(0),
         )
         .optional()?;
 
-    match row {
+    match rcm_bytes {
         None => Ok(None),
-        Some((name, rcm_bytes, ua, height)) => {
-            let tip_rcm = bytes_to_array32(&rcm_bytes).map_err(|e| StateError::CorruptRow {
+        Some(bytes) => {
+            let rcm = bytes_to_array32(&bytes).map_err(|e| StateError::CorruptRow {
                 table: "names",
                 field: "rcm",
                 detail: e,
             })?;
-            Ok(Some(NameRecord {
-                name,
-                tip_rcm,
-                ua,
-                height,
-            }))
+            Ok(Some(rcm))
         }
     }
 }
@@ -494,25 +508,25 @@ pub fn upsert_record_from_action(
     Ok(())
 }
 
-/// Legacy 4-arg upsert kept only for a few internal tests during transition.
-/// Prefer `upsert_record_from_action`.
+/// Legacy helper kept only for a few internal tests during transition.
+/// Prefer `upsert_record_from_action` + explicit `MintedAction` when you
+/// need real verification fields in the tip row.
 pub fn upsert_record(
     conn: &Connection,
     name: &str,
-    tip_rcm: &[u8; 32],
     ua: &str,
     height: u32,
 ) -> Result<(), StateError> {
-    // Synthesize a minimal action row for the live table. prev_rcm/psi/cmx/txid
-    // are not observable via the NameRecord projection, so zeros are fine for
-    // tests that only care about get_record roundtrips of (rcm,ua,height).
+    // The public `Name` only carries the binding. We still write a row
+    // into the tip table (with dummy verification fields) so that
+    // get_record works for tests that only care about the public binding.
     let dummy = crate::MintedAction {
         name: name.to_owned(),
-        action: zns_core::Action::Claim, // placeholder; not exposed in NameRecord
+        action: zns_core::Action::Claim,
         ua: ua.to_owned(),
         txid: [0u8; 32],
         cmx: [0u8; 32],
-        rcm: *tip_rcm,
+        rcm: [0u8; 32],
         psi: [0u8; 32],
         prev_rcm: [0u8; 32],
         height,
@@ -520,8 +534,8 @@ pub fn upsert_record(
     upsert_record_from_action(conn, &dummy)
 }
 
-/// Delete a name record (called after a successful RELEASE mint, or when a
-/// reorg leaves a RELEASE as the new tip).
+/// Delete the binding for a name (called after a successful RELEASE mint,
+/// or when a reorg leaves a RELEASE as the new tip).
 pub fn delete_record(conn: &Connection, name: &str) -> Result<(), StateError> {
     conn.execute("DELETE FROM names WHERE name = ?1", params![name])?;
     Ok(())
@@ -548,13 +562,10 @@ mod tests {
     #[test]
     fn insert_and_get() {
         let conn = open();
-        let rcm = [0xabu8; 32];
-        upsert_record(&conn, "alice", &rcm, "u1xxx", 1_000_000).unwrap();
+        upsert_record(&conn, "alice", "u1xxx", 1_000_000).unwrap();
         let rec = get_record(&conn, "alice").unwrap().unwrap();
         assert_eq!(rec.name, "alice");
-        assert_eq!(rec.tip_rcm, rcm);
         assert_eq!(rec.ua, "u1xxx");
-        assert_eq!(rec.height, 1_000_000);
     }
 
     #[test]
@@ -566,19 +577,16 @@ mod tests {
     #[test]
     fn upsert_updates() {
         let conn = open();
-        let rcm1 = [0x11u8; 32];
-        let rcm2 = [0x22u8; 32];
-        upsert_record(&conn, "alice", &rcm1, "u1old", 100).unwrap();
-        upsert_record(&conn, "alice", &rcm2, "u1new", 200).unwrap();
+        upsert_record(&conn, "alice", "u1old", 100).unwrap();
+        upsert_record(&conn, "alice", "u1new", 200).unwrap();
         let rec = get_record(&conn, "alice").unwrap().unwrap();
-        assert_eq!(rec.tip_rcm, rcm2);
         assert_eq!(rec.ua, "u1new");
     }
 
     #[test]
     fn delete() {
         let conn = open();
-        upsert_record(&conn, "alice", &[0u8; 32], "u1xxx", 100).unwrap();
+        upsert_record(&conn, "alice", "u1xxx", 100).unwrap();
         delete_record(&conn, "alice").unwrap();
         assert!(get_record(&conn, "alice").unwrap().is_none());
     }
@@ -635,7 +643,7 @@ mod tests {
             },
         )
         .unwrap();
-        upsert_record(&conn, "alice", &claim_rcm, "u1old", 10).unwrap();
+        upsert_record(&conn, "alice", "u1old", 10).unwrap();
 
         crate::actions::append_action(
             &conn,
@@ -652,7 +660,7 @@ mod tests {
             },
         )
         .unwrap();
-        upsert_record(&conn, "alice", &update_rcm, "u1new", 20).unwrap();
+        upsert_record(&conn, "alice", "u1new", 20).unwrap();
 
         // Reorg at height 20 removes the update.
         let tx = conn.unchecked_transaction().unwrap();
@@ -661,8 +669,6 @@ mod tests {
         tx.commit().unwrap();
 
         let rec = get_record(&conn, "alice").unwrap().unwrap();
-        assert_eq!(rec.tip_rcm, claim_rcm);
-        assert_eq!(rec.height, 10);
         // The action log now stores the UA, so reorg reconstruction is exact:
         // the record reverts to the binding carried by the remaining claim.
         assert_eq!(rec.ua, "u1old");
@@ -690,7 +696,7 @@ mod tests {
             },
         )
         .unwrap();
-        upsert_record(&conn, "alice", &claim_rcm, "u1old", 10).unwrap();
+        upsert_record(&conn, "alice", "u1old", 10).unwrap();
 
         crate::actions::append_action(
             &conn,
