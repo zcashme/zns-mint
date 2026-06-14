@@ -508,32 +508,6 @@ pub fn upsert_record_from_action(
     Ok(())
 }
 
-/// Legacy helper kept only for a few internal tests during transition.
-/// Prefer `upsert_record_from_action` + explicit `MintedAction` when you
-/// need real verification fields in the tip row.
-pub fn upsert_record(
-    conn: &Connection,
-    name: &str,
-    ua: &str,
-    height: u32,
-) -> Result<(), StateError> {
-    // The public `Name` only carries the binding. We still write a row
-    // into the tip table (with dummy verification fields) so that
-    // get_record works for tests that only care about the public binding.
-    let dummy = crate::MintedAction {
-        name: name.to_owned(),
-        action: zns_core::Action::Claim,
-        ua: ua.to_owned(),
-        txid: [0u8; 32],
-        cmx: [0u8; 32],
-        rcm: [0u8; 32],
-        psi: [0u8; 32],
-        prev_rcm: [0u8; 32],
-        height,
-    };
-    upsert_record_from_action(conn, &dummy)
-}
-
 /// Delete the binding for a name (called after a successful RELEASE mint,
 /// or when a reorg leaves a RELEASE as the new tip).
 pub fn delete_record(conn: &Connection, name: &str) -> Result<(), StateError> {
@@ -562,7 +536,36 @@ mod tests {
     #[test]
     fn insert_and_get() {
         let conn = open();
-        upsert_record(&conn, "alice", "u1xxx", 1_000_000).unwrap();
+        crate::actions::append_action(
+            &conn,
+            &crate::MintedAction {
+                name: "alice".into(),
+                action: zns_core::Action::Claim,
+                ua: "u1xxx".into(),
+                txid: [0u8; 32],
+                cmx: [0u8; 32],
+                rcm: [0u8; 32],
+                psi: [0u8; 32],
+                prev_rcm: [0u8; 32],
+                height: 1_000_000,
+            },
+        )
+        .unwrap();
+        upsert_record_from_action(
+            &conn,
+            &crate::MintedAction {
+                name: "alice".into(),
+                action: zns_core::Action::Claim,
+                ua: "u1xxx".into(),
+                txid: [0u8; 32],
+                cmx: [0u8; 32],
+                rcm: [0u8; 32],
+                psi: [0u8; 32],
+                prev_rcm: [0u8; 32],
+                height: 1_000_000,
+            },
+        )
+        .unwrap();
         let rec = get_record(&conn, "alice").unwrap().unwrap();
         assert_eq!(rec.name, "alice");
         assert_eq!(rec.ua, "u1xxx");
@@ -577,8 +580,19 @@ mod tests {
     #[test]
     fn upsert_updates() {
         let conn = open();
-        upsert_record(&conn, "alice", "u1old", 100).unwrap();
-        upsert_record(&conn, "alice", "u1new", 200).unwrap();
+        let mk = |ua: &str, h: u32| crate::MintedAction {
+            name: "alice".into(),
+            action: zns_core::Action::Claim,
+            ua: ua.into(),
+            txid: [0u8; 32],
+            cmx: [0u8; 32],
+            rcm: [0u8; 32],
+            psi: [0u8; 32],
+            prev_rcm: [0u8; 32],
+            height: h,
+        };
+        upsert_record_from_action(&conn, &mk("u1old", 100)).unwrap();
+        upsert_record_from_action(&conn, &mk("u1new", 200)).unwrap();
         let rec = get_record(&conn, "alice").unwrap().unwrap();
         assert_eq!(rec.ua, "u1new");
     }
@@ -586,7 +600,21 @@ mod tests {
     #[test]
     fn delete() {
         let conn = open();
-        upsert_record(&conn, "alice", "u1xxx", 100).unwrap();
+        upsert_record_from_action(
+            &conn,
+            &crate::MintedAction {
+                name: "alice".into(),
+                action: zns_core::Action::Claim,
+                ua: "u1xxx".into(),
+                txid: [0u8; 32],
+                cmx: [0u8; 32],
+                rcm: [0u8; 32],
+                psi: [0u8; 32],
+                prev_rcm: [0u8; 32],
+                height: 100,
+            },
+        )
+        .unwrap();
         delete_record(&conn, "alice").unwrap();
         assert!(get_record(&conn, "alice").unwrap().is_none());
     }
@@ -643,7 +671,21 @@ mod tests {
             },
         )
         .unwrap();
-        upsert_record(&conn, "alice", "u1old", 10).unwrap();
+        upsert_record_from_action(
+            &conn,
+            &crate::MintedAction {
+                name: "alice".into(),
+                action: zns_core::Action::Claim,
+                ua: "u1old".into(),
+                txid: [1u8; 32],
+                cmx: [0u8; 32],
+                rcm: claim_rcm,
+                psi: [0u8; 32],
+                prev_rcm: [0u8; 32],
+                height: 10,
+            },
+        )
+        .unwrap();
 
         crate::actions::append_action(
             &conn,
@@ -660,7 +702,21 @@ mod tests {
             },
         )
         .unwrap();
-        upsert_record(&conn, "alice", "u1new", 20).unwrap();
+        upsert_record_from_action(
+            &conn,
+            &crate::MintedAction {
+                name: "alice".into(),
+                action: zns_core::Action::Update,
+                ua: "u1new".into(),
+                txid: [2u8; 32],
+                cmx: [0u8; 32],
+                rcm: update_rcm,
+                psi: [0u8; 32],
+                prev_rcm: claim_rcm,
+                height: 20,
+            },
+        )
+        .unwrap();
 
         // Reorg at height 20 removes the update.
         let tx = conn.unchecked_transaction().unwrap();
@@ -696,7 +752,21 @@ mod tests {
             },
         )
         .unwrap();
-        upsert_record(&conn, "alice", "u1old", 10).unwrap();
+        upsert_record_from_action(
+            &conn,
+            &crate::MintedAction {
+                name: "alice".into(),
+                action: zns_core::Action::Claim,
+                ua: "u1old".into(),
+                txid: [1u8; 32],
+                cmx: [0u8; 32],
+                rcm: claim_rcm,
+                psi: [0u8; 32],
+                prev_rcm: [0u8; 32],
+                height: 10,
+            },
+        )
+        .unwrap();
 
         crate::actions::append_action(
             &conn,

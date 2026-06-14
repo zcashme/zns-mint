@@ -36,7 +36,7 @@ pub use actions::{
 pub use db::{
     delete_intents_above, delete_processed_above, delete_record, get_current_rcm, get_record,
     last_processed_height, mark_processed, processed_hash_at_height, rebuild_records_after_reorg,
-    upsert_record, upsert_record_from_action, Name,
+    upsert_record_from_action, Name,
 };
 pub use db::PendingMint;
 pub use error::StateError;
