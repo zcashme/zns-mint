@@ -286,3 +286,70 @@ pub struct SweepResult {
     pub tx_bytes: Vec<u8>,
     pub amount_zat: u64,
 }
+
+/// === Dev / test boundary helpers (the *only* place the dev zero seed appears) ===
+/// 
+/// The orchestrator (zns-registry binary / host) must never see or hold the raw
+/// spend seed. All derivation and secret material stays inside this crate.
+/// These functions exist so the host can get the public view material it needs
+/// (for CLI and scanner/treasury setup) and construct a Signer for signing
+/// without ever receiving seed bytes.
+
+impl Signer {
+    /// Development-only constructor.
+    /// The spend seed is derived *inside* this crate. The caller only supplies
+    /// the (public) policy parameters. In production the equivalent construction
+    /// happens inside the TEE from sealed/derived material.
+    pub fn new_dev(policy: SpendPolicy) -> Result<Self, SignError> {
+        let seed = [0u8; 32];
+        let coin_type = 133;
+        let account = zip32::AccountId::ZERO;
+
+        let sk = SpendingKey::from_zip32_seed(&seed, coin_type, account)
+            .map_err(|e| SignError::InvalidSeed(format!("{e:?}")))?;
+        let fvk = FullViewingKey::from(&sk);
+        let registry_addr = fvk.address_at(0u32, Scope::External);
+
+        // The host may pass a policy with a placeholder registry_addr.
+        // We force the correct one derived from the (internal) seed so it always matches.
+        let actual_policy = SpendPolicy {
+            registry_addr,
+            cold_addr: policy.cold_addr,
+            max_fee_zat: policy.max_fee_zat,
+            target_float_zat: policy.target_float_zat,
+            high_watermark_zat: policy.high_watermark_zat,
+            low_watermark_zat: policy.low_watermark_zat,
+            max_mints_per_window: policy.max_mints_per_window,
+            max_swept_per_window_zat: policy.max_swept_per_window_zat,
+        };
+
+        Ok(Self {
+            seed: Zeroizing::new(seed),
+            coin_type,
+            account,
+            fvk,
+            policy: actual_policy,
+            guard: Mutex::new(SpendGuard::default()),
+        })
+    }
+}
+
+/// Pure view material for the dev key. The host can call these for
+/// "zns-mint address", "viewkey", and scanner/treasury setup.
+pub fn dev_registry_address() -> Address {
+    let seed = [0u8; 32];
+    let sk = SpendingKey::from_zip32_seed(&seed, 133, zip32::AccountId::ZERO)
+        .expect("dev seed is always valid");
+    let fvk = FullViewingKey::from(&sk);
+    fvk.address_at(0u32, Scope::External)
+}
+
+pub fn dev_orchard_ivk() -> orchard::keys::IncomingViewingKey {
+    let seed = [0u8; 32];
+    let sk = SpendingKey::from_zip32_seed(&seed, 133, zip32::AccountId::ZERO)
+        .expect("dev seed is always valid");
+    let fvk = FullViewingKey::from(&sk);
+    fvk.to_ivk(Scope::External)
+}
+
+

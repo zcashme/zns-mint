@@ -11,9 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use zns_registry::{
-    dev_orchard_ivk, dev_registry_address, dev_registry_uivk, scan_incoming_all, scan_mempool,
-    FundingInput, GrpcClient, MintContext, NoteState, ProcessResult, Processor, Registry,
-    ScannerConfig, Signer, SpendPolicy, Treasury, TreasuryConfig, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
+    dev_orchard_ivk, dev_registry_address, scan_incoming_all, scan_mempool, FundingInput,
+    GrpcClient, MintContext, NoteState, ProcessResult, Processor, Registry, ScannerConfig,
+    Signer, SpendPolicy, Treasury, TreasuryConfig, FUNDING_MIN_ZAT, MINT_FEE_ZAT,
 };
 
 /// How often to poll lightwalletd for new blocks.
@@ -353,9 +353,16 @@ impl DaemonConfig {
     }
 
     /// addr_reg's Unified Incoming Viewing Key — the published key
-    /// (the one resolvers use to scan). Delegates to the signer crate.
+    /// (the one resolvers use to scan). We get the IVK via the signer boundary
+    /// (no spend seed in the host) and do the (public) encoding here.
     fn registry_uivk(&self) -> Result<String, zns_registry::RegistryError> {
-        dev_registry_uivk().map_err(|e| zns_registry::RegistryError::Config(format!("{e}")))
+        use zcash_address::unified::{Encoding, Ivk, Uivk};
+        use zcash_protocol::consensus::Parameters as _;
+
+        let ivk_bytes = dev_orchard_ivk().to_bytes();
+        let uivk = Uivk::try_from_items(vec![Ivk::Orchard(ivk_bytes)])
+            .map_err(|e| zns_registry::RegistryError::Config(format!("building UIVK: {e:?}")))?;
+        Ok(uivk.encode(&self.network.network_type()))
     }
 
     fn scanner(&self) -> ScannerConfig {
@@ -393,18 +400,13 @@ impl DaemonConfig {
         }
     }
 
-    /// Build the per-round mint context. Value-0 Name Notes need only the
-    /// registry key, an empty-tree anchor, and the current height — no treasury.
-    /// `treasury` stays `None` until note-state lands, so UPDATE/RELEASE relays
-    /// surface a clear "no treasury funding configured" error.
-    /// The signing authority: the spend seed behind the policy gate. Default
-    /// bounds are deliberately conservative; a config file refines them later.
+    /// Build the signing authority.
+    /// The raw spend seed is derived inside the signer crate only (via new_dev).
     fn signer(&self) -> Result<Signer, zns_registry::RegistryError> {
-        let registry_addr = self.registry_fvk().address_at(0u32, Scope::External);
+        let registry_addr = dev_registry_address();
 
         // cold_addr == registry_addr (the COLD_ADDR_UA-unset fallback) keeps
-        // sweeps a harmless no-op: force the thresholds that would trigger
-        // one off, regardless of the constants above.
+        // sweeps a harmless no-op.
         let cold_addr = if COLD_ADDR_UA.is_empty() {
             registry_addr
         } else {
@@ -422,7 +424,7 @@ impl DaemonConfig {
             } else {
                 u64::MAX
             },
-            low_watermark_zat: 2 * MINT_FEE_ZAT, // pause when even a relay can't fund
+            low_watermark_zat: 2 * MINT_FEE_ZAT,
             max_mints_per_window: 4,
             max_swept_per_window_zat: if sweeps_enabled {
                 MAX_SWEPT_PER_WINDOW_ZAT
@@ -430,14 +432,13 @@ impl DaemonConfig {
                 0
             },
         };
-        Signer::new(self.seed, self.coin_type(), zip32::AccountId::ZERO, policy)
+
+        Signer::new_dev(policy)
             .map_err(|e| zns_registry::RegistryError::Config(format!("constructing signer: {e}")))
     }
 
     fn mint_context(&self, tip_height: u32, signer: Arc<Signer>) -> MintContext {
-        // Branch id for the active upgrade at the tip — `Network` carries the
-        // activation heights, so this resolves the right upgrade (e.g. Nu6_2 on
-        // a post-NU6.2 testnet) automatically.
+        // Branch id for the active upgrade at the tip.
         let branch_id = zcash_protocol::consensus::BranchId::for_height(
             &self.network,
             zcash_protocol::consensus::BlockHeight::from_u32(tip_height),
@@ -447,8 +448,6 @@ impl DaemonConfig {
             hot_balance_zat: 0,
             anchor: orchard::tree::Anchor::empty_tree(),
             height: tip_height,
-            // Bounded expiry (ZIP-203) so crash reconciliation can declare an
-            // unmined intent dead once the chain passes this height.
             expiry_height: tip_height + TX_EXPIRY_BLOCKS,
             network: self.network,
             circuit_version: self.circuit_version(),

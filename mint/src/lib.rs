@@ -26,8 +26,8 @@ pub use zns_chain::{
 };
 pub use zns_core::{memo, parse_memo, Action, MemoError, ParsedMemo, ZERO_PREV_RCM};
 pub use zns_mint::{
-    build_name_note, dev_orchard_ivk, dev_registry_address, dev_registry_uivk, FundingInput,
-    MintParams, MintResult, RequestId, Signer, SpendPolicy,
+    build_name_note, dev_orchard_ivk, dev_registry_address, FundingInput, MintParams, MintResult,
+    RequestId, Signer, SpendPolicy,
 };
 pub use zns_state::{
     FundingSelection, MintedAction, Name, NoteState, SpendableNote, TreasuryConfig,
@@ -70,10 +70,9 @@ mod tests {
     use std::sync::Arc;
 
     fn make_context() -> MintContext {
-        let seed = [0x42u8; 32];
-        let sk = SpendingKey::from_zip32_seed(&seed, 133, zip32::AccountId::ZERO).unwrap();
-        let fvk = FullViewingKey::from(&sk);
-        let registry_addr = fvk.address_at(0u32, Scope::External);
+        // Tests go through the signer crate boundary (new_dev). The seed never
+        // appears in this (host) crate.
+        let registry_addr = dev_registry_address();
         let policy = SpendPolicy {
             registry_addr,
             cold_addr: registry_addr,
@@ -84,7 +83,7 @@ mod tests {
             max_mints_per_window: u32::MAX,
             max_swept_per_window_zat: 0,
         };
-        let signer = Arc::new(Signer::new(seed, 133, zip32::AccountId::ZERO, policy).unwrap());
+        let signer = Arc::new(Signer::new_dev(policy).unwrap());
         MintContext {
             signer,
             hot_balance_zat: 1_000_000,
