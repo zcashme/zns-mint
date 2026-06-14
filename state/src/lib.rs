@@ -17,8 +17,8 @@
 //! ever needed. Both are updated atomically with the other registry tables in
 //! the same transaction on mint or reorg.
 //!
-//! Split out of `zns-core` so the storage layer is its own crate (cf.
-//! `zebra-state`) and pure consumers of the domain types never link rusqlite.
+//! Split out of `zns-core` so the storage layer is its own crate and pure
+//! consumers of the domain types never link rusqlite.
 //!
 //! [`treasury`] is the registry's *other* SQLite store — a `zcash_client_sqlite`
 //! `WalletDb` tracking the registry's own spendable notes (the treasury float)

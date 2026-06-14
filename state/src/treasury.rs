@@ -1,18 +1,4 @@
 //! Treasury note-state: the registry's wallet.
-//!
-//! [`NoteState`] wraps `zcash_client_sqlite`'s `WalletDb`, which owns scanning,
-//! shardtree witnesses, reorg rewind, and note selection — the spend side of
-//! the mint borrows a real wallet instead of hand-rolling one. The registry
-//! account is imported view-only (the spend key never leaves `zns-mint`);
-//! `sync::run` keeps the wallet at the chain tip incrementally, and
-//! [`NoteState::select_funding`] turns a spendable note into the
-//! `(note, path, anchor)` triple `zns_mint::build_funded_mint` needs.
-//!
-//! The wallet sees only ordinary notes (the treasury float and change). The
-//! Name Notes the registry mints override the ZIP-212 `rseed → (rcm, ψ)`
-//! derivation, so standard trial-decryption rejects them — by design: the
-//! registry confirms its own Name Notes by recomputing their `cmx`, not by
-//! decrypting them.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;

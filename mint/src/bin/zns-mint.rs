@@ -37,8 +37,7 @@ const RPC_ADDR: &str = "127.0.0.1:8081";
 /// as the code itself, not settable by whoever launches the process.
 ///
 /// Empty until a real cold vault address exists. While empty, `signer()`
-/// falls back to `cold_addr == registry_addr` and force-disables sweeps
-/// (`HIGH_WATERMARK_ZAT`/`MAX_SWEPT_PER_WINDOW_ZAT` are not applied).
+/// falls back to `cold_addr == registry_addr` and force-disables sweeps.
 const COLD_ADDR_UA: &str = "";
 
 /// Once the hot balance exceeds this, a sweep is due
@@ -47,10 +46,6 @@ const HIGH_WATERMARK_ZAT: u64 = 10 * MINT_FEE_ZAT;
 
 /// Sweep aims to bring the hot balance back down toward this.
 const TARGET_FLOAT_ZAT: u64 = 4 * MINT_FEE_ZAT;
-
-/// Hard cap on zatoshis swept to cold per velocity window — bounds the rate
-/// regardless of how large a single selected note is.
-const MAX_SWEPT_PER_WINDOW_ZAT: u64 = 1_000_000_000;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -388,7 +383,6 @@ impl DaemonConfig {
             high_watermark_zat: u64::MAX,
             low_watermark_zat: 0,
             max_mints_per_window: u32::MAX,
-            max_swept_per_window_zat: 0,
         })
         .expect("test signer for FVK");
 
@@ -427,11 +421,6 @@ impl DaemonConfig {
             },
             low_watermark_zat: 2 * MINT_FEE_ZAT,
             max_mints_per_window: 4,
-            max_swept_per_window_zat: if sweeps_enabled {
-                MAX_SWEPT_PER_WINDOW_ZAT
-            } else {
-                0
-            },
         };
 
         Signer::new_test(policy)

@@ -249,6 +249,8 @@ impl Signer {
             },
         ))?;
 
+        // Sweep velocity cap removed. We still call through the guard API for
+        // now; the implementation is a no-op for sweeps.
         self.guard
             .lock()
             .expect("guard poisoned")
@@ -324,7 +326,6 @@ impl Signer {
             high_watermark_zat: policy.high_watermark_zat,
             low_watermark_zat: policy.low_watermark_zat,
             max_mints_per_window: policy.max_mints_per_window,
-            max_swept_per_window_zat: policy.max_swept_per_window_zat,
         };
 
         Ok(Self {

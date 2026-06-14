@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "state", "chain", "signer", "auth", "mint", "tools"]
+members = ["core", "state", "chain", "signer", "auth", "mint"]
 resolver = "2"
 
 [workspace.package]
@@ -12,11 +12,11 @@ publish = false
 [workspace.dependencies]
 # ── internal crates ────────────────────────────────────────────────
 # core     — domain types (action, memo, error), no crypto/io
-# state    — SQLite persistence (cf. zebra-state)
-# chain    — chain I/O: lightwalletd intake + zebrad broadcast (cf. zebra-network)
+# state    — SQLite persistence
+# chain    — chain I/O: lightwalletd intake + full node broadcast
 # mint     — crypto core: derive (ψ, rcm), build/prove the Orchard Name Note
 # auth     — OTP challenge-response
-# registry — the daemon: registry orchestration + the zns-mint binary (cf. zebrad)
+# registry — the daemon: registry orchestration + the zns-mint binary
 zns-core     = { path = "core" }
 zns-state    = { path = "state" }
 zns-chain    = { path = "chain" }

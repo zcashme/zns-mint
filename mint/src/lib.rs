@@ -66,7 +66,6 @@ mod tests {
             high_watermark_zat: u64::MAX,
             low_watermark_zat: 0,
             max_mints_per_window: u32::MAX,
-            max_swept_per_window_zat: 0,
         };
         let signer = Arc::new(Signer::new_test(policy).unwrap());
         MintContext {

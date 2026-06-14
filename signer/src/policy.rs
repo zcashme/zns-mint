@@ -42,9 +42,8 @@ pub struct SpendPolicy {
     /// Refuse to mint below this (request a cold→hot top-up instead).
     pub low_watermark_zat: u64,
     /// Max mints authorized per rolling window.
+    /// (This still exists to bound relay griefing and rapid mint spam from a compromised host.)
     pub max_mints_per_window: u32,
-    /// Max value swept to cold per rolling window.
-    pub max_swept_per_window_zat: u64,
 }
 
 // ── what the (untrusted) host proposes ───────────────────────────────────────
@@ -125,7 +124,7 @@ pub enum PolicyError {
     BelowLowWatermark { balance: u64, low: u64 },
     /// This request was already minted.
     Replay(RequestId),
-    /// Per-window mint or sweep cap exceeded.
+    /// Per-window mint (or relay) cap exceeded.
     VelocityExceeded,
 }
 
@@ -202,13 +201,12 @@ pub fn validate_name(name: &str) -> Result<(), PolicyError> {
 
 // ── stateful guard: replay + velocity ────────────────────────────────────────
 
-/// Per-window replay and velocity enforcement. Held by the [`Signer`]; the
-/// window is advanced by the caller (e.g. once per block/epoch).
+/// Per-window replay and mint velocity enforcement. Held by the [`Signer`];
+/// the window is advanced by the caller (e.g. once per block/epoch).
 #[derive(Default)]
 pub struct SpendGuard {
     minted: HashSet<RequestId>,
     mints_this_window: u32,
-    swept_this_window_zat: u64,
 }
 
 impl SpendGuard {
@@ -216,7 +214,6 @@ impl SpendGuard {
     /// `minted` set persists across windows (replay protection is permanent).
     pub fn roll_window(&mut self) {
         self.mints_this_window = 0;
-        self.swept_this_window_zat = 0;
     }
 
     /// Admit a mint: rejects replays and over-cap velocity. Records on success.
@@ -241,23 +238,11 @@ impl SpendGuard {
         }
     }
 
-    /// Admit a sweep of `amount_zat` against the per-window value cap.
-    pub fn admit_sweep(
-        &mut self,
-        policy: &SpendPolicy,
-        amount_zat: u64,
-    ) -> Result<(), PolicyError> {
-        if self.swept_this_window_zat.saturating_add(amount_zat) > policy.max_swept_per_window_zat {
-            return Err(PolicyError::VelocityExceeded);
-        }
-        self.swept_this_window_zat += amount_zat;
+    pub fn admit_sweep(&mut self, _policy: &SpendPolicy, _amount_zat: u64) -> Result<(), PolicyError> {
         Ok(())
     }
 
-    /// Undo a prior [`admit_sweep`] when the build failed.
-    pub fn rollback_sweep(&mut self, amount_zat: u64) {
-        self.swept_this_window_zat = self.swept_this_window_zat.saturating_sub(amount_zat);
-    }
+    pub fn rollback_sweep(&mut self, _amount_zat: u64) {}
 }
 
 #[cfg(test)]
@@ -280,7 +265,6 @@ mod tests {
             high_watermark_zat: 5_000_000,
             low_watermark_zat: 100_000,
             max_mints_per_window: 3,
-            max_swept_per_window_zat: 10_000_000,
         }
     }
 
@@ -389,13 +373,10 @@ mod tests {
     }
 
     #[test]
-    fn sweep_velocity_cap() {
+    fn admit_sweep_succeeds() {
         let p = policy();
         let mut g = SpendGuard::default();
         assert!(g.admit_sweep(&p, 6_000_000).is_ok());
-        assert_eq!(
-            g.admit_sweep(&p, 5_000_000),
-            Err(PolicyError::VelocityExceeded)
-        ); // 11M > 10M cap
+        assert!(g.admit_sweep(&p, 5_000_000).is_ok());
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "zns-chain"
-description = "ZNS chain I/O: lightwalletd compact-block intake scan and zebrad gRPC broadcast."
+description = "ZNS chain I/O: lightwalletd compact-block intake scan and full node gRPC broadcast."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

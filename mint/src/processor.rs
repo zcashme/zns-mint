@@ -11,7 +11,7 @@
 //!
 //! All chain I/O (scanning is done by the caller; broadcasting is done here)
 //! is supplied explicitly via `&GrpcClient` parameters. The processor never
-//! owns a lightwalletd/zebrad endpoint string.
+//! owns a lightwalletd / node endpoint string.
 
 use std::sync::Arc;
 

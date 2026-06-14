@@ -5,9 +5,9 @@
 //! the (ψ, rcm) chain), the intake settlement ledger, pending OTP challenges,
 //! and crash-recovery mint intents.
 //!
-//! It deliberately knows *nothing* about how to talk to lightwalletd or zebrad
-//! for new data or for broadcasting. Those concerns live in the processor and
-//! are supplied by the caller at the operation sites.
+//! It deliberately knows *nothing* about how to talk to lightwalletd or the
+//! full node for new data or for broadcasting. Those concerns live in the
+//! processor and are supplied by the caller at the operation sites.
 
 use std::sync::Arc;
 
