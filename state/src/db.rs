@@ -48,10 +48,11 @@ pub fn init_schema(conn: &Connection) -> Result<(), StateError> {
          -- owner is trying to echo back.
          CREATE TABLE IF NOT EXISTS processed_notes (
              txid         BLOB    NOT NULL,
+             pool         INTEGER NOT NULL DEFAULT 0,
              output_index INTEGER NOT NULL,
              block_height INTEGER NOT NULL,
              block_hash   BLOB    NOT NULL,
-             PRIMARY KEY (txid, output_index)
+             PRIMARY KEY (txid, pool, output_index)
          ) WITHOUT ROWID;
          -- Pending OTP challenges (zns-auth::PendingChallenge), durable so a
          -- daemon restart cannot void a mutation mid-flow. Expiry is by block
@@ -98,6 +99,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), StateError> {
         "ALTER TABLE mint_intents ADD COLUMN request_idx INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE processed_notes ADD COLUMN block_height INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE processed_notes ADD COLUMN block_hash BLOB NOT NULL DEFAULT x'0000000000000000000000000000000000000000000000000000000000000000'",
+        "ALTER TABLE processed_notes ADD COLUMN pool INTEGER NOT NULL DEFAULT 0",
         // prev_rcm added when we started storing the full chain witness in
         // MintedAction (and thus in durable intents for crash recovery).
         "ALTER TABLE mint_intents ADD COLUMN prev_rcm BLOB NOT NULL DEFAULT x'0000000000000000000000000000000000000000000000000000000000000000'",
@@ -343,16 +345,18 @@ pub fn purge_expired_challenges(conn: &Connection, current_height: u32) -> Resul
     Ok(())
 }
 
-/// Whether the intake note `(txid, output_index)` has already been settled.
+/// Whether the intake note `(txid, pool, output_index)` has already been settled.
+/// `pool`: 0 = Orchard, 1 = Sapling.
 pub fn is_processed(
     conn: &Connection,
     txid: &[u8; 32],
+    pool: u8,
     output_index: u32,
 ) -> Result<bool, StateError> {
     let hit: Option<i64> = conn
         .query_row(
-            "SELECT 1 FROM processed_notes WHERE txid = ?1 AND output_index = ?2",
-            params![txid.as_slice(), output_index],
+            "SELECT 1 FROM processed_notes WHERE txid = ?1 AND pool = ?2 AND output_index = ?3",
+            params![txid.as_slice(), pool, output_index],
             |row| row.get(0),
         )
         .optional()?;
@@ -360,18 +364,21 @@ pub fn is_processed(
 }
 
 /// Settle an intake note: it will be skipped on every future rescan.
+/// `pool`: 0 = Orchard, 1 = Sapling.
 pub fn mark_processed(
     conn: &Connection,
     txid: &[u8; 32],
+    pool: u8,
     output_index: u32,
     block_height: u32,
     block_hash: &[u8; 32],
 ) -> Result<(), StateError> {
     conn.execute(
-        "INSERT OR IGNORE INTO processed_notes (txid, output_index, block_height, block_hash)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT OR IGNORE INTO processed_notes (txid, pool, output_index, block_height, block_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             txid.as_slice(),
+            pool,
             output_index,
             block_height,
             block_hash.as_slice(),
@@ -626,11 +633,11 @@ mod tests {
         let hash10 = [10u8; 32];
         let hash20 = [20u8; 32];
 
-        mark_processed(&conn, &txid, 0, 10, &hash10).unwrap();
+        mark_processed(&conn, &txid, 0, 0, 10, &hash10).unwrap();
         assert_eq!(last_processed_height(&conn).unwrap(), Some(10));
         assert_eq!(processed_hash_at_height(&conn, 10).unwrap(), Some(hash10));
 
-        mark_processed(&conn, &txid, 1, 20, &hash20).unwrap();
+        mark_processed(&conn, &txid, 0, 1, 20, &hash20).unwrap();
         assert_eq!(last_processed_height(&conn).unwrap(), Some(20));
         assert_eq!(processed_hash_at_height(&conn, 20).unwrap(), Some(hash20));
     }
@@ -640,12 +647,12 @@ mod tests {
         let conn = open();
         let h10 = [10u8; 32];
         let h20 = [20u8; 32];
-        mark_processed(&conn, &[1u8; 32], 0, 10, &h10).unwrap();
-        mark_processed(&conn, &[2u8; 32], 0, 20, &h20).unwrap();
+        mark_processed(&conn, &[1u8; 32], 0, 0, 10, &h10).unwrap();
+        mark_processed(&conn, &[2u8; 32], 0, 0, 20, &h20).unwrap();
 
         delete_processed_above(&conn, 15).unwrap();
-        assert!(is_processed(&conn, &[1u8; 32], 0).unwrap());
-        assert!(!is_processed(&conn, &[2u8; 32], 0).unwrap());
+        assert!(is_processed(&conn, &[1u8; 32], 0, 0).unwrap());
+        assert!(!is_processed(&conn, &[2u8; 32], 0, 0).unwrap());
         assert_eq!(last_processed_height(&conn).unwrap(), Some(10));
     }
 
@@ -885,9 +892,9 @@ mod tests {
         let conn = open();
         let txid = [1u8; 32];
         let hash = [10u8; 32];
-        mark_processed(&conn, &txid, 0, 100, &hash).unwrap();
-        mark_processed(&conn, &txid, 0, 100, &hash).unwrap(); // idempotent
-        assert!(is_processed(&conn, &txid, 0).unwrap());
+        mark_processed(&conn, &txid, 0, 0, 100, &hash).unwrap();
+        mark_processed(&conn, &txid, 0, 0, 100, &hash).unwrap(); // idempotent
+        assert!(is_processed(&conn, &txid, 0, 0).unwrap());
         assert_eq!(last_processed_height(&conn).unwrap(), Some(100));
     }
 

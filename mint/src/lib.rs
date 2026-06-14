@@ -11,7 +11,7 @@ pub use zns_chain::{
 };
 pub use zns_core::{memo, parse_memo, Action, MemoError, ParsedMemo, ZERO_PREV_RCM};
 pub use zns_mint::{
-    build_name_note, test_orchard_ivk, test_registry_address, FundingInput, MintParams, MintResult,
+    build_name_note, test_orchard_ivk, test_registry_address, test_sapling_ivk, FundingInput, MintParams, MintResult,
     RequestId, Signer, SpendPolicy,
 };
 pub use zns_state::{

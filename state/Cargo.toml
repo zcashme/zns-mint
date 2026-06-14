@@ -10,11 +10,10 @@ publish = false
 [dependencies]
 zns-core = { workspace = true }
 zns-auth = { workspace = true }   # PendingChallenge (persisted here)
-# treasury note-state is a separate WalletDb (plus its orchard shardtree) for the
-# registry's own spendable notes ("treasury float") used to self-fund mint fees
-# and OTP relays. It is *passive* — the orchestrator drives scanning and
-# bootstrap using the public `wallet_db_mut()` escape hatch + `initialize()`.
-# No lwd URLs, gRPC clients, or `sync::run` live in this crate.
+# treasury is a proper library-backed light client wallet (WalletDb data + BlockDb cache)
+# for the registry's own spendable notes ("treasury float") used to self-fund mint fees.
+# The Treasury object owns the dbs and drives sync (clean async sync method).
+# Follows librustzcash higher-level ownership rather than passive raw DB + external mut seam.
 rusqlite = { workspace = true }
 thiserror = { workspace = true }
 orchard = { workspace = true, features = ["unsafe-zns"] }
@@ -22,6 +21,9 @@ zcash_protocol = { workspace = true }
 zcash_client_backend = { workspace = true }
 zcash_client_sqlite = { workspace = true }
 zcash_keys = { workspace = true }
+# For the concrete client type in the proper owned sync API (CompactTxStreamerClient<Channel>)
+tonic = { version = "0.14", features = ["transport"] }
+bytes = "1"
 zcash_address = { workspace = true }
 rand = { workspace = true }
 async-trait = { workspace = true }

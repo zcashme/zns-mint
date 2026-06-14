@@ -20,6 +20,7 @@ zcash_protocol = { workspace = true }
 # Orchard trial-decryption.
 zcash_client_backend = { workspace = true }
 zcash_note_encryption = { workspace = true }
+sapling = { workspace = true }
 tonic = { workspace = true, features = ["transport", "tls-ring", "tls-webpki-roots"] }
 # names tonic's `Channel::from_shared` error type for `GrpcError`
 http = { workspace = true }

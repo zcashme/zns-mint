@@ -2,21 +2,18 @@
 //!
 //! Everything the signer will authorize passes through here. The design goal is
 //! that a **fully compromised host is worthless**: the host proposes only
-//! *intent* (which name, which UA, which funding note to spend); the signer
-//! derives every `(rcm, ψ)` itself and constructs every output address from
-//! [`SpendPolicy`] constants. So the only places value can ever go are:
+//! *intent*; the signer derives keys, builds outputs, and signs. Value can
+//! only ever go to:
 //!
-//! 1. a value-0 Name Note to the registry self-address,
-//! 2. change back to the registry self-address,
-//! 3. a sweep to the single, policy-fixed cold address.
+//! 1. value-0 Name Note or change to registry self-address, or
+//! 2. sweep to the single policy-fixed cold address.
 //!
-//! There is no code path by which a host-supplied address or amount reaches an
-//! output. Combined with the tiered treasury (auto-sweep keeps the hot float
-//! small) and velocity caps, the blast radius of a total host compromise is
-//! bounded to *griefing the float*, never theft.
+//! The host controls when to drain excess hot float (infrequent balance-based
+//! checks + note selection). The signer enforces destinations, fee/low
+//! watermark limits, and the mint velocity/replay guard.
 //!
-//! In production these constants and this code are part of the attested enclave
-//! measurement, and the spend key lives only in memory (see [`Signer`]).
+//! Policy constants are attested with the binary; the spend key is held only
+//! inside the signer (see [`Signer`]).
 
 use std::collections::HashSet;
 
@@ -35,11 +32,8 @@ pub struct SpendPolicy {
     pub cold_addr: Address,
     /// Maximum fee the signer will pay for one mint (caps fee-burn griefing).
     pub max_fee_zat: u64,
-    /// (Legacy) Hot-float target. In the current host-controlled infrequent
-    /// drain model this is not used as a constraint — the host decides the
-    /// amount to drain purely via note selection when balance exceeds the
-    /// high watermark.
-    pub target_float_zat: u64,
+    /// Hot-float target (retained for API; current host drain uses
+    /// high_watermark + note selection, not this).
     /// Sweep to cold once the hot balance exceeds this.
     pub high_watermark_zat: u64,
     /// Refuse to mint below this (request a cold→hot top-up instead).
@@ -169,6 +163,8 @@ impl SpendPolicy {
         })
     }
 
+    /// Returns full hot balance if above high_watermark (candidate for
+    /// host drain); None otherwise.
     pub fn evaluate_sweep(&self, hot_balance_zat: u64) -> Option<u64> {
         if hot_balance_zat <= self.high_watermark_zat {
             return None;
@@ -192,10 +188,10 @@ pub fn validate_name(name: &str) -> Result<(), PolicyError> {
         .map_err(|_| PolicyError::NameInvalid("violates the registry name grammar"))
 }
 
-// ── stateful guard: replay + velocity ────────────────────────────────────────
+// ── stateful guard: replay + mint velocity ───────────────────────────────────
 
-/// Per-window replay and mint velocity enforcement. Held by the [`Signer`];
-/// the window is advanced by the caller (e.g. once per block/epoch).
+/// Per-window replay (permanent) + mint velocity limits. Window
+/// advanced by caller. (Host controls sweep rate.)
 #[derive(Default)]
 pub struct SpendGuard {
     minted: HashSet<RequestId>,
@@ -209,7 +205,7 @@ impl SpendGuard {
         self.mints_this_window = 0;
     }
 
-    /// Admit a mint: rejects replays and over-cap velocity. Records on success.
+    /// Admit mint: replay + per-window velocity.
     pub fn admit_mint(&mut self, policy: &SpendPolicy, id: RequestId) -> Result<(), PolicyError> {
         if self.minted.contains(&id) {
             return Err(PolicyError::Replay(id));
@@ -222,15 +218,14 @@ impl SpendGuard {
         Ok(())
     }
 
-    /// Undo a prior [`admit_mint`] when the subsequent build/prove failed, so a
-    /// transient failure neither burns the request (it can retry) nor a velocity
-    /// slot. Replay protection is exact: only a recorded id is rolled back.
+    /// Undo prior admit on build failure.
     pub fn rollback_mint(&mut self, id: RequestId) {
         if self.minted.remove(&id) {
             self.mints_this_window = self.mints_this_window.saturating_sub(1);
         }
     }
 
+    /// Admit sweep (no-op for rate; host controls).
     pub fn admit_sweep(&mut self, _policy: &SpendPolicy, _amount_zat: u64) -> Result<(), PolicyError> {
         Ok(())
     }
@@ -243,8 +238,6 @@ mod tests {
     use super::*;
 
     fn policy() -> SpendPolicy {
-        // Addresses are placeholders for the pure-logic tests (the gate never
-        // inspects them — it only emits to them).
         let addr = orchard::keys::FullViewingKey::from(
             &orchard::keys::SpendingKey::from_zip32_seed(&[7u8; 32], 1, zip32::AccountId::ZERO)
                 .unwrap(),

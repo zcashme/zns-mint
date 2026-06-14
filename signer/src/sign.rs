@@ -1,13 +1,10 @@
-//! The policy-gated signing authority — the heart of the (future in-enclave)
-//! signer.
+//! The policy-gated signing authority.
 //!
-//! [`Signer`] holds the registry spend seed **in memory only** ([`Zeroizing`],
-//! zeroized on drop; in production generated in-enclave and sealed to the
-//! attestation measurement). Nothing can extract the key: the only operation is
-//! [`Signer::sign_mint`], which runs every request through the [`SpendPolicy`]
-//! gate and the [`SpendGuard`] (replay + velocity) before it will author and
-//! sign a transaction. A fully-compromised host can therefore never redirect
-//! funds — only request mints the policy already permits.
+//! [`Signer`] holds the spend seed in memory only (zeroized on drop; in
+//! production derived inside the attested environment). The only operations
+//! are sign_mint, sign_relay, and sign_sweep. The [`SpendPolicy`] and
+//! [`SpendGuard`] (replay + mint velocity) ensure a compromised host cannot
+//! redirect value or exceed limits.
 
 use std::sync::Mutex;
 
@@ -15,6 +12,7 @@ use orchard::{
     keys::{FullViewingKey, Scope, SpendingKey},
     Address,
 };
+use sapling::zip32::ExtendedSpendingKey;
 use zcash_protocol::consensus::BranchId;
 use zeroize::Zeroizing;
 
@@ -71,14 +69,13 @@ impl Signer {
         &self.fvk
     }
 
-    /// The active spend policy — the daemon consults this to decide whether a
-    /// sweep is due ([`SpendPolicy::evaluate_sweep`]); the signer is what
-    /// enforces it.
+    /// The active spend policy. The host uses high_watermark for drain
+    /// decisions; signer enforces cold destination and limits.
     pub fn policy(&self) -> &SpendPolicy {
         &self.policy
     }
 
-    /// Advance the velocity window (call once per block/epoch).
+    /// Advance the mint velocity/replay window (call once per epoch).
     pub fn roll_window(&self) {
         self.guard.lock().expect("guard poisoned").roll_window();
     }
@@ -220,9 +217,9 @@ impl Signer {
         }
     }
 
-    /// Author and sign an auto-sweep of one treasury note to the **cold address**.
-    /// Destination is always the policy's cold_addr. The host decides when and
-    /// how much.
+    /// Author and sign a sweep of a treasury note to the policy's cold address.
+    /// The host decides when and which note. The signer enforces the
+    /// destination and performs the signing.
     pub fn sign_sweep(
         &self,
         funding: FundingInput,
@@ -245,8 +242,6 @@ impl Signer {
             },
         ))?;
 
-        // Sweep velocity cap removed. We still call through the guard API for
-        // now; the implementation is a no-op for sweeps.
         self.guard
             .lock()
             .expect("guard poisoned")
@@ -318,7 +313,6 @@ impl Signer {
             registry_addr,
             cold_addr: policy.cold_addr,
             max_fee_zat: policy.max_fee_zat,
-            target_float_zat: policy.target_float_zat,
             high_watermark_zat: policy.high_watermark_zat,
             low_watermark_zat: policy.low_watermark_zat,
             max_mints_per_window: policy.max_mints_per_window,
@@ -351,6 +345,23 @@ pub fn test_orchard_ivk() -> orchard::keys::IncomingViewingKey {
         .expect("test seed is always valid");
     let fvk = FullViewingKey::from(&sk);
     fvk.to_ivk(Scope::External)
+}
+
+/// Returns the Sapling incoming viewing key derived from the test seed
+/// (for internal scanner use only; never published in the UIVK/UA).
+pub fn test_sapling_ivk() -> sapling::SaplingIvk {
+    let seed = [0u8; 32];
+    let master = ExtendedSpendingKey::master(&seed);
+    let extsk = ExtendedSpendingKey::from_path(
+        &master,
+        &[
+            zip32::ChildIndex::hardened(32),
+            zip32::ChildIndex::hardened(133),
+            zip32::ChildIndex::hardened(0),
+        ],
+    );
+    let dfvk = extsk.to_diversifiable_full_viewing_key();
+    dfvk.to_ivk(zip32::Scope::External)
 }
 
 

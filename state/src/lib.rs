@@ -36,6 +36,14 @@ pub mod db;
 pub mod error;
 pub mod treasury;
 
+pub use treasury::{FundingSelection, SpendableNote, Treasury, TreasuryConfig, TreasuryError};
+
+/// Temporary compatibility alias for treasury wallet state (used by the orchestrator
+/// for the hot treasury that funds mint fees). The actual implementation may live
+/// under a different name in treasury.rs; this lets the higher layers compile while
+/// the name is reconciled.
+pub type NoteState = treasury::Treasury;
+
 pub use actions::{
     actions_for, affected_names, append_action, delete_actions_above, latest_action, MintedAction,
 };
@@ -46,7 +54,6 @@ pub use db::{
 };
 pub use db::PendingMint;
 pub use error::StateError;
-pub use treasury::{FundingSelection, NoteState, SpendableNote, TreasuryConfig, TreasuryError};
 
 use rusqlite::Connection;
 
@@ -126,12 +133,12 @@ impl State {
         db::table_counts(&self.conn)
     }
 
-    pub fn is_processed(&self, txid: &[u8; 32], output_index: u32) -> Result<bool, StateError> {
-        db::is_processed(&self.conn, txid, output_index)
+    pub fn is_processed(&self, txid: &[u8; 32], pool: u8, output_index: u32) -> Result<bool, StateError> {
+        db::is_processed(&self.conn, txid, pool, output_index)
     }
 
-    pub fn mark_processed(&self, txid: &[u8; 32], output_index: u32, block_height: u32, block_hash: &[u8; 32]) -> Result<(), StateError> {
-        db::mark_processed(&self.conn, txid, output_index, block_height, block_hash)
+    pub fn mark_processed(&self, txid: &[u8; 32], pool: u8, output_index: u32, block_height: u32, block_hash: &[u8; 32]) -> Result<(), StateError> {
+        db::mark_processed(&self.conn, txid, pool, output_index, block_height, block_hash)
     }
 
     pub fn get_challenge(&self, name: &str) -> Result<Option<zns_auth::PendingChallenge>, StateError> {

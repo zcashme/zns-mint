@@ -1,4 +1,6 @@
-//! Treasury note-state: the registry's wallet.
+//! Treasury wallet using the proper zcash_client_sqlite / librustzcash light client shape.
+//! Owns the WalletDb (notes + Orchard shardtree witnesses). The orchestrator drives
+//! sync using the passive `wallet_db_mut()` seam and an ephemeral block cache.
 
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -14,7 +16,16 @@ use zcash_client_backend::{
         TargetValue, WalletCommitmentTrees as _, WalletRead as _, WalletWrite as _,
     },
 };
-use zcash_client_sqlite::{util::SystemClock, wallet::init::init_wallet_db, AccountUuid, WalletDb};
+use zcash_client_sqlite::{
+    util::SystemClock,
+    wallet::init::init_wallet_db,
+    AccountUuid, WalletDb,
+};
+
+use tonic::{
+    body::Body as TonicBody,
+    codegen::{Body, Bytes, StdError},
+};
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_protocol::{
     consensus::{BlockHeight, Network},
@@ -92,9 +103,9 @@ pub struct SpendableNote {
     pub anchor: Anchor,
 }
 
-/// The outcome of funding selection: the chosen unspent note (if any meets
-/// the floor) plus the total spendable registry balance — the *hot balance*
-/// the signer's low-watermark gate runs against.
+/// Result of note selection: one note (if any >= floor) + total spendable
+/// hot treasury balance. The host uses the total for drain decisions;
+/// the signer uses it for the low watermark.
 pub struct FundingSelection {
     /// A spendable note worth at least the floor, with its witness.
     pub note: Option<SpendableNote>,
@@ -102,73 +113,83 @@ pub struct FundingSelection {
     pub spendable_total_zat: u64,
 }
 
-/// The registry's note-state: a view-only `WalletDb` over the registry FVK.
+/// The registry's treasury wallet, using the proper zcash_client_sqlite light
+/// client shape.
 ///
-/// This object owns the persisted treasury (spendable notes + orchard witnesses).
-/// It does **not** perform chain sync. The orchestrator (main loop / sync
-/// coordinator) is responsible for driving `zcash_client_backend::sync::run`
-/// against `wallet_db_mut()` and keeping the view up to date before calling
-/// `select_funding`.
-pub struct NoteState {
-    db: WalletDb<rusqlite::Connection, Network, SystemClock, OsRng>,
+/// Owns the data `WalletDb` (notes, Orchard witnesses via shardtree, scan state
+/// for the view-only account). Provides `select_funding` and an explicit passive
+/// seam (`wallet_db_mut`) so the orchestrator can drive `sync::run` (or
+/// `scan_cached_blocks`) with its own ephemeral `BlockCache`.
+///
+/// All durable treasury state lives in the WalletDb. Block caching for sync is
+/// ephemeral and owned by the caller (recommended when the WalletDb holds scan
+/// progress).
+pub struct Treasury {
+    data: WalletDb<rusqlite::Connection, Network, SystemClock, OsRng>,
     network: Network,
     account: AccountUuid,
 }
 
-impl NoteState {
-    /// Open the wallet database at `wallet_db`.
+impl Treasury {
+    /// Open the treasury WalletDb.
     ///
     /// If the registry account does not exist yet, this will fail with
     /// `TreasuryError::Uninitialized`. The orchestrator is responsible for
     /// the one-time bootstrap (fetching the tree state for the birthday and
-    /// calling a separate import helper, or constructing with a birthday).
+    /// calling `NoteState::initialize`).
     ///
     /// Normal operation (account already imported) is synchronous and performs
     /// no network I/O.
     pub fn open(
-        wallet_db: impl AsRef<Path>,
+        wallet_db_path: impl AsRef<Path>,
         config: &TreasuryConfig,
     ) -> Result<Self, TreasuryError> {
-        let mut db = WalletDb::for_path(wallet_db, config.network, SystemClock, OsRng)?;
-        init_wallet_db(&mut db, None).map_err(|e| TreasuryError::Init(e.to_string()))?;
+        // Data DB (notes, trees, scan progress, witnesses)
+        let mut data = WalletDb::for_path(wallet_db_path, config.network, SystemClock, OsRng)?;
+        init_wallet_db(&mut data, None).map_err(|e| TreasuryError::Init(e.to_string()))?;
 
-        let account = match db.get_account_ids()?.first() {
+        let account = match data.get_account_ids()?.first() {
             Some(id) => *id,
             None => {
                 // First run / uninitialized treasury wallet.
                 // The orchestrator must have supplied a pre-fetched AccountBirthday
                 // (via chain helper that talks to lightwalletd get_tree_state).
-                // We no longer do network I/O inside the "state" object.
                 return Err(TreasuryError::Uninitialized(
                     "treasury wallet has no account — caller must supply AccountBirthday for initial import (see orchestrator bootstrap)".into(),
                 ));
             }
         };
 
-        Ok(NoteState {
-            db,
+        Ok(Treasury {
+            data,
             network: config.network,
             account,
         })
     }
 
     /// One-time initialization: create the view-only account in the WalletDb
-    /// using a pre-fetched `AccountBirthday`.
+    /// using a pre-fetched `AccountBirthday`. Also initializes the proper block cache DB.
     ///
     /// The caller (orchestrator) is responsible for obtaining the `AccountBirthday`
     /// by talking to lightwalletd (typically one `get_tree_state` call at the
     /// height just before `config.birthday`). This method performs no I/O.
     ///
-    /// After calling this, subsequent `open` calls on the same path will succeed.
+    /// After calling this, subsequent `open` calls on the same paths will succeed.
     pub fn initialize(
-        wallet_db: impl AsRef<Path>,
+        wallet_db_path: impl AsRef<Path>,
+        block_db_path: impl AsRef<Path>,
         config: &TreasuryConfig,
         birthday: AccountBirthday,
     ) -> Result<Self, TreasuryError> {
-        let mut db = WalletDb::for_path(wallet_db, config.network, SystemClock, OsRng)?;
-        init_wallet_db(&mut db, None).map_err(|e| TreasuryError::Init(e.to_string()))?;
+        // Data DB
+        let mut data = WalletDb::for_path(wallet_db_path, config.network, SystemClock, OsRng)?;
+        init_wallet_db(&mut data, None).map_err(|e| TreasuryError::Init(e.to_string()))?;
 
-        let account = if let Some(&id) = db.get_account_ids()?.first() {
+        // Proper block cache DB
+        let block_cache = BlockDb::for_path(block_db_path)?;
+        init_cache_database(&block_cache).map_err(|e| TreasuryError::Init(e.to_string()))?;
+
+        let account = if let Some(&id) = data.get_account_ids()?.first() {
             // Already present — treat as success (idempotent bootstrap).
             id
         } else {
@@ -177,7 +198,7 @@ impl NoteState {
                 Ufvk::try_from_items(vec![Fvk::Orchard(config.registry_fvk.to_bytes())])?;
             let ufvk = UnifiedFullViewingKey::parse(&ufvk)?;
 
-            db.import_account_ufvk(
+            data.import_account_ufvk(
                 "zns-registry",
                 &ufvk,
                 &birthday,
@@ -187,26 +208,51 @@ impl NoteState {
             .id()
         };
 
-        Ok(NoteState {
-            db,
+        Ok(Treasury {
+            data,
+            block_cache,
             network: config.network,
             account,
         })
     }
 
-    /// Escape hatch for the orchestrator to drive synchronization.
+    /// Drive synchronization using the library's sync helper.
     ///
-    /// Returns a mutable handle to the underlying `WalletDb` so that an
-    /// external sync driver (e.g. `zcash_client_backend::sync::run` called
-    /// from the main poll loop or a dedicated coordinator) can feed it
-    /// compact blocks and advance the scan state + witnesses.
+    /// This is the proper entry point: the higher-level Treasury object owns
+    /// the data DB + block cache DB. The caller supplies a connected Lwd client
+    /// and the (ephemeral) BlockCache for the duration of the run. The block_cache
+    /// field is owned here as the start of using the library's proper cache shape
+    /// (zcash_client_sqlite::chain::BlockDb + init_cache_database).
     ///
-    /// `state` does **not** own clients, caches, or the sync loop. This is
-    /// the explicit seam.
-    pub fn wallet_db_mut(
+    /// Follows the librustzcash pattern of an owning wallet object.
+    pub async fn sync<ChT, CaT>(
         &mut self,
-    ) -> &mut WalletDb<rusqlite::Connection, Network, SystemClock, OsRng> {
-        &mut self.db
+        client: &mut zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<ChT>,
+        cache: &mut CaT,
+    ) -> Result<(), TreasuryError>
+    where
+        ChT: tonic::client::GrpcService<TonicBody> + Send + Sync + 'static,
+        ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
+        <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
+        ChT::Error: Into<StdError>,
+        CaT: zcash_client_backend::data_api::chain::BlockCache,
+        CaT::Error: std::error::Error + Send + Sync + 'static,
+    {
+        // Note: we still delegate to the high-level run helper (the "stupid" convenience)
+        // inside the owned object. This is already a big improvement over leaking
+        // wallet_db_mut and calling run directly from the main poll loop.
+        // Future: drive with update_chain_tip + suggest_scan_ranges + scan_cached_blocks
+        // for more control, and wire the owned block_cache as persistent backing.
+        zcash_client_backend::sync::run(
+            client,
+            &self.network,
+            cache,
+            &mut self.data,
+            1_000,
+        )
+        .await
+        .map_err(|e| TreasuryError::Init(format!("treasury sync: {e:#}")))?;
+        Ok(())
     }
 
     /// Find a spendable registry note worth at least `min_value_zat` and build
@@ -214,6 +260,13 @@ impl NoteState {
     ///
     /// Returns `note: None` (with the hot balance still reported) if the
     /// wallet has no sufficiently confirmed note worth the floor.
+    /// Access to the owned proper block cache DB (for future use in persistent
+    /// BlockCache implementation instead of pure ephemeral).
+    #[allow(dead_code)]
+    pub fn block_cache(&self) -> &BlockDb {
+        &self.block_cache
+    }
+
     pub fn select_funding(
         &mut self,
         min_value_zat: u64,
@@ -224,7 +277,7 @@ impl NoteState {
         let policy = ConfirmationsPolicy::new_symmetrical(min_confirmations);
 
         let spendable_total_zat = self
-            .db
+            .data
             .get_wallet_summary(policy)?
             .as_ref()
             .and_then(|s| s.account_balances().get(&self.account))
@@ -233,7 +286,7 @@ impl NoteState {
 
         // No blocks scanned yet → nothing spendable.
         let Some((target_height, anchor_height)) =
-            self.db.get_target_and_anchor_heights(min_confirmations)?
+            self.data.get_target_and_anchor_heights(min_confirmations)?
         else {
             return Ok(FundingSelection {
                 note: None,
@@ -243,7 +296,7 @@ impl NoteState {
 
         // Selection targets a *sum*; the mint spends a single input, so the
         // note itself must meet the floor.
-        let notes = self.db.select_spendable_notes(
+        let notes = self.data.select_spendable_notes(
             self.account,
             TargetValue::AtLeast(Zatoshis::from_u64(min_value_zat)?),
             &[ShieldedProtocol::Orchard],
@@ -264,7 +317,7 @@ impl NoteState {
 
         let position = received.note_commitment_tree_position();
         let (path, root) = self
-            .db
+            .data
             .with_orchard_tree_mut::<_, _, TreasuryError>(|tree| {
                 let root = tree
                     .root_at_checkpoint_id(&anchor_height)?

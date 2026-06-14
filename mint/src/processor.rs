@@ -75,10 +75,14 @@ impl Processor {
         grpc: &GrpcClient,
         treasury: &mut Option<Arc<Treasury>>,
     ) -> ProcessResult {
+        let pool_byte: u8 = match note.pool {
+            zcash_protocol::ShieldedProtocol::Orchard => 0,
+            zcash_protocol::ShieldedProtocol::Sapling => 1,
+        };
         {
             if self
                 .registry
-                .is_processed(&note.txid, note.output_index)
+                .is_processed(&note.txid, pool_byte, note.output_index)
                 .await
                 .unwrap_or(false)
             {
@@ -172,7 +176,7 @@ impl Processor {
         if settled {
             if let Err(e) = self
                 .registry
-                .mark_processed(&note.txid, note.output_index, note.height, &note.block_hash)
+                .mark_processed(&note.txid, pool_byte, note.output_index, note.height, &note.block_hash)
                 .await
             {
                 tracing::warn!("intake ledger write failed: {e}");

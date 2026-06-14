@@ -72,7 +72,13 @@ impl Registry {
         let st = self.state.lock().await;
         notes
             .into_iter()
-            .filter(|n| !st.is_processed(&n.txid, n.output_index).unwrap_or(false))
+            .filter(|n| {
+                let pool_byte: u8 = match n.pool {
+                    zcash_protocol::ShieldedProtocol::Orchard => 0,
+                    zcash_protocol::ShieldedProtocol::Sapling => 1,
+                };
+                !st.is_processed(&n.txid, pool_byte, n.output_index).unwrap_or(false)
+            })
             .collect()
     }
 
@@ -81,21 +87,23 @@ impl Registry {
     pub(crate) async fn is_processed(
         &self,
         txid: &[u8; 32],
+        pool: u8,
         output_index: u32,
     ) -> Result<bool, RegistryError> {
         let st = self.state.lock().await;
-        st.is_processed(txid, output_index).map_err(Into::into)
+        st.is_processed(txid, pool, output_index).map_err(Into::into)
     }
 
     pub(crate) async fn mark_processed(
         &self,
         txid: &[u8; 32],
+        pool: u8,
         output_index: u32,
         block_height: u32,
         block_hash: &[u8; 32],
     ) -> Result<(), RegistryError> {
         let st = self.state.lock().await;
-        st.mark_processed(txid, output_index, block_height, block_hash)
+        st.mark_processed(txid, pool, output_index, block_height, block_hash)
             .map_err(Into::into)
     }
 

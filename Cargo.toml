@@ -48,6 +48,12 @@ zcash_client_backend = { version = "0.23", default-features = false, features = 
 # rewind, and note selection for self-funding mint fees (see DESIGN — spend side).
 zcash_client_sqlite = { version = "0.21", default-features = false, features = ["orchard"] }
 
+# Sapling support for the intake scanner (trial-decrypting inbound ZNS memos
+# that arrive via Sapling notes). The public addr_reg/UIVK stays Orchard-only.
+# Declared this way (package rename) to match the pattern used in the zallet/zebra
+# subtrees and avoid version skew.
+sapling = { package = "sapling-crypto", version = "0.7" }
+
 # ── crypto ─────────────────────────────────────────────────────────
 pasta_curves = "0.5"
 blake2b_simd = "1"
