@@ -27,7 +27,7 @@ pub use zns_mint::{
     build_name_note, FundingInput, MintParams, MintResult, RequestId, Signer, SpendPolicy,
 };
 pub use zns_state::{
-    db, FundingSelection, MintedAction, NameRecord, NoteState, SpendableNote, TreasuryConfig,
+    FundingSelection, MintedAction, NameRecord, NoteState, SpendableNote, TreasuryConfig,
 };
 
 pub mod rpc;
@@ -156,13 +156,13 @@ impl Registry {
     /// Look up a registered name.  Returns `None` if the name is unknown.
     pub async fn lookup(&self, name: &str) -> Result<Option<NameRecord>, RegistryError> {
         let st = self.state.lock().await;
-        db::get_record(st.conn(), name).map_err(Into::into)
+        st.get_record(name).map_err(Into::into)
     }
 
     /// Registry table counts for the control plane's `status` method.
     pub async fn stats(&self) -> Result<RegistryStats, RegistryError> {
         let st = self.state.lock().await;
-        let (names, pending_challenges, mint_intents) = db::table_counts(st.conn())?;
+        let (names, pending_challenges, mint_intents) = st.table_counts()?;
         Ok(RegistryStats {
             names,
             pending_challenges,
@@ -177,7 +177,7 @@ impl Registry {
         let st = self.state.lock().await;
         notes
             .into_iter()
-            .filter(|n| !db::is_processed(st.conn(), &n.txid, n.output_index).unwrap_or(false))
+            .filter(|n| !st.is_processed(&n.txid, n.output_index).unwrap_or(false))
             .collect()
     }
 
@@ -219,7 +219,7 @@ impl Registry {
     ) -> ProcessResult {
         {
             let st = self.state.lock().await;
-            if db::is_processed(st.conn(), &note.txid, note.output_index).unwrap_or(false) {
+            if st.is_processed(&note.txid, note.output_index).unwrap_or(false) {
                 return ProcessResult::Skipped("already settled".into());
             }
         }
@@ -321,8 +321,7 @@ impl Registry {
 
         if settled {
             let st = self.state.lock().await;
-            if let Err(e) = db::mark_processed(
-                st.conn(),
+            if let Err(e) = st.mark_processed(
                 &note.txid,
                 note.output_index,
                 note.height,
@@ -362,7 +361,7 @@ impl Registry {
                 // 2. Ensure name is not already taken.
                 {
                     let st = self.state.lock().await;
-                    if db::get_record(st.conn(), name)?.is_some() {
+                    if st.get_record(name)?.is_some() {
                         return Err(RegistryError::AlreadyClaimed(name.into()));
                     }
                 }
@@ -411,7 +410,7 @@ impl Registry {
                 // Name must exist.
                 let record = {
                     let st = self.state.lock().await;
-                    db::get_record(st.conn(), name)?
+                    st.get_record(name)?
                         .ok_or_else(|| RegistryError::NotFound(name.into()))?
                 };
 
@@ -423,8 +422,8 @@ impl Registry {
                     .map_err(|e| RegistryError::Auth(e.to_string()))?;
                 {
                     let st = self.state.lock().await;
-                    db::purge_expired_challenges(st.conn(), mint_ctx.height)?;
-                    db::put_challenge(st.conn(), &challenge)?;
+                    st.purge_expired_challenges(mint_ctx.height)?;
+                    st.put_challenge(&challenge)?;
                 }
 
                 self.relay_challenge(
@@ -455,7 +454,7 @@ impl Registry {
     ) -> Result<ActionOutcome, RegistryError> {
         let challenge = {
             let st = self.state.lock().await;
-            db::get_challenge(st.conn(), name)?
+            st.get_challenge(name)?
         }
         .ok_or_else(|| RegistryError::Auth(format!("no pending challenge for name '{name}'")))?;
         zns_auth::verify(&challenge, nonce, mint_ctx.height)
@@ -463,7 +462,7 @@ impl Registry {
 
         let prev_rcm = {
             let st = self.state.lock().await;
-            match db::get_record(st.conn(), name)? {
+            match st.get_record(name)? {
                 Some(rec) => rec.tip_rcm,
                 None => return Err(RegistryError::NotFound(name.into())),
             }
@@ -509,7 +508,7 @@ impl Registry {
     ) -> Result<MintResult, RegistryError> {
         {
             let st = self.state.lock().await;
-            if db::get_intent(st.conn(), name)?.is_some() {
+            if st.get_intent(name)?.is_some() {
                 return Err(RegistryError::Broadcast(format!(
                     "mint intent for {name:?} pending reconciliation"
                 )));
@@ -562,9 +561,8 @@ impl Registry {
 
         {
             let st = self.state.lock().await;
-            db::put_intent(
-                st.conn(),
-                &db::PendingMint {
+            st.put_intent(
+                &zns_state::db::PendingMint {
                     minted: minted_action(name, action, ua, &result, ctx.height, *prev_rcm),
                     expiry_height: ctx.expiry_height,
                     request: (request.txid, request.action_index),
@@ -582,7 +580,7 @@ impl Registry {
             // intent for reconciliation: the tx may still be in flight.
             if matches!(e, GrpcError::Rejected { .. }) {
                 let st = self.state.lock().await;
-                let _ = db::delete_intent(st.conn(), name);
+                let _ = st.delete_intent(name);
                 ctx.signer.release_request(request);
             }
             return Err(e.into());
@@ -615,7 +613,7 @@ impl Registry {
     ) -> Result<(), RegistryError> {
         let intents = {
             let st = self.state.lock().await;
-            db::list_intents(st.conn())?
+            st.list_intents()?
         };
         for intent in intents {
             let name = &intent.minted.name;
@@ -654,7 +652,7 @@ impl Registry {
     ) -> Result<Option<u32>, RegistryError> {
         let st = self.state.lock().await;
 
-        let Some(last_height) = db::last_processed_height(st.conn())? else {
+        let Some(last_height) = st.last_processed_height()? else {
             return Ok(None);
         };
 
@@ -663,7 +661,7 @@ impl Registry {
         let reorg_height = if last_height > tip_height {
             tip_height.saturating_add(1)
         } else {
-            let Some(stored_hash) = db::processed_hash_at_height(st.conn(), last_height)? else {
+            let Some(stored_hash) = st.processed_hash_at_height(last_height)? else {
                 return Ok(None);
             };
             let current_hash = grpc.block_hash(last_height).await?;
@@ -673,7 +671,7 @@ impl Registry {
 
             let mut h = last_height;
             loop {
-                let Some(stored) = db::processed_hash_at_height(st.conn(), h)? else {
+                let Some(stored) = st.processed_hash_at_height(h)? else {
                     break 0;
                 };
                 let current = grpc.block_hash(h).await?;

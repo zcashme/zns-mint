@@ -23,9 +23,9 @@ pub struct NameRecord {
 pub fn init_schema(conn: &Connection) -> Result<(), StateError> {
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
-         -- Live tip per name (denormalized latest event from name_events).
-         -- One row per actively bound name. RELEASE removes the row; reorg may
-         -- restore an earlier binding or remove the row if the new tip is RELEASE.
+         PRAGMA synchronous = NORMAL;
+         PRAGMA temp_store = MEMORY;
+         PRAGMA cache_size = -64000;
          CREATE TABLE IF NOT EXISTS names (
              name     TEXT    PRIMARY KEY NOT NULL,
              height   INTEGER NOT NULL,

@@ -56,7 +56,7 @@ impl State {
         Ok(State { conn })
     }
 
-    pub fn conn(&self) -> &Connection {
+    pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
 
@@ -96,6 +96,66 @@ impl State {
 
     pub fn delete_intent(&self, name: &str) -> Result<(), StateError> {
         db::delete_intent(&self.conn, name)
+    }
+
+    pub fn get_record(&self, name: &str) -> Result<Option<NameRecord>, StateError> {
+        db::get_record(&self.conn, name)
+    }
+
+    pub fn table_counts(&self) -> Result<(u64, u64, u64), StateError> {
+        db::table_counts(&self.conn)
+    }
+
+    pub fn is_processed(&self, txid: &[u8; 32], output_index: u32) -> Result<bool, StateError> {
+        db::is_processed(&self.conn, txid, output_index)
+    }
+
+    pub fn mark_processed(&self, txid: &[u8; 32], output_index: u32, block_height: u32, block_hash: &[u8; 32]) -> Result<(), StateError> {
+        db::mark_processed(&self.conn, txid, output_index, block_height, block_hash)
+    }
+
+    pub fn get_challenge(&self, name: &str) -> Result<Option<zns_auth::PendingChallenge>, StateError> {
+        db::get_challenge(&self.conn, name)
+    }
+
+    pub fn put_challenge(&self, c: &zns_auth::PendingChallenge) -> Result<(), StateError> {
+        db::put_challenge(&self.conn, c)
+    }
+
+    pub fn purge_expired_challenges(&self, current_height: u32) -> Result<(), StateError> {
+        db::purge_expired_challenges(&self.conn, current_height)
+    }
+
+    pub fn get_intent(&self, name: &str) -> Result<Option<db::PendingMint>, StateError> {
+        db::get_intent(&self.conn, name)
+    }
+
+    pub fn put_intent(&self, intent: &db::PendingMint) -> Result<(), StateError> {
+        db::put_intent(&self.conn, intent)
+    }
+
+    pub fn list_intents(&self) -> Result<Vec<db::PendingMint>, StateError> {
+        db::list_intents(&self.conn)
+    }
+
+    pub fn last_processed_height(&self) -> Result<Option<u32>, StateError> {
+        db::last_processed_height(&self.conn)
+    }
+
+    pub fn processed_hash_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
+        db::processed_hash_at_height(&self.conn, height)
+    }
+
+    pub fn delete_intents_above(&self, height: u32) -> Result<(), StateError> {
+        db::delete_intents_above(&self.conn, height)
+    }
+
+    pub fn delete_processed_above(&self, height: u32) -> Result<(), StateError> {
+        db::delete_processed_above(&self.conn, height)
+    }
+
+    pub fn delete_challenge(&self, name: &str) -> Result<(), StateError> {
+        db::delete_challenge(&self.conn, name)
     }
 }
 
