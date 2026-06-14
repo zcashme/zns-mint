@@ -34,6 +34,7 @@ pub use db::{
     mark_processed, processed_hash_at_height, rebuild_records_after_reorg, upsert_record,
     upsert_record_from_action, NameRecord,
 };
+pub use db::PendingMint;
 pub use error::StateError;
 pub use treasury::{FundingSelection, NoteState, SpendableNote, TreasuryConfig, TreasuryError};
 
@@ -54,10 +55,6 @@ impl State {
         let conn = Connection::open_in_memory()?;
         init_schema(&conn)?;
         Ok(State { conn })
-    }
-
-    pub(crate) fn conn(&self) -> &Connection {
-        &self.conn
     }
 
     pub fn apply_mint(&self, minted: &MintedAction) -> Result<(), StateError> {

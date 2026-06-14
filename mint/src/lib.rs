@@ -562,7 +562,7 @@ impl Registry {
         {
             let st = self.state.lock().await;
             st.put_intent(
-                &zns_state::db::PendingMint {
+                &zns_state::PendingMint {
                     minted: minted_action(name, action, ua, &result, ctx.height, *prev_rcm),
                     expiry_height: ctx.expiry_height,
                     request: (request.txid, request.action_index),
