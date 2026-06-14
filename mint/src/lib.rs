@@ -633,7 +633,7 @@ impl Registry {
                     action_index: intent.request.1,
                 });
                 let st = self.state.lock().await;
-                db::delete_intent(st.conn(), name)?;
+                st.delete_intent(name)?;
             }
         }
         Ok(())
@@ -687,30 +687,16 @@ impl Registry {
             }
         };
 
-        let names = zns_state::affected_names(st.conn(), reorg_height)?;
-        let intents = db::list_intents(st.conn())?;
-
-        let tx = st.conn().unchecked_transaction()?;
-
-        for intent in &intents {
-            if intent.minted.height >= reorg_height {
-                signer.release_request(RequestId {
-                    txid: intent.request.0,
-                    action_index: intent.request.1,
-                });
-            }
-        }
-
-        db::delete_intents_above(&tx, reorg_height)?;
-        db::delete_processed_above(&tx, reorg_height)?;
-        zns_state::delete_actions_above(&tx, reorg_height)?;
-        zns_state::rebuild_records_after_reorg(&tx, &names)?;
-
-        tx.commit()?;
+        let affected = st.apply_reorg(reorg_height, |(txid, idx)| {
+            signer.release_request(RequestId {
+                txid,
+                action_index: idx,
+            });
+        })?;
 
         tracing::warn!(
             reorg_height,
-            affected_names = names.len(),
+            affected_names = affected,
             "chain reorg detected: rolled back registry state"
         );
         Ok(Some(reorg_height))

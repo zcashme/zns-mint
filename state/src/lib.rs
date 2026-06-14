@@ -73,6 +73,30 @@ impl State {
         tx.commit()?;
         Ok(())
     }
+
+    pub fn apply_reorg<F>(&self, height: u32, mut releaser: F) -> Result<usize, StateError>
+    where
+        F: FnMut(([u8; 32], u32)),
+    {
+        let tx = self.conn.unchecked_transaction()?;
+        let names = affected_names(&tx, height)?;
+        let intents = db::list_intents(&tx)?;
+        for intent in &intents {
+            if intent.minted.height >= height {
+                releaser((intent.request.0, intent.request.1));
+            }
+        }
+        db::delete_intents_above(&tx, height)?;
+        db::delete_processed_above(&tx, height)?;
+        delete_actions_above(&tx, height)?;
+        rebuild_records_after_reorg(&tx, &names)?;
+        tx.commit()?;
+        Ok(names.len())
+    }
+
+    pub fn delete_intent(&self, name: &str) -> Result<(), StateError> {
+        db::delete_intent(&self.conn, name)
+    }
 }
 
 /// Initialise the full registry schema (idempotent): the live `names` tip table,
