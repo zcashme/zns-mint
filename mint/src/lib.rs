@@ -27,10 +27,7 @@ pub use zns_mint::{
     build_name_note, FundingInput, MintParams, MintResult, RequestId, Signer, SpendPolicy,
 };
 pub use zns_state::{
-    affected_names, append_action, db, delete_actions_above, delete_intents_above,
-    delete_processed_above, last_processed_height, latest_action, processed_hash_at_height,
-    rebuild_records_after_reorg, upsert_record_from_action, FundingSelection, MintedAction,
-    NameRecord, NoteState, SpendableNote, TreasuryConfig,
+    db, FundingSelection, MintedAction, NameRecord, NoteState, SpendableNote, TreasuryConfig,
 };
 
 pub mod rpc;
@@ -602,15 +599,7 @@ impl Registry {
     /// crash reconciliation — partial persistence cannot exist.
     async fn persist_mint(&self, minted: &MintedAction) -> Result<(), RegistryError> {
         let st = self.state.lock().await;
-        let tx = st.conn().unchecked_transaction()?;
-        append_action(&tx, minted)?;
-        match minted.action {
-            zns_core::Action::Release => db::delete_record(&tx, &minted.name)?,
-            _ => db::upsert_record_from_action(&tx, minted)?,
-        }
-        db::delete_challenge(&tx, &minted.name)?;
-        db::delete_intent(&tx, &minted.name)?;
-        tx.commit()?;
+        st.apply_mint(minted)?;
         Ok(())
     }
 
@@ -698,7 +687,7 @@ impl Registry {
             }
         };
 
-        let names = affected_names(st.conn(), reorg_height)?;
+        let names = zns_state::affected_names(st.conn(), reorg_height)?;
         let intents = db::list_intents(st.conn())?;
 
         let tx = st.conn().unchecked_transaction()?;
@@ -714,8 +703,8 @@ impl Registry {
 
         db::delete_intents_above(&tx, reorg_height)?;
         db::delete_processed_above(&tx, reorg_height)?;
-        delete_actions_above(&tx, reorg_height)?;
-        rebuild_records_after_reorg(&tx, &names)?;
+        zns_state::delete_actions_above(&tx, reorg_height)?;
+        zns_state::rebuild_records_after_reorg(&tx, &names)?;
 
         tx.commit()?;
 
