@@ -5,32 +5,76 @@
 
 mod boot;
 mod config;
-mod record;
-mod registry;
-mod reorg;
-mod rpc;
 mod scan;
-mod shutdown;
 mod spend;
-mod status;
 mod sweep;
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use tokio::sync::Mutex;
 use zcash_protocol::consensus::Network;
-use zns_chain::{connect, GrpcClient, GrpcError, ScannerConfig};
+use zns_chain::{connect, scan_mempool, GrpcClient, GrpcError, ScannerConfig};
 use zns_signer::Signer;
-use zns_state::Treasury;
+use zns_state::{Name, State, StateError, Treasury, TreasuryError};
 
 pub use boot::{boot, BootError};
 pub use config::{MintConfig, POLL_INTERVAL};
-pub use rpc::{serve, RpcContext};
-pub use shutdown::wait_for_shutdown;
-pub use status::{new_shared_status, record_tick_status};
 
-use registry::Registry;
 use spend::SpendLane;
+
+/// Table counters for the control plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RegistryStats {
+    pub names: u64,
+    pub pending_challenges: u64,
+}
+
+/// Async handle to the registry SQLite store.
+#[derive(Clone)]
+pub struct Registry {
+    inner: Arc<Mutex<State>>,
+}
+
+impl Registry {
+    pub fn new(state: State) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(state)),
+        }
+    }
+
+    pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, State> {
+        self.inner.lock().await
+    }
+
+    pub async fn lookup(&self, name: &str) -> Result<Option<Name>, StateError> {
+        let st = self.inner.lock().await;
+        st.get_record(name)
+    }
+
+    pub async fn stats(&self) -> Result<RegistryStats, StateError> {
+        let st = self.inner.lock().await;
+        let (names, pending_challenges) = st.table_counts()?;
+        Ok(RegistryStats {
+            names,
+            pending_challenges,
+        })
+    }
+}
+
+/// Operator snapshot from the latest completed tick.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TickSnapshot {
+    pub tip_height: u32,
+    pub scan_tip_height: u32,
+    pub spendable_zat: u64,
+    pub mempool_notes: u64,
+    pub spend_queue_depth: u32,
+    pub in_flight: bool,
+    pub treasury_available: bool,
+    pub last_poll_unix: u64,
+}
 
 /// Registry scan + single-lane spend. Constructed only via [`boot`].
 pub struct Mint {
@@ -64,12 +108,60 @@ impl Mint {
         self.spend.treasury.is_some()
     }
 
+    /// Observations after a tick (for the binary control plane).
+    pub async fn snapshot(&self, chain_tip: u32) -> TickSnapshot {
+        let scan_tip_height = {
+            let st = self.registry.lock().await;
+            st.get_scan_tip()
+                .ok()
+                .flatten()
+                .map(|t| t.height)
+                .unwrap_or(0)
+        };
+
+        let in_flight = {
+            let st = self.registry.lock().await;
+            st.get_in_flight().ok().flatten().is_some()
+        };
+
+        let spendable_zat = if let Some(treasury) = self.spend.treasury.as_ref() {
+            let mut t = treasury.lock().await;
+            t.select_funding(config::MINT_FEE_ZAT, config::ANCHOR_CONFIRMATIONS)
+                .ok()
+                .map(|f| f.spendable_total_zat)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let mempool_notes = scan_mempool(&self.chain.scanner, chain_tip)
+            .await
+            .map(|notes| notes.len() as u64)
+            .unwrap_or(0);
+
+        let last_poll_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        TickSnapshot {
+            tip_height: chain_tip,
+            scan_tip_height,
+            spendable_zat,
+            mempool_notes,
+            spend_queue_depth: self.spend.lane.pending_count() as u32,
+            in_flight,
+            treasury_available: self.spend.treasury.is_some(),
+            last_poll_unix,
+        }
+    }
+
     /// One protocol step. Returns chain tip height observed for this tick.
     pub async fn tick(&self) -> Result<u32, TickError> {
         let chain_tip = self.chain.grpc.tip_height().await?;
         self.spend.signer.roll_window();
 
-        if let Some(reorg_at) = reorg::handle_reorg(
+        if let Some(reorg_at) = scan::handle_reorg(
             &self.registry,
             &self.chain.grpc,
             &self.spend.signer,
@@ -138,15 +230,15 @@ pub enum TickError {
     #[error(transparent)]
     Grpc(#[from] GrpcError),
     #[error(transparent)]
-    State(#[from] zns_state::StateError),
+    State(#[from] StateError),
     #[error(transparent)]
     Scan(#[from] scan::ScanSyncError),
     #[error(transparent)]
-    Reorg(#[from] reorg::ReorgError),
+    Reorg(#[from] scan::ReorgError),
     #[error(transparent)]
     Spend(#[from] spend::SpendError),
     #[error(transparent)]
     Sweep(#[from] sweep::SweepError),
     #[error(transparent)]
-    Treasury(#[from] zns_state::TreasuryError),
+    Treasury(#[from] TreasuryError),
 }

@@ -14,7 +14,7 @@ use zns_signer::{
 use zns_state::{InFlightSpend, SpendableNote, StateError, Treasury, TreasuryError};
 
 use crate::config::{ANCHOR_CONFIRMATIONS, MIN_MUTATION_FEE_ZAT, MINT_FEE_ZAT, TX_EXPIRY_BLOCKS};
-use crate::registry::Registry;
+use crate::Registry;
 
 /// A request note waiting for the single-lane spend path (in-memory only).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -563,7 +563,7 @@ mod lane_tests {
     use zns_state::{InFlightSpend, State};
 
     use super::*;
-    use crate::registry::Registry;
+    use crate::Registry;
 
     #[tokio::test]
     async fn spend_lane_idle_when_empty() {

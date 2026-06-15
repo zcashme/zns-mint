@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "zns-mint"
-path = "src/bin/zns-mint.rs"
+path = "src/bin/zns-mint/main.rs"
 
 [features]
 # Build against Zcash testnet instead of mainnet. A build-time choice so the

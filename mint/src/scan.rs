@@ -1,13 +1,14 @@
 use std::collections::HashSet;
 
-use zns_chain::{scan_blocks, IncomingNote, ScanError, ScannerConfig};
+use pasta_curves::group::ff::PrimeField;
+use zns_chain::{scan_blocks, GrpcClient, GrpcError, IncomingNote, ScanError, ScannerConfig};
 use zns_core::{parse_memo, Action, ParsedMemo};
-use zns_state::{ScanTip, StateError};
+use zns_signer::{derive_psi_rcm, Signer, RequestId};
+use zns_state::{MintedAction, ScanTip, StateError};
 use zcash_protocol::ShieldedProtocol;
 
 use crate::config::{MIN_CLAIM_FEE_ZAT, MIN_MUTATION_FEE_ZAT};
-use crate::record;
-use crate::registry::Registry;
+use crate::Registry;
 use crate::spend::{QueuedSpend, SpendLane, SpendVerb};
 
 #[derive(Debug, thiserror::Error)]
@@ -127,10 +128,8 @@ async fn handle_note(
             name,
             ua,
         } => {
-            record::apply_name_note(
-                registry, spend, note, height, hash, action, name, ua, prev_rcm,
-            )
-            .await?;
+            apply_name_note(registry, spend, note, height, hash, action, name, ua, prev_rcm)
+                .await?;
             Ok(NoteOutcome::Settled)
         }
         ParsedMemo::Challenge { name, .. } => {
@@ -286,6 +285,140 @@ fn pool_byte(pool: &ShieldedProtocol) -> u8 {
         ShieldedProtocol::Orchard => 0,
         ShieldedProtocol::Sapling => 1,
     }
+}
+
+/// Persist a registry-authored Name Note seen on chain and finish the spend lane.
+async fn apply_name_note(
+    registry: &Registry,
+    spend: &SpendLane,
+    note: &IncomingNote,
+    height: u32,
+    hash: [u8; 32],
+    action: Action,
+    name: String,
+    ua: String,
+    prev_rcm: [u8; 32],
+) -> Result<(), StateError> {
+    let (psi, rcm) = derive_psi_rcm(action, &name, &ua, &prev_rcm);
+    let minted = MintedAction {
+        name: name.clone(),
+        action,
+        ua,
+        txid: note.txid,
+        cmx: [0u8; 32],
+        rcm: rcm.to_repr(),
+        psi: psi.to_repr(),
+        prev_rcm,
+        height,
+    };
+
+    {
+        let st = registry.lock().await;
+        st.apply_mint(&minted)?;
+        st.mark_processed(
+            &note.txid,
+            pool_byte(&note.pool),
+            note.output_index,
+            height,
+            &hash,
+        )?;
+    }
+
+    let flight = {
+        let st = registry.lock().await;
+        st.get_in_flight()?
+    };
+    if let Some(flight) = flight {
+        if !flight.relay && flight.name == name {
+            let request_pool = spend
+                .active_job()
+                .map(|j| j.pool)
+                .unwrap_or_else(|| pool_byte(&note.pool));
+            let st = registry.lock().await;
+            st.mark_processed(
+                &flight.request_txid,
+                request_pool,
+                flight.request_index,
+                height,
+                &hash,
+            )?;
+            st.clear_in_flight()?;
+            spend.clear_active();
+            tracing::info!(name = %name, height, "mint confirmed on chain");
+        }
+    }
+
+    Ok(())
+}
+
+/// Detect a chain reorg against the scan tip and rewind if needed.
+pub async fn handle_reorg(
+    registry: &Registry,
+    grpc: &GrpcClient,
+    signer: &Signer,
+    chain_tip: u32,
+) -> Result<Option<u32>, ReorgError> {
+    let scan_tip = {
+        let st = registry.lock().await;
+        st.get_scan_tip()?
+    };
+
+    let Some(scan_tip) = scan_tip else {
+        return Ok(None);
+    };
+
+    let reorg_height = if scan_tip.height > chain_tip {
+        chain_tip.saturating_add(1)
+    } else {
+        let current_hash = grpc.block_hash(scan_tip.height).await?;
+        if current_hash == scan_tip.hash {
+            return Ok(None);
+        }
+
+        let mut h = scan_tip.height;
+        loop {
+            let stored = {
+                let st = registry.lock().await;
+                st.processed_hash_at_height(h)?
+            };
+            let Some(stored) = stored else {
+                break 0;
+            };
+            let current = grpc.block_hash(h).await?;
+            if stored == current {
+                break h.saturating_add(1);
+            }
+            if h == 0 {
+                break 0;
+            }
+            h -= 1;
+        }
+    };
+
+    let affected = {
+        let st = registry.lock().await;
+        st.apply_reorg(reorg_height, |(txid, idx)| {
+            signer.release_request(RequestId {
+                txid,
+                action_index: idx,
+            });
+        })?
+    };
+
+    tracing::warn!(
+        reorg_height,
+        affected_names = affected,
+        "chain reorg: registry rewound"
+    );
+    Ok(Some(reorg_height))
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReorgError {
+    #[error(transparent)]
+    State(#[from] StateError),
+    #[error(transparent)]
+    Grpc(#[from] GrpcError),
 }
 
 #[cfg(test)]

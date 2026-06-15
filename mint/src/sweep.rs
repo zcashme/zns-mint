@@ -6,7 +6,7 @@ use zns_signer::{FundingInput, Signer};
 use zns_state::{InFlightSpend, Treasury, TreasuryError};
 
 use crate::config::{ANCHOR_CONFIRMATIONS, MINT_FEE_ZAT, TX_EXPIRY_BLOCKS};
-use crate::registry::Registry;
+use crate::Registry;
 use crate::spend::SpendLane;
 
 /// Drain hot treasury balance to cold when above the policy high watermark.

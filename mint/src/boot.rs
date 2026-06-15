@@ -7,7 +7,7 @@ use zns_state::{ScanTip, State, Treasury, TreasuryConfig, TreasuryError};
 
 use crate::config::{self, MintConfig, MINT_FEE_ZAT};
 use crate::{Chain, Spend};
-use crate::registry::Registry;
+use crate::Registry;
 use crate::spend::SpendLane;
 use crate::Mint;
 use zns_chain::{GrpcClient, ScannerConfig};

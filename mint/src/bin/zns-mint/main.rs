@@ -1,9 +1,10 @@
 //! `zns-mint` binary — boot, poll loop, JSON-RPC.
 
-use zns_registry::{
-    boot, new_shared_status, record_tick_status, serve, wait_for_shutdown, MintConfig, RpcContext,
-    POLL_INTERVAL,
-};
+mod rpc;
+mod shutdown;
+mod status;
+
+use zns_registry::{boot, MintConfig, POLL_INTERVAL};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -24,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "zns-mint started (scan-ahead / single-lane spend)"
     );
 
-    let status = new_shared_status();
+    let status = status::new_shared_status();
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
 
     let rpc_task = tokio::spawn({
@@ -33,8 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let addr = config.rpc_bind.clone();
         let rpc_shutdown_rx = shutdown_rx.clone();
         async move {
-            let ctx = RpcContext { registry, status };
-            if let Err(e) = serve(addr, ctx, rpc_shutdown_rx).await {
+            let ctx = rpc::RpcContext { registry, status };
+            if let Err(e) = rpc::serve(addr, ctx, rpc_shutdown_rx).await {
                 tracing::error!(%e, "control plane stopped");
             }
         }
@@ -43,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut stop_after_tick = false;
     loop {
         let chain_tip = mint.tick().await?;
-        record_tick_status(&status, &mint, chain_tip).await;
+        status::record_tick_status(&status, &mint, chain_tip).await;
 
         if stop_after_tick {
             break;
@@ -51,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
         tokio::select! {
             _ = tokio::time::sleep(POLL_INTERVAL) => {}
-            _ = wait_for_shutdown() => {
+            _ = shutdown::wait_for_shutdown() => {
                 tracing::info!("shutdown requested — finishing current tick");
                 stop_after_tick = true;
             }

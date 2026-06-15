@@ -5,9 +5,9 @@ use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::server::Server;
 use jsonrpsee::types::ErrorObjectOwned;
 use serde::Serialize;
+use zns_registry::{Registry, RegistryStats, TickSnapshot};
 
-use crate::registry::Registry;
-use crate::status::{ChainStatus, SharedChainStatus};
+use super::status::SharedStatus;
 
 /// The `status` method result.
 #[derive(Debug, Clone, Serialize)]
@@ -38,7 +38,7 @@ pub trait MintApi {
 /// Shared context behind the RPC server.
 pub struct RpcContext {
     pub registry: Registry,
-    pub status: SharedChainStatus,
+    pub status: SharedStatus,
 }
 
 #[jsonrpsee::core::async_trait]
@@ -57,7 +57,7 @@ impl MintApiServer for RpcContext {
     }
 }
 
-fn status_result(chain: ChainStatus, stats: crate::registry::RegistryStats) -> StatusResult {
+fn status_result(chain: TickSnapshot, stats: RegistryStats) -> StatusResult {
     StatusResult {
         tip_height: chain.tip_height,
         scan_tip_height: chain.scan_tip_height,
@@ -109,14 +109,14 @@ pub enum RpcError {
 mod tests {
     use super::*;
     use crate::status::new_shared_status;
+    use zns_registry::Registry;
     use zns_state::State;
 
     #[tokio::test]
     async fn status_merges_chain_and_registry_counters() {
-        let state = State::open_in_memory().unwrap();
-        let registry = Registry::new(state);
+        let registry = Registry::new(State::open_in_memory().unwrap());
         let status = new_shared_status();
-        *status.write().await = ChainStatus {
+        *status.write().await = TickSnapshot {
             tip_height: 2_000_100,
             scan_tip_height: 2_000_050,
             spendable_zat: 42_000,
@@ -125,6 +125,7 @@ mod tests {
             in_flight: true,
             treasury_available: true,
             last_poll_unix: 1_700_000_000,
+            ..TickSnapshot::default()
         };
 
         let ctx = RpcContext { registry, status };
