@@ -9,8 +9,6 @@
 //! Scope: receive-side intake only. Spends of the registry's own notes are
 //! tracked by the [`crate::treasury`] note-state (`WalletDb`).
 
-use std::convert::Infallible;
-
 use orchard::{
     keys::PreparedIncomingViewingKey,
     note::{ExtractedNoteCommitment, Nullifier},

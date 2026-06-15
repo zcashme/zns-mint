@@ -16,12 +16,14 @@ use zns_signer::{Signer, SpendPolicy, test_orchard_ivk, test_registry_address, t
 /// Open databases, wire keys and chain I/O, and return a runnable mint.
 pub async fn boot(config: MintConfig) -> Result<Mint, BootError> {
     let state = State::open(&config.registry_db)?;
+    let grpc = GrpcClient::new(&config.lwd_url);
 
     let rewind_height = config.birthday.saturating_sub(config::STARTUP_REWIND_BLOCKS);
     if rewind_height > 0 {
+        let hash = grpc.block_hash(rewind_height).await?;
         state.set_scan_tip(&ScanTip {
             height: rewind_height,
-            hash: [0u8; 32],
+            hash,
         })?;
         tracing::info!(
             rewind_height,
@@ -41,8 +43,6 @@ pub async fn boot(config: MintConfig) -> Result<Mint, BootError> {
         max_mints_per_window: u32::MAX,
     };
     let signer = Arc::new(Signer::new_test(policy)?);
-
-    let grpc = GrpcClient::new(&config.lwd_url);
 
     let treasury_config = TreasuryConfig {
         registry_fvk: signer.fvk().clone(),
@@ -122,6 +122,8 @@ async fn bootstrap_treasury(
 pub enum BootError {
     #[error(transparent)]
     State(#[from] zns_state::StateError),
+    #[error(transparent)]
+    Grpc(#[from] zns_chain::GrpcError),
     #[error(transparent)]
     Treasury(#[from] TreasuryError),
     #[error(transparent)]
