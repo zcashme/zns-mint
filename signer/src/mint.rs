@@ -42,6 +42,24 @@ use crate::error::BuildError;
 static PK_FIXED: OnceLock<ProvingKey> = OnceLock::new();
 static PK_INSECURE: OnceLock<ProvingKey> = OnceLock::new();
 
+/// Orchard circuit version for proofs authored under `branch_id`.
+///
+/// `branch_id` should come from [`BranchId::for_height`] at the spend/sweep tip.
+/// Mirrors `zebra-consensus`'s `verifier_for` era split: NU5..=NU6.1 use the
+/// historical insecure circuit; NU6.2+ use the fixed circuit.
+pub(crate) fn orchard_circuit_version(branch_id: BranchId) -> OrchardCircuitVersion {
+    use BranchId::*;
+    match branch_id {
+        Nu6_2 => OrchardCircuitVersion::FixedPostNu6_2,
+        Nu5 | Nu6 | Nu6_1 => OrchardCircuitVersion::InsecurePreNu6_2,
+        // Orchard did not exist before NU5; kept for an exhaustive match only.
+        Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy => {
+            OrchardCircuitVersion::InsecurePreNu6_2
+        }
+
+    }
+}
+
 /// The proving key for `version`, built once and cached.
 pub(crate) fn proving_key_for(version: OrchardCircuitVersion) -> &'static ProvingKey {
     match version {
@@ -168,7 +186,6 @@ pub struct MintParams<'a> {
     pub anchor: Anchor,
     pub branch_id: BranchId,
     pub expiry_height: u32,
-    pub circuit_version: OrchardCircuitVersion,
 }
 
 /// The output of a successful OTP challenge relay.
@@ -193,6 +210,7 @@ pub struct MintResult {
 // ---------------------------------------------------------------------------
 
 pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, BuildError> {
+    let circuit_version = orchard_circuit_version(params.branch_id);
     let (psi, rcm) = zns_psi_rcm(
         params.action.as_bytes(),
         params.name.as_bytes(),
@@ -205,7 +223,7 @@ pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, BuildError>
 
     let ovk = Some(params.registry_fvk.to_ovk(Scope::External));
     let mut builder =
-        OrchardBuilder::new_for_version(BundleType::DEFAULT, params.anchor, params.circuit_version);
+        OrchardBuilder::new_for_version(BundleType::DEFAULT, params.anchor, circuit_version);
 
     let memo =
         zns_core::memo::encode_name_note(params.action, params.name, params.ua, &params.prev_rcm)?;
@@ -234,7 +252,7 @@ pub fn build_name_note(params: MintParams<'_>) -> Result<MintResult, BuildError>
     let sighash = v5_shielded_sighash(params.branch_id, 0, params.expiry_height, &orchard_digest);
 
     let proven_bundle = unauthorized_bundle
-        .create_proof(proving_key_for(params.circuit_version), &mut rng)
+        .create_proof(proving_key_for(circuit_version), &mut rng)
         .map_err(BuildError::proof)?;
 
     let authorized_bundle = proven_bundle
@@ -277,8 +295,8 @@ pub fn build_funded_mint(
     plan: &MintPlan,
     branch_id: BranchId,
     expiry_height: u32,
-    circuit_version: OrchardCircuitVersion,
 ) -> Result<MintResult, BuildError> {
+    let circuit_version = orchard_circuit_version(branch_id);
     let (psi, rcm) = zns_psi_rcm(
         plan.action.as_bytes(),
         plan.name.as_bytes(),
@@ -378,8 +396,8 @@ pub fn build_sweep(
     amount_zat: u64,
     branch_id: BranchId,
     expiry_height: u32,
-    circuit_version: OrchardCircuitVersion,
 ) -> Result<(Vec<u8>, [u8; 32]), BuildError> {
+    let circuit_version = orchard_circuit_version(branch_id);
     let ovk = Some(registry_fvk.to_ovk(Scope::External));
     let mut builder =
         OrchardBuilder::new_for_version(BundleType::DEFAULT, funding.anchor, circuit_version);
@@ -430,8 +448,8 @@ pub fn build_memo_send(
     memo: [u8; 512],
     branch_id: BranchId,
     expiry_height: u32,
-    circuit_version: OrchardCircuitVersion,
 ) -> Result<RelayResult, BuildError> {
+    let circuit_version = orchard_circuit_version(branch_id);
     let ovk = Some(registry_fvk.to_ovk(Scope::External));
     let mut builder =
         OrchardBuilder::new_for_version(BundleType::DEFAULT, funding.anchor, circuit_version);
@@ -534,8 +552,31 @@ mod tests {
             anchor: Anchor::empty_tree(),
             branch_id: BranchId::Nu6,
             expiry_height: 0,
-            circuit_version: OrchardCircuitVersion::InsecurePreNu6_2,
         }
+    }
+
+    #[test]
+    fn testnet_post_nu6_2_uses_fixed_circuit() {
+        use zcash_protocol::consensus::{BlockHeight, Network};
+
+        let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(4_069_676));
+        assert_eq!(branch, BranchId::Nu6_2);
+        assert_eq!(
+            orchard_circuit_version(branch),
+            OrchardCircuitVersion::FixedPostNu6_2
+        );
+    }
+
+    #[test]
+    fn testnet_pre_nu6_2_orchard_uses_insecure_circuit() {
+        use zcash_protocol::consensus::{BlockHeight, Network};
+
+        let branch = BranchId::for_height(&Network::TestNetwork, BlockHeight::from_u32(4_051_999));
+        assert_eq!(branch, BranchId::Nu6_1);
+        assert_eq!(
+            orchard_circuit_version(branch),
+            OrchardCircuitVersion::InsecurePreNu6_2
+        );
     }
 
     #[test]
@@ -563,7 +604,6 @@ mod tests {
             anchor: Anchor::empty_tree(),
             branch_id: BranchId::Nu6,
             expiry_height: 0,
-            circuit_version: OrchardCircuitVersion::InsecurePreNu6_2,
         })
         .unwrap();
         assert_ne!(claim.new_rcm, update.new_rcm);

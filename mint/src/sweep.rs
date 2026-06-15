@@ -5,7 +5,6 @@ use zns_signer::{FundingInput, Signer};
 use zns_state::{SweepCursor, Treasury, TreasuryError};
 
 use crate::config::{ANCHOR_CONFIRMATIONS, MINT_FEE_ZAT, SWEEP_INTERVAL_BLOCKS, TX_EXPIRY_BLOCKS};
-use crate::consensus::orchard_circuit_version;
 use crate::Registry;
 
 fn sweep_due(chain_tip: u32, last_height: u32) -> bool {
@@ -53,13 +52,7 @@ pub async fn maybe_sweep(
         anchor: funding_note.anchor,
     };
 
-    let result = signer.sign_sweep(
-        funding,
-        MINT_FEE_ZAT,
-        branch_id,
-        expiry_height,
-        orchard_circuit_version(branch_id),
-    )?;
+    let result = signer.sign_sweep(funding, MINT_FEE_ZAT, branch_id, expiry_height)?;
 
     match grpc.broadcast(result.tx_bytes).await {
         Ok(()) => {

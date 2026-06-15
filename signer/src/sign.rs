@@ -16,8 +16,6 @@ use sapling::zip32::ExtendedSpendingKey;
 use zcash_protocol::consensus::BranchId;
 use zeroize::Zeroizing;
 
-use orchard::circuit::OrchardCircuitVersion;
-
 use crate::error::SignError;
 use crate::mint::{build_funded_mint, build_memo_send, build_sweep, MintResult, RelayResult};
 use crate::policy::{FundingInput, MintProposal, PolicyError, RequestId, SpendGuard, SpendPolicy};
@@ -113,7 +111,6 @@ impl Signer {
         hot_balance_zat: u64,
         branch_id: BranchId,
         expiry_height: u32,
-        circuit_version: OrchardCircuitVersion,
     ) -> Result<MintResult, SignError> {
         // Pure policy gate first — cheap rejects without mutating state.
         let funding_value = proposal.funding.note.value().inner();
@@ -138,7 +135,6 @@ impl Signer {
             &plan,
             branch_id,
             expiry_height,
-            circuit_version,
         ) {
             Ok(result) => Ok(result),
             Err(e) => {
@@ -168,7 +164,6 @@ impl Signer {
         hot_balance_zat: u64,
         branch_id: BranchId,
         expiry_height: u32,
-        circuit_version: OrchardCircuitVersion,
     ) -> Result<RelayResult, SignError> {
         // The dust mirrors the fee (one policy knob bounds both).
         let fee = self.policy.max_fee_zat.min(crate::policy::RELAY_UNIT_ZAT);
@@ -204,7 +199,6 @@ impl Signer {
             memo,
             branch_id,
             expiry_height,
-            circuit_version,
         ) {
             Ok(result) => Ok(result),
             Err(e) => {
@@ -226,7 +220,6 @@ impl Signer {
         fee_zat: u64,
         branch_id: BranchId,
         expiry_height: u32,
-        circuit_version: OrchardCircuitVersion,
     ) -> Result<SweepResult, SignError> {
         if fee_zat > self.policy.max_fee_zat {
             return Err(SignError::Policy(PolicyError::FeeTooHigh {
@@ -256,7 +249,6 @@ impl Signer {
             amount,
             branch_id,
             expiry_height,
-            circuit_version,
         ) {
             Ok((tx_bytes, txid)) => Ok(SweepResult {
                 tx_bytes,

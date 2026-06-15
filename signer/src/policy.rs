@@ -247,7 +247,6 @@ mod tests {
             registry_addr: addr,
             cold_addr: addr,
             max_fee_zat: 10_000,
-            target_float_zat: 1_000_000,
             high_watermark_zat: 5_000_000,
             low_watermark_zat: 100_000,
             max_mints_per_window: 3,

@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use orchard::circuit::OrchardCircuitVersion;
 use tokio::sync::Mutex as AsyncMutex;
 use zcash_address::unified::{self, Container, Encoding, Receiver};
 use zcash_protocol::consensus::BranchId;
@@ -14,7 +13,6 @@ use zns_signer::{
 use zns_state::{InFlightSpend, SpendableNote, StateError, Treasury, TreasuryError};
 
 use crate::config::{ANCHOR_CONFIRMATIONS, MIN_MUTATION_FEE_ZAT, MINT_FEE_ZAT, TX_EXPIRY_BLOCKS};
-use crate::consensus::orchard_circuit_version;
 use crate::Registry;
 
 /// A request note waiting for the single-lane spend path (in-memory only).
@@ -154,7 +152,6 @@ impl SpendLane {
             network,
             branch_id,
             hot_balance_zat: hot_balance,
-            circuit_version: orchard_circuit_version(branch_id),
         };
 
         let request_id = RequestId {
@@ -223,7 +220,6 @@ struct SpendCtx {
     network: zcash_protocol::consensus::Network,
     branch_id: BranchId,
     hot_balance_zat: u64,
-    circuit_version: OrchardCircuitVersion,
 }
 
 struct BroadcastFlight {
@@ -331,7 +327,6 @@ fn dispatch_mint(
         ctx.hot_balance_zat,
         ctx.branch_id,
         ctx.expiry_height,
-        ctx.circuit_version,
     )?;
     Ok(BroadcastFlight {
         tx_bytes: result.tx_bytes,
@@ -379,7 +374,6 @@ async fn dispatch_challenge(
         ctx.hot_balance_zat,
         ctx.branch_id,
         ctx.expiry_height,
-        ctx.circuit_version,
     )?;
 
     Ok(BroadcastFlight {
