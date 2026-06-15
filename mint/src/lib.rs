@@ -5,6 +5,7 @@
 
 mod boot;
 mod config;
+mod consensus;
 mod scan;
 mod spend;
 mod sweep;

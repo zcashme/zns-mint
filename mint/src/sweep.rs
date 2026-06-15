@@ -1,4 +1,3 @@
-use orchard::circuit::OrchardCircuitVersion;
 use tokio::sync::Mutex as AsyncMutex;
 use zcash_protocol::consensus::BranchId;
 use zns_chain::GrpcClient;
@@ -6,6 +5,7 @@ use zns_signer::{FundingInput, Signer};
 use zns_state::{SweepCursor, Treasury, TreasuryError};
 
 use crate::config::{ANCHOR_CONFIRMATIONS, MINT_FEE_ZAT, SWEEP_INTERVAL_BLOCKS, TX_EXPIRY_BLOCKS};
+use crate::consensus::orchard_circuit_version;
 use crate::Registry;
 
 fn sweep_due(chain_tip: u32, last_height: u32) -> bool {
@@ -58,7 +58,7 @@ pub async fn maybe_sweep(
         MINT_FEE_ZAT,
         branch_id,
         expiry_height,
-        OrchardCircuitVersion::InsecurePreNu6_2,
+        orchard_circuit_version(branch_id),
     )?;
 
     match grpc.broadcast(result.tx_bytes).await {

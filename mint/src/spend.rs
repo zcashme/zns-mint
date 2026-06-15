@@ -14,6 +14,7 @@ use zns_signer::{
 use zns_state::{InFlightSpend, SpendableNote, StateError, Treasury, TreasuryError};
 
 use crate::config::{ANCHOR_CONFIRMATIONS, MIN_MUTATION_FEE_ZAT, MINT_FEE_ZAT, TX_EXPIRY_BLOCKS};
+use crate::consensus::orchard_circuit_version;
 use crate::Registry;
 
 /// A request note waiting for the single-lane spend path (in-memory only).
@@ -145,14 +146,15 @@ impl SpendLane {
         };
 
         let sign_tip = grpc.tip_height().await?;
+        let branch_id = BranchId::for_height(&network, sign_tip.into());
         let ctx = SpendCtx {
             signer: Arc::clone(signer),
             height: sign_tip,
             expiry_height: sign_tip.saturating_add(TX_EXPIRY_BLOCKS),
             network,
-            branch_id: BranchId::for_height(&network, sign_tip.into()),
+            branch_id,
             hot_balance_zat: hot_balance,
-            circuit_version: OrchardCircuitVersion::InsecurePreNu6_2,
+            circuit_version: orchard_circuit_version(branch_id),
         };
 
         let request_id = RequestId {
