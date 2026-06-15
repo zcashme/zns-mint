@@ -18,18 +18,24 @@ pub async fn boot(config: MintConfig) -> Result<Mint, BootError> {
     let state = State::open(&config.registry_db)?;
     let grpc = GrpcClient::new(&config.lwd_url);
 
-    let rewind_height = config.birthday.saturating_sub(config::STARTUP_REWIND_BLOCKS);
-    if rewind_height > 0 {
-        let hash = grpc.block_hash(rewind_height).await?;
-        state.set_scan_tip(&ScanTip {
-            height: rewind_height,
-            hash,
-        })?;
-        tracing::info!(
-            rewind_height,
-            birthday = config.birthday,
-            "startup: scan_tip rewound for safety re-sync"
-        );
+    // First boot only: rewind behind birthday so the initial catch-up re-scans a
+    // safety window. Restarts keep the persisted scan_tip so operators can
+    // re-scan a narrower range (e.g. after a scanner fix) without replaying
+    // from genesis.
+    if state.get_scan_tip()?.is_none() {
+        let rewind_height = config.birthday.saturating_sub(config::STARTUP_REWIND_BLOCKS);
+        if rewind_height > 0 {
+            let hash = grpc.block_hash(rewind_height).await?;
+            state.set_scan_tip(&ScanTip {
+                height: rewind_height,
+                hash,
+            })?;
+            tracing::info!(
+                rewind_height,
+                birthday = config.birthday,
+                "startup: scan_tip rewound for safety re-sync"
+            );
+        }
     }
 
     let registry = Registry::new(state);

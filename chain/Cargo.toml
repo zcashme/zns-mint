@@ -9,10 +9,18 @@ publish = false
 
 [dependencies]
 zns-core = { workspace = true }
-# orchard types in the scanned-note API: IncomingViewingKey drives trial
-# decryption of incoming request notes (standard ZIP-212, no unsafe-zns needed
-# — that's only for the Name Notes the registry itself mints).
-orchard = { workspace = true }
+# Orchard trial decryption: standard ZIP-212 for request notes, relaxed path
+# (see `name_note`) for registry-authored Name Notes with deterministic (ψ, rcm).
+orchard = { workspace = true, features = ["unsafe-zns"] }
+# Relaxed decrypt cipher primitives — pinned to zcash_note_encryption 0.4's versions.
+chacha20 = "0.9"
+chacha20poly1305 = "0.10"
+# Sinsemilla note-commitment recompute for Name Note binding verification.
+sinsemilla = "0.1"
+bitvec = { version = "1", default-features = false }
+group = "0.13"
+pasta_curves = { workspace = true }
+blake2b_simd = { workspace = true }
 zcash_primitives = { workspace = true }
 zcash_protocol = { workspace = true }
 # lightwalletd gRPC transport: zcash_client_backend supplies the proto client +

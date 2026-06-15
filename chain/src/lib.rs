@@ -7,6 +7,7 @@
 //! policy decisions; the `zns-mint` daemon drives it.
 
 pub mod grpc;
+pub mod name_note;
 pub mod scanner;
 pub mod wallet_sync;
 

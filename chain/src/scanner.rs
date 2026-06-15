@@ -1,10 +1,15 @@
-//! Chain intake — scans `addr_reg` for incoming ZNS request notes.
+//! Chain intake — scans `addr_reg` for incoming ZNS notes.
 //!
 //! Host owns this directly now (no `seer-sync`): it streams compact blocks from
 //! lightwalletd via [`crate::grpc`], trial-decrypts each Orchard action with the
-//! registry IVK (standard ZIP-212 — the *inbound* request notes are ordinary
-//! notes; only the Name Notes the registry *mints* are non-standard), then
-//! fetches the full transaction to recover the memo (compact blocks omit it).
+//! registry IVK, then fetches the full transaction to recover the memo (compact
+//! blocks omit it).
+//!
+//! Two Orchard paths:
+//! - **Request notes** (user → registry): standard ZIP-212 trial decryption.
+//! - **Name Notes** (registry mint → self): relaxed decrypt without the ZIP-212
+//!   `cmx` check, then [`crate::name_note::verify_name_note_decrypted`] on the
+//!   canonical memo's `prev_rcm` witness.
 //!
 //! Scope: receive-side intake only. Spends of the registry's own notes are
 //! tracked by the [`crate::treasury`] note-state (`WalletDb`).
@@ -13,7 +18,6 @@ use orchard::{
     keys::PreparedIncomingViewingKey,
     note::{ExtractedNoteCommitment, Nullifier},
     note_encryption::{CompactAction, OrchardDomain},
-    Action,
 };
 use sapling::note_encryption::{
     CompactOutputDescription, Zip212Enforcement,
@@ -25,7 +29,10 @@ use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 use zcash_protocol::ShieldedProtocol;
 
+use zns_core::{parse_memo, ParsedMemo};
+
 use crate::grpc::{GrpcClient, GrpcError};
+use crate::name_note::{try_decrypt_orchard_relaxed, verify_name_note_decrypted};
 
 /// Errors scanning `addr_reg` for incoming Name Note requests.
 #[derive(Debug, Error)]
@@ -129,11 +136,10 @@ where
         let height = block.height as u32;
         let block_hash: [u8; 32] = block.hash[..].try_into().unwrap_or([0u8; 32]);
 
-        // (txid, output_index, value_zat, pool) for every shielded output/action
-        // that IVK-decrypts. We process *both* pools; a tx may have only Sapling,
-        // only Orchard, or (rarely) both. Never early-continue on one pool being
-        // empty.
-        let mut hits: Vec<([u8; 32], usize, u64, ShieldedProtocol)> = Vec::new();
+        // (txid, output_index, value_zat, pool[, on-chain cmx for Name Notes])
+        // for every shielded output/action that IVK-decrypts. We process *both*
+        // pools; a tx may have only Sapling, only Orchard, or (rarely) both.
+        let mut hits: Vec<ScanHit> = Vec::new();
         for ctx in &block.vtx {
             let Ok(txid) = <[u8; 32]>::try_from(&ctx.txid[..]) else {
                 continue;
@@ -148,7 +154,13 @@ where
                             &compact,
                             Zip212Enforcement::GracePeriod,
                         ) {
-                            hits.push((txid, i, note.value().inner(), ShieldedProtocol::Sapling));
+                            hits.push(ScanHit {
+                                txid,
+                                idx: i,
+                                value: note.value().inner(),
+                                pool: ShieldedProtocol::Sapling,
+                                orchard: None,
+                            });
                         }
                     }
                 }
@@ -167,10 +179,14 @@ where
                     })
                 })
                 .collect::<Result<_, ScanError>>()?;
-            for (i, hit) in try_compact_orchard(&ivk, actions).into_iter().enumerate() {
-                if let Some(value) = hit {
-                    hits.push((txid, i, value, ShieldedProtocol::Orchard));
-                }
+            for hit in try_orchard_scan(&ivk, &actions) {
+                hits.push(ScanHit {
+                    txid,
+                    idx: hit.idx,
+                    value: hit.value,
+                    pool: ShieldedProtocol::Orchard,
+                    orchard: Some(hit.kind),
+                });
             }
         }
         if hits.is_empty() {
@@ -185,53 +201,23 @@ where
         let mut batch_out: Vec<IncomingNote> = Vec::with_capacity(hits.len());
         let mut last_txid: Option<[u8; 32]> = None;
         let mut tx: Option<Transaction> = None;
-        for (txid, idx, value, pool) in hits {
-            if last_txid != Some(txid) {
-                tx = fetch_transaction(&client, &txid, branch).await?;
-                last_txid = Some(txid);
+        for hit in hits {
+            if last_txid != Some(hit.txid) {
+                tx = fetch_transaction(&client, &hit.txid, branch).await?;
+                last_txid = Some(hit.txid);
             }
 
-            let memo = match pool {
-                ShieldedProtocol::Orchard => tx
-                    .as_ref()
-                    .and_then(|t| t.orchard_bundle())
-                    .and_then(|b| b.actions().get(idx))
-                    .and_then(|action| decrypt_memo(action, &ivk))
-                    .unwrap_or_default(),
-                ShieldedProtocol::Sapling => {
-                    // Memo recovery for Sapling requires the full tx (compact
-                    // only carries the 52-byte prefix). Use the same full-tx
-                    // fetch we already do for Orchard.
-                    let prepared = config
-                        .sapling_ivk
-                        .as_ref()
-                        .map(sapling::keys::PreparedIncomingViewingKey::new);
-                    if let (Some(p), Some(output)) = (
-                        prepared.as_ref(),
-                        tx.as_ref().and_then(|t| t.sapling_bundle()).and_then(|b| b.shielded_outputs().get(idx)),
-                    ) {
-                        if let Some((_note, _addr, memo)) = sapling::note_encryption::try_sapling_note_decryption(
-                            p,
-                            output,
-                            Zip212Enforcement::GracePeriod,
-                        ) {
-                            memo.to_vec()
-                        } else {
-                            Vec::new()
-                        }
-                    } else {
-                        Vec::new()
-                    }
-                }
+            let Some(memo) = recover_memo(&hit, tx.as_ref(), &ivk, &config.sapling_ivk) else {
+                continue;
             };
 
             batch_out.push(IncomingNote {
-                txid,
+                txid: hit.txid,
                 height,
                 block_hash,
-                output_index: idx as u32,
-                pool,
-                value_zat: value,
+                output_index: hit.idx as u32,
+                pool: hit.pool,
+                value_zat: hit.value,
                 memo,
                 is_received: true,
                 confirmed: true,
@@ -303,7 +289,7 @@ pub async fn scan_mempool(
     // between tip and next block is handled by the next poll's re-parse.
     let branch = BranchId::for_height(&config.network, BlockHeight::from_u32(current_height));
 
-    let mut hits: Vec<([u8; 32], usize, u64, ShieldedProtocol)> = Vec::new();
+    let mut hits: Vec<ScanHit> = Vec::new();
     for ctx in &compact_txs {
         let Ok(txid) = <[u8; 32]>::try_from(&ctx.txid[..]) else {
             continue;
@@ -318,7 +304,13 @@ pub async fn scan_mempool(
                         &compact,
                         Zip212Enforcement::GracePeriod,
                     ) {
-                        hits.push((txid, i, note.value().inner(), ShieldedProtocol::Sapling));
+                        hits.push(ScanHit {
+                            txid,
+                            idx: i,
+                            value: note.value().inner(),
+                            pool: ShieldedProtocol::Sapling,
+                            orchard: None,
+                        });
                     }
                 }
             }
@@ -334,10 +326,14 @@ pub async fn scan_mempool(
                 })
             })
             .collect::<Result<_, ScanError>>()?;
-        for (i, hit) in try_compact_orchard(&ivk, actions).into_iter().enumerate() {
-            if let Some(value) = hit {
-                hits.push((txid, i, value, ShieldedProtocol::Orchard));
-            }
+        for hit in try_orchard_scan(&ivk, &actions) {
+            hits.push(ScanHit {
+                txid,
+                idx: hit.idx,
+                value: hit.value,
+                pool: ShieldedProtocol::Orchard,
+                orchard: Some(hit.kind),
+            });
         }
     }
     if hits.is_empty() {
@@ -347,50 +343,23 @@ pub async fn scan_mempool(
     let mut out = Vec::with_capacity(hits.len());
     let mut last_txid: Option<[u8; 32]> = None;
     let mut tx: Option<Transaction> = None;
-    for (txid, idx, value, pool) in hits {
-        if last_txid != Some(txid) {
-            tx = fetch_transaction(&client, &txid, branch).await?;
-            last_txid = Some(txid);
+    for hit in hits {
+        if last_txid != Some(hit.txid) {
+            tx = fetch_transaction(&client, &hit.txid, branch).await?;
+            last_txid = Some(hit.txid);
         }
 
-        let memo = match pool {
-            ShieldedProtocol::Orchard => tx
-                .as_ref()
-                .and_then(|t| t.orchard_bundle())
-                .and_then(|b| b.actions().get(idx))
-                .and_then(|action| decrypt_memo(action, &ivk))
-                .unwrap_or_default(),
-            ShieldedProtocol::Sapling => {
-                let prepared = config
-                    .sapling_ivk
-                    .as_ref()
-                    .map(sapling::keys::PreparedIncomingViewingKey::new);
-                if let (Some(p), Some(output)) = (
-                    prepared.as_ref(),
-                    tx.as_ref().and_then(|t| t.sapling_bundle()).and_then(|b| b.shielded_outputs().get(idx)),
-                ) {
-                    if let Some((_note, _addr, memo)) = sapling::note_encryption::try_sapling_note_decryption(
-                        p,
-                        output,
-                        Zip212Enforcement::GracePeriod,
-                    ) {
-                        memo.to_vec()
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    Vec::new()
-                }
-            }
+        let Some(memo) = recover_memo(&hit, tx.as_ref(), &ivk, &config.sapling_ivk) else {
+            continue;
         };
 
         out.push(IncomingNote {
-            txid,
+            txid: hit.txid,
             height: current_height,
             block_hash: [0u8; 32],
-            output_index: idx as u32,
-            pool,
-            value_zat: value,
+            output_index: hit.idx as u32,
+            pool: hit.pool,
+            value_zat: hit.value,
             memo,
             is_received: true,
             confirmed: false,
@@ -401,6 +370,32 @@ pub async fn scan_mempool(
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// A shielded output/action that trial-decrypts under the registry IVK.
+struct ScanHit {
+    txid: [u8; 32],
+    idx: usize,
+    value: u64,
+    pool: ShieldedProtocol,
+    /// Set for Orchard hits; distinguishes request notes from Name Note candidates.
+    orchard: Option<OrchardHitKind>,
+}
+
+/// How an Orchard action was discovered during compact-block scanning.
+#[derive(Debug, Clone, Copy)]
+enum OrchardHitKind {
+    /// Standard ZIP-212 trial decryption (request notes).
+    Standard,
+    /// Relaxed decrypt only — binding must be confirmed from the full tx memo.
+    NameNoteCandidate { cmx: [u8; 32] },
+}
+
+/// Result of scanning one tx's Orchard actions.
+struct OrchardScanHit {
+    idx: usize,
+    value: u64,
+    kind: OrchardHitKind,
+}
 
 /// Prepare the registry's incoming viewing key for trial decryption.
 fn orchard_ivk(ivk: &orchard::keys::IncomingViewingKey) -> PreparedIncomingViewingKey {
@@ -418,27 +413,97 @@ pub(crate) fn parse_orchard(p: &CompactOrchardAction) -> Option<CompactAction> {
     Some(CompactAction::from_parts(nf, cmx, epk, ct))
 }
 
-/// Trial-decrypt a batch of compact actions; returns the note value (zatoshis)
-/// for each that decrypts under `ivk`, else `None` at that index.
-fn try_compact_orchard(
+/// Trial-decrypt Orchard actions: standard ZIP-212 for request notes, relaxed
+/// path for registry-authored Name Notes the standard path rejects.
+fn try_orchard_scan(
     ivk: &PreparedIncomingViewingKey,
-    actions: Vec<CompactAction>,
-) -> Vec<Option<u64>> {
+    actions: &[CompactAction],
+) -> Vec<OrchardScanHit> {
+    use crate::name_note::try_compact_orchard_relaxed;
+
     let inputs: Vec<(OrchardDomain, CompactAction)> = actions
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|a| (OrchardDomain::for_compact_action(&a), a))
         .collect();
-    batch::try_compact_note_decryption(std::slice::from_ref(ivk), &inputs)
-        .into_iter()
-        .map(|hit| hit.map(|((note, _recipient), _ivk_idx)| note.value().inner()))
-        .collect()
+    let standard = batch::try_compact_note_decryption(std::slice::from_ref(ivk), &inputs);
+
+    let mut out = Vec::new();
+    for (i, (action, hit)) in actions.iter().zip(standard.into_iter()).enumerate() {
+        if let Some(((note, _recipient), _ivk_idx)) = hit {
+            out.push(OrchardScanHit {
+                idx: i,
+                value: note.value().inner(),
+                kind: OrchardHitKind::Standard,
+            });
+            continue;
+        }
+        if let Some((note, _recipient)) = try_compact_orchard_relaxed(ivk, action) {
+            out.push(OrchardScanHit {
+                idx: i,
+                value: note.value().inner(),
+                kind: OrchardHitKind::NameNoteCandidate {
+                    cmx: action.cmx().to_bytes(),
+                },
+            });
+        }
+    }
+    out
 }
 
-/// Full-decrypt a single Orchard action to recover its 512-byte memo.
-fn decrypt_memo<A>(action: &Action<A>, ivk: &PreparedIncomingViewingKey) -> Option<Vec<u8>> {
-    let (_note, _recipient, memo) =
-        try_note_decryption(&OrchardDomain::for_action(action), ivk, action)?;
-    Some(memo.to_vec())
+/// Recover the 512-byte memo for a scan hit, confirming Name Note binding when needed.
+fn recover_memo(
+    hit: &ScanHit,
+    tx: Option<&Transaction>,
+    ivk: &PreparedIncomingViewingKey,
+    sapling_ivk: &Option<sapling::SaplingIvk>,
+) -> Option<Vec<u8>> {
+    match hit.pool {
+        ShieldedProtocol::Orchard => {
+            let action = tx?.orchard_bundle()?.actions().get(hit.idx)?;
+            match hit.orchard? {
+                OrchardHitKind::Standard => {
+                    let (_note, _recipient, memo) =
+                        try_note_decryption(&OrchardDomain::for_action(action), ivk, action)?;
+                    Some(memo.to_vec())
+                }
+                OrchardHitKind::NameNoteCandidate { cmx } => {
+                    let (note, _recipient, memo) = try_decrypt_orchard_relaxed(action, ivk)?;
+                    let parsed = parse_memo(memo.as_array()).ok()?;
+                    let ParsedMemo::Action {
+                        action,
+                        name,
+                        ua,
+                        prev_rcm: Some(prev_rcm),
+                    } = parsed
+                    else {
+                        return None;
+                    };
+                    if !verify_name_note_decrypted(
+                        &note,
+                        cmx,
+                        action.as_bytes(),
+                        &name,
+                        &ua,
+                        &prev_rcm,
+                    ) {
+                        return None;
+                    }
+                    Some(memo.as_array().to_vec())
+                }
+            }
+        }
+        ShieldedProtocol::Sapling => {
+            let prepared = sapling_ivk.as_ref().map(sapling::keys::PreparedIncomingViewingKey::new);
+            let output = tx?.sapling_bundle()?.shielded_outputs().get(hit.idx)?;
+            let (_note, _addr, memo) = sapling::note_encryption::try_sapling_note_decryption(
+                &prepared?,
+                output,
+                Zip212Enforcement::GracePeriod,
+            )?;
+            Some(memo.to_vec())
+        }
+    }
 }
 
 /// Fetch and parse a full transaction by txid.
@@ -458,5 +523,3 @@ async fn fetch_transaction(
     })?;
     Ok(Some(tx))
 }
-
-
