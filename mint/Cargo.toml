@@ -44,6 +44,7 @@ zip32 = { workspace = true }
 hex = { workspace = true }
 pasta_curves = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 jsonrpsee = { workspace = true }
 
 [lints]

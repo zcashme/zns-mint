@@ -1,4 +1,4 @@
-//! One-time machine bring-up. Returns a [`Mint`](crate::Mint) ready for [`Mint::run`](crate::Mint::run).
+//! One-time machine bring-up. Returns a [`Mint`](crate::Mint) ready for [`Mint::tick`](crate::Mint::tick).
 
 use std::sync::Arc;
 
@@ -6,14 +6,14 @@ use tokio::sync::Mutex;
 use zns_state::{ScanTip, State, Treasury, TreasuryConfig, TreasuryError};
 
 use crate::config::{self, MintConfig, MINT_FEE_ZAT};
+use crate::{Chain, Spend};
 use crate::registry::Registry;
-use crate::status;
 use crate::spend::SpendLane;
 use crate::Mint;
 use zns_chain::{GrpcClient, ScannerConfig};
 use zns_signer::{Signer, SpendPolicy, test_orchard_ivk, test_registry_address, test_sapling_ivk};
 
-/// Open databases, wire keys and chain I/O, and return a runnable orchestrator.
+/// Open databases, wire keys and chain I/O, and return a runnable mint.
 pub async fn boot(config: MintConfig) -> Result<Mint, BootError> {
     let state = State::open(&config.registry_db)?;
 
@@ -82,14 +82,19 @@ pub async fn boot(config: MintConfig) -> Result<Mint, BootError> {
     };
 
     Ok(Mint {
-        grpc,
-        spend: SpendLane::new(),
-        chain_status: status::new_shared_status(),
-        config,
+        chain: Chain {
+            grpc,
+            scanner,
+            network: config.network,
+            birthday: config.birthday,
+            lwd_url: config.lwd_url,
+        },
         registry,
-        treasury,
-        signer,
-        scanner,
+        spend: Spend {
+            signer,
+            treasury,
+            lane: SpendLane::new(),
+        },
     })
 }
 
