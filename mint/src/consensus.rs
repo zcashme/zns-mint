@@ -15,11 +15,8 @@ use zcash_protocol::consensus::BranchId;
 pub fn orchard_circuit_version(branch_id: BranchId) -> OrchardCircuitVersion {
     use BranchId::*;
     match branch_id {
+        // NU6.2+ upgrades inherit the fixed Orchard circuit (see zebra `verifier_for`).
         Nu6_2 => OrchardCircuitVersion::FixedPostNu6_2,
-        #[cfg(zcash_unstable = "nu7")]
-        Nu7 => OrchardCircuitVersion::FixedPostNu6_2,
-        #[cfg(zcash_unstable = "zfuture")]
-        ZFuture => OrchardCircuitVersion::FixedPostNu6_2,
         Nu5 | Nu6 | Nu6_1 => OrchardCircuitVersion::InsecurePreNu6_2,
         // Orchard did not exist before NU5; kept for an exhaustive match only.
         Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy => {
