@@ -23,6 +23,9 @@ pub const MIN_MUTATION_FEE_ZAT: u64 = 2 * MINT_FEE_ZAT;
 /// Hot treasury balance above which a cold sweep is considered (0.05 ZEC).
 pub const HIGH_WATERMARK_ZAT: u64 = 5_000_000;
 
+/// Minimum blocks between sweep attempts (~24h at 75s block time).
+pub const SWEEP_INTERVAL_BLOCKS: u32 = 1_152;
+
 /// lightwalletd gRPC endpoint.
 pub const LWD_URL: &str = "https://zec.rocks:443";
 

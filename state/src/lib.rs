@@ -56,7 +56,7 @@ pub use db::{
     Name,
 };
 pub use error::StateError;
-pub use orchestrator::{InFlightSpend, ScanTip};
+pub use orchestrator::{InFlightSpend, ScanTip, SweepCursor};
 
 use rusqlite::Connection;
 
@@ -97,9 +97,7 @@ impl State {
         let tx = self.conn.unchecked_transaction()?;
         let names = affected_names(&tx, height)?;
         if let Some(flight) = orchestrator::get_in_flight(&tx)? {
-            if !flight.sweep {
-                releaser((flight.request_txid, flight.request_index));
-            }
+            releaser((flight.request_txid, flight.request_index));
         }
         db::delete_processed_above(&tx, height)?;
         orchestrator::rewind_scan_tip(&tx, height)?;
@@ -186,6 +184,14 @@ impl State {
     pub fn clear_in_flight(&self) -> Result<(), StateError> {
         orchestrator::clear_in_flight(&self.conn)
     }
+
+    pub fn get_sweep_cursor(&self) -> Result<SweepCursor, StateError> {
+        orchestrator::get_sweep_cursor(&self.conn)
+    }
+
+    pub fn set_sweep_cursor(&self, cursor: &SweepCursor) -> Result<(), StateError> {
+        orchestrator::set_sweep_cursor(&self.conn, cursor)
+    }
 }
 
 /// Initialise the full registry schema (idempotent): the live `names` tip table,
@@ -202,22 +208,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn in_flight_sweep_round_trip() {
+    fn sweep_cursor_round_trip() {
         let state = State::open_in_memory().unwrap();
-        let flight = InFlightSpend {
-            txid: [1u8; 32],
-            request_txid: [0u8; 32],
-            request_index: 0,
-            expiry_height: 200,
-            relay: false,
-            sweep: true,
-            name: String::new(),
+        assert_eq!(
+            state.get_sweep_cursor().unwrap(),
+            SweepCursor {
+                height: 0,
+                txid: None,
+            }
+        );
+
+        let cursor = SweepCursor {
+            height: 2_000_500,
+            txid: Some([0xab; 32]),
         };
-        state.set_in_flight(&flight).unwrap();
-        let loaded = state.get_in_flight().unwrap().unwrap();
-        assert_eq!(loaded, flight);
-        state.clear_in_flight().unwrap();
-        assert!(state.get_in_flight().unwrap().is_none());
+        state.set_sweep_cursor(&cursor).unwrap();
+        assert_eq!(state.get_sweep_cursor().unwrap(), cursor);
     }
 
     #[test]
@@ -230,7 +236,6 @@ mod tests {
                 request_index: 2,
                 expiry_height: 300,
                 relay: false,
-                sweep: false,
                 name: "alice".into(),
             })
             .unwrap();
@@ -244,27 +249,4 @@ mod tests {
         assert!(state.get_in_flight().unwrap().is_none());
     }
 
-    #[test]
-    fn apply_reorg_does_not_release_sweep_request() {
-        let state = State::open_in_memory().unwrap();
-        state
-            .set_in_flight(&InFlightSpend {
-                txid: [9u8; 32],
-                request_txid: [0u8; 32],
-                request_index: 0,
-                expiry_height: 300,
-                relay: false,
-                sweep: true,
-                name: String::new(),
-            })
-            .unwrap();
-
-        let mut released = false;
-        state
-            .apply_reorg(100, |_| released = true)
-            .unwrap();
-
-        assert!(!released);
-        assert!(state.get_in_flight().unwrap().is_none());
-    }
 }

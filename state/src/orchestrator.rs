@@ -1,4 +1,4 @@
-//! Orchestrator cursor persistence (`scan_tip`, `in_flight_spend`).
+//! Orchestrator cursor persistence (`scan_tip`, `in_flight_spend`, `sweep_cursor`).
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -11,6 +11,15 @@ pub struct ScanTip {
     pub hash: [u8; 32],
 }
 
+/// Last successful cold sweep (rate gate + operator audit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SweepCursor {
+    /// Chain height when the sweep was broadcast. `0` = never swept.
+    pub height: u32,
+    /// Txid of that sweep. `None` until the first successful broadcast.
+    pub txid: Option<[u8; 32]>,
+}
+
 /// Broadcast tx awaiting chain confirmation before the next spend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InFlightSpend {
@@ -20,8 +29,6 @@ pub struct InFlightSpend {
     pub expiry_height: u32,
     /// `true` = OTP relay; cleared when tx is on chain. `false` = name mint; cleared on name note sight.
     pub relay: bool,
-    /// `true` = cold sweep; cleared when tx is on chain.
-    pub sweep: bool,
     pub name: String,
 }
 
@@ -41,6 +48,11 @@ pub fn init_orchestrator_schema(conn: &Connection) -> Result<(), StateError> {
              relay           INTEGER NOT NULL DEFAULT 0,
              sweep           INTEGER NOT NULL DEFAULT 0,
              name            TEXT    NOT NULL DEFAULT ''
+         );
+         CREATE TABLE IF NOT EXISTS sweep_cursor (
+             id     INTEGER PRIMARY KEY CHECK (id = 1),
+             height INTEGER NOT NULL DEFAULT 0,
+             txid   BLOB
          );",
     )?;
     for ddl in [
@@ -60,6 +72,33 @@ pub fn init_orchestrator_schema(conn: &Connection) -> Result<(), StateError> {
         [],
     )?;
     conn.execute("INSERT OR IGNORE INTO in_flight_spend (id) VALUES (1)", [])?;
+    conn.execute("INSERT OR IGNORE INTO sweep_cursor (id) VALUES (1)", [])?;
+    Ok(())
+}
+
+pub fn get_sweep_cursor(conn: &Connection) -> Result<SweepCursor, StateError> {
+    let row: (i64, Option<Vec<u8>>) = conn.query_row(
+        "SELECT height, txid FROM sweep_cursor WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let height = u32::try_from(row.0).map_err(|_| StateError::CorruptRow {
+        table: "sweep_cursor",
+        field: "height",
+        detail: format!("out of range: {}", row.0),
+    })?;
+    let txid = match row.1 {
+        None => None,
+        Some(bytes) => Some(bytes_to_hash(&bytes)?),
+    };
+    Ok(SweepCursor { height, txid })
+}
+
+pub fn set_sweep_cursor(conn: &Connection, cursor: &SweepCursor) -> Result<(), StateError> {
+    conn.execute(
+        "UPDATE sweep_cursor SET height = ?1, txid = ?2 WHERE id = 1",
+        params![cursor.height, cursor.txid.as_ref().map(|t| t.as_slice())],
+    )?;
     Ok(())
 }
 
@@ -138,7 +177,7 @@ pub fn get_in_flight(conn: &Connection) -> Result<Option<InFlightSpend>, StateEr
             },
         )
         .optional()?;
-    let Some((txid, req_txid, req_idx, expiry, relay, sweep, name)) = row else {
+    let Some((txid, req_txid, req_idx, expiry, relay, _sweep, name)) = row else {
         return Ok(None);
     };
     let (Some(txid), Some(req_txid), Some(req_idx), Some(expiry)) = (txid, req_txid, req_idx, expiry)
@@ -151,7 +190,6 @@ pub fn get_in_flight(conn: &Connection) -> Result<Option<InFlightSpend>, StateEr
         request_index: req_idx as u32,
         expiry_height: expiry as u32,
         relay: relay.unwrap_or(0) != 0,
-        sweep: sweep.unwrap_or(0) != 0,
         name: name.unwrap_or_default(),
     }))
 }
@@ -168,7 +206,7 @@ pub fn set_in_flight(conn: &Connection, flight: &InFlightSpend) -> Result<(), St
             flight.request_index,
             flight.expiry_height,
             i64::from(flight.relay),
-            i64::from(flight.sweep),
+            0i64,
             flight.name,
         ],
     )?;

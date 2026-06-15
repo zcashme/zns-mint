@@ -20,6 +20,8 @@ pub struct StatusResult {
     pub in_flight: bool,
     pub treasury_available: bool,
     pub last_poll_unix: u64,
+    pub last_sweep_height: u32,
+    pub last_sweep_txid: Option<String>,
     pub names: u64,
     pub pending_challenges: u64,
 }
@@ -67,6 +69,11 @@ fn status_result(chain: TickSnapshot, stats: RegistryStats) -> StatusResult {
         in_flight: chain.in_flight,
         treasury_available: chain.treasury_available,
         last_poll_unix: chain.last_poll_unix,
+        last_sweep_height: chain.last_sweep_height,
+        last_sweep_txid: chain
+            .last_sweep_txid
+            .as_ref()
+            .map(hex::encode),
         names: stats.names,
         pending_challenges: stats.pending_challenges,
     }

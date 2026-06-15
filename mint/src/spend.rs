@@ -83,20 +83,6 @@ impl SpendLane {
         self.active.lock().expect("spend active").clone()
     }
 
-    /// True when no registry in-flight tx, no queued job, and no active job.
-    pub async fn is_idle(&self, registry: &Registry) -> Result<bool, StateError> {
-        {
-            let st = registry.lock().await;
-            if st.get_in_flight()?.is_some() {
-                return Ok(false);
-            }
-        }
-        Ok(
-            self.queue.lock().expect("spend queue").is_empty()
-                && self.active.lock().expect("spend active").is_none(),
-        )
-    }
-
     fn requeue_active(&self) {
         if let Some(job) = self.active.lock().expect("spend active").take() {
             self.queue.lock().expect("spend queue").push_front(job);
@@ -353,7 +339,6 @@ fn dispatch_mint(
             request_index: request_id.action_index,
             expiry_height: ctx.expiry_height,
             relay,
-            sweep: false,
             name: name.to_owned(),
         },
     })
@@ -403,7 +388,6 @@ async fn dispatch_challenge(
             request_index: request_id.action_index,
             expiry_height: ctx.expiry_height,
             relay: true,
-            sweep: false,
             name: job.name.clone(),
         },
     })
@@ -490,7 +474,6 @@ async fn mark_request_settled(registry: &Registry, job: &QueuedSpend) -> Result<
 #[derive(Debug)]
 enum InFlightOutcome {
     RelayConfirmed,
-    SweepConfirmed,
     Expired,
 }
 
@@ -510,12 +493,6 @@ async fn reconcile_in_flight(
     };
 
     if grpc.transaction_exists(&flight.txid).await? {
-        if flight.sweep {
-            let st = registry.lock().await;
-            st.clear_in_flight()?;
-            tracing::info!(txid = %hex::encode(flight.txid), "cold sweep confirmed on chain");
-            return Ok(Some(InFlightOutcome::SweepConfirmed));
-        }
         if flight.relay {
             if let Some(job) = spend.active_job() {
                 mark_request_settled(registry, &job).await?;
@@ -534,13 +511,11 @@ async fn reconcile_in_flight(
     }
 
     if chain_tip > flight.expiry_height {
-        if !flight.sweep {
-            signer.release_request(RequestId {
-                txid: flight.request_txid,
-                action_index: flight.request_index,
-            });
-            spend.requeue_active();
-        }
+        signer.release_request(RequestId {
+            txid: flight.request_txid,
+            action_index: flight.request_index,
+        });
+        spend.requeue_active();
         let st = registry.lock().await;
         st.clear_in_flight()?;
         return Ok(Some(InFlightOutcome::Expired));
@@ -560,37 +535,7 @@ pub(crate) fn verb_label(verb: SpendVerb) -> &'static str {
 
 #[cfg(test)]
 mod lane_tests {
-    use zns_state::{InFlightSpend, State};
-
     use super::*;
-    use crate::Registry;
-
-    #[tokio::test]
-    async fn spend_lane_idle_when_empty() {
-        let state = State::open_in_memory().unwrap();
-        let registry = Registry::new(state);
-        let lane = SpendLane::new();
-        assert!(lane.is_idle(&registry).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn spend_lane_not_idle_with_in_flight() {
-        let state = State::open_in_memory().unwrap();
-        state
-            .set_in_flight(&InFlightSpend {
-                txid: [1u8; 32],
-                request_txid: [2u8; 32],
-                request_index: 0,
-                expiry_height: 100,
-                relay: false,
-                sweep: false,
-                name: "alice".into(),
-            })
-            .unwrap();
-        let registry = Registry::new(state);
-        let lane = SpendLane::new();
-        assert!(!lane.is_idle(&registry).await.unwrap());
-    }
 
     #[test]
     fn pending_count_includes_queued_and_active() {

@@ -74,6 +74,8 @@ pub struct TickSnapshot {
     pub in_flight: bool,
     pub treasury_available: bool,
     pub last_poll_unix: u64,
+    pub last_sweep_height: u32,
+    pub last_sweep_txid: Option<[u8; 32]>,
 }
 
 /// Registry scan + single-lane spend. Constructed only via [`boot`].
@@ -139,6 +141,14 @@ impl Mint {
             .map(|notes| notes.len() as u64)
             .unwrap_or(0);
 
+        let (last_sweep_height, last_sweep_txid) = {
+            let st = self.registry.lock().await;
+            st.get_sweep_cursor()
+                .ok()
+                .map(|c| (c.height, c.txid))
+                .unwrap_or((0, None))
+        };
+
         let last_poll_unix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -153,6 +163,8 @@ impl Mint {
             in_flight,
             treasury_available: self.spend.treasury.is_some(),
             last_poll_unix,
+            last_sweep_height,
+            last_sweep_txid,
         }
     }
 
@@ -211,7 +223,6 @@ impl Mint {
         if let Some(treasury) = self.spend.treasury.as_ref() {
             sweep::maybe_sweep(
                 &self.registry,
-                &self.spend.lane,
                 treasury,
                 &self.spend.signer,
                 &self.chain.grpc,
