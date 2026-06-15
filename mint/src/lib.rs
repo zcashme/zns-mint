@@ -194,7 +194,12 @@ impl Mint {
         if let Some(treasury) = self.spend.treasury.as_ref() {
             let mut client = connect(&self.chain.lwd_url).await?;
             let mut t = treasury.lock().await;
-            t.sync(&mut client).await?;
+            if let Err(e) = t.sync(&mut client).await {
+                tracing::warn!(
+                    %e,
+                    "treasury sync failed; continuing tick (spend may defer until wallet recovers)"
+                );
+            }
         }
 
         let blocks = scan::catch_up(
