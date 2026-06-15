@@ -38,6 +38,9 @@ pub const TREASURY_BLOCK_DB: &str = "zns-treasury-blocks.sqlite";
 /// First block height to scan from.
 pub const BIRTHDAY: u32 = 2_000_000;
 
+/// Blocks behind `birthday` to rewind `scan_tip` on startup (safety re-sync window).
+pub const STARTUP_REWIND_BLOCKS: u32 = 100;
+
 /// JSON-RPC control plane bind address (`host:port`).
 pub const RPC_BIND: &str = "127.0.0.1:8320";
 

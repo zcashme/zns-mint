@@ -40,9 +40,6 @@ pub use zns_signer::{
 };
 pub use zns_state::{FundingSelection, InFlightSpend, Name, SpendableNote};
 
-/// Blocks behind `birthday` to rewind `scan_tip` on startup (safety re-sync window).
-pub const STARTUP_REWIND_BLOCKS: u32 = 100;
-
 /// The orchestrator.
 pub struct Mint {
     config: MintConfig,
@@ -59,7 +56,7 @@ impl Mint {
     pub async fn boot(config: MintConfig) -> Result<Self, BootError> {
         let state = State::open(&config.registry_db)?;
 
-        let rewind_height = config.birthday.saturating_sub(STARTUP_REWIND_BLOCKS);
+        let rewind_height = config.birthday.saturating_sub(config::STARTUP_REWIND_BLOCKS);
         if rewind_height > 0 {
             state.set_scan_tip(&ScanTip {
                 height: rewind_height,
