@@ -56,23 +56,22 @@ pub struct Mint {
 
 impl Mint {
     pub async fn run(self) -> Result<(), TickError> {
-        let mint = Arc::new(self);
         tracing::info!(
-            lwd = %mint.config.lwd_url,
-            registry_db = %mint.config.registry_db,
-            birthday = mint.config.birthday,
-            treasury = mint.treasury.is_some(),
-            rpc = %mint.config.rpc_bind,
+            lwd = %self.config.lwd_url,
+            registry_db = %self.config.registry_db,
+            birthday = self.config.birthday,
+            treasury = self.treasury.is_some(),
+            rpc = %self.config.rpc_bind,
             "zns-mint started (scan-ahead / single-lane spend)"
         );
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
 
         let ctx = RpcContext {
-            registry: mint.registry.clone(),
-            status: Arc::clone(&mint.chain_status),
+            registry: self.registry.clone(),
+            status: self.chain_status.clone(),
         };
-        let addr = mint.config.rpc_bind.clone();
+        let addr = self.config.rpc_bind.clone();
         let rpc_shutdown_rx = shutdown_rx.clone();
         let rpc_task = tokio::spawn(async move {
             if let Err(e) = rpc::serve(addr, ctx, rpc_shutdown_rx).await {
@@ -82,7 +81,7 @@ impl Mint {
 
         let mut stop_after_tick = false;
         loop {
-            mint.tick().await?;
+            self.tick().await?;
 
             if stop_after_tick {
                 break;
