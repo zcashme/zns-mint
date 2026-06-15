@@ -138,7 +138,11 @@ impl SpendLane {
             (funding.note, funding.spendable_total_zat)
         };
         let Some(funding_note) = funding_note else {
-            tracing::warn!(name = %job.name, "spend deferred: treasury not spendable");
+            tracing::warn!(
+                name = %job.name,
+                spendable_total_zat = hot_balance,
+                "spend deferred: no spendable note at floor"
+            );
             self.queue.lock().expect("spend queue").push_front(job);
             return Ok(());
         };

@@ -32,6 +32,11 @@ prost = { workspace = true }
 # orchard shard-store error type for TreasuryError's shardtree variant
 shardtree = { workspace = true }
 incrementalmerkletree = { workspace = true }
+futures-util = "0.3"
+tracing = { workspace = true }
+subtle = { workspace = true }
+sapling = { workspace = true }
+zcash_primitives = { workspace = true }
 
 [lints]
 workspace = true

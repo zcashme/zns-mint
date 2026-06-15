@@ -182,6 +182,16 @@ impl Mint {
         .await?
         {
             self.spend.lane.reset();
+            if let Some(treasury) = self.spend.treasury.as_ref() {
+                let retain = reorg_at.saturating_sub(1);
+                let mut t = treasury.lock().await;
+                t.rewind_to(retain).await?;
+                tracing::warn!(
+                    reorg_at,
+                    retain,
+                    "treasury rewound for registry reorg"
+                );
+            }
             tracing::warn!(reorg_at, "replay scan from reorg height (spend lane cleared)");
         }
 

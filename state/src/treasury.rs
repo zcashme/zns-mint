@@ -22,8 +22,10 @@ use orchard::tree::{Anchor, MerklePath};
 use rand::rngs::OsRng;
 use thiserror::Error;
 use zcash_address::unified::{Encoding as _, Fvk, Ufvk};
+use tracing::warn;
 use zcash_client_backend::{
     data_api::{
+        chain::BlockCache,
         wallet::ConfirmationsPolicy,
         Account as _, AccountBirthday, AccountPurpose, InputSource as _,
         TargetValue, WalletCommitmentTrees as _, WalletRead as _, WalletWrite as _,
@@ -145,6 +147,8 @@ pub struct Treasury {
     block_cache: PersistedBlockCache,
     network: Network,
     account: AccountUuid,
+    /// Account birthday; floor for recovery rewinds.
+    birthday: BlockHeight,
 }
 
 impl Treasury {
@@ -183,6 +187,7 @@ impl Treasury {
             block_cache,
             network: config.network,
             account,
+            birthday: BlockHeight::from_u32(config.birthday),
         })
     }
 
@@ -230,7 +235,21 @@ impl Treasury {
             block_cache,
             network: config.network,
             account,
+            birthday: BlockHeight::from_u32(config.birthday),
         })
+    }
+
+    /// Rewind wallet state and the compact-block cache to `retain_height`.
+    ///
+    /// Blocks above `retain_height` are dropped; the next sync rescans from there.
+    pub async fn rewind_to(&mut self, retain_height: u32) -> Result<(), TreasuryError> {
+        let height = BlockHeight::from_u32(retain_height);
+        self.data.truncate_to_height(height)?;
+        self.block_cache
+            .truncate(height)
+            .await
+            .map_err(|e| TreasuryError::Init(format!("block cache truncate: {e}")))?;
+        Ok(())
     }
 
     /// Convenience method that owns a sync run for this Treasury's WalletDb.
@@ -246,16 +265,48 @@ impl Treasury {
         <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
         ChT::Error: Into<StdError>,
     {
-        zcash_client_backend::sync::run(
+        const BATCH_SIZE: u32 = 1_000;
+        match crate::treasury_sync::run(
             client,
             &self.network,
             &self.block_cache,
             &mut self.data,
-            1_000,
+            BATCH_SIZE,
         )
         .await
-        .map_err(|e| TreasuryError::Init(format!("treasury sync: {e:#}")))?;
-        Ok(())
+        {
+            Ok(()) => Ok(()),
+            Err(e) if crate::treasury_sync::is_tree_root_conflict(&e) => {
+                let retain = self.tree_conflict_rewind_height()?;
+                warn!(
+                    retain_height = u32::from(retain),
+                    "treasury subtree root conflict; rewinding and retrying sync"
+                );
+                self.rewind_to(u32::from(retain)).await?;
+                crate::treasury_sync::run(
+                    client,
+                    &self.network,
+                    &self.block_cache,
+                    &mut self.data,
+                    BATCH_SIZE,
+                )
+                .await
+                .map_err(|e| TreasuryError::Init(format!("treasury sync after rewind: {e:#}")))?;
+                Ok(())
+            }
+            Err(e) => Err(TreasuryError::Init(format!("treasury sync: {e:#}"))),
+        }
+    }
+
+    fn tree_conflict_rewind_height(&self) -> Result<BlockHeight, TreasuryError> {
+        let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN);
+        let scanned = self
+            .data
+            .get_wallet_summary(policy)?
+            .map(|s| s.fully_scanned_height())
+            .unwrap_or(self.birthday);
+        let floor = self.birthday.saturating_sub(1);
+        Ok(scanned.saturating_sub(10).max(floor))
     }
 
     /// Gives the caller direct mutable access to the underlying WalletDb.

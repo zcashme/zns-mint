@@ -37,8 +37,10 @@ pub mod db;
 pub mod error;
 pub mod orchestrator;
 pub mod treasury;
+pub mod treasury_sync;
 
 pub use treasury::{FundingSelection, SpendableNote, Treasury, TreasuryConfig, TreasuryError};
+pub use treasury_sync::is_tree_root_conflict;
 
 /// Compatibility alias.
 ///
