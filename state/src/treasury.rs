@@ -30,11 +30,12 @@ use zcash_client_backend::{
     },
 };
 use zcash_client_sqlite::{
-    chain::{init::init_cache_database, BlockDb},
     util::SystemClock,
     wallet::init::init_wallet_db,
     AccountUuid, WalletDb,
 };
+
+use crate::block_cache::PersistedBlockCache;
 
 use tonic::{
     body::Body as TonicBody,
@@ -141,7 +142,7 @@ pub struct FundingSelection {
 /// or just calls `select_funding` on a stub is up to the caller.
 pub struct Treasury {
     data: WalletDb<rusqlite::Connection, Network, SystemClock, OsRng>,
-    block_cache: BlockDb,
+    block_cache: PersistedBlockCache,
     network: Network,
     account: AccountUuid,
 }
@@ -163,9 +164,7 @@ impl Treasury {
         let mut data = WalletDb::for_path(wallet_db_path, config.network, SystemClock, OsRng)?;
         init_wallet_db(&mut data, None).map_err(|e| TreasuryError::Init(e.to_string()))?;
 
-        // Proper library block cache DB
-        let block_cache = BlockDb::for_path(block_db_path)?;
-        init_cache_database(&block_cache).map_err(|e| TreasuryError::Init(e.to_string()))?;
+        let block_cache = PersistedBlockCache::open(block_db_path)?;
 
         let account = match data.get_account_ids()?.first() {
             Some(id) => *id,
@@ -197,12 +196,15 @@ impl Treasury {
     /// After calling this, subsequent `open` calls on the same path will succeed.
     pub fn initialize(
         wallet_db_path: impl AsRef<Path>,
+        block_db_path: impl AsRef<Path>,
         config: &TreasuryConfig,
         birthday: AccountBirthday,
     ) -> Result<Self, TreasuryError> {
         // Data DB (notes, trees, scan progress, witnesses)
         let mut data = WalletDb::for_path(wallet_db_path, config.network, SystemClock, OsRng)?;
         init_wallet_db(&mut data, None).map_err(|e| TreasuryError::Init(e.to_string()))?;
+
+        let block_cache = PersistedBlockCache::open(block_db_path)?;
 
         let account = if let Some(&id) = data.get_account_ids()?.first() {
             // Already present — treat as success (idempotent bootstrap).
@@ -225,6 +227,7 @@ impl Treasury {
 
         Ok(Treasury {
             data,
+            block_cache,
             network: config.network,
             account,
         })
@@ -232,29 +235,21 @@ impl Treasury {
 
     /// Convenience method that owns a sync run for this Treasury's WalletDb.
     ///
-    /// The caller still provides the client and the (ephemeral) cache.
-    /// In practice, many callers (including the current mint binary) do not
-    /// use this method and instead work directly with select_funding on a
-    /// (possibly stub) instance.
-    pub async fn sync<ChT, CaT>(
+    /// Sync the wallet against lightwalletd using the on-disk compact-block cache.
+    pub async fn sync<ChT>(
         &mut self,
         client: &mut zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<ChT>,
-        cache: &mut CaT,
     ) -> Result<(), TreasuryError>
     where
         ChT: tonic::client::GrpcService<TonicBody> + Send + Sync + 'static,
         ChT::ResponseBody: Body<Data = Bytes> + Send + 'static,
         <ChT::ResponseBody as Body>::Error: Into<StdError> + Send,
         ChT::Error: Into<StdError>,
-        CaT: zcash_client_backend::data_api::chain::BlockCache,
-        CaT::Error: std::error::Error + Send + Sync + 'static,
     {
-        // Convenience wrapper. The orchestrator owns the cache (ephemeral is fine
-        // and recommended — see chain::wallet_sync::EphemeralCompactBlockCache).
         zcash_client_backend::sync::run(
             client,
             &self.network,
-            cache,
+            &self.block_cache,
             &mut self.data,
             1_000,
         )

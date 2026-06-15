@@ -102,6 +102,26 @@ impl GrpcClient {
         Ok(block.height as u32)
     }
 
+    /// Fetch the full note-commitment tree state at `height` (for wallet birthday bootstrap).
+    pub async fn tree_state(
+        &self,
+        height: u32,
+    ) -> Result<zcash_client_backend::proto::service::TreeState, GrpcError> {
+        let mut client = connect(&self.lwd_url).await?;
+        let state = client
+            .get_tree_state(BlockId {
+                height: height as u64,
+                hash: vec![],
+            })
+            .await
+            .map_err(|source| GrpcError::Rpc {
+                call: "get_tree_state",
+                source,
+            })?
+            .into_inner();
+        Ok(state)
+    }
+
     /// Fetch the Orchard note-commitment-tree root at `height` for use as a
     /// spend anchor.
     pub async fn orchard_anchor(&self, height: u32) -> Result<Anchor, GrpcError> {

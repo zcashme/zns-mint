@@ -1,6 +1,6 @@
 [package]
-name = "zns-registry"
-description = "ZNS registry daemon: orchestrates chain intake, minting, auth, and state."
+name = "zns-mint"
+description = "ZNS minting daemon (zns-mint binary) + registry orchestration library."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,10 +24,10 @@ testnet = []
 zns-core = { workspace = true }
 zns-state = { workspace = true }
 zns-chain = { workspace = true }
-zns-mint = { workspace = true }
+zns-signer = { workspace = true }
 zns-auth = { workspace = true }
 # orchard types appear in MintContext's public API; circuit arrives transitively
-# via zns-mint (this is the registry daemon, so that is expected).
+# via zns-signer (the cryptographic mint core).
 orchard = { workspace = true, features = ["unsafe-zns"] }
 zcash_protocol = { workspace = true }
 # Parse a name owner's Unified Address → Orchard receiver for the OTP relay.
@@ -36,14 +36,14 @@ zcash_address = { workspace = true }
 zcash_client_backend = { workspace = true }
 # Registry holds the SQLite connection directly and calls zns-state's helpers.
 rusqlite = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal"] }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 # The daemon derives the registry Orchard key from a configured zip32 seed.
 zip32 = { workspace = true }
 hex = { workspace = true }
+pasta_curves = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 jsonrpsee = { workspace = true }
 
 [lints]

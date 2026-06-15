@@ -96,24 +96,28 @@ pub struct IncomingNote {
     pub confirmed: bool,
 }
 
-/// Scan from `config.birthday` to the current chain tip, invoking `callback`
-/// once per block that contains notes addressed to the registry UFVK.
+/// Scan `[start, end]` block-linear, invoking `callback` once per block.
 ///
-/// Receive-side, single pass (no reorg rewind — the daemon re-runs to advance).
-pub async fn scan_incoming<F, E>(config: &ScannerConfig, mut callback: F) -> Result<(), ScanError>
+/// `callback` runs even when a block has no registry notes (`notes` is empty).
+pub async fn scan_blocks<F, Fut, E>(
+    config: &ScannerConfig,
+    start: u32,
+    end: u32,
+    mut callback: F,
+) -> Result<(), ScanError>
 where
-    F: FnMut(Vec<IncomingNote>) -> Result<(), E>,
+    F: FnMut(u32, [u8; 32], Vec<IncomingNote>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let client = GrpcClient::new(&config.lwd_url);
-    let ivk = orchard_ivk(&config.registry_ivk);
-
-    let tip = client.tip_height().await?;
-    if config.birthday > tip {
+    if start > end {
         return Ok(());
     }
 
-    let mut stream = client.block_range(config.birthday, tip).await?;
+    let client = GrpcClient::new(&config.lwd_url);
+    let ivk = orchard_ivk(&config.registry_ivk);
+
+    let mut stream = client.block_range(start, end).await?;
 
     // Prepare Sapling IVK once per scan (if provided). We use the raw IVK here
     // and prepare on demand; this mirrors how the Orchard IVK is handled.
@@ -172,6 +176,9 @@ where
             }
         }
         if hits.is_empty() {
+            callback(height, block_hash, Vec::new())
+                .await
+                .map_err(|e| ScanError::Callback(Box::new(e)))?;
             continue;
         }
 
@@ -232,10 +239,30 @@ where
                 confirmed: true,
             });
         }
-        callback(batch_out).map_err(|e| ScanError::Callback(Box::new(e)))?;
+        callback(height, block_hash, batch_out)
+            .await
+            .map_err(|e| ScanError::Callback(Box::new(e)))?;
     }
 
     Ok(())
+}
+
+/// Scan from `config.birthday` to the current chain tip, invoking `callback`
+/// once per block that contains notes addressed to the registry UFVK.
+///
+/// Receive-side, single pass (no reorg rewind — the daemon re-runs to advance).
+pub async fn scan_incoming<F, Fut, E>(config: &ScannerConfig, mut callback: F) -> Result<(), ScanError>
+where
+    F: FnMut(Vec<IncomingNote>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let client = GrpcClient::new(&config.lwd_url);
+    let tip = client.tip_height().await?;
+    if config.birthday > tip {
+        return Ok(());
+    }
+    scan_blocks(config, config.birthday, tip, |_, _, notes| callback(notes)).await
 }
 
 /// Collect **all** notes from `birthday` to chain tip into a `Vec`.
@@ -244,9 +271,9 @@ where
 /// callback form to bound memory.
 pub async fn scan_incoming_all(config: &ScannerConfig) -> Result<Vec<IncomingNote>, ScanError> {
     let mut all = Vec::new();
-    scan_incoming(config, |batch| -> Result<(), Infallible> {
+    scan_incoming(config, |batch| {
         all.extend(batch);
-        Ok(())
+        async { Ok::<(), std::convert::Infallible>(()) }
     })
     .await?;
     Ok(all)

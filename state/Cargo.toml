@@ -28,6 +28,7 @@ bytes = "1"
 zcash_address = { workspace = true }
 rand = { workspace = true }
 async-trait = { workspace = true }
+prost = { workspace = true }
 # orchard shard-store error type for TreasuryError's shardtree variant
 shardtree = { workspace = true }
 incrementalmerkletree = { workspace = true }

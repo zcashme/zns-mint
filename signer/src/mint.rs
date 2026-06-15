@@ -171,6 +171,13 @@ pub struct MintParams<'a> {
     pub circuit_version: OrchardCircuitVersion,
 }
 
+/// The output of a successful OTP challenge relay.
+#[derive(Debug)]
+pub struct RelayResult {
+    pub txid: [u8; 32],
+    pub tx_bytes: Vec<u8>,
+}
+
 /// The output of a successful mint.
 #[derive(Debug)]
 pub struct MintResult {
@@ -372,7 +379,7 @@ pub fn build_sweep(
     branch_id: BranchId,
     expiry_height: u32,
     circuit_version: OrchardCircuitVersion,
-) -> Result<Vec<u8>, BuildError> {
+) -> Result<(Vec<u8>, [u8; 32]), BuildError> {
     let ovk = Some(registry_fvk.to_ovk(Scope::External));
     let mut builder =
         OrchardBuilder::new_for_version(BundleType::DEFAULT, funding.anchor, circuit_version);
@@ -405,9 +412,9 @@ pub fn build_sweep(
         .apply_signatures(rng, sighash, &[ask])
         .map_err(BuildError::signature)?;
 
-    let (tx_bytes, _txid) =
+    let (tx_bytes, txid) =
         orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
-    Ok(tx_bytes)
+    Ok((tx_bytes, txid))
 }
 
 /// Build a memo-send transaction (OTP challenge relay).
@@ -424,7 +431,7 @@ pub fn build_memo_send(
     branch_id: BranchId,
     expiry_height: u32,
     circuit_version: OrchardCircuitVersion,
-) -> Result<Vec<u8>, BuildError> {
+) -> Result<RelayResult, BuildError> {
     let ovk = Some(registry_fvk.to_ovk(Scope::External));
     let mut builder =
         OrchardBuilder::new_for_version(BundleType::DEFAULT, funding.anchor, circuit_version);
@@ -469,9 +476,9 @@ pub fn build_memo_send(
         .apply_signatures(rng, sighash, &[ask])
         .map_err(BuildError::signature)?;
 
-    let (tx_bytes, _txid) =
+    let (tx_bytes, txid) =
         orchard_bundle_to_tx_bytes(authorized, branch_id, expiry_height, &sighash)?;
-    Ok(tx_bytes)
+    Ok(RelayResult { tx_bytes, txid })
 }
 
 // ---------------------------------------------------------------------------

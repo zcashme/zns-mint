@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 use orchard::circuit::OrchardCircuitVersion;
 
 use crate::error::SignError;
-use crate::mint::{build_funded_mint, build_memo_send, build_sweep, MintResult};
+use crate::mint::{build_funded_mint, build_memo_send, build_sweep, MintResult, RelayResult};
 use crate::policy::{FundingInput, MintProposal, PolicyError, RequestId, SpendGuard, SpendPolicy};
 
 /// The registry signing authority. Cheap to share behind an `Arc`; the inner
@@ -169,7 +169,7 @@ impl Signer {
         branch_id: BranchId,
         expiry_height: u32,
         circuit_version: OrchardCircuitVersion,
-    ) -> Result<Vec<u8>, SignError> {
+    ) -> Result<RelayResult, SignError> {
         // The dust mirrors the fee (one policy knob bounds both).
         let fee = self.policy.max_fee_zat.min(crate::policy::RELAY_UNIT_ZAT);
         let dust = fee;
@@ -206,7 +206,7 @@ impl Signer {
             expiry_height,
             circuit_version,
         ) {
-            Ok(tx_bytes) => Ok(tx_bytes),
+            Ok(result) => Ok(result),
             Err(e) => {
                 self.guard
                     .lock()
@@ -258,8 +258,9 @@ impl Signer {
             expiry_height,
             circuit_version,
         ) {
-            Ok(tx_bytes) => Ok(SweepResult {
+            Ok((tx_bytes, txid)) => Ok(SweepResult {
                 tx_bytes,
+                txid,
                 amount_zat: amount,
             }),
             Err(e) => {
@@ -277,12 +278,13 @@ impl Signer {
 #[derive(Debug)]
 pub struct SweepResult {
     pub tx_bytes: Vec<u8>,
+    pub txid: [u8; 32],
     pub amount_zat: u64,
 }
 
 /// === Test harness boundary helpers (the *only* place the test zero seed appears) ===
 /// 
-/// The orchestrator (zns-registry binary / host) must never see or hold the raw
+/// The orchestrator (zns-mint binary / host) must never see or hold the raw
 /// spend seed. All derivation and secret material stays inside this crate.
 /// These functions exist so the host can get the public view material it needs
 /// (for CLI and scanner/treasury setup) and construct a Signer for signing

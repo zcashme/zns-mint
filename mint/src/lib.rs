@@ -1,185 +1,304 @@
-//! `zns-mint` (library surface) — ZNS registry orchestration.
-//! The `zns-mint` binary is built from src/bin/zns-mint.rs.
+//! `zns-mint` — block-linear orchestrator.
 //!
+//! Scan runs ahead block-by-block; spend follows in a single lane. Names are
+//! written when our Name Notes appear on chain — not at broadcast time.
 
-// ---------------------------------------------------------------------------
-// Convenience re-exports (flat surface the rest of the workspace likes)
-// ---------------------------------------------------------------------------
+mod config;
+mod record;
+mod registry;
+mod reorg;
+mod rpc;
+mod scan;
+mod shutdown;
+mod spend;
+mod status;
+mod sweep;
 
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
+use zns_state::{ScanTip, State, Treasury, TreasuryConfig, TreasuryError};
+
+pub use config::MintConfig;
+pub use config::{
+    ANCHOR_CONFIRMATIONS, HIGH_WATERMARK_ZAT, MIN_CLAIM_FEE_ZAT, MIN_MUTATION_FEE_ZAT,
+    MINT_FEE_ZAT, POLL_INTERVAL, RPC_BIND, TX_EXPIRY_BLOCKS,
+};
+pub use registry::{Registry, RegistryStats};
+pub use rpc::{RpcContext, RpcError, StatusResult};
+pub use spend::{QueuedSpend, SpendLane, SpendVerb};
+pub use status::{ChainStatus, SharedChainStatus};
+pub use zns_auth::{new_challenge, verify, PendingChallenge, CHALLENGE_TTL_BLOCKS};
 pub use zns_chain::{
-    connect, scan_incoming, scan_incoming_all, scan_mempool, EphemeralCompactBlockCache,
-    GrpcClient, GrpcError, IncomingNote, ScannerConfig,
+    connect, scan_blocks, scan_incoming, scan_incoming_all, GrpcClient, GrpcError, IncomingNote,
+    ScannerConfig,
 };
 pub use zns_core::{memo, parse_memo, Action, MemoError, ParsedMemo, ZERO_PREV_RCM};
 pub use zns_signer::{
-    build_name_note, test_orchard_ivk, test_registry_address, test_sapling_ivk, FundingInput, MintParams, MintResult,
-    RequestId, Signer, SpendPolicy,
+    build_name_note, test_orchard_ivk, test_registry_address, test_sapling_ivk, FundingInput,
+    MintIntent, MintParams, MintProposal, MintResult, RequestId, Signer, SpendPolicy,
 };
-pub use zns_state::{
-    FundingSelection, MintedAction, Name, SpendableNote, Treasury as TreasuryWallet, TreasuryConfig, TreasuryError,
-};
+pub use zns_state::{FundingSelection, InFlightSpend, Name, SpendableNote};
 
-// ---------------------------------------------------------------------------
-// Our own modules (the actual modularity)
-// ---------------------------------------------------------------------------
+/// Blocks behind `birthday` to rewind `scan_tip` on startup (safety re-sync window).
+pub const STARTUP_REWIND_BLOCKS: u32 = 100;
 
-pub mod error;
-pub mod processor;
-pub mod rpc;
-pub mod store;
-pub mod types;
+/// The orchestrator.
+pub struct Mint {
+    config: MintConfig,
+    grpc: GrpcClient,
+    registry: Registry,
+    treasury: Option<Mutex<Treasury>>,
+    signer: Arc<Signer>,
+    scanner: ScannerConfig,
+    spend: SpendLane,
+    chain_status: SharedChainStatus,
+}
 
-// Re-export the main types under the old names for minimal caller churn in
-// the short term. Callers should prefer being explicit about store vs.
-// processor in new code.
-pub use error::RegistryError;
-pub use processor::Processor;
-pub use store::Registry;
-pub use types::{ActionOutcome, MintContext, ProcessResult, RegistryStats, Treasury};
+impl Mint {
+    pub async fn boot(config: MintConfig) -> Result<Self, BootError> {
+        let state = State::open(&config.registry_db)?;
 
-// ---------------------------------------------------------------------------
-// Basic tests exercising the new modular surface (processor + store split)
-// The old god-module tests have been migrated here.
-// ---------------------------------------------------------------------------
+        let rewind_height = config.birthday.saturating_sub(STARTUP_REWIND_BLOCKS);
+        if rewind_height > 0 {
+            state.set_scan_tip(&ScanTip {
+                height: rewind_height,
+                hash: [0u8; 32],
+            })?;
+            tracing::info!(
+                rewind_height,
+                birthday = config.birthday,
+                "startup: scan_tip rewound for safety re-sync"
+            );
+        }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use orchard::{
-        keys::{FullViewingKey, Scope, SpendingKey},
-        tree::Anchor,
-    };
-    use std::sync::Arc;
+        let registry = Registry::new(state);
 
-    // Test values for the attested fee rules (same numbers as processor).
-    // ponytail: local to the test so we don't need the old re-export surface.
-    const MIN_CLAIM_FEE_ZAT: u64 = 10_000;
-    const MINT_FEE_ZAT: u64 = 10_000;
-
-    fn make_context() -> MintContext {
-        // Tests go through the signer crate boundary. The seed never
-        // appears in this (host) crate.
-        let registry_addr = test_registry_address();
         let policy = SpendPolicy {
-            registry_addr,
-            cold_addr: registry_addr,
+            registry_addr: test_registry_address(),
+            cold_addr: test_registry_address(),
             max_fee_zat: MINT_FEE_ZAT,
-            target_float_zat: 0,
-            high_watermark_zat: u64::MAX,
+            high_watermark_zat: config.high_watermark_zat,
             low_watermark_zat: 0,
             max_mints_per_window: u32::MAX,
         };
-        let signer = Arc::new(Signer::new_test(policy).unwrap());
-        MintContext {
-            signer,
-            hot_balance_zat: 1_000_000,
-            anchor: Anchor::empty_tree(),
-            height: 2_000_000,
-            expiry_height: 0,
-            network: zcash_protocol::consensus::Network::MainNetwork,
-            circuit_version: orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
-            branch_id: zcash_protocol::consensus::BranchId::Nu6_2,
-            treasury: None,
-        }
-    }
+        let signer = Arc::new(Signer::new_test(policy)?);
 
-    #[tokio::test]
-    async fn registry_authored_memos_are_skipped() {
-        let store = Registry::open_in_memory().unwrap();
-        let processor = Processor::new(store);
-        let ctx = make_context();
-        // We still need a GrpcClient for the signature, even if these paths
-        // never broadcast (treasury None + early skips).
-        let grpc = GrpcClient::new("http://127.0.0.1:0");
+        let grpc = GrpcClient::new(&config.lwd_url);
 
-        let note = |s: &[u8]| IncomingNote {
-            txid: [9u8; 32],
-            height: 2_000_000,
-            block_hash: [0u8; 32],
-            output_index: 0,
-            memo: {
-                let mut m = vec![0u8; 512];
-                m[..s.len()].copy_from_slice(s);
-                m
+        let treasury_config = TreasuryConfig {
+            registry_fvk: signer.fvk().clone(),
+            network: config.network,
+            birthday: config.birthday,
+        };
+        let treasury = match Treasury::open(
+            &config.treasury_wallet_db,
+            &config.treasury_block_db,
+            &treasury_config,
+        ) {
+            Ok(t) => {
+                tracing::info!("treasury wallet open");
+                Some(Mutex::new(t))
+            }
+            Err(TreasuryError::Uninitialized(_)) => match bootstrap_treasury(&grpc, &config, &treasury_config)
+                .await
+            {
+                Ok(t) => {
+                    tracing::info!(birthday = config.birthday, "treasury wallet bootstrapped");
+                    Some(Mutex::new(t))
+                }
+                Err(e) => {
+                    tracing::warn!(%e, "treasury bootstrap failed — scan-only");
+                    None
+                }
             },
-            value_zat: MIN_CLAIM_FEE_ZAT,
-            is_received: true,
-            confirmed: true,
+            Err(e) => return Err(e.into()),
         };
 
-        let name_note = format!("ZNS:claim:alice:u1xxx:{}", "a".repeat(64));
-        let results = processor
-            .process_notes(
-                &[
-                    note(name_note.as_bytes()),
-                    note(b"ZNS:challenge:alice:beef"),
-                ],
-                &ctx,
-                &grpc,
-            )
-            .await;
-        assert!(
-            results
-                .iter()
-                .all(|r| matches!(r, ProcessResult::Skipped(_))),
-            "got: {results:?}"
+        let scanner = ScannerConfig {
+            registry_ivk: test_orchard_ivk(),
+            sapling_ivk: Some(test_sapling_ivk()),
+            network: config.network,
+            birthday: config.birthday,
+            lwd_url: config.lwd_url.clone(),
+        };
+
+        Ok(Self {
+            grpc,
+            spend: SpendLane::new(),
+            chain_status: status::new_shared_status(),
+            config,
+            registry,
+            treasury,
+            signer,
+            scanner,
+        })
+    }
+
+    pub async fn run(self) -> Result<(), TickError> {
+        let mint = Arc::new(self);
+        tracing::info!(
+            lwd = %mint.config.lwd_url,
+            registry_db = %mint.config.registry_db,
+            birthday = mint.config.birthday,
+            treasury = mint.treasury.is_some(),
+            rpc = %mint.config.rpc_bind,
+            "zns-mint started (scan-ahead / single-lane spend)"
         );
 
-        let store = processor.registry();
-        assert!(store.lookup("alice").await.unwrap().is_none());
-    }
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
 
-    #[tokio::test]
-    async fn claim_insufficient_fee() {
-        let store = Registry::open_in_memory().unwrap();
-        let processor = Processor::new(store);
-        let ctx = make_context();
-        let grpc = GrpcClient::new("http://127.0.0.1:0");
-
-        let note = IncomingNote {
-            txid: [0u8; 32],
-            height: 2_000_000,
-            block_hash: [0u8; 32],
-            output_index: 0,
-            memo: {
-                let mut m = vec![0u8; 512];
-                let s = b"ZNS:claim:alice:u1xxx";
-                m[..s.len()].copy_from_slice(s);
-                m
-            },
-            value_zat: 1,
-            is_received: true,
-            confirmed: true,
+        let ctx = RpcContext {
+            registry: mint.registry.clone(),
+            status: Arc::clone(&mint.chain_status),
         };
+        let addr = mint.config.rpc_bind.clone();
+        let rpc_shutdown_rx = shutdown_rx.clone();
+        let rpc_task = tokio::spawn(async move {
+            if let Err(e) = rpc::serve(addr, ctx, rpc_shutdown_rx).await {
+                tracing::error!(%e, "control plane stopped");
+            }
+        });
 
-        let results = processor.process_notes(&[note], &ctx, &grpc).await;
-        assert!(matches!(results[0], ProcessResult::Err(_, _)));
+        let mut stop_after_tick = false;
+        loop {
+            mint.tick().await?;
+
+            if stop_after_tick {
+                break;
+            }
+
+            tokio::select! {
+                _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                _ = shutdown::wait_for_shutdown() => {
+                    tracing::info!("shutdown requested — finishing current tick");
+                    stop_after_tick = true;
+                }
+            }
+        }
+
+        drop(shutdown_tx);
+        let _ = rpc_task.await;
+        tracing::info!("zns-mint stopped");
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn sent_notes_skipped() {
-        let store = Registry::open_in_memory().unwrap();
-        let processor = Processor::new(store);
-        let ctx = make_context();
-        let grpc = GrpcClient::new("http://127.0.0.1:0");
+    pub async fn tick(&self) -> Result<(), TickError> {
+        let chain_tip = self.grpc.tip_height().await?;
+        self.signer.roll_window();
 
-        let note = IncomingNote {
-            txid: [0u8; 32],
-            height: 2_000_000,
-            block_hash: [0u8; 32],
-            output_index: 0,
-            memo: {
-                let mut m = vec![0u8; 512];
-                let s = b"ZNS:claim:alice:u1xxx";
-                m[..s.len()].copy_from_slice(s);
-                m
-            },
-            value_zat: MIN_CLAIM_FEE_ZAT,
-            is_received: false,
-            confirmed: true,
-        };
+        if let Some(reorg_at) =
+            reorg::handle_reorg(&self.registry, &self.grpc, &self.signer, chain_tip).await?
+        {
+            self.spend.reset();
+            tracing::warn!(reorg_at, "replay scan from reorg height (spend lane cleared)");
+        }
 
-        let results = processor.process_notes(&[note], &ctx, &grpc).await;
-        assert_eq!(results.len(), 0);
+        {
+            let st = self.registry.lock().await;
+            st.purge_expired_challenges(chain_tip)?;
+        }
+
+        if let Some(treasury) = self.treasury.as_ref() {
+            let mut client = connect(&self.config.lwd_url).await?;
+            let mut t = treasury.lock().await;
+            t.sync(&mut client).await?;
+        }
+
+        let blocks = scan::catch_up(
+            &self.registry,
+            &self.scanner,
+            self.config.birthday,
+            chain_tip,
+            &self.spend,
+        )
+        .await?;
+        if blocks > 0 {
+            tracing::info!(blocks, chain_tip, "scan catch-up");
+        }
+
+        self.spend
+            .tick(
+                &self.registry,
+                self.treasury.as_ref(),
+                &self.signer,
+                &self.grpc,
+                self.config.network,
+                chain_tip,
+            )
+            .await?;
+
+        if let Some(treasury) = self.treasury.as_ref() {
+            sweep::maybe_sweep(
+                &self.registry,
+                &self.spend,
+                treasury,
+                &self.signer,
+                &self.grpc,
+                self.config.network,
+                chain_tip,
+            )
+            .await?;
+        }
+
+        status::record_tick_status(
+            &self.chain_status,
+            &self.registry,
+            &self.spend,
+            self.treasury.as_ref(),
+            &self.scanner,
+            chain_tip,
+        )
+        .await;
+
+        Ok(())
     }
+}
+
+async fn bootstrap_treasury(
+    grpc: &GrpcClient,
+    config: &MintConfig,
+    treasury_config: &TreasuryConfig,
+) -> Result<Treasury, TreasuryError> {
+    let prior_height = config.birthday.saturating_sub(1);
+    let treestate = grpc
+        .tree_state(prior_height)
+        .await
+        .map_err(|e| TreasuryError::Init(format!("get_tree_state: {e}")))?;
+    let birthday = zcash_client_backend::data_api::AccountBirthday::from_treestate(treestate, None)
+        .map_err(|_| TreasuryError::Init("invalid account birthday from tree state".into()))?;
+    Treasury::initialize(
+        &config.treasury_wallet_db,
+        &config.treasury_block_db,
+        treasury_config,
+        birthday,
+    )
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BootError {
+    #[error(transparent)]
+    State(#[from] zns_state::StateError),
+    #[error(transparent)]
+    Treasury(#[from] TreasuryError),
+    #[error(transparent)]
+    Sign(#[from] zns_signer::SignError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TickError {
+    #[error(transparent)]
+    Grpc(#[from] GrpcError),
+    #[error(transparent)]
+    State(#[from] zns_state::StateError),
+    #[error(transparent)]
+    Scan(#[from] scan::ScanSyncError),
+    #[error(transparent)]
+    Reorg(#[from] reorg::ReorgError),
+    #[error(transparent)]
+    Spend(#[from] spend::SpendError),
+    #[error(transparent)]
+    Sweep(#[from] sweep::SweepError),
+    #[error(transparent)]
+    Treasury(#[from] TreasuryError),
 }

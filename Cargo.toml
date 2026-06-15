@@ -14,15 +14,15 @@ publish = false
 # core     — domain types (action, memo, error), no crypto/io
 # state    — SQLite persistence
 # chain    — chain I/O: lightwalletd intake + full node broadcast
-# mint     — crypto core: derive (ψ, rcm), build/prove the Orchard Name Note
+# signer   — crypto core: derive (ψ, rcm), build/prove the Orchard Name Note, policy signing
 # auth     — OTP challenge-response
-# registry — the daemon: registry orchestration + the zns-mint binary
+# mint     — the daemon crate (package "zns-mint"): registry orchestration + the zns-mint binary
 zns-core     = { path = "core" }
 zns-state    = { path = "state" }
 zns-chain    = { path = "chain" }
-zns-mint     = { path = "signer" }
+zns-signer   = { path = "signer" }
 zns-auth     = { path = "auth" }
-zns-registry = { path = "mint" }
+zns-mint     = { path = "mint" }
 
 # ── Zcash / Orchard stack ──────────────────────────────────────────
 # orchard resolves to the zns-orchard fork via [patch.crates-io] below;
@@ -68,6 +68,7 @@ uuid      = { version = "1.1", features = ["v4"] }
 thiserror = "1"
 anyhow    = "1"
 hex       = "0.4"
+prost     = "0.14"
 
 # ── dev ────────────────────────────────────────────────────────────
 zip32 = "0.2"

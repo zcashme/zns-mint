@@ -2,9 +2,11 @@
 //!
 //! The `state` crate is deliberately passive: it owns the WalletDb (notes,
 //! shardtree witnesses, scan progress) and exposes `wallet_db_mut()` as an
-//! explicit seam. All responsibility for clients, polling, `sync::run` /
-//! `scan_cached_blocks`, and block caching (ephemeral is recommended) lives in
-//! the orchestrator or here in the chain I/O crate.
+//! explicit seam. In theory, all responsibility for clients, polling, sync,
+//! and block caching lives in the orchestrator.
+//!
+//! (In the current zns-mint binary the treasury sync is stubbed and the NoteState
+//! is a dummy, so this separation is not yet exercised in the main loop.)
 
 use std::collections::BTreeMap;
 use std::ops::Range;

@@ -3,7 +3,7 @@
 //! Owns the SQLite stores:
 //! - [`db`] owns the live `names` table (fast current binding per active name,
 //!   plus the chain-head `rcm` for the next mutation) and ancillary tables
-//!   (processed_notes, challenges, intents).
+//!   (processed_notes, challenges).
 //! - [`actions`] owns the append-only `name_events` history log (one row per
 //!   CLAIM/UPDATE/RELEASE). This is the source of truth for the `(ψ, rcm)`
 //!   chain and for reorg reconstruction.
@@ -32,8 +32,10 @@
 //! drives `sync::run` / `scan_cached_blocks` and bootstrap.
 
 pub mod actions;
+pub mod block_cache;
 pub mod db;
 pub mod error;
+pub mod orchestrator;
 pub mod treasury;
 
 pub use treasury::{FundingSelection, SpendableNote, Treasury, TreasuryConfig, TreasuryError};
@@ -49,12 +51,12 @@ pub use actions::{
     actions_for, affected_names, append_action, delete_actions_above, latest_action, MintedAction,
 };
 pub use db::{
-    delete_intents_above, delete_processed_above, delete_record, get_current_rcm, get_record,
-    last_processed_height, mark_processed, processed_hash_at_height, rebuild_records_after_reorg,
-    upsert_record_from_action, Name,
+    delete_processed_above, delete_record, get_current_rcm, get_record, last_processed_height,
+    mark_processed, processed_hash_at_height, rebuild_records_after_reorg, upsert_record_from_action,
+    Name,
 };
-pub use db::PendingMint;
 pub use error::StateError;
+pub use orchestrator::{InFlightSpend, ScanTip};
 
 use rusqlite::Connection;
 
@@ -84,7 +86,6 @@ impl State {
             upsert_record_from_action(&tx, minted)?;
         }
         db::delete_challenge(&tx, &minted.name)?;
-        db::delete_intent(&tx, &minted.name)?;
         tx.commit()?;
         Ok(())
     }
@@ -95,22 +96,18 @@ impl State {
     {
         let tx = self.conn.unchecked_transaction()?;
         let names = affected_names(&tx, height)?;
-        let intents = db::list_intents(&tx)?;
-        for intent in &intents {
-            if intent.minted.height >= height {
-                releaser((intent.request.0, intent.request.1));
+        if let Some(flight) = orchestrator::get_in_flight(&tx)? {
+            if !flight.sweep {
+                releaser((flight.request_txid, flight.request_index));
             }
         }
-        db::delete_intents_above(&tx, height)?;
         db::delete_processed_above(&tx, height)?;
+        orchestrator::rewind_scan_tip(&tx, height)?;
+        orchestrator::clear_in_flight(&tx)?;
         delete_actions_above(&tx, height)?;
         rebuild_records_after_reorg(&tx, &names)?;
         tx.commit()?;
         Ok(names.len())
-    }
-
-    pub fn delete_intent(&self, name: &str) -> Result<(), StateError> {
-        db::delete_intent(&self.conn, name)
     }
 
     /// Return the current public binding for a name (name + UA).
@@ -130,7 +127,7 @@ impl State {
         db::get_current_rcm(&self.conn, name)
     }
 
-    pub fn table_counts(&self) -> Result<(u64, u64, u64), StateError> {
+    pub fn table_counts(&self) -> Result<(u64, u64), StateError> {
         db::table_counts(&self.conn)
     }
 
@@ -154,28 +151,12 @@ impl State {
         db::purge_expired_challenges(&self.conn, current_height)
     }
 
-    pub fn get_intent(&self, name: &str) -> Result<Option<db::PendingMint>, StateError> {
-        db::get_intent(&self.conn, name)
-    }
-
-    pub fn put_intent(&self, intent: &db::PendingMint) -> Result<(), StateError> {
-        db::put_intent(&self.conn, intent)
-    }
-
-    pub fn list_intents(&self) -> Result<Vec<db::PendingMint>, StateError> {
-        db::list_intents(&self.conn)
-    }
-
     pub fn last_processed_height(&self) -> Result<Option<u32>, StateError> {
         db::last_processed_height(&self.conn)
     }
 
     pub fn processed_hash_at_height(&self, height: u32) -> Result<Option<[u8; 32]>, StateError> {
         db::processed_hash_at_height(&self.conn, height)
-    }
-
-    pub fn delete_intents_above(&self, height: u32) -> Result<(), StateError> {
-        db::delete_intents_above(&self.conn, height)
     }
 
     pub fn delete_processed_above(&self, height: u32) -> Result<(), StateError> {
@@ -185,6 +166,26 @@ impl State {
     pub fn delete_challenge(&self, name: &str) -> Result<(), StateError> {
         db::delete_challenge(&self.conn, name)
     }
+
+    pub fn get_scan_tip(&self) -> Result<Option<ScanTip>, StateError> {
+        orchestrator::get_scan_tip(&self.conn)
+    }
+
+    pub fn set_scan_tip(&self, tip: &ScanTip) -> Result<(), StateError> {
+        orchestrator::set_scan_tip(&self.conn, tip)
+    }
+
+    pub fn get_in_flight(&self) -> Result<Option<InFlightSpend>, StateError> {
+        orchestrator::get_in_flight(&self.conn)
+    }
+
+    pub fn set_in_flight(&self, flight: &InFlightSpend) -> Result<(), StateError> {
+        orchestrator::set_in_flight(&self.conn, flight)
+    }
+
+    pub fn clear_in_flight(&self) -> Result<(), StateError> {
+        orchestrator::clear_in_flight(&self.conn)
+    }
 }
 
 /// Initialise the full registry schema (idempotent): the live `names` tip table,
@@ -192,5 +193,78 @@ impl State {
 pub fn init_schema(conn: &Connection) -> Result<(), StateError> {
     db::init_schema(conn)?;
     actions::init_actions_schema(conn)?;
+    orchestrator::init_orchestrator_schema(conn)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn in_flight_sweep_round_trip() {
+        let state = State::open_in_memory().unwrap();
+        let flight = InFlightSpend {
+            txid: [1u8; 32],
+            request_txid: [0u8; 32],
+            request_index: 0,
+            expiry_height: 200,
+            relay: false,
+            sweep: true,
+            name: String::new(),
+        };
+        state.set_in_flight(&flight).unwrap();
+        let loaded = state.get_in_flight().unwrap().unwrap();
+        assert_eq!(loaded, flight);
+        state.clear_in_flight().unwrap();
+        assert!(state.get_in_flight().unwrap().is_none());
+    }
+
+    #[test]
+    fn apply_reorg_releases_in_flight_request() {
+        let state = State::open_in_memory().unwrap();
+        state
+            .set_in_flight(&InFlightSpend {
+                txid: [9u8; 32],
+                request_txid: [7u8; 32],
+                request_index: 2,
+                expiry_height: 300,
+                relay: false,
+                sweep: false,
+                name: "alice".into(),
+            })
+            .unwrap();
+
+        let mut released = None;
+        state
+            .apply_reorg(100, |(txid, idx)| released = Some((txid, idx)))
+            .unwrap();
+
+        assert_eq!(released, Some(([7u8; 32], 2)));
+        assert!(state.get_in_flight().unwrap().is_none());
+    }
+
+    #[test]
+    fn apply_reorg_does_not_release_sweep_request() {
+        let state = State::open_in_memory().unwrap();
+        state
+            .set_in_flight(&InFlightSpend {
+                txid: [9u8; 32],
+                request_txid: [0u8; 32],
+                request_index: 0,
+                expiry_height: 300,
+                relay: false,
+                sweep: true,
+                name: String::new(),
+            })
+            .unwrap();
+
+        let mut released = false;
+        state
+            .apply_reorg(100, |_| released = true)
+            .unwrap();
+
+        assert!(!released);
+        assert!(state.get_in_flight().unwrap().is_none());
+    }
 }
