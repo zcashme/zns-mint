@@ -17,11 +17,13 @@ pub async fn maybe_sweep(
     signer: &Signer,
     grpc: &GrpcClient,
     network: zcash_protocol::consensus::Network,
-    chain_tip: u32,
+    _chain_tip: u32,
 ) -> Result<(), SweepError> {
     if !spend.is_idle(registry).await? {
         return Ok(());
     }
+
+    let chain_tip = grpc.tip_height().await?;
 
     let (funding_note, hot_balance) = {
         let mut t = treasury.lock().await;
@@ -54,26 +56,36 @@ pub async fn maybe_sweep(
         OrchardCircuitVersion::InsecurePreNu6_2,
     )?;
 
-    grpc.broadcast(result.tx_bytes).await?;
-    {
-        let st = registry.lock().await;
-        st.set_in_flight(&InFlightSpend {
-            txid: result.txid,
-            request_txid: [0u8; 32],
-            request_index: 0,
-            expiry_height,
-            relay: false,
-            sweep: true,
-            name: String::new(),
-        })?;
-    }
+    match grpc.broadcast(result.tx_bytes).await {
+        Ok(()) => {
+            {
+                let st = registry.lock().await;
+                st.set_in_flight(&InFlightSpend {
+                    txid: result.txid,
+                    request_txid: [0u8; 32],
+                    request_index: 0,
+                    expiry_height,
+                    relay: false,
+                    sweep: true,
+                    name: String::new(),
+                })?;
+            }
 
-    tracing::info!(
-        txid = %hex::encode(result.txid),
-        amount_zat = result.amount_zat,
-        hot_balance_zat = hot_balance,
-        "broadcast cold sweep"
-    );
+            tracing::info!(
+                txid = %hex::encode(result.txid),
+                amount_zat = result.amount_zat,
+                hot_balance_zat = hot_balance,
+                "broadcast cold sweep"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                txid = %hex::encode(result.txid),
+                error = %e,
+                "sweep broadcast rejected; will retry"
+            );
+        }
+    }
     Ok(())
 }
 

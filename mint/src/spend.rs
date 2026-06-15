@@ -110,8 +110,10 @@ impl SpendLane {
         signer: &Arc<Signer>,
         grpc: &GrpcClient,
         network: zcash_protocol::consensus::Network,
-        chain_tip: u32,
+        _chain_tip: u32,
     ) -> Result<(), SpendError> {
+        let chain_tip = grpc.tip_height().await?;
+
         if let Some(outcome) =
             reconcile_in_flight(registry, grpc, signer, self, chain_tip).await?
         {
@@ -156,12 +158,13 @@ impl SpendLane {
             return Ok(());
         };
 
+        let sign_tip = grpc.tip_height().await?;
         let ctx = SpendCtx {
             signer: Arc::clone(signer),
-            height: chain_tip,
-            expiry_height: chain_tip.saturating_add(TX_EXPIRY_BLOCKS),
+            height: sign_tip,
+            expiry_height: sign_tip.saturating_add(TX_EXPIRY_BLOCKS),
             network,
-            branch_id: BranchId::for_height(&network, chain_tip.into()),
+            branch_id: BranchId::for_height(&network, sign_tip.into()),
             hot_balance_zat: hot_balance,
             circuit_version: OrchardCircuitVersion::InsecurePreNu6_2,
         };
@@ -174,19 +177,32 @@ impl SpendLane {
         match dispatch(&ctx, registry, &job, funding_note, request_id).await {
             Ok(flight) => {
                 let verb = job.verb;
-                grpc.broadcast(flight.tx_bytes).await?;
-                {
-                    let st = registry.lock().await;
-                    st.set_in_flight(&flight.in_flight)?;
+                match grpc.broadcast(flight.tx_bytes).await {
+                    Ok(()) => {
+                        {
+                            let st = registry.lock().await;
+                            st.set_in_flight(&flight.in_flight)?;
+                        }
+                        *self.active.lock().expect("spend active") = Some(job);
+                        tracing::info!(
+                            verb = verb_label(verb),
+                            name = %flight.in_flight.name,
+                            txid = %hex::encode(flight.in_flight.txid),
+                            relay = flight.in_flight.relay,
+                            "broadcast spend"
+                        );
+                    }
+                    Err(e) => {
+                        signer.release_request(request_id);
+                        self.queue.lock().expect("spend queue").push_front(job);
+                        tracing::warn!(
+                            verb = verb_label(verb),
+                            name = %flight.in_flight.name,
+                            error = %e,
+                            "broadcast rejected; spend requeued"
+                        );
+                    }
                 }
-                *self.active.lock().expect("spend active") = Some(job);
-                tracing::info!(
-                    verb = verb_label(verb),
-                    name = %flight.in_flight.name,
-                    txid = %hex::encode(flight.in_flight.txid),
-                    relay = flight.in_flight.relay,
-                    "broadcast spend"
-                );
             }
             Err(SpendDispatchError::Permanent(reason)) => {
                 tracing::warn!(
@@ -205,7 +221,6 @@ impl SpendLane {
                     "spend deferred (transient)"
                 );
                 self.queue.lock().expect("spend queue").push_front(job);
-                return Err(e);
             }
         }
 
