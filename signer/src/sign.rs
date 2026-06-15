@@ -301,7 +301,7 @@ impl Signer {
     /// In production the equivalent happens inside the TEE.
     pub fn new_test(policy: SpendPolicy) -> Result<Self, SignError> {
         let seed = [0u8; 32];
-        let coin_type = 133;
+        let coin_type = 1;
         let account = zip32::AccountId::ZERO;
 
         let sk = SpendingKey::from_zip32_seed(&seed, coin_type, account)
@@ -335,7 +335,7 @@ impl Signer {
 /// "zns-mint address", "viewkey", and scanner/treasury setup.
 pub fn test_registry_address() -> Address {
     let seed = [0u8; 32];
-    let sk = SpendingKey::from_zip32_seed(&seed, 133, zip32::AccountId::ZERO)
+    let sk = SpendingKey::from_zip32_seed(&seed, 1, zip32::AccountId::ZERO)
         .expect("test seed is always valid");
     let fvk = FullViewingKey::from(&sk);
     fvk.address_at(0u32, Scope::External)
@@ -343,7 +343,7 @@ pub fn test_registry_address() -> Address {
 
 pub fn test_orchard_ivk() -> orchard::keys::IncomingViewingKey {
     let seed = [0u8; 32];
-    let sk = SpendingKey::from_zip32_seed(&seed, 133, zip32::AccountId::ZERO)
+    let sk = SpendingKey::from_zip32_seed(&seed, 1, zip32::AccountId::ZERO)
         .expect("test seed is always valid");
     let fvk = FullViewingKey::from(&sk);
     fvk.to_ivk(Scope::External)
@@ -358,7 +358,7 @@ pub fn test_sapling_ivk() -> sapling::SaplingIvk {
         &master,
         &[
             zip32::ChildIndex::hardened(32),
-            zip32::ChildIndex::hardened(133),
+            zip32::ChildIndex::hardened(1),
             zip32::ChildIndex::hardened(0),
         ],
     );

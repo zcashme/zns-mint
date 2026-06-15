@@ -24,19 +24,19 @@ pub const MIN_MUTATION_FEE_ZAT: u64 = 2 * MINT_FEE_ZAT;
 pub const HIGH_WATERMARK_ZAT: u64 = 5_000_000;
 
 /// lightwalletd gRPC endpoint.
-pub const LWD_URL: &str = "https://zec.rocks:443";
+pub const LWD_URL: &str = "https://testnet.zec.rocks:443";
 
 /// Name registry / scan state database.
-pub const REGISTRY_DB: &str = "zns-registry.sqlite";
+pub const REGISTRY_DB: &str = "zns-registry-testnet.sqlite";
 
 /// Treasury wallet notes database.
-pub const TREASURY_WALLET_DB: &str = "zns-treasury.sqlite";
+pub const TREASURY_WALLET_DB: &str = "zns-treasury-testnet.sqlite";
 
 /// Treasury block cache database.
-pub const TREASURY_BLOCK_DB: &str = "zns-treasury-blocks.sqlite";
+pub const TREASURY_BLOCK_DB: &str = "zns-treasury-blocks-testnet.sqlite";
 
-/// First block height to scan from.
-pub const BIRTHDAY: u32 = 2_000_000;
+/// First block height to scan from (testnet NU5).
+pub const BIRTHDAY: u32 = 1_842_420;
 
 /// Blocks behind `birthday` to rewind `scan_tip` on startup (safety re-sync window).
 pub const STARTUP_REWIND_BLOCKS: u32 = 100;
@@ -64,7 +64,7 @@ impl Default for MintConfig {
             registry_db: REGISTRY_DB.into(),
             treasury_wallet_db: TREASURY_WALLET_DB.into(),
             treasury_block_db: TREASURY_BLOCK_DB.into(),
-            network: Network::MainNetwork,
+            network: Network::TestNetwork,
             birthday: BIRTHDAY,
             high_watermark_zat: HIGH_WATERMARK_ZAT,
             rpc_bind: RPC_BIND.into(),
