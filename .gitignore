@@ -1,2 +1,3 @@
 /target
 /zns-mint.sqlite*
+/zns-*.sqlite*
