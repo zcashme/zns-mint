@@ -6,6 +6,7 @@
 
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_protocol::consensus::TEST_NETWORK;
+use zip32::AccountId;
 use zeroize::Zeroizing;
 
 /// The two spending keys the daemon needs.
@@ -22,14 +23,14 @@ impl Keys {
         let treasury = UnifiedSpendingKey::from_seed(
             &TEST_NETWORK,
             seed.as_ref(),
-            0u32.into(),
+            AccountId::const_from_u32(0),
         )
         .expect("treasury key derivation");
 
         let registry = UnifiedSpendingKey::from_seed(
             &TEST_NETWORK,
             seed.as_ref(),
-            1u32.into(),
+            AccountId::const_from_u32(1),
         )
         .expect("registry key derivation");
 
@@ -48,15 +49,6 @@ impl Keys {
         self.registry.to_unified_full_viewing_key()
     }
 
-    /// Borrow the treasury's raw Orchard spending key (for signing).
-    pub fn treasury_spend(&self) -> &impl ::core::fmt::Debug {
-        self.treasury.orchard()
-    }
-
-    /// Borrow the registry's raw Orchard spending key (for signing).
-    pub fn registry_spend(&self) -> &impl ::core::fmt::Debug {
-        self.registry.orchard()
-    }
 }
 
 #[cfg(test)]
