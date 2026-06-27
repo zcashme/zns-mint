@@ -18,7 +18,7 @@ Splitting boot out of `main` keeps `main.rs` readable and lets the boot sequence
 2. Performs ZIP-32 derivation of the two accounts using `Keys` (from `src/key.rs`):
    - Treasury (account 0)
    - Registry (account 1)
-   For now `boot()` directly returns `Keys`. The user will replace this with a richer `Accounts` / `Booted` type containing FVKS, addresses, etc.
+   `boot()` currently returns `Keys` directly. The user may later replace this with a richer `Accounts` type containing FVKS, addresses, etc.
 3. Uses a temporary dev zero seed (`obtain_dev_seed`). This will be replaced by TEE-injected blob decryption + zeroization.
 4. The hard-coded Zebra URL remains a `const` (no env vars, per project rules).
 

@@ -1,5 +1,6 @@
 mod boot;
 mod key;
+mod metrics;
 
 #[tokio::main]
 async fn main() {
@@ -8,8 +9,14 @@ async fn main() {
         .init();
 
     tracing::info!("zns-mint starting");
+    metrics::serve_metrics();
+    tracing::info!("zns-mint: metrics listening on 127.0.0.1:9898");
 
-    let _keys = boot::boot().await;
+    let boot = boot::boot().await;
+    metrics::set_boot_success(true);
 
-    tracing::info!("zns-mint: boot complete (keys derived)");
+    tracing::info!("zns-mint: boot complete");
+    tracing::info!(treasury_fvk = %boot.treasury_fvk_string(), "zns-mint: ready");
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("zns-mint shutting down");
 }

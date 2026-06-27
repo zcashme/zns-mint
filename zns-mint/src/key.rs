@@ -3,18 +3,13 @@
 //! Two Orchard spending keys are derived from a single seed via ZIP-32:
 //!   - Treasury (account 0): receives user deposits, pays OTP fees, sweeps to registry + cold
 //!   - Registry (account 1): creates and spends Name Notes
-//!
-//! The seed is used once at construction and zeroized immediately after.
-//! The two `UnifiedSpendingKey`s are held for the daemon's lifetime.
-//! Viewing keys are derived on demand (matching zingolib's `UnifiedKeyStore` pattern).
-
-use std::convert::TryInto;
 
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_protocol::consensus::TEST_NETWORK;
 use zeroize::Zeroizing;
 
 /// The two spending keys the daemon needs.
+#[derive(Debug)]
 pub struct Keys {
     treasury: UnifiedSpendingKey,
     registry: UnifiedSpendingKey,
@@ -24,13 +19,19 @@ impl Keys {
     /// Derive both accounts from a seed.
     pub fn from_seed(seed: [u8; 32]) -> Self {
         let seed = Zeroizing::new(seed);
-        let treasury =
-            UnifiedSpendingKey::from_seed(&TEST_NETWORK, seed.as_ref(), 0u32.try_into().unwrap())
-                .expect("treasury key derivation");
+        let treasury = UnifiedSpendingKey::from_seed(
+            &TEST_NETWORK,
+            seed.as_ref(),
+            0u32.into(),
+        )
+        .expect("treasury key derivation");
 
-        let registry =
-            UnifiedSpendingKey::from_seed(&TEST_NETWORK, seed.as_ref(), 1u32.try_into().unwrap())
-                .expect("registry key derivation");
+        let registry = UnifiedSpendingKey::from_seed(
+            &TEST_NETWORK,
+            seed.as_ref(),
+            1u32.into(),
+        )
+        .expect("registry key derivation");
 
         // seed is dropped here, Zeroizing wipes it
 
