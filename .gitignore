@@ -1,0 +1,7 @@
+/target
+**/target/
+Cargo.lock
+**/*.rs.bk
+
+# Vendored external code (reference only)
+/librustzcash/
