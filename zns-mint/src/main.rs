@@ -2,7 +2,7 @@ mod boot;
 mod key;
 mod metrics;
 
-use zcash_protocol::consensus::TEST_NETWORK;
+use zcash_protocol::consensus::MAIN_NETWORK;
 
 #[tokio::main]
 async fn main() {
@@ -16,8 +16,8 @@ async fn main() {
     metrics::set_boot_success(true);
 
     tracing::info!("zns-mint: boot complete");
-    tracing::info!(treasury_fvk = %accounts.treasury_fvk().encode(&TEST_NETWORK), "zns-mint: ready");
-    tracing::info!(registry_fvk = %accounts.registry_fvk().encode(&TEST_NETWORK), "zns-mint: ready");
+    tracing::info!(treasury_fvk = %accounts.treasury_fvk().encode(&MAIN_NETWORK), "zns-mint: ready");
+    tracing::info!(registry_fvk = %accounts.registry_fvk().encode(&MAIN_NETWORK), "zns-mint: ready");
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("zns-mint shutting down");
 }

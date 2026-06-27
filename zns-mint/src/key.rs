@@ -5,7 +5,7 @@
 //!   - Registry (account 1): creates and spends Name Notes
 
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
-use zcash_protocol::consensus::TEST_NETWORK;
+use zcash_protocol::consensus::MAIN_NETWORK;
 use zip32::AccountId;
 use zeroize::Zeroizing;
 
@@ -21,14 +21,14 @@ impl Keys {
     pub fn from_seed(seed: [u8; 32]) -> Self {
         let seed = Zeroizing::new(seed);
         let treasury = UnifiedSpendingKey::from_seed(
-            &TEST_NETWORK,
+            &MAIN_NETWORK,
             seed.as_ref(),
             AccountId::const_from_u32(0),
         )
         .expect("treasury key derivation");
 
         let registry = UnifiedSpendingKey::from_seed(
-            &TEST_NETWORK,
+            &MAIN_NETWORK,
             seed.as_ref(),
             AccountId::const_from_u32(1),
         )
