@@ -8,7 +8,7 @@ fn obtain_dev_seed() -> [u8; 32] {
     [0u8; 32]
 }
 
-pub async fn boot() -> Keys {
+pub async fn boot() -> Accounts {
     tracing::info!("boot: starting");
     let mut client = connect_zebra().await;
 
@@ -31,7 +31,11 @@ pub async fn boot() -> Keys {
     let keys = Keys::from_seed(seed);
     tracing::info!("boot: keys derived");
 
-    keys
+    let accounts = Accounts::from_keys(&keys);
+    drop(keys);
+
+    tracing::info!("boot: accounts ready");
+    accounts
 }
 
 async fn connect_zebra() -> ZebraClient {
@@ -39,4 +43,26 @@ async fn connect_zebra() -> ZebraClient {
     ZebraClient::connect(ZEBRA_INDEXER_URL)
         .await
         .expect("zebra indexer gRPC connect failed")
+}
+
+pub struct Accounts {
+    treasury_fvk: zcash_keys::keys::UnifiedFullViewingKey,
+    registry_fvk: zcash_keys::keys::UnifiedFullViewingKey,
+}
+
+impl Accounts {
+    pub fn from_keys(keys: &Keys) -> Self {
+        Self {
+            treasury_fvk: keys.treasury_fvk(),
+            registry_fvk: keys.registry_fvk(),
+        }
+    }
+
+    pub fn treasury_fvk(&self) -> &zcash_keys::keys::UnifiedFullViewingKey {
+        &self.treasury_fvk
+    }
+
+    pub fn registry_fvk(&self) -> &zcash_keys::keys::UnifiedFullViewingKey {
+        &self.registry_fvk
+    }
 }
