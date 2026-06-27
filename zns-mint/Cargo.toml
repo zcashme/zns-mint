@@ -27,3 +27,6 @@ zebra-indexer-proto = "2.3"
 zcash_keys = { version = "0.14", default-features = false, features = ["orchard"] }
 zcash_protocol = { version = "0.9", default-features = false }
 zip32 = "0.2.1"
+
+# Block parsing
+zcash_primitives = { version = "0.28", default-features = false }

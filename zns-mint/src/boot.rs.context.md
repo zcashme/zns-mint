@@ -12,17 +12,28 @@ Splitting boot out of `main` keeps `main.rs` readable and lets the boot sequence
 
 ## Current State (as of this writing)
 
-`boot.rs` is intentionally minimal and performs the early boot steps:
+`boot.rs` owns the boot phase as a sequence of named steps. `boot()` is a thin
+orchestrator that calls them in order; each step fails loudly (`.expect` /
+`assert!`) rather than soldiering on with partial state.
 
-1. Connects to a Zebra indexer gRPC endpoint and runs a liveness check via `ChainTipChange`.
-2. Performs ZIP-32 derivation of the two accounts using `Keys` (from `src/key.rs`):
-   - Treasury (account 0)
-   - Registry (account 1)
-   `boot()` currently returns `Keys` directly. The user may later replace this with a richer `Accounts` type containing FVKS, addresses, etc.
-3. Uses a temporary dev zero seed (`obtain_dev_seed`). This will be replaced by TEE-injected blob decryption + zeroization.
-4. The hard-coded Zebra URL remains a `const` (no env vars, per project rules).
+1. `connect_zebra()` → `ZebraClient`. Hard-coded endpoint `http://light.zcash.me:8230` (no env vars, per project rules).
+2. `liveness_check(&mut client) -> BlockHashAndHeight` — calls `ChainTipChange`, reads exactly one stream message (the current best-chain tip per Zebra's first-message contract), drops the stream. Proves the indexer is alive and reports a tip.
+3. `verify_tip_block(&mut client, &tip) -> Block` — exhaustive structural + integrity check of the tip block:
+   - `GetBlock(tip.height)` → encoded block bytes.
+   - `Block::read(&data, &MAIN_NETWORK)` — parses the bytes and enforces structural consensus invariants (coinbase present + no sprout data, coinbase consensus-branch-id matches the network params for the claimed height, no non-coinbase null transparent inputs). Uses `zcash_primitives` (added as a dep).
+   - Header-hash integrity: the SHA-256d hash recomputed from the parsed header must equal both the `GetBlock`-reported hash and the `ChainTipChange`-reported hash. The proto reports hashes in display order; `BlockHash` stores internal order, so `block_hash_from_display` reverses before comparing. Catches tampering/corruption of the `data` field and RPC disagreement about the tip.
+   - Height consistency: `parsed.claimed_height() == tip.height`.
+   - Coinbase presence (belt-and-braces; `Block::read` already enforces this).
 
-`async fn connect_zebra() -> ZebraClient` builds the gRPC client. Endpoint: `http://light.zcash.me:8230`.
+   This is NOT full consensus verification (no PoW/Equihash, no merkle-root recomputation over txs, no signature/proof checks, no chain linkage) — those remain Zebra's job. It is "is the node serving an untampered, internally-consistent block at the tip."
+4. `derive_accounts() -> Accounts` — derives the two ZIP-32 accounts (Treasury=0, Registry=1) from a single seed. **This is the only place that touches seed material**, and it runs only after the chain checks pass, so seed material is never read on a broken or unverified chain connection.
+   - Uses a temporary dev zero seed (`obtain_dev_seed`); will be replaced by TEE-injected blob decryption + zeroization.
+
+`boot()` itself is a 4-line orchestrator: `connect → liveness_check → verify_tip_block → derive_accounts`.
+
+`async fn connect_zebra() -> ZebraClient` builds the gRPC client. `fn block_hash_from_display(&[u8]) -> Option<BlockHash>` is a small helper for the display↔internal byte-order conversion.
+
+There is an ignored smoke test (`zebra_smoke_liveness_and_verify_tip_block`) that calls `connect_zebra` + `liveness_check` + `verify_tip_block` against the same hard-coded endpoint. It is meant for manual node validation, not normal test runs.
 
 No wallet DBs or full sync yet. Those come later.
 
@@ -58,17 +69,25 @@ Notes:
 
 ### How `boot.rs` uses it today
 
+`boot()` is a thin orchestrator. The two RPCs are used in two separate steps:
+
 ```rust
-let mut client = connect_zebra().await;            // ZebraClient::connect(URL)
+// liveness_check: one-shot tip read
 let resp = client.chain_tip_change(Empty {}).await.expect("...");
 let mut stream = resp.into_inner();                // Streaming<BlockHashAndHeight>
 let tip = stream.message().await                  // first message = current tip
     .expect("no chain tip message")
     .expect("stream closed with no tip");
-tracing::info!(height = tip.height, "zebra: liveness check passed");
+// stream is dropped here — no ongoing subscription
+
+// verify_tip_block: fetch + parse + integrity-check the tip block
+let req = BlockRequest { hash_or_height: tip.height.to_be_bytes().to_vec() };
+let block = client.get_block(req).await.expect("...").into_inner();
+let parsed = Block::read(&block.data[..], &MAIN_NETWORK).expect("...");
+// + header-hash three-way compare, height consistency, coinbase presence
 ```
 
-This is a one-shot liveness probe: we connect, ask for the tip stream, pull exactly one message, and drop the stream. We are not yet subscribing to ongoing tip changes or driving a sync loop from it — both are future boot/run steps.
+The liveness probe is one-shot: connect, ask for the tip stream, pull exactly one message, drop the stream. The verify step then fetches the tip block by height and parses it with `zcash_primitives::block::Block::read` against `MAIN_NETWORK`. We are not yet subscribing to ongoing tip changes or driving a sync loop from it — both are future boot/run steps.
 
 ### Why a hard-coded public endpoint?
 
@@ -90,7 +109,7 @@ In roughly the order implied by the "Boot Idea" in `main.rs.context.md`:
 2. Decrypt the blob **inside** the TEE; zeroize plaintext ASAP after derivation.
 3. ZIP-32 multi-account derivation → real `Accounts` (Treasury 0, Registry 1), plus Full Viewing Keys, the registry self-address, UIVK.
 4. Open wallet DBs for both accounts.
-5. Real sync of both accounts to the current tip (replacing/augmenting the single-message liveness probe; likely via ongoing `ChainTipChange` subscription + `GetBlock` backfill).
+5. Real sync of both accounts to the current tip (replacing/augmenting the single-message liveness probe; likely via ongoing `ChainTipChange` subscription + `GetBlock` backfill). The `GetBlock` + `Block::read` path is already wired in `verify_tip_block`; a sync loop would reuse it to walk back from the tip to the wallet's last-synced height.
 6. ZNS memo scanning setup (registry account), using the `Indexer` RPCs (and/or lightwalletd compact blocks) to feed the run loop.
 7. Hand off to the run loop (see "Run Idea" in `main.rs.context.md`).
 
@@ -101,6 +120,7 @@ Each step should land as its own small change, with this file and `main.changelo
 - Re-read this file **and** `main.rs.context.md` before changing `boot.rs`.
 - `boot.rs` is the **only** place that owns the boot phase. Don't add boot logic to `main.rs` and don't add run-loop logic here.
 - When you add a boot step, update this file (Current State + Roadmap) and append a dated entry to `main.changelog.md`.
+- Keep the ignored smoke test in sync with the live RPC assumptions. If `GetBlock` starts failing, that is a node/operator issue or a protocol mismatch worth investigating before sync work continues.
 - Don't reach for env vars, CLI args, or a config struct to parameterize `boot.rs`. The TEE/injected-blob model is the configuration story.
 - If the proto surface changes (new RPCs, renamed messages, version bump of `zebra-indexer-proto`), update the table above and verify `boot.rs` still compiles — the crate pins generated bindings, so a major-version bump may require import/type changes.
 
