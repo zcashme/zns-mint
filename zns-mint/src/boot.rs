@@ -10,12 +10,9 @@ fn obtain_dev_seed() -> [u8; 32] {
 
 pub async fn boot() -> Keys {
     tracing::info!("boot: starting");
-
-    // Liveness before we ever touch seed material (design constraint)
-    tracing::info!("boot: zebra indexer gRPC liveness");
     let mut client = connect_zebra().await;
 
-    tracing::info!("zebra: performing liveness check (ChainTipChange)");
+    // Liveness before we ever touch seed material (design constraint)
     let resp = client
         .chain_tip_change(Empty {})
         .await
@@ -26,23 +23,13 @@ pub async fn boot() -> Keys {
         .await
         .expect("no chain tip message")
         .expect("stream closed with no tip");
-    tracing::info!(
-        height = tip.height,
-        "zebra: liveness check passed — chain tip received"
-    );
+    tracing::info!(height = tip.height, "boot: zebra liveness ok");
 
     // Derive the two ZIP-32 accounts from a single seed.
     // Treasury = account 0, Registry = account 1.
     let seed = obtain_dev_seed();
     let keys = Keys::from_seed(seed);
-
-    // Touch the public fvk accessors (cheap). This proves derivation worked
-    // and will be replaced by real consumers of treasury_fvk / registry_fvk.
-    let _ = keys.treasury_fvk();
-    let _ = keys.registry_fvk();
-
-    tracing::info!("boot: ZIP-32 derivation complete (treasury=0, registry=1)");
-    tracing::info!("boot: done");
+    tracing::info!("boot: keys derived");
 
     keys
 }

@@ -29,3 +29,7 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
 - `main.rs` updated to receive the keys result.
 - User noted: `boot` return type is temporary ("I will obviously change this").
 - Updated `boot.rs.context.md`.
+
+## 2026-06-27 (later still)
+- Removed the incorrect `Booted` wrapper type from `boot.rs`.
+- `boot()` now returns `Keys` directly, matching `main.rs` and the existing boot docs.
