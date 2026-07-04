@@ -1,205 +1,143 @@
-use zebra_indexer_proto::{BlockHashAndHeight, BlockRequest, Empty, ZebraClient};
-use zcash_primitives::block::{Block, BlockHash};
-use zcash_protocol::consensus::{BlockHeight, MAIN_NETWORK};
+//! ZNS Mint Boot Sequence
+
+use zcash_protocol::consensus::BlockHeight;
+use zeroize::Zeroizing;
 
 use crate::key::Keys;
+use crate::zcash;
 
-/// Runs the boot phase: connect → prove the chain is alive → verify the tip
-/// block → derive accounts.
-///
-/// Each step fails loudly (`.expect` / `assert!`) rather than soldiering on with
-/// partial state, per the project's "liveness before trust" + "fail loud" rules.
-/// Seed material is touched only by [`derive_accounts`], after every chain check
-/// has passed.
-pub async fn boot() -> Accounts {
+pub async fn boot() -> (
+    zcash::chain::Reader,
+    Keys,
+    crate::wallet::Wallet,
+    BlockHeight,
+) {
     tracing::info!("boot: starting");
 
-    let mut client = connect_zebra().await;
-    let tip = liveness_check(&mut client).await;
-    let _block = verify_tip_block(&mut client, &tip).await;
-    derive_accounts()
+    // 1. Network Path: Prove node is reachable
+    let info = check_liveness().await;
+
+    // 2. Data Flow Path: Connect to data stream and strictly verify integrity
+    let (chain, tip_height) = verify_chain_integrity(&info).await;
+
+    // 3. Cryptography Path: Trust established, touch the seed
+    let keys = derive_keys(obtain_key_source());
+
+    // 4. RAM Path: Initialize the in-memory wallet (rebuilt from birthday on every boot)
+    let wallet = initialize_wallet(&keys);
+
+    // Return the verified environment to the orchestrator
+    (chain, keys, wallet, tip_height)
 }
 
-/// Proves the Zebra indexer is alive and reports a best-chain tip.
-///
-/// Calls `ChainTipChange` and reads exactly one stream message (the current tip
-/// per Zebra's first-message contract). The stream is then dropped — we do not
-/// subscribe to ongoing tip changes here; that's a future sync-loop concern.
-///
-/// Returns the tip as a [`BlockHashAndHeight`] (hash in display order, height).
-async fn liveness_check(client: &mut ZebraClient) -> BlockHashAndHeight {
-    let resp = client
-        .chain_tip_change(Empty {})
+/// Pings the node via JSON-RPC to ensure the network path is alive.
+async fn check_liveness() -> zcash::zebra::BlockchainInfo {
+    let zebra_rpc = zcash::zebra::JsonRpc::new();
+    let info = zebra_rpc
+        .get_blockchain_info()
         .await
-        .expect("chain_tip_change failed");
-    let mut stream = resp.into_inner();
-    let tip = stream
-        .message()
-        .await
-        .expect("no chain tip message")
-        .expect("stream closed with no tip");
-    tracing::info!(height = tip.height, "boot: zebra liveness ok");
-    tip
-}
-
-/// Proves the node serves a real, structurally-valid, integrity-checked block at
-/// the given tip.
-///
-/// This is NOT full consensus verification (no PoW/Equihash, no merkle-root
-/// recomputation over txs, no signature/proof checks, no chain linkage) — those
-/// remain Zebra's job. It is "is the node serving an untampered,
-/// internally-consistent block at this tip."
-///
-/// Steps:
-/// 1. `GetBlock(tip.height)` → encoded block bytes.
-/// 2. `Block::read` against `MAIN_NETWORK` — parses the bytes and enforces
-///    structural consensus invariants (coinbase present + no sprout data,
-///    coinbase consensus-branch-id matches the network params for the claimed
-///    height, no non-coinbase null transparent inputs).
-/// 3. Header-hash integrity: the hash recomputed from the parsed header must
-///    equal both the `GetBlock`-reported hash and the `ChainTipChange`-reported
-///    hash. Catches tampering/corruption of the `data` field and RPC
-///    disagreement about the tip.
-/// 4. Height consistency: the parsed block's claimed height must equal
-///    `tip.height`.
-/// 5. Coinbase presence (belt-and-braces; `Block::read` already enforces this).
-async fn verify_tip_block(client: &mut ZebraClient, tip: &BlockHashAndHeight) -> Block {
-    let block_req = BlockRequest {
-        hash_or_height: tip.height.to_be_bytes().to_vec(),
-    };
-    let block_resp = client
-        .get_block(block_req)
-        .await
-        .expect("get_block request failed");
-    let block_and_hash = block_resp.into_inner();
-    tracing::info!(height = tip.height, "boot: get_block ok");
-
-    let parsed = Block::read(&block_and_hash.data[..], &MAIN_NETWORK)
-        .expect("get_block returned bytes that do not parse as a mainnet block");
-    tracing::info!(height = tip.height, "boot: block parsed ok");
-
-    // `Block::read` recomputes the header hash (SHA-256d of the encoded header),
-    // so `parsed.header().hash()` is independent of any server-reported hash.
-    // The proto reports hashes in display order; `BlockHash` stores internal
-    // order, so we reverse the server-reported bytes before comparing.
-    let tip_hash = block_hash_from_display(&tip.hash)
-        .expect("chain_tip_change returned a malformed 32-byte hash");
-    let getblock_hash = block_hash_from_display(&block_and_hash.hash)
-        .expect("get_block returned a malformed 32-byte hash");
-    assert_eq!(
-        tip_hash, getblock_hash,
-        "chain_tip_change hash != get_block hash"
-    );
-    assert_eq!(
-        parsed.header().hash(),
-        getblock_hash,
-        "recomputed header hash != get_block hash"
-    );
-    tracing::info!("boot: block hash matches chain tip");
-
-    // `claimed_height` is only trustworthy for a chain-validated block, which is
-    // exactly the assumption when trusting the local Zebra node.
-    assert_eq!(
-        parsed.claimed_height(),
-        BlockHeight::from_u32(tip.height),
-        "parsed block height != chain tip height"
-    );
-    tracing::info!("boot: block height matches chain tip");
-
-    assert!(
-        !parsed.vtx().is_empty(),
-        "parsed block has no transactions"
-    );
+        .expect("json-rpc getblockchaininfo failed, node is unreachable");
+    
     tracing::info!(
-        tx_count = parsed.vtx().len(),
-        "boot: block has transactions"
+        height = info.blocks,
+        hash = %info.bestblockhash,
+        "boot: zebra json-rpc liveness ok"
     );
-
-    parsed
+    info
 }
 
-/// Derives the two ZIP-32 accounts from a single seed.
+/// Connects via gRPC, fetches the tip, cross-validates against RPC, and verifies the block.
+async fn verify_chain_integrity(info: &zcash::zebra::BlockchainInfo) -> (zcash::chain::Reader, BlockHeight) {
+    let mut chain = zcash::chain::Reader::connect().await;
+    let (tip_height, tip_hash) = chain.tip().await;
+
+    assert_eq!(
+        info.blocks,
+        u32::from(tip_height),
+        "split-brain: json-rpc height != grpc height"
+    );
+
+    assert_eq!(
+        info.bestblockhash,
+        tip_hash.to_string(),
+        "split-brain: json-rpc tip hash != grpc tip hash"
+    );
+
+    let block = chain.block(tip_height).await;
+    tracing::info!(
+        height = u32::from(tip_height),
+        tx_count = block.transactions().count(),
+        "boot: block verified ok"
+    );
+
+    (chain, tip_height)
+}
+
+/// Seeds the in-memory wallet using the derived viewing keys.
+fn initialize_wallet(keys: &Keys) -> crate::wallet::Wallet {
+    let ufvks = [
+        (crate::mint::TREASURY_ACCOUNT, keys.treasury_fvk()),
+        (crate::mint::REGISTRY_ACCOUNT, keys.registry_fvk()),
+    ];
+    crate::wallet::Wallet::new(ufvks)
+}
+
+/// The source of the mint's seed material.
+///
+/// This is the typed seam between "the operator gave the TEE something" and
+/// "the mint is now holding a seed". It exists so that *which* trust
+/// assumption the mint is operating under is a value the compiler checks,
+/// not a log line a human has to read.
+///
+/// Per `AGENTS.md` "Seed and key material", Layer 1: the seed must arrive as
+/// an encrypted blob bound to the TEE's measurement — never an env var, CLI
+/// flag, or config file. The only variant here is `SealedBlob`. There is no
+/// `Dev` variant: the crate is hardcoded mainnet (`MAIN_NETWORK` in `key.rs`,
+/// `CHECKPOINT_NETWORK = "main"` in `zcash::zebra`), there is no testnet
+/// mode, and a hardcoded zero seed on mainnet is not a trust assumption worth
+/// naming — it is a bug. The binary refuses to boot until the sealed-blob
+/// decrypt path is implemented.
+enum KeySource {
+    /// A TEE-sealed seed blob: operator-unreadable ciphertext that only the
+    /// attested enclave can decrypt. The blob's bytes are not the seed; the
+    /// seed is recovered inside the enclave by `decrypt_sealed_blob` and
+    /// returned already wrapped in `Zeroizing`.
+    SealedBlob { blob: Vec<u8> },
+}
+
+/// The one and only key source the mint will accept today.
+///
+/// Not implemented. The TEE-sealed-blob decrypt path is the load-bearing
+/// security guarantee and is not yet wired — see `AGENTS.md` "Seed and key
+/// material", Layer 1 ("Status: not yet wired"). Until it is, the mint
+/// cannot boot, which is the honest state: a zero-seed mainnet run is worse
+/// than no run.
+fn obtain_key_source() -> KeySource {
+    todo!("TEE-sealed-blob decryption is not yet wired; the mint cannot boot until it is")
+}
+
+/// Decrypts a sealed blob into a seed, inside the attested boundary.
+///
+/// This is where the TEE unseals the blob and returns the plaintext seed
+/// wrapped in `Zeroizing`. Unimplemented; the future TEE work lands here.
+fn decrypt_sealed_blob(_blob: &[u8]) -> Zeroizing<[u8; 32]> {
+    todo!("TEE-sealed-blob decryption is not yet wired")
+}
+
+/// Derives the two ZIP-32 keys from a single seed.
 ///
 /// Treasury = account 0, Registry = account 1. This is the **only** place that
-/// touches seed material, and it runs only after [`liveness_check`] and
-/// [`verify_tip_block`] have passed — so seed material is never read on a broken
-/// or unverified chain connection.
-fn derive_accounts() -> Accounts {
-    let seed = obtain_dev_seed();
+/// touches seed material, and it runs only after liveness and tip verification
+/// have passed — so seed material is never read on a broken or unverified chain.
+///
+/// The seed arrives already wrapped in `Zeroizing` from `decrypt_sealed_blob`.
+/// An unwrapped `[u8; 32]` seed is unrepresentable at this call site — see
+/// `AGENTS.md` "Seed and key material", Layer 2.
+fn derive_keys(source: KeySource) -> Keys {
+    let seed = match source {
+        KeySource::SealedBlob { blob } => decrypt_sealed_blob(&blob),
+    };
     let keys = Keys::from_seed(seed);
     tracing::info!("boot: keys derived");
-
-    let accounts = Accounts::from_keys(&keys);
-
-    tracing::info!("boot: accounts ready");
-    accounts
-}
-
-/// Temporary dev path. Will be replaced by TEE-injected blob decryption.
-fn obtain_dev_seed() -> [u8; 32] {
-    tracing::warn!("boot: USING DEV ZERO SEED for derivation — replace with real blob path");
-    [0u8; 32]
-}
-
-/// Constructs a [`BlockHash`] from a 32-byte hash in display order.
-///
-/// Zebra's indexer proto reports block hashes in display order (the byte-reversed
-/// form used by block explorers and RPCs). `BlockHash` stores the internal
-/// (non-display) order. This helper reverses the bytes and returns a `BlockHash`,
-/// or `None` if the input is not exactly 32 bytes.
-fn block_hash_from_display(display: &[u8]) -> Option<BlockHash> {
-    let mut bytes: [u8; 32] = BlockHash::try_from_slice(display)?.0;
-    bytes.reverse();
-    Some(BlockHash(bytes))
-}
-
-async fn connect_zebra() -> ZebraClient {
-    const ZEBRA_INDEXER_URL: &str = "http://light.zcash.me:8230";
-    ZebraClient::connect(ZEBRA_INDEXER_URL)
-        .await
-        .expect("zebra indexer gRPC connect failed")
-}
-
-pub struct Accounts {
-    treasury_fvk: zcash_keys::keys::UnifiedFullViewingKey,
-    registry_fvk: zcash_keys::keys::UnifiedFullViewingKey,
-}
-
-impl Accounts {
-    pub fn from_keys(keys: &Keys) -> Self {
-        Self {
-            treasury_fvk: keys.treasury_fvk(),
-            registry_fvk: keys.registry_fvk(),
-        }
-    }
-
-    pub fn treasury_fvk(&self) -> &zcash_keys::keys::UnifiedFullViewingKey {
-        &self.treasury_fvk
-    }
-
-    pub fn registry_fvk(&self) -> &zcash_keys::keys::UnifiedFullViewingKey {
-        &self.registry_fvk
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Manual node-health check: connects to the same hard-coded endpoint as
-    /// [`boot`] and exercises the liveness + tip-block verification path against
-    /// a live Zebra indexer. Ignored by default — run with
-    /// `cargo test --release -- --ignored --nocapture zebra_smoke`.
-    #[tokio::test]
-    #[ignore]
-    async fn zebra_smoke_liveness_and_verify_tip_block() {
-        let mut client = connect_zebra().await;
-        let tip = liveness_check(&mut client).await;
-        let block = verify_tip_block(&mut client, &tip).await;
-        tracing::info!(
-            height = %tip.height,
-            tx_count = block.vtx().len(),
-            "smoke: tip block verified"
-        );
-    }
+    keys
 }

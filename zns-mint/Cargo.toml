@@ -13,6 +13,8 @@ path = "src/main.rs"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 prometheus = "0.13"
+lazy_static = "1.4"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
@@ -20,13 +22,47 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 hkdf = "0.12"
 sha2 = "0.10"
 thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+hex = "0.4"
+incrementalmerkletree = "0.8.2"
+
+# ZNS payload (rcm, ψ) derivation: BLAKE2b-512 wide-reduced into Pallas field
+# elements. Both are already transitive deps (via zcash_spec / orchard); pulling
+# them direct adds no new compiled code to the graph.
+blake2b_simd = "1"
+pasta_curves = "0.5"
+
+# CSPRNG for Orchard spend-auth + binding nonces in the signer. Already a
+# transitive dep (orchard); pulled direct with default features so `OsRng` is
+# available (orchard itself uses `default-features = false`).
+rand = "0.8"
 
 zebra-indexer-proto = "2.3"
 
 # Key derivation (ZIP-32 Orchard)
-zcash_keys = { version = "0.14", default-features = false, features = ["orchard"] }
-zcash_protocol = { version = "0.9", default-features = false }
+zcash_keys = { git = "https://github.com/zcash/librustzcash", rev = "eb828caadb4b2be4a39823f95e50b42731a515f5", default-features = false, features = ["orchard"] }
+zcash_protocol = { git = "https://github.com/zcash/librustzcash", rev = "eb828caadb4b2be4a39823f95e50b42731a515f5", default-features = false }
 zip32 = "0.2.1"
 
 # Block parsing
-zcash_primitives = { version = "0.28", default-features = false }
+zcash_primitives = { git = "https://github.com/zcash/librustzcash", rev = "eb828caadb4b2be4a39823f95e50b42731a515f5", default-features = false }
+sapling = { package = "sapling-crypto", version = "0.7", default-features = false }
+
+# Full-block wallet scanning.
+# TODO: Switch back to crates.io once zcash_client_backend >= 0.24.0 is
+# published and confirmed to expose zcash_client_backend::scanning::full.
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash", rev = "eb828caadb4b2be4a39823f95e50b42731a515f5", default-features = false, features = ["orchard"] }
+
+# Orchard with the `unsafe-zns` feature: Name Notes override the standard
+# note commitment so a note commits to a ZNS payload. The fork lives at
+# https://github.com/zcashme/orchard (branch `main`, rev pinned below).
+# zns-mint calls `Builder::add_zns_output` / `add_zns_spend` directly, so
+# this is a first-class dep, not just a transitive one.
+orchard = { git = "https://github.com/zcashme/orchard", rev = "e9edfa65b249d1f5ffa78dd04173530b52607162", default-features = false, features = ["unsafe-zns", "circuit"] }
+
+# Redirect the crates.io `orchard` consumed transitively by librustzcash to
+# the ZNS fork so the whole graph builds against the same source.
+[patch.crates-io]
+orchard = { git = "https://github.com/zcashme/orchard", rev = "e9edfa65b249d1f5ffa78dd04173530b52607162" }

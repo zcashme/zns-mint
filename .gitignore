@@ -5,3 +5,4 @@ Cargo.lock
 
 # Vendored external code (reference only)
 /librustzcash/
+/ens-contracts/
