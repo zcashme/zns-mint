@@ -1,8 +1,4 @@
-mod boot;
-mod key;
-mod metrics;
-
-use zcash_protocol::consensus::MAIN_NETWORK;
+use zns_mint::{boot, metrics, registry::Registry};
 
 #[tokio::main]
 async fn main() {
@@ -12,12 +8,34 @@ async fn main() {
 
     tracing::info!("zns-mint starting");
 
-    let accounts = boot::boot().await;
-    metrics::set_boot_success(true);
+    // Start the metrics server in a background task immediately, so we can
+    // monitor the boot and sync processes via Prometheus.
+    tokio::spawn(metrics::serve());
 
-    tracing::info!("zns-mint: boot complete");
-    tracing::info!(treasury_fvk = %accounts.treasury_fvk().encode(&MAIN_NETWORK), "zns-mint: ready");
-    tracing::info!(registry_fvk = %accounts.registry_fvk().encode(&MAIN_NETWORK), "zns-mint: ready");
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("zns-mint shutting down");
+    // Boot Sequence
+    let (mut chain, _keys, mut wallet, tip_height) = boot::boot().await;
+
+    // Registry owns the name-chain state; Wallet owns note/tree state.
+    // They are peers: the scanner borrows both per block, nothing owns both.
+    let mut registry = Registry::new();
+
+    // Bootstrap scanner state (injects Birthday Checkpoint if needed)
+    let mut reorg_buffer = zns_mint::scanner::scan::bootstrap(&mut wallet).await;
+
+    // Scan to tip
+    zns_mint::scanner::scan::scan_to_tip(
+        &mut chain,
+        &mut wallet,
+        &mut registry,
+        &mut reorg_buffer,
+        tip_height,
+    )
+    .await;
+
+    metrics::set_boot_success(true);
+    tracing::info!(height = u32::from(tip_height), "zns-mint: boot complete");
+    tracing::info!("zns-mint: ready");
+
+    //why is this here?
+    std::future::pending::<()>().await;
 }
