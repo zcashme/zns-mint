@@ -1,84 +1,207 @@
 //! Key derivation for the ZNS mint daemon.
 //!
-//! Two Orchard spending keys are derived from a single seed via ZIP-32:
-//!   - Treasury (account 0): receives user deposits, pays OTP fees, sweeps to registry + cold
-//!   - Registry (account 1): creates and spends Name Notes
 
+use secrecy::{ExposeSecret, Secret};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_protocol::consensus::MAIN_NETWORK;
-use zeroize::Zeroizing;
 use zip32::AccountId;
 
-/// The two spending keys the mint needs.
-pub struct Keys {
-    treasury: UnifiedSpendingKey,
-    registry: UnifiedSpendingKey,
+// ===========================================================================
+// AccountKeys — per-account keys, generated at boot, held by each module
+// ===========================================================================
+
+/// An account's keys — the spending key and everything derivable from it.
+pub struct AccountKeys {
+    pub(crate) spending: UnifiedSpendingKey,
 }
 
-impl Keys {
-    /// Derive both accounts from a seed.
-    pub fn from_seed(seed: Zeroizing<[u8; 32]>) -> Self {
-        let treasury = UnifiedSpendingKey::from_seed(
-            &MAIN_NETWORK,
-            seed.as_ref(),
-            AccountId::const_from_u32(0),
-        )
-        .expect("treasury key derivation");
-
-        let registry = UnifiedSpendingKey::from_seed(
-            &MAIN_NETWORK,
-            seed.as_ref(),
-            AccountId::const_from_u32(1),
-        )
-        .expect("registry key derivation");
-
-        // `seed` (the Zeroizing wrapper) is wiped by its Drop when the
-        // caller lets it go out of scope.
-
-        Self { treasury, registry }
+impl AccountKeys {
+    /// The account's unified full viewing key — for scanning.
+    ///
+    /// Derived on demand from the spending key via
+    /// `UnifiedSpendingKey::to_unified_full_viewing_key`. Contains Orchard,
+    /// Sapling, and Transparent components.
+    pub fn fvk(&self) -> UnifiedFullViewingKey {
+        self.spending.to_unified_full_viewing_key()
     }
 
-    /// Derive the treasury's full viewing key (for scanning incoming notes).
-    pub fn treasury_fvk(&self) -> UnifiedFullViewingKey {
-        self.treasury.to_unified_full_viewing_key()
+    /// The account's Orchard spending key.
+    pub(crate) fn orchard_spending_key(&self) -> &orchard::keys::SpendingKey {
+        self.spending.orchard()
     }
 
-    /// Derive the registry's full viewing key (for scanning incoming Name Notes).
-    pub fn registry_fvk(&self) -> UnifiedFullViewingKey {
-        self.registry.to_unified_full_viewing_key()
+    /// The account's Sapling extended spending key.
+    pub(crate) fn sapling_spending_key(&self) -> &sapling::zip32::ExtendedSpendingKey {
+        self.spending.sapling()
     }
 
-    /// The Registry's Orchard spending key -- the sole signer for every Name
-    /// Note lifecycle transition. This is the attested-boundary capability: it
-    /// is `pub(crate)` so only the signer module can reach it, and it must never
-    /// be `Debug`-formatted, logged, or copied out of the attested boundary.
-    pub(crate) fn registry_orchard_spending_key(&self) -> &orchard::keys::SpendingKey {
-        self.registry.orchard()
+    /// The account's transparent account private key.
+    pub(crate) fn transparent_spending_key(&self) -> &transparent::keys::AccountPrivKey {
+        self.spending.transparent()
     }
+}
+
+// ===========================================================================
+// Derivation function — called once at boot per account, never again
+// ===========================================================================
+
+/// Derive an account's keys from the seed.
+///
+/// Panics if derivation fails — a zero-seed on mainnet is a bug, not a runtime
+/// condition. The upstream derivation code rejects invalid seeds (zero ask,
+/// invalid IVKs); a panic here means the seed is cryptographically broken.
+pub fn derive_account(seed: &Secret<[u8; 32]>, account: AccountId) -> AccountKeys {
+    let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, seed.expose_secret(), account)
+        .expect("key derivation");
+    AccountKeys { spending: usk }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::Secret;
+    use zip32::fingerprint::SeedFingerprint;
+
+    fn test_seed() -> Secret<[u8; 32]> {
+        Secret::new([0u8; 32])
+    }
+
+    fn test_treasury() -> AccountKeys {
+        derive_account(&test_seed(), AccountId::const_from_u32(0))
+    }
+
+    fn test_registry() -> AccountKeys {
+        derive_account(&test_seed(), AccountId::const_from_u32(1))
+    }
+
+    // ------------------------------------------------------------------
+    // Seed fingerprint (upstream standalone function)
+    // ------------------------------------------------------------------
 
     #[test]
-    fn two_accounts_produce_different_keys() {
-        let keys = Keys::from_seed(Zeroizing::new([0u8; 32]));
-
-        let t_bytes = keys.treasury.orchard().to_bytes();
-        let r_bytes = keys.registry.orchard().to_bytes();
-
-        assert_ne!(t_bytes, r_bytes, "treasury and registry must differ");
+    fn seed_fingerprint_is_derivable() {
+        let seed = test_seed();
+        let fp = SeedFingerprint::from_seed(seed.expose_secret()).unwrap();
+        assert!(
+            fp.to_string().starts_with("zip32seedfp1"),
+            "fingerprint must be bech32m-encoded with zip32seedfp HRP, got: {}",
+            fp
+        );
     }
 
     #[test]
-    fn fvks_are_derivable() {
-        let keys = Keys::from_seed(Zeroizing::new([0u8; 32]));
+    fn seed_fingerprint_is_deterministic() {
+        let seed_a = Secret::new([0u8; 32]);
+        let seed_b = Secret::new([0u8; 32]);
+        let fp_a = SeedFingerprint::from_seed(seed_a.expose_secret()).unwrap();
+        let fp_b = SeedFingerprint::from_seed(seed_b.expose_secret()).unwrap();
+        assert_eq!(fp_a, fp_b, "same seed must produce same fingerprint");
+    }
 
-        let t_fvk = keys.treasury_fvk();
-        let r_fvk = keys.registry_fvk();
+    #[test]
+    fn different_seeds_produce_different_fingerprints() {
+        let seed_a = Secret::new([0u8; 32]);
+        let seed_b = Secret::new([1u8; 32]);
+        let fp_a = SeedFingerprint::from_seed(seed_a.expose_secret()).unwrap();
+        let fp_b = SeedFingerprint::from_seed(seed_b.expose_secret()).unwrap();
+        assert_ne!(
+            fp_a, fp_b,
+            "different seeds must produce different fingerprints"
+        );
+    }
 
-        assert!(t_fvk.orchard().is_some());
-        assert!(r_fvk.orchard().is_some());
+    // ------------------------------------------------------------------
+    // Derivation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn derive_account_succeeds_for_valid_accounts() {
+        let seed = test_seed();
+        let usk_0 = UnifiedSpendingKey::from_seed(
+            &MAIN_NETWORK,
+            seed.expose_secret(),
+            AccountId::const_from_u32(0),
+        );
+        let usk_1 = UnifiedSpendingKey::from_seed(
+            &MAIN_NETWORK,
+            seed.expose_secret(),
+            AccountId::const_from_u32(1),
+        );
+        assert!(usk_0.is_ok(), "account 0 derivation must succeed");
+        assert!(usk_1.is_ok(), "account 1 derivation must succeed");
+    }
+
+    // ------------------------------------------------------------------
+    // AccountKeys — viewing
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn fvk_has_all_three_pools() {
+        let treasury = test_treasury();
+        let fvk = treasury.fvk();
+        assert!(fvk.orchard().is_some(), "must have Orchard");
+        assert!(fvk.sapling().is_some(), "must have Sapling");
+        assert!(fvk.transparent().is_some(), "must have Transparent");
+    }
+
+    #[test]
+    fn fvk_is_deterministic() {
+        let a = test_treasury();
+        let b = test_treasury();
+        assert!(
+            a.fvk().subsumes_ufvk(&b.fvk()) && b.fvk().subsumes_ufvk(&a.fvk()),
+            "same seed + account must produce same UFVK"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // AccountKeys — spending
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn orchard_spending_key_is_accessible() {
+        let treasury = test_treasury();
+        let _ = treasury.orchard_spending_key();
+    }
+
+    #[test]
+    fn sapling_spending_key_is_accessible() {
+        let treasury = test_treasury();
+        let _ = treasury.sapling_spending_key();
+    }
+
+    #[test]
+    fn transparent_spending_key_is_accessible() {
+        let treasury = test_treasury();
+        let _ = treasury.transparent_spending_key();
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-account
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn orchard_spending_keys_differ_between_accounts() {
+        let treasury = test_treasury();
+        let registry = test_registry();
+        let t = treasury.orchard_spending_key().to_bytes();
+        let r = registry.orchard_spending_key().to_bytes();
+        assert_ne!(t, r, "orchard spending keys must differ");
+    }
+
+    #[test]
+    fn sapling_spending_keys_differ_between_accounts() {
+        let treasury = test_treasury();
+        let registry = test_registry();
+        let t = treasury.sapling_spending_key().to_bytes();
+        let r = registry.sapling_spending_key().to_bytes();
+        assert_ne!(t, r, "sapling spending keys must differ");
+    }
+
+    #[test]
+    fn fvks_differ_between_accounts() {
+        let t = test_treasury().fvk();
+        let r = test_registry().fvk();
+        assert!(!t.subsumes_ufvk(&r), "UFVKs must differ between accounts");
     }
 }

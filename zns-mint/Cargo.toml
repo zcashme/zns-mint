@@ -18,6 +18,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
+secrecy = "0.8"
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 hkdf = "0.12"
 sha2 = "0.10"
@@ -42,8 +43,16 @@ rand = "0.8"
 zebra-indexer-proto = "2.3"
 
 # Key derivation (ZIP-32 Orchard)
-zcash_keys = { git = "https://github.com/zcash/librustzcash", rev = "eb828caadb4b2be4a39823f95e50b42731a515f5", default-features = false, features = ["orchard"] }
+# Treasury (account 0) is user-facing and accepts Orchard + Sapling + Transparent
+# payments from users. Registry (account 1) is name-notes-only (Orchard). Both
+# accounts derive all enabled pools via `from_seed`; the Registry's Sapling and
+# Transparent components are unused (its address is not published).
+zcash_keys = { git = "https://github.com/zcash/librustzcash", rev = "eb828caadb4b2be4a39823f95e50b42731a515f5", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
 zcash_protocol = { git = "https://github.com/zcash/librustzcash", rev = "eb828caadb4b2be4a39823f95e50b42731a515f5", default-features = false }
+
+# Transparent key types (Treasury accepts transparent payments from users).
+# The workspace crate is `zcash_transparent`, published as `transparent`.
+transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash", rev = "eb828caadb4b2be4a39823f95e50b42731a515f5", default-features = false }
 zip32 = "0.2.1"
 
 # Block parsing
@@ -53,7 +62,11 @@ sapling = { package = "sapling-crypto", version = "0.7", default-features = fals
 # Full-block wallet scanning.
 # TODO: Switch back to crates.io once zcash_client_backend >= 0.24.0 is
 # published and confirmed to expose zcash_client_backend::scanning::full.
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash", rev = "eb828caadb4b2be4a39823f95e50b42731a515f5", default-features = false, features = ["orchard"] }
+# Full-block wallet scanning. `transparent-inputs` enables transparent UTXO
+# detection (Treasury accepts transparent payments from users).
+# TODO: Switch back to crates.io once zcash_client_backend >= 0.24.0 is
+# published and confirmed to expose zcash_client_backend::scanning::full.
+zcash_client_backend = { git = "https://github.com/zcash/librustzcash", rev = "eb828caadb4b2be4a39823f95e50b42731a515f5", default-features = false, features = ["orchard", "transparent-inputs"] }
 
 # Orchard with the `unsafe-zns` feature: Name Notes override the standard
 # note commitment so a note commits to a ZNS payload. The fork lives at
@@ -61,6 +74,7 @@ zcash_client_backend = { git = "https://github.com/zcash/librustzcash", rev = "e
 # zns-mint calls `Builder::add_zns_output` / `add_zns_spend` directly, so
 # this is a first-class dep, not just a transitive one.
 orchard = { git = "https://github.com/zcashme/orchard", rev = "e9edfa65b249d1f5ffa78dd04173530b52607162", default-features = false, features = ["unsafe-zns", "circuit"] }
+shardtree = "0.6.2"
 
 # Redirect the crates.io `orchard` consumed transitively by librustzcash to
 # the ZNS fork so the whole graph builds against the same source.

@@ -208,7 +208,7 @@ pub fn authorize_release(
 pub fn build_transaction(
     _wallet: &crate::wallet::Wallet,
     _registry: &Registry,
-    _keys: &crate::key::Keys,
+    _orchard_spending_key: &orchard::keys::SpendingKey,
     _request: NameNoteRequest,
     _exclude: &std::collections::HashSet<orchard::note::Rho>,
 ) -> Result<
