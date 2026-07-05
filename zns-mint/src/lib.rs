@@ -5,7 +5,7 @@ pub mod key;
 pub mod metrics;
 pub mod mint;
 pub mod registry;
-pub mod scanner;
+pub mod sync;
 
 pub mod treasury;
 pub mod wallet;

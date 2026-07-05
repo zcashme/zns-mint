@@ -1,14 +1,5 @@
 //! Registry state-machine view and transition authorization.
 //!
-//! The `Registry` owns the name-chain state: a map from canonical ZNS name to
-//! its most recent known tip (the `Action` and `Commitment` of the live Name
-//! Note for that name). It is a peer of `Wallet`, not a field of it: both are
-//! chain-derived stores that the scanner writes to by reference at scan time,
-//! and each owns its own domain state. See `docs/protocol/14-wallet-design.md`.
-//!
-//! The scanner writes name tips here via [`Registry::set_tip`]; the
-//! authorization functions read them via [`Registry::tip`]. No spending keys,
-//! no chain I/O, no signing — those live elsewhere.
 
 use crate::mint::{Action, Name, NameCommitment, ZERO_PREV_COMMITMENT};
 use std::collections::HashMap;
@@ -81,18 +72,6 @@ pub struct Tip {
 
 /// The name-chain state: a map from each canonical ZNS name to the most
 /// recent confirmed tip for that name.
-///
-/// This is a peer of [`crate::wallet::Wallet`], not a field of it. The scanner
-/// takes `&mut Registry` and `&mut Wallet` by reference per block; nothing owns
-/// both as nested state. Composition happens at the call site (the sync loop),
-/// which holds `Wallet` and `Registry` as independent locals.
-///
-/// Invariants:
-/// - At most one live tip per name (enforced by the per-name chain rule in the
-///   scanner: a new Name Note for an existing name requires the prior tip's
-///   nullifier to have appeared in the same or an earlier block).
-/// - The tip's `commitment` is the `rcm` of the note that the next transition
-///   for this name must chain off.
 pub struct Registry(HashMap<Name, Tip>);
 
 impl Registry {
@@ -135,16 +114,13 @@ pub fn current_tip(registry: &Registry, name: &Name) -> Option<Tip> {
 ///
 /// The Treasury layer must have already verified that the claim payment was made.
 /// This function verifies that the name is available (either no tip, or tip is `Release`).
-pub fn authorize_claim(
-    registry: &Registry,
-    name: Name,
-    ua: String,
-) -> Option<NameNoteRequest> {
+pub fn authorize_claim(registry: &Registry, name: Name, ua: String) -> Option<NameNoteRequest> {
     match current_tip(registry, &name) {
         None => Some(NameNoteRequest::new_claim(name.as_str().to_string(), ua)),
-        Some(Tip { action: Action::Release, .. }) => {
-            Some(NameNoteRequest::new_claim(name.as_str().to_string(), ua))
-        }
+        Some(Tip {
+            action: Action::Release,
+            ..
+        }) => Some(NameNoteRequest::new_claim(name.as_str().to_string(), ua)),
         Some(_) => None, // Name is already live
     }
 }

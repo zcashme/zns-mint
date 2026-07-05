@@ -1,8 +1,7 @@
 //! Zebra-backed best-chain block reads.
 //!
 //! This module owns chain-tip reads and full-block fetch/parse/verification
-//! over a caller-owned Zebra client. It does not track scanning position or
-//! model "the chain"; callers own cursors and replay policy.
+//! over a caller-owned Zebra client. 
 
 use zcash_primitives::{
     block::{Block as ZcashBlock, BlockHash},
