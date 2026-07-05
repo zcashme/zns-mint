@@ -457,6 +457,12 @@ rebuilt from the birthday checkpoint on every boot. There is no `store.rs`
 layer, no on-disk snapshot, and no cross-restart wallet state. Restart cost
 is bounded by chain length since the birthday, not by wallet activity.
 
+## Storage Rationale
+
+For the reasoning behind the in-memory-only, no-database design — why it is
+sufficient for an always-on daemon next to a Zebra full node, and when it
+should be revisited — see `14a-wallet-storage-rationale.md`.
+
 ## Open Questions
 
 - **Witness strategy for funding notes**: maintain incrementally like

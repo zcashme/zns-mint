@@ -1,26 +1,10 @@
 //! In-band OTP authorization policy for update/release requests.
 //!
-//! OTPs are transported by shielded memos, never by logs. The flow is:
+//! OTPs are transported by shielded memos:
 //!
 //! 1. user -> Treasury: `ZNS:update:<name>:<ua>` or `ZNS:release:<name>:<ua>`
 //! 2. Treasury -> current controller: `ZNS:otp:<name>:<verb>:<ua>:<otp>`
 //! 3. user -> Treasury: same request with `:<otp>` appended
-//!
-//! This module owns OTP credential state and memo construction only. It is the
-//! sole OTP authority: issuance, verification, expiry, and one-time
-//! consumption. It does **not** sign or broadcast the OTP relay transaction;
-//! that is the job of the transaction-assembly path, which funds the relay
-//! from the Treasury account and signs it with the Treasury spending key. The
-//! Treasury module (`treasury.rs`) owns Treasury wallet state and policy
-//! (auto-sweep, funding the Registry account) and does not sign OTP relays
-//! either.
-//!
-//! This module is currently not wired into `main.rs` (`mod auth;` is commented
-//! out) and depends on `crate::payload`, which does not exist in the current
-//! tree. It is aspirational: it documents the OTP credential policy shape and
-//! will be re-enabled when the request-processing layer and payload kernel are
-//! restored.
-
 use std::collections::HashMap;
 
 use rand::{rngs::OsRng, RngCore};

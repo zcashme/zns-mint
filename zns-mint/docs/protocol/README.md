@@ -47,6 +47,10 @@ preserve that boundary.
   per-account note maps, nullifiers, witnesses, undo buffer, ZNS-specific
   Registry view, sync flow, and integration with the treasury and registry
   layers.
+- [14a-wallet-storage-rationale.md](14a-wallet-storage-rationale.md) records
+  *why* the wallet is in-memory only with no durable state: the blockchain as
+  source of truth, the always-on daemon + Zebra context, and why a database
+  or partial persistence is unnecessary.
 - [15-treasury-module.md](15-treasury-module.md) defines the `treasury.rs`
   module: Treasury wallet view, fund selection, request memo classification,
   auto-sweep, Registry funding, and claim payment detection.

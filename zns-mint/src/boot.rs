@@ -1,15 +1,31 @@
 //! ZNS Mint Boot Sequence
 
+use std::str::FromStr;
+use secrecy::{ExposeSecret, Secret};
 use zcash_protocol::consensus::BlockHeight;
-use zeroize::Zeroizing;
+use zip32::{fingerprint::SeedFingerprint, AccountId};
 
-use crate::key::Keys;
+use crate::key::{self, AccountKeys};
 use crate::zcash;
+
+/// The expected seed fingerprint, hardcoded at deployment time.
+///
+/// At boot, the TEE-injected seed is verified against this value. If they
+/// don't match, the wrong seed was injected — the mint refuses to boot before
+/// touching the chain.
+///
+/// **Dummy value** — this is the fingerprint of the all-zeros seed
+/// (`[0u8; 32]`), used during development. Replace with the actual deployment
+/// seed's fingerprint before production. To compute:
+/// `SeedFingerprint::from_seed(&seed).unwrap().to_string()` and paste the
+/// `zip32seedfp1...` string here.
+const EXPECTED_SEED_FINGERPRINT: &str = "zip32seedfp1rc52vh66vxh4klcd22fgmxlzfxcutdfr34gahe5mksv2g82mcejsqqwlyu";
 
 pub async fn boot() -> (
     zcash::chain::Reader,
-    Keys,
     crate::wallet::Wallet,
+    AccountKeys,
+    AccountKeys,
     BlockHeight,
 ) {
     tracing::info!("boot: starting");
@@ -21,13 +37,24 @@ pub async fn boot() -> (
     let (chain, tip_height) = verify_chain_integrity(&info).await;
 
     // 3. Cryptography Path: Trust established, touch the seed
-    let keys = derive_keys(obtain_key_source());
+    let source = obtain_key_source();
+    let blob = match &source {
+        KeySource::SealedBlob { blob } => blob.as_slice(),
+    };
+    let seed = decrypt_sealed_blob(blob);
+    verify_fingerprint(&seed);
 
-    // 4. RAM Path: Initialize the in-memory wallet (rebuilt from birthday on every boot)
-    let wallet = initialize_wallet(&keys);
+    // 4. Key Derivation: derive per-module keys from the seed
+    let treasury_keys = key::derive_account(&seed, AccountId::const_from_u32(0));
+    let registry_keys = key::derive_account(&seed, AccountId::const_from_u32(1));
+    tracing::info!("boot: keys derived");
+    // `seed` drops here — Secret zeroizes the bytes.
+
+    // 5. RAM Path: Initialize the in-memory wallet (rebuilt from birthday on every boot)
+    let wallet = initialize_wallet(&treasury_keys.fvk(), &registry_keys.fvk());
 
     // Return the verified environment to the orchestrator
-    (chain, keys, wallet, tip_height)
+    (chain, wallet, treasury_keys, registry_keys, tip_height)
 }
 
 /// Pings the node via JSON-RPC to ensure the network path is alive.
@@ -73,11 +100,33 @@ async fn verify_chain_integrity(info: &zcash::zebra::BlockchainInfo) -> (zcash::
     (chain, tip_height)
 }
 
+/// Verifies the TEE-injected seed against the hardcoded expected fingerprint.
+///
+/// If the fingerprints don't match, the wrong seed was injected. This is a
+/// critical safety check: a different seed means different spending keys,
+/// different viewing keys, and a different namespace. The mint refuses to boot.
+fn verify_fingerprint(seed: &Secret<[u8; 32]>) {
+    let expected = SeedFingerprint::from_str(EXPECTED_SEED_FINGERPRINT)
+        .expect("hardcoded seed fingerprint is valid bech32m");
+    let actual = SeedFingerprint::from_seed(seed.expose_secret())
+        .expect("seed is 32 bytes, within ZIP-32's 32..=252 range");
+    assert_eq!(
+        actual, expected,
+        "SEED FINGERPRINT MISMATCH: wrong seed injected into TEE. \
+         expected={}, actual={}",
+        expected, actual
+    );
+    tracing::info!("boot: seed fingerprint verified = {}", actual);
+}
+
 /// Seeds the in-memory wallet using the derived viewing keys.
-fn initialize_wallet(keys: &Keys) -> crate::wallet::Wallet {
+fn initialize_wallet(
+    treasury_fvk: &zcash_keys::keys::UnifiedFullViewingKey,
+    registry_fvk: &zcash_keys::keys::UnifiedFullViewingKey,
+) -> crate::wallet::Wallet {
     let ufvks = [
-        (crate::mint::TREASURY_ACCOUNT, keys.treasury_fvk()),
-        (crate::mint::REGISTRY_ACCOUNT, keys.registry_fvk()),
+        (crate::mint::TREASURY_ACCOUNT, treasury_fvk.clone()),
+        (crate::mint::REGISTRY_ACCOUNT, registry_fvk.clone()),
     ];
     crate::wallet::Wallet::new(ufvks)
 }
@@ -101,7 +150,7 @@ enum KeySource {
     /// A TEE-sealed seed blob: operator-unreadable ciphertext that only the
     /// attested enclave can decrypt. The blob's bytes are not the seed; the
     /// seed is recovered inside the enclave by `decrypt_sealed_blob` and
-    /// returned already wrapped in `Zeroizing`.
+    /// returned as `Secret<[u8; 32]>`.
     SealedBlob { blob: Vec<u8> },
 }
 
@@ -119,25 +168,8 @@ fn obtain_key_source() -> KeySource {
 /// Decrypts a sealed blob into a seed, inside the attested boundary.
 ///
 /// This is where the TEE unseals the blob and returns the plaintext seed
-/// wrapped in `Zeroizing`. Unimplemented; the future TEE work lands here.
-fn decrypt_sealed_blob(_blob: &[u8]) -> Zeroizing<[u8; 32]> {
+/// wrapped in `Secret<[u8; 32]>`, which zeroizes on drop. Unimplemented; the
+/// future TEE work lands here.
+fn decrypt_sealed_blob(_blob: &[u8]) -> Secret<[u8; 32]> {
     todo!("TEE-sealed-blob decryption is not yet wired")
-}
-
-/// Derives the two ZIP-32 keys from a single seed.
-///
-/// Treasury = account 0, Registry = account 1. This is the **only** place that
-/// touches seed material, and it runs only after liveness and tip verification
-/// have passed — so seed material is never read on a broken or unverified chain.
-///
-/// The seed arrives already wrapped in `Zeroizing` from `decrypt_sealed_blob`.
-/// An unwrapped `[u8; 32]` seed is unrepresentable at this call site — see
-/// `AGENTS.md` "Seed and key material", Layer 2.
-fn derive_keys(source: KeySource) -> Keys {
-    let seed = match source {
-        KeySource::SealedBlob { blob } => decrypt_sealed_blob(&blob),
-    };
-    let keys = Keys::from_seed(seed);
-    tracing::info!("boot: keys derived");
-    keys
 }

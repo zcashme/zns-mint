@@ -13,11 +13,16 @@ async fn main() {
     tokio::spawn(metrics::serve());
 
     // Boot Sequence
-    let (mut chain, _keys, mut wallet, tip_height) = boot::boot().await;
+    let (mut chain, mut wallet, treasury_keys, registry_keys, tip_height) = boot::boot().await;
 
     // Registry owns the name-chain state; Wallet owns note/tree state.
     // They are peers: the scanner borrows both per block, nothing owns both.
     let mut registry = Registry::new();
+
+    // `treasury_keys` and `registry_keys` are held for the signing path
+    // (transaction assembly), which is not yet implemented. The scanner
+    // gets UFVKs from the wallet, not from these.
+    let _ = (treasury_keys, registry_keys);
 
     // Bootstrap scanner state (injects Birthday Checkpoint if needed)
     let mut reorg_buffer = zns_mint::scanner::scan::bootstrap(&mut wallet).await;
