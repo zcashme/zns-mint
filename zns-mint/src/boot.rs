@@ -22,13 +22,16 @@ use crate::zcash;
 const EXPECTED_SEED_FINGERPRINT: &str = "zip32seedfp1rc52vh66vxh4klcd22fgmxlzfxcutdfr34gahe5mksv2g82mcejsqqwlyu";
 
 pub async fn boot() -> (
-    zcash::chain::Reader,
+    zcash::zebra::ChainClient,
     crate::wallet::Wallet,
     AccountKeys,
     AccountKeys,
     BlockHeight,
 ) {
     tracing::info!("boot: starting");
+
+    // 0. Environment Path: Assert no configuration vectors exist
+    sanitize_environment();
 
     // 1. Network Path: Prove node is reachable
     let info = check_liveness().await;
@@ -38,10 +41,11 @@ pub async fn boot() -> (
 
     // 3. Cryptography Path: Trust established, touch the seed
     let source = obtain_key_source();
-    let blob = match &source {
-        KeySource::SealedBlob { blob } => blob.as_slice(),
+    let seed = match &source {
+        KeySource::SealedBlob { blob } => decrypt_sealed_blob(blob),
+        #[cfg(feature = "dev-seed")]
+        KeySource::Dev => Secret::new([0u8; 32]),
     };
-    let seed = decrypt_sealed_blob(blob);
     verify_fingerprint(&seed);
 
     // 4. Key Derivation: derive per-module keys from the seed
@@ -55,6 +59,21 @@ pub async fn boot() -> (
 
     // Return the verified environment to the orchestrator
     (chain, wallet, treasury_keys, registry_keys, tip_height)
+}
+
+/// Assert that no dangerous environment variables are set.
+/// The TEE guarantees the execution environment, but we must explicitly reject
+/// host-provided config like `RUST_LOG=trace` to prevent side-channel leaks.
+fn sanitize_environment() {
+    let banned_prefixes = ["RUST_LOG", "RUST_BACKTRACE", "ZNS_"];
+    for (key, _) in std::env::vars() {
+        for prefix in banned_prefixes {
+            if key.starts_with(prefix) {
+                panic!("FATAL: Banned environment variable '{}' detected. The mint accepts zero host configuration.", key);
+            }
+        }
+    }
+    tracing::info!("boot: environment sanitized");
 }
 
 /// Pings the node via JSON-RPC to ensure the network path is alive.
@@ -74,9 +93,13 @@ async fn check_liveness() -> zcash::zebra::BlockchainInfo {
 }
 
 /// Connects via gRPC, fetches the tip, cross-validates against RPC, and verifies the block.
-async fn verify_chain_integrity(info: &zcash::zebra::BlockchainInfo) -> (zcash::chain::Reader, BlockHeight) {
-    let mut chain = zcash::chain::Reader::connect().await;
-    let (tip_height, tip_hash) = chain.tip().await;
+async fn verify_chain_integrity(info: &zcash::zebra::BlockchainInfo) -> (zcash::zebra::ChainClient, BlockHeight) {
+    let mut chain = zcash::zebra::ChainClient::connect().await;
+    
+    let resp = chain.client().chain_tip_change(zebra_indexer_proto::Empty {}).await.expect("chain_tip_change failed");
+    let mut stream = resp.into_inner();
+    let tip = stream.message().await.expect("no chain tip message").expect("stream closed with no tip");
+    let (tip_height, tip_hash) = crate::sync::scan::tip_height_hash(&tip);
 
     assert_eq!(
         info.blocks,
@@ -90,11 +113,33 @@ async fn verify_chain_integrity(info: &zcash::zebra::BlockchainInfo) -> (zcash::
         "split-brain: json-rpc tip hash != grpc tip hash"
     );
 
-    let block = chain.block(tip_height).await;
+    let block = crate::sync::scan::fetch_verified_block(&mut chain, tip_height).await;
+    
+    // Consensus Check: Ensure node is past NU5 activation (Orchard support required)
+    const NU5_MAINNET_ACTIVATION_HEIGHT: u32 = 1_687_104;
+    assert!(
+        u32::from(tip_height) >= NU5_MAINNET_ACTIVATION_HEIGHT,
+        "consensus failure: node is on a pre-NU5 branch"
+    );
+
+    // Freshness Check: Ensure the tip is not older than 2 hours.
+    let tip_time = block.as_inner().header().time;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time went backwards")
+        .as_secs() as u32;
+    
+    // Allow a 2 hour window (7200 seconds)
+    assert!(
+        now.saturating_sub(tip_time) <= 7200,
+        "liveness failure: node is fully synced but tip is too old (stuck node? tip_time={}, now={})",
+        tip_time, now
+    );
+
     tracing::info!(
         height = u32::from(tip_height),
         tx_count = block.transactions().count(),
-        "boot: block verified ok"
+        "boot: block verified ok, tip is fresh"
     );
 
     (chain, tip_height)
@@ -152,6 +197,10 @@ enum KeySource {
     /// seed is recovered inside the enclave by `decrypt_sealed_blob` and
     /// returned as `Secret<[u8; 32]>`.
     SealedBlob { blob: Vec<u8> },
+    /// A developer-only hardcoded zero seed, gated by the `dev-seed` feature flag.
+    /// Never enabled in production builds.
+    #[cfg(feature = "dev-seed")]
+    Dev,
 }
 
 /// The one and only key source the mint will accept today.
@@ -162,6 +211,10 @@ enum KeySource {
 /// cannot boot, which is the honest state: a zero-seed mainnet run is worse
 /// than no run.
 fn obtain_key_source() -> KeySource {
+    #[cfg(feature = "dev-seed")]
+    return KeySource::Dev;
+
+    #[cfg(not(feature = "dev-seed"))]
     todo!("TEE-sealed-blob decryption is not yet wired; the mint cannot boot until it is")
 }
 

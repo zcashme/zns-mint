@@ -3,6 +3,7 @@
 
 use crate::mint::{Action, Name, NameCommitment, ZERO_PREV_COMMITMENT};
 use std::collections::HashMap;
+use zcash_protocol::consensus::BlockHeight;
 
 /// A requested Name Note transition, ready for the transaction-assembly path.
 ///
@@ -70,30 +71,62 @@ pub struct Tip {
     pub psi: pasta_curves::pallas::Base,
 }
 
+#[derive(Debug, Clone)]
+pub struct RegistryHistoryRecord {
+    pub height: BlockHeight,
+    pub name: Name,
+    pub prev_tip: Option<Tip>,
+}
+
 /// The name-chain state: a map from each canonical ZNS name to the most
-/// recent confirmed tip for that name.
-pub struct Registry(HashMap<Name, Tip>);
+/// recent confirmed tip for that name, plus an undo log for reorgs.
+pub struct Registry {
+    tips: HashMap<Name, Tip>,
+    history: Vec<RegistryHistoryRecord>,
+}
 
 impl Registry {
     /// Create a new, empty registry.
     pub fn new() -> Self {
-        Self(HashMap::new())
+        Self {
+            tips: HashMap::new(),
+            history: Vec::new(),
+        }
     }
 
     /// Read the current tip of a ZNS name chain.
     pub fn tip(&self, name: &Name) -> Option<&Tip> {
-        self.0.get(name)
+        self.tips.get(name)
     }
 
     /// Update the current tip of a ZNS name chain. Called by the scanner when
     /// a confirmed Name Note for `name` is observed on the best chain.
-    pub fn set_tip(&mut self, name: Name, tip: Tip) {
-        self.0.insert(name, tip);
+    pub fn set_tip(&mut self, name: Name, tip: Tip, height: BlockHeight) {
+        let prev_tip = self.tips.insert(name.clone(), tip);
+        self.history.push(RegistryHistoryRecord { height, name, prev_tip });
     }
 
     /// Read-only iterator over all known name tips. Used for diagnostics.
     pub fn name_chain(&self) -> impl Iterator<Item = (&Name, &Tip)> {
-        self.0.iter()
+        self.tips.iter()
+    }
+
+    /// Rewinds the registry state back to the specified height (linear undo).
+    pub fn truncate_to_height(&mut self, height: BlockHeight) {
+        while let Some(record) = self.history.last() {
+            if record.height <= height {
+                break;
+            }
+            let record = self.history.pop().unwrap();
+            match record.prev_tip {
+                Some(old_tip) => {
+                    self.tips.insert(record.name, old_tip);
+                }
+                None => {
+                    self.tips.remove(&record.name);
+                }
+            }
+        }
     }
 }
 
@@ -182,17 +215,114 @@ pub fn authorize_release(
 /// the missing piece. Until that lands, the boot path does not call this.
 #[allow(clippy::too_many_arguments)]
 pub fn build_transaction(
-    _wallet: &crate::wallet::Wallet,
-    _registry: &Registry,
-    _orchard_spending_key: &orchard::keys::SpendingKey,
-    _request: NameNoteRequest,
-    _exclude: &std::collections::HashSet<orchard::note::Rho>,
+    wallet: &mut crate::wallet::Wallet,
+    registry: &Registry,
+    orchard_spending_key: &orchard::keys::SpendingKey,
+    request: NameNoteRequest,
+    exclude: &[orchard::note::Rho],
+    target_height: BlockHeight,
 ) -> Result<
     orchard::Bundle<
         orchard::builder::InProgress<orchard::builder::Unproven, orchard::builder::Unauthorized>,
-        (),
+        i64,
     >,
     &'static str,
 > {
-    todo!("transaction assembly: witness derivation (Slice 4) + sighash/funding (Slice 5) unimplemented")
+    use orchard::builder::BundleType;
+    use orchard::bundle::BundleVersion;
+    use rand::rngs::OsRng;
+
+    // 1. Get the latest anchor at target_height
+    let anchor = wallet
+        .trees
+        .orchard_anchor(target_height)
+        .ok_or("no orchard anchor at target height")?;
+
+    // 2. Initialize the Builder
+    let bundle_version = BundleVersion::orchard_v2();
+    let flags = bundle_version.default_flags();
+
+    let mut builder = orchard::builder::Builder::new(
+        BundleType::DEFAULT,
+        bundle_version,
+        flags,
+        anchor.into(),
+    )
+    .map_err(|_| "failed to create builder")?;
+
+    let fvk = orchard::keys::FullViewingKey::from(orchard_spending_key);
+    let address = fvk.address_at(0u32, orchard::keys::Scope::External);
+    let name = Name::parse(&request.name).ok_or("invalid ZNS name in request")?;
+
+    // 3. Spend previous Name Note if updating or releasing
+    if request.action == Action::Update || request.action == Action::Release {
+        let prev_note = wallet
+            .notes_for(crate::mint::REGISTRY_ACCOUNT)
+            .find(|n| {
+                if exclude.contains(&n.note.rho()) {
+                    return false;
+                }
+                if let Some((n_name, _, _, _)) = crate::mint::decode_name_note(&n.memo) {
+                    n_name == name
+                } else {
+                    false
+                }
+            })
+            .cloned()
+            .ok_or("previous name note not found in wallet")?;
+
+        let merkle_path = wallet
+            .trees
+            .orchard_witness(prev_note.position, target_height)
+            .ok_or("witness for previous note not found")?;
+
+        let tip = registry.tip(&name).ok_or("tip not found in registry")?;
+
+        builder
+            .add_zns_spend(
+                fvk.clone(),
+                prev_note.note.clone(),
+                merkle_path.into(),
+                tip.rcm,
+                tip.psi,
+            )
+            .map_err(|_| "failed to add zns spend")?;
+    }
+
+    // 4. Create new ZNS output
+    let (new_rcm, new_psi) = crate::mint::zns_psi_rcm(
+        &name,
+        request.action,
+        &request.ua,
+        request.prev_commitment,
+    );
+
+    let memo = crate::mint::encode_name_note(
+        &name,
+        request.action,
+        &request.ua,
+        request.prev_commitment,
+    )
+    .ok_or("failed to encode name note memo")?;
+
+    let value = orchard::value::NoteValue::from_raw(0);
+
+    builder
+        .add_zns_output(
+            Some(fvk.to_ovk(orchard::keys::Scope::External)),
+            address,
+            value,
+            memo,
+            new_rcm,
+            new_psi,
+        )
+        .map_err(|_| "failed to add zns output")?;
+
+    // 5. Build and return
+    let (bundle, _meta) = builder
+        .build::<i64>(&mut OsRng)
+        .map_err(|_| "failed to build transaction")?
+        .ok_or("builder produced no bundle")?;
+
+    Ok(bundle)
 }
