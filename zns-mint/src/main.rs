@@ -25,10 +25,10 @@ async fn main() {
     let _ = (treasury_keys, registry_keys);
 
     // Bootstrap scanner state (injects Birthday Checkpoint if needed)
-    let mut reorg_buffer = zns_mint::scanner::scan::bootstrap(&mut wallet).await;
+    let mut reorg_buffer = zns_mint::sync::scan::bootstrap(&mut wallet).await;
 
     // Scan to tip
-    zns_mint::scanner::scan::scan_to_tip(
+    zns_mint::sync::scan::scan_to_tip(
         &mut chain,
         &mut wallet,
         &mut registry,
