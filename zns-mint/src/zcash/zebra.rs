@@ -5,32 +5,29 @@
 //! - `ChainClient`: A streaming, stateful HTTP/2 gRPC client for observing chain state.
 //! - `JsonRpc`: A stateless, point-in-time HTTP POST client for JSON-RPC requests.
 
-use std::{any::type_name, fmt, fs, path::Path, time::Duration};
+use std::{any::type_name, fmt, time::Duration};
 
 use incrementalmerkletree::frontier::CommitmentTree;
 use reqwest::ClientBuilder;
 use sapling::Node as SaplingNode;
 use serde::{Deserialize, Serialize};
 use zcash_client_backend::data_api::BlockMetadata;
-use zcash_primitives::{
-    block::BlockHash,
-    merkle_tree::{read_commitment_tree, HashSer},
-};
+use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
 use zcash_protocol::consensus::BlockHeight;
 use zebra_indexer_proto::ZebraClient;
 
 use orchard::tree::MerkleHashOrchard;
 
-const ZEBRA_INDEXER_URL: &str = "http://light.zcash.me:8230";
-const ZEBRA_JSON_RPC_URL: &str = "http://light.zcash.me:8232";
-const CHECKPOINT_NETWORK: &str = "main";
+const ZEBRA_INDEXER_URL: &str = "http://127.0.0.1:8230";
+const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:8232";
 
 // ============================================================================
 // gRPC Chain Observer
 // ============================================================================
 
+/// A client for reading best-chain blocks and tips.
 #[derive(Clone)]
-pub(crate) struct ChainClient(ZebraClient);
+pub struct ChainClient(ZebraClient);
 
 impl ChainClient {
     pub(crate) async fn connect() -> Self {
@@ -73,34 +70,15 @@ impl JsonRpc {
     }
 
     /// Fetches the shielded tree state for a block through Zebra JSON-RPC.
-    pub(crate) async fn tree_state(
+    pub(crate) async fn get_checkpoint(
         &self,
         height: BlockHeight,
-    ) -> Result<BirthdayCheckpoint, TransportError> {
+    ) -> Result<CheckpointData, TransportError> {
         let response: TreeStateResponse = self
             .send_request("z_gettreestate", [u32::from(height).to_string()])
             .await?;
 
-        BirthdayCheckpoint::from_rpc_response(response)
-    }
-
-    /// Loads the ZNS birthday checkpoint if it exists, otherwise creates it
-    /// from the trusted in-TEE Zebra node.
-    pub(crate) async fn load_or_create_birthday_checkpoint(
-        &self,
-        path: impl AsRef<Path>,
-        height: BlockHeight,
-    ) -> Result<BirthdayCheckpoint, TransportError> {
-        let path = path.as_ref();
-        if path.exists() {
-            let checkpoint = BirthdayCheckpoint::read(path)?;
-            checkpoint.validate_height(height)?;
-            Ok(checkpoint)
-        } else {
-            let checkpoint = self.tree_state(height).await?;
-            checkpoint.write(path)?;
-            Ok(checkpoint)
-        }
+        CheckpointData::from_rpc_response(response)
     }
 
     /// Fetches the raw transaction hex for a given transaction ID.
@@ -196,8 +174,6 @@ impl JsonRpc {
 // ============================================================================
 
 // We hand-roll these narrow JSON-RPC 2.0 envelopes instead of pulling in `jsonrpsee`.
-// For a TEE environment, we only need to serialize a few specific HTTP POST payloads,
-// so avoiding the bloat keeps our footprint minimal and our security boundary auditable.
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct RpcRequest<T> {
@@ -216,7 +192,7 @@ struct RpcResponse<T> {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
-pub(crate) struct RpcError {
+pub struct RpcError {
     code: i64,
     message: String,
     data: Option<serde_json::Value>,
@@ -286,21 +262,13 @@ struct TreeCommitments {
 // ZNS Birthday Checkpoint
 // ============================================================================
 
-/// ZNS-owned checkpoint format for the scan birthday.
-///
-/// This mirrors the useful payload returned by Zebra's `z_gettreestate`, but it
-/// is deliberately not the lightwalletd protobuf `TreeState`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct BirthdayCheckpoint {
-    pub network: String,
-    pub height: u32,
-    pub hash: String,
-    pub time: u32,
-    pub sapling_final_state: String,
-    pub orchard_final_state: String,
+pub(crate) struct CheckpointData {
+    pub metadata: BlockMetadata,
+    pub sapling_tree: CommitmentTree<SaplingNode, 32>,
+    pub orchard_tree: CommitmentTree<MerkleHashOrchard, 32>,
 }
 
-impl BirthdayCheckpoint {
+impl CheckpointData {
     fn from_rpc_response(response: TreeStateResponse) -> Result<Self, TransportError> {
         let sapling_final_state = response
             .sapling
@@ -313,78 +281,36 @@ impl BirthdayCheckpoint {
             .final_state
             .ok_or(TransportError::BadNodeData("missing Orchard finalState"))?;
 
+        let sapling_tree = decode_tree::<SaplingNode>(&sapling_final_state, "Sapling")?;
+        let orchard_tree = decode_tree::<MerkleHashOrchard>(&orchard_final_state, "Orchard")?;
+
+        let expected_hash_bytes = hex::decode(&response.hash)
+            .map_err(|_| TransportError::BadNodeData("invalid hash hex"))?;
+
+        let expected_hash = crate::sync::scan::block_hash_from_display(&expected_hash_bytes)
+            .ok_or(TransportError::BadNodeData("malformed 32-byte hash"))?;
+
+        let metadata =
+            BlockMetadata::from_parts(
+                BlockHeight::from_u32(response.height),
+                expected_hash,
+                Some(
+                    sapling_tree.size().try_into().map_err(|_| {
+                        TransportError::BadCheckpoint("Sapling tree too large".into())
+                    })?,
+                ),
+                Some(
+                    orchard_tree.size().try_into().map_err(|_| {
+                        TransportError::BadCheckpoint("Orchard tree too large".into())
+                    })?,
+                ),
+            );
+
         Ok(Self {
-            network: CHECKPOINT_NETWORK.to_string(),
-            height: response.height,
-            hash: response.hash,
-            time: response.time,
-            sapling_final_state,
-            orchard_final_state,
+            metadata,
+            sapling_tree,
+            orchard_tree,
         })
-    }
-
-    fn read(path: &Path) -> Result<Self, TransportError> {
-        let bytes = fs::read(path)?;
-        Ok(serde_json::from_slice(&bytes)?)
-    }
-
-    fn write(&self, path: &Path) -> Result<(), TransportError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        fs::write(path, serde_json::to_vec_pretty(self)?)?;
-        Ok(())
-    }
-
-    pub(crate) fn block_metadata(
-        &self,
-        expected_hash: BlockHash,
-    ) -> Result<BlockMetadata, TransportError> {
-        if self.network != CHECKPOINT_NETWORK {
-            return Err(TransportError::BadCheckpoint(format!(
-                "checkpoint network {} != {}",
-                self.network, CHECKPOINT_NETWORK
-            )));
-        }
-
-        if self.hash != expected_hash.to_string() {
-            return Err(TransportError::BadCheckpoint(
-                "checkpoint hash != Zebra block hash".to_string(),
-            ));
-        }
-
-        let sapling_tree = decode_tree::<SaplingNode>(&self.sapling_final_state, "Sapling")?;
-        let orchard_tree = decode_tree::<MerkleHashOrchard>(&self.orchard_final_state, "Orchard")?;
-
-        Ok(BlockMetadata::from_parts(
-            BlockHeight::from_u32(self.height),
-            expected_hash,
-            Some(
-                sapling_tree
-                    .size()
-                    .try_into()
-                    .map_err(|_| TransportError::BadCheckpoint("Sapling tree too large".into()))?,
-            ),
-            Some(
-                orchard_tree
-                    .size()
-                    .try_into()
-                    .map_err(|_| TransportError::BadCheckpoint("Orchard tree too large".into()))?,
-            ),
-        ))
-    }
-
-    fn validate_height(&self, expected: BlockHeight) -> Result<(), TransportError> {
-        if self.height == u32::from(expected) {
-            Ok(())
-        } else {
-            Err(TransportError::BadCheckpoint(format!(
-                "checkpoint height {} != {}",
-                self.height,
-                u32::from(expected)
-            )))
-        }
     }
 }
 

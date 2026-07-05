@@ -113,6 +113,20 @@ impl ShardTrees {
             .expect("in-memory store is infallible")
     }
 
+    pub fn sapling_tree_size(&self) -> Option<u32> {
+        self.sapling
+            .max_leaf_position(None)
+            .expect("in-memory store is infallible")
+            .map(|p| (u64::from(p) + 1) as u32)
+    }
+
+    pub fn orchard_tree_size(&self) -> Option<u32> {
+        self.orchard
+            .max_leaf_position(None)
+            .expect("in-memory store is infallible")
+            .map(|p| (u64::from(p) + 1) as u32)
+    }
+
     // --- Reorg Handling ---
 
     pub fn truncate_to_checkpoint(&mut self, height: BlockHeight) {

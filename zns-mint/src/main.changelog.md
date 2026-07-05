@@ -530,3 +530,8 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
   (a log is a log).
 - `cargo build`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
   pass (6 passed, 1 ignored).
+
+## 2026-07-05 (dev-seed feature flag)
+- Added a `dev-seed` feature flag to `Cargo.toml`.
+- Added a `Dev` variant to `KeySource` in `boot.rs` gated by the `dev-seed` feature.
+- Modified `obtain_key_source` and `boot` to return and handle a hardcoded zero seed when the `dev-seed` feature is enabled, allowing local development to bypass the TEE-enforced sealed blob requirement.

@@ -5,6 +5,10 @@ edition = "2021"
 rust-version = "1.85"
 publish = false
 
+[features]
+default = []
+dev-seed = []
+
 [[bin]]
 name = "zns-mint"
 path = "src/main.rs"
