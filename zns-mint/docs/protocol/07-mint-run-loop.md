@@ -57,17 +57,21 @@ Boot proves that the chain source is alive and serving structurally valid data,
 then derives accounts. Seed material should not be touched before the chain
 source passes the boot checks.
 
+Boot enforces strict security constraints before starting:
+1. **Environment Sanitation:** Asserts zero host-configuration by panicking if dangerous environment variables (e.g., `RUST_LOG`, `RUST_BACKTRACE`, `ZNS_*`) are set.
+2. **Consensus Branch Verification:** Asserts the node's tip height is past Orchard activation (NU5), refusing to sync against deprecated chain branches.
+3. **Tip Freshness:** Asserts the tip block timestamp is within a 2-hour window of the mint's system time, refusing to operate on a stalled or partitioned node.
+
 Boot does not own sync policy, request policy, transaction policy, or run-loop
 state machines.
 
 ## Rebuild Responsibilities
 
 Because there is no durable state, the catch-up phase *is* the rebuild. The
-mint seeds its in-memory wallet from the static birthday checkpoint and scans
-forward from there. There is no "load state" step and no "fail loudly on
-inconsistent state" branch, because the only durable artifact is the birthday
-checkpoint itself, which is created and validated once (see
-`08-chain-sync.md`).
+mint seeds its in-memory wallet from the birthday checkpoint fetched live from
+Zebra's JSON-RPC, and scans forward from there. There is no "load state" step
+and no "fail loudly on inconsistent state" branch, because the only durable
+artifact is the Zebra node itself.
 
 ## Catch-Up Responsibilities
 
@@ -124,7 +128,5 @@ Boot and trust-path failures are fatal.
 Per-request failures are not fatal. They should produce redacted rejection logs
 and leave the mint running.
 
-Birthday-checkpoint corruption is fatal: the static checkpoint is the one
-durable artifact the rebuild depends on, and a corrupt or missing checkpoint
-that cannot be re-derived from trusted Zebra leaves the mint with no
-authoritative starting state.
+Birthday-checkpoint corruption is fatal: a failure to fetch a valid tree state
+from trusted Zebra leaves the mint with no authoritative starting state.

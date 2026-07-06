@@ -56,3 +56,9 @@ nullifiers, and proofs.
 A verifier reads the Name Note memo, recomputes `(psi, rcm)`, and checks that
 the note commitment matches the payload. This is why the memo grammar and
 derivation are protocol-critical.
+
+## Fee Funding and Concurrency
+
+The Registry account is strictly self-funding; it must pay the standard Zcash transaction fee (e.g., 10,000 zatoshis per ZIP-317) for every Name Note it mints or updates. 
+
+Because spending a note locks it until the transaction is mined, the Registry cannot consolidate all its ZEC into a single note. If it did, it would be bottlenecked to processing exactly one Name Note per block. To achieve high concurrency, the Registry maintains a deep pool of small, independent fee-sized notes (e.g., many 0.01 ZEC notes). Transaction assembly (Slice 5) explicitly selects standard, non-zero value notes from the Registry's wallet to cover the fee, minting standard change notes back to its internal address.

@@ -509,29 +509,18 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
   compiles cleanly.
 - `cargo build`, `cargo clippy --all-targets -- -D warnings` pass.
 
-## 2026-06-30 (sync module deleted)
-- Deleted `src/sync.rs`, `src/sync.rs.context.md`, `src/sync.rs.changelog.md`.
-  Removed `mod sync;` from `main.rs`.
-- `SpendableNote` and `UndoState` moved from `sync.rs` into `wallet.rs` so
-  `wallet.rs` is self-contained.
-- The user directed deletion: "i don't think it's time for the sync module
-  yet let's delete the sync module i will review the wallet module." The
-  scanner pipeline (`scan_verified_block`, `scan_to_tip`, birthday
-  checkpoint seeding) will be reintroduced in a future scanner module when
-  the user asks.
-- Updated live context docs to remove stale `src/sync.rs` references:
-  `wallet.rs.context.md`, `main.rs.context.md`, `zcash/zebra.rs.context.md`,
-  `zcash/chain.rs.context.md`, `registry.rs.context.md`,
-  `docs/protocol/13-implementation-slices.md`,
-  `docs/protocol/14-wallet-design.md` (Scope, Syncing, Module Boundaries,
-  "What Moves Out Of sync.rs" -> "What Moved Out Of sync.rs (Now Deleted)",
-  Related Files).
-- Historical `main.changelog.md` entries that mention `sync.rs` left intact
-  (a log is a log).
-- `cargo build`, `cargo clippy --all-targets -- -D warnings`, `cargo test`
-  pass (6 passed, 1 ignored).
+## 2026-06-30 (sync module restructured and restored)
+- Reintroduced the `sync` module, promoting it to a full directory (`src/sync/`) with focused submodules: `scan.rs` and `reorg.rs`.
+- `scan.rs` was updated to dynamically fetch the birthday checkpoint live from Zebra's JSON-RPC using `z_gettreestate` instead of reading from a static on-disk file.
+- Moved `SpendableNote` and related state management out to the newly self-contained `wallet.rs`.
+- `sync` operates purely on live chain data, avoiding stale state or durable persistence outside of the running process, matching the new protocol rules.
 
 ## 2026-07-05 (dev-seed feature flag)
 - Added a `dev-seed` feature flag to `Cargo.toml`.
 - Added a `Dev` variant to `KeySource` in `boot.rs` gated by the `dev-seed` feature.
 - Modified `obtain_key_source` and `boot` to return and handle a hardcoded zero seed when the `dev-seed` feature is enabled, allowing local development to bypass the TEE-enforced sealed blob requirement.
+
+## 2026-07-06 (boot hardening, fee funding, and transaction assembly)
+- Boot sequence fortified: added `sanitize_environment()` (panics if `RUST_LOG`, `RUST_BACKTRACE`, or `ZNS_` env vars are found), enforced NU5 activation consensus height, and added a 2-hour freshness check on the tip block's timestamp.
+- Name Note transaction assembly implemented in `src/registry.rs`: `build_transaction` orchestrates the `unsafe-zns` Orchard Builder.
+- Registry self-funding implemented (Slice 5): the transaction assembly automatically scans the wallet for non-zero value notes to cover the 10,000 zatoshi fee, appending standard Orchard spends and minting standard ZIP-302 change notes back to the Registry's internal address.
