@@ -1,20 +1,20 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use zip32::AccountId;
 
 use super::transaction::{ReceivedOrchardNote, ReceivedSaplingNote, TransactionRecord};
 
 #[derive(Default)]
 pub struct UnspentNotes {
-    pub orchard: HashMap<AccountId, HashMap<[u8; 32], ReceivedOrchardNote>>,
-    pub sapling: HashMap<AccountId, HashMap<[u8; 32], ReceivedSaplingNote>>,
+    pub orchard: BTreeMap<AccountId, BTreeMap<orchard::note::Rho, ReceivedOrchardNote>>,
+    pub sapling: BTreeMap<AccountId, BTreeMap<[u8; 32], ReceivedSaplingNote>>,
 }
 
 #[derive(Default)]
 pub struct NullifierIndex {
-    /// Maps a nullifier to the AccountId and the note's unique `rho`
-    pub orchard: HashMap<[u8; 32], (AccountId, [u8; 32])>,
-    /// Maps a nullifier to the AccountId and the note's `rho` equivalent
-    pub sapling: HashMap<[u8; 32], (AccountId, [u8; 32])>,
+    // Maps Orchard Nullifier to the AccountId and Rho that holds it.
+    pub orchard: BTreeMap<orchard::note::Nullifier, (AccountId, orchard::note::Rho)>,
+    // Maps Sapling Nullifier to the AccountId and Note identity (if applicable).
+    pub sapling: BTreeMap<sapling::Nullifier, (AccountId, [u8; 32])>,
 }
 
 #[derive(Default)]
@@ -25,14 +25,14 @@ pub struct WalletBalance {
 }
 
 impl WalletBalance {
-    pub fn get_orchard_note_by_nf(&self, nf: &[u8; 32]) -> Option<&ReceivedOrchardNote> {
-        let (account_id, rho) = self.nullifiers.orchard.get(nf)?;
-        self.unspent.orchard.get(account_id)?.get(rho)
+    pub fn get_orchard_note_by_nf(&self, nf: &orchard::note::Nullifier) -> Option<&ReceivedOrchardNote> {
+        let (account, rho) = self.nullifiers.orchard.get(nf)?;
+        self.unspent.orchard.get(account)?.get(rho)
     }
 
-    pub fn get_sapling_note_by_nf(&self, nf: &[u8; 32]) -> Option<&ReceivedSaplingNote> {
-        let (account_id, id) = self.nullifiers.sapling.get(nf)?;
-        self.unspent.sapling.get(account_id)?.get(id)
+    pub fn get_sapling_note_by_nf(&self, nf: &sapling::Nullifier) -> Option<&ReceivedSaplingNote> {
+        let (account, note_id) = self.nullifiers.sapling.get(nf)?;
+        self.unspent.sapling.get(account)?.get(note_id)
     }
     pub fn new() -> Self {
         Self::default()
@@ -42,7 +42,7 @@ impl WalletBalance {
     pub fn add_transaction(&mut self, tx: &TransactionRecord) {
         // Insert newly received Orchard notes
         for note in &tx.received_orchard {
-            let rho = note.note.rho().to_bytes();
+            let rho = note.note.rho();
             self.unspent
                 .orchard
                 .entry(note.account_id)
@@ -92,7 +92,7 @@ impl WalletBalance {
             
             // Undo received notes (delete them)
             for note in &tx.received_orchard {
-                let rho = note.note.rho().to_bytes();
+                let rho = note.note.rho();
                 if let Some(account_notes) = self.unspent.orchard.get_mut(&note.account_id) {
                     account_notes.remove(&rho);
                 }
@@ -107,7 +107,7 @@ impl WalletBalance {
             
             // Undo spent notes (put them back!)
             for spent in &tx.spent_orchard {
-                let rho = spent.original_note.note.rho().to_bytes();
+                let rho = spent.original_note.note.rho();
                 self.unspent.orchard
                     .entry(spent.account_id)
                     .or_default()

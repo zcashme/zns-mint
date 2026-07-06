@@ -1,12 +1,13 @@
 use crate::wallet::Wallet;
 use crate::treasury::TREASURY_ACCOUNT;
 use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::value::Zatoshis;
 
 /// A request to assemble a transparent auto-sweep transaction.
 #[derive(Debug, Clone)]
 pub struct SweepRequest {
-    pub selected_notes: Vec<[u8; 32]>,
-    pub sweep_amount: u64,
+    pub selected_notes: Vec<orchard::note::Rho>,
+    pub sweep_amount: Zatoshis,
 }
 
 // 1 ZEC = 100,000,000 zatoshis
@@ -36,13 +37,14 @@ pub fn sweep_policy(
     }
 
     let balance = wallet.balance(TREASURY_ACCOUNT);
-    if balance > SWEEP_THRESHOLD {
-        let sweep_amount = balance.saturating_sub(SWEEP_RESERVE);
-        if sweep_amount == 0 {
+    if balance.into_u64() > SWEEP_THRESHOLD {
+        let sweep_amount_u64 = balance.into_u64().saturating_sub(SWEEP_RESERVE);
+        if sweep_amount_u64 == 0 {
             return None;
         }
+        let sweep_amount = Zatoshis::from_u64(sweep_amount_u64).unwrap();
 
-        let exclude = std::collections::HashSet::new();
+        let exclude = std::collections::BTreeSet::new();
         if let Some((selected, _)) = crate::wallet::selection::select_funds(wallet, TREASURY_ACCOUNT, sweep_amount, &exclude) {
             
             // 2. Exact ZIP-317 Fee Calculation
@@ -52,14 +54,14 @@ pub fn sweep_policy(
 
             // 3. Fee Ratio Guard (Fee must be less than 0.01% of sweep_amount)
             // mathematically: exact_fee < sweep_amount / 10,000
-            if exact_fee > (sweep_amount / 10_000) {
+            if exact_fee > (sweep_amount.into_u64() / 10_000) {
                 // The fee ratio is too high because there are too many dust notes.
                 // Abort the sweep and let the Treasury accumulate more funds.
                 return None;
             }
 
             return Some(SweepRequest {
-                selected_notes: selected.into_iter().map(|n| n.note.rho().to_bytes()).collect(),
+                selected_notes: selected.into_iter().map(|n| n.note.rho()).collect(),
                 sweep_amount,
             });
         }

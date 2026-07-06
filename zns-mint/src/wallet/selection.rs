@@ -1,6 +1,7 @@
 use crate::wallet::{SpendableNote, Wallet};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use zip32::AccountId;
+use zcash_protocol::value::Zatoshis;
 
 /// Selects a subset of unspent notes for a given account whose total value is
 /// at least `target`, ignoring any notes present in the `exclude` set.
@@ -11,25 +12,26 @@ use zip32::AccountId;
 pub fn select_funds<'a>(
     wallet: &'a Wallet,
     account: AccountId,
-    target: u64,
-    exclude: &HashSet<[u8; 32]>,
-) -> Option<(Vec<&'a SpendableNote>, u64)> {
+    target: Zatoshis,
+    exclude: &BTreeSet<orchard::note::Rho>,
+) -> Option<(Vec<&'a SpendableNote>, Zatoshis)> {
+    let target_u64 = target.into_u64();
     let mut notes: Vec<&SpendableNote> = wallet
         .notes_for(account)
-        .filter(|n| !exclude.contains(&n.note.rho().to_bytes()))
+        .filter(|n| !exclude.contains(&n.note.rho()))
         .collect();
     
     // Sort from smallest to largest value
     notes.sort_by_key(|n| n.note.value().inner());
 
     // 1. Exact match (holy grail: minimum inputs, zero change)
-    if let Some(exact) = notes.iter().find(|n| n.note.value().inner() == target) {
+    if let Some(exact) = notes.iter().find(|n| n.note.value().inner() == target_u64) {
         return Some((vec![*exact], target));
     }
 
     // 2. Smallest sufficient (minimum inputs, preserves large notes)
-    if let Some(sufficient) = notes.iter().find(|n| n.note.value().inner() > target) {
-        return Some((vec![*sufficient], sufficient.note.value().inner()));
+    if let Some(sufficient) = notes.iter().find(|n| n.note.value().inner() > target_u64) {
+        return Some((vec![*sufficient], Zatoshis::from_u64(sufficient.note.value().inner()).unwrap()));
     }
 
     // 3. Dust sweep fallback (sweeps small notes until target is reached)
@@ -38,8 +40,8 @@ pub fn select_funds<'a>(
     for note in notes {
         selected.push(note);
         total += note.note.value().inner();
-        if total >= target {
-            return Some((selected, total));
+        if total >= target_u64 {
+            return Some((selected, Zatoshis::from_u64(total).unwrap()));
         }
     }
 

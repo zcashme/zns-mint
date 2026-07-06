@@ -2,7 +2,7 @@ use incrementalmerkletree::Position;
 use zcash_protocol::consensus::BlockHeight;
 use zip32::AccountId;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReceivedOrchardNote {
     pub account_id: AccountId,
     pub note: orchard::note::Note,
@@ -11,7 +11,7 @@ pub struct ReceivedOrchardNote {
     pub confirmed_height: BlockHeight,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReceivedSaplingNote {
     pub account_id: AccountId,
     pub note: sapling::Note,
@@ -20,23 +20,23 @@ pub struct ReceivedSaplingNote {
     pub confirmed_height: BlockHeight,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SpentOrchardNote {
     pub account_id: AccountId,
-    pub nullifier: [u8; 32],
+    pub nullifier: orchard::note::Nullifier,
     pub original_note: ReceivedOrchardNote, // The Ctrl-Z backup!
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SpentSaplingNote {
     pub account_id: AccountId,
-    pub nullifier: [u8; 32],
+    pub nullifier: sapling::Nullifier,
     pub original_note: ReceivedSaplingNote, // The Ctrl-Z backup!
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TransactionRecord {
-    pub txid: [u8; 32],
+    pub txid: zcash_primitives::transaction::TxId,
     pub block_height: BlockHeight,
     pub received_orchard: Vec<ReceivedOrchardNote>,
     pub received_sapling: Vec<ReceivedSaplingNote>,

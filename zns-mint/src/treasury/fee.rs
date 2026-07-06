@@ -1,7 +1,7 @@
 use crate::treasury::TREASURY_ACCOUNT;
 use crate::treasury::memo;
 use crate::wallet::{SpendableNote, Wallet};
-
+use zcash_protocol::value::Zatoshis;
 
 /// Detects if a specific claim request included the correct fee.
 ///
@@ -10,7 +10,7 @@ use crate::wallet::{SpendableNote, Wallet};
 pub fn match_fee<'a>(
     wallet: &'a Wallet,
     request: &memo::RequestMemo,
-    fee_amount: u64,
+    fee_amount: Zatoshis,
 ) -> Option<&'a SpendableNote> {
     if !matches!(request, memo::RequestMemo::Claim { .. }) {
         return None;
@@ -25,5 +25,5 @@ pub fn match_fee<'a>(
     // simulating the fee match. (A full implementation would parse the note's memo).
     wallet
         .notes_for(TREASURY_ACCOUNT)
-        .find(|n| n.note.value().inner() == fee_amount)
+        .find(|n| n.note.value().inner() == fee_amount.into_u64())
 }
