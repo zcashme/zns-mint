@@ -1,6 +1,7 @@
 use crate::treasury::TREASURY_ACCOUNT;
 use crate::treasury::memo;
-use crate::wallet::{SpendableNote, Wallet};
+use crate::wallet::transaction::ReceivedOrchardNote;
+use crate::wallet::Wallet;
 use zcash_protocol::value::Zatoshis;
 
 /// Detects if a specific claim request included the correct fee.
@@ -11,7 +12,7 @@ pub fn match_fee<'a>(
     wallet: &'a Wallet,
     request: &memo::RequestMemo,
     fee_amount: Zatoshis,
-) -> Option<&'a SpendableNote> {
+) -> Option<&'a ReceivedOrchardNote> {
     if !matches!(request, memo::RequestMemo::Claim { .. }) {
         return None;
     }
@@ -20,10 +21,10 @@ pub fn match_fee<'a>(
     // if they parse to `request`. Since we only have `RequestMemo` and no access
     // to the note's memo bytes directly without decryption, we assume the caller
     // might pass the request they parsed from some source.
-    // However, the rule is T6: match_fee(request, fee_amount) -> Option<&SpendableNote>.
+    // However, the rule is T6: match_fee(request, fee_amount) -> Option<&ReceivedOrchardNote>.
     // For now, we'll just return the first note that matches the fee exactly,
     // simulating the fee match. (A full implementation would parse the note's memo).
     wallet
-        .notes_for(TREASURY_ACCOUNT)
+        .orchard_notes_for(TREASURY_ACCOUNT)
         .find(|n| n.note.value().inner() == fee_amount.into_u64())
 }
