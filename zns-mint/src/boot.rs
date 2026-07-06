@@ -22,7 +22,7 @@ use crate::zcash;
 const EXPECTED_SEED_FINGERPRINT: &str = "zip32seedfp1rc52vh66vxh4klcd22fgmxlzfxcutdfr34gahe5mksv2g82mcejsqqwlyu";
 
 pub async fn boot() -> (
-    zcash::zebra::ChainClient,
+    zcash::ChainClient,
     crate::wallet::Wallet,
     AccountKeys,
     AccountKeys,
@@ -77,8 +77,8 @@ fn sanitize_environment() {
 }
 
 /// Pings the node via JSON-RPC to ensure the network path is alive.
-async fn check_liveness() -> zcash::zebra::BlockchainInfo {
-    let zebra_rpc = zcash::zebra::JsonRpc::new();
+async fn check_liveness() -> zcash::BlockchainInfo {
+    let zebra_rpc = zcash::JsonRpc::new();
     let info = zebra_rpc
         .get_blockchain_info()
         .await
@@ -93,8 +93,8 @@ async fn check_liveness() -> zcash::zebra::BlockchainInfo {
 }
 
 /// Connects via gRPC, fetches the tip, cross-validates against RPC, and verifies the block.
-async fn verify_chain_integrity(info: &zcash::zebra::BlockchainInfo) -> (zcash::zebra::ChainClient, BlockHeight) {
-    let mut chain = zcash::zebra::ChainClient::connect().await;
+async fn verify_chain_integrity(info: &zcash::BlockchainInfo) -> (zcash::ChainClient, BlockHeight) {
+    let mut chain = zcash::ChainClient::connect().await;
     
     let resp = chain.client().chain_tip_change(zebra_indexer_proto::Empty {}).await.expect("chain_tip_change failed");
     let mut stream = resp.into_inner();
@@ -187,7 +187,7 @@ fn initialize_wallet(
 /// an encrypted blob bound to the TEE's measurement — never an env var, CLI
 /// flag, or config file. The only variant here is `SealedBlob`. There is no
 /// `Dev` variant: the crate is hardcoded mainnet (`MAIN_NETWORK` in `key.rs`,
-/// `CHECKPOINT_NETWORK = "main"` in `zcash::zebra`), there is no testnet
+/// `CHECKPOINT_NETWORK = "main"` in `zcash`), there is no testnet
 /// mode, and a hardcoded zero seed on mainnet is not a trust assumption worth
 /// naming — it is a bug. The binary refuses to boot until the sealed-blob
 /// decrypt path is implemented.
