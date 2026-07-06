@@ -31,6 +31,21 @@ OTP-relay transaction code, not in the protocol kernel.
 Because the Treasury receives user request memos and funds name payments, the
 Treasury UFVK is the one a wallet UI shows to users as "the ZNS address".
 
+The Treasury UFVK derives all three pools (Orchard, Sapling, Transparent) via
+`UnifiedSpendingKey::from_seed` — the upstream API doesn't support per-account
+pool selection. However, the **published Treasury UA omits the transparent
+receiver**: users send to an Orchard+Sapling UA, never a transparent address.
+A published transparent address would create a permanent public link between
+the Treasury and every UTXO sent to it, undermining the shielding story that
+is load-bearing for an attested security service. The transparent key material
+exists in the UFVK but is unused, the same way the Registry's Sapling and
+Transparent components are unused.
+
+Consequence: the mint's scanner does no transparent output detection. There
+is no transparent address index, no gap-limit discovery, no transparent UTXO
+set. `sync::scan_block`'s `find_account_for_address` closure permanently
+returns `Ok(None)`.
+
 ## Registry Capability
 
 The Registry key creates and spends Name Notes. It is the sole signer for name

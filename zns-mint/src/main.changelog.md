@@ -4,7 +4,7 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
-## 2026-07-06 (sync module rewrite + Memo newtype)
+## 2026-07-06 (sync module rewrite + Memo newtype + no transparent)
 
 - Rewrote `src/sync` from a directory (`scan.rs` + `reorg.rs`) into a single
   `src/sync.rs`: a pure library, `Block` + UFVKs in, `BlockOutput` out. No
@@ -20,17 +20,28 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
   spent nullifiers (without original note — wallet resolves NF → original
   during `apply`). One `TxOutput` = one `TxId` = one transaction.
 - Memo capture via `zcash_client_backend::decrypt_transaction`
-  (`decrypt.rs:123`) — the public upstream path that returns `MemoBytes`
-  in-band. Replaces the prior orchard-fork `Bundle::decrypt_outputs_with_keys`
-  detour. UFVK → memo in one call; Sapling memos work for free. Per-tx
-  `decrypt_transaction` runs alongside upstream `decrypt_block` + `scan_block`
-  (which produce positions/spends/commitments but drop memos).
+  (`decrypt.rs:123`, re-exported at crate root `lib.rs:83`) — the public
+  upstream path that returns `MemoBytes` in-band. Replaces the prior
+  orchard-fork `Bundle::decrypt_outputs_with_keys` detour. UFVK → memo in
+  one call; Sapling memos work for free. Per-tx `decrypt_transaction` runs
+  alongside upstream `decrypt_block` + `scan_block` (which produce
+  positions/spends/commitments but drop memos).
 - Introduced `Memo` newtype in `src/mint.rs`: wraps upstream `MemoBytes` with
   `Debug` redacted (`Memo(<redacted>)`). ZNS memo contents are shielded user
   data; upstream's hex `Debug` would leak the full payload on any `{:?}` log
   line. Construction via `Memo::from_bytes(&[u8]) -> Result<Self, Error>`
   (mirrors upstream's checked constructor). Read accessors `as_array` /
   `into_bytes` forward to inner. `Clone, PartialEq, Eq` derived.
+- **No transparent output detection.** The published Treasury UA omits the
+  transparent receiver (shielded-only); a published transparent address
+  would create a permanent public link between the Treasury and every UTXO
+  sent to it. The transparent key material exists in the UFVK (upstream
+  API forces all-pool derivation) but is unused, like the Registry's
+  Sapling/Transparent components. `sync::scan_block`'s
+  `find_account_for_address` closure permanently returns `Ok(None)`; this
+  is not a stub. No `received_transparent` field on `TxOutput`. See
+  `docs/protocol/02-accounts-and-keys.md` "Treasury Capability" for the
+  decision record.
 - `main.rs` no longer compiles: it called `sync::scan::bootstrap`,
   `sync::scan::scan_verified_block`, `sync::reorg::ReorgBuffer` — all gone.
   Expected; the orchestrator rewrite is a separate pass that builds on the
@@ -38,6 +49,10 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
 - Updated `docs/protocol/08-chain-sync.md`: "Scanner Boundary" now describes
   the pure-library shape; new "Block Output" and "Memo Capture" sections
   document the two-concern split and the `decrypt_transaction` path.
+- Updated `docs/protocol/02-accounts-and-keys.md`: "Treasury Capability"
+  records the no-transparent-receiver decision and its consequences
+  (no transparent address index, no gap-limit discovery, permanent closure
+  stub).
 
 ## 2026-07-01
 - Separated `main.rs` into a binary/library split by creating `lib.rs` to anchor the module tree. `main.rs` continues to be a strictly thin orchestrator that imports the core logic from the library crate. No CLI/env-var parsing added.
