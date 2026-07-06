@@ -318,7 +318,70 @@ pub fn build_transaction(
         )
         .map_err(|_| "failed to add zns output")?;
 
-    // 5. Build and return
+    // 5. Fee Funding (Slice 5)
+    // The Registry must self-fund the 10,000 zatoshi fee using its own ZEC reserves.
+    let fee: u64 = 10_000;
+    let mut total_funded: u64 = 0;
+    
+    // Collect funding notes to avoid borrowing `wallet` mutably later inside the loop
+    let funding_notes: Vec<_> = wallet
+        .notes_for(crate::mint::REGISTRY_ACCOUNT)
+        .filter(|n| !exclude.contains(&n.note.rho()))
+        .filter(|n| {
+            let note_val: u64 = n.note.value().inner();
+            note_val > 0 // Ignore 0-value Name Notes
+        })
+        .cloned()
+        .collect();
+
+    for prev_note in funding_notes {
+        if total_funded >= fee {
+            break;
+        }
+        
+        let note_val: u64 = prev_note.note.value().inner();
+        total_funded += note_val;
+        
+        let merkle_path = wallet
+            .trees
+            .orchard_witness(prev_note.position, target_height)
+            .ok_or("witness for funding note not found")?;
+            
+        // Use standard add_spend, NOT add_zns_spend!
+        builder
+            .add_spend(
+                fvk.clone(),
+                prev_note.note.clone(),
+                merkle_path.into(),
+            )
+            .map_err(|_| "failed to add fee spend")?;
+    }
+
+    if total_funded < fee {
+        return Err("insufficient funds in Registry account to pay transaction fee");
+    }
+
+    let change = total_funded - fee;
+    if change > 0 {
+        // Send change back to the Registry's internal address
+        let change_address = fvk.address_at(0u32, orchard::keys::Scope::Internal);
+        
+        // Zcash empty memo (ZIP-302) starts with 0xF6 followed by 511 zeros
+        let mut change_memo = [0u8; 512];
+        change_memo[0] = 0xF6;
+        
+        // Use standard add_output, NOT add_zns_output!
+        builder
+            .add_output(
+                Some(fvk.to_ovk(orchard::keys::Scope::Internal)),
+                change_address,
+                orchard::value::NoteValue::from_raw(change),
+                change_memo,
+            )
+            .map_err(|_| "failed to add change output")?;
+    }
+
+    // 6. Build and return
     let (bundle, _meta) = builder
         .build::<i64>(&mut OsRng)
         .map_err(|_| "failed to build transaction")?
