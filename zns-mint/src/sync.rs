@@ -140,11 +140,11 @@ where
         scanning_keys,
         nullifiers,
         prior_metadata,
-        // We don't scan transparent outputs yet; the account-lookup closure
-        // returns `Ok(None)` so no transparent output is attributed to an
-        // account. When transparent scanning lands, this wires to the
-        // wallet's transparent address index.
-        |_| Ok::<Option<(AccountId, Option<transparent::keys::TransparentKeyScope>)>, Infallible>(None),
+    // The published Treasury UA omits a transparent receiver (shielded-only,
+    // see docs/protocol/02-accounts-and-keys.md), so no transparent output
+    // is ever attributed to a wallet account. The closure permanently
+    // returns `Ok(None)`; this is not a stub awaiting wiring.
+    |_| Ok::<Option<(AccountId, Option<transparent::keys::TransparentKeyScope>)>, Infallible>(None),
     )
     .expect("scan_block failed on a verified block");
 
