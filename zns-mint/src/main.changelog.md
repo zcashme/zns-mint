@@ -4,6 +4,41 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-07-06 (sync module rewrite + Memo newtype)
+
+- Rewrote `src/sync` from a directory (`scan.rs` + `reorg.rs`) into a single
+  `src/sync.rs`: a pure library, `Block` + UFVKs in, `BlockOutput` out. No
+  `&Wallet`, no `&Registry`, no ZNS decode, no tree appends, no reorg
+  awareness, no I/O. The orchestrator (`main.rs`) owns catch-up, reorg
+  detection, and fan-out — deferred to the orchestrator/wallet refactor.
+- `BlockOutput` carries two concerns: `transactions: Vec<TxOutput>` (the
+  decrypted subset, wallet-relevant only) and `orchard_commitments` /
+  `sapling_commitments` (the full ordered commitment stream for `ShardTree`
+  integrity — every action's `cmx` / every output's `cmu`, wallet-relevant
+  or not).
+- `TxOutput` groups per-tx: `txid`, received notes (with `Memo` + position),
+  spent nullifiers (without original note — wallet resolves NF → original
+  during `apply`). One `TxOutput` = one `TxId` = one transaction.
+- Memo capture via `zcash_client_backend::decrypt_transaction`
+  (`decrypt.rs:123`) — the public upstream path that returns `MemoBytes`
+  in-band. Replaces the prior orchard-fork `Bundle::decrypt_outputs_with_keys`
+  detour. UFVK → memo in one call; Sapling memos work for free. Per-tx
+  `decrypt_transaction` runs alongside upstream `decrypt_block` + `scan_block`
+  (which produce positions/spends/commitments but drop memos).
+- Introduced `Memo` newtype in `src/mint.rs`: wraps upstream `MemoBytes` with
+  `Debug` redacted (`Memo(<redacted>)`). ZNS memo contents are shielded user
+  data; upstream's hex `Debug` would leak the full payload on any `{:?}` log
+  line. Construction via `Memo::from_bytes(&[u8]) -> Result<Self, Error>`
+  (mirrors upstream's checked constructor). Read accessors `as_array` /
+  `into_bytes` forward to inner. `Clone, PartialEq, Eq` derived.
+- `main.rs` no longer compiles: it called `sync::scan::bootstrap`,
+  `sync::scan::scan_verified_block`, `sync::reorg::ReorgBuffer` — all gone.
+  Expected; the orchestrator rewrite is a separate pass that builds on the
+  wallet's `apply_block(&BlockOutput)` API (also deferred).
+- Updated `docs/protocol/08-chain-sync.md`: "Scanner Boundary" now describes
+  the pure-library shape; new "Block Output" and "Memo Capture" sections
+  document the two-concern split and the `decrypt_transaction` path.
+
 ## 2026-07-01
 - Separated `main.rs` into a binary/library split by creating `lib.rs` to anchor the module tree. `main.rs` continues to be a strictly thin orchestrator that imports the core logic from the library crate. No CLI/env-var parsing added.
 

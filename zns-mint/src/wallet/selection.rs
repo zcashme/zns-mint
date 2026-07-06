@@ -1,4 +1,5 @@
-use crate::wallet::{SpendableNote, Wallet};
+use crate::wallet::transaction::ReceivedOrchardNote;
+use crate::wallet::Wallet;
 use std::collections::BTreeSet;
 use zip32::AccountId;
 use zcash_protocol::value::Zatoshis;
@@ -14,10 +15,10 @@ pub fn select_funds<'a>(
     account: AccountId,
     target: Zatoshis,
     exclude: &BTreeSet<orchard::note::Rho>,
-) -> Option<(Vec<&'a SpendableNote>, Zatoshis)> {
+) -> Option<(Vec<&'a ReceivedOrchardNote>, Zatoshis)> {
     let target_u64 = target.into_u64();
-    let mut notes: Vec<&SpendableNote> = wallet
-        .notes_for(account)
+    let mut notes: Vec<&ReceivedOrchardNote> = wallet
+        .orchard_notes_for(account)
         .filter(|n| !exclude.contains(&n.note.rho()))
         .collect();
     

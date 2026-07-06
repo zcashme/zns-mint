@@ -5,10 +5,57 @@ mod note;
 // Re-export note functions so existing `crate::mint::` paths keep working.
 pub use note::{decode_name_note, encode_name_note, zns_psi_rcm};
 
+use std::fmt;
+
+use zcash_protocol::memo::MemoBytes;
 use zip32::AccountId;
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
+
+/// A ZNS memo: the fixed 512-byte payload carried by an Orchard note.
+///
+/// A newtype around upstream [`MemoBytes`] (`zcash_protocol::memo`) that keeps
+/// the Zcash memo representation upstream-faithful while overriding `Debug` to
+/// redact the contents. ZNS memo contents are shielded user data (names,
+/// addresses, ZNS payloads); per AGENTS.md "treat key material as radioactive",
+/// they must not leak to logs — the upstream `MemoBytes::Debug` prints hex, which
+/// would leak the full payload on any `{:?}` log line.
+///
+/// Construction goes through [`Memo::from_bytes`] (mirrors upstream's checked
+/// constructor) and is called at the sync extraction boundary. Reading goes
+/// through [`Memo::as_array`] / [`Memo::into_bytes`], forwarded to the inner
+/// `MemoBytes`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Memo(MemoBytes);
+
+impl Memo {
+    /// Constructs a `Memo` from a byte slice, padding with zeros if shorter
+    /// than 512 and rejecting slices longer than 512.
+    ///
+    /// Mirrors [`MemoBytes::from_bytes`]. Called at the sync extraction
+    /// boundary with the `[u8; 512]` from upstream note decryption; the
+    /// grammar parser (encode/decode) lives in `mint::note`.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, zcash_protocol::memo::Error> {
+        MemoBytes::from_bytes(bytes).map(Self)
+    }
+
+    /// Returns the raw 512-byte memo array by reference.
+    pub fn as_array(&self) -> &[u8; 512] {
+        self.0.as_array()
+    }
+
+    /// Consumes this `Memo` and returns the underlying 512-byte array.
+    pub fn into_bytes(self) -> [u8; 512] {
+        self.0.into_bytes()
+    }
+}
+
+impl fmt::Debug for Memo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Memo(<redacted>)")
+    }
+}
 
 /// ZNS action kinds.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
