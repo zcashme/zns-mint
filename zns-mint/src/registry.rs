@@ -1,8 +1,8 @@
 //! Registry state-machine view and transition authorization.
 //!
 
-use crate::mint::{Action, Name, NameCommitment, ZERO_PREV_COMMITMENT};
-use std::collections::HashMap;
+use crate::mint::{Action, Name, NameCommitment};
+use std::collections::BTreeMap;
 use zcash_protocol::consensus::BlockHeight;
 
 /// A requested Name Note transition, ready for the transaction-assembly path.
@@ -19,44 +19,39 @@ pub struct NameNoteRequest {
     /// The unified address the name is binding to (empty for a release).
     pub ua: String,
     /// The previous Name Note's commitment, linking this note to the chain.
-    pub prev_commitment: NameCommitment,
+    pub prev_commitment: Option<NameCommitment>,
 }
 
 impl NameNoteRequest {
-    /// Constructs a valid claim request.
-    ///
-    /// Claims always use `ZERO_PREV_COMMITMENT` as they start a new active chain.
+    /// Creates a request for a new name claim.
     pub fn new_claim(name: String, ua: String) -> Self {
         Self {
             action: Action::Claim,
             name,
             ua,
-            prev_commitment: ZERO_PREV_COMMITMENT,
+            prev_commitment: None,
         }
     }
 
-    /// Constructs a valid update request.
-    ///
-    /// The `prev_commitment` must be the `commitment` of the currently live tip.
+    /// Creates a request to update an existing name.
     pub fn new_update(name: String, new_ua: String, prev_commitment: NameCommitment) -> Self {
         Self {
             action: Action::Update,
             name,
             ua: new_ua,
-            prev_commitment,
+            prev_commitment: Some(prev_commitment),
         }
     }
 
-    /// Constructs a valid release request.
+    /// Creates a request to release an existing name.
     ///
-    /// The `ua` field is forced to be empty, as releases drop the binding.
-    /// The `prev_commitment` must be the `commitment` of the currently live tip.
+    /// The UA is forced to an empty string.
     pub fn new_release(name: String, prev_commitment: NameCommitment) -> Self {
         Self {
             action: Action::Release,
             name,
             ua: String::new(),
-            prev_commitment,
+            prev_commitment: Some(prev_commitment),
         }
     }
 }
@@ -81,7 +76,7 @@ pub struct RegistryHistoryRecord {
 /// The name-chain state: a map from each canonical ZNS name to the most
 /// recent confirmed tip for that name, plus an undo log for reorgs.
 pub struct Registry {
-    tips: HashMap<Name, Tip>,
+    tips: BTreeMap<Name, Tip>,
     history: Vec<RegistryHistoryRecord>,
 }
 
@@ -89,7 +84,7 @@ impl Registry {
     /// Create a new, empty registry.
     pub fn new() -> Self {
         Self {
-            tips: HashMap::new(),
+            tips: BTreeMap::new(),
             history: Vec::new(),
         }
     }
@@ -257,7 +252,7 @@ pub fn build_transaction(
     // 3. Spend previous Name Note if updating or releasing
     if request.action == Action::Update || request.action == Action::Release {
         let prev_note = wallet
-            .notes_for(crate::mint::REGISTRY_ACCOUNT)
+            .orchard_notes_for(crate::mint::REGISTRY_ACCOUNT)
             .find(|n| {
                 if exclude.contains(&n.note.rho()) {
                     return false;
@@ -325,7 +320,7 @@ pub fn build_transaction(
     
     // Collect funding notes to avoid borrowing `wallet` mutably later inside the loop
     let funding_notes: Vec<_> = wallet
-        .notes_for(crate::mint::REGISTRY_ACCOUNT)
+        .orchard_notes_for(crate::mint::REGISTRY_ACCOUNT)
         .filter(|n| !exclude.contains(&n.note.rho()))
         .filter(|n| {
             let note_val: u64 = n.note.value().inner();
