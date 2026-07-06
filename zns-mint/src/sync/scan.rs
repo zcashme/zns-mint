@@ -93,7 +93,7 @@ pub fn scan_verified_block<P: Parameters + Send + 'static>(
     // 3. Process the results into our TransactionRecords
     for tx in scanned_block.transactions() {
         let mut record = TransactionRecord {
-            txid: *tx.txid().as_ref(),
+            txid: tx.txid(),
             block_height: height,
             received_orchard: vec![],
             received_sapling: vec![],
@@ -102,7 +102,7 @@ pub fn scan_verified_block<P: Parameters + Send + 'static>(
         };
 
         for spend in tx.orchard_spends() {
-            let nf = spend.nf().to_bytes();
+            let nf = *spend.nf();
             let original_note = wallet.ledger.get_orchard_note_by_nf(&nf).expect("spent note not found").clone();
             record.spent_orchard.push(SpentOrchardNote {
                 account_id: *spend.account_id(),
@@ -111,7 +111,7 @@ pub fn scan_verified_block<P: Parameters + Send + 'static>(
             });
         }
         for spend in tx.sapling_spends() {
-            let nf = spend.nf().0;
+            let nf = *spend.nf();
             let original_note = wallet.ledger.get_sapling_note_by_nf(&nf).expect("spent note not found").clone();
             record.spent_sapling.push(SpentSaplingNote {
                 account_id: *spend.account_id(),

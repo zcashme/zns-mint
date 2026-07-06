@@ -5,7 +5,7 @@ pub mod trees;
 pub mod transaction;
 pub mod balance;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zip32::AccountId;
@@ -16,7 +16,7 @@ use trees::ShardTrees;
 /// The in-memory ZNS wallet engine: a notes table and a tree.
 pub struct Wallet {
     // Identity / scanning inputs (read-only after boot).
-    ufvk_map: HashMap<AccountId, UnifiedFullViewingKey>,
+    ufvk_map: BTreeMap<AccountId, UnifiedFullViewingKey>,
 
     // Tracks unspent notes and spent nullifiers.
     pub ledger: WalletBalance,
@@ -50,8 +50,22 @@ impl Wallet {
             .flat_map(|m| m.values())
     }
 
-    pub fn balance(&self, account: AccountId) -> u64 {
-        self.notes_for(account).map(|n| n.note.value().inner()).sum()
+    pub fn balance(&self, account: AccountId) -> zcash_protocol::value::Zatoshis {
+        let orchard_val: u64 = self
+            .ledger
+            .unspent
+            .orchard
+            .get(&account)
+            .map(|m| m.values().map(|n| n.note.value().inner()).sum())
+            .unwrap_or(0);
+        let sapling_val: u64 = self
+            .ledger
+            .unspent
+            .sapling
+            .get(&account)
+            .map(|m| m.values().map(|n| n.note.value().inner()).sum())
+            .unwrap_or(0);
+        zcash_protocol::value::Zatoshis::from_u64(orchard_val + sapling_val).unwrap()
     }
 }
 
