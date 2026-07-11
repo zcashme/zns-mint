@@ -106,8 +106,10 @@ impl Name {
     /// Attempts to parse a string into a valid ZNS name.
     pub fn parse(s: &str) -> Option<Self> {
         // ZNS protocol operates purely on the base name label, never the extension.
-        // A valid name must be lowercase, alphanumeric, and not contain dots.
+        // A valid name must be lowercase, alphanumeric, not contain dots or hyphens,
+        // and must not exceed 63 bytes.
         if !s.is_empty()
+            && s.len() <= 63
             && s.chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         {
@@ -119,5 +121,39 @@ impl Name {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// A Zcash unified address string (e.g. `u1qz...`).
+///
+/// Newtype over `String` to distinguish a UA from arbitrary text. The mint
+/// never parses or validates UAs — it hashes the string into the ZNS
+/// commitment and stores it in the Name Note memo. The resolver/verifier
+/// is what parses the UA to extract payment receivers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnifiedAddress(String);
+
+impl UnifiedAddress {
+    /// Constructs a `UnifiedAddress` from a string. No validation — the mint
+    /// treats the UA as an opaque string.
+    pub fn from_string(s: String) -> Self {
+        Self(s)
+    }
+
+    /// The empty UA, used for release actions.
+    pub fn empty() -> Self {
+        Self(String::new())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }

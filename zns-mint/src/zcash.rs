@@ -4,11 +4,22 @@
 //! It defines two distinct clients to separate concerns:
 //! - `ChainClient`: A streaming, stateful HTTP/2 gRPC client for observing chain state.
 //! - `JsonRpc`: A stateless, point-in-time HTTP POST client for JSON-RPC requests.
+//!
+//! The [`submit`] submodule adds a stateful outbound layer on top of `JsonRpc`:
+//! it broadcasts assembled transactions and tracks their lifecycle from submission
+//! through confirmation or permanent failure.
+
+pub mod submit;
+pub use submit::{Origin, SubmissionState, Submitter};
 
 use std::{any::type_name, fmt, time::Duration};
 
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use hyper::Request;
+use hyper_util::client::legacy::{Client as HyperClient, connect::HttpConnector};
+use hyper_util::rt::TokioExecutor;
 use incrementalmerkletree::frontier::CommitmentTree;
-use reqwest::ClientBuilder;
 use sapling::Node as SaplingNode;
 use serde::{Deserialize, Serialize};
 use zcash_client_backend::data_api::BlockMetadata;
@@ -21,6 +32,9 @@ use orchard::tree::MerkleHashOrchard;
 const ZEBRA_INDEXER_URL: &str = "http://127.0.0.1:8230";
 const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:8232";
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
 // ============================================================================
 // gRPC Chain Observer
 // ============================================================================
@@ -30,12 +44,13 @@ const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:8232";
 pub struct ChainClient(ZebraClient);
 
 impl ChainClient {
-    pub(crate) async fn connect() -> Self {
-        Self(
-            ZebraClient::connect(ZEBRA_INDEXER_URL)
-                .await
-                .expect("zebra indexer gRPC connect failed"),
-        )
+    pub(crate) async fn connect() -> Result<Self, tonic::transport::Error> {
+        let endpoint = tonic::transport::Endpoint::from_static(ZEBRA_INDEXER_URL)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT);
+
+        let client = ZebraClient::connect(endpoint).await?;
+        Ok(Self(client))
     }
 
     pub fn client(&mut self) -> &mut ZebraClient {
@@ -47,26 +62,36 @@ impl ChainClient {
 // JSON-RPC Client
 // ============================================================================
 
+/// Stateless JSON-RPC transport over plaintext HTTP/1.1 to the local Zebra node.
+///
+/// Each call fires one POST, collects the response, and returns. The
+/// `hyper-util` legacy client pools connections internally, but we don't rely
+/// on that — every call is independent. No TLS, no auth, no config: Zebra lives
+/// in the same TEE and the URL is hardcoded.
+///
+/// **Body-first error handling:** The JSON-RPC envelope is parsed *before*
+/// checking HTTP status. Zebra returns HTTP 500 with a JSON error body for
+/// RPC-level rejections (Bitcoin Core convention). Checking status first would
+/// treat every RPC error as an HTTP error and discard the structured error
+/// message. This matches `zecd`'s approach.
 #[derive(Clone)]
 pub(crate) struct JsonRpc {
-    rpc: reqwest::Client,
+    client: HyperClient<HttpConnector, Full<Bytes>>,
 }
 
 impl JsonRpc {
     pub(crate) fn new() -> Self {
-        let rpc = ClientBuilder::new()
-            .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("zebra JSON-RPC client construction failed");
+        let client = HyperClient::builder(TokioExecutor::new())
+            .build(HttpConnector::new());
 
-        Self { rpc }
+        Self { client }
     }
 
     /// Fetches blockchain state info, used for boot-time cross-validation.
     pub(crate) async fn get_blockchain_info(&self) -> Result<BlockchainInfo, TransportError> {
-        self.send_request("getblockchaininfo", [(); 0]).await
+        self.send_request("getblockchaininfo", [(); 0])
+            .await?
+            .ok_or(TransportError::BadNodeData("getblockchaininfo returned null"))
     }
 
     /// Fetches the shielded tree state for a block through Zebra JSON-RPC.
@@ -76,96 +101,81 @@ impl JsonRpc {
     ) -> Result<CheckpointData, TransportError> {
         let response: TreeStateResponse = self
             .send_request("z_gettreestate", [u32::from(height).to_string()])
-            .await?;
+            .await?
+            .ok_or(TransportError::BadNodeData("z_gettreestate returned null"))?;
 
         CheckpointData::from_rpc_response(response)
     }
 
     /// Fetches the raw transaction hex for a given transaction ID.
     pub(crate) async fn raw(&self, txid_hex: &str) -> Result<String, TransportError> {
-        self.send_request("getrawtransaction", (txid_hex, 0)).await
+        self.send_request("getrawtransaction", (txid_hex, 0))
+            .await?
+            .ok_or(TransportError::BadNodeData("getrawtransaction returned null"))
     }
 
     /// Broadcasts a signed raw transaction hex to the network and returns its transaction ID.
     pub(crate) async fn send(&self, raw_tx_hex: &str) -> Result<String, TransportError> {
-        self.send_request("sendrawtransaction", [raw_tx_hex]).await
+        self.send_request("sendrawtransaction", [raw_tx_hex])
+            .await?
+            .ok_or(TransportError::BadNodeData("sendrawtransaction returned null"))
     }
 
-    async fn send_request_allow_null<T: fmt::Debug + Serialize>(
-        &self,
-        method: &str,
-        params: T,
-    ) -> Result<(), TransportError> {
-        let req = RpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: method.to_string(),
-            params,
-            id: 0,
-        };
-
-        let response = self
-            .rpc
-            .post(ZEBRA_JSON_RPC_URL)
-            .header("Content-Type", "application/json")
-            .body(serde_json::to_string(&req)?)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let body_bytes = response.bytes().await?;
-
-        match status.as_u16() {
-            200..300 => {
-                let response: RpcResponse<serde_json::Value> = serde_json::from_slice(&body_bytes)
-                    .map_err(|_| TransportError::BadNodeData(type_name::<T>()))?;
-
-                if let Some(error) = response.error {
-                    return Err(TransportError::Rpc(error));
-                }
-                Ok(())
-            }
-            100..200 | 300..400 => Err(TransportError::UnexpectedStatusCode(status.as_u16())),
-            code => Err(TransportError::InvalidStatusCode(code)),
-        }
-    }
-
+    /// Fires one JSON-RPC POST at the local Zebra node and returns the result.
+    ///
+    /// Returns `Ok(None)` when the JSON-RPC response has no `result` field
+    /// (i.e. the method legitimately returns null). Returns `Err` on transport
+    /// failures, non-success HTTP status (after body parsing), or a JSON-RPC
+    /// `error` object.
     async fn send_request<T: fmt::Debug + Serialize, R: fmt::Debug + for<'de> Deserialize<'de>>(
         &self,
         method: &str,
         params: T,
-    ) -> Result<R, TransportError> {
+    ) -> Result<Option<R>, TransportError> {
         let req = RpcRequest {
             jsonrpc: "2.0".to_string(),
             method: method.to_string(),
             params,
             id: 0,
         };
+        let body = serde_json::to_string(&req)?;
 
-        let response = self
-            .rpc
-            .post(ZEBRA_JSON_RPC_URL)
-            .header("Content-Type", "application/json")
-            .body(serde_json::to_string(&req)?)
-            .send()
-            .await?;
+        let (status, body_bytes) = self.round_trip(body).await?;
+
+        // Parse the JSON-RPC envelope regardless of HTTP status — Zebra returns
+        // HTTP 500 with a JSON error body for RPC-level rejections (Bitcoin Core
+        // convention). The body is always checked first; status is the fallback.
+        let response: RpcResponse<R> = serde_json::from_slice(&body_bytes)
+            .map_err(|_| TransportError::BadNodeData(type_name::<R>()))?;
+
+        if let Some(error) = response.error {
+            return Err(TransportError::Rpc(error));
+        }
+
+        if !status.is_success() {
+            return Err(TransportError::HttpStatus(status.as_u16()));
+        }
+
+        Ok(response.result)
+    }
+
+    /// Opens a connection to the local Zebra node, performs a single HTTP/1.1
+    /// POST, collects the response body, and returns.
+    async fn round_trip(&self, body: String) -> Result<(http::StatusCode, Bytes), TransportError> {
+        let request = Request::builder()
+            .method("POST")
+            .uri(ZEBRA_JSON_RPC_URL)
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(body)))?;
+
+        let response = tokio::time::timeout(REQUEST_TIMEOUT, self.client.request(request))
+            .await
+            .map_err(|_| TransportError::Timeout)??;
 
         let status = response.status();
-        let body_bytes = response.bytes().await?;
+        let body = response.into_body().collect().await?.to_bytes();
 
-        match status.as_u16() {
-            200..300 => {
-                let response: RpcResponse<R> = serde_json::from_slice(&body_bytes)
-                    .map_err(|_| TransportError::BadNodeData(type_name::<R>()))?;
-
-                match (response.error, response.result) {
-                    (Some(error), _) => Err(TransportError::Rpc(error)),
-                    (None, Some(result)) => Ok(result),
-                    (None, None) => Err(TransportError::EmptyResponseBody),
-                }
-            }
-            100..200 | 300..400 => Err(TransportError::UnexpectedStatusCode(status.as_u16())),
-            code => Err(TransportError::InvalidStatusCode(code)),
-        }
+        Ok((status, body))
     }
 }
 
@@ -208,22 +218,20 @@ impl std::error::Error for RpcError {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
-    #[error("reqwest error: {0}")]
-    Reqwest(#[from] reqwest::Error),
-    #[error("invalid status code: {0}")]
-    InvalidStatusCode(u16),
-    #[error("unexpected status code: {0}")]
-    UnexpectedStatusCode(u16),
+    #[error("hyper-util client error: {0}")]
+    Client(#[from] hyper_util::client::legacy::Error),
+    #[error("http error: {0}")]
+    Http(#[from] http::Error),
+    #[error("request timeout")]
+    Timeout,
+    #[error("HTTP {0}")]
+    HttpStatus(u16),
     #[error("serde error: {0}")]
     Serde(#[from] serde_json::Error),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
     #[error("bad node data for {0}")]
     BadNodeData(&'static str),
     #[error("bad checkpoint: {0}")]
     BadCheckpoint(String),
-    #[error("empty response body")]
-    EmptyResponseBody,
     #[error("{0}")]
     Rpc(RpcError),
 }
@@ -290,21 +298,20 @@ impl CheckpointData {
         let expected_hash = crate::sync::scan::block_hash_from_display(&expected_hash_bytes)
             .ok_or(TransportError::BadNodeData("malformed 32-byte hash"))?;
 
-        let metadata =
-            BlockMetadata::from_parts(
-                BlockHeight::from_u32(response.height),
-                expected_hash,
-                Some(
-                    sapling_tree.size().try_into().map_err(|_| {
-                        TransportError::BadCheckpoint("Sapling tree too large".into())
-                    })?,
-                ),
-                Some(
-                    orchard_tree.size().try_into().map_err(|_| {
-                        TransportError::BadCheckpoint("Orchard tree too large".into())
-                    })?,
-                ),
-            );
+        let metadata = BlockMetadata::from_parts(
+            BlockHeight::from_u32(response.height),
+            expected_hash,
+            Some(
+                sapling_tree.size().try_into().map_err(|_| {
+                    TransportError::BadCheckpoint("Sapling tree too large".into())
+                })?,
+            ),
+            Some(
+                orchard_tree.size().try_into().map_err(|_| {
+                    TransportError::BadCheckpoint("Orchard tree too large".into())
+                })?,
+            ),
+        );
 
         Ok(Self {
             metadata,

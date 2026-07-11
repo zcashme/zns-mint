@@ -53,6 +53,15 @@ impl Wallet {
             .flat_map(|m| m.values())
     }
 
+    pub fn sapling_notes_for(&self, account: AccountId) -> impl Iterator<Item = &crate::wallet::transaction::ReceivedSaplingNote> {
+        self.balance
+            .unspent
+            .sapling
+            .get(&account)
+            .into_iter()
+            .flat_map(|m| m.values())
+    }
+
     pub fn balance(&self, account: AccountId) -> Zatoshis {
         let orchard_val: u64 = self
             .balance
@@ -69,5 +78,17 @@ impl Wallet {
             .map(|m| m.values().map(|n| n.note.value().inner()).sum())
             .unwrap_or(0);
         Zatoshis::from_u64(orchard_val + sapling_val).unwrap()
+    }
+
+    pub fn orchard_anchor(&mut self, height: zcash_protocol::consensus::BlockHeight) -> Result<Option<orchard::tree::MerkleHashOrchard>, trees::TreeError> {
+        self.trees.orchard_anchor(height)
+    }
+
+    pub fn orchard_witness(
+        &mut self,
+        position: incrementalmerkletree::Position,
+        height: zcash_protocol::consensus::BlockHeight,
+    ) -> Result<Option<incrementalmerkletree::MerklePath<orchard::tree::MerkleHashOrchard, 32>>, trees::TreeError> {
+        self.trees.orchard_witness(position, height)
     }
 }

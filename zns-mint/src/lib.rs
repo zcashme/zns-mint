@@ -1,6 +1,7 @@
 #![allow(dead_code)]
-// pub mod auth;
+pub mod auth;
 pub mod boot;
+pub mod env;
 pub mod key;
 pub mod metrics;
 pub mod mint;

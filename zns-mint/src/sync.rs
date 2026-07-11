@@ -261,3 +261,36 @@ where
 
     memos
 }
+
+pub mod scan {
+    use zcash_primitives::block::{Block, BlockHash};
+    use zcash_protocol::consensus::BlockHeight;
+    use zebra_indexer_proto::{BlockHashAndHeight, BlockRequest};
+    use crate::zcash::ChainClient;
+
+    pub fn tip_height_hash(tip: &BlockHashAndHeight) -> (BlockHeight, BlockHash) {
+        let height = BlockHeight::from_u32(tip.height);
+        let hash = block_hash_from_display(&tip.hash).expect("invalid tip hash");
+        (height, hash)
+    }
+
+    pub fn block_hash_from_display(bytes: &[u8]) -> Option<BlockHash> {
+        if bytes.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(bytes);
+            arr.reverse();
+            Some(BlockHash(arr))
+        } else {
+            None
+        }
+    }
+
+    pub async fn fetch_verified_block(chain: &mut ChainClient, height: BlockHeight) -> Block {
+        let req = BlockRequest {
+            hash_or_height: u32::from(height).to_be_bytes().to_vec(),
+        };
+        let response = chain.client().get_block(req).await.expect("failed to fetch block").into_inner();
+        let params = zcash_protocol::consensus::MAIN_NETWORK;
+        Block::read(&response.data[..], &params).expect("failed to parse block")
+    }
+}

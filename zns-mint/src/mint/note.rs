@@ -18,6 +18,7 @@ pub fn zns_psi_rcm(
     prev_rcm: Option<NameCommitment>,
 ) -> (pasta_curves::pallas::Scalar, pasta_curves::pallas::Base) {
     use pasta_curves::group::ff::FromUniformBytes;
+    use pasta_curves::group::ff::PrimeField;
 
     let action_bytes: &[u8] = match action {
         Action::Claim => b"claim",
@@ -159,4 +160,128 @@ pub fn decode_name_note(
     };
 
     Some((name, action, ua, prev_rcm))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mint::{Action, Name, NameCommitment};
+use pasta_curves::group::ff::PrimeField;
+
+    /// The ZNS memo round-trip: encode → decode must preserve all fields.
+    #[test]
+    fn name_note_memo_round_trip() {
+        let name = Name::parse("alice").unwrap();
+        let ua = "u1abc123";
+
+        // Claim: prev_rcm = None (zero bytes)
+        let memo = encode_name_note(&name, Action::Claim, ua, None).unwrap();
+        let (n, a, u, p) = decode_name_note(&memo).unwrap();
+        assert_eq!(n, name);
+        assert_eq!(a, Action::Claim);
+        assert_eq!(u, ua);
+        assert_eq!(p, None);
+
+        // Update with a prev_rcm
+        let prev_rcm_bytes = [0x42u8; 32];
+        let prev_rcm = NameCommitment::from_bytes(&prev_rcm_bytes).unwrap();
+        let memo = encode_name_note(&name, Action::Update, ua, Some(prev_rcm)).unwrap();
+        let (n, a, u, p) = decode_name_note(&memo).unwrap();
+        assert_eq!(n, name);
+        assert_eq!(a, Action::Update);
+        assert_eq!(u, ua);
+        assert_eq!(p, Some(prev_rcm));
+
+        // Release: UA must be empty
+        let memo = encode_name_note(&name, Action::Release, "", Some(prev_rcm)).unwrap();
+        let (n, a, u, p) = decode_name_note(&memo).unwrap();
+        assert_eq!(n, name);
+        assert_eq!(a, Action::Release);
+        assert_eq!(u, "");
+        assert_eq!(p, Some(prev_rcm));
+    }
+
+    /// The chain rule: a claim's rcm must differ from an update's rcm, and
+    /// the update's rcm must depend on the claim's rcm (via prev_rcm).
+    #[test]
+    fn zns_psi_rcm_chain_rule() {
+        let name = Name::parse("bob").unwrap();
+        let ua = "u1def456";
+
+        // Claim: no prev_rcm
+        let (claim_rcm, claim_psi) = zns_psi_rcm(&name, Action::Claim, ua, None);
+
+        // Update: prev_rcm = claim's rcm (encoded as NameCommitment)
+        let claim_commitment = NameCommitment::from_inner(
+            orchard::note::NoteCommitTrapdoor::from_bytes(&{
+                let mut bytes = [0u8; 32];
+                let rcm_bytes = claim_rcm.to_repr();
+                bytes.copy_from_slice(rcm_bytes.as_ref());
+                bytes
+            })
+            .into_option()
+            .unwrap(),
+        );
+        let (update_rcm, update_psi) =
+            zns_psi_rcm(&name, Action::Update, ua, Some(claim_commitment));
+
+        // The chain: claim and update must produce different (rcm, psi)
+        assert_ne!(claim_rcm.to_repr(), update_rcm.to_repr(), "claim and update rcm must differ");
+        assert_ne!(claim_psi, update_psi, "claim and update psi must differ");
+
+        // Release from update: prev_rcm = update's rcm
+        let update_commitment = NameCommitment::from_inner(
+            orchard::note::NoteCommitTrapdoor::from_bytes(&{
+                let mut bytes = [0u8; 32];
+                let rcm_bytes = update_rcm.to_repr();
+                bytes.copy_from_slice(rcm_bytes.as_ref());
+                bytes
+            })
+            .into_option()
+            .unwrap(),
+        );
+        let (release_rcm, release_psi) =
+            zns_psi_rcm(&name, Action::Release, "", Some(update_commitment));
+
+        assert_ne!(update_rcm.to_repr(), release_rcm.to_repr());
+        assert_ne!(update_psi, release_psi);
+    }
+
+    /// A release must force empty UA in the memo and in the psi/rcm derivation.
+    #[test]
+    fn release_forces_empty_ua() {
+        let name = Name::parse("carol").unwrap();
+        let prev_rcm = NameCommitment::from_bytes(&[0x11u8; 32]).unwrap();
+
+        // Release with a non-empty UA string — the function should ignore it
+        // for the derivation (same result as empty UA).
+        let (rcm_with_ua, psi_with_ua) =
+            zns_psi_rcm(&name, Action::Release, "u1shouldbeignored", Some(prev_rcm));
+        let (rcm_empty, psi_empty) =
+            zns_psi_rcm(&name, Action::Release, "", Some(prev_rcm));
+
+        assert_eq!(rcm_with_ua.to_repr(), rcm_empty.to_repr());
+        assert_eq!(psi_with_ua, psi_empty);
+    }
+
+    /// Memo decode rejects malformed inputs.
+    #[test]
+    fn decode_rejects_malformed() {
+        // Wrong prefix
+        let mut memo = [0u8; 512];
+        memo[..4].copy_from_slice(b"XXXX");
+        assert!(decode_name_note(&memo).is_none());
+
+        // Too few fields
+        let m = encode_name_note(&Name::parse("dave").unwrap(), Action::Claim, "u1", None).unwrap();
+        let mut truncated = [0u8; 512];
+        truncated[..20].copy_from_slice(&m[..20]);
+        assert!(decode_name_note(&truncated).is_none());
+
+        // Invalid name (uppercase)
+        let mut bad = [0u8; 512];
+        let s = b"ZNS:claim:Alice:u1:0000000000000000000000000000000000000000000000000000000000000000";
+        bad[..s.len()].copy_from_slice(s);
+        assert!(decode_name_note(&bad).is_none());
+    }
 }

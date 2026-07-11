@@ -1,62 +1,94 @@
 # ZNS Mint Protocol
 
-This directory is the design source for `zns-mint`: the Zcash Name Service
-mint.
+This directory is the design source for `zns-mint`: the Zcash Name Service mint.
 
 `zns-mint` is the attested issuer for ZNS Name Notes. It runs inside an
 attested TEE, derives two ZIP-32 accounts from one seed, scans Zcash chain data,
 detects shielded ZNS memos, and creates Orchard Name Notes that encode name
 ownership and lifecycle state.
 
-The central security question is: can the Registry spending key ever be seen by
-a human? The intended answer is no. The Registry key must exist only inside
-attested hardware, and every protocol, boot, sync, and run-loop decision must
-preserve that boundary.
 
-## Document Map
+u1hru7mj89zrlrwsa62uywlxpqcqc6nvaxt6vlxestprqa6hfv2vu3uhc9wtnn0tqjnvmaydp3zg0ql2x4drapfplrsaky3mmdelqcu6n9ykasukt47cgav5k7055srupg6z4dfkrlr88kl9plw03jp6ejr8dvqzpzf7yatws7xg6s6fuy
 
-- [00-overview.md](00-overview.md) defines the system goal, scope, and current
-  implementation state.
-- [01-trust-model.md](01-trust-model.md) defines parties, capabilities, and
-  trust boundaries.
-- [02-accounts-and-keys.md](02-accounts-and-keys.md) defines the seed, Treasury
-  account, Registry account, and key-handling constraints.
-- [03-name-note.md](03-name-note.md) defines the Orchard Name Note artifact.
-- [04-memo-grammar.md](04-memo-grammar.md) defines request, Name Note, and OTP
-  memo formats.
-- [05-lifecycle.md](05-lifecycle.md) defines claim, update, release, and the
-  per-name chain rule.
-- [06-authorization.md](06-authorization.md) defines v1 authorization policy and
-  OTP flow.
-- [07-mint-run-loop.md](07-mint-run-loop.md) sketches the long-running
-  `main.rs` orchestration target.
-- [08-chain-sync.md](08-chain-sync.md) defines chain scanning, checkpointing,
-  reorg, and witness expectations.
-- [09-transaction-assembly.md](09-transaction-assembly.md) defines the missing
-  bridge from signed Orchard bundles to broadcastable Zcash transactions.
-- [10-resolution-and-verification.md](10-resolution-and-verification.md)
-  defines how resolvers and independent verifiers consume Name Notes.
-- [11-open-questions.md](11-open-questions.md) records decisions not yet fixed.
-- [12-programming-model.md](12-programming-model.md) explains the concrete
-  software shape, database responsibilities, Zebra interaction, and run-loop
-  pipeline.
-- [13-implementation-slices.md](13-implementation-slices.md) breaks the mint
-  into small implementation slices with module boundaries and verification
-  gates.
-- [14-wallet-design.md](14-wallet-design.md) defines the in-memory wallet:
-  per-account note maps, nullifiers, witnesses, undo buffer, ZNS-specific
-  Registry view, sync flow, and integration with the treasury and registry
-  layers.
-- [14a-wallet-storage-rationale.md](14a-wallet-storage-rationale.md) records
-  *why* the wallet is in-memory only with no durable state: the blockchain as
-  source of truth, the always-on daemon + Zebra context, and why a database
-  or partial persistence is unnecessary.
-- [15-treasury-module.md](15-treasury-module.md) defines the `treasury.rs`
-  module: Treasury wallet view, fund selection, request memo classification,
-  auto-sweep, Registry funding, and claim payment detection.
 
-## Working Rule
+deeksha.zcash
 
-When source code implements or changes protocol behavior, update the matching
-document in this directory in the same change. If the code and docs disagree,
-stop and resolve the protocol decision before continuing.
+DNS: ICANN
+192.168.1.2 <--> deeksha.com 
+
+sangeetha.deeksha.com ->
+
+-> (registry) godaddy/namecheap -> deeksha@gmail.com
+
+ENS (ethereum name service)
+
+bitcoin: money (dumb money)
+proof of work 
+
+ethereum: programmable money (smart money)
+
+proof of stake
+
+'smart contracts' <-> custom (your) code
+
+deeksha.eth <-> public address: 0x1234567890abcdef1234567890abcdef12345678
+
+private password: 1234567890abcdef1234567890abcdef12345678 
+
+message: hi i'm deeksha
+
+signature: 0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890
+
+DAO (decentralized autonomous organization): 7 dudes 
+
+Nick Johnson
+
+ZNS (invented/discovered/engineered/designed/created by craftsoldier): zcash name service
+
+problem: 
+
+zcash: money (dumb money)
+
+how do you ensure (proof/certainty/attestation/trust model)
+
+how do you ensure that name owner can only change the address associated with their name and nobody else can change it?
+
+how do you tie state with blockchain
+
+
+deeksha <-> julian
+
+memo (512bytes): unicode
+
+signature (5kb)
+
+one-time-passocdes with ZCASH (invented by james joseph):
+
+
+administrator: verification service
+
+deeksha.zcash <->  u1hru7mj89zrlrwsa62uywlxpqcqc6nvaxt6vlxestprqa6hfv2vu3uhc9wtnn0tqjnvmaydp3zg0ql2x4drapfplrsaky3mmdelqcu6n9ykasukt47cgav5k7055srupg6z4dfkrlr88kl9plw03jp6ejr8dvqzpzf7yatws7xg6s6fuy
+
+
+deeksha sends a message to admin: here's my new address, give me one-time-passcode for deeksha.zcash
+
+administrato sends a one-time-passcode to deeksha.zcash: 123456
+
+deeksha.zcash sends a message to admin: here is my one-time-passcode: 123456
+
+TEE (trusted execution environment): bytes (attestation)
+
+mint name note: 0-value zcash transaction that has custom randomness in some super special cryprography that we changed and since we did that we can now prove to everyone that deeksha.zcash is actually registered to an address
+
+rcm: hash(deeksha.zcash || u1hru7mj89zrlrwsa62uywlxpqcqc6nvaxt6vlxestprqa6hfv2vu3uhc9wtnn0tqjnvmaydp3zg0ql2x4drapfplrsaky3mmdelqcu6n9ykasukt47cgav5k7055srupg6z4dfkrlr88kl9plw03jp6ejr8dvqzpzf7yatws7xg6s6fuy || 123456)
+
+
+
+deeksha.zcash
+
+amount: 0.5ZEC
+memo: pls register deeksha.zcash
+
+mint: 
+
+resolver:
