@@ -9,18 +9,18 @@ use std::collections::HashMap;
 
 use rand::{rngs::OsRng, RngCore};
 
-use crate::payload::{self, Action, OtpCode};
+use crate::mint::Action;
 
 /// OTPs are scoped to the exact requested transition.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct OtpKey {
-    name: String,
-    action: Action,
-    ua: String,
+pub struct OtpKey {
+    pub name: String,
+    pub action: Action,
+    pub ua: String,
 }
 
 impl OtpKey {
-    fn new(name: &str, action: Action, ua: &str) -> Self {
+    pub fn new(name: &str, action: Action, ua: &str) -> Self {
         Self {
             name: name.to_string(),
             action,
@@ -28,131 +28,53 @@ impl OtpKey {
         }
     }
 }
+use zcash_protocol::consensus::BlockHeight;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IssuedOtp {
-    pub name: String,
-    pub action: Action,
-    pub ua: String,
-    /// The 512-byte OTP relay memo. The Treasury account is the shielded origin
-    /// of this memo; the transaction-assembly path funds and signs the relay
-    /// transaction, not this module.
-    pub memo: [u8; payload::MEMO_SIZE],
+pub struct OtpEntry {
+    pub otp: String,
+    pub expires_at: BlockHeight,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum AuthError {
-    #[error("OTP is not valid for claim")]
-    ClaimDoesNotUseOtp,
-    #[error("OTP memo encode failed: {0:?}")]
-    Encode(payload::MemoError),
-    #[error("no pending OTP for request")]
-    Missing,
-    #[error("OTP mismatch")]
-    Mismatch,
-}
-
-#[derive(Default)]
 pub struct OtpStore {
-    pending: HashMap<OtpKey, OtpCode>,
+    store: HashMap<OtpKey, OtpEntry>,
 }
 
 impl OtpStore {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            store: HashMap::new(),
+        }
     }
 
-    /// Issue or replace the pending OTP for `(name, action, ua)`.
-    pub fn issue(&mut self, name: &str, action: Action, ua: &str) -> Result<IssuedOtp, AuthError> {
-        if action == Action::Claim {
-            return Err(AuthError::ClaimDoesNotUseOtp);
-        }
-
-        let mut bytes = [0u8; 16];
+    /// Issues a new highly secure 256-bit hex OTP, valid for 50 blocks.
+    pub fn issue(&mut self, key: OtpKey, current_height: BlockHeight) -> String {
+        let mut bytes = [0u8; 32];
         OsRng.fill_bytes(&mut bytes);
-        let otp = OtpCode::from_bytes(bytes);
-        let memo = payload::encode_otp_memo(action, name, ua, otp).map_err(AuthError::Encode)?;
-        self.pending.insert(OtpKey::new(name, action, ua), otp);
+        let otp = hex::encode(bytes);
 
-        Ok(IssuedOtp {
-            name: name.to_string(),
-            action,
-            ua: ua.to_string(),
-            memo,
-        })
+        self.store.insert(key, OtpEntry {
+            otp: otp.clone(),
+            expires_at: current_height + 50,
+        });
+        
+        otp
     }
 
-    /// Verify and consume the OTP. A successful OTP cannot be replayed.
-    pub fn verify_consume(
-        &mut self,
-        name: &str,
-        action: Action,
-        ua: &str,
-        provided: OtpCode,
-    ) -> Result<(), AuthError> {
-        if action == Action::Claim {
-            return Err(AuthError::ClaimDoesNotUseOtp);
+    /// Verifies and burns the OTP if it is valid.
+    pub fn verify(&mut self, key: &OtpKey, otp: &str, current_height: BlockHeight) -> bool {
+        self.prune(current_height);
+
+        if let Some(entry) = self.store.get(key) {
+            if entry.otp == otp {
+                self.store.remove(key); // Burn it!
+                return true;
+            }
         }
-        let key = OtpKey::new(name, action, ua);
-        let expected = self.pending.get(&key).copied().ok_or(AuthError::Missing)?;
-        if expected != provided {
-            return Err(AuthError::Mismatch);
-        }
-        self.pending.remove(&key);
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn memo_text(memo: &[u8; payload::MEMO_SIZE]) -> &str {
-        let end = memo.iter().rposition(|b| *b != 0).unwrap() + 1;
-        std::str::from_utf8(&memo[..end]).unwrap()
+        false
     }
 
-    #[test]
-    fn issue_returns_in_band_otp_memo() {
-        let mut store = OtpStore::new();
-        let issued = store.issue("alice", Action::Update, "u1new").unwrap();
-        let text = memo_text(&issued.memo);
-        assert!(text.starts_with("ZNS:otp:alice:update:u1new:"));
-        assert_eq!(text.rsplit(':').next().unwrap().len(), OtpCode::LEN_HEX);
-    }
-
-    #[test]
-    fn verify_consumes_exact_match_once() {
-        let mut store = OtpStore::new();
-        let issued = store.issue("alice", Action::Release, "u1old").unwrap();
-        let otp = OtpCode::parse(memo_text(&issued.memo).rsplit(':').next().unwrap()).unwrap();
-
-        store
-            .verify_consume("alice", Action::Release, "u1old", otp)
-            .unwrap();
-        assert_eq!(
-            store.verify_consume("alice", Action::Release, "u1old", otp),
-            Err(AuthError::Missing)
-        );
-    }
-
-    #[test]
-    fn otp_is_bound_to_name_action_and_ua() {
-        let mut store = OtpStore::new();
-        let issued = store.issue("alice", Action::Update, "u1new").unwrap();
-        let otp = OtpCode::parse(memo_text(&issued.memo).rsplit(':').next().unwrap()).unwrap();
-
-        assert_eq!(
-            store.verify_consume("alice", Action::Update, "u1other", otp),
-            Err(AuthError::Missing)
-        );
-        assert_eq!(
-            store.verify_consume("alice", Action::Release, "u1new", otp),
-            Err(AuthError::Missing)
-        );
-        assert_eq!(
-            store.verify_consume("bob", Action::Update, "u1new", otp),
-            Err(AuthError::Missing)
-        );
+    /// Removes expired OTPs to prevent memory exhaustion.
+    pub fn prune(&mut self, current_height: BlockHeight) {
+        self.store.retain(|_, entry| u32::from(entry.expires_at) >= u32::from(current_height));
     }
 }

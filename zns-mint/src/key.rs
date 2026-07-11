@@ -11,6 +11,13 @@ use zip32::AccountId;
 // ===========================================================================
 
 /// An account's keys — the spending key and everything derivable from it.
+///
+/// Implements `Drop` to zeroize the spending key bytes on drop. The upstream
+/// `UnifiedSpendingKey` does not implement `Zeroize` (its inner types —
+/// `orchard::keys::SpendingKey` is `[u8; 32]` with no `Drop`, same for
+/// Sapling and transparent), so we manually overwrite the struct's memory with
+/// zeros. Per AGENTS.md "treat key material as radioactive", derived spending
+/// keys must not persist in freed memory inside the TEE.
 pub struct AccountKeys {
     pub(crate) spending: UnifiedSpendingKey,
 }
@@ -38,6 +45,33 @@ impl AccountKeys {
     /// The account's transparent account private key.
     pub(crate) fn transparent_spending_key(&self) -> &transparent::keys::AccountPrivKey {
         self.spending.transparent()
+    }
+}
+
+impl Drop for AccountKeys {
+    fn drop(&mut self) {
+        // UnifiedSpendingKey doesn't implement Zeroize (upstream limitation),
+        // so we manually zeroize its memory. The individual spending key types
+        // (orchard::keys::SpendingKey is [u8; 32], sapling::ExtendedSpendingKey,
+        // transparent::keys::AccountPrivKey) contain raw key bytes that must not
+        // persist in freed memory.
+        //
+        // SAFETY: We are dropping self.spending, so no other references to it
+        // exist. write_bytes overwrites every byte of the struct with zeros.
+        // This is safe because:
+        // - We own the memory (it's a field of self, which is being dropped)
+        // - No destructors need to run on the zeroed bytes (UnifiedSpendingKey
+        //   has no Drop impl, only #[derive(Clone)])
+        // - The memory is valid and properly aligned (it's a field of self)
+        unsafe {
+            std::ptr::write_bytes(
+                &mut self.spending as *mut _ as *mut u8,
+                0,
+                std::mem::size_of::<UnifiedSpendingKey>(),
+            );
+        }
+        // Prevent the compiler from optimizing away the zeroization.
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     }
 }
 
