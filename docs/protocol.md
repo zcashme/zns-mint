@@ -662,7 +662,7 @@ bundle is included in a block.
 
 The interop contract is pinned by byte-identical vectors in:
 
-- `zns-mint/src/payload.rs::tests::VECTORS`
+- `src/payload.rs::tests::VECTORS`
 - `zns-verify::tests::vectors::VECTORS`
 
 Four tuples covering: a minimal claim, an update with non-zero `prev_rcm`, a
