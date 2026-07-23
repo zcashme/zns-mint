@@ -3,6 +3,7 @@ const SYNC_SOURCE: &str = include_str!("../src/sync.rs");
 const WALLET_SOURCE: &str = include_str!("../src/wallet.rs");
 const REGISTRY_SOURCE: &str = include_str!("../src/registry/state.rs");
 const REGISTRY_TRANSACTION_SOURCE: &str = include_str!("../src/registry/transaction.rs");
+const TREASURY_SOURCE: &str = include_str!("../src/treasury.rs");
 const ZCASH_SOURCE: &str = include_str!("../src/zcash.rs");
 
 #[test]
@@ -39,12 +40,12 @@ fn canonical_replay_invokes_no_operational_effects() {
 }
 
 #[test]
-fn canonical_applicator_has_no_duplicate_height_or_live_state() {
+fn canonical_applicator_returns_only_transition_status() {
     let signature_start = MAIN_SOURCE
         .find("fn apply_canonical_block(")
         .expect("canonical applicator must exist");
     let signature_end = MAIN_SOURCE[signature_start..]
-        .find(") -> Result<BlockHeight, RuntimeError>")
+        .find(") -> Result<(), RuntimeError>")
         .map(|offset| signature_start + offset)
         .expect("canonical applicator signature terminator must exist");
     let signature = &MAIN_SOURCE[signature_start..signature_end];
@@ -66,6 +67,32 @@ fn canonical_applicator_has_no_duplicate_height_or_live_state() {
             "canonical applicator accepts forbidden input `{forbidden}`"
         );
     }
+
+    assert!(
+        !MAIN_SOURCE.contains("Result<CommittedBlock, RuntimeError>"),
+        "canonical folding must not become an event-delivery interface"
+    );
+
+    let catch_up_start = MAIN_SOURCE
+        .find("async fn catch_up(")
+        .expect("catch-up function must exist");
+    let applicator_start = MAIN_SOURCE
+        .find("fn apply_canonical_block(")
+        .expect("canonical applicator must exist");
+    let catch_up = &MAIN_SOURCE[catch_up_start..applicator_start];
+    let apply_call = catch_up
+        .find("apply_canonical_block(")
+        .expect("catch-up must invoke the canonical applicator");
+    let after_apply = &catch_up[apply_call..];
+
+    assert!(
+        after_apply.contains("publish_canonical_gauges(wallet, cursor.block_height())"),
+        "post-fold consumers must read the promoted cursor"
+    );
+    assert!(
+        !after_apply.contains("committed_height"),
+        "catch-up must not retain a second accepted-height result"
+    );
 }
 
 #[test]
@@ -146,6 +173,14 @@ fn canonical_state_owners_have_no_operational_locks() {
             "Registry regained operational lock surface `{forbidden}`"
         );
     }
+}
+
+#[test]
+fn treasury_has_no_per_block_request_queue() {
+    assert!(
+        !TREASURY_SOURCE.contains("requests_in_block"),
+        "Treasury must not expose a replay-oriented per-block request queue"
+    );
 }
 
 #[test]

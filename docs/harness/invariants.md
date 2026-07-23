@@ -252,7 +252,7 @@ weaken any invariant.
 | Authorization | Request parsing, OTP storage, and lifecycle authorization helpers exist as unwired libraries. Passive replay preserves canonical request evidence but performs no authorization. |
 | Transactions | Registry and drafted Treasury construction/proving/signing libraries are unwired. Canonical Wallet/Registry state contains no locks or reservations; a cursor-bound Live owner is missing. |
 | Submission | No submission path is wired into the runtime. Typed retry, expiry, restart recovery, confirmation, and reorg policy remain unimplemented. |
-| Runtime | `main` performs passive canonical catch-up and canonical rewind only. Replay invokes no OTP, policy, reservation, proving, signing, submission, or lifecycle-counter operation. Catch-up receives a read-only block-source facade, and `apply_canonical_block` receives no RPC capability. Exact Zebra target capture and Live projection are absent. |
+| Runtime | `main` performs passive canonical catch-up and canonical rewind only. Replay invokes no OTP, policy, reservation, proving, signing, submission, or lifecycle-counter operation. Catch-up receives a read-only block-source facade, and `apply_canonical_block` receives no RPC capability or event-return responsibility. Exact Zebra target capture and Live state reconciliation are absent. |
 | Regtest | The harness boots components and shields funds but does not submit or verify a ZNS lifecycle transaction. |
 
 Known release blockers include:
@@ -260,9 +260,9 @@ Known release blockers include:
 - `SEC-003`: the existing regtest harness uses environment variables;
 - `SEC-006`: production artifacts do not yet prove development features absent;
 - `SYNC-002`: the origin hash is an all-zero placeholder;
-- `SYNC-005` and `SYNC-006`: canonical ordering exists but lacks staged
-  failure/crash evidence and a returned immutable `CommittedBlock`;
-- `SYNC-007`: Live request projection is intentionally absent;
+- `SYNC-005` and `SYNC-006`: canonical ordering and cursor-last promotion
+  exist but lack staged failure/crash evidence;
+- `SYNC-007`: Live request reconciliation is intentionally absent;
 - `SYNC-008`: same-height, shorter, and multi-block reorg handling plus
   operational invalidation/reconstruction are incomplete;
 - `SYNC-009`: passive restart replay lacks equivalence/property evidence;

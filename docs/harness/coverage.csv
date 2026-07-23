@@ -19,20 +19,20 @@ NAME-005,contradicted,"src/mint/note.rs:78-169","uppercase-hex and non-ASCII rej
 NAME-006,sourced,"src/mint.rs:128-166","exhaustive boundary and property tests",35dad3d
 NAME-007,contradicted,"src/registry/authorize.rs:37-138; src/registry/transaction.rs:84-127","make authorization bypass impossible; full state model",35dad3d
 NAME-008,sourced,"src/registry/transaction.rs:90-149","end-to-end linkage and stale-tip tests",35dad3d
-NAME-009,sourced,"src/registry/state.rs; src/main.rs; tests/runtime_replay_boundary.rs","execute replay-equivalence, reorg, and authority-boundary tests",worktree-2026-07-23-passive-replay
+NAME-009,sourced,"src/registry/state.rs; src/main.rs; src/treasury.rs; tests/runtime_replay_boundary.rs","execute state-reconciliation, replay-equivalence, reorg, and authority-boundary tests",worktree-2026-07-24-no-request-queue
 NAME-010,sourced,"tests/test_vectors.rs:17-57","separately built producer/verifier differential job",35dad3d
 SYNC-001,sourced,"src/boot.rs:66-95; src/boot.rs:189-268","instrumented boot-order failures",35dad3d
 SYNC-002,contradicted,"src/boot.rs:317-332","non-placeholder production origin and artifact inspection",35dad3d
 SYNC-003,sourced,"src/sync.rs; tests/runtime_replay_boundary.rs","execute scanner continuity and single-height-authority tests",worktree-2026-07-24-height-authority
 SYNC-004,sourced,"src/sync.rs:259-274; src/wallet.rs:287-303","roots against Zebra and cross-pool fixtures",35dad3d
-SYNC-005,sourced,"src/main.rs:apply_canonical_block; src/sync.rs; src/wallet.rs:apply_block; src/registry/state.rs:apply_block; tests/runtime_replay_boundary.rs","return immutable committed evidence; failure injection before/after every commit stage",worktree-2026-07-24-height-authority
-SYNC-006,sourced,"src/main.rs:apply_canonical_block; src/sync.rs; tests/runtime_replay_boundary.rs","execute single-height-authority gate; cursor-last crash/fault tests and exact-target transition",worktree-2026-07-24-height-authority
-SYNC-007,unmapped,"docs/design/07-mint-run-loop.md:96-108","same-block ordering implementation and fixtures",35dad3d
+SYNC-005,sourced,"src/main.rs:apply_canonical_block; src/sync.rs; src/wallet.rs:apply_block; src/registry/state.rs:apply_block; tests/runtime_replay_boundary.rs","failure injection before/after every commit stage; Live reconciliation from installed state",worktree-2026-07-24-unit-fold
+SYNC-006,sourced,"src/main.rs:apply_canonical_block; src/sync.rs; tests/runtime_replay_boundary.rs","execute unit-return and single-height-authority gates; cursor-last crash/fault tests and exact-target transition",worktree-2026-07-24-unit-fold
+SYNC-007,unmapped,"docs/design/07-mint-run-loop.md; docs/design/15-treasury-module.md; src/treasury.rs; tests/runtime_replay_boundary.rs","implement Live state reconciliation and same-state ordering fixtures",worktree-2026-07-24-no-request-queue
 SYNC-008,sourced,"src/main.rs:find_common_ancestor; src/main.rs:rewind_canonical_state; src/wallet/balance.rs; src/wallet/trees.rs; src/registry/state.rs","same-height, shorter, and multi-block reorg implementation/tests; Live invalidation/reconstruction",worktree-2026-07-23-passive-replay
-SYNC-009,sourced,"src/main.rs:catch_up; src/main.rs:apply_canonical_block","deterministic replay/property tests and arbitrary restart schedules",worktree-2026-07-23-passive-replay
+SYNC-009,sourced,"src/main.rs:catch_up; src/main.rs:apply_canonical_block; src/treasury.rs; tests/runtime_replay_boundary.rs","deterministic state-reconciliation replay/property tests and arbitrary restart schedules",worktree-2026-07-24-no-request-queue
 SYNC-010,sourced,"src/main.rs; tests/runtime_replay_boundary.rs","execute capability-isolation gate; broadcast/eviction/expiry/reorg tests after Live exists",worktree-2026-07-23-passive-replay
 SYNC-011,sourced,"src/main.rs; src/zcash.rs; src/boot.rs; src/treasury/memo.rs","retryable transport versus fatal node-data/RPC tests and daemon-liveness evidence",worktree-2026-07-23-passive-replay
-AUTH-001,sourced,"src/treasury/fee.rs; src/treasury/assemble.rs; src/registry/authorize.rs","implement semantic atomic-claim recovery plus cursor-bound Live reservation; duplicate/reorg tests",worktree-2026-07-23-passive-replay
+AUTH-001,sourced,"src/treasury.rs; src/treasury/fee.rs; src/treasury/assemble.rs; src/registry/authorize.rs; tests/runtime_replay_boundary.rs","implement canonical-note reconciliation, semantic atomic-claim recovery, and cursor-bound Live reservation; duplicate/reorg tests",worktree-2026-07-24-no-request-queue
 AUTH-002,contradicted,"src/registry/state.rs:64-82; src/registry/authorize.rs:88-138","canonical controller state and adversarial tests",35dad3d
 AUTH-003,contradicted,"src/auth.rs:16-118","resolve expiry policy; non-cloneable one-shot authorization; model tests",35dad3d
 AUTH-004,sourced,"src/auth.rs:121-131","Treasury relay transaction and secret-surface tests",35dad3d

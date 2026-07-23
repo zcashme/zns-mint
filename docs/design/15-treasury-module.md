@@ -65,30 +65,6 @@ value), so small change notes get consolidated and the Treasury doesn't sit on
 a long tail of dust. This is a starting policy; it can be revisited without
 breaking the boundary.
 
-### T3 — Request Memo Classification
-
-`requests_in_block(height) -> &[RequestMemo]`: raw 512-byte Treasury-received
-memos, parsed into a typed `RequestMemo`:
-
-```text
-struct RequestMemo {
-    height: BlockHeight,
-    txid: TxId,
-    action: Action,            // Claim | Update | Release
-    name: NameKey,
-    ua: String,
-    otp: Option<OtpCode>,      // None for the no-OTP (request-authorization) form
-}
-```
-
-This is *parsing* of incoming user request memos (per `04-memo-grammar.md`),
-not OTP policy. The parsed requests are handed to the request-processing
-layer (future, alongside `auth`), which decides whether to issue an OTP (via
-`auth`), verify an OTP (via `auth`), or pass a claim to the Registry layer.
-
-Memos that do not match the ZNS request grammar are dropped silently — they
-are not ZNS traffic. Classification failures are not fatal.
-
 ### T4 — Auto-Sweep Policy
 
 When Treasury balance exceeds a hardcoded `SWEEP_THRESHOLD`, the Treasury
@@ -172,18 +148,19 @@ Name Note until `treasury.match_payment(...)` returns `Some`.
 
 ## Data
 
-The Treasury module owns no durable state. It borrows the Treasury slice
-of the shared `Wallet` and reads hardcoded constants. The only owned data
-types are the request structs it produces:
+The Treasury module owns no durable request state. It borrows the Treasury
+slice of the shared `Wallet` and reads hardcoded constants. Wallet note and
+transaction state retains canonical memo evidence; `RequestMemo::parse`
+classifies a memo when Live reconciliation needs it. This design does not yet
+define which observations constitute pending work.
 
 ```text
-struct RequestMemo { ... }       // T3
 struct SweepRequest { ... }      // T4
 struct RegistryFundingRequest { ... }  // T5
 ```
 
-These are produced-per-block, handed to the run loop / transaction-assembly,
-and dropped. They are not stored.
+Policy request values are handed to transaction assembly and are not canonical
+state.
 
 ## Public Surface
 
@@ -201,9 +178,6 @@ impl<'w> Treasury<'w> {
     // T2
     fn select_funds(&self, target: u64) -> Option<Vec<&SpendableNote>>;
 
-    // T3
-    fn requests_in_block(&self, height: BlockHeight) -> &[RequestMemo];
-
     // T4
     fn auto_sweep(&self) -> Option<SweepRequest>;
 
@@ -215,15 +189,18 @@ impl<'w> Treasury<'w> {
 }
 ```
 
-`main.rs` does not call this directly. The run loop constructs a `Treasury`
-borrow each block (or the request-processing layer does) and drives T3 → T6
-→ T4/T5 in that order.
+`main.rs` does not call this directly. Future Live reconciliation reads
+canonical Treasury evidence from Wallet, classifies memos, compares Wallet and
+Registry state, and only then invokes the relevant policy methods. There is no
+height-indexed request queue, and no replacement pending-work query is defined
+here.
 
-## Per-Block Evaluation Order
+## Live Reconciliation Order
 
-Within a block, after `scan_verified_block` has updated the wallet:
+After rebuild reaches and verifies an exact Zebra tip:
 
-1. **T3** — classify Treasury-received memos into `RequestMemo`s.
+1. Classify relevant canonical Treasury memo evidence with
+   `RequestMemo::parse`.
 2. **T6** — for each claim `RequestMemo`, ask `match_payment` (caller supplies
    price). Claims without a matching payment are rejected; claims with a
    matching payment are handed to the Registry layer to mint.
@@ -234,7 +211,8 @@ Within a block, after `scan_verified_block` has updated the wallet:
 5. **T4** — check Treasury balance after any outgoing funding; if above
    threshold, produce a `SweepRequest`.
 
-T5 before T4 so auto-sweep sees the post-funding Treasury balance.
+No request slice is produced or retained per block. T5 precedes T4 so
+auto-sweep sees the post-funding Treasury balance.
 
 ## Boundaries
 

@@ -53,11 +53,6 @@ impl Treasury {
             .map(|(notes, _)| notes)
     }
 
-    pub fn requests_in_block(&self, _height: BlockHeight) -> &[crate::treasury::memo::RequestMemo] {
-        // T3 implementation is not yet hooked to the scanner's output
-        &[]
-    }
-
     pub fn auto_sweep(
         &self,
         wallet: &Wallet,
