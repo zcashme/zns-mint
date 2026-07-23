@@ -7,10 +7,14 @@
 //! Treasury funds the Registry via Ironwood, so a single Ironwood bundle
 //! carries everything: ZNS spend, ZNS output, funding spends, and change.
 
+use crate::key::RegistryKeys;
 use crate::mint::Action;
 use crate::registry::authorize::NameNoteRequest;
-use crate::registry::state::{Psi, Rcm, Registry};
+use crate::registry::state::Registry;
+use crate::wallet::NoteLocator;
+use std::collections::BTreeSet;
 use transparent::address::TransparentAddress;
+use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 
@@ -31,13 +35,120 @@ pub struct TransparentOutput {
     pub value: Zatoshis,
 }
 
+/// Exact ordinary Registry notes selected to fund one lifecycle transaction.
+///
+/// Fields are private so transaction assembly cannot be redirected to a
+/// different wallet note after planning.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RegistryFeeInputs {
+    locators: BTreeSet<NoteLocator>,
+}
+
+impl std::fmt::Debug for RegistryFeeInputs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryFeeInputs")
+            .field("count", &self.locators.len())
+            .finish()
+    }
+}
+
+impl RegistryFeeInputs {
+    pub fn locators(&self) -> &BTreeSet<NoteLocator> {
+        &self.locators
+    }
+}
+
+fn registry_fee(
+    target_height: BlockHeight,
+    lifecycle_spends: usize,
+    funding_spends: usize,
+    has_change: bool,
+) -> Result<u64, &'static str> {
+    use orchard::builder::BundleType;
+    use orchard::bundle::BundleVersion;
+
+    let version = BundleVersion::ironwood_v3();
+    let actions = BundleType::DEFAULT
+        .num_actions(
+            version.default_flags(),
+            lifecycle_spends + funding_spends,
+            1 + usize::from(has_change),
+        )
+        .map_err(|_| "Registry action count overflow")?;
+    FeeRule::standard()
+        .fee_required(
+            &zcash_protocol::consensus::MAIN_NETWORK,
+            target_height,
+            std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
+            std::iter::empty::<usize>(),
+            0,
+            0,
+            0,
+            actions,
+        )
+        .map(Zatoshis::into_u64)
+        .map_err(|_| "Registry ZIP-317 fee computation overflow")
+}
+
+/// Selects the exact ordinary Registry notes required to fund `request` at
+/// `target_height`, excluding every locator held by another Live operation.
+pub fn select_registry_fee_inputs(
+    wallet: &crate::wallet::Wallet,
+    request: &NameNoteRequest,
+    target_height: BlockHeight,
+    excluded: &BTreeSet<NoteLocator>,
+) -> Result<RegistryFeeInputs, &'static str> {
+    let lifecycle_spends = usize::from(request.action() != Action::Claim);
+    let mut candidates: Vec<_> = wallet
+        .ironwood_notes_for(crate::mint::REGISTRY_ACCOUNT)
+        .filter(|note| {
+            crate::registry::liquidity::classify_registry_ironwood_note(note)
+                == crate::registry::liquidity::RegistryNoteClass::Fee
+        })
+        .map(|note| {
+            (
+                NoteLocator::ironwood(crate::mint::REGISTRY_ACCOUNT, note.note.rho()),
+                note.note.value().inner(),
+            )
+        })
+        .filter(|(locator, _)| !excluded.contains(locator))
+        .collect();
+    candidates.sort_by_key(|(_, value)| *value);
+
+    let mut locators = BTreeSet::new();
+    let mut total = 0u64;
+    for funding_spends in 0..=candidates.len() {
+        let fee_without_change =
+            registry_fee(target_height, lifecycle_spends, funding_spends, false)?;
+        if total == fee_without_change {
+            return Ok(RegistryFeeInputs { locators });
+        }
+
+        let fee_with_change = registry_fee(target_height, lifecycle_spends, funding_spends, true)?;
+        if total > fee_without_change && total >= fee_with_change {
+            return Ok(RegistryFeeInputs { locators });
+        }
+
+        let Some((locator, value)) = candidates.get(funding_spends) else {
+            break;
+        };
+        total = total
+            .checked_add(*value)
+            .ok_or("Registry fee input value overflow")?;
+        locators.insert(*locator);
+    }
+
+    Err("insufficient available Registry fee notes")
+}
+
 // ---------------------------------------------------------------------------
 // Bundle construction
 // ---------------------------------------------------------------------------
 
 /// Assembles an unproven Ironwood bundle to execute a ZNS request.
 ///
-/// Spends the previous Name Note (if update/release) via `add_zns_spend`,
+/// Spends the previous Name Note (if update/release) via the validated-note
+/// builder boundary,
 /// mints the new Name Note via `add_zns_output`, and self-funds the ZIP-317
 /// fee using the Registry's own Ironwood ZEC reserves.
 ///
@@ -47,9 +158,10 @@ pub struct TransparentOutput {
 pub fn build_transaction(
     wallet: &mut crate::wallet::Wallet,
     registry: &Registry,
-    orchard_spending_key: &orchard::keys::SpendingKey,
+    registry_keys: &RegistryKeys,
     request: NameNoteRequest,
-    exclude: &[orchard::note::Rho],
+    fee_inputs: &RegistryFeeInputs,
+    anchor_height: BlockHeight,
     target_height: BlockHeight,
 ) -> Result<
     orchard::Bundle<
@@ -62,12 +174,12 @@ pub fn build_transaction(
     use orchard::bundle::BundleVersion;
     use rand::rngs::OsRng;
 
-    // 1. Get the Ironwood anchor at target_height
+    // 1. Get the Ironwood anchor at the fully-applied chain height.
     let anchor = wallet
-        .ironwood_anchor(target_height)
+        .ironwood_anchor(anchor_height)
         .ok()
         .flatten()
-        .ok_or("no ironwood anchor at target height")?;
+        .ok_or("no ironwood anchor at accepted anchor height")?;
 
     // 2. Initialize the Ironwood Builder
     let bundle_version = BundleVersion::ironwood_v3();
@@ -77,7 +189,7 @@ pub fn build_transaction(
         orchard::builder::Builder::new(BundleType::DEFAULT, bundle_version, flags, anchor.into())
             .map_err(|_| "failed to create builder")?;
 
-    let fvk = orchard::keys::FullViewingKey::from(orchard_spending_key);
+    let fvk = orchard::keys::FullViewingKey::from(registry_keys.orchard_spending_key());
     let address = fvk.address_at(0u32, orchard::keys::Scope::External);
     let name = request.name();
 
@@ -87,50 +199,44 @@ pub fn build_transaction(
         NameNoteRequest::Release(b) => (Action::Release, "", Some(b.prev_commitment)),
     };
 
+    if action == Action::Claim
+        && registry
+            .tip(name)
+            .is_some_and(|tip| tip.action != Action::Release)
+    {
+        return Err("claim name became unavailable before assembly");
+    }
+
     // 3. Spend previous Name Note if updating or releasing
     //
-    // The previous Name Note is an Ironwood note — looked up via
-    // `ironwood_notes_for` and witnessed via `ironwood_witness`.
+    // The previous Name Note is the exact validated Registry tip. It is not an
+    // ordinary wallet note and is never selected by parsing arbitrary memos.
     if action == Action::Update || action == Action::Release {
-        let prev_note = wallet
-            .ironwood_notes_for(crate::mint::REGISTRY_ACCOUNT)
-            .find(|n| {
-                if exclude.contains(&n.note.rho()) {
-                    return false;
-                }
-                if let Some((n_name, _, _, _)) = crate::mint::decode_name_note(n.memo.as_array()) {
-                    &n_name == name
-                } else {
-                    false
-                }
-            })
-            .cloned()
-            .ok_or("previous name note not found in wallet")?;
+        let tip = registry.tip(name).ok_or("tip not found in registry")?;
+        if tip.commitment != prev_commitment.ok_or("request has no predecessor commitment")? {
+            return Err("request predecessor does not match Registry tip");
+        }
+        let previous = tip
+            .received()
+            .ok_or("Registry tip has no validated Name Note")?;
 
         let merkle_path = wallet
-            .ironwood_witness(prev_note.position, target_height)
+            .ironwood_witness(previous.locator().position, anchor_height)
             .ok()
             .flatten()
             .ok_or("witness for previous note not found")?;
 
-        let tip = registry.tip(name).ok_or("tip not found in registry")?;
-
         builder
-            .add_zns_spend(
+            .add_validated_zns_spend(
                 fvk.clone(),
-                prev_note.note,
+                previous.validated().clone(),
                 merkle_path.into(),
-                tip.rcm.into_scalar(),
-                tip.psi.into_base(),
             )
-            .map_err(|_| "failed to add zns spend")?;
+            .map_err(|_| "failed to add validated zns spend")?;
     }
 
     // 4. Create new ZNS output
     let (new_rcm, new_psi) = crate::mint::zns_psi_rcm(name, action, ua_str, prev_commitment);
-
-    let rcm = Rcm::from_scalar(new_rcm);
-    let psi = Psi::from_base(new_psi);
 
     let memo = crate::mint::encode_name_note(name, action, ua_str, prev_commitment)
         .ok_or("failed to encode name note memo")?;
@@ -143,66 +249,47 @@ pub fn build_transaction(
             address,
             value,
             memo,
-            rcm.into_scalar(),
-            psi.into_base(),
+            new_rcm,
+            new_psi,
         )
         .map_err(|_| "failed to add zns output")?;
 
-    // 5. Fee Funding — ZIP-317 iterative computation
-    //
-    // fee = MARGINAL_FEE * max(GRACE_ACTIONS, logical_actions)
-    // where logical_actions = max(num_spends, num_outputs) for Ironwood-only.
-    //
-    // The fee is circular: it depends on the number of funding spends, which
-    // depends on how much we need to fund, which depends on the fee. We resolve
-    // this iteratively: each extra funding action adds exactly MARGINAL_FEE
-    // (5_000 zatoshis) to the fee, so the loop converges in at most 2 steps
-    // (any note worth spending has value >> 5_000).
-    const MARGINAL_FEE: u64 = 5_000;
-    const GRACE_ACTIONS: usize = 2;
-
+    // 5. Resolve only the exact fee notes retained in the caller's plan.
     let committed_spends = builder.spends().len();
-    let committed_outputs = builder.outputs().len();
-
-    // Collect Ironwood funding notes sorted smallest-first (dust sweep).
-    let mut funding_notes: Vec<_> = wallet
-        .ironwood_notes_for(crate::mint::REGISTRY_ACCOUNT)
-        .filter(|n| !exclude.contains(&n.note.rho()))
-        .filter(|n| {
-            crate::registry::liquidity::classify_registry_ironwood_note(n)
-                == crate::registry::liquidity::RegistryNoteClass::Fee
-        })
-        .cloned()
-        .collect();
-    funding_notes.sort_by_key(|n| n.note.value().inner());
-
-    let mut selected_count: usize = 0;
-    let mut total_funded: u64 = 0;
-    let mut fee: u64;
-
-    loop {
-        let num_spends = committed_spends + selected_count;
-        let num_outputs = committed_outputs + 1; // +1 for change
-        let logical_actions = std::cmp::max(num_spends, num_outputs);
-        fee = MARGINAL_FEE * std::cmp::max(GRACE_ACTIONS, logical_actions) as u64;
-
-        if total_funded >= fee {
-            break;
+    let mut funding_notes = Vec::with_capacity(fee_inputs.locators.len());
+    let mut total_funded = 0u64;
+    for locator in &fee_inputs.locators {
+        let note = wallet
+            .ironwood_note(*locator)
+            .ok_or("selected Registry fee note no longer exists")?;
+        if note.account_id != crate::mint::REGISTRY_ACCOUNT
+            || crate::registry::liquidity::classify_registry_ironwood_note(note)
+                != crate::registry::liquidity::RegistryNoteClass::Fee
+        {
+            return Err("selected input is not an ordinary Registry fee note");
         }
-
-        if selected_count >= funding_notes.len() {
-            return Err("insufficient funds in Registry account to pay transaction fee");
-        }
-
-        let note = &funding_notes[selected_count];
-        total_funded += note.note.value().inner();
-        selected_count += 1;
+        total_funded = total_funded
+            .checked_add(note.note.value().inner())
+            .ok_or("Registry fee input value overflow")?;
+        funding_notes.push(note.clone());
     }
 
+    let funding_spends = funding_notes.len();
+    let fee_without_change = registry_fee(target_height, committed_spends, funding_spends, false)?;
+    let (fee, change) = if total_funded == fee_without_change {
+        (fee_without_change, 0)
+    } else {
+        let fee_with_change = registry_fee(target_height, committed_spends, funding_spends, true)?;
+        if total_funded < fee_with_change {
+            return Err("selected Registry fee notes are insufficient for final shape");
+        }
+        (fee_with_change, total_funded - fee_with_change)
+    };
+
     // Add the selected funding notes as standard Ironwood spends.
-    for prev_note in funding_notes.iter().take(selected_count) {
+    for prev_note in &funding_notes {
         let merkle_path = wallet
-            .ironwood_witness(prev_note.position, target_height)
+            .ironwood_witness(prev_note.position, anchor_height)
             .ok()
             .flatten()
             .ok_or("witness for funding note not found")?;
@@ -212,7 +299,6 @@ pub fn build_transaction(
             .map_err(|_| "failed to add fee spend")?;
     }
 
-    let change = total_funded - fee;
     if change > 0 {
         let change_address = fvk.address_at(0u32, orchard::keys::Scope::Internal);
 

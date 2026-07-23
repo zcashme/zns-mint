@@ -142,9 +142,7 @@ pub fn authorize_release(
 mod tests {
     use super::*;
     use crate::mint::NameCommitment;
-    use crate::registry::state::{Rcm, Psi};
     use zcash_protocol::consensus::BlockHeight;
-    use pasta_curves::group::ff::Field;
 
     fn mock_registry() -> Registry {
         Registry::new()
@@ -154,14 +152,6 @@ mod tests {
         let mut b = [0u8; 32];
         b[0] = 1;
         NameCommitment::from_bytes(&b).unwrap()
-    }
-    
-    fn dummy_rcm() -> Rcm {
-        Rcm::from_scalar(pasta_curves::pallas::Scalar::random(&mut rand::thread_rng()))
-    }
-    
-    fn dummy_psi() -> Psi {
-        Psi::from_base(pasta_curves::pallas::Base::random(&mut rand::thread_rng()))
     }
 
     fn mock_pending_otps() -> crate::auth::PendingOtps {
@@ -180,12 +170,12 @@ mod tests {
         assert_eq!(req.action(), Action::Claim);
 
         // Released name is claimable
-        reg.set_tip(name.clone(), Tip { action: Action::Release, rcm: dummy_rcm(), psi: dummy_psi(), commitment: dummy_commitment() }, height);
+        reg.set_tip_for_test(name.clone(), Action::Release, dummy_commitment(), height);
         let req2 = authorize_claim(&reg, name.clone(), ua.clone()).unwrap();
         assert_eq!(req2.action(), Action::Claim);
 
         // Live name is NOT claimable
-        reg.set_tip(name.clone(), Tip { action: Action::Claim, rcm: dummy_rcm(), psi: dummy_psi(), commitment: dummy_commitment() }, height);
+        reg.set_tip_for_test(name.clone(), Action::Claim, dummy_commitment(), height);
         assert!(authorize_claim(&reg, name, ua).is_none());
     }
 
@@ -199,13 +189,45 @@ mod tests {
 
         let dummy_otp = [0u8; 16];
         // Unseen name cannot be updated/released
-        assert!(authorize_update(&reg, &mut otps, height, name.clone(), ua.clone(), &dummy_otp).is_none());
-        assert!(authorize_release(&reg, &mut otps, height, name.clone(), ua.clone(), &dummy_otp).is_none());
+        assert!(authorize_update(
+            &reg,
+            &mut otps,
+            height,
+            name.clone(),
+            ua.clone(),
+            &dummy_otp
+        )
+        .is_none());
+        assert!(authorize_release(
+            &reg,
+            &mut otps,
+            height,
+            name.clone(),
+            ua.clone(),
+            &dummy_otp
+        )
+        .is_none());
 
         // Released name cannot be updated/released
-        reg.set_tip(name.clone(), Tip { action: Action::Release, rcm: dummy_rcm(), psi: dummy_psi(), commitment: dummy_commitment() }, height);
-        assert!(authorize_update(&reg, &mut otps, height, name.clone(), ua.clone(), &dummy_otp).is_none());
-        assert!(authorize_release(&reg, &mut otps, height, name.clone(), ua.clone(), &dummy_otp).is_none());
+        reg.set_tip_for_test(name.clone(), Action::Release, dummy_commitment(), height);
+        assert!(authorize_update(
+            &reg,
+            &mut otps,
+            height,
+            name.clone(),
+            ua.clone(),
+            &dummy_otp
+        )
+        .is_none());
+        assert!(authorize_release(
+            &reg,
+            &mut otps,
+            height,
+            name.clone(),
+            ua.clone(),
+            &dummy_otp
+        )
+        .is_none());
     }
 
     #[test]
@@ -216,18 +238,23 @@ mod tests {
         let ua = UnifiedAddress::from_string("u1new".into());
         let height = BlockHeight::from_u32(100);
 
-        reg.set_tip(name.clone(), Tip { action: Action::Update, rcm: dummy_rcm(), psi: dummy_psi(), commitment: dummy_commitment() }, height);
-        
+        reg.set_tip_for_test(name.clone(), Action::Update, dummy_commitment(), height);
+
         // Invalid OTP fails
         let mut bad_otp = [0u8; 16];
         bad_otp[0] = 0xFF;
-        assert!(authorize_update(&reg, &mut otps, height, name.clone(), ua.clone(), &bad_otp).is_none());
+        assert!(
+            authorize_update(&reg, &mut otps, height, name.clone(), ua.clone(), &bad_otp).is_none()
+        );
 
         // Issue real OTP and it succeeds
-        let key = crate::auth::ChallengeKey::new(Name::parse("carol").unwrap(), Action::Update, UnifiedAddress::from_string("u1new".into()));
-        let otp_hex = otps.issue(key, height);
-        let mut real_otp = [0u8; 16];
-        hex::decode_to_slice(&otp_hex, &mut real_otp).unwrap();
+        let key = crate::auth::ChallengeKey::new(
+            Name::parse("carol").unwrap(),
+            Action::Update,
+            UnifiedAddress::from_string("u1new".into()),
+        );
+        let issued_otp = otps.issue(key, height);
+        let real_otp = issued_otp.expose_for_test();
         let req = authorize_update(&reg, &mut otps, height, name.clone(), ua, &real_otp).unwrap();
         assert_eq!(req.action(), Action::Update);
     }

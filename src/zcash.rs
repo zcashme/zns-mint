@@ -1,16 +1,12 @@
 //! Zcash Blockchain I/O boundary for the mint.
 //!
-//! This module provides the clients for interacting with the Zebra node.
-//! It defines two distinct clients to separate concerns:
-//! - `ChainClient`: A streaming, stateful HTTP/2 gRPC client for observing chain state.
-//! - `JsonRpc`: A stateless, point-in-time HTTP POST client for JSON-RPC requests.
+//! This module provides the clients for interacting with the Zebra node:
+//! - `ChainClient`: a streaming HTTP/2 gRPC client for tip wake-ups.
+//! - `CanonicalBlockSource`: read-only JSON-RPC capability for passive replay.
+//! - `JsonRpc`: the underlying point-in-time JSON-RPC client, including
+//!   transaction lookup and submission for a future Live owner.
 //!
-//! The [`submit`] submodule adds a stateful outbound layer on top of `JsonRpc`:
-//! it broadcasts assembled transactions and tracks their lifecycle from submission
-//! through confirmation or permanent failure.
-
-pub mod submit;
-pub use submit::{Origin, SubmissionState, Submitter};
+//! This module owns transport, not submission lifecycle state.
 
 use std::{any::type_name, fmt, time::Duration};
 
@@ -40,7 +36,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 // gRPC Chain Observer
 // ============================================================================
 
-/// A client for reading best-chain blocks and tips.
+/// A client for observing best-chain tip changes.
 #[derive(Clone)]
 pub struct ChainClient(ZebraClient);
 
@@ -57,10 +53,9 @@ impl ChainClient {
     pub fn client(&mut self) -> &mut ZebraClient {
         &mut self.0
     }
-
 }
 
-pub(crate) fn tip_height_hash(tip: &BlockHashAndHeight) -> (BlockHeight, BlockHash) {
+pub fn tip_height_hash(tip: &BlockHashAndHeight) -> (BlockHeight, BlockHash) {
     let height = BlockHeight::from_u32(tip.height);
     let hash = block_hash_from_display(&tip.hash).expect("invalid tip hash");
     (height, hash)
@@ -94,19 +89,19 @@ pub(crate) fn block_hash_from_display(bytes: &[u8]) -> Option<BlockHash> {
 /// treat every RPC error as an HTTP error and discard the structured error
 /// message. This matches `zecd`'s approach.
 #[derive(Clone)]
-pub(crate) struct JsonRpc {
+pub struct JsonRpc {
     client: HyperClient<HttpConnector, Full<Bytes>>,
 }
 
 impl JsonRpc {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let client = HyperClient::builder(TokioExecutor::new()).build(HttpConnector::new());
 
         Self { client }
     }
 
     /// Fetches blockchain state info, used for boot-time cross-validation.
-    pub(crate) async fn get_blockchain_info(&self) -> Result<BlockchainInfo, TransportError> {
+    pub async fn get_blockchain_info(&self) -> Result<BlockchainInfo, TransportError> {
         self.send_request("getblockchaininfo", [(); 0])
             .await?
             .ok_or(TransportError::BadNodeData(
@@ -132,13 +127,14 @@ impl JsonRpc {
     /// This proves the node returned bytes that are structurally parseable as a
     /// Zcash mainnet block. Best-chain membership and full consensus validity
     /// remain Zebra's responsibility.
-    pub(crate) async fn get_block(&self, height: BlockHeight) -> Result<Block, TransportError> {
+    pub async fn get_block(&self, height: BlockHeight) -> Result<Block, TransportError> {
         let hex_str: String = self
             .send_request("getblock", (u32::from(height).to_string(), 0))
             .await?
             .ok_or(TransportError::BadNodeData("getblock returned null"))?;
 
-        let bytes = hex::decode(hex_str).map_err(|_| TransportError::BadNodeData("getblock hex"))?;
+        let bytes =
+            hex::decode(hex_str).map_err(|_| TransportError::BadNodeData("getblock hex"))?;
         Block::read(&bytes[..], &MAIN_NETWORK)
             .map_err(|_| TransportError::BadNodeData("getblock parse"))
     }
@@ -153,7 +149,7 @@ impl JsonRpc {
     }
 
     /// Broadcasts a signed raw transaction hex to the network and returns its transaction ID.
-    pub(crate) async fn send(&self, raw_tx_hex: &str) -> Result<String, TransportError> {
+    pub async fn send(&self, raw_tx_hex: &str) -> Result<String, TransportError> {
         self.send_request("sendrawtransaction", [raw_tx_hex])
             .await?
             .ok_or(TransportError::BadNodeData(
@@ -219,6 +215,39 @@ impl JsonRpc {
     }
 }
 
+impl Default for JsonRpc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Read-only JSON-RPC capability for canonical block reconstruction.
+///
+/// The wrapped transport is private and this facade intentionally exposes no
+/// raw-transaction lookup or submission method.
+#[derive(Clone)]
+pub struct CanonicalBlockSource(JsonRpc);
+
+impl CanonicalBlockSource {
+    pub fn new() -> Self {
+        Self(JsonRpc::new())
+    }
+
+    pub async fn get_blockchain_info(&self) -> Result<BlockchainInfo, TransportError> {
+        self.0.get_blockchain_info().await
+    }
+
+    pub async fn get_block(&self, height: BlockHeight) -> Result<Block, TransportError> {
+        self.0.get_block(height).await
+    }
+}
+
+impl Default for CanonicalBlockSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ============================================================================
 // JSON-RPC Envelopes and Errors
 // ============================================================================
@@ -278,12 +307,26 @@ pub enum TransportError {
     Rpc(RpcError),
 }
 
+impl TransportError {
+    /// Whether repeating the same read can recover without trusting new data.
+    ///
+    /// Decode, checkpoint, request-construction, and RPC-semantic failures are
+    /// fatal trust-path errors. Only connection/body transport failures,
+    /// timeouts, and server-side HTTP availability failures are retried.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Client(_) | Self::Hyper(_) | Self::Timeout | Self::HttpStatus(500..=599)
+        )
+    }
+}
+
 // ============================================================================
 // Typed JSON-RPC Responses
 // ============================================================================
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct BlockchainInfo {
+pub struct BlockchainInfo {
     pub blocks: u32,
     pub bestblockhash: String,
 }

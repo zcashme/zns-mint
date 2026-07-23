@@ -11,6 +11,10 @@ use zip32::AccountId;
 /// Implements a Best-Fit / Waterfall selection strategy (Exact match, Smallest sufficient,
 /// then Dust Sweep fallback). Returns the selected notes and the total value selected, or
 /// `None` if the account balance is insufficient.
+///
+/// Note: `exclude` is a caller-owned set of note *identity* keys (`Rho` for
+/// Orchard/Ironwood, `Position` for Sapling). The future Live layer must derive
+/// it from its operational reservation state before calling this pure selector.
 pub fn select_funds<'a>(
     wallet: &'a Wallet,
     account: AccountId,
@@ -55,6 +59,8 @@ pub fn select_funds<'a>(
 
 /// Selects a subset of unspent Sapling notes for a given account whose total value is
 /// at least `target`, ignoring any notes present in the `exclude` set (identified by Position).
+///
+/// Uses the same Best-Fit / Waterfall strategy as [`select_funds`].
 pub fn select_sapling_funds<'a>(
     wallet: &'a Wallet,
     account: AccountId,

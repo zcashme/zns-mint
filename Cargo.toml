@@ -84,10 +84,10 @@ zcash_client_backend = { git = "https://github.com/zcash/librustzcash", rev = "a
 # https://github.com/zcashme/orchard (branch `main`, rev pinned below).
 # zns-mint calls `Builder::add_zns_output` / `add_zns_spend` directly, so
 # this is a first-class dep, not just a transitive one.
-orchard = { git = "https://github.com/zcashme/orchard", rev = "34699d38695ad28c37a022155df5420760a29741", default-features = false, features = ["unsafe-zns", "circuit"] }
+orchard = { path = "/Users/jules/ZcashNames/zns-orchard", default-features = false, features = ["unsafe-zns", "circuit"] }
 shardtree = "0.6.2"
 
 # Redirect the crates.io `orchard` consumed transitively by librustzcash to
 # the ZNS fork so the whole graph builds against the same source.
 [patch.crates-io]
-orchard = { git = "https://github.com/zcashme/orchard", rev = "34699d38695ad28c37a022155df5420760a29741" }
+orchard = { path = "/Users/jules/ZcashNames/zns-orchard" }

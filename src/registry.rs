@@ -2,7 +2,7 @@
 //! transaction assembly path.
 //!
 //! Submodules:
-//! - [`state`] — `Registry`, `Tip`, `Rcm`, `Psi`, `RegistryHistoryRecord`
+//! - [`state`] — `Registry`, validated `Tip`, and `RegistryHistoryRecord`
 //! - [`authorize`] — `NameNoteRequest`, `authorize_claim`/`update`/`release`
 //! - [`liquidity`] — Registry fee-note classification and top-up policy
 //! - [`transaction`] — `build_transaction`, `TransparentOutput`
@@ -23,5 +23,7 @@ pub use liquidity::{
     RegistryFundingPlan, RegistryNoteClass,
 };
 pub use signing::assemble_and_sign_transaction;
-pub use state::{Psi, Rcm, Registry, RegistryHistoryRecord, Tip};
-pub use transaction::{build_transaction, TransparentOutput};
+pub use state::{Registry, RegistryApplyError, RegistryHistoryRecord, Tip};
+pub use transaction::{
+    build_transaction, select_registry_fee_inputs, RegistryFeeInputs, TransparentOutput,
+};

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-A ZNS name is a human-readable handle (e.g. `alice`) that maps to a Zcash payment address, so senders can type a name instead of pasting a `z`-address; "owning" a name means being able to reassign which address it points to *or* transfer the name to a new owner, and the on-chain artifact encoding that ownership is an Orchard "Name Note" — an Orchard note whose 512-byte memo carries the ZNS payload — spendable by the Registry account, so the authority to create, update, release, and transfer any name in the entire namespace *is* the Registry spending key, which makes that one key a single point of compromise for all names at once.
+A ZNS name is a human-readable handle (e.g. `alice`) that maps to a Zcash payment address, so senders can type a name instead of pasting a `z`-address; "owning" a name means being able to reassign which address it points to *or* transfer the name to a new owner, and the on-chain artifact encoding that ownership is an Ironwood "Name Note" — an Orchard-family note in the distinct Ironwood value pool whose 512-byte memo carries the ZNS payload — spendable by the Registry account, so the authority to create, update, release, and transfer any name in the entire namespace *is* the Registry spending key, which makes that one key a single point of compromise for all names at once.
 
 System security therefore reduces to one question: can the Registry spending key ever be seen by a human? `zns-mint` exists to make that answer provably *no* — it runs in a TEE because the key must never exist outside attested hardware, the seed arrives as an encrypted blob bound to the TEE's measurement (never an env var, CLI flag, or config file) because any operator-readable input is a leak channel that would undo the attestation guarantee, and one seed under ZIP-32 derives two accounts (Treasury=0 is the user-facing account that receives name payments and request memos and is the shielded origin of OTP relay memos, Registry=1 is the sole signer for every Name Note lifecycle op and self-funds its Name Note fees) so each account's capability stays narrow and auditable; bend any of these and the rest is theatre.
 
@@ -22,6 +22,15 @@ You are pair-programming on a security-critical Rust binary where every constrai
 - **Never commit unless the user says so.** Do not run `git commit` or `git push` on your own initiative. Wait for the user to say "commit" or "push". Remind the user that uncommitted changes exist whenever you finish a change. Read the diff yourself as often as possible — do not just print it, study it.
 - **Use PR-style commits.** Commits should be feature-scoped and atomic — one logical change per commit, conventional-commit format (`feat`, `fix`, `refactor`, `chore`, `docs` with a scope). Group related changes into a single commit; split unrelated changes into separate commits.
 - **Respond with code blocks often.** The user prefers to reason with the agent on the code that the agent writes, so it's the agent's responsibility to read the edited code after writing it and show code to the user in responses with reasonable and sufficient explanations.
+
+## Agent harness
+
+When the user asks to build, complete, harden, audit, test, or continue
+`zns-mint` with subagents, use the project skill at
+`.agents/skills/build-zns-mint/SKILL.md`. The root agent owns all design
+decisions. Parallel agents are read-only evidence gatherers; exactly one agent
+may hold an explicit write lease at a time. Do not create project agent config
+files as a workaround for these rules.
 
 ## System Architecture
 

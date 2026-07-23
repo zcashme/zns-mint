@@ -1,10 +1,8 @@
 //! Registry fee-note classification and liquidity policy.
 //!
-//! Name Notes and fee notes both arrive at the Registry account as Ironwood
-//! notes, but they have different protocol meanings. Name Notes are namespace
-//! state and must only be spent by the matching name transition. Fee notes are
-//! ordinary value notes used to pay ZIP-317 fees for Registry-origin
-//! transactions.
+//! Validated Name Notes are held in Registry state and never enter this
+//! ordinary-note lane. These notes are ordinary value notes used to pay
+//! ZIP-317 fees for Registry-origin transactions.
 
 use crate::mint::REGISTRY_ACCOUNT;
 use crate::wallet::{transaction::ReceivedIronwoodNote, Wallet};
@@ -25,23 +23,17 @@ pub const REGISTRY_FUNDING_BATCH_SIZE: usize = 100;
 /// Registry Ironwood note classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistryNoteClass {
-    /// A ZNS Name Note. This is namespace state, not fee liquidity.
-    Name,
     /// An ordinary positive-value Registry note eligible for fee selection.
     Fee,
     /// A Registry note that is neither a valid Name Note nor useful fee value.
     Other,
 }
 
-/// Classifies a Registry note from only its value and memo.
+/// Classifies an ordinary Registry note from its value.
 ///
-/// A parseable ZNS Name Note is always classified as [`RegistryNoteClass::Name`]
-/// even if its value is non-zero. That makes the safe failure mode "do not use
-/// it for fees" if a later bug accidentally mints a non-zero Name Note.
-pub fn classify_registry_note_parts(value: u64, memo: &[u8; 512]) -> RegistryNoteClass {
-    if crate::mint::decode_name_note(memo).is_some() {
-        RegistryNoteClass::Name
-    } else if value > 0 {
+/// Memo bytes have no authority to change an ordinary note's capability.
+pub fn classify_registry_note_parts(value: u64) -> RegistryNoteClass {
+    if value > 0 {
         RegistryNoteClass::Fee
     } else {
         RegistryNoteClass::Other
@@ -50,7 +42,7 @@ pub fn classify_registry_note_parts(value: u64, memo: &[u8; 512]) -> RegistryNot
 
 /// Classifies a decrypted Registry Ironwood note.
 pub fn classify_registry_ironwood_note(note: &ReceivedIronwoodNote) -> RegistryNoteClass {
-    classify_registry_note_parts(note.note.value().inner(), note.memo.as_array())
+    classify_registry_note_parts(note.note.value().inner())
 }
 
 /// Count of Registry fee notes rebuilt from wallet state.
@@ -101,39 +93,15 @@ pub struct RegistryFundingPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mint::{encode_name_note, Action, Name};
-
-    fn empty_memo() -> [u8; 512] {
-        let mut memo = [0u8; 512];
-        memo[0] = 0xF6;
-        memo
-    }
 
     #[test]
-    fn zns_memo_is_name_even_if_value_is_nonzero() {
-        let name = Name::parse("alice").unwrap();
-        let memo = encode_name_note(&name, Action::Claim, "u1test", None).unwrap();
-
-        assert_eq!(
-            classify_registry_note_parts(50_000, &memo),
-            RegistryNoteClass::Name
-        );
-    }
-
-    #[test]
-    fn positive_non_zns_note_is_fee_liquidity() {
-        assert_eq!(
-            classify_registry_note_parts(50_000, &empty_memo()),
-            RegistryNoteClass::Fee
-        );
+    fn positive_ordinary_note_is_fee_liquidity() {
+        assert_eq!(classify_registry_note_parts(50_000), RegistryNoteClass::Fee);
     }
 
     #[test]
     fn zero_non_zns_note_is_other() {
-        assert_eq!(
-            classify_registry_note_parts(0, &empty_memo()),
-            RegistryNoteClass::Other
-        );
+        assert_eq!(classify_registry_note_parts(0), RegistryNoteClass::Other);
     }
 
     #[test]

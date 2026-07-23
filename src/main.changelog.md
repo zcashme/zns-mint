@@ -4,6 +4,109 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-07-23 (passive canonical replay cleanup)
+
+- Deleted request interpretation, OTP issuance, Treasury policy, intent,
+  reservation, proving/signing, retry, submission, and lifecycle-counter paths
+  from canonical catch-up instead of wrapping them in a replay flag.
+- `apply_canonical_block` now receives only scanning and canonical derived
+  state. It is synchronous, derives the accepted height from scanner evidence,
+  and advances cursor/history last.
+- Catch-up receives a read-only `CanonicalBlockSource`, not the
+  submission-capable JSON-RPC client. Only explicitly retryable transport
+  availability failures loop; malformed or semantically invalid node data is
+  fatal.
+- Reorg rewind now touches only Wallet, Registry, cursor, and accepted metadata
+  history. Canonical gauges are recomputed after boot, commit, and rewind;
+  replay emits no lifecycle event counters.
+- Exact-target Rebuild/Live transition, same-height and shorter reorg
+  detection, staged tree atomicity, semantic claim recovery, and OTP recovery
+  remain separate work.
+
+## 2026-07-23 (chain-authenticated Registry transitions)
+
+- Ordinary Ironwood memos no longer mutate Registry state.
+- The block fold simulates validated Name Note transitions before wallet
+  mutation. Every transition requires a same-transaction spend of an available
+  positive-value Registry fee note; update/release also require the exact tip
+  nullifier and predecessor commitment.
+- The simulated Registry is installed only after wallet application succeeds,
+  eliminating Registry-first partial application for rejected transitions.
+- Removed the per-catch-up upstream nullifier cache from orchestration. Raw
+  shielded nullifiers are now resolved by the wallet's replayable indexes.
+
+## 2026-07-23 (exact reorg ancestor metadata)
+
+- The run loop retains exact accepted `BlockMetadata` by height.
+- Common-ancestor search compares Zebra's canonical block and the locally
+  accepted hash at the same height while walking downward.
+- Rewind restores the ancestor's real hash and Sapling/Orchard/Ironwood tree
+  sizes, prunes later metadata, and fails closed if the reorg extends below the
+  retained history. Zero hashes and stale pre-rewind tree sizes are gone.
+
+## 2026-07-23 (atomic local block commit before external actions)
+
+- Wallet application is fallible and rollback-safe across balance plus all
+  three commitment trees.
+- Registry simulation occurs before wallet mutation; the simulated Registry is
+  installed only after wallet success.
+- Request observation, submission reconciliation, expiry, cursor, and metadata
+  history commit before any proving or broadcast attempt. External RPC effects
+  can no longer precede the cursor representing their source block.
+
+## 2026-07-23 (exact reserved claim payment)
+
+- Claim assembly resolves the exact Treasury Orchard locator held by the
+  intent. It no longer reruns memo/value matching during proving, so an
+  identical later payment cannot replace the note that authorized the claim.
+
+## 2026-07-23 (parent-intent confirmation)
+
+- Individual submissions record inclusion without incrementing lifecycle
+  metrics.
+- A parent intent confirms exactly once after every txid it owns is observed in
+  an applied canonical block; lifecycle metrics increment on that transition.
+- Confirmed intents retain their txids and reservations. Rewind clears
+  above-ancestor submission confirmations and reopens the same parent intent,
+  avoiding duplicate authorization or double counting.
+- Removed request-bearing `Origin` debug output from the reorg log path.
+
+## 2026-07-23 (validated idempotent submission retry)
+
+- Submission records retain the serialized transaction's actual expiry height.
+- Zebra's `sendrawtransaction` result must equal the display-order txid derived
+  locally from the exact bytes; mismatches fail closed.
+- Transport failures retry the same bytes and txid. Once the transaction
+  expires unconfirmed, the same parent intent returns to proving with its
+  existing reservations and produces a fresh-expiry replacement.
+
+## 2026-07-23 (fallible validated Name Note scan)
+
+- `apply_block` now propagates typed scanner failures before mutating wallet,
+  Registry, intent, submission, or cursor state.
+- The supplemental scanner validates memo-derived Name Note openings and
+  positional invariants; any contradiction aborts the block transition.
+
+## 2026-07-23 (single-use OTP authorization intent)
+
+- Update/release requests consume their OTP exactly once inside the Registry
+  authorization boundary after acquiring the name lock.
+- The authorized typed `NameNoteRequest` is retained by the intent instead of
+  being discarded before assembly.
+- OTP relay intents retain the zeroizable memo and the current validated Name
+  Note controller destination. No challenge identifier was added to the wire
+  grammar; the internal key remains `(name, action, ua)`.
+
+## 2026-07-23 (exact Registry fee reservations and target height)
+
+- Claim, update, and release intents select unreserved Registry fee notes,
+  reserve the exact locator set atomically, retain it in the typed intent, and
+  assemble only from that set.
+- Update and release now reach Registry transaction assembly instead of
+  remaining permanently in `Proving`.
+- Witnesses bind to the fully-applied cursor height while fee, branch, and
+  expiry policy bind to checked `cursor + 1`.
+
 ## 2026-07-13 (added PINNED_ORIGIN_HASH check to boot.rs)
 
 - In `boot.rs`, `origin_checkpoint` now fetches the checkpoint directly from Zebra via `z_gettreestate` at the `ironwood_activation_height() - 1`.

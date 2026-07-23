@@ -7,6 +7,7 @@ pub mod trees;
 
 use std::collections::BTreeMap;
 
+use incrementalmerkletree::Position;
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
@@ -21,6 +22,43 @@ use transaction::{
 };
 use trees::ShardTrees;
 
+/// A globally-unique note identity across all shielded pools.
+///
+/// Transaction planning uses this identity to bind assembly to one exact note.
+/// Live exclusion and reservation state belongs outside this canonical cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NoteLocator {
+    Orchard {
+        account_id: AccountId,
+        rho: orchard::note::Rho,
+    },
+    Sapling {
+        account_id: AccountId,
+        position: Position,
+    },
+    Ironwood {
+        account_id: AccountId,
+        rho: orchard::note::Rho,
+    },
+}
+
+impl NoteLocator {
+    pub fn orchard(account_id: AccountId, rho: orchard::note::Rho) -> Self {
+        Self::Orchard { account_id, rho }
+    }
+
+    pub fn sapling(account_id: AccountId, position: Position) -> Self {
+        Self::Sapling {
+            account_id,
+            position,
+        }
+    }
+
+    pub fn ironwood(account_id: AccountId, rho: orchard::note::Rho) -> Self {
+        Self::Ironwood { account_id, rho }
+    }
+}
+
 /// The in-memory ZNS wallet engine: a notes table and a tree.
 pub struct Wallet {
     // Identity / scanning inputs (read-only after boot).
@@ -33,6 +71,14 @@ pub struct Wallet {
     // The running commitment trees for Orchard and Sapling. Private for the
     // same reason as `balance`: must stay in sync with the note set.
     trees: ShardTrees,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WalletApplyError {
+    #[error("commitment-tree application failed: {0}")]
+    Tree(#[from] trees::TreeError),
+    #[error("commitment-tree rollback to the prior accepted checkpoint failed: {0}")]
+    Rollback(trees::TreeError),
 }
 
 impl Wallet {
@@ -49,6 +95,23 @@ impl Wallet {
     /// Used by the scanner to derive IVKs for trial decryption.
     pub fn ufvk_for(&self, account: AccountId) -> Option<&UnifiedFullViewingKey> {
         self.ufvk_map.get(&account)
+    }
+
+    /// Read-only access to the full account -> UFVK map, for scanning-key construction.
+    pub fn ufvk_map(&self) -> &BTreeMap<AccountId, UnifiedFullViewingKey> {
+        &self.ufvk_map
+    }
+
+    /// Mutable access to the balance cache, used only by the orchestrator during
+    /// deterministic rewind operations.
+    pub fn balance_mut(&mut self) -> &mut WalletBalance {
+        &mut self.balance
+    }
+
+    /// Mutable access to the commitment trees, used only by the orchestrator during
+    /// deterministic rewind operations.
+    pub fn trees_mut(&mut self) -> &mut ShardTrees {
+        &mut self.trees
     }
 
     /// Seeds the commitment trees from the birthday checkpoint.
@@ -115,6 +178,33 @@ impl Wallet {
             .flat_map(|m| m.values())
     }
 
+    /// Returns the ordinary unspent Ironwood note identified by `nullifier`.
+    ///
+    /// Name Notes are deliberately absent from this index. Callers use this
+    /// only to authenticate same-transaction spends of ordinary account notes.
+    pub fn ironwood_note_by_nullifier(
+        &self,
+        nullifier: &orchard::note::Nullifier,
+    ) -> Option<&ReceivedIronwoodNote> {
+        self.balance.get_ironwood_note_by_nf(nullifier)
+    }
+
+    /// Resolves one exact Orchard locator without performing selection.
+    pub fn orchard_note(&self, locator: NoteLocator) -> Option<&ReceivedOrchardNote> {
+        let NoteLocator::Orchard { account_id, rho } = locator else {
+            return None;
+        };
+        self.balance.unspent.orchard.get(&account_id)?.get(&rho)
+    }
+
+    /// Resolves one exact ordinary Ironwood locator without performing selection.
+    pub fn ironwood_note(&self, locator: NoteLocator) -> Option<&ReceivedIronwoodNote> {
+        let NoteLocator::Ironwood { account_id, rho } = locator else {
+            return None;
+        };
+        self.balance.unspent.ironwood.get(&account_id)?.get(&rho)
+    }
+
     pub fn balance(&self, account: AccountId) -> Zatoshis {
         let orchard_val: u64 = self
             .balance
@@ -165,6 +255,16 @@ impl Wallet {
         self.trees.ironwood_anchor(height)
     }
 
+    /// Returns the newest retained Ironwood checkpoint root.
+    ///
+    /// Used for output-only Ironwood bundles, which require a real pool root
+    /// but do not require an exact-height spend witness.
+    pub fn latest_ironwood_anchor(
+        &mut self,
+    ) -> Result<Option<orchard::tree::MerkleHashOrchard>, trees::TreeError> {
+        self.trees.latest_ironwood_anchor()
+    }
+
     pub fn ironwood_witness(
         &mut self,
         position: incrementalmerkletree::Position,
@@ -182,50 +282,55 @@ impl Wallet {
     ///
     /// Called by the orchestrator after `scan_block` returns. This is the
     /// connective tissue between the pure scanner and the wallet's mutable state.
-    pub fn apply_block(&mut self, output: &BlockOutput) {
-        let height = output.height;
+    pub fn apply_block(
+        &mut self,
+        output: &BlockOutput,
+        prior_height: BlockHeight,
+    ) -> Result<(), WalletApplyError> {
+        let height = output.height();
+        let mut next_balance = self.balance.clone();
 
         // 1. Build TransactionRecords and apply to balance, per-tx in order.
-        for tx in &output.transactions {
+        for tx in output.transactions() {
             // Look up original notes for spent nullifiers BEFORE
             // add_transaction removes them from the unspent set.
             let spent_orchard: Vec<_> = tx
-                .spent_orchard
+                .orchard_nullifiers()
                 .iter()
-                .filter_map(|s| {
-                    self.balance
-                        .get_orchard_note_by_nf(&s.nullifier)
+                .filter_map(|nullifier| {
+                    next_balance
+                        .get_orchard_note_by_nf(nullifier)
                         .map(|note| SpentOrchardNote {
-                            account_id: s.account_id,
-                            nullifier: s.nullifier,
+                            account_id: note.account_id,
+                            nullifier: *nullifier,
                             original_note: note.clone(),
                         })
                 })
                 .collect();
 
             let spent_sapling: Vec<_> = tx
-                .spent_sapling
+                .sapling_nullifiers()
                 .iter()
-                .filter_map(|s| {
-                    self.balance
-                        .get_sapling_note_by_nf(&s.nullifier)
+                .filter_map(|nullifier| {
+                    next_balance
+                        .get_sapling_note_by_nf(nullifier)
                         .map(|note| SpentSaplingNote {
-                            account_id: s.account_id,
-                            nullifier: s.nullifier,
+                            account_id: note.account_id,
+                            nullifier: *nullifier,
                             original_note: note.clone(),
                         })
                 })
                 .collect();
 
             let spent_ironwood: Vec<_> = tx
-                .spent_ironwood
+                .ironwood_nullifiers()
                 .iter()
-                .filter_map(|s| {
-                    self.balance
-                        .get_ironwood_note_by_nf(&s.nullifier)
+                .filter_map(|nullifier| {
+                    next_balance
+                        .get_ironwood_note_by_nf(nullifier)
                         .map(|note| SpentIronwoodNote {
-                            account_id: s.account_id,
-                            nullifier: s.nullifier,
+                            account_id: note.account_id,
+                            nullifier: *nullifier,
                             original_note: note.clone(),
                         })
                 })
@@ -233,7 +338,7 @@ impl Wallet {
 
             // Convert received notes, adding confirmed_height.
             let received_orchard: Vec<_> = tx
-                .received_orchard
+                .received_orchard()
                 .iter()
                 .map(|r| ReceivedOrchardNote {
                     account_id: r.account_id,
@@ -246,7 +351,7 @@ impl Wallet {
                 .collect();
 
             let received_sapling: Vec<_> = tx
-                .received_sapling
+                .received_sapling()
                 .iter()
                 .map(|r| ReceivedSaplingNote {
                     account_id: r.account_id,
@@ -259,7 +364,7 @@ impl Wallet {
                 .collect();
 
             let received_ironwood: Vec<_> = tx
-                .received_ironwood
+                .received_ironwood()
                 .iter()
                 .map(|r| ReceivedIronwoodNote {
                     account_id: r.account_id,
@@ -272,7 +377,7 @@ impl Wallet {
                 .collect();
 
             let record = TransactionRecord {
-                txid: tx.txid,
+                txid: tx.txid(),
                 block_height: height,
                 received_orchard,
                 received_sapling,
@@ -282,25 +387,34 @@ impl Wallet {
                 spent_ironwood,
             };
 
-            self.balance.add_transaction(&record);
+            next_balance.add_transaction(&record);
         }
 
         // 2. Append all commitments to ShardTrees for Merkle witness integrity.
-        for (cmx, retention) in &output.orchard_commitments {
+        // Any failure rewinds every pool to the exact prior accepted checkpoint
+        // before the prepared balance becomes visible.
+        let append_result = (|| -> Result<(), trees::TreeError> {
+            for (cmx, retention) in output.orchard_commitments() {
+                self.trees.append_orchard(*cmx, *retention)?;
+            }
+            for (node, retention) in output.sapling_commitments() {
+                self.trees.append_sapling(*node, *retention)?;
+            }
+            for (cmx, retention) in output.ironwood_commitments() {
+                self.trees.append_ironwood(*cmx, *retention)?;
+            }
+            self.trees.checkpoint_all(height)?;
+            Ok(())
+        })();
+        if let Err(error) = append_result {
             self.trees
-                .append_orchard(*cmx, *retention)
-                .expect("FATAL: failed to append Orchard commitment");
+                .truncate_to_checkpoint(prior_height)
+                .map_err(WalletApplyError::Rollback)?;
+            return Err(WalletApplyError::Tree(error));
         }
-        for (node, retention) in &output.sapling_commitments {
-            self.trees
-                .append_sapling(*node, *retention)
-                .expect("FATAL: failed to append Sapling commitment");
-        }
-        for (cmx, retention) in &output.ironwood_commitments {
-            self.trees
-                .append_ironwood(*cmx, *retention)
-                .expect("FATAL: failed to append Ironwood commitment");
-        }
+
+        self.balance = next_balance;
+        Ok(())
     }
 }
 

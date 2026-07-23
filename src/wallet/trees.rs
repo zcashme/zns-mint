@@ -24,6 +24,11 @@ pub enum TreeError {
         height: BlockHeight,
         inner: QueryError,
     },
+    #[error("{pool} commitment tree has no checkpoint at accepted height {height}")]
+    MissingCheckpoint {
+        pool: &'static str,
+        height: BlockHeight,
+    },
 }
 
 impl From<ShardTreeError<Infallible>> for TreeError {
@@ -195,6 +200,20 @@ impl ShardTrees {
             })
     }
 
+    /// Returns the root at the newest retained Ironwood checkpoint.
+    ///
+    /// Unlike [`Self::ironwood_anchor`], this does not require a checkpoint
+    /// whose identifier exactly equals a block height. It is appropriate for
+    /// output-only bundles: if no Ironwood commitments were appended in later
+    /// scanned blocks, the newest checkpoint root is still the current root.
+    pub fn latest_ironwood_anchor(
+        &mut self,
+    ) -> Result<Option<orchard::tree::MerkleHashOrchard>, TreeError> {
+        self.ironwood
+            .root_at_checkpoint_depth_caching(Some(0))
+            .map_err(TreeError::from)
+    }
+
     pub fn ironwood_tree_size(&self) -> Result<Option<u32>, TreeError> {
         Ok(self
             .ironwood
@@ -272,12 +291,92 @@ impl ShardTrees {
             .map(|p| (u64::from(p) + 1) as u32))
     }
 
+    /// Ensures every pool has a checkpoint for `height`, including pools with
+    /// no commitments in that block.
+    ///
+    /// `ShardTree::checkpoint` returns `false` when the same height was already
+    /// installed by a final leaf carrying `Retention::Checkpoint`; that is the
+    /// expected idempotent case here.
+    pub fn checkpoint_all(&mut self, height: BlockHeight) -> Result<(), TreeError> {
+        self.orchard.checkpoint(height)?;
+        self.ironwood.checkpoint(height)?;
+        self.sapling.checkpoint(height)?;
+        Ok(())
+    }
+
     // --- Reorg Handling ---
 
     pub fn truncate_to_checkpoint(&mut self, height: BlockHeight) -> Result<bool, TreeError> {
         let orchard_truncated = self.orchard.truncate_to_checkpoint(&height)?;
+        if !orchard_truncated {
+            return Err(TreeError::MissingCheckpoint {
+                pool: "Orchard",
+                height,
+            });
+        }
         let ironwood_truncated = self.ironwood.truncate_to_checkpoint(&height)?;
+        if !ironwood_truncated {
+            return Err(TreeError::MissingCheckpoint {
+                pool: "Ironwood",
+                height,
+            });
+        }
         let sapling_truncated = self.sapling.truncate_to_checkpoint(&height)?;
-        Ok(orchard_truncated || ironwood_truncated || sapling_truncated)
+        if !sapling_truncated {
+            return Err(TreeError::MissingCheckpoint {
+                pool: "Sapling",
+                height,
+            });
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use incrementalmerkletree::frontier::Frontier;
+
+    #[test]
+    fn latest_ironwood_anchor_does_not_require_exact_height() {
+        let mut trees = ShardTrees::new();
+        trees
+            .insert_ironwood_frontier(
+                Frontier::<orchard::tree::MerkleHashOrchard, COMMITMENT_TREE_DEPTH>::empty(),
+                BlockHeight::from_u32(10),
+            )
+            .expect("empty Ironwood checkpoint is valid");
+
+        assert!(trees
+            .ironwood_anchor(BlockHeight::from_u32(11))
+            .expect("exact-height query succeeds")
+            .is_none());
+        assert!(trees
+            .latest_ironwood_anchor()
+            .expect("latest-checkpoint query succeeds")
+            .is_some());
+    }
+
+    #[test]
+    fn checkpoint_all_records_quiet_pools() {
+        let mut trees = ShardTrees::new();
+        let birthday = BlockHeight::from_u32(10);
+        trees
+            .insert_orchard_frontier(Frontier::empty(), birthday)
+            .unwrap();
+        trees
+            .insert_ironwood_frontier(Frontier::empty(), birthday)
+            .unwrap();
+        trees
+            .insert_sapling_frontier(Frontier::empty(), birthday)
+            .unwrap();
+
+        let quiet_height = BlockHeight::from_u32(11);
+        trees.checkpoint_all(quiet_height).unwrap();
+
+        assert!(trees.orchard_anchor(quiet_height).unwrap().is_some());
+        assert!(trees.ironwood_anchor(quiet_height).unwrap().is_some());
+        assert!(trees.sapling_anchor(quiet_height).unwrap().is_some());
+        assert!(trees.truncate_to_checkpoint(birthday).unwrap());
     }
 }

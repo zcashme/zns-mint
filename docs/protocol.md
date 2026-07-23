@@ -45,9 +45,10 @@ Registry key material; compromising P1 compromises one user, not the namespace.
 **P2. The Registry.** The sole party authorized to spend and create Name Notes.
 Implemented by `zns-mint` account 1 inside a Trusted Execution Environment
 (TEE). Its private state is the **Registry spending key** (a ZIP-32 Orchard
-spending key, account index 1). The Registry scans memos addressed to its
-Orchard address, validates requests, derives `(psi, rcm)`, builds and proves and
-signs the Orchard bundle that mints, updates, or releases a Name Note.
+spending key, account index 1; Ironwood reuses the Orchard-family key types).
+The Registry scans Ironwood outputs addressed to its Orchard-family address,
+validates requests, derives `(psi, rcm)`, and builds, proves, and signs the V6
+Ironwood bundle that mints, updates, or releases a Name Note.
 
 The Registry's capability is narrow and auditable: *authorizing name lifecycle
 transitions*. It does not custody user funds, it does not pick resolutions, it
@@ -88,7 +89,7 @@ remains Zebra's job. The oracle is the one external input the TEE consumes and
 is named separately because a malicious oracle is in scope for the threat model.
 
 **P5. Zcash consensus (validators/miners).** The party that *finalizes* a Name
-Note by including the Orchard bundle in a block. The Registry proposes; P5
+Note by including the V6 Ironwood bundle in a block. The Registry proposes; P5
 disposes. Reorgs here are the Registry's failure case (section 10). Finality is
 inherited from Zcash: a Name Note is *tentative* until its containing block is
 buried under enough work to match the resolver's chosen confirmation depth.
@@ -103,7 +104,7 @@ secret material; section 9 fixes the resolution algorithm.
 
 **P7. The independent verifier (`zns-verify`).** A second implementation of the
 ZNS kernel, run by clients or resolvers, kept deliberately separate from the
-mint's `payload.rs`. Its whole purpose is to *not trust* the Registry: anyone
+mint's `mint/note.rs`. Its whole purpose is to *not trust* the Registry: anyone
 can run it to recompute `psi`/`rcm` and check a Name Note's commitment. This is
 the protocol's structural defense against the Registry becoming "a hidden trust
 oracle" (a load-bearing requirement; see section 11). The two implementations
@@ -113,7 +114,7 @@ are pinned by shared, byte-identical test vectors (section 12).
 
 ```
 human -> wallet -> [request memo on-chain] ->
-  Registry (TEE) validates  +  Treasury funds ->
+  Registry (TEE) validates, signs, and self-funds Name Notes ->
     Zcash consensus finalizes ->
       resolver serves it,  zns-verify checks it
 ```
@@ -142,9 +143,9 @@ any one is a protocol version bump (section 13).
 
 | Primitive | Use | Source |
 |---|---|---|
-| Orchard note commitment (Sinsemilla, Pallas) | Bind `(rcm, psi, rho, value, recipient)` of a Name Note into `cmx` | Zcash Orchard, with the `unsafe-zns` override (section 4) |
-| Orchard nullifier | Detect double-spend of a prior Name Note; supplies `rho` to the next note via `Rho::from_nf_old` | Orchard |
-| Orchard spend authority | Prove knowledge of the Registry spending key on each spend | Orchard |
+| Ironwood note commitment (Orchard-family Sinsemilla, Pallas) | Bind `(rcm, psi, rho, value, recipient)` of a Name Note into `cmx` | Zcash Ironwood via the Orchard-family implementation, with the `unsafe-zns` override (section 4) |
+| Ironwood nullifier | Detect double-spend of a prior Name Note; supplies `rho` to the next note via `Rho::from_nf_old` | Ironwood's Orchard-family action protocol |
+| Ironwood spend authority | Prove knowledge of the Registry spending key on each spend | Ironwood's Orchard-family action protocol |
 | BLAKE2b-512 | Domain-tagged hash for `(psi, rcm)` derivation | `blake2b_simd` |
 | Pallas base field `from_uniform_bytes` | Wide-reduce 64 bytes -> `psi in F_q` | `pasta_curves` |
 | Pallas scalar field `from_uniform_bytes` | Wide-reduce 64 bytes -> `rcm in F_r` (commitment trapdoor) | `pasta_curves` |
@@ -158,7 +159,7 @@ any one is a protocol version bump (section 13).
 `(action, name, ua, prev_rcm)` can recompute them. They are not secrets. But
 they *are* the interop contract: if the mint computes them one way and the
 verifier another, every Name Note's commitment silently disagrees. The protocol
-therefore mandates that the mint (`payload.rs`) and the reference verifier
+therefore mandates that the mint (`mint/note.rs`) and the reference verifier
 (`zns-verify`) keep *separate* copies of the derivation, pinned by
 byte-identical test vectors (section 12). A derivation bug surfaces as a
 mismatch instead of cancelling out.
@@ -169,24 +170,27 @@ mismatch instead of cancelling out.
 
 ### 4.1 Definition
 
-A **Name Note** is an Orchard note with three deviations from spec-faithful
-Orchard:
+A **Name Note** is an Orchard-family note in the distinct Ironwood value pool,
+carried in the `ironwood_bundle` field of a V6 transaction. It has three
+deviations from spec-faithful Ironwood:
 
 1. Its `value` is `0` (a self-send; no ZEC moves).
-2. Its `recipient` is the Registry's own external Orchard address
+2. Its `recipient` is the Registry's own external Orchard-family address
    (`fvk.address_at(0, Scope::External)`), so the Registry can later spend it.
 3. Its note commitment is overridden: instead of committing to
    `(recipient, value, rcm)`, the commitment binds a **ZNS payload** through a
    second trapdoor `psi` supplied alongside `rcm`.
 
-The override is provided by the `orchard` crate's `unsafe-zns` feature
+Ironwood uses `BundleVersion::ironwood_v3()`, V3 note plaintexts, and the
+post-NU6.3 Orchard-family circuit. The override is provided by the `orchard`
+crate's `unsafe-zns` feature
 (`Builder::add_zns_output`, `Builder::add_zns_spend`, `OutputInfo::new_zns`).
-The `unsafe-` prefix is deliberate: it breaks Orchard's standard safety
+The `unsafe-` prefix is deliberate: it breaks the standard Orchard-family safety
 guarantees by design. The commitment now ties to *ZNS state* (`psi`), not just
 to note ownership. The security implication is that the note's value envelope is
-repurposed as a commitment to a name binding; we rely on the rest of Orchard
-(nullifier, spend authority, proof) continuing to function, which the fork's
-tests verify.
+repurposed as a commitment to a name binding; we rely on the rest of the
+Ironwood/Orchard-family protocol (nullifier, spend authority, proof) continuing
+to function, which the fork's tests verify.
 
 ### 4.2 What a Name Note commits to
 
@@ -211,7 +215,7 @@ and then recomputes `psi`/`rcm` to verify that the on-chain commitment matches.
 ### 4.3 The Name Note chain
 
 A name's history is a **chain** of Name Notes. Each note after the first spends
-its predecessor and mints its successor in the same Orchard bundle. The chain
+its predecessor and mints its successor in the same Ironwood bundle. The chain
 rule is:
 
 - `prev_rcm` of note `i+1` equals `rcm` of note `i`.
@@ -293,7 +297,8 @@ the resolver's verification independent of in-transaction positioning.
 
 Bumping `ZNS_DOMAIN_TAG` is a protocol version change. It moves every test
 vector and breaks interop with every resolver and client verifier. New vectors
-must be added simultaneously to the mint (`payload.rs::tests::VECTORS`) and to
+must be added simultaneously to the mint (`mint/note.rs` plus
+`tests/test_vectors.rs`) and to
 `zns-verify::tests::vectors::VECTORS`.
 
 ---
@@ -336,17 +341,24 @@ hyphen. Validation does *not* lowercase; canonicalization is a separate step
 always the lowercase canonical string. Two inputs that canonicalize to the same
 label are the same name.
 
-### 6.4 Request memo form **[deferred]**
+### 6.4 Request memo form
 
-A user-to-Registry request is a `ZNS:`-prefixed memo that is *not* a Name Note.
-The v1 kernel only needs to *classify* it as a request (`classify_memo`
-returns `ZnsRequest` for any `ZNS:` memo that fails Name-Note parsing for a
-non-`NotZns` reason). The full request grammar -- including the OTP
-challenge/response fields that carry the authorization proof from P1 to P2 --
-is fixed by the auth step and is **not** part of the v1 interop contract. The
-load-bearing rule that *is* fixed now: the Name Note itself never carries an
-OTP, so the on-chain verifiable artifact stays parseable by the unmodified
-`zns-verify` kernel.
+User-to-Treasury requests use exactly these five forms:
+
+```text
+ZNS:claim:<name>:<ua>
+ZNS:update:<name>:<new_ua>
+ZNS:update:<name>:<new_ua>:<otp>
+ZNS:release:<name>:<ua>
+ZNS:release:<name>:<ua>:<otp>
+```
+
+There is no request version, network field, nonce, or challenge identifier.
+The optional OTP is exactly 32 lowercase hexadecimal characters encoding 16
+bytes. Internal OTP lookup uses the exact `(name, action, ua)` request tuple;
+that identifier is implementation state and is never serialized into the
+request memo. The Treasury-to-controller OTP relay grammar remains a separate
+policy decision. A Name Note itself never carries an OTP.
 
 ---
 
@@ -430,12 +442,14 @@ protocol (section 14).
 1. Compute `prev_rcm = ZERO_PREV_RCM`.
 2. `memo = encode_name_note(Claim, name, ua, prev_rcm)`.
 3. `(psi, rcm) = zns_psi_rcm(b"claim", name, ua, prev_rcm)`.
-4. Build an Orchard bundle: `Builder::add_zns_output(None, registry_addr,
-   NoteValue::ZERO, memo, rcm, psi)`. No spend (output-only; the dummy spend
-   covers the action).
+4. Build a V6 Ironwood bundle using `BundleVersion::ironwood_v3()`:
+   `Builder::add_zns_output(None, registry_addr, NoteValue::ZERO, memo, rcm,
+   psi)`. No real Name Note spend is present; the bundle's dummy action covers
+   the output.
 5. Prove, prepare, finalize. Sign with the Registry spending key (output-only
    path skips spend-auth signing; the dummy spend is signed in `prepare`).
-6. Treasury funds fees; broadcast (P3, P4); P5 finalizes.
+6. Add Registry-owned Ironwood fee-note spends and change, prove, verify, sign,
+   and broadcast. The Registry self-funds Name Note fees; P5 finalizes.
 
 **Effects:** a new Name Note exists on chain, spendable only by the Registry,
 committing to `(claim, name, ua, ZERO_PREV_RCM)`. The name is now `live`.
@@ -522,7 +536,7 @@ Not in v1. See section 14.
 
 The protocol separates:
 
-- **on-chain (authoritative):** the Name Note chain itself -- Orchard note
+- **on-chain (authoritative):** the Name Note chain itself -- Ironwood note
   commitments, nullifiers, the 512-byte memos, and the chain order induced by
   block ordering.
 - **off-chain (derived):** indexes that map `name -> chain tip` for fast
@@ -581,20 +595,21 @@ bundle is included in a block.
 ### 11.1 What is cryptographically enforced
 
 - **Binding integrity.** A Name Note's commitment binds
-  `(action, name, ua, prev_rcm)` via `psi`. Forgery requires either the
-  Registry spending key (to spend/create) or a BLAKE2b-512 collision (to find
-  `(psi, rcm)` matching a target commitment). Reduces to BLAKE2b-512
-  collision resistance and Orchard commitment soundness.
+  `(action, name, ua, prev_rcm)` via `psi`. Anyone can construct a
+  commitment-valid output to the public Registry address; it has no namespace
+  authority unless its transaction also proves Registry authorship and a legal
+  transition. Substituting a different payload for an existing target
+  commitment reduces to the hash and commitment assumptions.
 - **Chain integrity.** `prev_rcm_{i+1} = rcm_i` and `rcm` is a deterministic
   function of all prior inputs, so the chain is tamper-evident. Altering any
   link breaks the `prev_rcm` equality at the next link and is detectable by any
   verifier.
-- **Double-spend prevention.** Orchard nullifiers prevent the same prior Name
+- **Double-spend prevention.** Ironwood nullifiers prevent the same prior Name
   Note being spent twice. Because `psi` feeds the nullifier, two distinct
   notes at the same chain position derive conflicting nullifiers.
 - **Spend authority.** Only the Registry spending key can authorize a spend of
   a Name Note (the recipient is the Registry's own address). Forging a
-  transition requires forging an Orchard spend proof.
+  transition requires forging an Ironwood spend proof.
 - **Independent verifiability.** `psi`/`rcm` are public derivations; any third
   party can recompute and check `cmx` against the on-chain commitment without
   trusting the Registry, the operator, or the resolver. `zns-verify` exists
@@ -623,31 +638,27 @@ bundle is included in a block.
   mis-provisioning their wallet, pasting a UA into a phishing UI, or signing a
   request that binds their name to an attacker's address. This is the seam
   between P0 and P1; no downstream cryptography recovers it.
-- **Request authorization (v1 detail deferred).** The v1 kernel fixes *that*
-  the Registry must act only on an authentically-bound request, but the
-  concrete OTP/challenge grammar is the auth step. Until that lands, the
-  request path is a trust assumption on the Registry, not a cryptographic
-  guarantee. This is the most important open item.
+- **Request authorization.** Claim, update, and release use the fixed
+  unversioned `ZNS:` request grammar. Update/release OTP challenges are scoped
+  to the exact name, action, requested address, and canonical controller state.
 - **Operator -> Registry key exfiltration via side channels.** TEE attestation
   binds the *binary*, not the *hardware*. Side-channel, physical, or
   firmware-compromise attacks on the TEE itself are out of scope for the
   protocol and are the TEE platform's problem.
 - **Censorship.** The Registry can refuse to build a bundle for any request.
-  v1 has no forced-update or censorship-resistance mechanism; the Registry is
+  The protocol has no forced-update or censorship-resistance mechanism; the Registry is
   a trusted-by-policy operator for *availability*, even though it is
   *untrusted* for correctness (section 11.1).
 - **Name squatting / dispute.** Policy. Section 14.
-- **Front-running.** A request memo in the mempool is visible. An attacker
-  with the Registry key could front-run (but they already have the key, so
-  this is subsumed by key compromise). An attacker *without* the key cannot
-  front-run because they cannot build a valid Name Note. So front-running is
-  not an additional risk in v1.
+- **Front-running.** An attacker without Registry authority can construct a
+  commitment-valid candidate but cannot make it an accepted lifecycle
+  transition. Registry-key compromise subsumes lifecycle front-running.
 
 ### 11.4 Threat model summary
 
 | Adversary | Can they rebind a name? | Can they read user UAs? | Notes |
 |---|---|---|---|
-| Network observer | No (shielded) | No (shielded) | Orchard privacy |
+| Network observer | No (shielded) | No (shielded) | Ironwood shielded-pool privacy |
 | Compromised resolver | No | Sees UAs (public) | Can lie to *its* readers; readers run `zns-verify` |
 | Compromised oracle (P4) | No (cannot forge proofs) | No | Can censor/DOS, can serve stale tip; `verify_tip_block` catches structural tampering |
 | Compromised Treasury key | No (different account) | No | Loses operator funds |
@@ -662,7 +673,7 @@ bundle is included in a block.
 
 The interop contract is pinned by byte-identical vectors in:
 
-- `src/payload.rs::tests::VECTORS`
+- `src/mint/note.rs` and `tests/test_vectors.rs`
 - `zns-verify::tests::vectors::VECTORS`
 
 Four tuples covering: a minimal claim, an update with non-zero `prev_rcm`, a
@@ -747,12 +758,11 @@ policy extension).
 
 ---
 
-## 16. Open issues (v1)
+## 16. Open issues
 
-1. **Request authorization grammar.** The OTP/challenge/response shape that
-   binds a request memo to the current controller. This is the most important
-   open item: until it lands, the wallet -> Registry authorization is a trust
-   assumption, not a cryptographic guarantee.
+1. **OTP relay policy.** The user request grammar is fixed in section 6.4. The
+   remaining decision is the Treasury-to-controller relay memo and output
+   policy that delivers the OTP to the canonical current controller.
 2. **Expiration and renewal.** Whether v1 ships without expiration (simplest)
    or with a block-height-based expiry that extends the chain grammar.
 3. **Forced revocation.** Whether governance can authorize a `release` on a
@@ -776,7 +786,8 @@ For the first implementation, the simplest viable protocol is:
 - the deterministic `(psi, rcm)` derivation (section 5)
 - the Name Note chain as the sole source of truth (section 4.3)
 - deterministic resolution from chain-backed registry state (section 8.4)
-- the Registry as sole signer, in a TEE, with the Treasury as fee funder
+- the Registry as sole Name Note signer and fee funder, in a TEE; the Treasury
+  replenishes Registry fee-note liquidity as a separate Treasury transaction
   (section 2.2)
 - independent verification via `zns-verify` (section 2.4)
 

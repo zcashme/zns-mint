@@ -1,18 +1,20 @@
-//! Signing and serialization: proves, signs, and serializes an assembled
-//! Ironwood bundle into a broadcastable v6 transaction hex string.
+//! Signing and serialization: proves, signs, and serializes V6 shielded
+//! bundles into a broadcastable transaction hex string.
 //!
-//! Optionally accepts a pre-proven, pre-signed Sapling bundle and/or
-//! transparent outputs for cross-pool transactions (e.g. auto-sweep: Ironwood
-//! spend + transparent output). The Ironwood bundle is proven and signed here;
-//! the Sapling bundle must be proven and signed by the caller (it uses a
-//! different proving system — Groth16 — and different signing keys).
+//! This module provides two entry points:
 //!
-//! # Transaction version
+//! - [`assemble_and_sign_transaction`] — the original Registry-only path that
+//!   takes a single Ironwood bundle and optional transparent outputs.
+//! - [`assemble_v6_transaction`] — a crate-private mixed-pool assembler that
+//!   requires at least one Orchard-family shielded bundle and can additionally
+//!   carry outputs-only transparent components.
 //!
-//! At NU6.3, transactions are V6 (`TxVersion::V6`). The Ironwood bundle goes
-//! in the `ironwood_bundle` field of [`TransactionData`]; the `orchard_bundle`
-//! field is `None`. The transaction is assembled via [`from_parts_v6`], which
-//! omits `TxVersion` (always V6) and `sprout_bundle` (V6 has no sprout).
+//! Both follow the same ordering as [`zcash_primitives::transaction::Builder`]:
+//! every effecting bundle is placed into one unauthorized transaction before
+//! computing the shared shielded signature hash, then each bundle is proven and
+//! signed over that exact commitment. Sapling is deliberately excluded because
+//! a Sapling bundle would require Groth16 prover parameters that are not
+//! available inside the attested mint boundary.
 //!
 //! # Transparent bundle design
 //!
@@ -30,47 +32,41 @@
 //! pattern and avoids any manual `Bundle` construction or `zcash_script`
 //! dependency.
 
+use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::registry::transaction::TransparentOutput;
 use transparent::builder::{TransparentBuilder, TransparentSigningSet};
-use zcash_protocol::consensus::BlockHeight;
+use zcash_primitives::transaction::TxId;
+use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
 /// The expiry height buffer: 20 blocks (~25 minutes at 75s/block).
 const TX_EXPIRY_BUFFER: u32 = 20;
 
-/// Proves, signs, and serializes an assembled Ironwood bundle into a broadcastable
-/// v6 transaction hex string.
+/// The common unsigned bundle type used by this module.
+type UnsignedBundle = orchard::Bundle<
+    orchard::builder::InProgress<orchard::builder::Unproven, orchard::builder::Unauthorized>,
+    zcash_protocol::value::ZatBalance,
+>;
+
+/// Proves, signs, and serializes a mixed V6 transaction containing at least one
+/// Orchard or Ironwood bundle and optional outputs-only transparent components.
 ///
-/// # Proving key cache
+/// This is the shared assembler used by the Registry for Ironwood-only Name
+/// Note transactions and by the Treasury for mixed-pool transactions (e.g.
+/// Orchard spend + Ironwood refund output). It follows the same sighash
+/// ordering as [`zcash_primitives::transaction::Builder`]: every effecting
+/// bundle is placed into one unauthorized transaction before computing the
+/// shared shielded signature hash, then each bundle is proven and signed over
+/// that exact commitment.
 ///
-/// `ProvingKey::build()` takes ~2 minutes. Both the `ProvingKey` and
-/// `VerifyingKey` are cached in `OnceLock` statics so the first call pays the
-/// cost and all subsequent calls reuse the cached keys. The circuit version
-/// is `PostNu6_3` for both `ironwood_v3` and `orchard_v3` bundles, so a single
-/// key pair serves all transactions at NU6.3 and later.
-///
-/// # Pre-broadcast verification
-///
-/// After proving and signing, the Ironwood proof is verified against the cached
-/// `VerifyingKey` before serialization. This catches a malformed proof (from a
-/// builder bug, fork divergence, or hardware fault) before the transaction
-/// hits the network.
-///
-/// # Expiry height
-///
-/// Per ZIP-225, a non-coinbase transaction's `expiry_height` must be set to a
-/// future block height. We use `target_height + 20` (~25 minutes at 75s/block).
-pub fn assemble_and_sign_transaction(
-    unproven_bundle: orchard::Bundle<
-        orchard::builder::InProgress<orchard::builder::Unproven, orchard::builder::Unauthorized>,
-        zcash_protocol::value::ZatBalance,
-    >,
-    orchard_spending_key: &orchard::keys::SpendingKey,
-    sapling_bundle: Option<
-        sapling::Bundle<sapling::bundle::Authorized, zcash_protocol::value::ZatBalance>,
-    >,
+/// Returns the transaction ID and the serialized transaction as a hex string.
+pub(crate) fn assemble_v6_transaction(
+    orchard_bundle: Option<UnsignedBundle>,
+    ironwood_bundle: Option<UnsignedBundle>,
+    treasury_signer: Option<&TreasuryKeys>,
+    registry_signer: Option<&RegistryKeys>,
     transparent_outputs: Option<&[TransparentOutput]>,
     target_height: BlockHeight,
-) -> Result<String, &'static str> {
+) -> Result<(TxId, String), &'static str> {
     use orchard::circuit::{ProvingKey, VerifyingKey};
     use rand::rngs::OsRng;
     use std::sync::OnceLock;
@@ -81,6 +77,25 @@ pub fn assemble_and_sign_transaction(
     };
     use zcash_protocol::consensus::BranchId;
 
+    if orchard_bundle.is_none() && ironwood_bundle.is_none() {
+        return Err("mixed V6 assembly requires at least one shielded bundle");
+    }
+
+    if !zcash_protocol::consensus::MAIN_NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, target_height) {
+        return Err("V6 Orchard/Ironwood assembly requires NU6.3 activation");
+    }
+
+    if orchard_bundle.as_ref().is_some_and(|bundle| {
+        bundle.bundle_version() != orchard::bundle::BundleVersion::orchard_v3()
+    }) {
+        return Err("orchard bundle is not Orchard V3");
+    }
+    if ironwood_bundle.as_ref().is_some_and(|bundle| {
+        bundle.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3()
+    }) {
+        return Err("ironwood bundle is not Ironwood V3");
+    }
+
     // Cache the proving and verifying keys across calls. The circuit version
     // is PostNu6_3 for ironwood_v3 (and orchard_v3), so a single pair serves
     // all transactions at NU6.3 and later.
@@ -88,7 +103,11 @@ pub fn assemble_and_sign_transaction(
     static VK: OnceLock<VerifyingKey> = OnceLock::new();
 
     let branch_id = BranchId::for_height(&zcash_protocol::consensus::MAIN_NETWORK, target_height);
-    let expiry_height = BlockHeight::from_u32(u32::from(target_height) + TX_EXPIRY_BUFFER);
+    let expiry_height = BlockHeight::from_u32(
+        u32::from(target_height)
+            .checked_add(TX_EXPIRY_BUFFER)
+            .ok_or("transaction expiry height overflow")?,
+    );
 
     // --- Transparent bundle: phase 1 (unauthed) ---
     //
@@ -111,49 +130,98 @@ pub fn assemble_and_sign_transaction(
 
     // --- Unauthed transaction (for sighash) ---
     //
-    // V6 transaction (`from_parts_v6`). The Ironwood bundle goes in
-    // `ironwood_bundle`; `orchard_bundle` is `None`. The Sapling bundle is
-    // omitted here — an `Authorized` Sapling bundle cannot be placed in an
-    // `Unauthorized` transaction. The shielded sighash does not commit to
-    // Sapling authorization data, so omitting it from the unauthed tx is
-    // correct.
+    // V6 transaction (`from_parts_v6`). Every effecting bundle must be present
+    // before the shared shielded signature hash is computed.
     let unauthed_tx: TransactionData<Unauthorized> = TransactionData::from_parts_v6(
         branch_id,
         0, // lock_time
         expiry_height,
         transparent_bundle_unauthed,
-        None,                          // sapling (see comment above)
-        None,                          // orchard (Name Notes are Ironwood)
-        Some(unproven_bundle.clone()), // ironwood
+        None, // sapling (not supported in the attested boundary)
+        orchard_bundle.clone(),
+        ironwood_bundle.clone(),
     );
 
     let txid_parts = unauthed_tx.digest(TxIdDigester);
     let shielded_sig_commitment =
         signature_hash(&unauthed_tx, &SignableInput::Shielded, &txid_parts);
 
-    // --- Ironwood: prove + sign ---
-    let circuit_version = unproven_bundle.circuit_version();
+    // --- Prove and sign each shielded bundle ---
+    //
+    // The pool role is part of the function's type boundary: only Treasury
+    // authority can satisfy Orchard spends, and only Registry authority can
+    // satisfy Ironwood spends. Output-only bundles need no real spend key and
+    // are completed using the builder's retained dummy authorizing keys.
+    let treasury_sak = treasury_signer
+        .map(|keys| orchard::keys::SpendAuthorizingKey::from(keys.orchard_spending_key()));
+    let registry_sak = registry_signer
+        .map(|keys| orchard::keys::SpendAuthorizingKey::from(keys.orchard_spending_key()));
+    let mut rng = OsRng;
+
+    let circuit_version = orchard_bundle
+        .as_ref()
+        .map(|b| b.circuit_version())
+        .or_else(|| ironwood_bundle.as_ref().map(|b| b.circuit_version()))
+        .ok_or("mixed V6 assembly requires at least one shielded bundle")?;
+
+    if let Some(ref ob) = orchard_bundle {
+        if ob.circuit_version() != circuit_version {
+            return Err("orchard and ironwood bundles must use the same circuit version");
+        }
+    }
+    if let Some(ref ib) = ironwood_bundle {
+        if ib.circuit_version() != circuit_version {
+            return Err("orchard and ironwood bundles must use the same circuit version");
+        }
+    }
+
     let pk = PK.get_or_init(|| ProvingKey::build(circuit_version));
     let vk = VK.get_or_init(|| VerifyingKey::build(circuit_version));
+    if pk.circuit_version() != circuit_version || vk.circuit_version() != circuit_version {
+        return Err("cached proving keys do not match the bundle circuit version");
+    }
 
-    let mut rng = OsRng;
-    let proven_bundle = unproven_bundle
-        .create_proof(pk, &mut rng)
-        .map_err(|_| "failed to create ironwood proof")?;
+    let authorized_orchard = orchard_bundle
+        .map(
+            |b| -> Result<
+                orchard::Bundle<orchard::bundle::Authorized, zcash_protocol::value::ZatBalance>,
+                &'static str,
+            > {
+                let proven = b
+                    .create_proof(pk, &mut rng)
+                    .map_err(|_| "failed to create orchard proof")?;
+                let signing_keys: Vec<_> = treasury_sak.iter().cloned().collect();
+                let authorized = proven
+                    .apply_signatures(rng, *shielded_sig_commitment.as_ref(), &signing_keys)
+                    .map_err(|_| "Treasury authority could not authorize Orchard bundle")?;
+                authorized
+                    .verify_proof(vk)
+                    .map_err(|_| "orchard proof verification failed before broadcast")?;
+                Ok(authorized)
+            },
+        )
+        .transpose()?;
 
-    let sak = orchard::keys::SpendAuthorizingKey::from(orchard_spending_key);
-
-    let authorized_ironwood = proven_bundle
-        .apply_signatures(rng, *shielded_sig_commitment.as_ref(), &[sak])
-        .map_err(|_| "failed to apply ironwood signatures")?;
-
-    // Pre-broadcast self-verification: verify the Ironwood proof against the
-    // verifying key before serialization. Catches a malformed proof (builder
-    // bug, fork divergence, hardware fault) before the transaction hits the
-    // network.
-    authorized_ironwood
-        .verify_proof(vk)
-        .map_err(|_| "ironwood proof verification failed before broadcast")?;
+    let authorized_ironwood = ironwood_bundle
+        .map(
+            |b| -> Result<
+                orchard::Bundle<orchard::bundle::Authorized, zcash_protocol::value::ZatBalance>,
+                &'static str,
+            > {
+                let proven = b
+                    .create_proof(pk, &mut rng)
+                    .map_err(|_| "failed to create ironwood proof")?;
+                let signing_keys: Vec<_> = registry_sak.iter().cloned().collect();
+                let authorized = proven
+                    .apply_signatures(rng, *shielded_sig_commitment.as_ref(), &signing_keys)
+                    .map_err(|_| "Registry authority could not authorize Ironwood bundle")?;
+                authorized
+                    .verify_proof(vk)
+                    .map_err(|_| "ironwood proof verification failed before broadcast")?;
+                Ok(authorized)
+            },
+        )
+        .transpose()?;
 
     // --- Transparent bundle: phase 2 (authorized) ---
     //
@@ -183,17 +251,87 @@ pub fn assemble_and_sign_transaction(
         0,
         expiry_height,
         transparent_bundle_authorized,
-        sapling_bundle,
-        None, // orchard (Name Notes are Ironwood)
-        Some(authorized_ironwood),
+        None, // sapling (must match the unauthorized transaction)
+        authorized_orchard,
+        authorized_ironwood,
     );
+
+    // TX-005: authorization data may change across the two phases, but the
+    // effecting data committed by the V6 shielded sighash may not. Compare the
+    // canonical upstream-generated digests of the exact transaction that will
+    // be serialized against the digests used for the shielded sighash. This
+    // catches a future bundle, header, or transparent-output mutation before
+    // broadcast without relying on the `signature_hash` generic bound (which
+    // cannot be satisfied by `TransactionData<Authorized>`).
+    let final_txid_parts = final_tx.digest(TxIdDigester);
+
+    let tx_digests_match = final_txid_parts.header_digest.as_bytes()
+        == txid_parts.header_digest.as_bytes()
+        && final_txid_parts.transparent_digests.as_ref().map(|d| {
+            (
+                d.prevouts_digest.as_bytes(),
+                d.sequence_digest.as_bytes(),
+                d.outputs_digest.as_bytes(),
+            )
+        }) == txid_parts.transparent_digests.as_ref().map(|d| {
+            (
+                d.prevouts_digest.as_bytes(),
+                d.sequence_digest.as_bytes(),
+                d.outputs_digest.as_bytes(),
+            )
+        })
+        && final_txid_parts
+            .sapling_digest
+            .as_ref()
+            .map(|h| h.as_bytes())
+            == txid_parts.sapling_digest.as_ref().map(|h| h.as_bytes())
+        && final_txid_parts
+            .orchard_digest
+            .as_ref()
+            .map(|h| h.as_bytes())
+            == txid_parts.orchard_digest.as_ref().map(|h| h.as_bytes())
+        && final_txid_parts
+            .ironwood_digest
+            .as_ref()
+            .map(|h| h.as_bytes())
+            == txid_parts.ironwood_digest.as_ref().map(|h| h.as_bytes());
+
+    if !tx_digests_match {
+        return Err(
+            "final transaction effecting data differs from the transaction authorized by its signatures",
+        );
+    }
 
     let tx = final_tx
         .freeze()
         .map_err(|_| "failed to freeze transaction")?;
+    let txid = tx.txid();
     let mut tx_bytes = Vec::new();
     tx.write(&mut tx_bytes)
         .map_err(|_| "failed to serialize tx")?;
 
-    Ok(hex::encode(tx_bytes))
+    Ok((txid, hex::encode(tx_bytes)))
+}
+
+/// Proves, signs, and serializes an assembled Ironwood bundle into a broadcastable
+/// v6 transaction hex string.
+///
+/// This is a convenience wrapper around [`assemble_v6_transaction`] that keeps the
+/// original Registry-only call signature. It returns only the serialized hex; callers
+/// that need the transaction ID should use [`assemble_v6_transaction`] directly.
+pub fn assemble_and_sign_transaction(
+    unproven_bundle: UnsignedBundle,
+    registry_keys: &RegistryKeys,
+    transparent_outputs: Option<&[TransparentOutput]>,
+    target_height: BlockHeight,
+) -> Result<String, &'static str> {
+    assemble_v6_transaction(
+        None,
+        Some(unproven_bundle),
+        None,
+        Some(registry_keys),
+        transparent_outputs,
+        target_height,
+    )
+    .map(|(_, hex)| hex)
 }
