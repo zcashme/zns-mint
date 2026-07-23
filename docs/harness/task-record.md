@@ -546,3 +546,161 @@ Uncommitted changes:
 All changes remain uncommitted. The broad pre-existing dirty worktree is still
 present; no commit or push was performed.
 ```
+
+## 2026-07-24 — Delete standalone claim refund
+
+```text
+Slice:
+Delete the Treasury-only refund transaction before designing the one atomic
+payment-settlement and Name Note transaction.
+
+Invariant IDs:
+AUTH-001; TX-001; TX-003; TX-004; TX-005; TX-006;
+HARNESS-001; HARNESS-002; HARNESS-003; HARNESS-006.
+
+Root owner and writer:
+/root was the sole writer.
+
+Initial state:
+HEAD f70942aeeadc60a1b261eec21c1ac87115ffb691. The worktree was clean and
+git diff --check exited 0.
+
+Authority and design records read:
+AGENTS.md; .agents/skills/build-zns-mint/SKILL.md;
+docs/harness/invariants.md; src/treasury/assemble.changelog.md;
+src/treasury.changelog.md; src/registry/signing.changelog.md;
+src/registry/transaction.changelog.md; docs/design/09-transaction-assembly.md
+and its changelog; docs/design/15-treasury-module.md.
+
+Pinned upstream evidence:
+librustzcash a97a3d5f46d096b94ceb71271c7d38f20af4e1f1.
+The root README and zcash_primitives README/lib.rs were read. In
+zcash_primitives/src/transaction/mod.rs:308-322, TransactionData has distinct
+Orchard and Ironwood bundle fields. At lines 383-419,
+TransactionData::from_parts_v6 accepts both fields in one V6 transaction.
+
+Observed facts:
+src/treasury/assemble.rs owned only the standalone refund transaction.
+build_refund_transaction had no caller outside its own unit tests. It spent the
+Treasury payment and emitted Treasury change plus an Ironwood refund, but it
+could not create the corresponding Name Note. The crate-private
+registry::signing::assemble_v6_transaction is separate: it accepts optional
+Orchard and Ironwood bundles plus typed Treasury and Registry signers, installs
+all effecting bundles before the shared sighash, then proves and signs them.
+
+Design and rejected alternatives:
+Delete the entire refund module, export, tests, and obsolete child changelog.
+Preserve payment matching, Registry transaction planning, and the generic mixed
+V6 signer. Do not adapt the refund builder because that would retain a
+Treasury-only settlement boundary. Do not add the atomic replacement until its
+complete ZIP-317 fee basis/account contribution and semantic recovery rules are
+settled.
+
+Failure modes:
+Deleting shared mixed signing; weakening exact payment/memo matching; retaining
+a hidden callable refund path; claiming atomic settlement is implemented; or
+silently applying the old standalone-refund fee arithmetic to the aggregate
+atomic transaction.
+
+Files changed:
+Deleted src/treasury/assemble.rs and
+src/treasury/assemble.changelog.md. Updated src/treasury.rs,
+src/treasury/fee.rs, src/treasury.changelog.md,
+src/treasury/sweep.changelog.md, docs/design/09-transaction-assembly.md and
+changelog, docs/harness/invariants.md, docs/harness/coverage.csv,
+docs/harness/task-record.md, and tests/runtime_replay_boundary.rs.
+
+Verification:
+The static boundary test rejects re-exporting a Treasury-only assemble module.
+Repository searches found no refund constructor, request, helper, or module
+reference in Rust source. The retained mixed signer still has both bundle
+inputs and both V6 construction points, and its blob is unchanged from HEAD.
+The final diff was reviewed and git diff --check exited 0. Cargo commands and
+formatting were not authorized and were not run, so the static test remains
+unexecuted.
+
+Uncommitted state:
+All changes remain uncommitted; no commit or push was performed.
+```
+
+## 2026-07-24 — Delete Treasury fee module
+
+```text
+Slice:
+Delete the misleading one-function treasury::fee module after explicit user
+direction assigned the complete atomic claim fee to Registry.
+
+Invariant IDs:
+KEY-004; AUTH-001; TX-001; TX-003;
+HARNESS-001; HARNESS-002; HARNESS-003; HARNESS-006.
+
+Root owner and writer:
+/root was the sole writer.
+
+Initial state:
+HEAD f70942aeeadc60a1b261eec21c1ac87115ffb691. The preceding standalone-refund
+deletion remained uncommitted as a 12-file dirty diff with 141 insertions and
+548 deletions. git diff --check exited 0. Those changes were preserved and this
+slice intentionally builds on them.
+
+Authority and design records read:
+AGENTS.md; .agents/skills/build-zns-mint/SKILL.md;
+docs/harness/invariants.md; src/treasury.changelog.md;
+src/treasury/memo.changelog.md; src/wallet.changelog.md;
+docs/design/09-transaction-assembly.md and changelog;
+docs/design/15-treasury-module.md; current Treasury, payment matcher, strict
+memo parser, and received-note sources.
+
+Pinned upstream evidence:
+librustzcash a97a3d5f46d096b94ceb71271c7d38f20af4e1f1.
+components/zcash_protocol README, src/lib.rs, and src/value.rs were read.
+At value.rs:268-311, Zatoshis::from_u64 accepts only 0..=MAX_MONEY and
+Zatoshis::into_u64 returns the checked value. The unsafe-zns Orchard checkout
+README and src/lib.rs, src/note.rs, and src/value.rs were read. Note::value at
+src/note.rs:350-357 returns NoteValue; NoteValue::inner at
+src/value.rs:100-116 returns its u64.
+
+Observed facts:
+src/treasury/fee.rs contained only match_fee. Its sole caller was
+Treasury::match_payment. It computed no transaction fee: it rejected non-claim
+requests, scanned Treasury Orchard notes, compared value against a checked
+minimum, strictly reparsed the memo, and required exact RequestMemo equality.
+docs/design/15-treasury-module.md already assigned this behavior directly to
+Treasury::match_payment.
+
+Explicit policy:
+Payment is at least the caller-supplied price. Treasury retains exactly price
+and refunds payment minus price through an always-present Ironwood output.
+Registry fee notes fund the complete atomic transaction's aggregate ZIP-317
+fee. There is no fee-derived Treasury surcharge.
+
+Design and rejected alternatives:
+Inline the exact predicate into Treasury::match_payment and delete the module.
+Do not rename the module, which would preserve a needless boundary. Do not use
+a raw-u64 shortcut, which would bypass the existing checked Zatoshis
+conversion. Do not add an atomic planner in this deletion slice.
+
+Failure modes:
+Relaxing the claim-only check, scanning a non-Treasury account, weakening
+strict memo equality, changing invalid-price behavior, or retaining a
+Treasury-owned transaction-fee policy.
+
+Files changed:
+Deleted src/treasury/fee.rs. Updated src/treasury.rs,
+src/treasury.changelog.md, docs/design/09-transaction-assembly.md and
+changelog, docs/harness/invariants.md, docs/harness/coverage.csv,
+docs/harness/task-record.md, and tests/runtime_replay_boundary.rs.
+
+Verification:
+The static boundary test rejects re-exporting treasury::fee. Repository search,
+found no live Rust reference to treasury::fee or match_fee. Manual predicate
+comparison confirmed the same checked price conversion, claim-only filter,
+Treasury-account iterator, minimum-value comparison, strict memo parse, and
+exact typed equality. The combined diff was reviewed and git diff --check
+exited 0. Cargo commands and formatting were not authorized and were not run,
+so the static test remains unexecuted.
+
+Uncommitted state:
+This slice and the preceding standalone-refund deletion remain uncommitted; no
+commit or push was performed.
+```

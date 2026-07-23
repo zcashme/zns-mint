@@ -18,9 +18,10 @@ Production minting still needs:
 
 - runtime wiring from authorized requests through assembly and submission;
 - Treasury transaction assembly for OTP relay and Registry replenishment;
-- runtime integration and Zebra acceptance evidence for the drafted Treasury
-  claim-refund assembler and auto-sweep policy;
-- one atomic claim transaction replacing the temporary two-transaction path;
+- one atomic claim transaction containing payment settlement and Name Note
+  creation;
+- runtime integration and Zebra acceptance evidence for atomic claims and
+  auto-sweep policy;
 - retry, confirmation, expiry, and reorg reconciliation;
 - end-to-end regtest coverage of claim, update, release, and failure paths.
 
@@ -31,25 +32,18 @@ Production minting still needs:
 A claim transaction creates a value-0 Registry Name Note. It does not spend a
 prior Name Note.
 
-The claim transaction path must also account for the user's name payment. That
-payment is received by the Treasury and is not the Name Note value; the Name
-Note is always value `0`. The Registry's claim transaction does not consume the
-payment; it only references its acceptance as a precondition.
+The claim transaction must also settle the user's name payment. That payment is
+received by Treasury and is distinct from the value-0 Name Note. One V6
+transaction must contain the exact Treasury payment spend, Treasury
+refund/change, Registry fee spends/change, and the new Name Note. There is no
+standalone refund constructor: payment consumption without the corresponding
+valid Name Note is not successful settlement.
 
-The drafted refund transaction is separate from the Registry Name Note
-transaction. It spends the matched Treasury Orchard payment, returns retained
-value to a Treasury internal Orchard address, and creates an always-present
-Ironwood refund output at the claimant UA's Orchard receiver. For this exact
-shape, Orchard V3 contributes two logical actions and the padded Ironwood V3
-output contributes two, so the standard ZIP-317 fee is 20,000 zatoshis. The
-gross Treasury surcharge is ten times that network fee; the network fee is paid
-from the surcharge before Treasury change is created.
-
-The runtime must replace this separate-transaction draft with one V6 atomic
-settlement containing the exact Treasury payment spend, refund/change, Registry
-fee spends/change, and Name Note. Which account contributes the aggregate
-ZIP-317 fee remains an explicit policy decision because consensus exposes one
-transaction fee, not a separable per-bundle fee.
+The payment must be at least the caller-supplied price. Treasury retains that
+price and returns `payment - price` through an always-present Ironwood refund
+output, including a value-zero output at the threshold. Registry fee notes fund
+the complete atomic transaction's aggregate ZIP-317 fee. There is no
+fee-derived Treasury surcharge.
 
 ### Update
 
@@ -102,7 +96,8 @@ fully verified.
 Fees are paid by the account that authorizes the transaction:
 
 - Registry Name Note transactions (claim, update, release) are funded by the
-  Registry account itself. There is no Treasury fee-funding path for Name Notes.
+  Registry account itself. For an atomic claim, this means Registry funds the
+  complete transaction's aggregate fee; there is no Treasury fee-funding path.
   The transaction builder must combine Registry funding with Registry Name Note
   actions without exposing the Registry key outside its signing path.
 - Treasury OTP relay transactions are funded by the Treasury account.
