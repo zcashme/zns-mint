@@ -1,0 +1,145 @@
+const MAIN_SOURCE: &str = include_str!("../src/main.rs");
+const WALLET_SOURCE: &str = include_str!("../src/wallet.rs");
+const REGISTRY_SOURCE: &str = include_str!("../src/registry/state.rs");
+const REGISTRY_TRANSACTION_SOURCE: &str = include_str!("../src/registry/transaction.rs");
+const ZCASH_SOURCE: &str = include_str!("../src/zcash.rs");
+
+#[test]
+fn canonical_replay_invokes_no_operational_effects() {
+    for forbidden in [
+        "PendingOtps",
+        "TreasuryKeys",
+        "RegistryKeys",
+        "authorize_claim",
+        "authorize_update",
+        "authorize_release",
+        "build_transaction",
+        "build_refund_transaction",
+        "OsRng",
+        "rpc.send(",
+        "JsonRpc",
+        "SubmissionState",
+        "InFlightIntent",
+        "inc_blocks_scanned",
+        "inc_request",
+        "inc_otp",
+        "inc_submission",
+    ] {
+        assert!(
+            !MAIN_SOURCE.contains(forbidden),
+            "passive replay regained forbidden operation `{forbidden}`"
+        );
+    }
+
+    assert!(
+        MAIN_SOURCE.contains("CanonicalBlockSource"),
+        "passive replay must use the read-only canonical block source"
+    );
+}
+
+#[test]
+fn canonical_applicator_has_no_duplicate_height_or_live_state() {
+    let signature_start = MAIN_SOURCE
+        .find("fn apply_canonical_block(")
+        .expect("canonical applicator must exist");
+    let signature_end = MAIN_SOURCE[signature_start..]
+        .find(") -> Result<BlockHeight, RuntimeError>")
+        .map(|offset| signature_start + offset)
+        .expect("canonical applicator signature terminator must exist");
+    let signature = &MAIN_SOURCE[signature_start..signature_end];
+
+    for forbidden in [
+        "height:",
+        "Treasury",
+        "Otp",
+        "Intent",
+        "Submission",
+        "TreasuryKeys",
+        "RegistryKeys",
+        "SpendingKey",
+        "JsonRpc",
+        "metrics",
+    ] {
+        assert!(
+            !signature.contains(forbidden),
+            "canonical applicator accepts forbidden input `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn canonical_block_source_exposes_only_chain_reads() {
+    let impl_start = ZCASH_SOURCE
+        .find("impl CanonicalBlockSource {")
+        .expect("canonical block source implementation must exist");
+    let impl_end = ZCASH_SOURCE[impl_start..]
+        .find("impl Default for CanonicalBlockSource")
+        .map(|offset| impl_start + offset)
+        .expect("canonical block source implementation terminator must exist");
+    let implementation = &ZCASH_SOURCE[impl_start..impl_end];
+
+    assert!(implementation.contains("pub async fn get_blockchain_info("));
+    assert!(implementation.contains("pub async fn get_block("));
+    assert!(!implementation.contains("send("));
+    assert!(!implementation.contains("raw("));
+    assert!(!implementation.contains("send_request"));
+}
+
+#[test]
+fn canonical_state_owners_have_no_operational_locks() {
+    for forbidden in [
+        "reserved:",
+        "reserve_note",
+        "reserve_all",
+        "reserved_notes",
+        "is_note_reserved",
+        "orchard_exclude_set",
+        "sapling_exclude_set",
+        "ironwood_exclude_set",
+    ] {
+        assert!(
+            !WALLET_SOURCE.contains(forbidden),
+            "Wallet regained operational reservation surface `{forbidden}`"
+        );
+    }
+
+    for forbidden in [
+        "locked:",
+        "lock_name",
+        "unlock_name",
+        "locked_names",
+        "is_name_locked",
+    ] {
+        assert!(
+            !REGISTRY_SOURCE.contains(forbidden),
+            "Registry regained operational lock surface `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn registry_fee_planning_requires_caller_owned_exclusions() {
+    assert!(
+        REGISTRY_TRANSACTION_SOURCE.contains("excluded: &BTreeSet<NoteLocator>"),
+        "Registry fee planning must receive explicit Live-owned exclusions"
+    );
+    assert!(
+        REGISTRY_TRANSACTION_SOURCE.contains("!excluded.contains(locator)"),
+        "Registry fee planning must apply every caller-owned exclusion"
+    );
+    assert!(
+        !REGISTRY_TRANSACTION_SOURCE.contains("wallet.is_note_reserved"),
+        "Registry fee planning must not read operational state from Wallet"
+    );
+}
+
+#[test]
+fn malformed_chain_data_is_never_retryable() {
+    use zns_mint::zcash::TransportError;
+
+    assert!(TransportError::Timeout.is_retryable());
+    assert!(TransportError::HttpStatus(503).is_retryable());
+    assert!(!TransportError::HttpStatus(400).is_retryable());
+    assert!(!TransportError::BadNodeData("test").is_retryable());
+    assert!(!TransportError::BadCheckpoint("test".to_owned()).is_retryable());
+}

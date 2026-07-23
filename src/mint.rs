@@ -3,7 +3,10 @@
 mod note;
 
 // Re-export note functions so existing `crate::mint::` paths keep working.
-pub use note::{decode_name_note, encode_name_note, zns_psi_rcm, zns_psi_rcm_raw};
+pub use note::{
+    decode_name_note, decode_name_note_payload, encode_name_note, zns_psi_rcm, zns_psi_rcm_raw,
+    NameNotePayload,
+};
 
 use std::fmt;
 
@@ -14,8 +17,6 @@ use zip32::AccountId;
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
-
-/// The fully-applied local chain prefix.
 
 /// The fully-applied local chain prefix.
 ///
@@ -85,7 +86,7 @@ impl fmt::Debug for Memo {
 }
 
 /// ZNS action kinds.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Action {
     /// Point a name to an address
     Claim,
@@ -93,6 +94,17 @@ pub enum Action {
     Update,
     /// Terminates a name's linkage to an address
     Release,
+}
+
+impl Action {
+    /// Returns the canonical ASCII verb for this action.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Action::Claim => "claim",
+            Action::Update => "update",
+            Action::Release => "release",
+        }
+    }
 }
 
 /// A ZNS name-chain commitment — the trapdoor that links consecutive Name Notes.
@@ -166,7 +178,7 @@ impl fmt::Display for Name {
 /// never parses or validates UAs — it hashes the string into the ZNS
 /// commitment and stores it in the Name Note memo. The resolver/verifier
 /// is what parses the UA to extract payment receivers.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct UnifiedAddress(String);
 
 impl UnifiedAddress {

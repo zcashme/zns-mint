@@ -28,7 +28,7 @@ use zip32::fingerprint::SeedFingerprint;
 use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
 use zeroize::Zeroize;
 
-use crate::key::{self, AccountKeys};
+use crate::key::{self, RegistryKeys, TreasuryKeys};
 use crate::mint::{ChainCursor, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::registry::Registry;
 use crate::treasury::Treasury;
@@ -54,8 +54,8 @@ pub struct Boot {
     registry: Registry,
     treasury: Treasury,
     cursor: ChainCursor,
-    treasury_keys: AccountKeys,
-    registry_keys: AccountKeys,
+    treasury_keys: TreasuryKeys,
+    registry_keys: RegistryKeys,
 }
 
 impl Boot {
@@ -85,8 +85,8 @@ impl Boot {
         verify_fingerprint(&seed);
 
         // 5. Key derivation
-        let treasury_keys = key::derive_account(&seed, TREASURY_ACCOUNT);
-        let registry_keys = key::derive_account(&seed, REGISTRY_ACCOUNT);
+        let treasury_keys = key::derive_treasury(&seed);
+        let registry_keys = key::derive_registry(&seed);
         tracing::info!("boot: keys derived (treasury=acct0, registry=acct1)");
 
         // 6. Wallet initialization
@@ -159,6 +159,31 @@ impl Boot {
     /// The chain cursor — fully-applied chain prefix.
     pub fn cursor(&self) -> &ChainCursor {
         &self.cursor
+    }
+
+    /// Consumes the boot evidence and returns the mutable run-loop components.
+    ///
+    /// The orchestrator is the only caller; this keeps the fields private
+    /// while allowing the run loop to take ownership of the initialized
+    /// subsystems.
+    pub fn into_parts(
+        self,
+    ) -> (
+        ChainClient,
+        Wallet,
+        Registry,
+        Treasury,
+        TreasuryKeys,
+        RegistryKeys,
+    ) {
+        (
+            self.chain,
+            self.wallet,
+            self.registry,
+            self.treasury,
+            self.treasury_keys,
+            self.registry_keys,
+        )
     }
 }
 
@@ -315,7 +340,7 @@ pub fn ironwood_activation_height() -> BlockHeight {
 /// hash pinning is needed — the checkpoint hash from `z_gettreestate` is
 /// stored in metadata for reference.
 async fn origin_checkpoint(rpc: &zcash::JsonRpc) -> CheckpointData {
-    let checkpoint_height = ironwood_activation_height() - BlockHeight::from_u32(1);
+    let checkpoint_height = ironwood_activation_height().saturating_sub(1);
 
     let checkpoint = rpc
         .get_checkpoint(checkpoint_height)
@@ -391,8 +416,8 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>) {
 /// An external verifier checks this against the expected Treasury address
 /// and Registry UFVK, binding the attestation to the mint's identity.
 fn generate_attestation_report_data(
-    treasury_keys: &AccountKeys,
-    registry_keys: &AccountKeys,
+    treasury_keys: &TreasuryKeys,
+    registry_keys: &RegistryKeys,
 ) -> [u8; 64] {
     use zcash_keys::keys::UnifiedAddressRequest;
 

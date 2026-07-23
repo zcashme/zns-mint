@@ -5,7 +5,79 @@
 //! [`decode_name_note`]) that together define the Name Note's on-chain
 //! representation.
 
-use super::{Action, Name, NameCommitment};
+use super::{Action, Name, NameCommitment, UnifiedAddress};
+
+/// A canonical parsed Name Note memo payload.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NameNotePayload {
+    name: Name,
+    action: Action,
+    ua: UnifiedAddress,
+    prev_rcm: Option<NameCommitment>,
+}
+
+impl std::fmt::Debug for NameNotePayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NameNotePayload(<redacted>)")
+    }
+}
+
+impl NameNotePayload {
+    /// Constructs a canonical action-consistent Name Note payload.
+    pub fn new(
+        name: Name,
+        action: Action,
+        ua: UnifiedAddress,
+        prev_rcm: Option<NameCommitment>,
+    ) -> Option<Self> {
+        let ua_bytes = ua.as_str().as_bytes();
+        if !ua_bytes.is_ascii() || ua_bytes.contains(&b':') || ua_bytes.contains(&0) {
+            return None;
+        }
+
+        let fields_match_action = match action {
+            Action::Claim => !ua.is_empty() && prev_rcm.is_none(),
+            Action::Update => !ua.is_empty() && prev_rcm.is_some(),
+            Action::Release => ua.is_empty() && prev_rcm.is_some(),
+        };
+        fields_match_action.then_some(Self {
+            name,
+            action,
+            ua,
+            prev_rcm,
+        })
+    }
+
+    /// Returns the canonical name.
+    pub fn name(&self) -> &Name {
+        &self.name
+    }
+
+    /// Returns the lifecycle action.
+    pub fn action(&self) -> Action {
+        self.action
+    }
+
+    /// Returns the bound Unified Address string.
+    pub fn ua(&self) -> &UnifiedAddress {
+        &self.ua
+    }
+
+    /// Returns the predecessor chain commitment, absent only for claims.
+    pub fn prev_rcm(&self) -> Option<NameCommitment> {
+        self.prev_rcm
+    }
+
+    /// Derives the commitment opening bound to this exact parsed payload.
+    pub fn opening(&self) -> (pasta_curves::pallas::Scalar, pasta_curves::pallas::Base) {
+        zns_psi_rcm(&self.name, self.action, self.ua.as_str(), self.prev_rcm)
+    }
+
+    /// Encodes this payload into its canonical zero-padded memo form.
+    pub fn encode(&self) -> Option<[u8; 512]> {
+        encode_name_note_fields(&self.name, self.action, self.ua.as_str(), self.prev_rcm)
+    }
+}
 
 /// Derives the ZNS payload scalars `(rcm, psi)` for the Orchard `unsafe-zns` circuit.
 ///
@@ -98,6 +170,21 @@ pub fn encode_name_note(
     ua: &str,
     prev_rcm: Option<NameCommitment>,
 ) -> Option<[u8; 512]> {
+    let payload = NameNotePayload::new(
+        name.clone(),
+        action,
+        UnifiedAddress::from_string(ua.to_string()),
+        prev_rcm,
+    )?;
+    payload.encode()
+}
+
+fn encode_name_note_fields(
+    name: &Name,
+    action: Action,
+    ua: &str,
+    prev_rcm: Option<NameCommitment>,
+) -> Option<[u8; 512]> {
     let action_str = match action {
         Action::Claim => "claim",
         Action::Update => "update",
@@ -133,6 +220,17 @@ pub fn encode_name_note(
 pub fn decode_name_note(
     memo: &[u8; 512],
 ) -> Option<(Name, Action, String, Option<NameCommitment>)> {
+    let payload = decode_name_note_payload(memo)?;
+    Some((
+        payload.name,
+        payload.action,
+        payload.ua.into_string(),
+        payload.prev_rcm,
+    ))
+}
+
+/// Decodes a canonical 512-byte Name Note memo into a typed payload.
+pub fn decode_name_note_payload(memo: &[u8; 512]) -> Option<NameNotePayload> {
     // Strip trailing zeros
     let end = memo.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
     let memo_str = std::str::from_utf8(&memo[..end]).ok()?;
@@ -161,6 +259,13 @@ pub fn decode_name_note(
     if parts[4].len() != 64 {
         return None;
     }
+    if !parts[4]
+        .as_bytes()
+        .iter()
+        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
     hex::decode_to_slice(parts[4], &mut prev_rcm_bytes).ok()?;
 
     let prev_rcm = if prev_rcm_bytes == [0u8; 32] {
@@ -169,7 +274,9 @@ pub fn decode_name_note(
         Some(NameCommitment::from_bytes(&prev_rcm_bytes)?)
     };
 
-    Some((name, action, ua, prev_rcm))
+    let payload = NameNotePayload::new(name, action, UnifiedAddress::from_string(ua), prev_rcm)?;
+
+    (payload.encode()?.as_slice() == memo).then_some(payload)
 }
 
 #[cfg(test)]

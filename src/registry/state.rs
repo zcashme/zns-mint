@@ -1,78 +1,83 @@
 //! Name-chain state machine: the registry of ZNS name tips and the
 //! cryptographic newtypes for the ZNS commitment scalars.
 
-use crate::mint::{Action, Name, NameCommitment};
+use crate::mint::{Action, Name, NameCommitment, REGISTRY_ACCOUNT};
+use crate::sync::{BlockOutput, ReceivedNameNote};
+use crate::wallet::Wallet;
 use std::collections::BTreeMap;
 use zcash_protocol::consensus::BlockHeight;
-
-// ---------------------------------------------------------------------------
-// Newtypes for the ZNS commitment scalars
-// ---------------------------------------------------------------------------
-
-/// The `rcm` trapdoor — the note commitment randomness that makes a Name
-/// Note's commitment unique and unpredictable.
-///
-/// Derived by [`crate::mint::zns_psi_rcm`] and fed to the orchard fork's
-/// `add_zns_spend` / `add_zns_output`. Stored in [`Tip`] so the Registry can
-/// spend a Name Note later. Newtype over `pallas::Scalar` to distinguish it
-/// from arbitrary scalars (binding nonces, spend-auth randomizers, etc.).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rcm(pasta_curves::pallas::Scalar);
-
-impl Rcm {
-    pub fn from_scalar(s: pasta_curves::pallas::Scalar) -> Self {
-        Self(s)
-    }
-
-    pub fn as_scalar(&self) -> &pasta_curves::pallas::Scalar {
-        &self.0
-    }
-
-    pub fn into_scalar(self) -> pasta_curves::pallas::Scalar {
-        self.0
-    }
-}
-
-/// The `ψ` (psi) value — the ZNS payload commitment that binds the Name Note
-/// to its `(name, action, ua, prev_rcm)` inputs.
-///
-/// Derived alongside [`Rcm`] by [`crate::mint::zns_psi_rcm`]. The orchard fork
-/// computes `cmx` from `(rcm, ψ)` instead of the standard `(recipient, value,
-/// rcm)` derivation. Newtype over `pallas::Base` to distinguish it from
-/// arbitrary base field elements.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Psi(pasta_curves::pallas::Base);
-
-impl Psi {
-    pub fn from_base(b: pasta_curves::pallas::Base) -> Self {
-        Self(b)
-    }
-
-    pub fn as_base(&self) -> &pasta_curves::pallas::Base {
-        &self.0
-    }
-
-    pub fn into_base(self) -> pasta_curves::pallas::Base {
-        self.0
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tip — the current state of a name chain
 // ---------------------------------------------------------------------------
 
-/// The current state of a name chain: the most recent confirmed Name Note's
-/// action, commitment, and the exact scalars needed to spend it later.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The current state of a name chain.
+///
+/// Production tips are constructed only from a scanner-validated Name Note.
+/// The duplicated public view fields are derived from that retained note at
+/// construction and exist so authorization code cannot access memo plaintext.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Tip {
     pub action: Action,
     pub commitment: NameCommitment,
-    /// The `rcm` trapdoor used to mint this Name Note. Needed to spend it
-    /// via `add_zns_spend`.
-    pub rcm: Rcm,
-    /// The `ψ` payload commitment used to mint this Name Note. Needed to
-    /// spend it via `add_zns_spend`.
-    pub psi: Psi,
+    received: Option<ReceivedNameNote>,
+}
+
+impl Tip {
+    fn from_received(received: ReceivedNameNote) -> Self {
+        let payload = received.payload();
+        let (rcm, _) = payload.opening();
+        Self {
+            action: payload.action(),
+            commitment: NameCommitment::from_inner(orchard::note::NoteCommitTrapdoor::from_inner(
+                rcm,
+            )),
+            received: Some(received),
+        }
+    }
+
+    /// The exact validated note and chain locator needed to spend this tip.
+    pub fn received(&self) -> Option<&ReceivedNameNote> {
+        self.received.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(action: Action, commitment: NameCommitment) -> Self {
+        Self {
+            action,
+            commitment,
+            received: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for Tip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tip")
+            .field("action", &self.action)
+            .field("commitment", &self.commitment)
+            .field("name_note", &self.received.as_ref().map(|_| "<validated>"))
+            .finish()
+    }
+}
+
+/// A canonical block transaction could not advance Registry state.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RegistryApplyError {
+    #[error("one transaction contained multiple validated Name Note candidates")]
+    AmbiguousNameNotes,
+    #[error("a Name Note transition lacked a recognized Registry fee-note spend")]
+    MissingRegistryFeeSpend,
+    #[error("a claim attempted to replace a live name")]
+    NameAlreadyLive,
+    #[error("an update or release had no live predecessor")]
+    MissingLiveTip,
+    #[error("an update or release did not name the current predecessor commitment")]
+    WrongPredecessor,
+    #[error("an update or release did not spend the exact current Name Note")]
+    MissingTipSpend,
+    #[error("a current Name Note was spent without exactly one legal successor")]
+    TipSpentWithoutSuccessor,
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +95,7 @@ pub struct RegistryHistoryRecord {
 
 /// The name-chain state: a map from each canonical ZNS name to the most
 /// recent confirmed tip for that name, plus an undo log for reorgs.
+#[derive(Clone)]
 pub struct Registry {
     tips: BTreeMap<Name, Tip>,
     history: Vec<RegistryHistoryRecord>,
@@ -109,9 +115,130 @@ impl Registry {
         self.tips.get(name)
     }
 
-    /// Update the current tip of a ZNS name chain. Called by the scanner when
-    /// a confirmed Name Note for `name` is observed on the best chain.
-    pub fn set_tip(&mut self, name: Name, tip: Tip, height: BlockHeight) {
+    /// Validates and simulates every Registry transition in block order.
+    ///
+    /// The evidence boundary takes the scanner's complete transaction and the
+    /// wallet's ordinary-note state directly. Callers cannot supply a detached
+    /// authorship boolean or nullifier list.
+    pub fn apply_block(
+        &self,
+        wallet: &Wallet,
+        output: &BlockOutput,
+    ) -> Result<Self, RegistryApplyError> {
+        let mut next = self.clone();
+        let mut available_registry_fees: Vec<_> = wallet
+            .ironwood_notes_for(REGISTRY_ACCOUNT)
+            .filter(|note| note.note.value().inner() > 0)
+            .map(|note| note.nullifier)
+            .collect();
+
+        for tx in output.transactions() {
+            let has_registry_fee_spend = tx
+                .ironwood_nullifiers()
+                .iter()
+                .any(|nullifier| available_registry_fees.contains(nullifier));
+            let spent_tip_names: Vec<_> = next
+                .tips
+                .iter()
+                .filter_map(|(name, tip)| {
+                    tip.received()
+                        .map(ReceivedNameNote::nullifier)
+                        .filter(|nullifier| tx.ironwood_nullifiers().contains(nullifier))
+                        .map(|_| name.clone())
+                })
+                .collect();
+
+            match tx.received_name_notes() {
+                [] => {
+                    if !spent_tip_names.is_empty() {
+                        return Err(RegistryApplyError::TipSpentWithoutSuccessor);
+                    }
+                }
+                notes if notes.len() > 1 => {
+                    // Public output construction is not Registry authorship.
+                    // Ignore attacker-created ambiguity unless this transaction
+                    // also spends Registry authority.
+                    if has_registry_fee_spend || !spent_tip_names.is_empty() {
+                        return Err(RegistryApplyError::AmbiguousNameNotes);
+                    }
+                }
+                [note] => {
+                    // An unauthenticated output candidate has no namespace
+                    // effect and must not make canonical block following fail.
+                    if !has_registry_fee_spend && spent_tip_names.is_empty() {
+                        Self::advance_fee_set(
+                            &mut available_registry_fees,
+                            tx.ironwood_nullifiers(),
+                            tx.received_ironwood(),
+                        );
+                        continue;
+                    }
+                    if !has_registry_fee_spend {
+                        return Err(RegistryApplyError::MissingRegistryFeeSpend);
+                    }
+
+                    let payload = note.payload();
+                    let name = payload.name();
+                    match payload.action() {
+                        Action::Claim => {
+                            if !spent_tip_names.is_empty() {
+                                return Err(RegistryApplyError::TipSpentWithoutSuccessor);
+                            }
+                            if next
+                                .tip(name)
+                                .is_some_and(|tip| tip.action != Action::Release)
+                            {
+                                return Err(RegistryApplyError::NameAlreadyLive);
+                            }
+                        }
+                        Action::Update | Action::Release => {
+                            let tip = next
+                                .tip(name)
+                                .filter(|tip| tip.action != Action::Release)
+                                .ok_or(RegistryApplyError::MissingLiveTip)?;
+                            if payload.prev_rcm() != Some(tip.commitment) {
+                                return Err(RegistryApplyError::WrongPredecessor);
+                            }
+                            if spent_tip_names.as_slice() != [name.clone()] {
+                                return Err(RegistryApplyError::MissingTipSpend);
+                            }
+                        }
+                    }
+
+                    next.set_tip(
+                        name.clone(),
+                        Tip::from_received(note.clone()),
+                        output.height(),
+                    );
+                }
+                _ => unreachable!("slice cardinality was handled above"),
+            }
+
+            Self::advance_fee_set(
+                &mut available_registry_fees,
+                tx.ironwood_nullifiers(),
+                tx.received_ironwood(),
+            );
+        }
+
+        Ok(next)
+    }
+
+    fn advance_fee_set(
+        available: &mut Vec<orchard::note::Nullifier>,
+        spent: &[orchard::note::Nullifier],
+        received: &[crate::sync::ReceivedIronwood],
+    ) {
+        available.retain(|nullifier| !spent.contains(nullifier));
+        available.extend(
+            received
+                .iter()
+                .filter(|note| note.account_id == REGISTRY_ACCOUNT && note.note.value().inner() > 0)
+                .map(|note| note.nullifier),
+        );
+    }
+
+    fn set_tip(&mut self, name: Name, tip: Tip, height: BlockHeight) {
         let prev_tip = self.tips.insert(name.clone(), tip);
         self.history.push(RegistryHistoryRecord {
             height,
@@ -141,6 +268,17 @@ impl Registry {
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_tip_for_test(
+        &mut self,
+        name: Name,
+        action: Action,
+        commitment: NameCommitment,
+        height: BlockHeight,
+    ) {
+        self.set_tip(name, Tip::for_test(action, commitment), height);
     }
 }
 

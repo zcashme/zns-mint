@@ -5,7 +5,7 @@ use super::transaction::{
     ReceivedIronwoodNote, ReceivedOrchardNote, ReceivedSaplingNote, TransactionRecord,
 };
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct UnspentNotes {
     pub orchard: BTreeMap<AccountId, BTreeMap<orchard::note::Rho, ReceivedOrchardNote>>,
     pub ironwood: BTreeMap<AccountId, BTreeMap<orchard::note::Rho, ReceivedIronwoodNote>>,
@@ -15,7 +15,7 @@ pub struct UnspentNotes {
         BTreeMap<AccountId, BTreeMap<incrementalmerkletree::Position, ReceivedSaplingNote>>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct NullifierIndex {
     // Maps Orchard Nullifier to the AccountId and Rho that holds it.
     pub orchard: BTreeMap<orchard::note::Nullifier, (AccountId, orchard::note::Rho)>,
@@ -27,7 +27,7 @@ pub struct NullifierIndex {
     pub sapling: BTreeMap<sapling::Nullifier, (AccountId, incrementalmerkletree::Position)>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct WalletBalance {
     pub unspent: UnspentNotes,
     pub nullifiers: NullifierIndex,

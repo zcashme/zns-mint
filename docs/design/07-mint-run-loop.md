@@ -1,132 +1,134 @@
 # 07 - Mint Run Loop
 
-This document describes the target shape that `main.rs` should eventually
-orchestrate. It is not a demand to put all logic in `main.rs`; `main.rs` should
-remain a thin phase orchestrator.
+This document defines the runtime phase boundary. `main.rs` remains a thin
+orchestrator; canonical replay and operational transaction work must never
+share one capability-bearing function.
 
-## Phase Shape
+## Current Safety Baseline
 
-The mint runtime has three broad phases:
+The current runtime is intentionally passive. It boots from the pinned
+birthday checkpoint, scans continuous blocks, applies Wallet and Registry
+state, advances its exact cursor/history, and recomputes canonical gauges.
 
-1. boot;
-2. catch up to the best chain;
-3. run forever on chain and submission events.
+Catch-up does not interpret requests, generate or verify OTPs, reserve names or
+notes, run Treasury policy, prove or sign transactions, submit bytes, reconcile
+submissions, or emit lifecycle event counters. Transaction and authorization
+libraries remain unwired until the phase architecture below is implemented.
 
-There is no "restore" phase. The mint holds no durable wallet, name, witness,
-or scan-checkpoint state across restarts; on every boot it replays from the
-static birthday checkpoint and rebuilds wallet/name state purely from chain.
-See `08-chain-sync.md` "Birthday Checkpoint": the only durable artifact the
-mint depends on is the birthday checkpoint itself; all wallet/name state is
-rebuilt from it on every boot.
+The current reorg detector handles a divergent fetched successor, but it does
+not yet detect every same-height or shorter reorg. This is a release blocker,
+not an implied property of the passive cleanup.
 
-In rough pseudocode:
+## Target Phase Shape
+
+The runtime has three explicit phases:
+
+1. `Boot` establishes the attested process, derives accounts, and seeds the
+   birthday checkpoint.
+2. `Rebuild` captures an exact fresh Zebra `(height, hash)` target and folds
+   canonical blocks without operational effects.
+3. `Live` begins only when the fully-applied cursor exactly equals that target
+   and Zebra still reports the same canonical hash.
+
+There is no durable Wallet, Registry, witness, intent, or submission authority.
+Canonical state is rebuilt from chain on every boot.
 
 ```text
-init tracing
-accounts = boot()
+boot
+target = zebra_exact_tip()
 
-catch_up_from_birthday(accounts)
+while cursor != target:
+  block = fetch_continuous_canonical_successor(cursor)
+  committed = apply_canonical_block(block, scanning, wallet, registry,
+                                    cursor, accepted_history)
+
+require zebra_hash(target.height) == target.hash
+enter Live
 
 loop:
-  event = next_chain_or_submission_event()
-  match event:
-    new_block(block):
-      verify_block_shape(block)
-      scan_accounts(block)
-      apply_detected_name_notes(block)
-      process_detected_treasury_requests(block)
-      assemble_ready_transactions()
-      submit_ready_transactions()
+  canonical change:
+    commit canonical blocks passively
+    project optional Live effects only from committed evidence
 
-    reorg(common_ancestor):
-      rewind_wallet_state(common_ancestor)
-      rewind_name_state(common_ancestor)
-      replay_best_chain_from(common_ancestor)
-
-    mempool_or_submit_result(result):
-      update_submission_state(result)
-      retry_or_mark_failed(result)
-
-    shutdown:
-      exit
+  reorg:
+    invalidate cursor-bound operational work
+    rewind every canonical subsystem to one exact ancestor
+    capture a fresh exact target
+    replay the replacement branch passively
+    re-enter Live only after exact target verification
 ```
 
-## Boot Responsibilities
+## Canonical Fold Boundary
 
-Boot proves that the chain source is alive and serving structurally valid data,
-then derives accounts. Seed material should not be touched before the chain
-source passes the boot checks.
+The target interface is:
 
-Boot enforces strict security constraints before starting:
-1. **Environment Sanitation:** Asserts zero host-configuration by panicking if dangerous environment variables (e.g., `RUST_LOG`, `RUST_BACKTRACE`, `ZNS_*`) are set.
-2. **Consensus Branch Verification:** Asserts the node's tip height is past Orchard activation (NU5), refusing to sync against deprecated chain branches.
-3. **Tip Freshness:** Asserts the tip block timestamp is within a 2-hour window of the mint's system time, refusing to operate on a stalled or partitioned node.
+```text
+apply_canonical_block(...) -> Result<CommittedBlock, RuntimeError>
+project_live_effects(..., CommittedBlock) -> ...
+```
 
-Boot does not own sync policy, request policy, transaction policy, or run-loop
-state machines.
+`apply_canonical_block` may receive only:
 
-## Rebuild Responsibilities
+- a block and scanning inputs;
+- Wallet and Registry derived state;
+- the fully-applied cursor and accepted chain history.
 
-Because there is no durable state, the catch-up phase *is* the rebuild. The
-mint seeds its in-memory wallet from the birthday checkpoint fetched live from
-Zebra's JSON-RPC, and scans forward from there. There is no "load state" step
-and no "fail loudly on inconsistent state" branch, because the only durable
-artifact is the Zebra node itself.
+It may not receive:
 
-## Catch-Up Responsibilities
+- spending keys, a prover, signer, or submitter;
+- RPC submission capability;
+- intents, submissions, OTP state, or entropy;
+- Treasury policy;
+- live event counters.
 
-Catch-up scans from the birthday checkpoint to the current tip. It must:
+One block commits in this order:
 
-- scan Treasury and Registry accounts in one pass;
-- surface incoming Treasury request memos;
-- surface incoming Registry Name Note memos;
-- apply confirmed Name Notes in chain order;
-- process Treasury request memos only after the state needed to validate them is known;
-- update witness data for spendable Registry Name Notes.
+1. scan and validate the next continuous block;
+2. simulate Registry transitions against pre-block canonical Wallet state;
+3. apply Wallet balances, nullifiers, and all three commitment trees;
+4. install the simulated Registry result;
+5. advance exact cursor and accepted history last;
+6. return immutable committed evidence.
+
+No request observation is lost: raw Treasury memos, txids, received/spent
+notes, nullifiers, and validated Name Notes remain canonical evidence. Rebuild
+does not interpret that evidence operationally.
 
 ## Live Responsibilities
 
-The live loop consumes best-chain changes and submission results. For each new
-block it should scan once and fan out observations to account-specific logic.
+Only `Live` may own or invoke:
 
-The live loop should not duplicate the full block scan for Treasury and Registry
-forever. The current code does this for simplicity; production should share the
-block fetch/decode pass and apply both accounts' scanning keys.
+- request interpretation and semantic claim reconstruction;
+- name, payment, fee-note, and OTP reservations;
+- OTP issuance and verification;
+- Treasury funding and sweep policy;
+- intent expiry, confirmation, and replacement;
+- proving, signing, retry, and submission;
+- lifecycle event counters.
 
-## Request Processing Order
+Operational locks and reservations are cursor-bound state outside canonical
+Wallet and Registry values. A reorg invalidates them before replacement replay.
+Orphan-bound serialized transactions never become automatically submit-ready.
 
-Within a block, confirmed Name Notes should be applied before request memos that
-depend on the resulting state. Across blocks, chain order is authoritative.
+Canonical facts are gauges recomputed from committed state. Replay lifecycle
+work, if measured, uses a separate process metric rather than replaying user
+events.
 
-The run loop must distinguish:
+## Deferred Policies
 
-- observed Registry Name Notes, which update confirmed name state;
-- Treasury-received claim requests, which can produce claim transactions;
-- Treasury-received update/release requests without OTP, which produce
-  Treasury OTP relay transactions;
-- Treasury-received update/release requests with OTP, which produce Registry
-  Name Note transactions once witnesses and funding are available.
+Atomic claim recovery must be semantic: the exact payment spend plus a valid
+matching Name Note in one canonical transaction settles a claim. It must not
+depend solely on an in-memory submission txid.
 
-## Output Queues
+Replacement of reconstructed claims after restart remains blocked on the
+approved maximum transaction-expiry waiting policy and its implementation.
 
-The run loop needs explicit queues for:
-
-- Treasury OTP relay memos awaiting transaction assembly;
-- claim bundles awaiting Registry fee funding and broadcast;
-- update/release operations awaiting witness data;
-- assembled transactions awaiting submission;
-- submitted transactions awaiting confirmation or retry.
-
-No queue entry should contain plaintext seed material or spending keys.
-Pending OTPs are in-memory authorization state and expire 30 minutes after
-issuance.
+OTP recovery remains a separate task. Restart loses ephemeral OTP knowledge;
+reissuing while an old relay may still confirm requires an explicit burn and
+reissue policy.
 
 ## Failure Policy
 
-Boot and trust-path failures are fatal.
-
-Per-request failures are not fatal. They should produce redacted rejection logs
-and leave the mint running.
-
-Birthday-checkpoint corruption is fatal: a failure to fetch a valid tree state
-from trusted Zebra leaves the mint with no authoritative starting state.
+Boot and canonical trust-path failures are fatal. Transport failures may retry
+without advancing state. Per-request failures belong to Live and must be
+redacted, isolated, and non-authoritative.

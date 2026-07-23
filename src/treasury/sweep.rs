@@ -1,8 +1,15 @@
 use crate::treasury::TREASURY_ACCOUNT;
 use crate::wallet::Wallet;
 use transparent::address::TransparentAddress;
+use zcash_primitives::transaction::fees::{
+    zip317::{FeeRule, P2PKH_STANDARD_OUTPUT_SIZE},
+    FeeRule as _, transparent::InputSize,
+};
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
+
+// 1 ZEC = 100,000,000 zatoshis
+const ZATOSHIS_PER_ZEC: u64 = 100_000_000;
 
 /// A request to assemble a transparent auto-sweep transaction.
 #[derive(Debug, Clone)]
@@ -28,9 +35,6 @@ pub const COLD_ADDRESS: TransparentAddress = TransparentAddress::PublicKeyHash([
     0x5d, 0x0a, 0x66, 0x23,
 ]);
 
-// 1 ZEC = 100,000,000 zatoshis
-const ZATOSHIS_PER_ZEC: u64 = 100_000_000;
-
 /// The balance above which a sweep is considered.
 pub const SWEEP_THRESHOLD: u64 = 10 * ZATOSHIS_PER_ZEC;
 
@@ -54,28 +58,51 @@ pub fn sweep_policy(
         }
     }
 
+    let exclude_orchard: std::collections::BTreeSet<orchard::note::Rho> = std::collections::BTreeSet::new();
+
     // 2. Sapling Policy
     let sapling_balance: u64 = wallet
         .sapling_notes_for(TREASURY_ACCOUNT)
         .map(|n| n.note.value().inner())
         .sum();
     if sapling_balance > SWEEP_THRESHOLD {
-        let sweep_amount = Zatoshis::from_u64(sapling_balance).unwrap();
-        let exclude = std::collections::BTreeSet::new();
+        // Reserve enough to cover the fee; exact fee depends on selection, but a
+        // fixed reserve guarantees the selected notes can pay it.
+        let sweep_amount_u64 = sapling_balance.saturating_sub(SWEEP_RESERVE);
+        if sweep_amount_u64 == 0 {
+            return None;
+        }
+        let sweep_amount = Zatoshis::from_u64(sweep_amount_u64).unwrap();
+        let exclude_sapling: std::collections::BTreeSet<incrementalmerkletree::Position> = std::collections::BTreeSet::new();
         if let Some((selected, _)) = crate::wallet::selection::select_sapling_funds(
             wallet,
             TREASURY_ACCOUNT,
             sweep_amount,
-            &exclude,
+            &exclude_sapling,
         ) {
-            let inputs_count = selected.len() as u64;
-            let exact_fee = std::cmp::max(2, inputs_count + 2) * 5_000;
-            if exact_fee <= (sweep_amount.into_u64() / 10_000) {
-                return Some(SweepRequest::Sapling {
-                    notes: selected.into_iter().map(|n| n.position).collect(),
-                    amount: sweep_amount,
-                });
-            }
+            let _fee = FeeRule::standard()
+                .fee_required(
+                    &zcash_protocol::consensus::MAIN_NETWORK,
+                    current_height,
+                    std::iter::empty::<InputSize>(),
+                    [P2PKH_STANDARD_OUTPUT_SIZE].iter().copied(),
+                    selected.len(),
+                    // Sapling: the builder pads any transactional bundle with at least
+                    // 2 outputs (MIN_SHIELDED_OUTPUTS). We send `selected.len()` inputs and
+                    // 1 real change output, so the logical output count is the upstream-padded
+                    // value, not the raw 1.
+                    sapling::builder::BundleType::DEFAULT
+                        .num_outputs(selected.len(), 1)
+                        .ok()?,
+                    0,
+                    0,
+                )
+                .ok()?;
+
+            return Some(SweepRequest::Sapling {
+                notes: selected.into_iter().map(|n| n.position).collect(),
+                amount: sweep_amount,
+            });
         }
     }
 
@@ -91,19 +118,30 @@ pub fn sweep_policy(
         }
         let sweep_amount = Zatoshis::from_u64(sweep_amount_u64).unwrap();
 
-        let exclude = std::collections::BTreeSet::new();
         if let Some((selected, _)) =
-            crate::wallet::selection::select_funds(wallet, TREASURY_ACCOUNT, sweep_amount, &exclude)
+            crate::wallet::selection::select_funds(wallet, TREASURY_ACCOUNT, sweep_amount, &exclude_orchard)
         {
-            // 4. Exact ZIP-317 Fee Calculation
-            // max(2, inputs + outputs) * 5000. Sweep has 2 outputs: cold address + change.
-            let inputs_count = selected.len() as u64;
-            let exact_fee = std::cmp::max(2, inputs_count + 2) * 5_000;
-
-            // 5. Fee Ratio Guard (Fee must be less than 0.01% of sweep_amount)
-            if exact_fee > (sweep_amount.into_u64() / 10_000) {
-                return None;
-            }
+            let _fee = FeeRule::standard()
+                .fee_required(
+                    &zcash_protocol::consensus::MAIN_NETWORK,
+                    current_height,
+                    std::iter::empty::<InputSize>(),
+                    [P2PKH_STANDARD_OUTPUT_SIZE].iter().copied(),
+                    0,
+                    0,
+                    0,
+                    // Orchard: V3 default flags disable cross-address transfers, so each real
+                    // spend and the change output occupy separate actions: N inputs + 1 change
+                    // output, padded to the default minimum of 2.
+                    orchard::builder::BundleType::DEFAULT
+                        .num_actions(
+                            orchard::bundle::BundleVersion::orchard_v3().default_flags(),
+                            selected.len(),
+                            1, // change output
+                        )
+                        .ok()?,
+                )
+                .ok()?;
 
             return Some(SweepRequest::Orchard {
                 notes: selected.into_iter().map(|n| n.note.rho()).collect(),

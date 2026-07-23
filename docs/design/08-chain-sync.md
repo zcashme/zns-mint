@@ -2,53 +2,59 @@
 
 ## Chain Source
 
-The current implementation uses Zebra's indexer gRPC API:
+The current implementation uses two Zebra interfaces:
 
-- `ChainTipChange` for tip/liveness;
-- `GetBlock` for full block bytes.
+- indexer gRPC `ChainTipChange` as a wake-up/liveness stream;
+- a read-only JSON-RPC facade over `getblockchaininfo` and `getblock` for
+  point-in-time best-chain reads.
 
-The mint parses full blocks locally and verifies that the recomputed header hash
-matches the server-reported hash and requested height. Full consensus remains
-Zebra's job.
+The JSON-RPC `getblock` response contains raw block bytes, not an independent
+server-reported hash. The mint parses those bytes, derives the claimed height
+and header hash, and checks continuity against its exact prior metadata.
+Selected-best-chain membership and full consensus validity remain Zebra's job.
 
 ## Birthday Checkpoint
 
 Scanning from an arbitrary post-Sapling height requires prior tree state. The
-current code uses a ZNS-owned JSON birthday checkpoint for block `2_999_999`
-and scans from `3_000_000`.
-
-If the birthday checkpoint is missing, the mint can create it from trusted Zebra
-JSON-RPC `z_gettreestate`. After boot, wallet state lives in memory and is
-rebuilt by replaying from the birthday checkpoint on restart. There is no
-durable wallet state across restarts.
+current code uses the block immediately before NU6.3/Ironwood activation as the
+ZNS origin checkpoint. It fetches that tree state from local Zebra through
+`z_gettreestate` and requires its block hash to match the attested binary's
+pinned origin hash. After boot, wallet state lives in memory and is rebuilt by
+replaying from that checkpoint on restart. There is no durable wallet state
+across restarts.
 
 ## Scanner Boundary
 
-The sync module is a **pure library**: `Block` + UFVKs in, `BlockOutput` out.
-It touches no wallet state, decodes no ZNS payload, owns no loop, detects no
-reorg. The orchestrator (`main.rs`) owns catch-up, reorg detection, and the
-fan-out to `wallet` / `registry` / `treasury`.
+The sync module is a **pure, non-mutating library**: verified `Block` + UFVKs
+in, opaque `BlockOutput` evidence out. It owns no run loop and mutates no wallet
+or Registry state. The orchestrator owns catch-up, reorg detection, and the
+state-transition boundary.
 
-The scanner does not know whether a UFVK belongs to Treasury or Registry.
-Account roles belong to the caller. It does not know that a memo is a Name
-Note payload or a request memo — it surfaces raw decrypted memos, and the
-registry / treasury layers classify them.
+Ordinary notes use pinned `zcash_client_backend` decryption and scanning. Name
+Notes require a supplemental pass over Ironwood V3 actions with the exact
+Registry external IVK/address because their memo-derived commitment opening is
+not a standard Orchard-family note opening. The Orchard fork's private-domain
+facade returns an opaque validated note only when the decrypted memo-derived
+opening matches the action commitment. This is not Registry authorship; the
+Registry state machine requires same-transaction Registry input evidence and a
+legal transition.
 
 ## Block Output
 
 Scanning one block produces a `BlockOutput` carrying two distinct concerns:
 
-- **`transactions: Vec<TxOutput>`** — the *decrypted subset*: only txs where
-  at least one output decrypted to one of our accounts or one of our
-  nullifiers was spent. Each `TxOutput` groups received notes (with memo +
-  tree position) and spent nullifiers (without original note — the wallet
-  resolves NF → original note via its own nullifier index during `apply`).
-  Most blocks yield an empty vec.
-- **`orchard_commitments` / `sapling_commitments`** — the *full ordered
-  commitment stream* for the block: every action's `cmx` and every output's
-  `cmu`, wallet-relevant or not. The wallet's `ShardTree` must append all of
-  them to stay in sync with the chain's tree; skipping non-wallet actions
-  would break every Merkle witness we compute.
+- **transaction evidence** — every Ironwood transaction, plus standard
+  transactions with wallet-relevant decrypted outputs or spends. Each
+  immutable `TxOutput` binds its source txid and block index to received notes
+  and the raw public Orchard, Sapling, and Ironwood nullifiers retained for
+  that transaction. Wallet spend detection resolves those nullifiers against
+  rewindable local indexes.
+- **`orchard_commitments` / `ironwood_commitments` /
+  `sapling_commitments`** — the separate *full ordered commitment streams* for
+  the block: every action's `cmx` and every output's `cmu`, wallet-relevant or
+  not. The wallet's per-pool `ShardTree`s must append all of them to stay in
+  sync with the chain; skipping non-wallet actions or mixing Orchard and
+  Ironwood would break witnesses.
 
 ## Memo Capture
 
@@ -58,9 +64,10 @@ is opaque. The public memo path is `zcash_client_backend::decrypt_transaction`
 (`decrypt.rs:123`): takes UFVKs directly, returns `DecryptedTransaction` with
 `DecryptedOutput`s carrying `MemoBytes` in-band. Sync calls
 `decrypt_transaction` per tx for notes + memos + accounts, and `scan_block`
-(upstream) for positions, spends, and the full commitment stream. UFVK →
-memo in one upstream call; no fork-specific decryption API, no
-`ScanningKeys`-vs-raw-IVK contortions.
+(upstream) for positions and the full commitment stream. UFVK → memo happens
+in one upstream call for ordinary notes. The separate Name Note supplement
+uses only the fork's validating facade and the Registry external IVK; it never
+exposes the relaxed decryption domain.
 
 Memos are wrapped in the `Memo` newtype (`mint.rs`) at the sync extraction
 boundary. `Memo` is a newtype around upstream `MemoBytes` with `Debug`
@@ -73,19 +80,19 @@ Treasury-received Orchard memos are shielded user request data. Sync surfaces
 raw decrypted memos to the caller; it must not log them (the `Memo` newtype's
 `Debug` is redacted for this reason).
 
-Registry-received Orchard memos that match the Name Note grammar are Name
-Note payloads. Sync surfaces them to the caller; the registry layer
-classifies them. Registry-received memos that do not match the Name Note
-grammar are ignored by the registry path.
+Memo grammar alone never creates a Name Note. Ordinary Registry Ironwood notes
+remain ordinary even if their memos contain ZNS-shaped bytes. Only a value-zero
+Ironwood V3 output to the exact Registry address whose memo-derived opening
+matches its action commitment enters the opaque candidate lane. Unauthenticated
+candidates are ignored by Registry replay and cannot halt chain following.
 
 ## Witness Tracking
 
-Update and release require spending prior Registry Name Notes. Production sync
-must track enough Orchard note and Merkle witness state to spend the current
-tip Name Note for each live name.
-
-The current dry-run code accepts update/release after OTP but stops at
-`NeedsWitness`. That is an explicit missing piece, not protocol policy.
+Update and release require spending prior Registry Name Notes. The supplement
+records exact `(block hash, height, tx index, txid, action index, position)`
+identity, cross-checks the upstream commitment stream, and promotes the
+corresponding retention mark. Registry tips retain that exact validated note
+and locator for later witness lookup.
 
 ## Reorg Handling
 
@@ -95,12 +102,28 @@ Reorg handling must rewind:
 - nullifier state;
 - note witnesses;
 - confirmed Name Note state;
-- submission state for transactions that became unconfirmed.
+- the fully-applied cursor and accepted metadata history.
 
-After rewind, the mint replays the new best chain from the common ancestor.
+The runtime retains exact accepted `BlockMetadata` for each applied height.
+Common-ancestor search compares local and Zebra hashes at the same height;
+rewind restores that ancestor's real hash and all three tree sizes. If the
+reorg extends below retained history, the mint fails closed and rebuilds from
+the pinned origin on process restart rather than fabricating cursor metadata.
+The current process aborts on `ReorgBeyondHistory`; it does not perform an
+in-process rebuild.
+
+Operational intents, submissions, OTPs, locks, and reservations are not fields
+of canonical Wallet or Registry state. The future Live owner must invalidate
+all cursor-bound operational work before rewind, replay the replacement branch
+without effects, and reconstruct/revalidate work only at a freshly verified
+exact Zebra tip.
 
 Confirmed name state must always match the selected best chain.
 
 ZNS uses immediate best-chain finality: the current Zcash best chain is the
 truth. Reorgs are handled by rewinding and replaying, not by waiting for a
 protocol-level confirmation depth.
+
+The current passive runtime detects a reorg only when a fetched successor does
+not extend its cursor. Exact target capture plus unconditional height-and-hash
+comparison is still required to detect same-height and shorter reorgs.

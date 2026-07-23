@@ -1,10 +1,14 @@
 //! Treasury memo parsing and classification.
 
+use core::fmt;
+
 pub use crate::mint::Action;
 
 /// Why a memo failed to parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoError {
+    /// Zcash memos are exactly 512 bytes.
+    InvalidLength,
     /// Not a ZNS memo at all (no `ZNS:` prefix, or not UTF-8).
     NotZns,
     /// A `ZNS:` memo with an unknown verb.
@@ -13,14 +17,14 @@ pub enum MemoError {
     FieldCount,
     /// The name violates the DNS-label rule.
     InvalidName,
-    /// A required argument (`ua` or `nonce`) is empty.
+    /// A required unified-address argument is empty.
     EmptyArg,
     /// `otp` is not exactly 32 lowercase hex chars.
     InvalidOtp,
 }
 
 /// A parsed, typed request memo sent by a user to the Treasury.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum RequestMemo {
     /// A claim request: `ZNS:claim:<name>:<ua>`
     Claim { name: String, ua: String },
@@ -38,6 +42,12 @@ pub enum RequestMemo {
     },
 }
 
+impl fmt::Debug for RequestMemo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RequestMemo(<redacted>)")
+    }
+}
+
 impl RequestMemo {
     /// Returns the action type for this request.
     pub fn action(&self) -> Action {
@@ -45,6 +55,15 @@ impl RequestMemo {
             RequestMemo::Claim { .. } => Action::Claim,
             RequestMemo::Update { .. } => Action::Update,
             RequestMemo::Release { .. } => Action::Release,
+        }
+    }
+
+    /// Returns a short, metrics-safe string for the action.
+    pub fn action_str(&self) -> &'static str {
+        match self {
+            RequestMemo::Claim { .. } => "claim",
+            RequestMemo::Update { .. } => "update",
+            RequestMemo::Release { .. } => "release",
         }
     }
 
@@ -57,9 +76,24 @@ impl RequestMemo {
         }
     }
 
+    /// Returns the parsed unified address for this request.
+    pub fn ua(&self) -> &str {
+        match self {
+            RequestMemo::Claim { ua, .. } => ua,
+            RequestMemo::Update { ua, .. } => ua,
+            RequestMemo::Release { ua, .. } => ua,
+        }
+    }
+
     /// Parses a raw 512-byte request memo using strict grammar rules.
     pub fn parse(raw: &[u8]) -> Result<Self, MemoError> {
-        let end = raw.iter().rposition(|b| *b != 0).map_or(0, |p| p + 1);
+        if raw.len() != 512 {
+            return Err(MemoError::InvalidLength);
+        }
+        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+        if raw[end..].iter().any(|b| *b != 0) {
+            return Err(MemoError::FieldCount);
+        }
         let text = core::str::from_utf8(&raw[..end]).map_err(|_| MemoError::NotZns)?;
 
         let mut fields = text.split(':');
@@ -150,6 +184,81 @@ mod tests {
         // A user request must not contain the 5th field (prev_rcm is for minted Name Notes)
         let m = "ZNS:claim:alice:u1xxx:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
         assert_eq!(RequestMemo::parse(&padded(m)), Err(MemoError::FieldCount));
+    }
+
+    #[test]
+    fn accepts_exactly_the_five_request_forms() {
+        let otp_hex = "00112233445566778899aabbccddeeff";
+        let mut otp = [0u8; 16];
+        hex::decode_to_slice(otp_hex, &mut otp).unwrap();
+
+        assert_eq!(
+            RequestMemo::parse(&padded("ZNS:claim:alice:u1owner")),
+            Ok(RequestMemo::Claim {
+                name: "alice".into(),
+                ua: "u1owner".into(),
+            })
+        );
+        assert_eq!(
+            RequestMemo::parse(&padded("ZNS:update:alice:u1new")),
+            Ok(RequestMemo::Update {
+                name: "alice".into(),
+                ua: "u1new".into(),
+                otp: None,
+            })
+        );
+        assert_eq!(
+            RequestMemo::parse(&padded(&format!("ZNS:update:alice:u1new:{otp_hex}"))),
+            Ok(RequestMemo::Update {
+                name: "alice".into(),
+                ua: "u1new".into(),
+                otp: Some(otp),
+            })
+        );
+        assert_eq!(
+            RequestMemo::parse(&padded("ZNS:release:alice:u1owner")),
+            Ok(RequestMemo::Release {
+                name: "alice".into(),
+                ua: "u1owner".into(),
+                otp: None,
+            })
+        );
+        assert_eq!(
+            RequestMemo::parse(&padded(&format!("ZNS:release:alice:u1owner:{otp_hex}"))),
+            Ok(RequestMemo::Release {
+                name: "alice".into(),
+                ua: "u1owner".into(),
+                otp: Some(otp),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_unapproved_request_fields() {
+        for text in [
+            "ZNS:v1:claim:alice:u1owner",
+            "ZNS:claim:main:alice:u1owner",
+            "ZNS:claim:alice:u1owner:nonce",
+            "ZNS:claim:alice:u1owner:challenge_id",
+            "ZNS:update:alice:u1new:00112233445566778899aabbccddeeff:nonce",
+            "ZNS:release:alice:u1owner:00112233445566778899aabbccddeeff:challenge_id",
+        ] {
+            assert!(
+                RequestMemo::parse(&padded(text)).is_err(),
+                "accepted {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_noncanonical_padding() {
+        let mut memo = padded("ZNS:claim:alice:u1owner");
+        memo[100] = b'x';
+        assert_eq!(RequestMemo::parse(&memo), Err(MemoError::FieldCount));
+        assert_eq!(
+            RequestMemo::parse(b"ZNS:claim:alice:u1owner"),
+            Err(MemoError::InvalidLength)
+        );
     }
 
     #[test]

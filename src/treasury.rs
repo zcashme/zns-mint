@@ -2,6 +2,7 @@
 
 pub use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 
+pub mod assemble;
 pub mod fee;
 pub mod memo;
 pub mod note;
