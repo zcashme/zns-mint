@@ -23,10 +23,10 @@ NAME-009,sourced,"src/registry/state.rs; src/main.rs; tests/runtime_replay_bound
 NAME-010,sourced,"tests/test_vectors.rs:17-57","separately built producer/verifier differential job",35dad3d
 SYNC-001,sourced,"src/boot.rs:66-95; src/boot.rs:189-268","instrumented boot-order failures",35dad3d
 SYNC-002,contradicted,"src/boot.rs:317-332","non-placeholder production origin and artifact inspection",35dad3d
-SYNC-003,sourced,"src/sync.rs:127-166","single scanning-key-set API and continuity tests",35dad3d
+SYNC-003,sourced,"src/sync.rs; tests/runtime_replay_boundary.rs","execute scanner continuity and single-height-authority tests",worktree-2026-07-24-height-authority
 SYNC-004,sourced,"src/sync.rs:259-274; src/wallet.rs:287-303","roots against Zebra and cross-pool fixtures",35dad3d
-SYNC-005,sourced,"src/main.rs:apply_canonical_block; src/wallet.rs:apply_block; src/registry/state.rs:apply_block","return immutable committed evidence; failure injection before/after every commit stage",worktree-2026-07-23-passive-replay
-SYNC-006,sourced,"src/main.rs:apply_canonical_block","cursor-last crash/fault tests and exact-target transition",worktree-2026-07-23-passive-replay
+SYNC-005,sourced,"src/main.rs:apply_canonical_block; src/sync.rs; src/wallet.rs:apply_block; src/registry/state.rs:apply_block; tests/runtime_replay_boundary.rs","return immutable committed evidence; failure injection before/after every commit stage",worktree-2026-07-24-height-authority
+SYNC-006,sourced,"src/main.rs:apply_canonical_block; src/sync.rs; tests/runtime_replay_boundary.rs","execute single-height-authority gate; cursor-last crash/fault tests and exact-target transition",worktree-2026-07-24-height-authority
 SYNC-007,unmapped,"docs/design/07-mint-run-loop.md:96-108","same-block ordering implementation and fixtures",35dad3d
 SYNC-008,sourced,"src/main.rs:find_common_ancestor; src/main.rs:rewind_canonical_state; src/wallet/balance.rs; src/wallet/trees.rs; src/registry/state.rs","same-height, shorter, and multi-block reorg implementation/tests; Live invalidation/reconstruction",worktree-2026-07-23-passive-replay
 SYNC-009,sourced,"src/main.rs:catch_up; src/main.rs:apply_canonical_block","deterministic replay/property tests and arbitrary restart schedules",worktree-2026-07-23-passive-replay

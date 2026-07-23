@@ -1,5 +1,13 @@
 # `sync.rs` design record
 
+## 2026-07-24 — Scanner metadata is the sole accepted-height source
+
+- Removed the duplicate `BlockOutput` height field and accessor.
+- Wallet application, Registry transitions, and validated Name Note locators
+  now derive the accepted height from `BlockOutput::metadata().block_height()`.
+- The scan input height remains only where the pinned upstream scanner and
+  transaction decryption APIs require it.
+
 ## Validated Ironwood Name Note scanning
 
 - The pinned upstream full scanner remains authoritative for block continuity,

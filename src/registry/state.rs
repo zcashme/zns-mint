@@ -208,7 +208,7 @@ impl Registry {
                     next.set_tip(
                         name.clone(),
                         Tip::from_received(note.clone()),
-                        output.height(),
+                        output.metadata().block_height(),
                     );
                 }
                 _ => unreachable!("slice cardinality was handled above"),
