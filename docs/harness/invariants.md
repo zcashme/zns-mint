@@ -216,12 +216,13 @@ rather than choose silently.
 1. The five user request forms are fixed by explicit user direction. The
    Treasury-to-controller OTP relay grammar and its replay/domain binding
    remain unresolved.
-2. The claim price decision is resolved by explicit user direction: payment is
-   a minimum of `price + 10 * ZIP-317 refund-transaction fee`; overpayment is
-   refunded through an always-present Ironwood output, including a value-zero
-   output at the threshold; and the network fee is deducted before Treasury
-   change. The durable meaning of “payment already consumed” in a replay-built
-   runtime remains unresolved and blocks runtime integration.
+2. Atomic claim value-flow policy is resolved by explicit user direction:
+   payment is at least the caller-supplied price; Treasury retains exactly that
+   price; overpayment is returned through an always-present Ironwood output,
+   including a value-zero output at the threshold; and Registry fee notes fund
+   the complete transaction's aggregate ZIP-317 fee. There is no fee-derived
+   Treasury surcharge. The durable meaning of “payment already consumed” in a
+   replay-built runtime remains unresolved.
 3. OTP expiry expressed in blocks or time, and the precise reservation/burn
    behavior across proof failure, broadcast failure, expiry, and reorg.
 4. Confirmation policy for accepting claim payments and for retrying dependent
@@ -250,7 +251,7 @@ weaken any invariant.
 | Name kernel | Encoding, derivation, and vectors exist. Independent Ironwood transaction-level verifier coverage is not demonstrated here. |
 | Sync and wallet | Passive per-block canonical folding now orders scanner output, Registry simulation, Wallet notes/nullifiers/all three trees, and cursor/history-last commit. Fault injection, exact-target entry, and complete reorg-shape handling are missing. |
 | Authorization | Request parsing, OTP storage, and lifecycle authorization helpers exist as unwired libraries. Passive replay preserves canonical request evidence but performs no authorization. |
-| Transactions | Registry and drafted Treasury construction/proving/signing libraries are unwired. Canonical Wallet/Registry state contains no locks or reservations; a cursor-bound Live owner is missing. |
+| Transactions | Registry construction and the crate-private mixed Orchard/Ironwood V6 signer are unwired. The standalone Treasury refund constructor has been deleted; no claim transaction exists until atomic payment settlement and Name Note creation share one V6 transaction. Canonical Wallet/Registry state contains no locks or reservations; a cursor-bound Live owner is missing. |
 | Submission | No submission path is wired into the runtime. Typed retry, expiry, restart recovery, confirmation, and reorg policy remain unimplemented. |
 | Runtime | `main` performs passive canonical catch-up and canonical rewind only. Replay invokes no OTP, policy, reservation, proving, signing, submission, or lifecycle-counter operation. Catch-up receives a read-only block-source facade, and `apply_canonical_block` receives no RPC capability or event-return responsibility. Exact Zebra target capture and Live state reconciliation are absent. |
 | Regtest | The harness boots components and shields funds but does not submit or verify a ZNS lifecycle transaction. |
@@ -270,6 +271,8 @@ Known release blockers include:
   eviction, expiry, and reorg isolation evidence is still absent;
 - `AUTH-001`, `AUTH-005`, `AUTH-006`, and `TX-002`: a cursor-bound Live
   authorization/reservation owner is absent;
+- `TX-001` and `TX-003`: atomic claim value-flow and Registry-funded aggregate
+  ZIP-317 fee policy are defined, but their construction is not implemented;
 - `TX-007` and `TX-008`: submission/retry/confirmation/reorg reconciliation
   are intentionally unwired pending approved semantic recovery policy;
 - `TX-005`: the Registry signer is now Ironwood-only, but the fail-closed

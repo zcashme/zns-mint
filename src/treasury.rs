@@ -2,8 +2,6 @@
 
 pub use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 
-pub mod assemble;
-pub mod fee;
 pub mod memo;
 pub mod note;
 pub mod sweep;
@@ -72,6 +70,16 @@ impl Treasury {
         price: u64,
     ) -> Option<&'w ReceivedOrchardNote> {
         let price_zat = zcash_protocol::value::Zatoshis::from_u64(price).unwrap();
-        crate::treasury::fee::match_fee(wallet, request, price_zat)
+        if !matches!(request, crate::treasury::memo::RequestMemo::Claim { .. }) {
+            return None;
+        }
+
+        wallet
+            .orchard_notes_for(TREASURY_ACCOUNT)
+            .find(|note| {
+                note.note.value().inner() >= price_zat.into_u64()
+                    && crate::treasury::memo::RequestMemo::parse(note.memo.as_array())
+                        .is_ok_and(|parsed| &parsed == request)
+            })
     }
 }

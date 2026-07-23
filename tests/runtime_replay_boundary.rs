@@ -184,6 +184,22 @@ fn treasury_has_no_per_block_request_queue() {
 }
 
 #[test]
+fn treasury_has_no_standalone_claim_refund_module() {
+    assert!(
+        !TREASURY_SOURCE.contains("pub mod assemble;"),
+        "a Treasury-only refund can consume payment without atomically minting the Name Note"
+    );
+}
+
+#[test]
+fn treasury_has_no_fee_policy_module() {
+    assert!(
+        !TREASURY_SOURCE.contains("pub mod fee;"),
+        "Treasury matches payments; Registry funds Name Note transaction fees"
+    );
+}
+
+#[test]
 fn registry_fee_planning_requires_caller_owned_exclusions() {
     assert!(
         REGISTRY_TRANSACTION_SOURCE.contains("excluded: &BTreeSet<NoteLocator>"),

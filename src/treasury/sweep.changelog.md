@@ -2,9 +2,6 @@
 
 Tracks design-relevant changes to `src/treasury/sweep.rs`.
 
-Claim-refund assembly is tracked separately in
-`src/treasury/assemble.changelog.md`.
-
 ## 2026-07-22 — ZIP-317 fee cross-check
 
 - Replaced hand-rolled `max(2, inputs_count + 2) * 5_000` ZIP-317 fee calculations

@@ -32,22 +32,22 @@ SYNC-008,sourced,"src/main.rs:find_common_ancestor; src/main.rs:rewind_canonical
 SYNC-009,sourced,"src/main.rs:catch_up; src/main.rs:apply_canonical_block; src/treasury.rs; tests/runtime_replay_boundary.rs","deterministic state-reconciliation replay/property tests and arbitrary restart schedules",worktree-2026-07-24-no-request-queue
 SYNC-010,sourced,"src/main.rs; tests/runtime_replay_boundary.rs","execute capability-isolation gate; broadcast/eviction/expiry/reorg tests after Live exists",worktree-2026-07-23-passive-replay
 SYNC-011,sourced,"src/main.rs; src/zcash.rs; src/boot.rs; src/treasury/memo.rs","retryable transport versus fatal node-data/RPC tests and daemon-liveness evidence",worktree-2026-07-23-passive-replay
-AUTH-001,sourced,"src/treasury.rs; src/treasury/fee.rs; src/treasury/assemble.rs; src/registry/authorize.rs; tests/runtime_replay_boundary.rs","implement canonical-note reconciliation, semantic atomic-claim recovery, and cursor-bound Live reservation; duplicate/reorg tests",worktree-2026-07-24-no-request-queue
+AUTH-001,sourced,"src/treasury.rs; src/registry/authorize.rs; tests/runtime_replay_boundary.rs","implement atomic claim assembly, canonical-note reconciliation, semantic recovery, and cursor-bound Live reservation; duplicate/reorg tests",worktree-2026-07-24-delete-fee-module
 AUTH-002,contradicted,"src/registry/state.rs:64-82; src/registry/authorize.rs:88-138","canonical controller state and adversarial tests",35dad3d
 AUTH-003,contradicted,"src/auth.rs:16-118","resolve expiry policy; non-cloneable one-shot authorization; model tests",35dad3d
 AUTH-004,sourced,"src/auth.rs:121-131","Treasury relay transaction and secret-surface tests",35dad3d
 AUTH-005,unmapped,"docs/harness/invariants.md:166","typed reservation owner and concurrency tests",35dad3d
 AUTH-006,unmapped,"docs/harness/invariants.md:167","cursor-bound intent and stale-state tests",35dad3d
-TX-001,sourced,"src/registry/transaction.rs:129-249; src/treasury/assemble.rs; docs/design/09-transaction-assembly.md","complete two-transaction claim settlement policy and regtest value-flow accounting",worktree-2026-07-22
+TX-001,designed,"docs/design/09-transaction-assembly.md; docs/harness/invariants.md","implement the defined atomic claim value flow and independently verify Treasury price/refund, value-0 Name Note, and Registry-funded aggregate fee",worktree-2026-07-24-delete-fee-module
 TX-002,sourced,"src/wallet/selection.rs:8-98","live reservation owner and concurrent selection tests",35dad3d
-TX-003,implemented,"src/registry/transaction.rs:151-249; src/treasury/sweep.rs:58-140; src/treasury/assemble.rs; Cargo.toml:orchard-fork","execute refund boundary tests; independently decode serialized transaction and verify fee",worktree-2026-07-22
-TX-004,implemented,"src/registry/signing.rs; src/registry/transaction.rs:65-78; src/treasury/assemble.rs; src/wallet.rs; src/wallet/trees.rs; src/wallet.changelog.md","execute pre/at/post-NU6.3 vectors and Zebra acceptance/rejection",worktree-2026-07-22
+TX-003,sourced,"src/registry/transaction.rs:151-249; src/treasury/sweep.rs:58-140; Cargo.toml:orchard-fork; docs/design/09-transaction-assembly.md","implement Registry-funded atomic-claim ZIP-317 accounting; independently decode serialized transactions and verify aggregate fees",worktree-2026-07-24-delete-fee-module
+TX-004,implemented,"src/registry/signing.rs; src/registry/transaction.rs:65-78; src/wallet.rs; src/wallet/trees.rs; src/wallet.changelog.md","execute pre/at/post-NU6.3 vectors and Zebra acceptance/rejection, including the future atomic claim",worktree-2026-07-24-delete-refund
 TX-005,implemented,"src/registry/signing.rs; docs/design/09-transaction-assembly.md","mutation matrix; independent sighash comparison; executed verification",worktree-2026-07-22
 TX-006,implemented,"src/registry/signing.rs","execute corrupted-proof and wrong-version negative tests",worktree-2026-07-22
 TX-007,unmapped,"docs/design/07-mint-run-loop.md; docs/design/09-transaction-assembly.md","implement approved retry/replacement policy with typed origin; first-send, expiry, restart and redaction evidence",worktree-2026-07-23-passive-replay
 TX-008,unmapped,"docs/design/07-mint-run-loop.md; docs/design/09-transaction-assembly.md","implement canonical semantic confirmation plus full reorg invalidation/reconstruction",worktree-2026-07-23-passive-replay
 HARNESS-001,reviewed,".agents/skills/build-zns-mint/SKILL.md; docs/harness/task-record.md","automated forward-test upstream citation verification",worktree-2026-07-22
-HARNESS-002,reviewed,".agents/skills/build-zns-mint/SKILL.md; src/treasury/assemble.changelog.md; src/registry/signing.changelog.md; docs/harness/task-record.md","automated forward-test changelog and rationale gate",worktree-2026-07-22
+HARNESS-002,reviewed,".agents/skills/build-zns-mint/SKILL.md; src/treasury.changelog.md; src/registry/signing.changelog.md; docs/design/09-transaction-assembly.changelog.md; docs/harness/task-record.md","automated forward-test changelog and rationale gate",worktree-2026-07-24-delete-fee-module
 HARNESS-003,contradicted,"docs/harness/invariants.md; docs/harness/coverage.csv","automated stale-path/revision detection and complete assertion-level mappings",worktree-2026-07-22
 HARNESS-004,designed,".agents/skills/build-zns-mint/SKILL.md; docs/harness/coverage.csv","implement layered test manifest and retained evidence",35dad3d
 HARNESS-005,designed,".agents/skills/build-zns-mint/SKILL.md; docs/harness/task-record.md","forward-test false-green rejection and release report",35dad3d
