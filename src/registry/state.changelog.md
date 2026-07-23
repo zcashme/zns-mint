@@ -2,6 +2,11 @@
 
 Tracks design-relevant changes to `src/registry/state.rs`.
 
+## 2026-07-24 — Accepted height comes from scanner metadata
+
+- Registry history records now take their block height from the immutable
+  `BlockOutput` metadata rather than a duplicate output field.
+
 ## 2026-07-23 — Canonical Registry excludes operational locks
 
 - Removed in-flight name locks and their mutation API from `Registry`.

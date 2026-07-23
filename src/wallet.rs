@@ -287,7 +287,7 @@ impl Wallet {
         output: &BlockOutput,
         prior_height: BlockHeight,
     ) -> Result<(), WalletApplyError> {
-        let height = output.height();
+        let height = output.metadata().block_height();
         let mut next_balance = self.balance.clone();
 
         // 1. Build TransactionRecords and apply to balance, per-tx in order.

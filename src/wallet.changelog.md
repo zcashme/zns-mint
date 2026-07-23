@@ -2,6 +2,11 @@
 
 Tracks design-relevant changes to `src/wallet.rs` and `src/wallet/trees.rs`.
 
+## 2026-07-24 — Accepted height comes from scanner metadata
+
+- `Wallet::apply_block` now derives the block height from the immutable
+  `BlockOutput` metadata rather than a duplicate output field.
+
 ## 2026-07-23 — Canonical cache excludes operational reservations
 
 - Removed the in-flight reservation set and its mutation/exclusion API from

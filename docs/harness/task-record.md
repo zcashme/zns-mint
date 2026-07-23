@@ -34,6 +34,53 @@ Remaining evidence:
 Uncommitted changes:
 ```
 
+## 2026-07-24 — Scanner metadata as sole accepted-height source
+
+```text
+Slice:
+Delete the duplicate accepted block height from BlockOutput and derive Wallet,
+Registry, and validated Name Note heights only from scanner-owned metadata.
+
+Invariant IDs:
+SYNC-003, SYNC-005, SYNC-006; HARNESS-001, HARNESS-002, HARNESS-003,
+HARNESS-006.
+
+Authority and evidence:
+Read AGENTS.md, the invariant catalog, the matching sync/Wallet/Registry
+changelogs, current source and call sites, and pinned librustzcash
+a97a3d5f46d096b94ceb71271c7d38f20af4e1f1. At that revision,
+zcash_client_backend::data_api::BlockMetadata exposes
+block_height(&self) -> BlockHeight, and ScannedBlock::to_block_metadata()
+constructs metadata containing the scanned height, hash, and three final tree
+sizes. The upstream scanner rejects height and predecessor-hash discontinuity
+before producing that ScannedBlock.
+
+Design:
+BlockOutput retains only BlockMetadata as accepted block identity. Wallet
+application, Registry history, and NameNoteLocator read its typed height
+accessor explicitly. The input height remains only where decryption and the
+upstream scan API require it. Keeping two fields plus an equality assertion was
+rejected because it leaves contradictory evidence representable; retaining a
+height convenience accessor was rejected because it obscures the sole
+authority.
+
+Files changed:
+src/sync.rs, src/wallet.rs, src/registry/state.rs; their matching changelogs;
+tests/runtime_replay_boundary.rs; docs/harness/coverage.csv; this task record.
+
+Tests written:
+A static boundary test isolates BlockOutput, rejects an independent height
+field and height accessor, and requires Wallet, Registry, and NameNoteLocator
+to read scanner metadata.
+
+Commands:
+Read-only source/upstream/status searches and git diff checks are recorded in
+the session. No Cargo command, build, test, commit, or push was run.
+
+Uncommitted state:
+This slice remains uncommitted inside the broad pre-existing dirty worktree.
+```
+
 ## Review gates
 
 - No source edit precedes the changelog receipt and root design critique.

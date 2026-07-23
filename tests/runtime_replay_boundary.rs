@@ -1,4 +1,5 @@
 const MAIN_SOURCE: &str = include_str!("../src/main.rs");
+const SYNC_SOURCE: &str = include_str!("../src/sync.rs");
 const WALLET_SOURCE: &str = include_str!("../src/wallet.rs");
 const REGISTRY_SOURCE: &str = include_str!("../src/registry/state.rs");
 const REGISTRY_TRANSACTION_SOURCE: &str = include_str!("../src/registry/transaction.rs");
@@ -65,6 +66,36 @@ fn canonical_applicator_has_no_duplicate_height_or_live_state() {
             "canonical applicator accepts forbidden input `{forbidden}`"
         );
     }
+}
+
+#[test]
+fn scanned_block_has_one_accepted_height_source() {
+    let struct_start = SYNC_SOURCE
+        .find("pub struct BlockOutput {")
+        .expect("BlockOutput must exist");
+    let impl_start = SYNC_SOURCE[struct_start..]
+        .find("impl BlockOutput {")
+        .map(|offset| struct_start + offset)
+        .expect("BlockOutput implementation must exist");
+    let next_type = SYNC_SOURCE[impl_start..]
+        .find("pub struct TxOutput {")
+        .map(|offset| impl_start + offset)
+        .expect("BlockOutput implementation terminator must exist");
+
+    let fields = &SYNC_SOURCE[struct_start..impl_start];
+    let implementation = &SYNC_SOURCE[impl_start..next_type];
+
+    assert!(
+        !fields.contains("\n    height: BlockHeight,"),
+        "BlockOutput must not duplicate scanner metadata height"
+    );
+    assert!(
+        !implementation.contains("pub fn height("),
+        "accepted height must be read explicitly from BlockMetadata"
+    );
+    assert!(WALLET_SOURCE.contains("output.metadata().block_height()"));
+    assert!(REGISTRY_SOURCE.contains("output.metadata().block_height()"));
+    assert!(SYNC_SOURCE.contains("block_height: metadata.block_height()"));
 }
 
 #[test]

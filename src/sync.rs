@@ -71,7 +71,6 @@ pub struct BlockOutput {
     /// The mint promotes this into its [`crate::mint::ChainCursor`] only after
     /// the wallet and Registry have both accepted the block.
     metadata: BlockMetadata,
-    height: BlockHeight,
     transactions: Vec<TxOutput>,
     orchard_commitments: Vec<(orchard::tree::MerkleHashOrchard, Retention<BlockHeight>)>,
     sapling_commitments: Vec<(sapling::Node, Retention<BlockHeight>)>,
@@ -81,10 +80,6 @@ pub struct BlockOutput {
 impl BlockOutput {
     pub fn metadata(&self) -> &BlockMetadata {
         &self.metadata
-    }
-
-    pub fn height(&self) -> BlockHeight {
-        self.height
     }
 
     pub fn transactions(&self) -> &[TxOutput] {
@@ -601,7 +596,7 @@ where
         tx_output.received_name_notes.push(ReceivedNameNote {
             locator: NameNoteLocator {
                 block_hash: metadata.block_hash(),
-                block_height: height,
+                block_height: metadata.block_height(),
                 block_index: pending.block_index,
                 txid: pending.txid,
                 action_index: pending.action_index,
@@ -616,7 +611,6 @@ where
 
     Ok(BlockOutput {
         metadata,
-        height,
         transactions,
         orchard_commitments,
         sapling_commitments,
