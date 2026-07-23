@@ -169,7 +169,7 @@ async fn catch_up(
             continue;
         }
 
-        let committed_height = apply_canonical_block(
+        apply_canonical_block(
             block,
             wallet,
             registry,
@@ -179,7 +179,7 @@ async fn catch_up(
             &scanning_keys,
         )?;
 
-        publish_canonical_gauges(wallet, committed_height);
+        publish_canonical_gauges(wallet, cursor.block_height());
     }
 }
 
@@ -246,8 +246,8 @@ fn publish_canonical_gauges(wallet: &Wallet, height: BlockHeight) {
 /// Scans and commits one continuous canonical block.
 ///
 /// Cursor and accepted history advance only after Registry simulation and
-/// Wallet application both succeed. The accepted height comes solely from the
-/// scanner output; callers cannot supply duplicate height state.
+/// Wallet application both succeed. Success returns no event payload; later
+/// operational work reconciles from the installed canonical state.
 fn apply_canonical_block(
     block: Block,
     wallet: &mut Wallet,
@@ -256,17 +256,16 @@ fn apply_canonical_block(
     chain_history: &mut BTreeMap<BlockHeight, BlockMetadata>,
     ufvks: &HashMap<zip32::AccountId, zcash_keys::keys::UnifiedFullViewingKey>,
     scanning_keys: &ScanningKeys<zip32::AccountId, (zip32::AccountId, zip32::Scope)>,
-) -> Result<BlockHeight, RuntimeError> {
+) -> Result<(), RuntimeError> {
     let output = scan_block(&MAIN_NETWORK, Some(cursor), block, ufvks, scanning_keys)?;
     let next_registry = registry.apply_block(wallet, &output)?;
 
     wallet.apply_block(&output, cursor.block_height())?;
     *registry = next_registry;
 
-    let committed = *output.metadata();
-    let committed_height = committed.block_height();
-    *cursor = committed;
-    chain_history.insert(committed_height, committed);
+    let metadata = *output.metadata();
+    *cursor = metadata;
+    chain_history.insert(metadata.block_height(), metadata);
 
-    Ok(committed_height)
+    Ok(())
 }

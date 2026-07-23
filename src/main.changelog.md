@@ -4,6 +4,14 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-07-24 (canonical fold returns only transition status)
+
+- `apply_canonical_block` now returns only success or a typed error. It no
+  longer returns a height already represented by the promoted cursor.
+- Catch-up publishes canonical gauges from that cursor after the fold succeeds.
+- Rejected per-block `CommittedBlock` event handoff: future Live work
+  reconciles from installed Wallet, Registry, and cursor state after rebuild.
+
 ## 2026-07-23 (passive canonical replay cleanup)
 
 - Deleted request interpretation, OTP issuance, Treasury policy, intent,

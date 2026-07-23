@@ -34,6 +34,107 @@ Remaining evidence:
 Uncommitted changes:
 ```
 
+## 2026-07-24 — Remove the per-block Treasury request queue
+
+```text
+Slice:
+Delete the unused requests_in_block placeholder and its event-oriented design
+contract without adding a replacement request API.
+
+Invariant IDs:
+NAME-009, SYNC-007, SYNC-009, AUTH-001; HARNESS-002, HARNESS-003,
+HARNESS-006.
+
+Authority and evidence:
+Read AGENTS.md, the invariant catalog, Treasury source, the complete Treasury
+design, request parser, Wallet received-note storage, and every repository
+reference to requests_in_block. The method had no caller and always returned
+an empty slice. No upstream API or Zcash representation changes in this local
+dead-API deletion.
+
+Design:
+Wallet note and transaction state retain canonical memo evidence. Future Live
+work will parse and reconcile Wallet with Registry state after exact-tip
+verification. Treasury owns no height-indexed request queue. This deletion
+does not decide which observations are pending. RequestMemo,
+RequestMemo::parse, Wallet memo storage, payment matching, and all policy
+methods remain intact. No pending_requests replacement was introduced.
+
+Failure modes:
+Deleting canonical memo evidence or the strict parser together with the dead
+queue; reintroducing per-block event delivery under another name; or claiming
+that request reconciliation is implemented. The source edit removes only the
+empty method, and coverage remains sourced rather than tested.
+
+Files changed:
+src/treasury.rs; new matching src/treasury.changelog.md;
+docs/design/15-treasury-module.md; tests/runtime_replay_boundary.rs;
+docs/harness/coverage.csv; this task record.
+
+Tests written:
+The runtime boundary guard rejects a Treasury requests_in_block surface.
+
+Commands:
+Read-only source/status searches and git diff checks are recorded in the
+session. No Cargo command, formatter, build, test, commit, or push was run.
+
+Pre-existing uncommitted state:
+The eight-file unit-return canonical-fold slice was already uncommitted at
+f1e6b9224b3bee2bc7e6fe7f4fa98f5d7ecc1166 and was preserved.
+```
+
+## 2026-07-24 — Canonical fold returns only transition status
+
+```text
+Slice:
+Remove the redundant height result from apply_canonical_block. A successful
+fold returns unit, and its caller reads the exact cursor promoted last.
+
+Invariant IDs:
+SYNC-005, SYNC-006, SYNC-009, SYNC-010; HARNESS-001, HARNESS-002,
+HARNESS-003, HARNESS-006.
+
+Authority and evidence:
+Read AGENTS.md, the invariant catalog, main and run-loop changelogs, current
+source/tests, and pinned librustzcash
+a97a3d5f46d096b94ceb71271c7d38f20af4e1f1. At that revision,
+zcash_client_backend::data_api::BlockMetadata::block_height returns the typed
+height, ScannedBlock::to_block_metadata constructs the exact scanned metadata,
+and scanning::full::scan_block rejects height/hash discontinuity against prior
+metadata.
+
+Design:
+Canonical folding is a state transition, not an event-delivery interface. It
+returns Result<(), RuntimeError>. After success, canonical gauges read the
+promoted cursor. Future Live behavior reconciles installed Wallet, Registry,
+and cursor state after exact-tip verification; it will not consume replayed
+per-block events. CommittedBlock and raw BlockOutput return alternatives were
+rejected because both preserve the wrong event-oriented boundary.
+
+Failure modes:
+Publishing gauges after a failed fold, reading pre-promotion height, weakening
+cursor-last ordering, or silently retaining the obsolete CommittedBlock design.
+The source ordering is unchanged and errors still return before publication.
+
+Files changed:
+src/main.rs and its changelog; docs/design/07-mint-run-loop.md and changelog;
+tests/runtime_replay_boundary.rs; docs/harness/invariants.md;
+docs/harness/coverage.csv; this task record.
+
+Tests written:
+The existing canonical-applicator boundary guard now requires a unit result,
+rejects CommittedBlock event handoff, and requires post-fold gauges to read the
+promoted cursor.
+
+Commands:
+Read-only source/upstream/status searches and git diff checks are recorded in
+the session. No Cargo command, formatter, build, test, commit, or push was run.
+
+Uncommitted state:
+This slice remains uncommitted. The worktree was clean at
+f1e6b9224b3bee2bc7e6fe7f4fa98f5d7ecc1166 before the slice.
+```
+
 ## 2026-07-24 — Scanner metadata as sole accepted-height source
 
 ```text

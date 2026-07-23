@@ -39,16 +39,18 @@ target = zebra_exact_tip()
 
 while cursor != target:
   block = fetch_continuous_canonical_successor(cursor)
-  committed = apply_canonical_block(block, scanning, wallet, registry,
-                                    cursor, accepted_history)
+  apply_canonical_block(block, scanning, wallet, registry,
+                        cursor, accepted_history)
 
 require zebra_hash(target.height) == target.hash
 enter Live
+reconcile live work from canonical Wallet + Registry + cursor
 
 loop:
   canonical change:
     commit canonical blocks passively
-    project optional Live effects only from committed evidence
+    verify the exact tip
+    reconcile live work from installed canonical state
 
   reorg:
     invalidate cursor-bound operational work
@@ -63,8 +65,8 @@ loop:
 The target interface is:
 
 ```text
-apply_canonical_block(...) -> Result<CommittedBlock, RuntimeError>
-project_live_effects(..., CommittedBlock) -> ...
+apply_canonical_block(...) -> Result<(), RuntimeError>
+reconcile_live_work(canonical state, operational state, narrow capabilities)
 ```
 
 `apply_canonical_block` may receive only:
@@ -88,11 +90,12 @@ One block commits in this order:
 3. apply Wallet balances, nullifiers, and all three commitment trees;
 4. install the simulated Registry result;
 5. advance exact cursor and accepted history last;
-6. return immutable committed evidence.
+6. return success without an event payload.
 
 No request observation is lost: raw Treasury memos, txids, received/spent
 notes, nullifiers, and validated Name Notes remain canonical evidence. Rebuild
-does not interpret that evidence operationally.
+does not interpret that evidence operationally. Live derives desired work from
+the installed Wallet, Registry, and cursor rather than replaying block events.
 
 ## Live Responsibilities
 
@@ -105,6 +108,10 @@ Only `Live` may own or invoke:
 - intent expiry, confirmation, and replacement;
 - proving, signing, retry, and submission;
 - lifecycle event counters.
+
+Live is a state reconciler, not a block-event consumer. Restart and reorg first
+reconstruct canonical state; only then may reconciliation determine which work
+is still pending.
 
 Operational locks and reservations are cursor-bound state outside canonical
 Wallet and Registry values. A reorg invalidates them before replacement replay.
