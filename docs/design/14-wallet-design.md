@@ -71,7 +71,8 @@ The orchestrator commits one continuous block in this order:
 4. append commitments and checkpoint Sapling, Orchard, and Ironwood;
 5. expose the prepared balance only after every tree operation succeeds;
 6. install the simulated Registry;
-7. promote scanner-derived cursor metadata and accepted history last.
+7. install bounded scanner-derived accepted metadata;
+8. promote the scanner-derived cursor last.
 
 If tree application fails, Wallet truncates all three trees to the prior
 accepted checkpoint and discards the prepared balance. A rollback failure is a
@@ -94,9 +95,9 @@ Wallet and Registry contain no operational state to reconcile. A future Live
 owner must invalidate cursor-bound OTPs, intents, submissions, locks, and
 reservations before passive replacement-branch replay.
 
-The current runtime still misses same-height and shorter reorgs because it
-returns early on height before comparing hashes. Exact Zebra target capture and
-unconditional height/hash comparison remain required.
+The runtime compares one exact Zebra target by both height and hash before
+declaring Rebuild complete. Same-height and shorter targets therefore enter
+the same common-ancestor path as taller divergent branches.
 
 ## Exact Transaction Planning
 
@@ -128,7 +129,7 @@ passive replay.
 - failure injection before and after every canonical commit stage;
 - deterministic restart/replay equivalence over long histories;
 - per-pool append/checkpoint/rollback failures;
-- same-height, shorter, and multi-block reorgs;
+- executed same-height, shorter, and multi-block reorg fixtures;
 - Zebra root comparison and witness-spend integration;
 - Live reservation concurrency once the external owner exists.
 

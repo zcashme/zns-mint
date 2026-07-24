@@ -10,7 +10,10 @@ use zcash_protocol::consensus::BlockHeight;
 
 pub const COMMITMENT_TREE_DEPTH: u8 = 32;
 pub const SHARD_HEIGHT: u8 = 16;
-pub const MAX_REORG_ALLOWANCE: usize = 100;
+/// Maximum number of accepted predecessors that can be rewound from the tip.
+pub const MAX_REORG_DEPTH: usize = 100;
+/// Current checkpoint plus every predecessor in [`MAX_REORG_DEPTH`].
+pub const RETAINED_CHECKPOINTS: usize = MAX_REORG_DEPTH + 1;
 
 pub type OrchardShardStore = MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>;
 pub type SaplingShardStore = MemoryShardStore<sapling::Node, BlockHeight>;
@@ -66,9 +69,9 @@ impl ShardTrees {
     /// Constructs empty trees with the standard reorg allowance.
     pub fn new() -> Self {
         Self {
-            orchard: ShardTree::new(MemoryShardStore::empty(), MAX_REORG_ALLOWANCE),
-            ironwood: ShardTree::new(MemoryShardStore::empty(), MAX_REORG_ALLOWANCE),
-            sapling: ShardTree::new(MemoryShardStore::empty(), MAX_REORG_ALLOWANCE),
+            orchard: ShardTree::new(MemoryShardStore::empty(), RETAINED_CHECKPOINTS),
+            ironwood: ShardTree::new(MemoryShardStore::empty(), RETAINED_CHECKPOINTS),
+            sapling: ShardTree::new(MemoryShardStore::empty(), RETAINED_CHECKPOINTS),
         }
     }
 
@@ -301,12 +304,78 @@ impl ShardTrees {
         self.orchard.checkpoint(height)?;
         self.ironwood.checkpoint(height)?;
         self.sapling.checkpoint(height)?;
+
+        for (pool, present) in [
+            (
+                "Orchard",
+                self.orchard
+                    .root_at_checkpoint_id(&height)
+                    .map_err(TreeError::from)?
+                    .is_some(),
+            ),
+            (
+                "Ironwood",
+                self.ironwood
+                    .root_at_checkpoint_id(&height)
+                    .map_err(TreeError::from)?
+                    .is_some(),
+            ),
+            (
+                "Sapling",
+                self.sapling
+                    .root_at_checkpoint_id(&height)
+                    .map_err(TreeError::from)?
+                    .is_some(),
+            ),
+        ] {
+            if !present {
+                return Err(TreeError::MissingCheckpoint { pool, height });
+            }
+        }
         Ok(())
     }
 
     // --- Reorg Handling ---
 
     pub fn truncate_to_checkpoint(&mut self, height: BlockHeight) -> Result<bool, TreeError> {
+        // Preflight every pool before mutating any tree. All three stores are
+        // in-memory with an Infallible storage error; once these exact
+        // checkpoints exist, truncation cannot discover a later missing pool
+        // after an earlier pool has already changed.
+        if self
+            .orchard
+            .root_at_checkpoint_id(&height)
+            .map_err(TreeError::from)?
+            .is_none()
+        {
+            return Err(TreeError::MissingCheckpoint {
+                pool: "Orchard",
+                height,
+            });
+        }
+        if self
+            .ironwood
+            .root_at_checkpoint_id(&height)
+            .map_err(TreeError::from)?
+            .is_none()
+        {
+            return Err(TreeError::MissingCheckpoint {
+                pool: "Ironwood",
+                height,
+            });
+        }
+        if self
+            .sapling
+            .root_at_checkpoint_id(&height)
+            .map_err(TreeError::from)?
+            .is_none()
+        {
+            return Err(TreeError::MissingCheckpoint {
+                pool: "Sapling",
+                height,
+            });
+        }
+
         let orchard_truncated = self.orchard.truncate_to_checkpoint(&height)?;
         if !orchard_truncated {
             return Err(TreeError::MissingCheckpoint {
@@ -336,6 +405,43 @@ impl ShardTrees {
 mod tests {
     use super::*;
     use incrementalmerkletree::frontier::Frontier;
+
+    fn empty_trees_at(height: BlockHeight) -> ShardTrees {
+        let mut trees = ShardTrees::new();
+        trees
+            .insert_orchard_frontier(Frontier::empty(), height)
+            .unwrap();
+        trees
+            .insert_ironwood_frontier(Frontier::empty(), height)
+            .unwrap();
+        trees
+            .insert_sapling_frontier(Frontier::empty(), height)
+            .unwrap();
+        trees
+    }
+
+    fn checkpoint_presence(
+        trees: &ShardTrees,
+        height: BlockHeight,
+    ) -> (bool, bool, bool) {
+        (
+            trees
+                .orchard
+                .root_at_checkpoint_id(&height)
+                .unwrap()
+                .is_some(),
+            trees
+                .ironwood
+                .root_at_checkpoint_id(&height)
+                .unwrap()
+                .is_some(),
+            trees
+                .sapling
+                .root_at_checkpoint_id(&height)
+                .unwrap()
+                .is_some(),
+        )
+    }
 
     #[test]
     fn latest_ironwood_anchor_does_not_require_exact_height() {
@@ -378,5 +484,105 @@ mod tests {
         assert!(trees.ironwood_anchor(quiet_height).unwrap().is_some());
         assert!(trees.sapling_anchor(quiet_height).unwrap().is_some());
         assert!(trees.truncate_to_checkpoint(birthday).unwrap());
+    }
+
+    #[test]
+    fn rewind_preflights_every_pool_before_mutation() {
+        let birthday = BlockHeight::from_u32(10);
+        let next = BlockHeight::from_u32(11);
+        let mut trees = empty_trees_at(birthday);
+
+        trees.orchard.checkpoint(next).unwrap();
+        let before = checkpoint_presence(&trees, next);
+
+        assert!(matches!(
+            trees.truncate_to_checkpoint(next),
+            Err(TreeError::MissingCheckpoint {
+                pool: "Ironwood",
+                height
+            }) if height == next
+        ));
+        assert_eq!(checkpoint_presence(&trees, next), before);
+    }
+
+    #[test]
+    fn rewind_preflight_preserves_all_pools_for_each_missing_checkpoint() {
+        let birthday = BlockHeight::from_u32(10);
+        let next = BlockHeight::from_u32(11);
+
+        let mut missing_orchard = empty_trees_at(birthday);
+        missing_orchard.ironwood.checkpoint(next).unwrap();
+        missing_orchard.sapling.checkpoint(next).unwrap();
+        let before = checkpoint_presence(&missing_orchard, next);
+        assert!(matches!(
+            missing_orchard.truncate_to_checkpoint(next),
+            Err(TreeError::MissingCheckpoint {
+                pool: "Orchard",
+                ..
+            })
+        ));
+        assert_eq!(checkpoint_presence(&missing_orchard, next), before);
+
+        let mut missing_ironwood = empty_trees_at(birthday);
+        missing_ironwood.orchard.checkpoint(next).unwrap();
+        missing_ironwood.sapling.checkpoint(next).unwrap();
+        let before = checkpoint_presence(&missing_ironwood, next);
+        assert!(matches!(
+            missing_ironwood.truncate_to_checkpoint(next),
+            Err(TreeError::MissingCheckpoint {
+                pool: "Ironwood",
+                ..
+            })
+        ));
+        assert_eq!(checkpoint_presence(&missing_ironwood, next), before);
+
+        let mut missing_sapling = empty_trees_at(birthday);
+        missing_sapling.orchard.checkpoint(next).unwrap();
+        missing_sapling.ironwood.checkpoint(next).unwrap();
+        let before = checkpoint_presence(&missing_sapling, next);
+        assert!(matches!(
+            missing_sapling.truncate_to_checkpoint(next),
+            Err(TreeError::MissingCheckpoint {
+                pool: "Sapling",
+                ..
+            })
+        ));
+        assert_eq!(checkpoint_presence(&missing_sapling, next), before);
+    }
+
+    #[test]
+    fn successful_rewind_moves_all_pool_horizons_together() {
+        let birthday = BlockHeight::from_u32(10);
+        let next = BlockHeight::from_u32(11);
+        let mut trees = empty_trees_at(birthday);
+        trees.checkpoint_all(next).unwrap();
+
+        assert_eq!(checkpoint_presence(&trees, next), (true, true, true));
+        assert!(trees.truncate_to_checkpoint(birthday).unwrap());
+        assert_eq!(checkpoint_presence(&trees, birthday), (true, true, true));
+        assert_eq!(checkpoint_presence(&trees, next), (false, false, false));
+    }
+
+    #[test]
+    fn every_pool_retains_current_plus_full_reorg_depth() {
+        let origin = BlockHeight::from_u32(1_000);
+        let mut trees = empty_trees_at(origin);
+        for offset in 1..RETAINED_CHECKPOINTS {
+            trees
+                .checkpoint_all(origin + u32::try_from(offset).unwrap())
+                .unwrap();
+        }
+
+        for offset in 0..RETAINED_CHECKPOINTS {
+            assert_eq!(
+                checkpoint_presence(&trees, origin + u32::try_from(offset).unwrap()),
+                (true, true, true)
+            );
+        }
+
+        let next = origin + u32::try_from(RETAINED_CHECKPOINTS).unwrap();
+        trees.checkpoint_all(next).unwrap();
+        assert_eq!(checkpoint_presence(&trees, origin), (false, false, false));
+        assert_eq!(checkpoint_presence(&trees, next), (true, true, true));
     }
 }

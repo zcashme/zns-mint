@@ -9,9 +9,8 @@ document in the same change.
 
 `treasury.rs` is the Treasury account's **wallet view and Treasury policy**
 layer. It is a stateless policy layer over borrowed wallet state — it owns no
-note map of its own and holds no key material. It reads the Treasury slice of
-the shared `Wallet` and produces policy decisions and "please sign this"
-requests for the future transaction-assembly path.
+note map of its own and holds no key material. It reads canonical Treasury
+evidence from the shared `Wallet` and matches claim payments.
 
 The Treasury account (ZIP-32 account `0`) is the user-facing account: users
 send name payments to it and send ZNS request memos to it; it is the shielded
@@ -24,8 +23,9 @@ These are load-bearing exclusions. The Treasury account and the Treasury
 module are different things:
 
 - **Does not sign transactions.** The Treasury spending key is consumed only
-  by the transaction-assembly path, never by this module. This module produces
-  *requests* (selected funds + recipient + intent), not signed transactions.
+  by the transaction-assembly path, never by this module. This module returns
+  canonical evidence references and pure policy answers; it produces neither
+  selected-fund requests nor signed transactions.
 - **Does not own OTP credentials.** OTP issuance, verification, expiry, and
   one-time consumption belong to `auth.rs`. `treasury.rs` does not generate,
   store, or verify OTPs. The Treasury *account* is the shielded origin of the
@@ -36,96 +36,34 @@ module are different things:
   lives elsewhere (a future `policy.rs` or in `payload.rs`). The Treasury
   module answers "was this paid" given a caller-supplied price; it does not
   decide the price.
+- **Does not select sweep or Registry-funding inputs.** The prior unwired
+  request modules hid empty reservation exclusions and were deleted. Any
+  future policy must be derived by a Live owner from one cursor-bound
+  exclusion/reservation view.
 - **Does not parse Name Note memos or maintain name chains.** That belongs to
   the registry path.
 - **Does not hold spending keys, seed material, or operator-readable config.**
-- **Does not read env vars, CLI flags, or config files.** All policy inputs
-  are hardcoded constants in this module.
+- **Does not read env vars, CLI flags, or config files.** Policy inputs arrive
+  through typed callers or canonical wallet state.
 
 ## Features
 
 ### T1 — Treasury Wallet View
 
-Read access to the Treasury account's unspent note map and balance, borrowed
-from the shared `Wallet` via `wallet.treasury()` / `wallet.treasury_mut()`.
+Read access to the Treasury account's unspent Orchard notes and balance,
+borrowed from the shared `Wallet` through
+`wallet.orchard_notes_for(TREASURY_ACCOUNT)` and
+`wallet.balance(TREASURY_ACCOUNT)`.
 
 The Treasury note map holds name payments received and any other Orchard value
 the Treasury happens to hold. It does not hold Name Notes (those are Registry
 account notes).
 
-### T2 — Fund Selection
-
-`select_funds(target) -> Vec<&SpendableNote>`: greedy note selection
-sufficient to cover a target value (e.g. an OTP relay fee, an auto-sweep
-amount, a Registry funding transfer). No spending keys touched. The selection
-is deterministic so the caller can predict what will be spent.
-
-Selection policy: smallest-notes-first (a simple greedy ascending sort by note
-value), so small change notes get consolidated and the Treasury doesn't sit on
-a long tail of dust. This is a starting policy; it can be revisited without
-breaking the boundary.
-
-### T4 — Auto-Sweep Policy
-
-When Treasury balance exceeds a hardcoded `SWEEP_THRESHOLD`, the Treasury
-module produces a `SweepRequest` for transaction-assembly:
-
-```text
-struct SweepRequest {
-    selected_notes: Vec<[u8; 32]>,   // nullifiers of the notes to spend
-    recipient: TransparentAddress,   // hardcoded SWEEP_ADDRESS
-    amount: u64,                     // balance - SWEEP_RESERVE
-}
-```
-
-Policy constants (hardcoded in `treasury.rs`):
-
-- `SWEEP_ADDRESS: TransparentAddress` — the transparent address excess funds
-  sweep to. Hardcoded; not env, not config.
-- `SWEEP_THRESHOLD: u64` — Treasury balance above which a sweep is triggered.
-- `SWEEP_RESERVE: u64` — amount kept in the Treasury for OTP relay fees and
-  normal operation; sweep sends `balance - SWEEP_RESERVE`.
-
-Auto-sweep is evaluated once per block, after sync. It produces *at most one*
-`SweepRequest` per block. The request is handed to transaction-assembly, which
-signs and broadcasts. The Treasury module does not sign.
-
-### T5 — Registry Funding Policy
-
-When the Registry account's spendable balance falls below a hardcoded
-`REGISTRY_FUNDING_FLOOR`, the Treasury module produces a `RegistryFundingRequest`
-for transaction-assembly:
-
-```text
-struct RegistryFundingRequest {
-    selected_notes: Vec<[u8; 32]>,   // Treasury notes to spend
-    recipient: RegistryOrchardAddress,  // the Registry's external Orchard address
-    amount: u64,                     // REGISTRY_FUNDING_TOPUP
-}
-```
-
-Policy constants:
-
-- `REGISTRY_FUNDING_FLOOR: u64` — Registry balance below which a top-up is
-  triggered.
-- `REGISTRY_FUNDING_TOPUP: u64` — amount sent from Treasury to Registry per
-  top-up.
-
-The Treasury module reads the Registry balance through the shared wallet
-(`wallet.registry().balance()`) to decide whether a top-up is needed. It does
-not touch the Registry spending key. The recipient is the Registry's external
-Orchard address, derived from the Registry UFVK (which the wallet already
-holds for scanning).
-
-Registry funding is evaluated once per block, after sync, after auto-sweep.
-If both fire in the same block, auto-sweep must account for the outgoing
-funding transfer when computing `balance - SWEEP_RESERVE` (see Open Questions).
-
 ### T6 — Claim Payment Detection
 
-`match_payment(request: &RequestMemo, price: u64) -> Option<&SpendableNote>`:
-given a claim request and a caller-supplied price, return the Treasury note
-that pays for this claim, if any.
+`match_payment(wallet: &Wallet, request: &RequestMemo, price: u64)
+-> Option<&ReceivedOrchardNote>`: given a claim request and a caller-supplied
+price, return the Treasury Orchard note that pays for this claim, if any.
 
 Detection rules:
 
@@ -148,52 +86,46 @@ Name Note until `treasury.match_payment(...)` returns `Some`.
 
 ## Data
 
-The Treasury module owns no durable request state. It borrows the Treasury
-slice of the shared `Wallet` and reads hardcoded constants. Wallet note and
-transaction state retains canonical memo evidence; `RequestMemo::parse`
+The Treasury module owns no durable request state. Its methods borrow the
+shared `Wallet`. Wallet note and transaction state retains canonical memo
+evidence; `RequestMemo::parse`
 classifies a memo when Live reconciliation needs it. This design does not yet
 define which observations constitute pending work.
 
-```text
-struct SweepRequest { ... }      // T4
-struct RegistryFundingRequest { ... }  // T5
-```
-
-Policy request values are handed to transaction assembly and are not canonical
-state.
+No Treasury request or selected-note type is retained as canonical state.
 
 ## Public Surface
 
-The Treasury module exposes a `Treasury` type that borrows the wallet's
-Treasury slice:
+The Treasury module exposes a stateless `Treasury` policy type. Each query
+borrows the shared wallet explicitly:
 
 ```text
-impl<'w> Treasury<'w> {
-    fn from_wallet(wallet: &'w Wallet) -> Self;
+impl Treasury {
+    fn new() -> Self;
 
     // T1
-    fn unspent_notes(&self) -> &HashMap<[u8; 32], SpendableNote>;
-    fn balance(&self) -> u64;
-
-    // T2
-    fn select_funds(&self, target: u64) -> Option<Vec<&SpendableNote>>;
-
-    // T4
-    fn auto_sweep(&self) -> Option<SweepRequest>;
-
-    // T5
-    fn registry_funding(&self, registry_balance: u64) -> Option<RegistryFundingRequest>;
+    fn unspent_notes<'w>(
+        &self,
+        wallet: &'w Wallet,
+    ) -> impl Iterator<Item = &'w ReceivedOrchardNote>;
+    fn balance(&self, wallet: &Wallet) -> u64;
 
     // T6
-    fn match_payment(&self, request: &RequestMemo, price: u64) -> Option<&SpendableNote>;
+    fn match_payment<'w>(
+        &self,
+        wallet: &'w Wallet,
+        request: &RequestMemo,
+        price: u64,
+    ) -> Option<&'w ReceivedOrchardNote>;
 }
 ```
 
 `main.rs` does not call this directly. Future Live reconciliation reads
 canonical Treasury evidence from Wallet, classifies memos, compares Wallet and
 Registry state, and only then invokes the relevant policy methods. There is no
-height-indexed request queue, and no replacement pending-work query is defined
-here.
+height-indexed request queue, no exclusion-free Treasury selection wrapper,
+and no replacement pending-work query. Exact note selection belongs to a
+future Live owner that supplies its reservation exclusions explicitly.
 
 ## Live Reconciliation Order
 
@@ -206,13 +138,10 @@ After rebuild reaches and verifies an exact Zebra tip:
    matching payment are handed to the Registry layer to mint.
 3. Update/release `RequestMemo`s go to the request-processing layer, which
    calls `auth` to issue or verify OTPs. This is not Treasury module work.
-4. **T5** — check Registry balance; if below floor, produce a
-   `RegistryFundingRequest`.
-5. **T4** — check Treasury balance after any outgoing funding; if above
-   threshold, produce a `SweepRequest`.
 
-No request slice is produced or retained per block. T5 precedes T4 so
-auto-sweep sees the post-funding Treasury balance.
+No request slice is produced or retained per block. Sweep and Registry-funding
+selection are absent; future Live requirements must force their correct
+reservation-aware shape back into existence.
 
 ## Boundaries
 
@@ -225,9 +154,9 @@ auto-sweep sees the post-funding Treasury balance.
   is `auth.rs`'s sole authority.
 - Do not decide name pricing. Pricing is protocol policy supplied by the
   caller.
-- Do not sign or broadcast transactions. Produce requests only.
-- Do not add env vars, CLI flags, or config files. Policy inputs are
-  hardcoded constants.
+- Do not sign or broadcast transactions. Return evidence references and pure
+  policy answers only.
+- Do not add env vars, CLI flags, or config files.
 - Do not add durable storage unless explicitly requested.
 - Do not expand this module until the user explicitly says so.
 
@@ -238,21 +167,10 @@ auto-sweep sees the post-funding Treasury balance.
   attribute a payment note to a specific claim (currently sketched as "the
   payment memo carries the same `name`"). The exact grammar needs to be
   added to `04-memo-grammar.md` before T6 can be implemented.
-- **Auto-sweep + Registry funding in the same block.** If both fire, the
-  sweep amount should be `balance - REGISTRY_FUNDING_TOPUP - SWEEP_RESERVE`,
-  not `balance - SWEEP_RESERVE`. The current "T5 before T4" ordering handles
-  this only if the sweep policy reads the post-funding balance; the exact
-  accounting needs to be made precise when implemented.
-- **Fund selection for sweep vs. funding.** `select_funds` is shared between
-  OTP relay, auto-sweep, and Registry funding. Whether one selection policy
-  fits all three or each needs its own is open. Starting assumption: one
-  policy, revisit if sweep or funding shows different dust behavior.
-- **Sweep address as a hardcoded constant.** A hardcoded transparent address
-  in `treasury.rs` means changing it requires a binary rebuild and
-  re-attestation. That is the safest option under the no-config rule, but it
-  is operationally rigid. Seed-derivation was rejected because the operator
-  can't predict the address without running the derivation. This is the
-  agreed tradeoff.
+- **Reservation-aware sweep and funding.** The prior selected-note request
+  modules were deleted. Future Live design must decide policy, accounting, and
+  destination together with one caller-owned reservation/exclusion view; no
+  shortcut API exists meanwhile.
 - **Reorg handling for T6.** A matched payment can be reorged out. The undo
   buffer reverts the Treasury note map on rewind, but `match_payment` results
   handed to the Registry layer in prior blocks are not automatically
@@ -267,16 +185,15 @@ auto-sweep sees the post-funding Treasury balance.
 - `docs/protocol.md (§6)` — request memo grammar; payment memo
   grammar is an open question here.
 - `docs/protocol.md (§8)` — claim/update/release flow.
-- `docs/design/09-transaction-assembly.md` — transaction-assembly is the
-  consumer of `SweepRequest` and `RegistryFundingRequest`.
+- `docs/design/09-transaction-assembly.md` — future transaction assembly;
+  no Treasury sweep/funding request surface currently exists.
 - `docs/design/14-wallet-design.md` — wallet design; F8, F9, F10 define the
   Treasury module's place in the wallet boundary.
 - `src/treasury.rs` and `src/treasury.rs.context.md` — the source module and
   its context.
 - `src/auth.rs` and `src/auth.rs.context.md` — OTP credential authority;
   the Treasury module does not touch it.
-- `src/wallet.rs` (future) — the shared `Wallet` this module borrows the
-  Treasury slice from.
+- `src/wallet.rs` — the shared `Wallet` each Treasury policy query borrows.
 - `src/key.rs` — the only place spending keys live; not reachable from this
   module.
 

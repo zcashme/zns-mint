@@ -2,6 +2,18 @@
 
 Tracks design-relevant changes to `src/wallet.rs` and `src/wallet/trees.rs`.
 
+## 2026-07-24 — Preflighted canonical rewind
+
+- Replaced the orchestrator's separate mutable balance/tree access with
+  `Wallet::rewind_to_height`.
+- Rewind preflights the exact checkpoint in Sapling, Orchard, and Ironwood
+  before mutating any pool, then truncates the fallible trees before the
+  infallible balance and nullifier history.
+- A missing retained checkpoint now fails before any Wallet mutation.
+- The retention count is explicitly current plus 100 predecessors, and every
+  accepted `checkpoint_all` call verifies that all three exact checkpoint IDs
+  exist. Boundary tests cover each missing pool and the retention floor.
+
 ## 2026-07-24 — Accepted height comes from scanner metadata
 
 - `Wallet::apply_block` now derives the block height from the immutable

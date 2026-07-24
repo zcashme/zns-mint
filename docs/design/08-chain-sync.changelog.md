@@ -1,5 +1,18 @@
 # Chain sync design changelog
 
+## 2026-07-24 — Complete passive reorg detection
+
+- Added checked exact-tip capture from one `getblockchaininfo` response.
+- Reorg discovery starts at `min(local height, target height)`, covering
+  same-height and shorter chains without requesting above Zebra's tip.
+- Height-indexed block reads reject a mismatched claimed height.
+- Successful block reads and all common-ancestor outcomes are revalidated
+  against the captured exact tip before they can mutate canonical state or
+  become a retained-history failure.
+- All three tree checkpoints are preflighted before rewind mutation, and
+  metadata history retains the current checkpoint plus 100 predecessors.
+- History gaps fail closed rather than skipping to an older retained key.
+
 ## 2026-07-23 — Passive replay and reorg ownership
 
 - Corrected `BlockOutput` transaction coverage: all Ironwood transactions are
