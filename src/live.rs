@@ -32,7 +32,7 @@ pub mod submissions;
 use std::collections::BTreeSet;
 
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use crate::auth::{ChallengeKey, OtpCode, PendingOtps};
 use crate::key::{RegistryKeys, TreasuryKeys};
@@ -51,6 +51,12 @@ use submissions::{Submission, SubmissionKind, Submissions};
 /// amount from each claim payment.
 // TODO: move to a policy module when one exists.
 const CLAIM_PRICE: u64 = 10_000;
+
+/// Minimum value (in zatoshis) required on an update or release request note
+/// for sybil resistance. The requester must attach at least this much ZEC to
+/// their request. The value flows through the OTP relay to the controller.
+// TODO: move to a policy module when one exists.
+const MIN_REQUEST_VALUE: u64 = 10_000;
 
 /// The transaction expiry buffer in blocks (~25 minutes at 75s/block).
 const TX_EXPIRY_BUFFER: u32 = 20;
@@ -115,6 +121,7 @@ pub enum PendingWork {
         action: Action,
         controller_ua: UnifiedAddress,
         request_note_locator: NoteLocator,
+        request_note_value: u64,
     },
     /// An update or release request with an OTP.
     VerifyAndTransition {
@@ -218,6 +225,23 @@ pub fn reconcile(
                             continue;
                         }
 
+                        // Sybil resistance: require minimum value on the request note.
+                        let request_value = note.note.value().inner();
+                        if request_value < MIN_REQUEST_VALUE {
+                            metrics::inc_request_invalid("insufficient_request_value");
+                            continue;
+                        }
+
+                        // Protocol constraint: controller UA must have an Orchard receiver.
+                        if !has_orchard_receiver(&controller_ua) {
+                            metrics::inc_request_invalid("no_orchard_receiver");
+                            tracing::warn!(
+                                name = %name,
+                                "controller UA has no Orchard receiver; cannot relay OTP"
+                            );
+                            continue;
+                        }
+
                         metrics::inc_request_received("update");
                         seen_no_otp.insert(key.clone());
                         work.push(PendingWork::NeedsOtpRelay {
@@ -225,6 +249,7 @@ pub fn reconcile(
                             action: Action::Update,
                             controller_ua,
                             request_note_locator: locator,
+                            request_note_value: request_value,
                         });
                     }
                     Some(otp_bytes) => {
@@ -262,6 +287,23 @@ pub fn reconcile(
                             continue;
                         }
 
+                        // Sybil resistance: require minimum value on the request note.
+                        let request_value = note.note.value().inner();
+                        if request_value < MIN_REQUEST_VALUE {
+                            metrics::inc_request_invalid("insufficient_request_value");
+                            continue;
+                        }
+
+                        // Protocol constraint: controller UA must have an Orchard receiver.
+                        if !has_orchard_receiver(&controller_ua) {
+                            metrics::inc_request_invalid("no_orchard_receiver");
+                            tracing::warn!(
+                                name = %name,
+                                "controller UA has no Orchard receiver; cannot relay OTP"
+                            );
+                            continue;
+                        }
+
                         metrics::inc_request_received("release");
                         seen_no_otp.insert(key.clone());
                         work.push(PendingWork::NeedsOtpRelay {
@@ -269,6 +311,7 @@ pub fn reconcile(
                             action: Action::Release,
                             controller_ua,
                             request_note_locator: locator,
+                            request_note_value: request_value,
                         });
                     }
                     Some(otp_bytes) => {
@@ -321,6 +364,26 @@ fn current_controller_ua(tip: &Tip) -> UnifiedAddress {
     tip.received()
         .map(|r| r.payload().ua().clone())
         .unwrap_or_else(UnifiedAddress::empty)
+}
+
+/// Whether a UA string contains an Orchard receiver.
+///
+/// Protocol constraint: all ZNS UAs must have an Orchard receiver so the
+/// Treasury can deliver OTP relay notes. The mint does not validate UAs at
+/// claim time (it stores the string opaquely), but it checks at relay time
+/// and rejects requests for names bound to non-Orchard UAs.
+fn has_orchard_receiver(ua: &UnifiedAddress) -> bool {
+    let zaddr: zcash_address::ZcashAddress = match ua.as_str().parse() {
+        Ok(z) => z,
+        Err(_) => return false,
+    };
+    let parsed: zcash_keys::address::Address = match zaddr
+        .convert_if_network(zcash_protocol::consensus::MAIN_NETWORK.network_type())
+    {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    matches!(parsed, zcash_keys::address::Address::Unified(ref ua) if ua.orchard().is_some())
 }
 
 /// Executes pending work: builds, signs, and submits transactions.
@@ -408,7 +471,8 @@ pub async fn execute(
                 name,
                 action,
                 controller_ua,
-                request_note_locator: _,
+                request_note_locator,
+                request_note_value,
             } => {
                 let key = ChallengeKey::new(name.clone(), action, controller_ua.clone());
                 let otp = live.pending_otps.issue(key, cursor_height);
@@ -421,6 +485,8 @@ pub async fn execute(
                     action,
                     &controller_ua,
                     &otp,
+                    request_note_locator,
+                    request_note_value,
                     cursor_height,
                     target_height,
                     &excluded,
@@ -729,6 +795,10 @@ fn execute_claim(
 }
 
 /// Builds an OTP relay transaction.
+///
+/// The relay is funded by the request note: the requester's payment is spent
+/// and the value (minus the network fee) is sent to the controller along
+/// with the OTP memo. The Treasury does not add its own notes.
 #[allow(clippy::too_many_arguments)]
 fn execute_otp_relay(
     wallet: &mut Wallet,
@@ -737,11 +807,16 @@ fn execute_otp_relay(
     action: Action,
     controller_ua: &UnifiedAddress,
     otp: &OtpCode,
+    request_note_locator: NoteLocator,
+    request_note_value: u64,
     anchor_height: BlockHeight,
     target_height: BlockHeight,
     excluded: &BTreeSet<NoteLocator>,
 ) -> Result<crate::treasury::relay::RelayAssembly, &'static str> {
-    let mut excluded_rhos: BTreeSet<orchard::note::Rho> = BTreeSet::new();
+    let excluded_rhos: BTreeSet<orchard::note::Rho> = BTreeSet::new();
+    // The request note is not in the exclusion set — it's the input we're
+    // spending. We only exclude notes reserved by other in-flight txs.
+    let mut excluded_rhos = excluded_rhos;
     for locator in excluded {
         if let NoteLocator::Orchard { account_id, rho } = locator {
             if *account_id == TREASURY_ACCOUNT {
@@ -757,6 +832,8 @@ fn execute_otp_relay(
         action,
         controller_ua,
         otp,
+        request_note_locator,
+        request_note_value,
         anchor_height,
         target_height,
         &excluded_rhos,
