@@ -59,7 +59,7 @@ type UnsignedBundle = orchard::Bundle<
 /// that exact commitment.
 ///
 /// Returns the transaction ID and the serialized transaction as a hex string.
-pub(crate) fn assemble_v6_transaction(
+pub fn assemble_v6_transaction(
     orchard_bundle: Option<UnsignedBundle>,
     ironwood_bundle: Option<UnsignedBundle>,
     treasury_signer: Option<&TreasuryKeys>,
