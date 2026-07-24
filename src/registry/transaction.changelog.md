@@ -2,6 +2,16 @@
 
 Tracks design-relevant changes to `src/registry/transaction.rs`.
 
+## 2026-07-24 — Refund output and extra-outputs fee parameter
+
+- `build_transaction` now accepts `refund: Option<(orchard::Address, u64)>` for
+  the atomic claim's Ironwood refund output to the Treasury. The refund is
+  always present for claims, including value-zero.
+- `select_registry_fee_inputs` now accepts `extra_outputs: usize` so the fee
+  computation accounts for non-ZNS, non-change outputs (e.g. the refund).
+- `registry_fee` now takes `extra_outputs` and computes total outputs as
+  `1 + extra_outputs + has_change` instead of `1 + has_change`.
+
 ## 2026-07-23 — Caller-owned fee-input exclusions
 
 - Registry fee-note selection now accepts an explicit read-only

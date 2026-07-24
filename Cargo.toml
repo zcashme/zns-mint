@@ -66,6 +66,10 @@ zebra-indexer-proto = "2.3"
 zcash_keys = { git = "https://github.com/zcash/librustzcash", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
 zcash_protocol = { git = "https://github.com/zcash/librustzcash", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1", default-features = false }
 
+# Address parsing for OTP relay (extracting Orchard receiver from UA string).
+# Already a transitive dep via zcash_keys; listed direct for importability.
+zcash_address = { git = "https://github.com/zcash/librustzcash", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1" }
+
 # Transparent key types (Treasury accepts transparent payments from users).
 # The workspace crate is `zcash_transparent`, published as `transparent`.
 transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1", default-features = false }

@@ -4,6 +4,48 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-07-24 — Live phase wired into main loop
+
+- The main loop now enters Live after Rebuild reaches the exact Zebra tip.
+- `catch_up` now returns `CatchUpResult { applied_txids, reorged }` instead of
+  `()`. Applied txids are collected from each block's scanned transactions.
+- On reorg, the main loop calls `LiveState::invalidate()` to clear all
+  cursor-bound operational state before re-reconciling.
+- After each catch-up cycle, the main loop calls `live::check_confirmations`
+  to mark submitted transactions confirmed in newly applied blocks, then
+  `live::reconcile` to derive pending work, then `live::execute` to build,
+  sign, and submit transactions via `JsonRpc::send`.
+- `apply_canonical_block` and `apply_canonical_block_with_fault` now return
+  `Vec<TxId>` instead of `()`.
+- The main function now retains `treasury_keys`, `registry_keys`, and
+  `treasury` from `boot.into_parts()`, creates a `JsonRpc` for submission,
+  and creates a `LiveState` for operational state.
+- New submission metrics: `zns_mint_transactions_submitted_total`,
+  `zns_mint_transactions_confirmed_total`,
+  `zns_mint_transactions_expired_total`, `zns_mint_transactions_pending`.
+
+## 2026-07-24 (exact-target passive Rebuild)
+
+- Catch-up now captures one checked Zebra `(height, hash)` target, reconciles
+  same-height, shorter, and taller divergence from the lower comparable
+  height, and replays only through that immutable target.
+- Success requires the installed cursor, the target block bytes, and a second
+  exact Zebra tip read to agree. A moving target remains passive and is
+  recaptured; every successful block read and every common-ancestor outcome is
+  rechecked against the captured target before use.
+- Accepted metadata retains the current height plus the complete 100-block
+  three-tree rewind depth. History is installed before the cursor, making
+  cursor promotion the last accepted-prefix publication.
+- Rewind now uses one preflighted Wallet boundary before truncating Registry,
+  history, and cursor.
+- The canonical fold has before/after crash boundaries around scanning,
+  Registry simulation, Wallet installation, Registry installation, accepted
+  history, and cursor promotion. Deterministic tests rebuild after every
+  boundary and enumerate restart/reorg/target-race schedules.
+- Canonical gauges remain on the last fully verified target during internal
+  rewind/replay and publish only after the replacement target passes final
+  height/hash verification.
+
 ## 2026-07-24 (canonical fold returns only transition status)
 
 - `apply_canonical_block` now returns only success or a typed error. It no

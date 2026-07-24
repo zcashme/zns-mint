@@ -62,18 +62,22 @@ fn registry_fee(
     target_height: BlockHeight,
     lifecycle_spends: usize,
     funding_spends: usize,
+    extra_outputs: usize,
     has_change: bool,
 ) -> Result<u64, &'static str> {
     use orchard::builder::BundleType;
     use orchard::bundle::BundleVersion;
 
     let version = BundleVersion::ironwood_v3();
+    // Total outputs: 1 (ZNS Name Note) + extra_outputs (e.g. refund) + change.
+    let total_outputs = 1 + extra_outputs + usize::from(has_change);
     let actions = BundleType::DEFAULT
         .num_actions(
             version.default_flags(),
             lifecycle_spends + funding_spends,
-            1 + usize::from(has_change),
+            total_outputs,
         )
+        
         .map_err(|_| "Registry action count overflow")?;
     FeeRule::standard()
         .fee_required(
@@ -97,6 +101,7 @@ pub fn select_registry_fee_inputs(
     request: &NameNoteRequest,
     target_height: BlockHeight,
     excluded: &BTreeSet<NoteLocator>,
+    extra_outputs: usize,
 ) -> Result<RegistryFeeInputs, &'static str> {
     let lifecycle_spends = usize::from(request.action() != Action::Claim);
     let mut candidates: Vec<_> = wallet
@@ -119,12 +124,12 @@ pub fn select_registry_fee_inputs(
     let mut total = 0u64;
     for funding_spends in 0..=candidates.len() {
         let fee_without_change =
-            registry_fee(target_height, lifecycle_spends, funding_spends, false)?;
+            registry_fee(target_height, lifecycle_spends, funding_spends, extra_outputs, false)?;
         if total == fee_without_change {
             return Ok(RegistryFeeInputs { locators });
         }
 
-        let fee_with_change = registry_fee(target_height, lifecycle_spends, funding_spends, true)?;
+        let fee_with_change = registry_fee(target_height, lifecycle_spends, funding_spends, extra_outputs, true)?;
         if total > fee_without_change && total >= fee_with_change {
             return Ok(RegistryFeeInputs { locators });
         }
@@ -163,6 +168,10 @@ pub fn build_transaction(
     fee_inputs: &RegistryFeeInputs,
     anchor_height: BlockHeight,
     target_height: BlockHeight,
+    // Optional Ironwood refund output (address, value). For atomic claims,
+    // this returns the excess payment (payment - price) to the Treasury.
+    // Always present for claims, including value-zero. None for update/release.
+    refund: Option<(orchard::Address, u64)>,
 ) -> Result<
     orchard::Bundle<
         orchard::builder::InProgress<orchard::builder::Unproven, orchard::builder::Unauthorized>,
@@ -275,11 +284,14 @@ pub fn build_transaction(
     }
 
     let funding_spends = funding_notes.len();
-    let fee_without_change = registry_fee(target_height, committed_spends, funding_spends, false)?;
+    let extra_outputs = usize::from(refund.is_some());
+    let fee_without_change =
+        registry_fee(target_height, committed_spends, funding_spends, extra_outputs, false)?;
     let (fee, change) = if total_funded == fee_without_change {
         (fee_without_change, 0)
     } else {
-        let fee_with_change = registry_fee(target_height, committed_spends, funding_spends, true)?;
+        let fee_with_change =
+            registry_fee(target_height, committed_spends, funding_spends, extra_outputs, true)?;
         if total_funded < fee_with_change {
             return Err("selected Registry fee notes are insufficient for final shape");
         }
@@ -297,6 +309,21 @@ pub fn build_transaction(
         builder
             .add_spend(fvk.clone(), prev_note.note, merkle_path.into())
             .map_err(|_| "failed to add fee spend")?;
+    }
+
+    // Add the refund output if present (always present for atomic claims).
+    if let Some((refund_address, refund_value)) = refund {
+        let mut refund_memo = [0u8; 512];
+        refund_memo[0] = 0xF6; // ZIP-302 empty memo
+
+        builder
+            .add_output(
+                Some(fvk.to_ovk(orchard::keys::Scope::Internal)),
+                refund_address,
+                orchard::value::NoteValue::from_raw(refund_value),
+                refund_memo,
+            )
+            .map_err(|_| "failed to add refund output")?;
     }
 
     if change > 0 {
