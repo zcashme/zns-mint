@@ -7,28 +7,22 @@
 //! The relay is a standard Orchard bundle (Treasury authority) that:
 //! 1. Spends the request note (the Treasury Orchard note carrying the
 //!    `ZNS:update` or `ZNS:release` memo from the requester).
-//! 2. Creates an output to the controller's Orchard receiver with the OTP
-//!    relay memo (`ZNS:otp:<name>:<verb>:<ua>:<otp>`). The output value is
-//!    `request_value - network_fee` — the requester's payment flows through
-//!    to the controller.
-//! 3. Creates a Treasury change output if there's residual value.
+//! 2. Creates one output to the controller's Orchard receiver with the OTP
+//!    relay memo. The output value is `request_value - network_fee`.
 //!
-//! The Treasury does not add its own notes — the requester funds the entire
-//! relay. This provides sybil resistance: each update/release request costs
-//! the requester ZEC, which flows to the controller.
+//! One spend, one output, one action. The requester's payment flows through
+//! to the controller minus the network fee. No change output, no Treasury
+//! notes needed.
 //!
 //! # Protocol constraint
 //!
 //! The controller's UA must have an Orchard receiver. If it doesn't, the
-//! mint rejects the request at reconciliation time (before reaching this
-//! assembly path). This is a protocol constraint: all ZNS UAs must have
-//! an Orchard receiver so the Treasury can deliver OTP relay notes.
+//! mint rejects the request at reconciliation time.
 //!
-//! # OVK recovery policy
+//! # OVK
 //!
-//! The relay output uses the Treasury external OVK so the Treasury can audit
-//! its own relay outputs ("did we send this relay?"). The OTP in the memo is
-//! ephemeral and already burned by the time anyone would check.
+//! Treasury external OVK — audit trail. The OTP in the memo is already
+//! burned by the time anyone would check.
 
 use orchard::builder::BundleType;
 use zcash_protocol::consensus::BlockHeight;
@@ -49,9 +43,6 @@ pub struct RelayAssembly {
     pub reserved_notes: Vec<NoteLocator>,
 }
 
-/// Parses a unified address string and extracts the Orchard receiver.
-///
-/// Returns `None` if the string is not a valid UA or has no Orchard receiver.
 fn extract_orchard_address(ua_str: &str) -> Option<orchard::Address> {
     let zaddr: zcash_address::ZcashAddress = ua_str.parse().ok()?;
     let parsed: ParsedAddress = zaddr
@@ -65,22 +56,8 @@ fn extract_orchard_address(ua_str: &str) -> Option<orchard::Address> {
 
 /// Builds, proves, signs, and serializes an OTP relay transaction.
 ///
-/// The relay is funded entirely by the request note. The requester's payment
-/// (minus the network fee) flows to the controller.
-///
-/// # Parameters
-///
-/// - `wallet`: the canonical wallet (mutated for witness lookup)
-/// - `treasury_keys`: Treasury spending key (signs the Orchard bundle)
-/// - `name`: the name being updated or released
-/// - `action`: `Update` or `Release` (claims don't use OTPs)
-/// - `controller_ua`: the current controller's unified address string
-/// - `otp`: the freshly issued OTP code
-/// - `request_note_locator`: the Treasury Orchard note carrying the request
-/// - `request_note_value`: the value of the request note (for fee computation)
-/// - `anchor_height`: the fully-applied cursor height
-/// - `target_height`: the next mineable height
-/// - `excluded`: Treasury note rhos already reserved by other in-flight txs
+/// One spend (request note), one output (controller + OTP memo), one action.
+/// The requester funds the entire relay. No change output, no Treasury notes.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble_otp_relay(
     wallet: &mut Wallet,
@@ -98,27 +75,22 @@ pub fn assemble_otp_relay(
     use rand::rngs::OsRng;
     use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
 
-    // Only update and release use OTPs.
     if action == Action::Claim {
         return Err("claims do not use OTPs");
     }
 
-    // 1. Parse the controller's UA to extract the Orchard receiver.
     let controller_orchard =
         extract_orchard_address(controller_ua.as_str()).ok_or("controller UA has no Orchard receiver")?;
 
-    // 2. Encode the OTP relay memo.
     let memo = encode_otp_relay_memo(name, action, controller_ua, otp)
         .ok_or("failed to encode OTP relay memo")?;
 
-    // 3. Get the Orchard anchor.
     let anchor = wallet
         .orchard_anchor(anchor_height)
         .ok()
         .flatten()
         .ok_or("no orchard anchor at accepted anchor height")?;
 
-    // 4. Initialize the Orchard builder.
     let bundle_version = orchard::bundle::BundleVersion::orchard_v3();
     let flags = bundle_version.default_flags();
     let mut builder =
@@ -127,7 +99,7 @@ pub fn assemble_otp_relay(
 
     let fvk = orchard::keys::FullViewingKey::from(treasury_keys.orchard_spending_key());
 
-    // 5. Resolve and spend the request note.
+    // Spend the request note.
     let (request_note, request_position) = {
         let note = wallet
             .orchard_note(request_note_locator)
@@ -148,13 +120,8 @@ pub fn assemble_otp_relay(
         .add_spend(fvk.clone(), request_note, merkle_path.into())
         .map_err(|_| "failed to add request note spend")?;
 
-    let reserved_notes = vec![request_note_locator];
-
-    // 6. Compute the network fee.
-    // 1 spend + 1 output (OTP relay) + optional change.
-    // With 1 spend and 1 output, actions = max(1, 1) = 1.
-    // If we need change, actions = max(1, 2) = 2.
-    let fee_without_change = FeeRule::standard()
+    // Fee: 1 action (1 spend, 1 output).
+    let fee = FeeRule::standard()
         .fee_required(
             &MAIN_NETWORK,
             target_height,
@@ -163,37 +130,17 @@ pub fn assemble_otp_relay(
             0,
             0,
             0,
-            1, // max(1 spend, 1 output) = 1
+            1,
         )
         .map(zcash_protocol::value::Zatoshis::into_u64)
         .map_err(|_| "ZIP-317 fee computation overflow")?;
 
-    let fee_with_change = FeeRule::standard()
-        .fee_required(
-            &MAIN_NETWORK,
-            target_height,
-            std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
-            std::iter::empty::<usize>(),
-            0,
-            0,
-            0,
-            2, // max(1 spend, 2 outputs) = 2
-        )
-        .map(zcash_protocol::value::Zatoshis::into_u64)
-        .map_err(|_| "ZIP-317 fee computation overflow")?;
-
-    // 7. Add the OTP relay output to the controller.
-    // The output value is request_value - fee.
-    let (relay_value, fee) = if request_note_value > fee_with_change {
-        // Enough for relay output + change.
-        (request_note_value - fee_with_change, fee_with_change)
-    } else if request_note_value > fee_without_change {
-        // Enough for relay output but no change — the excess is the fee.
-        (request_note_value - fee_without_change, fee_without_change)
-    } else {
-        // Not enough to cover even the minimum fee.
+    if request_note_value < fee {
         return Err("request note value insufficient for relay fee");
-    };
+    }
+
+    // One output to controller: request_value - fee.
+    let relay_value = request_note_value - fee;
 
     builder
         .add_output(
@@ -204,37 +151,18 @@ pub fn assemble_otp_relay(
         )
         .map_err(|_| "failed to add OTP relay output")?;
 
-    // 8. Add Treasury change if there's residual value.
-    let change_value = request_note_value - relay_value - fee;
-    if change_value > 0 {
-        let change_address = fvk.address_at(0u32, orchard::keys::Scope::Internal);
-        let mut change_memo = [0u8; 512];
-        change_memo[0] = 0xF6;
+    let reserved_notes = vec![request_note_locator];
 
-        builder
-            .add_output(
-                Some(fvk.to_ovk(orchard::keys::Scope::Internal)),
-                change_address,
-                orchard::value::NoteValue::from_raw(change_value),
-                change_memo,
-            )
-            .map_err(|_| "failed to add change output")?;
-    }
-
-    // 9. Build and verify value balance.
-    let (bundle, _meta) = builder
+    // Build and verify.
+    let (bundle, _) = builder
         .build::<ZatBalance>(&mut OsRng)
         .map_err(|_| "failed to build orchard bundle")?
         .ok_or("orchard builder produced no bundle")?;
 
     let actual_fee: i64 = bundle.value_balance().into();
-    assert_eq!(
-        actual_fee, fee as i64,
-        "OTP relay bundle value balance {} != intended fee {}",
-        actual_fee, fee,
-    );
+    assert_eq!(actual_fee, fee as i64, "relay value balance mismatch");
 
-    // 10. Sign and serialize.
+    // Sign and serialize.
     use crate::registry::signing;
     let (txid, hex) = signing::assemble_v6_transaction(
         Some(bundle),

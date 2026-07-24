@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
 use zcash_client_backend::data_api::BlockMetadata;
@@ -8,15 +8,18 @@ use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, MAIN_NETWORK};
 
 use zns_mint::boot::Boot;
-use zns_mint::live::{self, LiveState};
 use zns_mint::metrics;
-use zns_mint::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use zns_mint::mint::{Action, Name, UnifiedAddress, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::registry::state::Registry;
-use zns_mint::registry::{classify_registry_ironwood_note, RegistryNoteClass};
+use zns_mint::registry::{authorize, classify_registry_ironwood_note, NameNoteRequest, RegistryNoteClass};
 use zns_mint::sync::scan_block;
+use zns_mint::auth::{ChallengeKey, PendingOtps};
+use zns_mint::submissions::{Submission, SubmissionKind, Submissions};
+use zns_mint::treasury::memo::RequestMemo;
 use zns_mint::wallet::trees::RETAINED_CHECKPOINTS;
-use zns_mint::wallet::Wallet;
+use zns_mint::wallet::{NoteLocator, Wallet};
 use zns_mint::zcash::{CanonicalBlockSource, CanonicalTip, ChainClient, JsonRpc, TransportError};
+use zcash_protocol::consensus::Parameters;
 
 /// Polling interval when waiting for the next best-chain block.
 const BLOCK_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -80,11 +83,11 @@ async fn main() {
 
     let boot_height = boot.height();
     let mut cursor = *boot.cursor().metadata();
-    let (mut chain, mut wallet, mut registry, treasury, treasury_keys, registry_keys) =
+    let (mut chain, mut wallet, mut registry, _treasury, treasury_keys, registry_keys) =
         boot.into_parts();
     let block_source = CanonicalBlockSource::new();
     let rpc = JsonRpc::new();
-    let mut live_state = LiveState::new();
+    let mut ops = OperationalState::new();
     let mut chain_history = BTreeMap::from([(cursor.block_height(), cursor)]);
     publish_canonical_gauges(&wallet, cursor.block_height());
 
@@ -143,50 +146,28 @@ async fn main() {
 
         match catch_up_result {
             Ok(result) => {
-                // On reorg, invalidate all cursor-bound operational state.
                 if result.reorged {
-                    tracing::info!("live: reorg detected; invalidating operational state");
-                    live_state.invalidate();
+                    tracing::info!("reorg detected; clearing operational state");
+                    ops.clear();
                 }
 
-                // Check confirmations for submitted transactions.
                 if !result.applied_txids.is_empty() {
-                    live::check_confirmations(
-                        &mut live_state,
-                        &result.applied_txids,
-                        cursor.block_height(),
-                    );
+                    check_confirmations(&mut ops, &result.applied_txids, cursor.block_height());
                 }
 
-                // Reconcile and execute Live work.
-                let work = live::reconcile(
-                    &mut live_state,
-                    &wallet,
-                    &registry,
-                    &treasury,
-                    cursor.block_height(),
-                );
-
+                let work = reconcile(&mut ops, &wallet, &registry, cursor.block_height());
                 if !work.is_empty() {
                     tracing::info!(
                         work_count = work.len(),
                         height = u32::from(cursor.block_height()),
-                        "live: reconciled pending work"
+                        "reconciled pending work"
                     );
-
-                    let new_submissions = live::execute(
-                        &mut live_state,
-                        &mut wallet,
-                        &registry,
-                        &treasury_keys,
-                        &registry_keys,
-                        &rpc,
-                        cursor.block_height(),
-                        work,
-                    )
-                    .await;
-
-                    for sub in &new_submissions {
+                    let new_subs = execute(
+                        &mut ops, &mut wallet, &registry,
+                        &treasury_keys, &registry_keys, &rpc,
+                        cursor.block_height(), work,
+                    ).await;
+                    for sub in &new_subs {
                         metrics::inc_tx_submitted(sub.kind.as_str());
                     }
                 }
@@ -595,6 +576,397 @@ fn apply_canonical_block_with_fault(
     let txids: Vec<TxId> = output.transactions().iter().map(|tx| tx.txid()).collect();
 
     Ok(txids)
+}
+
+// ===========================================================================
+// Operational state and Live orchestration
+// ===========================================================================
+
+/// In-memory operational state for the active mint phase.
+/// All ephemeral — restart or reorg loses this state.
+struct OperationalState {
+    pending_otps: PendingOtps,
+    submissions: Submissions,
+}
+
+impl OperationalState {
+    fn new() -> Self {
+        Self {
+            pending_otps: PendingOtps::new(),
+            submissions: Submissions::new(),
+        }
+    }
+
+    /// Clears everything on reorg. Submissions may be reorged out; OTPs may
+    /// have been delivered to blocks that no longer exist.
+    fn clear(&mut self) {
+        self.submissions.clear();
+        self.pending_otps = PendingOtps::new();
+    }
+
+    fn reserved_locators(&self) -> BTreeSet<NoteLocator> {
+        self.submissions.reserved_locators()
+    }
+}
+
+/// Claim price and request minimum in zatoshis. Protocol policy.
+/// TODO: move to a policy module when one exists.
+const CLAIM_PRICE: u64 = 10_000;
+const MIN_REQUEST_VALUE: u64 = 10_000;
+const TX_EXPIRY_BUFFER: u32 = 20;
+
+/// Work items derived from canonical state.
+enum WorkItem {
+    Claim { name: Name, ua: UnifiedAddress, payment_locator: NoteLocator, _payment_value: u64 },
+    NeedsOtpRelay { name: Name, action: Action, controller_ua: UnifiedAddress, request_locator: NoteLocator, request_value: u64 },
+    VerifyAndTransition { name: Name, action: Action, ua: UnifiedAddress, otp: [u8; 16] },
+    ReplenishRegistry { plan: zns_mint::registry::liquidity::RegistryFundingPlan },
+    AutoSweep { sweep_amount: u64 },
+}
+
+/// Whether a UA string contains an Orchard receiver. Protocol constraint:
+/// all ZNS UAs must have one so the Treasury can deliver OTP relay notes.
+fn has_orchard_receiver(ua: &UnifiedAddress) -> bool {
+    let zaddr: zcash_address::ZcashAddress = match ua.as_str().parse() {
+        Ok(z) => z,
+        Err(_) => return false,
+    };
+    let parsed: zcash_keys::address::Address = match zaddr
+        .convert_if_network(MAIN_NETWORK.network_type())
+    {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    matches!(parsed, zcash_keys::address::Address::Unified(ref ua) if ua.orchard().is_some())
+}
+
+/// Scans Treasury notes for request memos and derives pending work.
+fn reconcile(
+    ops: &mut OperationalState,
+    wallet: &Wallet,
+    registry: &Registry,
+    cursor_height: BlockHeight,
+) -> Vec<WorkItem> {
+    use std::collections::BTreeSet;
+
+    ops.pending_otps.prune(cursor_height);
+    let reserved = ops.reserved_locators();
+    let mut work = Vec::new();
+    let mut seen_claims: BTreeSet<Name> = BTreeSet::new();
+    let mut seen_no_otp: BTreeSet<ChallengeKey> = BTreeSet::new();
+    let mut seen_with_otp: BTreeSet<ChallengeKey> = BTreeSet::new();
+
+    for note in wallet.orchard_notes_for(TREASURY_ACCOUNT) {
+        let Ok(request) = RequestMemo::parse(note.memo.as_array()) else { continue };
+        let Some(name) = Name::parse(request.name()) else { continue };
+        let locator = NoteLocator::orchard(TREASURY_ACCOUNT, note.note.rho());
+        if reserved.contains(&locator) { continue }
+
+        match &request {
+            RequestMemo::Claim { ua, .. } => {
+                if seen_claims.contains(&name) { continue }
+                let available = match registry.tip(&name) {
+                    None => true,
+                    Some(t) => t.action == Action::Release,
+                };
+                if !available { continue }
+                let value = note.note.value().inner();
+                if value < CLAIM_PRICE {
+                    metrics::inc_request_invalid("insufficient_payment");
+                    continue;
+                }
+                metrics::inc_request_received("claim");
+                seen_claims.insert(name.clone());
+                work.push(WorkItem::Claim {
+                    name, ua: UnifiedAddress::from_string(ua.clone()),
+                    payment_locator: locator, _payment_value: value,
+                });
+            }
+            RequestMemo::Update { ua, otp, .. } => {
+                let ua = UnifiedAddress::from_string(ua.clone());
+                let tip = match registry.tip(&name) {
+                    Some(t) if t.action != Action::Release => t,
+                    _ => continue,
+                };
+                let controller_ua = tip.received()
+                    .map(|r| r.payload().ua().clone())
+                    .unwrap_or_else(UnifiedAddress::empty);
+
+                match otp {
+                    None => {
+                        let key = ChallengeKey::new(name.clone(), Action::Update, ua.clone());
+                        if ops.pending_otps.contains(&key) || seen_no_otp.contains(&key) { continue }
+                        let value = note.note.value().inner();
+                        if value < MIN_REQUEST_VALUE {
+                            metrics::inc_request_invalid("insufficient_request_value");
+                            continue;
+                        }
+                        if !has_orchard_receiver(&controller_ua) {
+                            metrics::inc_request_invalid("no_orchard_receiver");
+                            continue;
+                        }
+                        metrics::inc_request_received("update");
+                        seen_no_otp.insert(key);
+                        work.push(WorkItem::NeedsOtpRelay {
+                            name, action: Action::Update, controller_ua,
+                            request_locator: locator, request_value: value,
+                        });
+                    }
+                    Some(otp_bytes) => {
+                        let key = ChallengeKey::new(name.clone(), Action::Update, ua.clone());
+                        if seen_with_otp.contains(&key) { continue }
+                        metrics::inc_request_received("update");
+                        seen_with_otp.insert(key);
+                        work.push(WorkItem::VerifyAndTransition {
+                            name, action: Action::Update, ua, otp: *otp_bytes,
+                        });
+                    }
+                }
+            }
+            RequestMemo::Release { ua, otp, .. } => {
+                let ua = UnifiedAddress::from_string(ua.clone());
+                let tip = match registry.tip(&name) {
+                    Some(t) if t.action != Action::Release => t,
+                    _ => continue,
+                };
+                let controller_ua = tip.received()
+                    .map(|r| r.payload().ua().clone())
+                    .unwrap_or_else(UnifiedAddress::empty);
+
+                match otp {
+                    None => {
+                        let key = ChallengeKey::new(name.clone(), Action::Release, ua.clone());
+                        if ops.pending_otps.contains(&key) || seen_no_otp.contains(&key) { continue }
+                        let value = note.note.value().inner();
+                        if value < MIN_REQUEST_VALUE {
+                            metrics::inc_request_invalid("insufficient_request_value");
+                            continue;
+                        }
+                        if !has_orchard_receiver(&controller_ua) {
+                            metrics::inc_request_invalid("no_orchard_receiver");
+                            continue;
+                        }
+                        metrics::inc_request_received("release");
+                        seen_no_otp.insert(key);
+                        work.push(WorkItem::NeedsOtpRelay {
+                            name, action: Action::Release, controller_ua,
+                            request_locator: locator, request_value: value,
+                        });
+                    }
+                    Some(otp_bytes) => {
+                        let key = ChallengeKey::new(name.clone(), Action::Release, ua.clone());
+                        if seen_with_otp.contains(&key) { continue }
+                        metrics::inc_request_received("release");
+                        seen_with_otp.insert(key);
+                        work.push(WorkItem::VerifyAndTransition {
+                            name, action: Action::Release, ua, otp: *otp_bytes,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Check Registry fee-note liquidity.
+    let liquidity = zns_mint::registry::liquidity::RegistryFeeLiquidity::from_wallet(wallet);
+    if let Some(plan) = liquidity.treasury_funding_plan() {
+        work.push(WorkItem::ReplenishRegistry { plan });
+    }
+
+    // Check Treasury balance for auto-sweep.
+    let balance = wallet.balance(TREASURY_ACCOUNT).into_u64();
+    if let Some(amount) = zns_mint::treasury::sweep::sweep_policy(balance) {
+        work.push(WorkItem::AutoSweep { sweep_amount: amount });
+    }
+
+    work
+}
+
+/// Builds, signs, and submits transactions for each work item.
+async fn execute(
+    ops: &mut OperationalState,
+    wallet: &mut Wallet,
+    registry: &Registry,
+    treasury_keys: &zns_mint::key::TreasuryKeys,
+    registry_keys: &zns_mint::key::RegistryKeys,
+    rpc: &JsonRpc,
+    cursor_height: BlockHeight,
+    work: Vec<WorkItem>,
+) -> Vec<Submission> {
+    let target_height = BlockHeight::from_u32(u32::from(cursor_height) + 1);
+    let expiry_height = BlockHeight::from_u32(
+        u32::from(target_height).checked_add(TX_EXPIRY_BUFFER).unwrap_or(u32::from(target_height)),
+    );
+    let excluded = ops.reserved_locators();
+    let mut new_subs = Vec::new();
+
+    for item in work {
+        let result = match item {
+            WorkItem::Claim { name, ua, payment_locator, .. } => {
+                execute_claim(wallet, registry, treasury_keys, registry_keys,
+                    &name, &ua, payment_locator, &excluded, cursor_height, target_height)
+                    .map(|(txid, hex, notes)| (SubmissionKind::Claim, txid, hex, notes))
+            }
+            WorkItem::NeedsOtpRelay { name, action, controller_ua, request_locator, request_value } => {
+                let key = ChallengeKey::new(name.clone(), action, controller_ua.clone());
+                let otp = ops.pending_otps.issue(key, cursor_height);
+                metrics::inc_otps_issued();
+                let mut excluded_rhos: BTreeSet<orchard::note::Rho> = BTreeSet::new();
+                for loc in excluded.iter() {
+                    if let NoteLocator::Orchard { account_id, rho } = *loc {
+                        if account_id == TREASURY_ACCOUNT { excluded_rhos.insert(rho); }
+                    }
+                }
+                zns_mint::treasury::relay::assemble_otp_relay(
+                    wallet, treasury_keys, &name, action, &controller_ua, &otp,
+                    request_locator, request_value, cursor_height, target_height, &excluded_rhos,
+                )
+                .map(|r| (SubmissionKind::OtpRelay, r.txid, r.hex, r.reserved_notes))
+            }
+            WorkItem::VerifyAndTransition { name, action, ua, otp } => {
+                let req = match action {
+                    Action::Update => authorize::authorize_update(
+                        registry, &mut ops.pending_otps, cursor_height,
+                        name.clone(), ua.clone(), &otp,
+                    ),
+                    Action::Release => authorize::authorize_release(
+                        registry, &mut ops.pending_otps, cursor_height,
+                        name.clone(), ua.clone(), &otp,
+                    ),
+                    Action::Claim => unreachable!(),
+                };
+                match req {
+                    None => { metrics::inc_request_invalid("authorization_failed"); continue }
+                    Some(r) => {
+                        metrics::inc_otps_verified();
+                        execute_transition(wallet, registry, registry_keys, r, &excluded, cursor_height, target_height)
+                            .map(|(txid, hex, notes)| (
+                                match action { Action::Update => SubmissionKind::Update, Action::Release => SubmissionKind::Release, _ => unreachable!() },
+                                txid, hex, notes,
+                            ))
+                    }
+                }
+            }
+            WorkItem::ReplenishRegistry { plan } => {
+                let mut excluded_rhos: BTreeSet<orchard::note::Rho> = BTreeSet::new();
+                for loc in excluded.iter() {
+                    if let NoteLocator::Orchard { account_id, rho } = *loc {
+                        if account_id == TREASURY_ACCOUNT { excluded_rhos.insert(rho); }
+                    }
+                }
+                zns_mint::treasury::replenish::assemble_replenishment(
+                    wallet, treasury_keys, &plan, cursor_height, target_height, &excluded_rhos,
+                )
+                .map(|r| (SubmissionKind::Replenish, r.txid, r.hex, r.reserved_notes))
+            }
+            WorkItem::AutoSweep { sweep_amount } => {
+                let mut excluded_rhos: BTreeSet<orchard::note::Rho> = BTreeSet::new();
+                for loc in excluded.iter() {
+                    if let NoteLocator::Orchard { account_id, rho } = *loc {
+                        if account_id == TREASURY_ACCOUNT { excluded_rhos.insert(rho); }
+                    }
+                }
+                zns_mint::treasury::sweep::assemble_sweep(
+                    wallet, treasury_keys, sweep_amount, cursor_height, target_height, &excluded_rhos,
+                )
+                .map(|r| (SubmissionKind::AutoSweep, r.txid, r.hex, r.reserved_notes))
+            }
+        };
+
+        match result {
+            Ok((kind, txid, hex, reserved_notes)) => {
+                match rpc.send(&hex).await {
+                    Ok(_) => {
+                        tracing::info!(txid = %txid, kind = kind.as_str(), "transaction submitted");
+                        let sub = Submission {
+                            kind, txid, submit_height: cursor_height, expiry_height,
+                            reserved_notes, confirmed_at: None,
+                        };
+                        new_subs.push(sub.clone());
+                        ops.submissions.add(sub);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, kind = kind.as_str(), "submission failed");
+                        metrics::inc_spend_error("submit");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = e, "assembly failed");
+                metrics::inc_spend_error("assembly");
+            }
+        }
+    }
+
+    new_subs
+}
+
+/// Checks pending submissions against the latest block's txids.
+fn check_confirmations(ops: &mut OperationalState, txids: &[TxId], height: BlockHeight) {
+    for txid in txids {
+        if let Some(confirmed) = ops.submissions.confirm(txid, height) {
+            tracing::info!(txid = %txid, kind = confirmed.kind.as_str(), "confirmed");
+            match confirmed.kind {
+                SubmissionKind::Claim => { metrics::inc_names_claimed(); metrics::inc_tx_confirmed("claim"); }
+                SubmissionKind::Update => { metrics::inc_names_updated(); metrics::inc_tx_confirmed("update"); }
+                SubmissionKind::Release => { metrics::inc_names_released(); metrics::inc_tx_confirmed("release"); }
+                SubmissionKind::OtpRelay => { metrics::inc_tx_confirmed("otp_relay"); }
+                SubmissionKind::Replenish => { metrics::inc_tx_confirmed("replenish"); }
+                SubmissionKind::AutoSweep => { metrics::inc_tx_confirmed("sweep"); }
+            }
+        }
+    }
+    for sub in ops.submissions.expire(height) {
+        tracing::warn!(txid = %sub.txid, kind = sub.kind.as_str(), "expired");
+        metrics::inc_tx_expired(sub.kind.as_str());
+    }
+    let _ = ops.submissions.drain_confirmed();
+}
+
+/// Builds an atomic claim transaction.
+#[allow(clippy::too_many_arguments)]
+fn execute_claim(
+    wallet: &mut Wallet, registry: &Registry,
+    treasury_keys: &zns_mint::key::TreasuryKeys, registry_keys: &zns_mint::key::RegistryKeys,
+    name: &Name, ua: &UnifiedAddress, payment_locator: NoteLocator,
+    excluded: &BTreeSet<NoteLocator>,
+    anchor_height: BlockHeight, target_height: BlockHeight,
+) -> Result<(TxId, String, Vec<NoteLocator>), &'static str> {
+    let claim_req = NameNoteRequest::Claim(authorize::ClaimRequest {
+        name: name.clone(), ua: ua.clone(),
+    });
+    let fee_inputs = zns_mint::registry::transaction::select_registry_fee_inputs(
+        wallet, &claim_req, target_height, excluded, 1,
+    )?;
+    let (txid, hex, _) = zns_mint::treasury::claim::assemble_atomic_claim(
+        wallet, registry, treasury_keys, registry_keys,
+        name.clone(), ua.clone(), payment_locator, &fee_inputs,
+        CLAIM_PRICE, anchor_height, target_height,
+    )?;
+    let mut reserved: Vec<NoteLocator> = fee_inputs.locators().iter().copied().collect();
+    reserved.push(payment_locator);
+    Ok((txid, hex, reserved))
+}
+
+/// Builds a Name Note transition (update or release) transaction.
+#[allow(clippy::too_many_arguments)]
+fn execute_transition(
+    wallet: &mut Wallet, registry: &Registry,
+    registry_keys: &zns_mint::key::RegistryKeys,
+    request: NameNoteRequest, excluded: &BTreeSet<NoteLocator>,
+    anchor_height: BlockHeight, target_height: BlockHeight,
+) -> Result<(TxId, String, Vec<NoteLocator>), &'static str> {
+    let fee_inputs = zns_mint::registry::transaction::select_registry_fee_inputs(
+        wallet, &request, target_height, excluded, 0,
+    )?;
+    let bundle = zns_mint::registry::transaction::build_transaction(
+        wallet, registry, registry_keys, request, &fee_inputs,
+        anchor_height, target_height, None,
+    )?;
+    let (txid, hex) = zns_mint::registry::signing::assemble_v6_transaction(
+        None, Some(bundle), None, Some(registry_keys), None, target_height,
+    )?;
+    Ok((txid, hex, fee_inputs.locators().iter().copied().collect()))
 }
 
 #[cfg(test)]
