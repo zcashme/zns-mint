@@ -1,32 +1,23 @@
 //! OTP relay transaction assembly.
 //!
-//! An OTP relay is a Treasury-origin Orchard transaction that delivers the
-//! OTP challenge to the current name controller, funded by the requester's
-//! payment.
+//! The relay is a mixed V6 transaction because Orchard V3 disables
+//! cross-address transfers (NU6.3 consensus rule). The Treasury cannot
+//! send an Orchard note to the controller's address directly.
 //!
-//! The relay is a standard Orchard bundle (Treasury authority) that:
-//! 1. Spends the request note (the Treasury Orchard note carrying the
-//!    `ZNS:update` or `ZNS:release` memo from the requester).
-//! 2. Creates one output to the controller's Orchard receiver with the OTP
-//!    relay memo. The output value is `request_value - network_fee`.
+//! Structure:
+//! - **Orchard V3 bundle** (Treasury authority): spends the request note,
+//!   creates Treasury change via `add_change_output`. Positive value
+//!   balance leaves the Orchard pool.
+//! - **Ironwood V3 bundle** (output-only, no spend authority): creates one
+//!   output to the controller's address with the OTP memo. Ironwood V3
+//!   permits cross-address transfers, so `add_output` works.
 //!
-//! One spend, one output, one action. The requester's payment flows through
-//! to the controller minus the network fee. No change output, no Treasury
-//! notes needed.
-//!
-//! # Protocol constraint
-//!
-//! The controller's UA must have an Orchard receiver. If it doesn't, the
-//! mint rejects the request at reconciliation time.
-//!
-//! # OVK
-//!
-//! Treasury external OVK — audit trail. The OTP in the memo is already
-//! burned by the time anyone would check.
+//! Value flows cross-pool: Orchard spend → Ironwood output to controller.
+//! The requester funds the entire transaction.
 
 use orchard::builder::BundleType;
 use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::value::ZatBalance;
+use zcash_protocol::value::{ZatBalance, Zatoshis};
 
 use crate::auth::{encode_otp_relay_memo, OtpCode};
 use crate::key::TreasuryKeys;
@@ -56,8 +47,8 @@ fn extract_orchard_address(ua_str: &str) -> Option<orchard::Address> {
 
 /// Builds, proves, signs, and serializes an OTP relay transaction.
 ///
-/// One spend (request note), one output (controller + OTP memo), one action.
-/// The requester funds the entire relay. No change output, no Treasury notes.
+/// Mixed V6: Orchard spend + Ironwood output-only. The requester's payment
+/// flows from the Orchard pool through the Ironwood pool to the controller.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble_otp_relay(
     wallet: &mut Wallet,
@@ -85,17 +76,47 @@ pub fn assemble_otp_relay(
     let memo = encode_otp_relay_memo(name, action, controller_ua, otp)
         .ok_or("failed to encode OTP relay memo")?;
 
-    let anchor = wallet
+    // --- Fee computation ---
+    // Orchard V3 (cross-address disabled): 1 real spend + optional change.
+    //   Without change: 1 action (spend + fabricated output). min_actions=2 → 2.
+    //   With change: 2 actions (spend + change). min_actions=2 → 2.
+    // Ironwood V3 (cross-address enabled): 1 output, 0 spends. min_actions=2 → 2.
+    // Total logical_actions = 2 + 2 = 4.
+    let fee = FeeRule::standard()
+        .fee_required(
+            &MAIN_NETWORK,
+            target_height,
+            std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
+            std::iter::empty::<usize>(),
+            0, 0,
+            2, // orchard_action_count (padded to min 2)
+            2, // ironwood_action_count (padded to min 2)
+        )
+        .map(Zatoshis::into_u64)
+        .map_err(|_| "ZIP-317 fee computation overflow")?;
+
+    if request_note_value < fee {
+        return Err("request note value insufficient for relay fee");
+    }
+
+    let relay_value = request_note_value - fee;
+
+    // --- Orchard V3 bundle: spend request note, Treasury change ---
+    let orchard_anchor = wallet
         .orchard_anchor(anchor_height)
         .ok()
         .flatten()
         .ok_or("no orchard anchor at accepted anchor height")?;
 
-    let bundle_version = orchard::bundle::BundleVersion::orchard_v3();
-    let flags = bundle_version.default_flags();
-    let mut builder =
-        orchard::builder::Builder::new(BundleType::DEFAULT, bundle_version, flags, anchor.into())
-            .map_err(|_| "failed to create orchard builder")?;
+    let orchard_version = orchard::bundle::BundleVersion::orchard_v3();
+    let orchard_flags = orchard_version.default_flags();
+    let mut orchard_builder = orchard::builder::Builder::new(
+        BundleType::DEFAULT,
+        orchard_version,
+        orchard_flags,
+        orchard_anchor.into(),
+    )
+    .map_err(|_| "failed to create orchard builder")?;
 
     let fvk = orchard::keys::FullViewingKey::from(treasury_keys.orchard_spending_key());
 
@@ -116,59 +137,70 @@ pub fn assemble_otp_relay(
         .flatten()
         .ok_or("witness for request note not found")?;
 
-    builder
+    orchard_builder
         .add_spend(fvk.clone(), request_note, merkle_path.into())
         .map_err(|_| "failed to add request note spend")?;
 
-    // Fee: 1 action (1 spend, 1 output).
-    let fee = FeeRule::standard()
-        .fee_required(
-            &MAIN_NETWORK,
-            target_height,
-            std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
-            std::iter::empty::<usize>(),
-            0,
-            0,
-            1, // orchard_action_count
-            0, // ironwood_action_count
-        )
-        .map(zcash_protocol::value::Zatoshis::into_u64)
-        .map_err(|_| "ZIP-317 fee computation overflow")?;
-
-    if request_note_value < fee {
-        return Err("request note value insufficient for relay fee");
+    // Treasury change (back to Treasury's own address — add_change_output,
+    // not add_output, because Orchard V3 disables cross-address).
+    if relay_value > 0 {
+        let change_address = fvk.address_at(0u32, orchard::keys::Scope::Internal);
+        let mut change_memo = [0u8; 512];
+        change_memo[0] = 0xF6;
+        orchard_builder
+            .add_change_output(
+                fvk.clone(),
+                Some(fvk.to_ovk(orchard::keys::Scope::Internal)),
+                change_address,
+                orchard::value::NoteValue::from_raw(0), // change is 0; relay_value goes to Ironwood
+                change_memo,
+            )
+            .map_err(|_| "failed to add orchard change output")?;
     }
 
-    // One output to controller: request_value - fee.
-    let relay_value = request_note_value - fee;
+    let (orchard_bundle, _) = orchard_builder
+        .build::<ZatBalance>(&mut OsRng)
+        .map_err(|_| "failed to build orchard bundle")?
+        .ok_or("orchard builder produced no bundle")?;
 
-    builder
+    // --- Ironwood V3 bundle: output-only, controller + OTP memo ---
+    let ironwood_anchor = wallet
+        .latest_ironwood_anchor()
+        .ok()
+        .flatten()
+        .ok_or("no ironwood anchor available")?;
+
+    let ironwood_version = orchard::bundle::BundleVersion::ironwood_v3();
+    let ironwood_flags = ironwood_version.default_flags();
+    let mut ironwood_builder = orchard::builder::Builder::new(
+        BundleType::DEFAULT,
+        ironwood_version,
+        ironwood_flags,
+        ironwood_anchor.into(),
+    )
+    .map_err(|_| "failed to create ironwood builder")?;
+
+    ironwood_builder
         .add_output(
             Some(fvk.to_ovk(orchard::keys::Scope::External)),
             controller_orchard,
             orchard::value::NoteValue::from_raw(relay_value),
             memo,
         )
-        .map_err(|_| "failed to add OTP relay output")?;
+        .map_err(|_| "failed to add ironwood relay output")?;
 
-    let reserved_notes = vec![request_note_locator];
-
-    // Build and verify.
-    let (bundle, _) = builder
+    let (ironwood_bundle, _) = ironwood_builder
         .build::<ZatBalance>(&mut OsRng)
-        .map_err(|_| "failed to build orchard bundle")?
-        .ok_or("orchard builder produced no bundle")?;
+        .map_err(|_| "failed to build ironwood bundle")?
+        .ok_or("ironwood builder produced no bundle")?;
 
-    let actual_fee: i64 = bundle.value_balance().into();
-    assert_eq!(actual_fee, fee as i64, "relay value balance mismatch");
-
-    // Sign and serialize.
+    // --- Prove, sign, serialize both bundles in one V6 transaction ---
     use crate::registry::signing;
     let (txid, hex) = signing::assemble_v6_transaction(
-        Some(bundle),
-        None,
+        Some(orchard_bundle),
+        Some(ironwood_bundle),
         Some(treasury_keys),
-        None,
+        None, // no Registry signer — Ironwood is output-only
         None,
         target_height,
     )?;
@@ -176,6 +208,6 @@ pub fn assemble_otp_relay(
     Ok(RelayAssembly {
         txid,
         hex,
-        reserved_notes,
+        reserved_notes: vec![request_note_locator],
     })
 }
