@@ -157,7 +157,8 @@ pub fn assemble_replenishment(
         let mut change_memo = [0u8; 512];
         change_memo[0] = 0xF6;
         orchard_builder
-            .add_output(
+            .add_change_output(
+                treasury_fvk.clone(),
                 Some(treasury_fvk.to_ovk(orchard::keys::Scope::Internal)),
                 change_address,
                 orchard::value::NoteValue::from_raw(change_value),
