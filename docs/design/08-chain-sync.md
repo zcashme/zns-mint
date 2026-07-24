@@ -110,7 +110,14 @@ rewind restores that ancestor's real hash and all three tree sizes. If the
 reorg extends below retained history, the mint fails closed and rebuilds from
 the pinned origin on process restart rather than fabricating cursor metadata.
 The current process aborts on `ReorgBeyondHistory`; it does not perform an
-in-process rebuild.
+in-process rebuild. Accepted metadata and each tree retain 101 checkpoints:
+the current accepted height plus 100 predecessors. Metadata therefore cannot
+nominate an ancestor whose tree checkpoint was intentionally pruned.
+
+Rewind preflights the exact Sapling, Orchard, and Ironwood checkpoints before
+mutating any pool. The trees truncate first; only then do the infallible Wallet
+balance/nullifier history, Registry history, accepted metadata, and cursor
+truncate.
 
 Operational intents, submissions, OTPs, locks, and reservations are not fields
 of canonical Wallet or Registry state. The future Live owner must invalidate
@@ -124,6 +131,11 @@ ZNS uses immediate best-chain finality: the current Zcash best chain is the
 truth. Reorgs are handled by rewinding and replaying, not by waiting for a
 protocol-level confirmation depth.
 
-The current passive runtime detects a reorg only when a fetched successor does
-not extend its cursor. Exact target capture plus unconditional height-and-hash
-comparison is still required to detect same-height and shorter reorgs.
+Passive Rebuild captures one checked `(height, hash)` from
+`getblockchaininfo`, compares from `min(local height, target height)`, and
+replays only through that target. It succeeds only when the installed cursor,
+the target block bytes, and a second exact-tip response still agree. A target
+that changes during replay is discarded and recaptured without operational
+effects. Every successful block read and every common-ancestor result,
+including an apparent retained-history exhaustion, is followed by an exact-tip
+recheck before the result is used.

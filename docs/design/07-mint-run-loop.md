@@ -15,9 +15,10 @@ notes, run Treasury policy, prove or sign transactions, submit bytes, reconcile
 submissions, or emit lifecycle event counters. Transaction and authorization
 libraries remain unwired until the phase architecture below is implemented.
 
-The current reorg detector handles a divergent fetched successor, but it does
-not yet detect every same-height or shorter reorg. This is a release blocker,
-not an implied property of the passive cleanup.
+Rebuild compares height and hash even when Zebra is at the same or a shorter
+height. It searches from the lower comparable height, rewinds to one retained
+exact ancestor, and replays passively. Behavioral fault, property, and Zebra
+branch evidence remains required before this boundary is considered tested.
 
 ## Target Phase Shape
 
@@ -35,14 +36,17 @@ Canonical state is rebuilt from chain on every boot.
 
 ```text
 boot
-target = zebra_exact_tip()
+target = zebra_exact_tip() // one checked height/hash pair
 
 while cursor != target:
   block = fetch_continuous_canonical_successor(cursor)
   apply_canonical_block(block, scanning, wallet, registry,
                         cursor, accepted_history)
 
-require zebra_hash(target.height) == target.hash
+require cursor == target
+require zebra_block_hash(target.height) == target.hash
+require zebra_exact_tip() == target
+publish canonical gauges from installed cursor
 enter Live
 reconcile live work from canonical Wallet + Registry + cursor
 
@@ -59,6 +63,10 @@ loop:
     replay the replacement branch passively
     re-enter Live only after exact target verification
 ```
+
+Intermediate rewind/replay state is not published. Canonical gauges continue
+to describe the last fully verified target until the replacement target passes
+all three final checks.
 
 ## Canonical Fold Boundary
 

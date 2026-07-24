@@ -249,11 +249,11 @@ weaken any invariant.
 | Ironwood direction | Source transaction/scanner code follows Ironwood V3/V6. `AGENTS.md`, the protocol, and the chain/transaction design documents were corrected when this catalog was introduced. Other older design documents still contain pre-Ironwood paths and checkpoint assumptions and require reconciliation. |
 | Secret boundary | Sealed-capsule, SEV-SNP derivation, account derivation, and attestation scaffolding exist. Production artifact and negative exfiltration tests do not. |
 | Name kernel | Encoding, derivation, and vectors exist. Independent Ironwood transaction-level verifier coverage is not demonstrated here. |
-| Sync and wallet | Passive per-block canonical folding now orders scanner output, Registry simulation, Wallet notes/nullifiers/all three trees, and cursor/history-last commit. Fault injection, exact-target entry, and complete reorg-shape handling are missing. |
+| Sync and wallet | Passive canonical folding captures one checked Zebra height/hash target, rechecks every successful read/result, detects same-height, shorter, and taller divergence, preflights three-pool rewind, retains current plus 100 predecessor checkpoints, and promotes accepted history before the cursor. Before/after commit crash fixtures and deterministic empty-block restart/reorg properties are written but unexecuted. Non-empty note/Name Note properties and Zebra branch evidence are missing. |
 | Authorization | Request parsing, OTP storage, and lifecycle authorization helpers exist as unwired libraries. Passive replay preserves canonical request evidence but performs no authorization. |
 | Transactions | Registry construction and the crate-private mixed Orchard/Ironwood V6 signer are unwired. The standalone Treasury refund constructor has been deleted; no claim transaction exists until atomic payment settlement and Name Note creation share one V6 transaction. Canonical Wallet/Registry state contains no locks or reservations; a cursor-bound Live owner is missing. |
 | Submission | No submission path is wired into the runtime. Typed retry, expiry, restart recovery, confirmation, and reorg policy remain unimplemented. |
-| Runtime | `main` performs passive canonical catch-up and canonical rewind only. Replay invokes no OTP, policy, reservation, proving, signing, submission, or lifecycle-counter operation. Catch-up receives a read-only block-source facade, and `apply_canonical_block` receives no RPC capability or event-return responsibility. Exact Zebra target capture and Live state reconciliation are absent. |
+| Runtime | `main` performs exact-target passive Rebuild and canonical rewind only. Replay invokes no OTP, policy, reservation, proving, signing, submission, or lifecycle-counter operation. Rebuild receives a read-only block-source capability, rejects successful reads and ancestor results from a moved target, and returns only after cursor, target block bytes, and a second exact-tip read agree. Live state reconciliation remains absent. |
 | Regtest | The harness boots components and shields funds but does not submit or verify a ZNS lifecycle transaction. |
 
 Known release blockers include:
@@ -261,16 +261,21 @@ Known release blockers include:
 - `SEC-003`: the existing regtest harness uses environment variables;
 - `SEC-006`: production artifacts do not yet prove development features absent;
 - `SYNC-002`: the origin hash is an all-zero placeholder;
-- `SYNC-005` and `SYNC-006`: canonical ordering and cursor-last promotion
-  exist but lack staged failure/crash evidence;
+- `SYNC-005` and `SYNC-006`: canonical ordering, cursor-last promotion,
+  exact-target entry, and before/after crash/target-race fixtures exist but
+  remain unexecuted; non-empty transition fixtures are still missing;
 - `SYNC-007`: Live request reconciliation is intentionally absent;
-- `SYNC-008`: same-height, shorter, and multi-block reorg handling plus
-  operational invalidation/reconstruction are incomplete;
-- `SYNC-009`: passive restart replay lacks equivalence/property evidence;
+- `SYNC-008`: same-height, shorter, and multi-block passive handling plus
+  three-pool preflight fixtures are implemented but unexecuted and presently
+  use empty blocks; operational invalidation remains absent until Live exists;
+- `SYNC-009`: deterministic empty-block restart/reorg properties are written
+  but unexecuted; received/spent-note, witness, and Registry-tip coverage is
+  still missing;
 - `SYNC-010`: the unsafe runtime authority path is deleted, but broadcast,
   eviction, expiry, and reorg isolation evidence is still absent;
 - `AUTH-001`, `AUTH-005`, `AUTH-006`, and `TX-002`: a cursor-bound Live
-  authorization/reservation owner is absent;
+  authorization/reservation owner is absent; all exclusion-free Treasury
+  selection wrappers and unwired sweep/funding request surfaces are deleted;
 - `TX-001` and `TX-003`: atomic claim value-flow and Registry-funded aggregate
   ZIP-317 fee policy are defined, but their construction is not implemented;
 - `TX-007` and `TX-008`: submission/retry/confirmation/reorg reconciliation

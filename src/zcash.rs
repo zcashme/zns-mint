@@ -72,6 +72,26 @@ pub(crate) fn block_hash_from_display(bytes: &[u8]) -> Option<BlockHash> {
     }
 }
 
+/// One point-in-time Zebra best-chain identity.
+///
+/// Height and hash are parsed from the same `getblockchaininfo` response so
+/// callers cannot accidentally combine observations from different tips.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalTip {
+    height: BlockHeight,
+    hash: BlockHash,
+}
+
+impl CanonicalTip {
+    pub fn height(&self) -> BlockHeight {
+        self.height
+    }
+
+    pub fn hash(&self) -> BlockHash {
+        self.hash
+    }
+}
+
 // ============================================================================
 // JSON-RPC Client
 // ============================================================================
@@ -135,8 +155,14 @@ impl JsonRpc {
 
         let bytes =
             hex::decode(hex_str).map_err(|_| TransportError::BadNodeData("getblock hex"))?;
-        Block::read(&bytes[..], &MAIN_NETWORK)
-            .map_err(|_| TransportError::BadNodeData("getblock parse"))
+        let block = Block::read(&bytes[..], &MAIN_NETWORK)
+            .map_err(|_| TransportError::BadNodeData("getblock parse"))?;
+        if block.claimed_height() != height {
+            return Err(TransportError::BadNodeData(
+                "getblock returned the wrong height",
+            ));
+        }
+        Ok(block)
     }
 
     /// Fetches the raw transaction hex for a given transaction ID.
@@ -233,8 +259,8 @@ impl CanonicalBlockSource {
         Self(JsonRpc::new())
     }
 
-    pub async fn get_blockchain_info(&self) -> Result<BlockchainInfo, TransportError> {
-        self.0.get_blockchain_info().await
+    pub async fn exact_tip(&self) -> Result<CanonicalTip, TransportError> {
+        self.0.get_blockchain_info().await?.canonical_tip()
     }
 
     pub async fn get_block(&self, height: BlockHeight) -> Result<Block, TransportError> {
@@ -329,6 +355,21 @@ impl TransportError {
 pub struct BlockchainInfo {
     pub blocks: u32,
     pub bestblockhash: String,
+}
+
+impl BlockchainInfo {
+    /// Parses the exact height/hash pair carried by this one response.
+    pub fn canonical_tip(&self) -> Result<CanonicalTip, TransportError> {
+        let display_bytes = hex::decode(&self.bestblockhash)
+            .map_err(|_| TransportError::BadNodeData("bestblockhash hex"))?;
+        let hash = block_hash_from_display(&display_bytes)
+            .ok_or(TransportError::BadNodeData("bestblockhash length"))?;
+
+        Ok(CanonicalTip {
+            height: BlockHeight::from_u32(self.blocks),
+            hash,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -448,4 +489,44 @@ where
 
     read_commitment_tree::<Node, _, 32>(&bytes[..])
         .map_err(|e| TransportError::BadCheckpoint(format!("{name} tree decode failed: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_tip_keeps_one_checked_height_hash_pair() {
+        let info = BlockchainInfo {
+            blocks: 42,
+            bestblockhash:
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+                    .to_owned(),
+        };
+
+        let tip = info.canonical_tip().expect("valid display-order hash");
+        assert_eq!(tip.height(), BlockHeight::from_u32(42));
+        assert_eq!(
+            tip.hash(),
+            BlockHash([
+                0x1f, 0x1e, 0x1d, 0x1c, 0x1b, 0x1a, 0x19, 0x18, 0x17, 0x16, 0x15, 0x14, 0x13,
+                0x12, 0x11, 0x10, 0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x06,
+                0x05, 0x04, 0x03, 0x02, 0x01, 0x00,
+            ])
+        );
+    }
+
+    #[test]
+    fn canonical_tip_rejects_malformed_hashes() {
+        for bestblockhash in ["zz".to_owned(), "00".to_owned(), "00".repeat(33)] {
+            let info = BlockchainInfo {
+                blocks: 42,
+                bestblockhash,
+            };
+            assert!(matches!(
+                info.canonical_tip(),
+                Err(TransportError::BadNodeData(_))
+            ));
+        }
+    }
 }

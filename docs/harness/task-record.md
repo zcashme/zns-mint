@@ -704,3 +704,133 @@ Uncommitted state:
 This slice and the preceding standalone-refund deletion remain uncommitted; no
 commit or push was performed.
 ```
+
+## 2026-07-24 — Delete unsafe Treasury selection and implement exact-target Rebuild
+
+```text
+Slice:
+Delete the unused exclusion-free Treasury::select_funds wrapper, audit the
+remaining production APIs for obsolete event/atomicity/reservation boundaries,
+and implement exact-target passive reconstruction with supported reorg,
+crash-boundary, and restart-schedule fixtures. Add no Live behavior.
+
+Invariant IDs:
+SYNC-003, SYNC-005, SYNC-006, SYNC-008, SYNC-009, SYNC-010;
+TX-002; HARNESS-001, HARNESS-002, HARNESS-003, HARNESS-005, HARNESS-006.
+
+Root owner and writers:
+/root was the sole writer. Three skill workers gathered upstream, repository,
+and adversarial evidence read-only. No worker edited files.
+
+Initial state:
+HEAD f79416852af12e5609baf32fd1091e3b0d7ff45b. The worktree was clean and
+git diff --check exited 0.
+
+Authority and design records read:
+AGENTS.md; .agents/skills/build-zns-mint/SKILL.md; the complete invariant
+catalog; src/main.changelog.md; src/zcash.changelog.md;
+src/wallet.changelog.md; src/registry/state.changelog.md;
+src/treasury.changelog.md; docs/design/07-mint-run-loop.md,
+08-chain-sync.md, 14-wallet-design.md, 15-treasury-module.md, and their
+matching changelogs; current source, tests, and call sites.
+
+Pinned upstream evidence:
+librustzcash a97a3d5f46d096b94ceb71271c7d38f20af4e1f1.
+zcash_client_backend/src/data_api.rs:2457-2517 defines copyable
+BlockMetadata and its private height/hash/tree-size accessors.
+data_api.rs:2585-2691 defines ScannedBlock::to_block_metadata from the exact
+scanned height, hash, and three final tree sizes.
+zcash_client_backend/src/scanning/full.rs:425-474 defines full::scan_block and
+rejects a height other than prior+1 or a prev_hash other than prior.hash.
+zcash_primitives/src/block.rs:33-77 and 79-177 define BlockHash display order,
+BlockHeaderData::freeze, BlockHeader::hash, and public prev_block.
+block.rs:179-354 defines Block parsing and claimed_height.
+zcash_primitives/src/transaction/mod.rs:308-419 defines TransactionData and
+from_parts_v6; transparent/src/builder.rs:332-360 and 473-493 define the
+coinbase authorization mapper and build_coinbase used only by test fixtures.
+shardtree 0.6.2 src/lib.rs:507-516, 550-564, 680-750, and 1125-1143 define
+checkpoint insertion/pruning, truncate_to_checkpoint, and exact checkpoint
+root lookup.
+
+Phase 0 result:
+Deleted Treasury::select_funds. It had no production caller and always
+constructed an empty exclusion set. The audit found the same shortcut in the
+unwired treasury::sweep and treasury::note request modules, so those modules,
+their request types, Treasury forwarding methods, and unused last-sweep state
+were deleted as well. Preserved
+wallet::selection::{select_funds, select_sapling_funds}, whose callers must
+provide exclusions. Added no replacement API.
+
+Audit result:
+No live Rust definition or call remains for requests_in_block,
+CommittedBlock delivery, project_live_effects, standalone claim refund, or
+treasury::fee. Treasury evidence accessors and payment matching are pure
+canonical evidence/policy. RegistryFeeLiquidity remains pure Registry policy
+and selects no note. No production Treasury API now owns a default-empty
+exclusion set, per-block event queue, or half of an atomic claim.
+
+Phase 1 design:
+CanonicalTip binds one height/hash pair from one getblockchaininfo response.
+Every fetched block validates its coinbase-claimed height, and every successful
+block read and common-ancestor outcome is followed by an exact-tip recheck.
+Moving targets discard the read/result and restart target capture. Comparison
+begins at min(local,target), history must be contiguous, and same-height,
+shorter, and deeper replacement branches rewind through one common path.
+
+Wallet rewind preflights exact Orchard, Ironwood, and Sapling checkpoints
+before any pool mutation. Trees rewind before balance/nullifier history;
+Registry, accepted history, and cursor follow. Accepted metadata and each tree
+retain 101 checkpoints: current plus 100 predecessors. History installs before
+cursor, and gauges publish only after final exact-target verification.
+
+Failure and schedule evidence written:
+The canonical fold exposes an internal no-op production hook with before/after
+boundaries around scan, Registry simulation, Wallet installation, Registry
+installation, accepted history, and cursor promotion. Tests panic at all
+twelve boundaries, discard interrupted in-memory state, rebuild from origin,
+and compare against uninterrupted state. Before discard, each boundary asserts
+the Orchard/Ironwood checkpoint, accepted-history, and cursor visibility
+expected from the ordered stages. The empty fixtures cannot make Registry,
+balance/nullifier, or Sapling-stage installation observable. A private
+read-only source trait lets tests feed structurally valid parsed V6 coinbase
+blocks through the production scanner, Wallet,
+Registry, trees, cursor, and history. Fixtures cover exact advancement,
+same-height/shorter/deep replacement, successful-read target movement,
+movement after a partial fold and during multiple ancestor reads, movement
+before apparent retained-floor failure, history gaps, restart masks, prefix
+restarts, each missing tree checkpoint, successful three-pool rewind, and the
+full retention boundary.
+
+Limitations:
+The deterministic branch blocks contain no received/spent shielded notes or
+Name Notes. The property therefore exercises the real scanner and canonical
+owners but does not yet satisfy SYNC-008/SYNC-009 evidence for non-empty note
+sets, witnesses, or Registry tips. No Live state exists to invalidate.
+All new tests remain unexecuted because Cargo execution was not authorized.
+
+Failure modes reviewed:
+Combining height/hash from separate tips; accepting a successful read from a
+moved target; treating a moving-target retained-floor result as fatal; asking
+above a shorter tip; skipping a history gap; pruning the ancestor required for
+a full 100-block rewind; mutating one tree before discovering a missing pool;
+publishing intermediate rewind state; promoting cursor before history; or
+allowing a crash boundary to perform operational work.
+
+Files changed:
+src/main.rs and changelog; src/zcash.rs and changelog; src/wallet.rs,
+src/wallet/trees.rs, and wallet changelog; src/treasury.rs and changelog;
+deleted src/treasury/note.rs, src/treasury/sweep.rs, and the sweep changelog;
+docs/design/07-mint-run-loop.md, 08-chain-sync.md, 14-wallet-design.md,
+15-treasury-module.md and matching changelogs; docs/harness/invariants.md,
+docs/harness/coverage.csv, this task record; tests/runtime_replay_boundary.rs.
+
+Verification:
+The full diff was reviewed, forbidden-symbol/call-site searches were run, and
+git diff --check exited 0. No formatter, build, test, commit, or push was run.
+One read-only repository worker accidentally ran
+cargo metadata --no-deps --format-version 1; it exited 0 and changed no file,
+dependency, build artifact, or test result.
+
+Uncommitted state:
+All changes remain uncommitted. No commit or push was performed.
+```

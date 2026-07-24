@@ -102,18 +102,6 @@ impl Wallet {
         &self.ufvk_map
     }
 
-    /// Mutable access to the balance cache, used only by the orchestrator during
-    /// deterministic rewind operations.
-    pub fn balance_mut(&mut self) -> &mut WalletBalance {
-        &mut self.balance
-    }
-
-    /// Mutable access to the commitment trees, used only by the orchestrator during
-    /// deterministic rewind operations.
-    pub fn trees_mut(&mut self) -> &mut ShardTrees {
-        &mut self.trees
-    }
-
     /// Seeds the commitment trees from the birthday checkpoint.
     ///
     /// Called once at boot after [`Wallet::new`]. Converts each
@@ -414,6 +402,17 @@ impl Wallet {
         }
 
         self.balance = next_balance;
+        Ok(())
+    }
+
+    /// Rewinds all canonical Wallet state to one retained exact checkpoint.
+    ///
+    /// Tree checkpoints are preflighted before any mutation. Trees rewind
+    /// first because that is the only fallible step; balance and nullifier
+    /// history truncate only after every pool has accepted the target.
+    pub fn rewind_to_height(&mut self, height: BlockHeight) -> Result<(), WalletApplyError> {
+        self.trees.truncate_to_checkpoint(height)?;
+        self.balance.truncate_to_height(height);
         Ok(())
     }
 }
