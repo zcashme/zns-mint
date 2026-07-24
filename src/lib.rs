@@ -5,7 +5,6 @@ pub mod key;
 pub mod metrics;
 pub mod mint;
 pub mod registry;
-pub mod submissions;
 pub mod sync;
 
 pub mod treasury;

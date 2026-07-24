@@ -14,7 +14,6 @@ use zns_mint::registry::state::Registry;
 use zns_mint::registry::{authorize, classify_registry_ironwood_note, NameNoteRequest, RegistryNoteClass};
 use zns_mint::sync::scan_block;
 use zns_mint::auth::{ChallengeKey, PendingOtps};
-use zns_mint::submissions::{Submission, SubmissionKind, Submissions};
 use zns_mint::treasury::memo::RequestMemo;
 use zns_mint::wallet::trees::RETAINED_CHECKPOINTS;
 use zns_mint::wallet::{NoteLocator, Wallet};
@@ -167,16 +166,19 @@ async fn main() {
                         &treasury_keys, &registry_keys, &rpc,
                         cursor.block_height(), work,
                     ).await;
-                    for sub in &new_subs {
-                        metrics::inc_tx_submitted(sub.kind.as_str());
+                    for (kind, _) in &new_subs {
+                        metrics::inc_tx_submitted(kind.as_str());
                     }
                 }
             }
             Err(RuntimeError::Transport(error)) if error.is_retryable() => {
                 tracing::warn!(error = %error, "canonical catch-up transport failed; retrying");
             }
+            Err(RuntimeError::Transport(error)) => {
+                tracing::error!(error = %error, "canonical catch-up non-retryable transport error");
+            }
             Err(error) => {
-                panic!("FATAL: canonical catch-up failed: {error}");
+                tracing::error!(error = %error, "canonical catch-up failed; skipping this cycle");
             }
         }
     }
@@ -584,28 +586,52 @@ fn apply_canonical_block_with_fault(
 
 /// In-memory operational state for the active mint phase.
 /// All ephemeral — restart or reorg loses this state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum SubmissionKind { Claim, Update, Release, OtpRelay, Replenish, AutoSweep }
+
+impl SubmissionKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Claim => "claim", Self::Update => "update", Self::Release => "release",
+            Self::OtpRelay => "otp_relay", Self::Replenish => "replenish", Self::AutoSweep => "sweep",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Submission {
+    kind: SubmissionKind,
+    txid: TxId,
+    expiry_height: BlockHeight,
+    reserved_notes: Vec<NoteLocator>,
+    confirmed_at: Option<BlockHeight>,
+}
+
+impl Submission {
+    fn is_expired(&self, current_height: BlockHeight) -> bool {
+        self.confirmed_at.is_none() && current_height > self.expiry_height
+    }
+}
+
 struct OperationalState {
     pending_otps: PendingOtps,
-    submissions: Submissions,
+    submissions: BTreeMap<TxId, Submission>,
 }
 
 impl OperationalState {
     fn new() -> Self {
-        Self {
-            pending_otps: PendingOtps::new(),
-            submissions: Submissions::new(),
-        }
+        Self { pending_otps: PendingOtps::new(), submissions: BTreeMap::new() }
     }
 
-    /// Clears everything on reorg. Submissions may be reorged out; OTPs may
-    /// have been delivered to blocks that no longer exist.
     fn clear(&mut self) {
         self.submissions.clear();
         self.pending_otps = PendingOtps::new();
     }
 
     fn reserved_locators(&self) -> BTreeSet<NoteLocator> {
-        self.submissions.reserved_locators()
+        self.submissions.values()
+            .flat_map(|s| s.reserved_notes.iter().copied())
+            .collect()
     }
 }
 
@@ -767,8 +793,14 @@ fn reconcile(
         }
     }
 
-    // Check Registry fee-note liquidity.
-    let liquidity = zns_mint::registry::liquidity::RegistryFeeLiquidity::from_wallet(wallet);
+    // Check Registry fee-note liquidity, subtracting notes reserved by
+    // in-flight submissions. Without this, the count says "OK" while most
+    // notes are actually locked and assembly fails.
+    let reserved_ironwood = ops.reserved_locators().iter()
+        .filter(|loc| matches!(loc, NoteLocator::Ironwood { .. }))
+        .count();
+    let mut liquidity = zns_mint::registry::liquidity::RegistryFeeLiquidity::from_wallet(wallet);
+    liquidity.fee_note_count = liquidity.fee_note_count.saturating_sub(reserved_ironwood);
     if let Some(plan) = liquidity.treasury_funding_plan() {
         work.push(WorkItem::ReplenishRegistry { plan });
     }
@@ -792,7 +824,7 @@ async fn execute(
     rpc: &JsonRpc,
     cursor_height: BlockHeight,
     work: Vec<WorkItem>,
-) -> Vec<Submission> {
+) -> Vec<(SubmissionKind, TxId)> {
     let target_height = BlockHeight::from_u32(u32::from(cursor_height) + 1);
     let expiry_height = BlockHeight::from_u32(
         u32::from(target_height).checked_add(TX_EXPIRY_BUFFER).unwrap_or(u32::from(target_height)),
@@ -804,13 +836,12 @@ async fn execute(
         let result = match item {
             WorkItem::Claim { name, ua, payment_locator, .. } => {
                 execute_claim(wallet, registry, treasury_keys, registry_keys,
-                    &name, &ua, payment_locator, &excluded, cursor_height, target_height)
+                    name, ua, payment_locator, &excluded, cursor_height, target_height)
                     .map(|(txid, hex, notes)| (SubmissionKind::Claim, txid, hex, notes))
             }
             WorkItem::NeedsOtpRelay { name, action, controller_ua, request_locator, request_value } => {
                 let key = ChallengeKey::new(name.clone(), action, controller_ua.clone());
                 let otp = ops.pending_otps.issue(key, cursor_height);
-                metrics::inc_otps_issued();
                 let mut excluded_rhos: BTreeSet<orchard::note::Rho> = BTreeSet::new();
                 for loc in excluded.iter() {
                     if let NoteLocator::Orchard { account_id, rho } = *loc {
@@ -879,20 +910,33 @@ async fn execute(
                     Ok(_) => {
                         tracing::info!(txid = %txid, kind = kind.as_str(), "transaction submitted");
                         let sub = Submission {
-                            kind, txid, submit_height: cursor_height, expiry_height,
+                            kind, txid, expiry_height,
                             reserved_notes, confirmed_at: None,
                         };
-                        new_subs.push(sub.clone());
-                        ops.submissions.add(sub.clone());
+                        new_subs.push((sub.kind, sub.txid));
+                        ops.submissions.insert(sub.txid, sub.clone());
                         // Update excluded set so subsequent work items
                         // don't select the same notes.
                         for loc in &sub.reserved_notes {
                             excluded.insert(*loc);
                         }
+                        if kind == SubmissionKind::OtpRelay {
+                            metrics::inc_otps_issued();
+                        }
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, kind = kind.as_str(), "submission failed");
-                        metrics::inc_spend_error("submit");
+                        if e.is_retryable() {
+                            tracing::warn!(error = %e, kind = kind.as_str(), "submission network error; will retry");
+                            metrics::inc_spend_error("submit_retryable");
+                        } else {
+                            tracing::warn!(error = %e, kind = kind.as_str(), "submission rejected");
+                            metrics::inc_spend_error("submit_rejected");
+                            // RPC rejection: the transaction is bad. Release
+                            // reserved notes so they're available next cycle.
+                            for loc in &reserved_notes {
+                                excluded.remove(loc);
+                            }
+                        }
                     }
                 }
             }
@@ -909,7 +953,11 @@ async fn execute(
 /// Checks pending submissions against the latest block's txids.
 fn check_confirmations(ops: &mut OperationalState, txids: &[TxId], height: BlockHeight) {
     for txid in txids {
-        if let Some(confirmed) = ops.submissions.confirm(txid, height) {
+        if let Some(confirmed) = ops.submissions.get_mut(txid) {
+            if confirmed.confirmed_at.is_none() {
+                confirmed.confirmed_at = Some(height);
+            }
+            let confirmed = confirmed.clone();
             tracing::info!(txid = %txid, kind = confirmed.kind.as_str(), "confirmed");
             match confirmed.kind {
                 SubmissionKind::Claim => { metrics::inc_names_claimed(); metrics::inc_tx_confirmed("claim"); }
@@ -921,11 +969,21 @@ fn check_confirmations(ops: &mut OperationalState, txids: &[TxId], height: Block
             }
         }
     }
-    for sub in ops.submissions.expire(height) {
-        tracing::warn!(txid = %sub.txid, kind = sub.kind.as_str(), "expired");
-        metrics::inc_tx_expired(sub.kind.as_str());
+    let expired: Vec<TxId> = ops.submissions.iter()
+        .filter(|(_, s)| s.is_expired(height))
+        .map(|(txid, _)| *txid)
+        .collect();
+    for txid in &expired {
+        if let Some(sub) = ops.submissions.remove(txid) {
+            tracing::warn!(txid = %sub.txid, kind = sub.kind.as_str(), "expired");
+            metrics::inc_tx_expired(sub.kind.as_str());
+        }
     }
-    let _ = ops.submissions.drain_confirmed();
+    let confirmed_txids: Vec<TxId> = ops.submissions.iter()
+        .filter(|(_, s)| s.confirmed_at.is_some())
+        .map(|(txid, _)| *txid)
+        .collect();
+    for txid in confirmed_txids { ops.submissions.remove(&txid); }
 }
 
 /// Builds an atomic claim transaction.
@@ -933,7 +991,7 @@ fn check_confirmations(ops: &mut OperationalState, txids: &[TxId], height: Block
 fn execute_claim(
     wallet: &mut Wallet, registry: &Registry,
     treasury_keys: &zns_mint::key::TreasuryKeys, registry_keys: &zns_mint::key::RegistryKeys,
-    name: &Name, ua: &UnifiedAddress, payment_locator: NoteLocator,
+    name: Name, ua: UnifiedAddress, payment_locator: NoteLocator,
     excluded: &BTreeSet<NoteLocator>,
     anchor_height: BlockHeight, target_height: BlockHeight,
 ) -> Result<(TxId, String, Vec<NoteLocator>), &'static str> {
