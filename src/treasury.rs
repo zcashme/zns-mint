@@ -2,27 +2,19 @@
 
 pub use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 
+pub mod claim;
 pub mod memo;
-pub mod note;
-pub mod sweep;
+pub mod relay;
 
 use crate::wallet::transaction::ReceivedOrchardNote;
 use crate::wallet::Wallet;
-use zcash_protocol::consensus::BlockHeight;
-
-pub use note::RegistryFundingRequest;
-
-#[derive(Default)]
-struct TreasuryState {
-    last_sweep_height: Option<BlockHeight>,
-}
 
 /// Owned Treasury policy state.
 ///
 /// The Treasury does not own notes; `Wallet` owns all notes and commitment
 /// trees. Treasury methods take `&Wallet` when evaluating policy.
 #[derive(Default)]
-pub struct Treasury(TreasuryState);
+pub struct Treasury;
 
 impl Treasury {
     pub fn new() -> Self {
@@ -38,29 +30,6 @@ impl Treasury {
 
     pub fn balance(&self, wallet: &Wallet) -> u64 {
         wallet.balance(TREASURY_ACCOUNT).into_u64()
-    }
-
-    pub fn select_funds<'w>(
-        &self,
-        wallet: &'w Wallet,
-        target: u64,
-    ) -> Option<Vec<&'w ReceivedOrchardNote>> {
-        let exclude = std::collections::BTreeSet::new();
-        let target_zat = zcash_protocol::value::Zatoshis::from_u64(target).unwrap();
-        crate::wallet::selection::select_funds(wallet, TREASURY_ACCOUNT, target_zat, &exclude)
-            .map(|(notes, _)| notes)
-    }
-
-    pub fn auto_sweep(
-        &self,
-        wallet: &Wallet,
-        current_height: BlockHeight,
-    ) -> Option<crate::treasury::sweep::SweepRequest> {
-        crate::treasury::sweep::sweep_policy(wallet, current_height, self.0.last_sweep_height)
-    }
-
-    pub fn registry_funding(&self, wallet: &Wallet) -> Option<RegistryFundingRequest> {
-        crate::treasury::note::registry_funding_policy(wallet)
     }
 
     pub fn match_payment<'w>(

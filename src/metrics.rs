@@ -120,6 +120,31 @@ lazy_static! {
     )
     .unwrap();
 
+    // --- 4b. Submissions ---
+    pub static ref TX_SUBMITTED: IntCounterVec = register_int_counter_vec!(
+        "zns_mint_transactions_submitted_total",
+        "Total number of transactions submitted to Zebra",
+        &["kind"] // claim, update, release, otp_relay
+    )
+    .unwrap();
+    pub static ref TX_CONFIRMED: IntCounterVec = register_int_counter_vec!(
+        "zns_mint_transactions_confirmed_total",
+        "Total number of transactions confirmed in a block",
+        &["kind"]
+    )
+    .unwrap();
+    pub static ref TX_EXPIRED: IntCounterVec = register_int_counter_vec!(
+        "zns_mint_transactions_expired_total",
+        "Total number of transactions that expired without confirmation",
+        &["kind"]
+    )
+    .unwrap();
+    pub static ref TX_PENDING: IntGauge = register_int_gauge!(
+        "zns_mint_transactions_pending",
+        "Current number of submitted but unconfirmed transactions"
+    )
+    .unwrap();
+
     // --- 5. Errors & Performance ---
     pub static ref RPC_ERRORS: IntCounterVec = register_int_counter_vec!(
         "zns_mint_rpc_errors_total",
@@ -218,5 +243,20 @@ pub fn observe_transaction_assembly_seconds(seconds: f64) {
 
 pub fn inc_no_fee_liquidity_blocks() {
     NO_FEE_LIQUIDITY_BLOCKS.inc();
+}
+
+pub fn inc_tx_submitted(kind: &str) {
+    TX_SUBMITTED.with_label_values(&[kind]).inc();
+    TX_PENDING.inc();
+}
+
+pub fn inc_tx_confirmed(kind: &str) {
+    TX_CONFIRMED.with_label_values(&[kind]).inc();
+    TX_PENDING.dec();
+}
+
+pub fn inc_tx_expired(kind: &str) {
+    TX_EXPIRED.with_label_values(&[kind]).inc();
+    TX_PENDING.dec();
 }
 

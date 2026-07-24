@@ -164,6 +164,11 @@ impl PendingOtps {
             .retain(|_, entry| u32::from(entry.expires_at) >= u32::from(current_height));
     }
 
+    /// Whether an unexpired OTP exists for this challenge.
+    pub fn contains(&self, key: &ChallengeKey) -> bool {
+        self.pending.contains_key(key)
+    }
+
     /// Configured OTP validity window, in blocks.
     ///
     /// 24 blocks ≈ 30 minutes at 75s block time.
