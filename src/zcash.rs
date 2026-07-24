@@ -311,6 +311,13 @@ impl fmt::Display for RpcError {
 
 impl std::error::Error for RpcError {}
 
+impl RpcError {
+    /// Bitcoin Core / Zebra RPC error -27: transaction already in chain.
+    pub fn is_tx_already_in_chain(&self) -> bool {
+        self.code == -27
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
     #[error("hyper-util client error: {0}")]
