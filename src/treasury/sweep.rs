@@ -105,11 +105,11 @@ pub fn assemble_sweep(
                 &MAIN_NETWORK,
                 target_height,
                 std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
-                std::iter::empty::<usize>(),
+                std::iter::once(34), // 1 P2PKH output (34 bytes)
                 0,
                 0,
-                1, // 1 transparent output
-                orchard_actions,
+                orchard_actions, // orchard_action_count
+                0,               // ironwood_action_count
             )
             .map(Zatoshis::into_u64)
             .map_err(|_| "ZIP-317 fee computation overflow")?;

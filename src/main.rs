@@ -797,7 +797,7 @@ async fn execute(
     let expiry_height = BlockHeight::from_u32(
         u32::from(target_height).checked_add(TX_EXPIRY_BUFFER).unwrap_or(u32::from(target_height)),
     );
-    let excluded = ops.reserved_locators();
+    let mut excluded = ops.reserved_locators();
     let mut new_subs = Vec::new();
 
     for item in work {
@@ -883,7 +883,12 @@ async fn execute(
                             reserved_notes, confirmed_at: None,
                         };
                         new_subs.push(sub.clone());
-                        ops.submissions.add(sub);
+                        ops.submissions.add(sub.clone());
+                        // Update excluded set so subsequent work items
+                        // don't select the same notes.
+                        for loc in &sub.reserved_notes {
+                            excluded.insert(*loc);
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, kind = kind.as_str(), "submission failed");
