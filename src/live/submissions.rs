@@ -24,6 +24,10 @@ pub enum SubmissionKind {
     Release,
     /// An OTP relay from Treasury to the current controller.
     OtpRelay,
+    /// Treasury→Registry fee-note replenishment.
+    Replenish,
+    /// Treasury auto-sweep to cold storage.
+    AutoSweep,
 }
 
 impl SubmissionKind {
@@ -33,6 +37,8 @@ impl SubmissionKind {
             Self::Update => "update",
             Self::Release => "release",
             Self::OtpRelay => "otp_relay",
+            Self::Replenish => "replenish",
+            Self::AutoSweep => "sweep",
         }
     }
 
@@ -42,6 +48,8 @@ impl SubmissionKind {
             Self::Update => Some(Action::Update),
             Self::Release => Some(Action::Release),
             Self::OtpRelay => None,
+            Self::Replenish => None,
+            Self::AutoSweep => None,
         }
     }
 }
