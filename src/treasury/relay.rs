@@ -5,9 +5,9 @@
 //! send an Orchard note to the controller's address directly.
 //!
 //! Structure:
-//! - **Orchard V3 bundle** (Treasury authority): spends the request note,
-//!   creates Treasury change via `add_change_output`. Positive value
-//!   balance leaves the Orchard pool.
+//! - **Orchard V3 bundle** (Treasury authority): spends the request note.
+//!   No change output — the full value leaves the Orchard pool as value
+//!   balance. 1 action, padded to 2 by min_actions.
 //! - **Ironwood V3 bundle** (output-only, no spend authority): creates one
 //!   output to the controller's address with the OTP memo. Ironwood V3
 //!   permits cross-address transfers, so `add_output` works.
@@ -141,22 +141,11 @@ pub fn assemble_otp_relay(
         .add_spend(fvk.clone(), request_note, merkle_path.into())
         .map_err(|_| "failed to add request note spend")?;
 
-    // Treasury change (back to Treasury's own address — add_change_output,
-    // not add_output, because Orchard V3 disables cross-address).
-    if relay_value > 0 {
-        let change_address = fvk.address_at(0u32, orchard::keys::Scope::Internal);
-        let mut change_memo = [0u8; 512];
-        change_memo[0] = 0xF6;
-        orchard_builder
-            .add_change_output(
-                fvk.clone(),
-                Some(fvk.to_ovk(orchard::keys::Scope::Internal)),
-                change_address,
-                orchard::value::NoteValue::from_raw(0), // change is 0; relay_value goes to Ironwood
-                change_memo,
-            )
-            .map_err(|_| "failed to add orchard change output")?;
-    }
+    // No Orchard change output needed: the full payment_value leaves the
+    // Orchard pool as value balance. relay_value enters the Ironwood pool
+    // via the output-only Ironwood bundle. Total fee = payment - relay_value.
+    // Without change: 1 spend + 0 outputs, cross-address disabled → 1 action,
+    // padded to 2 by min_actions. Same action count as with a zero-value change.
 
     let (orchard_bundle, _) = orchard_builder
         .build::<ZatBalance>(&mut OsRng)
