@@ -81,8 +81,6 @@ pub fn assemble_replenishment(
         let orchard_actions = std::cmp::max(num_spends, 1); // at least 1 for change
         let ironwood_actions = plan.output_count;
 
-        let total_actions = orchard_actions + ironwood_actions;
-
         fee = FeeRule::standard()
             .fee_required(
                 &MAIN_NETWORK,
@@ -91,8 +89,8 @@ pub fn assemble_replenishment(
                 std::iter::empty::<usize>(),
                 0,
                 0,
-                0,
-                total_actions,
+                orchard_actions,  // orchard_action_count
+                ironwood_actions, // ironwood_action_count
             )
             .map(Zatoshis::into_u64)
             .map_err(|_| "ZIP-317 fee computation overflow")?;
