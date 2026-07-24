@@ -4,7 +4,9 @@ pub use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 
 pub mod claim;
 pub mod memo;
+pub mod replenish;
 pub mod relay;
+pub mod sweep;
 
 use crate::wallet::transaction::ReceivedOrchardNote;
 use crate::wallet::Wallet;

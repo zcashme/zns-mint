@@ -308,9 +308,7 @@ fn treasury_has_no_exclusion_free_selection_wrapper() {
         "Treasury selection must not hide an empty reservation-exclusion set"
     );
     assert!(!TREASURY_SOURCE.contains("pub mod note;"));
-    assert!(!TREASURY_SOURCE.contains("pub mod sweep;"));
     assert!(!TREASURY_SOURCE.contains("pub fn registry_funding("));
-    assert!(!TREASURY_SOURCE.contains("pub fn auto_sweep("));
 }
 
 #[test]

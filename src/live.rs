@@ -40,6 +40,8 @@ use crate::metrics;
 use crate::mint::{Action, Name, UnifiedAddress, TREASURY_ACCOUNT};
 use crate::registry::{authorize, NameNoteRequest, Registry, Tip};
 use crate::treasury::{memo::RequestMemo, Treasury};
+use crate::treasury::replenish;
+use crate::treasury::sweep;
 use crate::wallet::{NoteLocator, Wallet};
 use crate::zcash::JsonRpc;
 
@@ -120,6 +122,15 @@ pub enum PendingWork {
         action: Action,
         ua: UnifiedAddress,
         otp: [u8; 16],
+    },
+    /// Registry fee-note pool is below the minimum; Treasury should refill it.
+    ReplenishRegistry {
+        plan: crate::registry::liquidity::RegistryFundingPlan,
+    },
+    /// Treasury balance exceeds the sweep threshold; sweep excess to cold
+    /// storage.
+    AutoSweep {
+        sweep_amount: u64,
     },
 }
 
@@ -278,6 +289,28 @@ pub fn reconcile(
                 }
             }
         }
+    }
+
+    // 3. Check Registry fee-note liquidity for replenishment.
+    let liquidity = crate::registry::liquidity::RegistryFeeLiquidity::from_wallet(wallet);
+    if let Some(plan) = liquidity.treasury_funding_plan() {
+        tracing::info!(
+            fee_notes = liquidity.fee_note_count,
+            min = crate::registry::liquidity::MIN_REGISTRY_FEE_NOTES,
+            "live: Registry fee-note liquidity below minimum, planning replenishment"
+        );
+        work.push(PendingWork::ReplenishRegistry { plan });
+    }
+
+    // 4. Check Treasury balance for auto-sweep.
+    let treasury_balance = wallet.balance(crate::mint::TREASURY_ACCOUNT).into_u64();
+    if let Some(sweep_amount) = sweep::sweep_policy(treasury_balance) {
+        tracing::info!(
+            treasury_balance,
+            sweep_amount,
+            "live: Treasury balance above sweep threshold, planning auto-sweep"
+        );
+        work.push(PendingWork::AutoSweep { sweep_amount });
     }
 
     work
@@ -528,6 +561,121 @@ pub async fn execute(
                     }
                 }
             }
+            PendingWork::ReplenishRegistry { plan } => {
+                let mut excluded_rhos: BTreeSet<orchard::note::Rho> = BTreeSet::new();
+                for locator in &excluded {
+                    if let NoteLocator::Orchard { account_id, rho } = locator {
+                        if *account_id == TREASURY_ACCOUNT {
+                            excluded_rhos.insert(*rho);
+                        }
+                    }
+                }
+
+                let result = replenish::assemble_replenishment(
+                    wallet,
+                    treasury_keys,
+                    &plan,
+                    cursor_height,
+                    target_height,
+                    &excluded_rhos,
+                );
+
+                match result {
+                    Ok(replenish) => {
+                        match rpc.send(&replenish.hex).await {
+                            Ok(_) => {
+                                tracing::info!(
+                                    txid = %replenish.txid,
+                                    outputs = plan.output_count,
+                                    amount = plan.total_amount,
+                                    "replenishment transaction submitted"
+                                );
+                                let sub = Submission {
+                                    kind: SubmissionKind::Replenish,
+                                    txid: replenish.txid,
+                                    submit_height: cursor_height,
+                                    expiry_height,
+                                    reserved_notes: replenish.reserved_notes,
+                                    confirmed_at: None,
+                                };
+                                new_submissions.push(sub.clone());
+                                live.submissions.add(sub);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "replenishment submission failed"
+                                );
+                                metrics::inc_spend_error("replenish_submit");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = e,
+                            "replenishment assembly failed"
+                        );
+                        metrics::inc_spend_error("replenish_assembly");
+                    }
+                }
+            }
+            PendingWork::AutoSweep { sweep_amount } => {
+                let mut excluded_rhos: BTreeSet<orchard::note::Rho> = BTreeSet::new();
+                for locator in &excluded {
+                    if let NoteLocator::Orchard { account_id, rho } = locator {
+                        if *account_id == TREASURY_ACCOUNT {
+                            excluded_rhos.insert(*rho);
+                        }
+                    }
+                }
+
+                let result = sweep::assemble_sweep(
+                    wallet,
+                    treasury_keys,
+                    sweep_amount,
+                    cursor_height,
+                    target_height,
+                    &excluded_rhos,
+                );
+
+                match result {
+                    Ok(sweep_result) => {
+                        match rpc.send(&sweep_result.hex).await {
+                            Ok(_) => {
+                                tracing::info!(
+                                    txid = %sweep_result.txid,
+                                    sweep_amount,
+                                    "auto-sweep transaction submitted"
+                                );
+                                let sub = Submission {
+                                    kind: SubmissionKind::AutoSweep,
+                                    txid: sweep_result.txid,
+                                    submit_height: cursor_height,
+                                    expiry_height,
+                                    reserved_notes: sweep_result.reserved_notes,
+                                    confirmed_at: None,
+                                };
+                                new_submissions.push(sub.clone());
+                                live.submissions.add(sub);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "auto-sweep submission failed"
+                                );
+                                metrics::inc_spend_error("sweep_submit");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = e,
+                            "auto-sweep assembly failed"
+                        );
+                        metrics::inc_spend_error("sweep_assembly");
+                    }
+                }
+            }
         }
     }
 
@@ -688,6 +836,12 @@ pub fn check_confirmations(
                 }
                 SubmissionKind::OtpRelay => {
                     metrics::inc_tx_confirmed("otp_relay");
+                }
+                SubmissionKind::Replenish => {
+                    metrics::inc_tx_confirmed("replenish");
+                }
+                SubmissionKind::AutoSweep => {
+                    metrics::inc_tx_confirmed("sweep");
                 }
             }
         }
