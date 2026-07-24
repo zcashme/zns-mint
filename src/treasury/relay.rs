@@ -129,8 +129,8 @@ pub fn assemble_otp_relay(
             std::iter::empty::<usize>(),
             0,
             0,
-            0,
-            1,
+            1, // orchard_action_count
+            0, // ironwood_action_count
         )
         .map(zcash_protocol::value::Zatoshis::into_u64)
         .map_err(|_| "ZIP-317 fee computation overflow")?;
