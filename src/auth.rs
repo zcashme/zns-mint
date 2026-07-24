@@ -159,9 +159,12 @@ impl PendingOtps {
     }
 
     /// Removes expired OTPs to prevent memory exhaustion.
-    pub fn prune(&mut self, current_height: BlockHeight) {
+    /// Prunes expired OTPs and returns how many were removed.
+    pub fn prune(&mut self, current_height: BlockHeight) -> usize {
+        let before = self.pending.len();
         self.pending
             .retain(|_, entry| u32::from(entry.expires_at) >= u32::from(current_height));
+        before - self.pending.len()
     }
 
     /// Whether an unexpired OTP exists for this challenge.

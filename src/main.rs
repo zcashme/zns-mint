@@ -599,9 +599,11 @@ impl SubmissionKind {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct Submission {
     kind: SubmissionKind,
     txid: TxId,
+    submit_height: BlockHeight,
     expiry_height: BlockHeight,
     reserved_notes: Vec<NoteLocator>,
     confirmed_at: Option<BlockHeight>,
@@ -643,7 +645,7 @@ const TX_EXPIRY_BUFFER: u32 = 20;
 
 /// Work items derived from canonical state.
 enum WorkItem {
-    Claim { name: Name, ua: UnifiedAddress, payment_locator: NoteLocator, _payment_value: u64 },
+    Claim { name: Name, ua: UnifiedAddress, payment_locator: NoteLocator },
     NeedsOtpRelay { name: Name, action: Action, controller_ua: UnifiedAddress, request_locator: NoteLocator, request_value: u64 },
     VerifyAndTransition { name: Name, action: Action, ua: UnifiedAddress, otp: [u8; 16] },
     ReplenishRegistry { plan: zns_mint::registry::liquidity::RegistryFundingPlan },
@@ -675,7 +677,10 @@ fn reconcile(
 ) -> Vec<WorkItem> {
     use std::collections::BTreeSet;
 
-    ops.pending_otps.prune(cursor_height);
+    let pruned = ops.pending_otps.prune(cursor_height);
+    if pruned > 0 {
+        metrics::inc_otps_never_returned(pruned as u64);
+    }
     let reserved = ops.reserved_locators();
     let mut work = Vec::new();
     let mut seen_claims: BTreeSet<Name> = BTreeSet::new();
@@ -705,7 +710,7 @@ fn reconcile(
                 seen_claims.insert(name.clone());
                 work.push(WorkItem::Claim {
                     name, ua: UnifiedAddress::from_string(ua.clone()),
-                    payment_locator: locator, _payment_value: value,
+                    payment_locator: locator,
                 });
             }
             RequestMemo::Update { ua, otp, .. } => {
@@ -801,14 +806,22 @@ fn reconcile(
         .count();
     let mut liquidity = zns_mint::registry::liquidity::RegistryFeeLiquidity::from_wallet(wallet);
     liquidity.fee_note_count = liquidity.fee_note_count.saturating_sub(reserved_ironwood);
+    let has_pending_replenish = ops.submissions.values()
+        .any(|s| s.kind == SubmissionKind::Replenish && s.confirmed_at.is_none());
     if let Some(plan) = liquidity.treasury_funding_plan() {
-        work.push(WorkItem::ReplenishRegistry { plan });
+        if !has_pending_replenish {
+            work.push(WorkItem::ReplenishRegistry { plan });
+        }
     }
 
     // Check Treasury balance for auto-sweep.
     let balance = wallet.balance(TREASURY_ACCOUNT).into_u64();
+    let has_pending_sweep = ops.submissions.values()
+        .any(|s| s.kind == SubmissionKind::AutoSweep && s.confirmed_at.is_none());
     if let Some(amount) = zns_mint::treasury::sweep::sweep_policy(balance) {
-        work.push(WorkItem::AutoSweep { sweep_amount: amount });
+        if !has_pending_sweep {
+            work.push(WorkItem::AutoSweep { sweep_amount: amount });
+        }
     }
 
     work
@@ -842,6 +855,7 @@ async fn execute(
             WorkItem::NeedsOtpRelay { name, action, controller_ua, request_locator, request_value } => {
                 let key = ChallengeKey::new(name.clone(), action, controller_ua.clone());
                 let otp = ops.pending_otps.issue(key, cursor_height);
+                metrics::inc_otps_issued();
                 let mut excluded_rhos: BTreeSet<orchard::note::Rho> = BTreeSet::new();
                 for loc in excluded.iter() {
                     if let NoteLocator::Orchard { account_id, rho } = *loc {
@@ -858,11 +872,11 @@ async fn execute(
                 let req = match action {
                     Action::Update => authorize::authorize_update(
                         registry, &mut ops.pending_otps, cursor_height,
-                        name.clone(), ua.clone(), &otp,
+                        name, ua, &otp,
                     ),
                     Action::Release => authorize::authorize_release(
                         registry, &mut ops.pending_otps, cursor_height,
-                        name.clone(), ua.clone(), &otp,
+                        name, ua, &otp,
                     ),
                     Action::Claim => unreachable!(),
                 };
@@ -910,7 +924,7 @@ async fn execute(
                     Ok(_) => {
                         tracing::info!(txid = %txid, kind = kind.as_str(), "transaction submitted");
                         let sub = Submission {
-                            kind, txid, expiry_height,
+                            kind, txid, submit_height: cursor_height, expiry_height,
                             reserved_notes, confirmed_at: None,
                         };
                         new_subs.push((sub.kind, sub.txid));
@@ -920,9 +934,7 @@ async fn execute(
                         for loc in &sub.reserved_notes {
                             excluded.insert(*loc);
                         }
-                        if kind == SubmissionKind::OtpRelay {
-                            metrics::inc_otps_issued();
-                        }
+
                     }
                     Err(e) => {
                         if e.is_retryable() {
@@ -992,6 +1004,7 @@ fn execute_claim(
     wallet: &mut Wallet, registry: &Registry,
     treasury_keys: &zns_mint::key::TreasuryKeys, registry_keys: &zns_mint::key::RegistryKeys,
     name: Name, ua: UnifiedAddress, payment_locator: NoteLocator,
+
     excluded: &BTreeSet<NoteLocator>,
     anchor_height: BlockHeight, target_height: BlockHeight,
 ) -> Result<(TxId, String, Vec<NoteLocator>), &'static str> {
