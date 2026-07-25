@@ -583,3 +583,18 @@ fn generate_mint_attestation(_report_data: [u8; 64]) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 // Tests — one critical invariant: fingerprint mismatch fails closed without leaking it
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use secrecy::Secret;
+
+    #[test]
+    #[cfg(not(feature = "dev-seed"))]
+    #[should_panic(expected = "FATAL: SEED FINGERPRINT MISMATCH")]
+    fn verify_fingerprint_mismatch_is_redacted() {
+        let seed = Secret::new([0xAB; 32]);
+        let wrong_fp = SeedFingerprint::from_seed(&[0xCD; 32]).unwrap().to_string();
+        verify_fingerprint(&seed, &wrong_fp);
+    }
+}
