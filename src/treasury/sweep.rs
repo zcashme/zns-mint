@@ -78,7 +78,7 @@ pub fn assemble_sweep(
     anchor_height: BlockHeight,
     target_height: BlockHeight,
     excluded: &std::collections::BTreeSet<orchard::note::Rho>,
-) -> Result<SweepAssembly, &'static str> {
+) -> Result<SweepAssembly, crate::mint::AssemblyError> {
     use rand::rngs::OsRng;
     use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
     use zcash_protocol::consensus::MAIN_NETWORK;
@@ -112,7 +112,7 @@ pub fn assemble_sweep(
                 0,               // ironwood_action_count
             )
             .map(Zatoshis::into_u64)
-            .map_err(|_| "ZIP-317 fee computation overflow")?;
+            .map_err(|_| crate::mint::AssemblyError::FeeOverflow)?;
 
         let needed = sweep_amount + fee;
         if total_selected >= needed {
@@ -131,7 +131,7 @@ pub fn assemble_sweep(
             .min_by_key(|n| n.note.value().inner());
 
         let Some(note_ref) = candidate else {
-            return Err("insufficient Treasury notes for sweep");
+            return Err(crate::mint::AssemblyError::InsufficientFunds);
         };
 
         let val = note_ref.note.value().inner();
@@ -146,7 +146,7 @@ pub fn assemble_sweep(
         .orchard_anchor(anchor_height)
         .ok()
         .flatten()
-        .ok_or("no orchard anchor at accepted anchor height")?;
+        .ok_or(crate::mint::AssemblyError::NoAnchor)?;
 
     let orchard_version = orchard::bundle::BundleVersion::orchard_v3();
     let orchard_flags = orchard_version.default_flags();
@@ -156,18 +156,18 @@ pub fn assemble_sweep(
         orchard_flags,
         orchard_anchor.into(),
     )
-    .map_err(|_| "failed to create orchard builder")?;
+    .map_err(|_| crate::mint::AssemblyError::BuilderCreation)?;
 
     for (note, position, _) in &funding_notes {
         let merkle_path = wallet
             .orchard_witness(*position, anchor_height)
             .ok()
             .flatten()
-            .ok_or("witness for treasury sweep note not found")?;
+            .ok_or(crate::mint::AssemblyError::NoWitness)?;
 
         orchard_builder
             .add_spend(treasury_fvk.clone(), note.clone(), merkle_path.into())
-            .map_err(|_| "failed to add treasury spend")?;
+            .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
 
         reserved_notes.push(NoteLocator::orchard(TREASURY_ACCOUNT, note.rho()));
     }
@@ -183,18 +183,18 @@ pub fn assemble_sweep(
                 orchard::value::NoteValue::from_raw(change_value),
                 change_memo,
             )
-            .map_err(|_| "failed to add orchard change output")?;
+            .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
     }
 
     let (orchard_bundle, _) = orchard_builder
         .build::<ZatBalance>(&mut OsRng)
-        .map_err(|_| "failed to build orchard bundle")?
-        .ok_or("orchard builder produced no bundle")?;
+        .map_err(|_| crate::mint::AssemblyError::BuildFailed)?
+        .ok_or(crate::mint::AssemblyError::BuildFailed)?;
 
     // 3. Transparent output to cold storage.
     let transparent_outputs = [TransparentOutput {
         address: SWEEP_ADDRESS,
-        value: Zatoshis::from_u64(sweep_amount).map_err(|_| "sweep amount overflow")?,
+        value: Zatoshis::from_u64(sweep_amount).map_err(|_| crate::mint::AssemblyError::ValueOverflow)?,
     }];
 
     // 4. Prove, sign, and serialize.

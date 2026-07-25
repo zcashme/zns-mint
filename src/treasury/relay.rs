@@ -62,19 +62,19 @@ pub fn assemble_otp_relay(
     anchor_height: BlockHeight,
     target_height: BlockHeight,
     _excluded: &std::collections::BTreeSet<orchard::note::Rho>,
-) -> Result<RelayAssembly, &'static str> {
+) -> Result<RelayAssembly, crate::mint::AssemblyError> {
     use rand::rngs::OsRng;
     use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
 
     if action == Action::Claim {
-        return Err("claims do not use OTPs");
+        return Err(crate::mint::AssemblyError::ClaimNoOtp);
     }
 
     let controller_orchard =
-        extract_orchard_address(controller_ua.as_str()).ok_or("controller UA has no Orchard receiver")?;
+        extract_orchard_address(controller_ua.as_str()).ok_or(crate::mint::AssemblyError::NoOrchardReceiver)?;
 
     let memo = encode_otp_relay_memo(name, action, controller_ua, otp)
-        .ok_or("failed to encode OTP relay memo")?;
+        .ok_or(crate::mint::AssemblyError::MemoEncode)?;
 
     // --- Fee computation ---
     // Orchard V3 (cross-address disabled): 1 real spend + optional change.
@@ -93,10 +93,10 @@ pub fn assemble_otp_relay(
             2, // ironwood_action_count (padded to min 2)
         )
         .map(Zatoshis::into_u64)
-        .map_err(|_| "ZIP-317 fee computation overflow")?;
+        .map_err(|_| crate::mint::AssemblyError::FeeOverflow)?;
 
     if request_note_value < fee {
-        return Err("request note value insufficient for relay fee");
+        return Err(crate::mint::AssemblyError::InsufficientValue);
     }
 
     let relay_value = request_note_value - fee;
@@ -106,7 +106,7 @@ pub fn assemble_otp_relay(
         .orchard_anchor(anchor_height)
         .ok()
         .flatten()
-        .ok_or("no orchard anchor at accepted anchor height")?;
+        .ok_or(crate::mint::AssemblyError::NoAnchor)?;
 
     let orchard_version = orchard::bundle::BundleVersion::orchard_v3();
     let orchard_flags = orchard_version.default_flags();
@@ -116,7 +116,7 @@ pub fn assemble_otp_relay(
         orchard_flags,
         orchard_anchor.into(),
     )
-    .map_err(|_| "failed to create orchard builder")?;
+    .map_err(|_| crate::mint::AssemblyError::BuilderCreation)?;
 
     let fvk = orchard::keys::FullViewingKey::from(treasury_keys.orchard_spending_key());
 
@@ -124,9 +124,9 @@ pub fn assemble_otp_relay(
     let (request_note, request_position) = {
         let note = wallet
             .orchard_note(request_note_locator)
-            .ok_or("request note not found in wallet")?;
+            .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
         if note.account_id != TREASURY_ACCOUNT {
-            return Err("request note is not a Treasury note");
+            return Err(crate::mint::AssemblyError::WrongAccount);
         }
         (note.note.clone(), note.position)
     };
@@ -135,11 +135,11 @@ pub fn assemble_otp_relay(
         .orchard_witness(request_position, anchor_height)
         .ok()
         .flatten()
-        .ok_or("witness for request note not found")?;
+        .ok_or(crate::mint::AssemblyError::NoWitness)?;
 
     orchard_builder
         .add_spend(fvk.clone(), request_note, merkle_path.into())
-        .map_err(|_| "failed to add request note spend")?;
+        .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
 
     // No Orchard change output needed: the full payment_value leaves the
     // Orchard pool as value balance. relay_value enters the Ironwood pool
@@ -149,15 +149,15 @@ pub fn assemble_otp_relay(
 
     let (orchard_bundle, _) = orchard_builder
         .build::<ZatBalance>(&mut OsRng)
-        .map_err(|_| "failed to build orchard bundle")?
-        .ok_or("orchard builder produced no bundle")?;
+        .map_err(|_| crate::mint::AssemblyError::BuildFailed)?
+        .ok_or(crate::mint::AssemblyError::BuildFailed)?;
 
     // --- Ironwood V3 bundle: output-only, controller + OTP memo ---
     let ironwood_anchor = wallet
         .latest_ironwood_anchor()
         .ok()
         .flatten()
-        .ok_or("no ironwood anchor available")?;
+        .ok_or(crate::mint::AssemblyError::NoAnchor)?;
 
     let ironwood_version = orchard::bundle::BundleVersion::ironwood_v3();
     let ironwood_flags = ironwood_version.default_flags();
@@ -167,7 +167,7 @@ pub fn assemble_otp_relay(
         ironwood_flags,
         ironwood_anchor.into(),
     )
-    .map_err(|_| "failed to create ironwood builder")?;
+    .map_err(|_| crate::mint::AssemblyError::BuilderCreation)?;
 
     ironwood_builder
         .add_output(
@@ -176,12 +176,12 @@ pub fn assemble_otp_relay(
             orchard::value::NoteValue::from_raw(relay_value),
             memo,
         )
-        .map_err(|_| "failed to add ironwood relay output")?;
+        .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
 
     let (ironwood_bundle, _) = ironwood_builder
         .build::<ZatBalance>(&mut OsRng)
-        .map_err(|_| "failed to build ironwood bundle")?
-        .ok_or("ironwood builder produced no bundle")?;
+        .map_err(|_| crate::mint::AssemblyError::BuildFailed)?
+        .ok_or(crate::mint::AssemblyError::BuildFailed)?;
 
     // --- Prove, sign, serialize both bundles in one V6 transaction ---
     use crate::registry::signing;

@@ -66,7 +66,7 @@ pub fn assemble_v6_transaction(
     registry_signer: Option<&RegistryKeys>,
     transparent_outputs: Option<&[TransparentOutput]>,
     target_height: BlockHeight,
-) -> Result<(TxId, String), &'static str> {
+) -> Result<(TxId, String), crate::mint::AssemblyError> {
     use orchard::circuit::{ProvingKey, VerifyingKey};
     use rand::rngs::OsRng;
     use std::sync::OnceLock;
@@ -78,22 +78,22 @@ pub fn assemble_v6_transaction(
     use zcash_protocol::consensus::BranchId;
 
     if orchard_bundle.is_none() && ironwood_bundle.is_none() {
-        return Err("mixed V6 assembly requires at least one shielded bundle");
+        return Err(crate::mint::AssemblyError::BuilderCreation);
     }
 
     if !zcash_protocol::consensus::MAIN_NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, target_height) {
-        return Err("V6 Orchard/Ironwood assembly requires NU6.3 activation");
+        return Err(crate::mint::AssemblyError::Nu63NotActive);
     }
 
     if orchard_bundle.as_ref().is_some_and(|bundle| {
         bundle.bundle_version() != orchard::bundle::BundleVersion::orchard_v3()
     }) {
-        return Err("orchard bundle is not Orchard V3");
+        return Err(crate::mint::AssemblyError::WrongVersion);
     }
     if ironwood_bundle.as_ref().is_some_and(|bundle| {
         bundle.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3()
     }) {
-        return Err("ironwood bundle is not Ironwood V3");
+        return Err(crate::mint::AssemblyError::WrongVersion);
     }
 
     // Cache the proving and verifying keys across calls. The circuit version
@@ -106,7 +106,7 @@ pub fn assemble_v6_transaction(
     let expiry_height = BlockHeight::from_u32(
         u32::from(target_height)
             .checked_add(TX_EXPIRY_BUFFER)
-            .ok_or("transaction expiry height overflow")?,
+            .ok_or(crate::mint::AssemblyError::ValueOverflow)?,
     );
 
     // --- Transparent bundle: phase 1 (unauthed) ---
@@ -162,41 +162,41 @@ pub fn assemble_v6_transaction(
         .as_ref()
         .map(|b| b.circuit_version())
         .or_else(|| ironwood_bundle.as_ref().map(|b| b.circuit_version()))
-        .ok_or("mixed V6 assembly requires at least one shielded bundle")?;
+        .ok_or(crate::mint::AssemblyError::BuilderCreation)?;
 
     if let Some(ref ob) = orchard_bundle {
         if ob.circuit_version() != circuit_version {
-            return Err("orchard and ironwood bundles must use the same circuit version");
+            return Err(crate::mint::AssemblyError::CircuitMismatch);
         }
     }
     if let Some(ref ib) = ironwood_bundle {
         if ib.circuit_version() != circuit_version {
-            return Err("orchard and ironwood bundles must use the same circuit version");
+            return Err(crate::mint::AssemblyError::CircuitMismatch);
         }
     }
 
     let pk = PK.get_or_init(|| ProvingKey::build(circuit_version));
     let vk = VK.get_or_init(|| VerifyingKey::build(circuit_version));
     if pk.circuit_version() != circuit_version || vk.circuit_version() != circuit_version {
-        return Err("cached proving keys do not match the bundle circuit version");
+        return Err(crate::mint::AssemblyError::CircuitMismatch);
     }
 
     let authorized_orchard = orchard_bundle
         .map(
             |b| -> Result<
                 orchard::Bundle<orchard::bundle::Authorized, zcash_protocol::value::ZatBalance>,
-                &'static str,
+                crate::mint::AssemblyError,
             > {
                 let proven = b
                     .create_proof(pk, &mut rng)
-                    .map_err(|_| "failed to create orchard proof")?;
+                    .map_err(|_| crate::mint::AssemblyError::ProofCreation)?;
                 let signing_keys: Vec<_> = treasury_sak.iter().cloned().collect();
                 let authorized = proven
                     .apply_signatures(rng, *shielded_sig_commitment.as_ref(), &signing_keys)
-                    .map_err(|_| "Treasury authority could not authorize Orchard bundle")?;
+                    .map_err(|_| crate::mint::AssemblyError::SigningAuth)?;
                 authorized
                     .verify_proof(vk)
-                    .map_err(|_| "orchard proof verification failed before broadcast")?;
+                    .map_err(|_| crate::mint::AssemblyError::ProofVerification)?;
                 Ok(authorized)
             },
         )
@@ -206,18 +206,18 @@ pub fn assemble_v6_transaction(
         .map(
             |b| -> Result<
                 orchard::Bundle<orchard::bundle::Authorized, zcash_protocol::value::ZatBalance>,
-                &'static str,
+                crate::mint::AssemblyError,
             > {
                 let proven = b
                     .create_proof(pk, &mut rng)
-                    .map_err(|_| "failed to create ironwood proof")?;
+                    .map_err(|_| crate::mint::AssemblyError::ProofCreation)?;
                 let signing_keys: Vec<_> = registry_sak.iter().cloned().collect();
                 let authorized = proven
                     .apply_signatures(rng, *shielded_sig_commitment.as_ref(), &signing_keys)
-                    .map_err(|_| "Registry authority could not authorize Ironwood bundle")?;
+                    .map_err(|_| crate::mint::AssemblyError::SigningAuth)?;
                 authorized
                     .verify_proof(vk)
-                    .map_err(|_| "ironwood proof verification failed before broadcast")?;
+                    .map_err(|_| crate::mint::AssemblyError::ProofVerification)?;
                 Ok(authorized)
             },
         )
@@ -297,18 +297,16 @@ pub fn assemble_v6_transaction(
             == txid_parts.ironwood_digest.as_ref().map(|h| h.as_bytes());
 
     if !tx_digests_match {
-        return Err(
-            "final transaction effecting data differs from the transaction authorized by its signatures",
-        );
+        return Err(crate::mint::AssemblyError::SighashMismatch);
     }
 
     let tx = final_tx
         .freeze()
-        .map_err(|_| "failed to freeze transaction")?;
+        .map_err(|_| crate::mint::AssemblyError::Serialize)?;
     let txid = tx.txid();
     let mut tx_bytes = Vec::new();
     tx.write(&mut tx_bytes)
-        .map_err(|_| "failed to serialize tx")?;
+        .map_err(|_| crate::mint::AssemblyError::Serialize)?;
 
     Ok((txid, hex::encode(tx_bytes)))
 }
@@ -324,7 +322,7 @@ pub fn assemble_and_sign_transaction(
     registry_keys: &RegistryKeys,
     transparent_outputs: Option<&[TransparentOutput]>,
     target_height: BlockHeight,
-) -> Result<String, &'static str> {
+) -> Result<String, crate::mint::AssemblyError> {
     assemble_v6_transaction(
         None,
         Some(unproven_bundle),

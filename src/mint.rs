@@ -528,3 +528,68 @@ pub fn check_confirmations(ops: &mut OperationalState, txids: &[TxId], height: B
         .collect();
     for txid in confirmed_txids { ops.submissions.remove(&txid); }
 }
+
+// ===========================================================================
+// Assembly error type
+// ===========================================================================
+
+/// Typed error for transaction assembly, signing, and submission.
+///
+/// Replaces `&'static str` returns throughout the assembly path. Follows the
+/// upstream convention of typed error enums (cf. `orchard::builder::SpendError`,
+/// `zcash_keys::keys::DerivationError`).
+#[derive(Debug, thiserror::Error)]
+pub enum AssemblyError {
+    #[error("no commitment tree anchor available")]
+    NoAnchor,
+    #[error("witness not found for note")]
+    NoWitness,
+    #[error("note not found in wallet")]
+    NoteNotFound,
+    #[error("note is from the wrong account")]
+    WrongAccount,
+    #[error("insufficient available notes for funding")]
+    InsufficientFunds,
+    #[error("note value insufficient for the required fee")]
+    InsufficientValue,
+    #[error("builder creation failed")]
+    BuilderCreation,
+    #[error("builder add operation failed")]
+    BuilderAdd,
+    #[error("bundle build produced no bundle")]
+    BuildFailed,
+    #[error("proof creation failed")]
+    ProofCreation,
+    #[error("proof verification failed before broadcast")]
+    ProofVerification,
+    #[error("signing authorization failed")]
+    SigningAuth,
+    #[error("transaction serialization failed")]
+    Serialize,
+    #[error("NU6.3 is not active at the target height")]
+    Nu63NotActive,
+    #[error("wrong bundle version for the pool")]
+    WrongVersion,
+    #[error("orchard and ironwood circuit versions disagree")]
+    CircuitMismatch,
+    #[error("action count overflow")]
+    ActionOverflow,
+    #[error("ZIP-317 fee computation overflow")]
+    FeeOverflow,
+    #[error("value arithmetic overflow")]
+    ValueOverflow,
+    #[error("name became unavailable before assembly")]
+    NameUnavailable,
+    #[error("request predecessor commitment does not match Registry tip")]
+    PredecessorMismatch,
+    #[error("claims do not use OTPs")]
+    ClaimNoOtp,
+    #[error("controller UA has no Orchard receiver")]
+    NoOrchardReceiver,
+    #[error("failed to encode memo")]
+    MemoEncode,
+    #[error("UFVK not found in wallet")]
+    UfvkNotFound,
+    #[error("sighash mismatch: effecting data changed after authorization")]
+    SighashMismatch,
+}

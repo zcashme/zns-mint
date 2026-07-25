@@ -52,7 +52,7 @@ pub fn assemble_replenishment(
     anchor_height: BlockHeight,
     target_height: BlockHeight,
     excluded: &std::collections::BTreeSet<orchard::note::Rho>,
-) -> Result<ReplenishAssembly, &'static str> {
+) -> Result<ReplenishAssembly, crate::mint::AssemblyError> {
     use rand::rngs::OsRng;
     use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
     use zcash_protocol::consensus::MAIN_NETWORK;
@@ -93,7 +93,7 @@ pub fn assemble_replenishment(
                 ironwood_actions, // ironwood_action_count
             )
             .map(Zatoshis::into_u64)
-            .map_err(|_| "ZIP-317 fee computation overflow")?;
+            .map_err(|_| crate::mint::AssemblyError::FeeOverflow)?;
 
         let needed = funding_total + fee;
         if total_selected >= needed {
@@ -112,7 +112,7 @@ pub fn assemble_replenishment(
             .min_by_key(|n| n.note.value().inner());
 
         let Some(note_ref) = candidate else {
-            return Err("insufficient Treasury notes for replenishment");
+            return Err(crate::mint::AssemblyError::InsufficientFunds);
         };
 
         let val = note_ref.note.value().inner();
@@ -127,7 +127,7 @@ pub fn assemble_replenishment(
         .orchard_anchor(anchor_height)
         .ok()
         .flatten()
-        .ok_or("no orchard anchor at accepted anchor height")?;
+        .ok_or(crate::mint::AssemblyError::NoAnchor)?;
 
     let orchard_version = orchard::bundle::BundleVersion::orchard_v3();
     let orchard_flags = orchard_version.default_flags();
@@ -137,18 +137,18 @@ pub fn assemble_replenishment(
         orchard_flags,
         orchard_anchor.into(),
     )
-    .map_err(|_| "failed to create orchard builder")?;
+    .map_err(|_| crate::mint::AssemblyError::BuilderCreation)?;
 
     for (note, position, _) in &funding_notes {
         let merkle_path = wallet
             .orchard_witness(*position, anchor_height)
             .ok()
             .flatten()
-            .ok_or("witness for treasury funding note not found")?;
+            .ok_or(crate::mint::AssemblyError::NoWitness)?;
 
         orchard_builder
             .add_spend(treasury_fvk.clone(), note.clone(), merkle_path.into())
-            .map_err(|_| "failed to add treasury spend")?;
+            .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
 
         reserved_notes.push(NoteLocator::orchard(TREASURY_ACCOUNT, note.rho()));
     }
@@ -164,20 +164,20 @@ pub fn assemble_replenishment(
                 orchard::value::NoteValue::from_raw(change_value),
                 change_memo,
             )
-            .map_err(|_| "failed to add orchard change output")?;
+            .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
     }
 
     let (orchard_bundle, _) = orchard_builder
         .build::<ZatBalance>(&mut OsRng)
-        .map_err(|_| "failed to build orchard bundle")?
-        .ok_or("orchard builder produced no bundle")?;
+        .map_err(|_| crate::mint::AssemblyError::BuildFailed)?
+        .ok_or(crate::mint::AssemblyError::BuildFailed)?;
 
     // 3. Build the Ironwood bundle (output-only: fee notes to Registry).
     let ironwood_anchor = wallet
         .latest_ironwood_anchor()
         .ok()
         .flatten()
-        .ok_or("no ironwood anchor available")?;
+        .ok_or(crate::mint::AssemblyError::NoAnchor)?;
 
     let registry_fvk = {
         // The Registry FVK is needed to derive the Registry's address.
@@ -187,10 +187,10 @@ pub fn assemble_replenishment(
         // Actually, the Wallet has the Registry's UFVK. We can get it from there.
         let registry_ufvk = wallet
             .ufvk_for(REGISTRY_ACCOUNT)
-            .ok_or("Registry UFVK not found in wallet")?;
+            .ok_or(crate::mint::AssemblyError::UfvkNotFound)?;
         registry_ufvk
             .orchard()
-            .ok_or("Registry UFVK has no Orchard component")?
+            .ok_or(crate::mint::AssemblyError::UfvkNotFound)?
             .clone()
     };
     let registry_address = registry_fvk.address_at(0u32, orchard::keys::Scope::External);
@@ -203,7 +203,7 @@ pub fn assemble_replenishment(
         ironwood_flags,
         ironwood_anchor.into(),
     )
-    .map_err(|_| "failed to create ironwood builder")?;
+    .map_err(|_| crate::mint::AssemblyError::BuilderCreation)?;
 
     for _ in 0..plan.output_count {
         let mut fee_memo = [0u8; 512];
@@ -215,13 +215,13 @@ pub fn assemble_replenishment(
                 orchard::value::NoteValue::from_raw(plan.output_value),
                 fee_memo,
             )
-            .map_err(|_| "failed to add ironwood funding output")?;
+            .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
     }
 
     let (ironwood_bundle, _) = ironwood_builder
         .build::<ZatBalance>(&mut OsRng)
-        .map_err(|_| "failed to build ironwood bundle")?
-        .ok_or("ironwood builder produced no bundle")?;
+        .map_err(|_| crate::mint::AssemblyError::BuildFailed)?
+        .ok_or(crate::mint::AssemblyError::BuildFailed)?;
 
     // 4. Prove, sign, and serialize both bundles in one V6 transaction.
     // The Orchard bundle is signed by the Treasury; the Ironwood bundle is

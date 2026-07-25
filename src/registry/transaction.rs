@@ -64,7 +64,7 @@ fn registry_fee(
     funding_spends: usize,
     extra_outputs: usize,
     has_change: bool,
-) -> Result<u64, &'static str> {
+) -> Result<u64, crate::mint::AssemblyError> {
     use orchard::builder::BundleType;
     use orchard::bundle::BundleVersion;
 
@@ -78,7 +78,7 @@ fn registry_fee(
             total_outputs,
         )
         
-        .map_err(|_| "Registry action count overflow")?;
+        .map_err(|_| crate::mint::AssemblyError::ActionOverflow)?;
     FeeRule::standard()
         .fee_required(
             &zcash_protocol::consensus::MAIN_NETWORK,
@@ -91,7 +91,7 @@ fn registry_fee(
             actions,
         )
         .map(Zatoshis::into_u64)
-        .map_err(|_| "Registry ZIP-317 fee computation overflow")
+        .map_err(|_| crate::mint::AssemblyError::FeeOverflow)
 }
 
 /// Selects the exact ordinary Registry notes required to fund `request` at
@@ -102,7 +102,7 @@ pub fn select_registry_fee_inputs(
     target_height: BlockHeight,
     excluded: &BTreeSet<NoteLocator>,
     extra_outputs: usize,
-) -> Result<RegistryFeeInputs, &'static str> {
+) -> Result<RegistryFeeInputs, crate::mint::AssemblyError> {
     let lifecycle_spends = usize::from(request.action() != Action::Claim);
     let mut candidates: Vec<_> = wallet
         .ironwood_notes_for(crate::mint::REGISTRY_ACCOUNT)
@@ -139,11 +139,11 @@ pub fn select_registry_fee_inputs(
         };
         total = total
             .checked_add(*value)
-            .ok_or("Registry fee input value overflow")?;
+            .ok_or(crate::mint::AssemblyError::ValueOverflow)?;
         locators.insert(*locator);
     }
 
-    Err("insufficient available Registry fee notes")
+    Err(crate::mint::AssemblyError::InsufficientFunds)
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +177,7 @@ pub fn build_transaction(
         orchard::builder::InProgress<orchard::builder::Unproven, orchard::builder::Unauthorized>,
         zcash_protocol::value::ZatBalance,
     >,
-    &'static str,
+    crate::mint::AssemblyError,
 > {
     use orchard::builder::BundleType;
     use orchard::bundle::BundleVersion;
@@ -188,7 +188,7 @@ pub fn build_transaction(
         .ironwood_anchor(anchor_height)
         .ok()
         .flatten()
-        .ok_or("no ironwood anchor at accepted anchor height")?;
+        .ok_or(crate::mint::AssemblyError::NoAnchor)?;
 
     // 2. Initialize the Ironwood Builder
     let bundle_version = BundleVersion::ironwood_v3();
@@ -196,7 +196,7 @@ pub fn build_transaction(
 
     let mut builder =
         orchard::builder::Builder::new(BundleType::DEFAULT, bundle_version, flags, anchor.into())
-            .map_err(|_| "failed to create builder")?;
+            .map_err(|_| crate::mint::AssemblyError::BuilderCreation)?;
 
     let fvk = orchard::keys::FullViewingKey::from(registry_keys.orchard_spending_key());
     let address = fvk.address_at(0u32, orchard::keys::Scope::External);
@@ -213,7 +213,7 @@ pub fn build_transaction(
             .tip(name)
             .is_some_and(|tip| tip.action != Action::Release)
     {
-        return Err("claim name became unavailable before assembly");
+        return Err(crate::mint::AssemblyError::NameUnavailable);
     }
 
     // 3. Spend previous Name Note if updating or releasing
@@ -221,19 +221,19 @@ pub fn build_transaction(
     // The previous Name Note is the exact validated Registry tip. It is not an
     // ordinary wallet note and is never selected by parsing arbitrary memos.
     if action == Action::Update || action == Action::Release {
-        let tip = registry.tip(name).ok_or("tip not found in registry")?;
-        if tip.commitment != prev_commitment.ok_or("request has no predecessor commitment")? {
-            return Err("request predecessor does not match Registry tip");
+        let tip = registry.tip(name).ok_or(crate::mint::AssemblyError::NoteNotFound)?;
+        if tip.commitment != prev_commitment.ok_or(crate::mint::AssemblyError::PredecessorMismatch)? {
+            return Err(crate::mint::AssemblyError::PredecessorMismatch);
         }
         let previous = tip
             .received()
-            .ok_or("Registry tip has no validated Name Note")?;
+            .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
 
         let merkle_path = wallet
             .ironwood_witness(previous.locator().position, anchor_height)
             .ok()
             .flatten()
-            .ok_or("witness for previous note not found")?;
+            .ok_or(crate::mint::AssemblyError::NoWitness)?;
 
         builder
             .add_validated_zns_spend(
@@ -241,14 +241,14 @@ pub fn build_transaction(
                 previous.validated().clone(),
                 merkle_path.into(),
             )
-            .map_err(|_| "failed to add validated zns spend")?;
+            .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
     }
 
     // 4. Create new ZNS output
     let (new_rcm, new_psi) = crate::mint::zns_psi_rcm(name, action, ua_str, prev_commitment);
 
     let memo = crate::mint::encode_name_note(name, action, ua_str, prev_commitment)
-        .ok_or("failed to encode name note memo")?;
+        .ok_or(crate::mint::AssemblyError::MemoEncode)?;
 
     let value = orchard::value::NoteValue::from_raw(0);
 
@@ -261,7 +261,7 @@ pub fn build_transaction(
             new_rcm,
             new_psi,
         )
-        .map_err(|_| "failed to add zns output")?;
+        .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
 
     // 5. Resolve only the exact fee notes retained in the caller's plan.
     let committed_spends = builder.spends().len();
@@ -270,16 +270,16 @@ pub fn build_transaction(
     for locator in &fee_inputs.locators {
         let note = wallet
             .ironwood_note(*locator)
-            .ok_or("selected Registry fee note no longer exists")?;
+            .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
         if note.account_id != crate::mint::REGISTRY_ACCOUNT
             || crate::registry::liquidity::classify_registry_ironwood_note(note)
                 != crate::registry::liquidity::RegistryNoteClass::Fee
         {
-            return Err("selected input is not an ordinary Registry fee note");
+            return Err(crate::mint::AssemblyError::WrongAccount);
         }
         total_funded = total_funded
             .checked_add(note.note.value().inner())
-            .ok_or("Registry fee input value overflow")?;
+            .ok_or(crate::mint::AssemblyError::ValueOverflow)?;
         funding_notes.push(note.clone());
     }
 
@@ -293,7 +293,7 @@ pub fn build_transaction(
         let fee_with_change =
             registry_fee(target_height, committed_spends, funding_spends, extra_outputs, true)?;
         if total_funded < fee_with_change {
-            return Err("selected Registry fee notes are insufficient for final shape");
+            return Err(crate::mint::AssemblyError::InsufficientValue);
         }
         (fee_with_change, total_funded - fee_with_change)
     };
@@ -304,11 +304,11 @@ pub fn build_transaction(
             .ironwood_witness(prev_note.position, anchor_height)
             .ok()
             .flatten()
-            .ok_or("witness for funding note not found")?;
+            .ok_or(crate::mint::AssemblyError::NoWitness)?;
 
         builder
             .add_spend(fvk.clone(), prev_note.note, merkle_path.into())
-            .map_err(|_| "failed to add fee spend")?;
+            .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
     }
 
     // Add the refund output if present (always present for atomic claims).
@@ -323,7 +323,7 @@ pub fn build_transaction(
                 orchard::value::NoteValue::from_raw(refund_value),
                 refund_memo,
             )
-            .map_err(|_| "failed to add refund output")?;
+            .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
     }
 
     if change > 0 {
@@ -340,14 +340,14 @@ pub fn build_transaction(
                 orchard::value::NoteValue::from_raw(change),
                 change_memo,
             )
-            .map_err(|_| "failed to add change output")?;
+            .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
     }
 
     // 6. Build and verify value balance
     let (bundle, _meta) = builder
         .build::<zcash_protocol::value::ZatBalance>(&mut OsRng)
-        .map_err(|_| "failed to build transaction")?
-        .ok_or("builder produced no bundle")?;
+        .map_err(|_| crate::mint::AssemblyError::BuildFailed)?
+        .ok_or(crate::mint::AssemblyError::BuildFailed)?;
 
     // Assert the bundle's value balance equals the intended fee. The Ironwood
     // value balance is (sum of spend values) - (sum of output values). For a

@@ -1,5 +1,12 @@
 # Zcash I/O changelog
 
+## 2026-07-25 — Mainnet genesis hash constant
+
+- Added `MAINNET_GENESIS_HASH`, a protocol-constant `BlockHash` in internal
+  byte order, used by the boot-time network-identity verification.
+- Added a round-trip test proving the constant matches the well-known display
+  form `00040fe8...973dce08`.
+
 ## 2026-07-24 — Checked exact canonical tip
 
 - Added `CanonicalTip`, a private-field height/hash pair parsed from one

@@ -75,7 +75,7 @@ fn build_treasury_orchard_bundle(
         orchard::Bundle<InProgress<Unproven, Unauthorized>, ZatBalance>,
         u64,
     ),
-    &'static str,
+    crate::mint::AssemblyError,
 > {
     use rand::rngs::OsRng;
 
@@ -83,22 +83,22 @@ fn build_treasury_orchard_bundle(
         .orchard_anchor(anchor_height)
         .ok()
         .flatten()
-        .ok_or("no orchard anchor at accepted anchor height")?;
+        .ok_or(crate::mint::AssemblyError::NoAnchor)?;
 
     let bundle_version = BundleVersion::orchard_v3();
     let flags = bundle_version.default_flags();
     let mut builder =
         orchard::builder::Builder::new(BundleType::DEFAULT, bundle_version, flags, anchor.into())
-            .map_err(|_| "failed to create orchard builder")?;
+            .map_err(|_| crate::mint::AssemblyError::BuilderCreation)?;
 
     let fvk = orchard::keys::FullViewingKey::from(treasury_keys.orchard_spending_key());
 
     let (note, position, payment_value) = {
         let note = wallet
             .orchard_note(payment_locator)
-            .ok_or("payment note not found in wallet")?;
+            .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
         if note.account_id != crate::mint::TREASURY_ACCOUNT {
-            return Err("payment note is not a Treasury note");
+            return Err(crate::mint::AssemblyError::WrongAccount);
         }
         (note.note.clone(), note.position, note.note.value().inner())
     };
@@ -107,16 +107,16 @@ fn build_treasury_orchard_bundle(
         .orchard_witness(position, anchor_height)
         .ok()
         .flatten()
-        .ok_or("witness for payment note not found")?;
+        .ok_or(crate::mint::AssemblyError::NoWitness)?;
 
     builder
         .add_spend(fvk, note, merkle_path.into())
-        .map_err(|_| "failed to add treasury payment spend")?;
+        .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
 
     let (bundle, _meta) = builder
         .build::<ZatBalance>(&mut OsRng)
-        .map_err(|_| "failed to build orchard bundle")?
-        .ok_or("orchard builder produced no bundle")?;
+        .map_err(|_| crate::mint::AssemblyError::BuildFailed)?
+        .ok_or(crate::mint::AssemblyError::BuildFailed)?;
 
     Ok((bundle, payment_value))
 }
@@ -150,7 +150,7 @@ pub fn assemble_atomic_claim(
     price: u64,
     anchor_height: BlockHeight,
     target_height: BlockHeight,
-) -> Result<(zcash_primitives::transaction::TxId, String, u64), &'static str> {
+) -> Result<(zcash_primitives::transaction::TxId, String, u64), crate::mint::AssemblyError> {
     // 1. Build the Treasury Orchard bundle (payment spend, no outputs).
     let (orchard_bundle, payment_value) = build_treasury_orchard_bundle(
         wallet,
@@ -160,7 +160,7 @@ pub fn assemble_atomic_claim(
     )?;
 
     if payment_value < price {
-        return Err("payment value is below the claim price");
+        return Err(crate::mint::AssemblyError::InsufficientValue);
     }
 
     let refund_value = payment_value - price;

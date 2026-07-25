@@ -23,3 +23,12 @@ Tracks design-relevant changes to `docs/harness/invariants.md`.
 - This is fork-level evidence only; the mint scanner still needs to consume the
   facade and enforce Name Note value, recipient, transition, and tree-position
   semantics before Registry state can be treated as validated.
+
+## 2026-07-25 — Origin checkpoint identity via genesis + measurement
+
+- Replaced the per-block hash pin at `ironwood_activation_height - 1` with a
+  mainnet genesis block hash check plus the existing SEV-SNP container-image
+  measurement as the canonical-chain identity guarantee.
+- Updated `SYNC-002`: the origin checkpoint hash is no longer compiled into
+  the binary; it is fetched from the verified mainnet Zebra node and stored
+  in metadata.
