@@ -1,9 +1,9 @@
 id,state,evidence,missing_evidence,last_verified_revision
-SEC-001,implemented,"src/boot.rs:66-95; src/boot.rs:421-489; src/lib.rs:3-8","attestation-boundary review; negative surface tests; production deployment test",worktree-2026-07-25
-SEC-002,implemented,"src/boot.rs:421-489; src/lib.rs:3-8","wrong-measurement and launch-policy evidence; input-surface scan",worktree-2026-07-25
-SEC-003,implemented,"src/lib.rs:3-8; src/boot.rs:435-442","remove environment/config dependency from repository harness",worktree-2026-07-25
-SEC-004,implemented,"src/boot.rs:435-480; src/key.rs:82-92","redacted secret wrappers and capture tests",worktree-2026-07-25
-SEC-005,implemented,"src/boot.rs:421-489; src/key.rs:82-92","observable failure-path zeroization evidence",worktree-2026-07-25
+SEC-001,implemented,"src/boot.rs:89; src/boot.rs:387-598; src/lib.rs:3-8","attestation-boundary review; negative surface tests; production deployment test",worktree-2026-07-25
+SEC-002,implemented,"src/boot.rs:495-540; src/lib.rs:3-8","wrong-measurement and launch-policy evidence; input-surface scan",worktree-2026-07-25
+SEC-003,implemented,"src/lib.rs:3-8; src/boot.rs:485-490","remove environment/config dependency from repository harness",worktree-2026-07-25
+SEC-004,implemented,"src/boot.rs:394-419; src/key.rs:82-92","redacted secret wrappers and capture tests",worktree-2026-07-25
+SEC-005,implemented,"src/boot.rs:495-526; src/key.rs:82-92","observable failure-path zeroization evidence",worktree-2026-07-25
 SEC-006,implemented,"src/lib.rs:3-8; Cargo.toml:7-10","release-artifact feature rejection gate",worktree-2026-07-25
 SEC-007,sourced,"docs/harness/invariants.md:114-115","synthetic-fixture provenance and harness review",35dad3d
 KEY-001,implemented,"src/mint.rs:15-16; src/boot.rs:87-107","upstream derivation vector and static constant gate",35dad3d
