@@ -921,34 +921,21 @@ async fn execute(
         match result {
             Ok((kind, txid, hex, reserved_notes)) => {
                 match rpc.send(&hex).await {
-                    Ok(_) => {
-                        tracing::info!(txid = %txid, kind = kind.as_str(), "transaction submitted");
-                        let sub = Submission {
-                            kind, txid, submit_height: cursor_height, expiry_height,
-                            reserved_notes, confirmed_at: None,
-                        };
-                        new_subs.push((sub.kind, sub.txid));
-                        ops.submissions.insert(sub.txid, sub.clone());
-                        // Update excluded set so subsequent work items
-                        // don't select the same notes.
-                        for loc in &sub.reserved_notes {
-                            excluded.insert(*loc);
-                        }
-
+                    Ok(_) => submit_tx(kind, txid, reserved_notes, cursor_height, expiry_height,
+                        ops, &mut excluded, &mut new_subs),
+                    Err(TransportError::Rpc(ref rpc_err)) if rpc_err.is_tx_already_in_chain() => {
+                        tracing::info!(txid = %txid, kind = kind.as_str(), "already in chain; tracking as pending");
+                        submit_tx(kind, txid, reserved_notes, cursor_height, expiry_height,
+                            ops, &mut excluded, &mut new_subs);
+                    }
+                    Err(e) if e.is_retryable() => {
+                        tracing::warn!(error = %e, kind = kind.as_str(), "submission network error; will retry");
+                        metrics::inc_spend_error("submit_retryable");
                     }
                     Err(e) => {
-                        if e.is_retryable() {
-                            tracing::warn!(error = %e, kind = kind.as_str(), "submission network error; will retry");
-                            metrics::inc_spend_error("submit_retryable");
-                        } else {
-                            tracing::warn!(error = %e, kind = kind.as_str(), "submission rejected");
-                            metrics::inc_spend_error("submit_rejected");
-                            // RPC rejection: the transaction is bad. Release
-                            // reserved notes so they're available next cycle.
-                            for loc in &reserved_notes {
-                                excluded.remove(loc);
-                            }
-                        }
+                        tracing::warn!(error = %e, kind = kind.as_str(), "submission rejected");
+                        metrics::inc_spend_error("submit_rejected");
+                        for loc in &reserved_notes { excluded.remove(loc); }
                     }
                 }
             }
@@ -960,6 +947,25 @@ async fn execute(
     }
 
     new_subs
+}
+
+
+/// Records a submission and updates the excluded set.
+fn submit_tx(
+    kind: SubmissionKind, txid: TxId, reserved_notes: Vec<NoteLocator>,
+    cursor_height: BlockHeight, expiry_height: BlockHeight,
+    ops: &mut OperationalState, excluded: &mut BTreeSet<NoteLocator>,
+    new_subs: &mut Vec<(SubmissionKind, TxId)>,
+) {
+    let sub = Submission {
+        kind, txid, submit_height: cursor_height, expiry_height,
+        reserved_notes, confirmed_at: None,
+    };
+    new_subs.push((sub.kind, sub.txid));
+    ops.submissions.insert(sub.txid, sub.clone());
+    for loc in &sub.reserved_notes {
+        excluded.insert(*loc);
+    }
 }
 
 /// Checks pending submissions against the latest block's txids.
