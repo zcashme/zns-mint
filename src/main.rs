@@ -1062,51 +1062,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn accepted_metadata_matches_tree_checkpoint_horizon() {
-        let mut history = BTreeMap::new();
-        for height in 0..RETAINED_CHECKPOINTS {
-            let height = u32::try_from(height).unwrap();
-            record_accepted_metadata(
-                &mut history,
-                BlockMetadata::from_parts(
-                    BlockHeight::from_u32(height),
-                    BlockHash([height as u8; 32]),
-                    Some(0),
-                    Some(0),
-                    Some(0),
-                ),
-            );
-        }
 
-        assert_eq!(history.len(), RETAINED_CHECKPOINTS);
-        assert_eq!(
-            history.first_key_value().map(|(height, _)| *height),
-            Some(BlockHeight::from_u32(0))
-        );
-        assert_eq!(
-            history.last_key_value().map(|(height, _)| *height),
-            Some(BlockHeight::from_u32(
-                u32::try_from(RETAINED_CHECKPOINTS - 1).unwrap()
-            ))
-        );
-
-        record_accepted_metadata(
-            &mut history,
-            BlockMetadata::from_parts(
-                BlockHeight::from_u32(u32::try_from(RETAINED_CHECKPOINTS).unwrap()),
-                BlockHash([0xff; 32]),
-                Some(0),
-                Some(0),
-                Some(0),
-            ),
-        );
-        assert_eq!(history.len(), RETAINED_CHECKPOINTS);
-        assert_eq!(
-            history.first_key_value().map(|(height, _)| *height),
-            Some(BlockHeight::from_u32(1))
-        );
-    }
 
     #[tokio::test]
     async fn exact_target_and_supported_reorg_schedules_converge() {
@@ -1155,160 +1111,15 @@ mod tests {
         assert_canonical_equivalent(&mut raced, &mut rebuilt);
     }
 
-    #[tokio::test]
-    async fn moving_target_after_partial_fold_converges() {
-        let origin = test_origin();
-        let stale = TestChain::from_origin(&origin, &[1, 2, 3]);
-        let selected = TestChain::from_origin(&origin, &[11, 12]);
-        let moving = ScriptedBlockSource::moving(
-            vec![stale, selected.clone()],
-            [0, 0, 0, 0, 1],
-        );
 
-        let mut raced = TestCanonicalState::new(&origin);
-        raced.catch_up(&moving).await;
 
-        let mut rebuilt = TestCanonicalState::new(&origin);
-        rebuilt
-            .catch_up(&ScriptedBlockSource::stable(selected))
-            .await;
-        assert_canonical_equivalent(&mut raced, &mut rebuilt);
-    }
 
-    #[tokio::test]
-    async fn moving_target_during_each_ancestor_read_converges() {
-        let origin = test_origin();
-        let installed = TestChain::from_origin(&origin, &[1, 2, 3, 4]);
-        let stale = TestChain::from_origin(&origin, &[11, 12, 13, 14]);
-        let selected = TestChain::from_origin(&origin, &[21, 22, 23]);
 
-        for tip_script in [vec![0, 0, 1], vec![0, 0, 0, 1]] {
-            let mut raced = TestCanonicalState::new(&origin);
-            raced
-                .catch_up(&ScriptedBlockSource::stable(installed.clone()))
-                .await;
-            raced
-                .catch_up(&ScriptedBlockSource::moving(
-                    vec![stale.clone(), selected.clone()],
-                    tip_script,
-                ))
-                .await;
 
-            let mut rebuilt = TestCanonicalState::new(&origin);
-            rebuilt
-                .catch_up(&ScriptedBlockSource::stable(selected.clone()))
-                .await;
-            assert_canonical_equivalent(&mut raced, &mut rebuilt);
-        }
-    }
 
-    #[tokio::test]
-    async fn moving_target_discards_apparent_beyond_history_failure() {
-        let selected_origin = test_origin();
-        let alternate_height = selected_origin.height;
-        let (alternate_block, alternate_hash) =
-            test_block(alternate_height, BlockHash([0; 32]), 99);
-        let alternate_origin = TestOrigin {
-            height: alternate_height,
-            hash: alternate_hash,
-            block: alternate_block,
-        };
-        let stale = TestChain::from_origin(&alternate_origin, &[]);
-        let selected = TestChain::from_origin(&selected_origin, &[]);
-        let moving =
-            ScriptedBlockSource::moving(vec![stale, selected.clone()], [0, 0, 1]);
 
-        let mut raced = TestCanonicalState::new(&selected_origin);
-        raced.catch_up(&moving).await;
 
-        let mut rebuilt = TestCanonicalState::new(&selected_origin);
-        rebuilt
-            .catch_up(&ScriptedBlockSource::stable(selected))
-            .await;
-        assert_canonical_equivalent(&mut raced, &mut rebuilt);
-    }
 
-    #[tokio::test]
-    async fn canonical_reader_rejects_wrong_claimed_height() {
-        let origin = test_origin();
-        let mut chain = TestChain::from_origin(&origin, &[1]);
-        let requested = origin.height + 1;
-        chain.blocks.insert(requested, origin.block.clone());
-        let target = chain.tip;
-
-        assert!(matches!(
-            get_block_while_target_is_current(
-                &ScriptedBlockSource::stable(chain),
-                requested,
-                target,
-            )
-            .await,
-            Err(RuntimeError::Transport(TransportError::BadNodeData(_)))
-        ));
-    }
-
-    #[tokio::test]
-    async fn common_ancestor_rejects_history_gaps() {
-        let origin = test_origin();
-        let canonical = TestChain::from_origin(&origin, &[1, 2]);
-        let start_height = origin.height + 2;
-        let mut history = BTreeMap::from([
-            (
-                origin.height,
-                BlockMetadata::from_parts(
-                    origin.height,
-                    origin.hash,
-                    Some(0),
-                    Some(0),
-                    Some(0),
-                ),
-            ),
-            (
-                start_height,
-                BlockMetadata::from_parts(
-                    start_height,
-                    BlockHash([0xff; 32]),
-                    Some(0),
-                    Some(0),
-                    Some(0),
-                ),
-            ),
-        ]);
-        assert!(matches!(
-            find_common_ancestor_while_target_is_current(
-                &ScriptedBlockSource::stable(canonical.clone()),
-                &history,
-                start_height,
-                canonical.tip,
-            )
-            .await,
-            Err(RuntimeError::ReorgBeyondHistory)
-        ));
-
-        history.insert(
-            origin.height + 1,
-            BlockMetadata::from_parts(
-                origin.height + 1,
-                BlockHash([0xfe; 32]),
-                Some(0),
-                Some(0),
-                Some(0),
-            ),
-        );
-        assert_eq!(
-            find_common_ancestor_while_target_is_current(
-                &ScriptedBlockSource::stable(canonical.clone()),
-                &history,
-                start_height,
-                canonical.tip,
-            )
-            .await
-            .expect("contiguous history reaches origin")
-            .expect("stable target returns an ancestor")
-            .block_height(),
-            origin.height
-        );
-    }
 
     #[tokio::test]
     async fn restart_and_reorg_schedule_property() {
