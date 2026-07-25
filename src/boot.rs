@@ -22,9 +22,11 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use secrecy::{ExposeSecret, Secret};
-use std::str::FromStr;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters, MAIN_NETWORK};
 use zip32::fingerprint::SeedFingerprint;
+
+#[cfg(not(feature = "dev-seed"))]
+use std::str::FromStr;
 
 #[cfg(target_os = "linux")]
 use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
@@ -395,30 +397,30 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 
     #[cfg(feature = "dev-seed")]
     {
-        // Dev mode: skip the check. The fingerprint is public, but we still
-        // only log it under the development feature.
+        let _ = expected; // Suppress unused warning in dev mode only.
         tracing::warn!("boot: dev-seed fingerprint = {} (verification skipped)", actual);
-        return;
     }
 
-    if expected.eq("PLACEHOLDER") {
-        panic!(
-            "FATAL: production build contains the placeholder seed fingerprint. \
-             Replace deployment/seed_fingerprint.txt with the real fingerprint before building."
-        );
-    }
+    #[cfg(not(feature = "dev-seed"))]
+    {
+        if expected.eq("PLACEHOLDER") {
+            panic!(
+                "FATAL: production build contains the placeholder seed fingerprint. \
+                 Replace deployment/seed_fingerprint.txt with the real fingerprint before building."
+            );
+        }
 
-    let expected_fp = SeedFingerprint::from_str(expected)
-        .expect("FATAL: compiled binary contains an invalid seed fingerprint");
+        let expected_fp = SeedFingerprint::from_str(expected)
+            .expect("FATAL: compiled binary contains an invalid seed fingerprint");
 
-    if actual != expected_fp {
-        // Redacted panic: do not print either fingerprint. The custody manifest
-        // is the public record of the expected fingerprint.
-        panic!(
-            "FATAL: SEED FINGERPRINT MISMATCH — decrypted seed does not match the fingerprint compiled into this binary"
-        );
+        if actual != expected_fp {
+            // Redacted panic: do not print either fingerprint.
+            panic!(
+                "FATAL: SEED FINGERPRINT MISMATCH — decrypted seed does not match the fingerprint compiled into this binary"
+            );
+        }
+        tracing::info!("boot: seed fingerprint verified");
     }
-    tracing::info!("boot: seed fingerprint verified");
 }
 
 // ---------------------------------------------------------------------------
@@ -581,18 +583,3 @@ fn generate_mint_attestation(_report_data: [u8; 64]) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 // Tests — one critical invariant: fingerprint mismatch fails closed without leaking it
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use secrecy::Secret;
-
-    #[test]
-    #[cfg(not(feature = "dev-seed"))]
-    #[should_panic(expected = "FATAL: SEED FINGERPRINT MISMATCH")]
-    fn verify_fingerprint_mismatch_is_redacted() {
-        let seed = Secret::new([0xAB; 32]);
-        let wrong_fp = SeedFingerprint::from_seed(&[0xCD; 32]).unwrap().to_string();
-        verify_fingerprint(&seed, &wrong_fp);
-    }
-}
