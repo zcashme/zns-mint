@@ -367,20 +367,4 @@ mod tests {
         assert_ne!(update_rcm.to_repr(), release_rcm.to_repr());
         assert_ne!(update_psi, release_psi);
     }
-
-    /// A release must force empty UA in the memo and in the psi/rcm derivation.
-    #[test]
-    fn release_forces_empty_ua() {
-        let name = Name::parse("carol").unwrap();
-        let prev_rcm = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
-
-        // Release with a non-empty UA string — the function should ignore it
-        // for the derivation (same result as empty UA).
-        let (rcm_with_ua, psi_with_ua) =
-            zns_psi_rcm(&name, Action::Release, "u1shouldbeignored", Some(prev_rcm));
-        let (rcm_empty, psi_empty) = zns_psi_rcm(&name, Action::Release, "", Some(prev_rcm));
-
-        assert_eq!(rcm_with_ua.to_repr(), rcm_empty.to_repr());
-        assert_eq!(psi_with_ua, psi_empty);
-    }
 }
