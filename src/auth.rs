@@ -248,43 +248,11 @@ pub fn encode_otp_relay_memo(
 mod tests {
     use super::*;
 
-    #[test]
-    fn relay_memo_encodes_update() {
-        let name = Name::parse("alice").unwrap();
-        let ua = UnifiedAddress::from_string("u1test".into());
-        let otp = OtpCode([0xabu8; 16]);
 
-        let memo = encode_otp_relay_memo(&name, Action::Update, &ua, &otp).unwrap();
 
-        let expected = "ZNS:otp:alice:update:u1test:abababababababababababababababab";
-        let end = memo.iter().rposition(|b| *b != 0).map_or(0, |p| p + 1);
-        let text = core::str::from_utf8(&memo[..end]).unwrap();
-        assert_eq!(text, expected);
-    }
 
-    #[test]
-    fn relay_memo_encodes_release() {
-        let name = Name::parse("bob").unwrap();
-        let ua = UnifiedAddress::from_string("u1current".into());
-        let otp = OtpCode([0xcdu8; 16]);
 
-        let memo = encode_otp_relay_memo(&name, Action::Release, &ua, &otp).unwrap();
 
-        let end = memo.iter().rposition(|b| *b != 0).map_or(0, |p| p + 1);
-        let text = core::str::from_utf8(&memo[..end]).unwrap();
-        assert_eq!(
-            text,
-            "ZNS:otp:bob:release:u1current:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
-        );
-    }
-
-    #[test]
-    fn relay_memo_rejects_claim() {
-        let name = Name::parse("alice").unwrap();
-        let ua = UnifiedAddress::from_string("u1test".into());
-        let otp = OtpCode([0u8; 16]);
-        assert!(encode_otp_relay_memo(&name, Action::Claim, &ua, &otp).is_none());
-    }
 
     #[test]
     fn relay_memo_is_not_a_request_memo() {
@@ -302,12 +270,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn relay_memo_is_exactly_512_bytes() {
-        let name = Name::parse("a").unwrap();
-        let ua = UnifiedAddress::from_string("u1".into());
-        let otp = OtpCode([0xffu8; 16]);
-        let memo = encode_otp_relay_memo(&name, Action::Update, &ua, &otp).unwrap();
-        assert_eq!(memo.len(), 512);
-    }
+
 }

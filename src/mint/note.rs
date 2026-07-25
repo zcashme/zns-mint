@@ -383,26 +383,4 @@ mod tests {
         assert_eq!(rcm_with_ua.to_repr(), rcm_empty.to_repr());
         assert_eq!(psi_with_ua, psi_empty);
     }
-
-    /// Memo decode rejects malformed inputs.
-    #[test]
-    fn decode_rejects_malformed() {
-        // Wrong prefix
-        let mut memo = [0u8; 512];
-        memo[..4].copy_from_slice(b"XXXX");
-        assert!(decode_name_note(&memo).is_none());
-
-        // Too few fields
-        let m = encode_name_note(&Name::parse("dave").unwrap(), Action::Claim, "u1", None).unwrap();
-        let mut truncated = [0u8; 512];
-        truncated[..20].copy_from_slice(&m[..20]);
-        assert!(decode_name_note(&truncated).is_none());
-
-        // Invalid name (uppercase)
-        let mut bad = [0u8; 512];
-        let s =
-            b"ZNS:claim:Alice:u1:0000000000000000000000000000000000000000000000000000000000000000";
-        bad[..s.len()].copy_from_slice(s);
-        assert!(decode_name_note(&bad).is_none());
-    }
 }

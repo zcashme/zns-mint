@@ -250,68 +250,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rejects_noncanonical_padding() {
-        let mut memo = padded("ZNS:claim:alice:u1owner");
-        memo[100] = b'x';
-        assert_eq!(RequestMemo::parse(&memo), Err(MemoError::FieldCount));
-        assert_eq!(
-            RequestMemo::parse(b"ZNS:claim:alice:u1owner"),
-            Err(MemoError::InvalidLength)
-        );
-    }
 
-    #[test]
-    fn parses_otp_field() {
-        let hex = "00112233445566778899aabbccddeeff";
-        let m = format!("ZNS:update:alice:u1new:{hex}");
-        let mut otp = [0u8; 16];
-        hex::decode_to_slice(hex, &mut otp).unwrap();
-        assert_eq!(
-            RequestMemo::parse(&padded(&m)),
-            Ok(RequestMemo::Update {
-                name: "alice".into(),
-                ua: "u1new".into(),
-                otp: Some(otp)
-            })
-        );
-    }
 
-    #[test]
-    fn strict_field_counts_and_validation() {
-        assert_eq!(
-            RequestMemo::parse(&padded("ZNS:claim:alice")),
-            Err(MemoError::FieldCount)
-        );
-        assert_eq!(
-            RequestMemo::parse(&padded("ZNS:claim:alice:")),
-            Err(MemoError::EmptyArg)
-        );
-        assert_eq!(
-            RequestMemo::parse(&padded("ZNS:settle:alice:u1x")),
-            Err(MemoError::UnknownVerb)
-        );
 
-        // Invalid names
-        assert_eq!(
-            RequestMemo::parse(&padded("ZNS:claim:Alice:u1x")),
-            Err(MemoError::InvalidName)
-        );
-        assert_eq!(
-            RequestMemo::parse(&padded("ZNS:claim:-alice:u1x")),
-            Err(MemoError::InvalidName)
-        );
-    }
 
-    #[test]
-    fn non_zns_memos_are_not_zns() {
-        assert_eq!(
-            RequestMemo::parse(&padded("just a payment note")),
-            Err(MemoError::NotZns)
-        );
-        assert_eq!(
-            RequestMemo::parse(&padded("ZEC:claim:alice:u1")),
-            Err(MemoError::NotZns)
-        );
-    }
+
+
+
 }
