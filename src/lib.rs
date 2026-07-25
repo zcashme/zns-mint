@@ -1,4 +1,11 @@
 #![allow(dead_code)]
+
+// Development escape hatches must never reach a production artifact.
+#[cfg(all(feature = "dev-seed", not(debug_assertions)))]
+compile_error!("dev-seed is a development-only feature and must not be enabled in release/production builds");
+#[cfg(all(feature = "pre-nu63-activation", not(debug_assertions)))]
+compile_error!("pre-nu63-activation is a development-only feature and must not be enabled in release/production builds");
+
 pub mod auth;
 pub mod boot;
 pub mod key;
