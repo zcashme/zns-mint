@@ -77,21 +77,12 @@ impl RegistryKeys {
     }
 }
 
+// `UnifiedSpendingKey` has no `Drop`; if upstream ever adds one, the assertion
+// below makes this fail to build instead of silently becoming UB.
+const _: () = assert!(!std::mem::needs_drop::<UnifiedSpendingKey>());
+
 impl Drop for AccountKeys {
     fn drop(&mut self) {
-        // UnifiedSpendingKey doesn't implement Zeroize (upstream limitation),
-        // so we manually zeroize its memory. The individual spending key types
-        // (orchard::keys::SpendingKey is [u8; 32], sapling::ExtendedSpendingKey,
-        // transparent::keys::AccountPrivKey) contain raw key bytes that must not
-        // persist in freed memory.
-        //
-        // SAFETY: We are dropping self.spending, so no other references to it
-        // exist. write_bytes overwrites every byte of the struct with zeros.
-        // This is safe because:
-        // - We own the memory (it's a field of self, which is being dropped)
-        // - No destructors need to run on the zeroed bytes (UnifiedSpendingKey
-        //   has no Drop impl, only #[derive(Clone)])
-        // - The memory is valid and properly aligned (it's a field of self)
         unsafe {
             std::ptr::write_bytes(
                 &mut self.spending as *mut _ as *mut u8,
@@ -99,7 +90,6 @@ impl Drop for AccountKeys {
                 std::mem::size_of::<UnifiedSpendingKey>(),
             );
         }
-        // Prevent the compiler from optimizing away the zeroization.
         std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     }
 }

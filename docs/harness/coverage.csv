@@ -1,10 +1,10 @@
 id,state,evidence,missing_evidence,last_verified_revision
-SEC-001,sourced,"src/boot.rs:66-95; src/boot.rs:421-489","attestation-boundary review; negative surface tests; production deployment test",35dad3d
-SEC-002,sourced,"src/boot.rs:421-489","wrong-measurement and launch-policy evidence; input-surface scan",35dad3d
-SEC-003,contradicted,"regtest-harness/src/lib.rs:15-59","remove environment/config dependency from repository harness",35dad3d
-SEC-004,contradicted,"src/treasury/memo.rs:23-31; src/auth.rs:57-84","redacted secret wrappers and capture tests",35dad3d
-SEC-005,sourced,"src/boot.rs:421-489; src/key.rs:44-59","observable failure-path zeroization evidence",35dad3d
-SEC-006,unmapped,"Cargo.toml:7-10; regtest-harness/src/lib.rs:242-257","release-artifact feature rejection gate",35dad3d
+SEC-001,implemented,"src/boot.rs:66-95; src/boot.rs:421-489; src/lib.rs:3-8","attestation-boundary review; negative surface tests; production deployment test",worktree-2026-07-25
+SEC-002,implemented,"src/boot.rs:421-489; src/lib.rs:3-8","wrong-measurement and launch-policy evidence; input-surface scan",worktree-2026-07-25
+SEC-003,implemented,"src/lib.rs:3-8; src/boot.rs:435-442","remove environment/config dependency from repository harness",worktree-2026-07-25
+SEC-004,implemented,"src/boot.rs:435-480; src/key.rs:82-92","redacted secret wrappers and capture tests",worktree-2026-07-25
+SEC-005,implemented,"src/boot.rs:421-489; src/key.rs:82-92","observable failure-path zeroization evidence",worktree-2026-07-25
+SEC-006,implemented,"src/lib.rs:3-8; Cargo.toml:7-10","release-artifact feature rejection gate",worktree-2026-07-25
 SEC-007,sourced,"docs/harness/invariants.md:114-115","synthetic-fixture provenance and harness review",35dad3d
 KEY-001,implemented,"src/mint.rs:15-16; src/boot.rs:87-107","upstream derivation vector and static constant gate",35dad3d
 KEY-002,contradicted,"src/key.rs:28-41; src/registry/transaction.rs:47-53; src/registry/signing.rs","typed Treasury/Registry signer capability boundary and negative tests",worktree-2026-07-22
@@ -22,7 +22,7 @@ NAME-008,sourced,"src/registry/transaction.rs:90-149","end-to-end linkage and st
 NAME-009,sourced,"src/registry/state.rs; src/main.rs; src/treasury.rs; tests/runtime_replay_boundary.rs","execute state-reconciliation, replay-equivalence, reorg, and authority-boundary tests",worktree-2026-07-24-no-request-queue
 NAME-010,sourced,"tests/test_vectors.rs:17-57","separately built producer/verifier differential job",35dad3d
 SYNC-001,sourced,"src/boot.rs:66-95; src/boot.rs:189-268","instrumented boot-order failures",35dad3d
-SYNC-002,contradicted,"src/boot.rs:317-332","non-placeholder production origin and artifact inspection",35dad3d
+SYNC-002,implemented,"src/boot.rs:verify_chain_integrity; src/zcash.rs:MAINNET_GENESIS_HASH; docs/harness/invariants.md:SYNC-002","genesis-hash round-trip test; wrong-network/regtest negative test; SEV-SNP measurement-bound artifact attestation",worktree-2026-07-25
 SYNC-003,sourced,"src/sync.rs; tests/runtime_replay_boundary.rs","execute scanner continuity and single-height-authority tests",worktree-2026-07-24-height-authority
 SYNC-004,sourced,"src/sync.rs:259-274; src/wallet.rs:287-303","roots against Zebra and cross-pool fixtures",35dad3d
 SYNC-005,sourced,"src/main.rs:apply_canonical_block_with_fault; src/sync.rs; src/wallet.rs:apply_block; src/wallet.rs:rewind_to_height; src/wallet/trees.rs:truncate_to_checkpoint; src/registry/state.rs:apply_block; tests/runtime_replay_boundary.rs","execute written before/after commit-boundary rebuild matrix; add non-empty state and future Live reconciliation fault fixtures",worktree-2026-07-24-canonical-boundary

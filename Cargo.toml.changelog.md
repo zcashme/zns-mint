@@ -2,6 +2,13 @@
 
 Tracks design-relevant dependency and build-configuration changes.
 
+## 2026-07-25 — Production build guards for development escape hatches
+
+- Added `compile_error!` guards in `src/lib.rs` so `dev-seed` and
+  `pre-nu63-activation` cannot be enabled in release builds
+  (`not(debug_assertions)`). Both features exist only for local development
+  and regtest; a production artifact must never include them.
+
 ## 2026-07-22 — Orchard fork compile fix
 
 The pinned `unsafe-zns` Orchard fork revision `34699d38695ad28c37a022155df5420760a29741`

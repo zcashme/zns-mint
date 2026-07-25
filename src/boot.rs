@@ -4,7 +4,8 @@
 //!
 //! 1. **Liveness** — JSON-RPC `getblockchaininfo` proves Zebra is reachable.
 //! 2. **Chain integrity** — gRPC `chain_tip_change` + `get_block` cross-validates
-//!    the tip against JSON-RPC, checks NU5 activation and tip freshness.
+//!    the tip against JSON-RPC, verifies the mainnet genesis block hash,
+//!    checks NU5 activation and tip freshness.
 //! 3. **Seed intake** — SEV-SNP sealed-blob decryption (production) or dev zero
 //!    seed (`dev-seed` feature). Fingerprint verification guards against wrong-seed
 //!    injection.
@@ -21,6 +22,7 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use secrecy::{ExposeSecret, Secret};
+use std::str::FromStr;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters, MAIN_NETWORK};
 use zip32::fingerprint::SeedFingerprint;
 
@@ -82,7 +84,7 @@ impl Boot {
             #[cfg(feature = "dev-seed")]
             KeySource::Dev => Secret::new([0u8; 32]),
         };
-        verify_fingerprint(&seed);
+        verify_fingerprint(&seed, expected_seed_fingerprint());
 
         // 5. Key derivation
         let treasury_keys = key::derive_treasury(&seed);
@@ -215,6 +217,7 @@ async fn check_liveness() -> zcash::BlockchainInfo {
 ///
 /// Verifies:
 /// - gRPC and JSON-RPC agree on tip height and hash (split-brain detection).
+/// - The genesis block hash matches the mainnet constant (network identity).
 /// - Tip is at or after NU5 activation (consensus baseline).
 /// - Tip block's timestamp is within 2 hours of wall clock (stuck-node detection).
 async fn verify_chain_integrity(info: &zcash::BlockchainInfo) -> (ChainClient, BlockHeight) {
@@ -252,8 +255,21 @@ async fn verify_chain_integrity(info: &zcash::BlockchainInfo) -> (ChainClient, B
         "FATAL: split-brain — JSON-RPC tip hash != gRPC tip hash"
     );
 
-    // Fetch and verify the tip block via JSON-RPC since Zebra gRPC doesn't implement get_block
+    // Network identity: Zebra must be on mainnet. The SEV-SNP measurement of
+    // the container image is the primary guarantee; this genesis check is a
+    // cheap secondary guarantee that does not depend on build determinism.
     let rpc = zcash::JsonRpc::new();
+    let genesis = rpc
+        .get_block(BlockHeight::from_u32(0))
+        .await
+        .expect("FATAL: failed to fetch genesis block via JSON-RPC");
+    assert_eq!(
+        genesis.header().hash(),
+        zcash::MAINNET_GENESIS_HASH,
+        "FATAL: genesis block hash mismatch — Zebra is not on mainnet"
+    );
+
+    // Fetch and verify the tip block via JSON-RPC since Zebra gRPC doesn't implement get_block
     let block = rpc
         .get_block(tip_height)
         .await
@@ -336,9 +352,9 @@ pub fn ironwood_activation_height() -> BlockHeight {
 /// exist until Ironwood activates.
 ///
 /// Zebra is the trust root (same TEE). `verify_chain_integrity` already
-/// cross-validates gRPC vs JSON-RPC and checks tip freshness. No hardcoded
-/// hash pinning is needed — the checkpoint hash from `z_gettreestate` is
-/// stored in metadata for reference.
+/// cross-validates gRPC vs JSON-RPC, verifies the mainnet genesis block hash,
+/// and checks tip freshness. No hardcoded origin-hash pinning is needed — the
+/// checkpoint hash from `z_gettreestate` is stored in metadata for reference.
 async fn origin_checkpoint(rpc: &zcash::JsonRpc) -> CheckpointData {
     let checkpoint_height = ironwood_activation_height().saturating_sub(1);
 
@@ -346,16 +362,6 @@ async fn origin_checkpoint(rpc: &zcash::JsonRpc) -> CheckpointData {
         .get_checkpoint(checkpoint_height)
         .await
         .expect("FATAL: failed to fetch origin checkpoint from Zebra");
-
-    #[cfg(not(feature = "pre-nu63-activation"))]
-    {
-        const PINNED_ORIGIN_HASH: [u8; 32] = [0u8; 32]; // TODO: set before mainnet
-        assert_eq!(
-            checkpoint.metadata.block_hash(),
-            zcash_primitives::block::BlockHash(PINNED_ORIGIN_HASH),
-            "FATAL: origin checkpoint hash mismatch — Zebra may be on a different chain"
-        );
-    }
 
     tracing::info!(
         "boot: origin checkpoint at height {}, hash {}",
@@ -370,40 +376,49 @@ async fn origin_checkpoint(rpc: &zcash::JsonRpc) -> CheckpointData {
 // Seed fingerprint verification
 // ---------------------------------------------------------------------------
 
-/// The expected ZIP-32 seed fingerprint.
+/// The expected ZIP-32 seed fingerprint, compiled into the binary.
 ///
-/// In production this is the deployment seed's fingerprint — the constant
-/// that ties the binary to one specific TEE instance. Under `dev-seed` the
-/// zero seed is used and verification is skipped (the fingerprint below is
-/// the zero-seed fingerprint, kept only for reference).
-const EXPECTED_SEED_FINGERPRINT: &str =
-    "zip32seedfp1tnv7fy2xyz8cajfrut5ph7rvj680zwpgu9q8ydk5p3js9x5a0wfqp0khgc";
+/// This is read at compile time from `deployment/seed_fingerprint.txt`. That
+/// file is a deployment artifact, not a runtime config: it must be replaced
+/// with the real seed fingerprint before a production artifact is built. The
+/// placeholder value causes boot to fail closed if it is not replaced.
+static EXPECTED_SEED_FINGERPRINT_RAW: &str =
+    include_str!("../deployment/seed_fingerprint.txt");
 
-fn verify_fingerprint(seed: &Secret<[u8; 32]>) {
+fn expected_seed_fingerprint() -> &'static str {
+    EXPECTED_SEED_FINGERPRINT_RAW.trim()
+}
+
+fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
+    let actual = SeedFingerprint::from_seed(seed.expose_secret())
+        .expect("seed is 32 bytes, within ZIP-32's 32..=252 range");
+
     #[cfg(feature = "dev-seed")]
     {
-        // Dev mode: skip fingerprint check. The zero seed's fingerprint is
-        // only valid for testnet/regtest development.
-        let fp = SeedFingerprint::from_seed(seed.expose_secret())
-            .expect("seed is 32 bytes, within ZIP-32's 32..=252 range");
-        tracing::warn!("boot: dev-seed fingerprint = {} (verification skipped)", fp);
+        // Dev mode: skip the check. The fingerprint is public, but we still
+        // only log it under the development feature.
+        tracing::warn!("boot: dev-seed fingerprint = {} (verification skipped)", actual);
+        return;
     }
 
-    #[cfg(not(feature = "dev-seed"))]
-    {
-        let actual = SeedFingerprint::from_seed(seed.expose_secret())
-            .expect("seed is 32 bytes, within ZIP-32's 32..=252 range");
-
-        assert_eq!(
-            actual.to_string(),
-            EXPECTED_SEED_FINGERPRINT,
-            "FATAL: SEED FINGERPRINT MISMATCH — wrong seed injected into TEE. \
-             expected={}, actual={}",
-            EXPECTED_SEED_FINGERPRINT,
-            actual
+    if expected.eq("PLACEHOLDER") {
+        panic!(
+            "FATAL: production build contains the placeholder seed fingerprint. \
+             Replace deployment/seed_fingerprint.txt with the real fingerprint before building."
         );
-        tracing::info!("boot: seed fingerprint verified = {}", actual);
     }
+
+    let expected_fp = SeedFingerprint::from_str(expected)
+        .expect("FATAL: compiled binary contains an invalid seed fingerprint");
+
+    if actual != expected_fp {
+        // Redacted panic: do not print either fingerprint. The custody manifest
+        // is the public record of the expected fingerprint.
+        panic!(
+            "FATAL: SEED FINGERPRINT MISMATCH — decrypted seed does not match the fingerprint compiled into this binary"
+        );
+    }
+    tracing::info!("boot: seed fingerprint verified");
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +458,7 @@ fn generate_attestation_report_data(
 // Seed intake (sealed blob)
 // ---------------------------------------------------------------------------
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 struct SeedCapsule {
     magic: [u8; 8],
     fingerprint: [u8; 32],
@@ -474,18 +489,22 @@ fn obtain_key_source() -> KeySource {
 }
 
 fn decrypt_sealed_blob(blob: &[u8]) -> Secret<[u8; 32]> {
+    tracing::info!("boot: deriving instance-bound SEV-SNP sealing key");
+    let mut raw_key = derive_sealing_key();
+    let seed = decrypt_capsule(blob, &raw_key);
+    raw_key.zeroize();
+    seed
+}
+
+fn decrypt_capsule(blob: &[u8], raw_key: &[u8; 32]) -> Secret<[u8; 32]> {
     tracing::info!("boot: deserializing capsule");
     let capsule: SeedCapsule =
         postcard::from_bytes(blob).expect("FATAL: failed to parse zns_seed.capsule");
 
     assert_eq!(&capsule.magic, b"ZNS_SEED", "FATAL: capsule magic mismatch");
 
-    tracing::info!("boot: deriving instance-bound SEV-SNP sealing key");
-    let mut raw_key = derive_sealing_key();
-
     let cipher =
-        XChaCha20Poly1305::new_from_slice(&raw_key).expect("sealing key is exactly 32 bytes");
-    raw_key.zeroize();
+        XChaCha20Poly1305::new_from_slice(raw_key).expect("sealing key is exactly 32 bytes");
 
     let mut aad = Vec::with_capacity(8 + 32);
     aad.extend_from_slice(&capsule.magic);
@@ -557,4 +576,23 @@ fn generate_mint_attestation(report_data: [u8; 64]) -> Vec<u8> {
 fn generate_mint_attestation(_report_data: [u8; 64]) -> Vec<u8> {
     tracing::warn!("boot: skipped attestation generation (not on linux)");
     Vec::new()
+}
+
+// ---------------------------------------------------------------------------
+// Tests — one critical invariant: fingerprint mismatch fails closed without leaking it
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use secrecy::Secret;
+
+    #[test]
+    #[cfg(not(feature = "dev-seed"))]
+    #[should_panic(expected = "FATAL: SEED FINGERPRINT MISMATCH")]
+    fn verify_fingerprint_mismatch_is_redacted() {
+        let seed = Secret::new([0xAB; 32]);
+        let wrong_fp = SeedFingerprint::from_seed(&[0xCD; 32]).unwrap().to_string();
+        verify_fingerprint(&seed, &wrong_fp);
+    }
 }

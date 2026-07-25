@@ -702,7 +702,7 @@ async fn execute(
                 }
             }
             Err(e) => {
-                tracing::warn!(error = e, "assembly failed");
+                tracing::warn!(error = %e, "assembly failed");
                 metrics::inc_spend_error("assembly");
             }
         }
@@ -735,7 +735,7 @@ fn execute_claim(
     name: Name, ua: UnifiedAddress, payment_locator: NoteLocator,
     excluded: &BTreeSet<NoteLocator>,
     anchor_height: BlockHeight, target_height: BlockHeight,
-) -> Result<(TxId, String, Vec<NoteLocator>), &'static str> {
+) -> Result<(TxId, String, Vec<NoteLocator>), zns_mint::mint::AssemblyError> {
     let claim_req = NameNoteRequest::Claim(authorize::ClaimRequest {
         name: name.clone(), ua: ua.clone(),
     });
@@ -758,7 +758,7 @@ fn execute_transition(
     registry_keys: &zns_mint::key::RegistryKeys,
     request: NameNoteRequest, excluded: &BTreeSet<NoteLocator>,
     anchor_height: BlockHeight, target_height: BlockHeight,
-) -> Result<(TxId, String, Vec<NoteLocator>), &'static str> {
+) -> Result<(TxId, String, Vec<NoteLocator>), zns_mint::mint::AssemblyError> {
     let fee_inputs = zns_mint::registry::transaction::select_registry_fee_inputs(
         wallet, &request, target_height, excluded, 0,
     )?;
