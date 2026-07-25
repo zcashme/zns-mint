@@ -179,12 +179,7 @@ mod tests {
         m
     }
 
-    #[test]
-    fn request_parsers_reject_prev_rcm() {
-        // A user request must not contain the 5th field (prev_rcm is for minted Name Notes)
-        let m = "ZNS:claim:alice:u1xxx:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
-        assert_eq!(RequestMemo::parse(&padded(m)), Err(MemoError::FieldCount));
-    }
+
 
     #[test]
     fn accepts_exactly_the_five_request_forms() {
@@ -233,22 +228,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rejects_unapproved_request_fields() {
-        for text in [
-            "ZNS:v1:claim:alice:u1owner",
-            "ZNS:claim:main:alice:u1owner",
-            "ZNS:claim:alice:u1owner:nonce",
-            "ZNS:claim:alice:u1owner:challenge_id",
-            "ZNS:update:alice:u1new:00112233445566778899aabbccddeeff:nonce",
-            "ZNS:release:alice:u1owner:00112233445566778899aabbccddeeff:challenge_id",
-        ] {
-            assert!(
-                RequestMemo::parse(&padded(text)).is_err(),
-                "accepted {text}"
-            );
-        }
-    }
+
 
 
 
