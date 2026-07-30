@@ -81,7 +81,7 @@ pub fn assemble_v6_transaction(
         return Err(crate::mint::AssemblyError::BuilderCreation);
     }
 
-    if !zcash_protocol::consensus::MAIN_NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, target_height) {
+    if !crate::zcash::NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, target_height) {
         return Err(crate::mint::AssemblyError::Nu63NotActive);
     }
 
@@ -102,7 +102,7 @@ pub fn assemble_v6_transaction(
     static PK: OnceLock<ProvingKey> = OnceLock::new();
     static VK: OnceLock<VerifyingKey> = OnceLock::new();
 
-    let branch_id = BranchId::for_height(&zcash_protocol::consensus::MAIN_NETWORK, target_height);
+    let branch_id = BranchId::for_height(&crate::zcash::NETWORK, target_height);
     let expiry_height = BlockHeight::from_u32(
         u32::from(target_height)
             .checked_add(TX_EXPIRY_BUFFER)

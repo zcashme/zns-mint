@@ -10,3 +10,9 @@ Tracks design-relevant changes to `src/registry/authorize.rs`.
   constructing production tips from free scalar fields. Production tips remain
   constructible only from scanner-validated Name Notes.
 
+## 2026-07-28 — Current-owner release and tip-bound OTPs
+
+- A release request's UA must exactly equal the current controller recorded in
+  the validated Name Note; request-controlled UAs cannot solicit a relay.
+- Update and release OTP verification includes the exact predecessor
+  commitment, invalidating every issued OTP once the name tip changes.

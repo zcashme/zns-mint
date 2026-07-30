@@ -1,14 +1,14 @@
 //! Shared protocol logic for ZNS minting and wallet operations.
 
-mod note;
+pub mod note;
 
 // Re-export note functions so existing `crate::mint::` paths keep working.
 pub use note::{
-    decode_name_note, decode_name_note_payload, encode_name_note, zns_psi_rcm, zns_psi_rcm_raw,
+    decode_name_note, decode_name_note_payload, encode_name_note,
+    zns_psi_rcm, zns_psi_rcm_raw,
+    note_commitment_cmx,
     NameNotePayload,
 };
-
-use std::fmt;
 
 use zcash_client_backend::data_api::BlockMetadata;
 use zcash_protocol::consensus::BlockHeight;
@@ -54,8 +54,16 @@ impl ChainCursor {
 /// constructor) and is called at the sync extraction boundary. Reading goes
 /// through [`Memo::as_array`] / [`Memo::into_bytes`], forwarded to the inner
 /// `MemoBytes`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Memo(MemoBytes);
+
+impl PartialEq for Memo {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        bool::from(self.as_array().ct_eq(other.as_array()))
+    }
+}
+impl Eq for Memo {}
 
 impl Memo {
     /// Constructs a `Memo` from a byte slice, padding with zeros if shorter
@@ -76,12 +84,6 @@ impl Memo {
     /// Consumes this `Memo` and returns the underlying 512-byte array.
     pub fn into_bytes(self) -> [u8; 512] {
         self.0.into_bytes()
-    }
-}
-
-impl fmt::Debug for Memo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Memo(<redacted>)")
     }
 }
 
@@ -166,12 +168,6 @@ impl Name {
     }
 }
 
-impl fmt::Display for Name {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 /// A Zcash unified address string (e.g. `u1qz...`).
 ///
 /// Newtype over `String` to distinguish a UA from arbitrary text. The mint
@@ -206,12 +202,6 @@ impl UnifiedAddress {
     }
 }
 
-impl fmt::Display for UnifiedAddress {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 
 // ===========================================================================
 // Operational state
@@ -221,18 +211,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::Parameters;
+use zcash_protocol::value::COIN;
 
-use crate::auth::PendingOtps;
+use crate::auth::{ChallengeKey, OtpCode, PendingOtps};
 use crate::metrics;
-use crate::registry::state::Registry;
-use crate::registry::liquidity::RegistryFeeLiquidity;
-use crate::treasury::memo::RequestMemo;
-use crate::treasury::sweep;
-use crate::wallet::{NoteLocator, Wallet};
+use crate::registry::Registry;
+use crate::wallet::NoteLocator;
 
 /// Claim price and request minimum in zatoshis. Protocol policy.
-pub const CLAIM_PRICE: u64 = 10_000;
-pub const MIN_REQUEST_VALUE: u64 = 10_000;
+///
+/// One ZEC is 100,000,000 zatoshis. Claim payments may exceed this amount;
+/// atomic claim settlement returns any excess to the payer.
+pub const CLAIM_PRICE: u64 = COIN;
 pub const TX_EXPIRY_BUFFER: u32 = 20;
 
 /// What kind of transaction a submission represents.
@@ -257,17 +247,25 @@ impl SubmissionKind {
             Self::AutoSweep => "sweep",
         }
     }
+
+    /// Whether this kind represents a name lifecycle transition
+    /// (claim, update, release) that locks a name while in flight.
+    pub fn is_lifecycle(self) -> bool {
+        matches!(self, Self::Claim | Self::Update | Self::Release)
+    }
 }
 
 /// One submitted transaction awaiting confirmation.
+///
+/// The txid is the `BTreeMap` key — not a field here. Name locking is
+/// derived from `name_binding` + `kind` on in-flight submissions, so no
+/// separate lock handle is stored.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct Submission {
     pub kind: SubmissionKind,
-    pub txid: TxId,
-    pub submit_height: BlockHeight,
     pub expiry_height: BlockHeight,
     pub reserved_notes: Vec<NoteLocator>,
+    pub name_binding: Option<NameBinding>,
     pub confirmed_at: Option<BlockHeight>,
 }
 
@@ -277,10 +275,45 @@ impl Submission {
     }
 }
 
+/// Exclusive ownership of one canonical name state while a lifecycle
+/// transaction is being assembled but not yet submitted.
+///
+/// This is a capability token: only the caller that acquired it via
+/// [`OperationalState::reserve_name`] can release it via
+/// [`OperationalState::release_name`]. Once the transaction is submitted,
+/// the binding moves into the [`Submission`] and the name is locked by
+/// derivation — the pre-submit lock is consumed.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NameLock {
+    pub(crate) binding: NameBinding,
+}
+
+/// Nonexclusive canonical binding for any name-dependent live operation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NameBinding {
+    name: Name,
+    tip_commitment: Option<[u8; 32]>,
+}
+
 /// In-memory operational state for the active mint phase.
+///
+/// Tracks four concerns, each with a lifecycle that ends when the
+/// blockchain catches up or time runs out:
+///
+/// 1. **Notes in flight** — `submissions` maps each broadcast txid to its
+///    reserved notes, kind, and expiry. Prevents re-spending. Pruned by
+///    [`reconcile`](Self::reconcile) when confirmed or expired.
+/// 2. **Names locked** — derived from #1: a name is locked if any
+///    unconfirmed lifecycle submission carries its binding, or if a
+///    pre-submit lock is held during assembly. No separate set.
+/// 3. **OTPs issued** — [`PendingOtps`], already its own well-designed struct.
+/// 4. **Recovery cooldown** — `recovery_until` blocks all work after restart
+///    until previous-process mempool txs confirm or expire.
 pub struct OperationalState {
     pub pending_otps: PendingOtps,
     pub submissions: BTreeMap<TxId, Submission>,
+    pre_submit_locks: BTreeSet<NameBinding>,
+    recovery_until: Option<BlockHeight>,
 }
 
 impl Default for OperationalState {
@@ -294,12 +327,42 @@ impl OperationalState {
         Self {
             pending_otps: PendingOtps::new(),
             submissions: BTreeMap::new(),
+            pre_submit_locks: BTreeSet::new(),
+            recovery_until: None,
         }
     }
 
-    pub fn clear(&mut self) {
-        self.submissions.clear();
-        self.pending_otps = PendingOtps::new();
+    /// Creates Live state after a process restart.
+    ///
+    /// No unconfirmed submission state survives a restart. Waiting a full
+    /// transaction-expiry window prevents reconstruction from immediately
+    /// competing with an already-broadcast transaction.
+    pub fn recovering(cursor_height: BlockHeight) -> Self {
+        Self {
+            recovery_until: Some(cursor_height + TX_EXPIRY_BUFFER),
+            ..Self::new()
+        }
+    }
+
+    /// Releases only work whose name-tip binding changed across a reorg.
+    /// Unrelated names and non-lifecycle Treasury work remain reserved.
+    pub fn invalidate_after_reorg(
+        &mut self,
+        registry: &Registry,
+        wallet: &crate::wallet::Wallet,
+        ancestor_height: BlockHeight,
+    ) {
+        self.pending_otps.invalidate_changed_tips(registry);
+        for submission in self.submissions.values_mut() {
+            if submission.confirmed_at.is_some_and(|height| height > ancestor_height) {
+                submission.confirmed_at = None;
+            }
+        }
+        self.submissions.retain(|_, submission| {
+            submission.name_binding.as_ref().is_none_or(|binding| binding.matches_registry(registry))
+                && (submission.confirmed_at.is_some()
+                    || submission.reserved_notes.iter().all(|locator| wallet.contains_unspent_locator(*locator)))
+        });
     }
 
     pub fn reserved_locators(&self) -> BTreeSet<NoteLocator> {
@@ -308,15 +371,163 @@ impl OperationalState {
             .flat_map(|s| s.reserved_notes.iter().copied())
             .collect()
     }
+
+    /// Acquires the only lifecycle lock for `name` at its observed tip.
+    ///
+    /// Returns a [`NameLock`] capability token. The lock lives in
+    /// `pre_submit_locks` until the transaction is recorded via
+    /// [`record_submission`](Self::record_submission) (which consumes it)
+    /// or released via [`release_name`](Self::release_name) (on failure).
+    pub fn reserve_name(
+        &mut self,
+        name: &Name,
+        tip_commitment: Option<NameCommitment>,
+    ) -> Option<NameLock> {
+        if self.is_name_locked(name) {
+            return None;
+        }
+
+        let binding = self.name_binding(name, tip_commitment);
+        self.pre_submit_locks.insert(binding.clone());
+        Some(NameLock { binding })
+    }
+
+    /// Releases a pre-submit name lock acquired by [`reserve_name`](Self::reserve_name).
+    ///
+    /// No-op if the binding was already consumed by `record_submission`.
+    pub fn release_name(&mut self, lock: &NameLock) {
+        self.pre_submit_locks.remove(&lock.binding);
+    }
+
+    /// Whether `name` is locked by a pre-submit lock or an in-flight lifecycle
+    /// submission. OTP relays carry a `name_binding` for reorg invalidation
+    /// but do not lock the name — only lifecycle kinds (claim/update/release) do.
+    fn is_name_locked(&self, name: &Name) -> bool {
+        self.pre_submit_locks.iter().any(|b| &b.name == name)
+            || self.submissions.values().any(|s| {
+                s.kind.is_lifecycle()
+                    && s.name_binding.as_ref().is_some_and(|b| &b.name == name)
+            })
+    }
+
+    /// Records a submitted transaction, reserves its notes, and consumes any
+    /// pre-submit name lock matching the binding.
+    ///
+    /// For lifecycle submissions (claim/update/release), the `name_binding`
+    /// was previously inserted into `pre_submit_locks` by `reserve_name`;
+    /// this method removes it — the name is now locked by derivation from
+    /// the submission itself. For relays and non-name work, the `remove` is
+    /// a no-op (the binding was never in `pre_submit_locks`).
+    pub fn record_submission(
+        &mut self,
+        kind: SubmissionKind,
+        txid: TxId,
+        reserved_notes: Vec<NoteLocator>,
+        name_binding: Option<NameBinding>,
+        expiry_height: BlockHeight,
+        excluded: &mut BTreeSet<NoteLocator>,
+    ) {
+        if let Some(ref binding) = name_binding {
+            self.pre_submit_locks.remove(binding);
+        }
+        for loc in &reserved_notes {
+            excluded.insert(*loc);
+        }
+        self.submissions.insert(txid, Submission {
+            kind,
+            expiry_height,
+            reserved_notes,
+            name_binding,
+            confirmed_at: None,
+        });
+    }
+
+    /// Reconciles in-flight submissions with confirmed blocks.
+    ///
+    /// Marks any submission whose txid appears in `confirmed_txids` as
+    /// confirmed, then prunes all confirmed and expired submissions in one
+    /// pass. Name locking is derived from submissions, so pruning a
+    /// submission automatically unlocks its name — no explicit release.
+    pub fn reconcile(&mut self, confirmed_txids: &[TxId], height: BlockHeight) {
+        // 1. Mark newly confirmed.
+        for txid in confirmed_txids {
+            if let Some(sub) = self.submissions.get_mut(txid) {
+                if sub.confirmed_at.is_none() {
+                    sub.confirmed_at = Some(height);
+                    tracing::info!(txid = %txid, kind = sub.kind.as_str(), "confirmed");
+                    match sub.kind {
+                        SubmissionKind::Claim    => { metrics::inc_names_claimed();  metrics::inc_tx_confirmed("claim"); }
+                        SubmissionKind::Update   => { metrics::inc_names_updated();  metrics::inc_tx_confirmed("update"); }
+                        SubmissionKind::Release  => { metrics::inc_names_released(); metrics::inc_tx_confirmed("release"); }
+                        SubmissionKind::OtpRelay => { metrics::inc_tx_confirmed("otp_relay"); }
+                        SubmissionKind::Replenish=> { metrics::inc_tx_confirmed("replenish"); }
+                        SubmissionKind::AutoSweep=> { metrics::inc_tx_confirmed("sweep"); }
+                    }
+                }
+            }
+        }
+        // 2. Prune confirmed and expired in one pass.
+        self.submissions.retain(|txid, sub| {
+            if sub.confirmed_at.is_some() {
+                false
+            } else if sub.is_expired(height) {
+                tracing::warn!(txid = %txid, kind = sub.kind.as_str(), "expired");
+                metrics::inc_tx_expired(sub.kind.as_str());
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    /// Binds a nonexclusive relay/submission to one observed Registry tip.
+    pub fn name_binding(
+        &self,
+        name: &Name,
+        tip_commitment: Option<NameCommitment>,
+    ) -> NameBinding {
+        NameBinding {
+            name: name.clone(),
+            tip_commitment: tip_commitment.map(|commitment| commitment.to_bytes()),
+        }
+    }
+
+    pub fn recovery_complete(&mut self, current_height: BlockHeight) -> bool {
+        match self.recovery_until {
+            Some(until) if current_height <= until => false,
+            Some(_) => {
+                self.recovery_until = None;
+                true
+            }
+            None => true,
+        }
+    }
 }
 
-/// Work items derived from canonical state.
-pub enum WorkItem {
-    Claim { name: Name, ua: UnifiedAddress, payment_locator: NoteLocator },
-    NeedsOtpRelay { name: Name, action: Action, controller_ua: UnifiedAddress, request_locator: NoteLocator, request_value: u64 },
-    VerifyAndTransition { name: Name, action: Action, ua: UnifiedAddress, otp: [u8; 16] },
-    ReplenishRegistry { plan: crate::registry::liquidity::RegistryFundingPlan },
-    AutoSweep { sweep_amount: u64 },
+impl NameLock {
+    /// Returns the canonical binding carried into a submitted lifecycle action.
+    pub fn binding(&self) -> NameBinding {
+        self.binding.clone()
+    }
+}
+
+impl NameBinding {
+    fn matches_registry(&self, registry: &Registry) -> bool {
+        match self.tip_commitment {
+            Some(expected) => registry
+                .tip(&self.name)
+                .is_some_and(|tip| tip.commitment.to_bytes() == expected),
+            None => registry.tip(&self.name).is_none(),
+        }
+    }
+}
+
+/// The result of processing a single Treasury note request.
+pub struct RequestOutcome {
+    pub result: Result<(SubmissionKind, TxId, String, Vec<NoteLocator>), AssemblyError>,
+    pub name_lock: Option<NameLock>,
+    pub name_binding: Option<NameBinding>,
+    pub relay_challenge: Option<(ChallengeKey, OtpCode)>,
 }
 
 /// Whether a UA string contains an Orchard receiver. Protocol constraint:
@@ -327,206 +538,12 @@ pub fn has_orchard_receiver(ua: &UnifiedAddress) -> bool {
         Err(_) => return false,
     };
     let parsed: zcash_keys::address::Address = match zaddr
-        .convert_if_network(zcash_protocol::consensus::MAIN_NETWORK.network_type())
+        .convert_if_network(crate::zcash::NETWORK.network_type())
     {
         Ok(p) => p,
         Err(_) => return false,
     };
     matches!(parsed, zcash_keys::address::Address::Unified(ref ua) if ua.orchard().is_some())
-}
-
-/// Scans Treasury notes for request memos and derives pending work.
-pub fn reconcile(
-    ops: &mut OperationalState,
-    wallet: &Wallet,
-    registry: &Registry,
-    cursor_height: BlockHeight,
-) -> Vec<WorkItem> {
-    use crate::auth::ChallengeKey;
-
-    let pruned = ops.pending_otps.prune(cursor_height);
-    if pruned > 0 {
-        metrics::inc_otps_never_returned(pruned as u64);
-    }
-    let reserved = ops.reserved_locators();
-    let mut work = Vec::new();
-    let mut seen_claims: BTreeSet<Name> = BTreeSet::new();
-    let mut seen_no_otp: BTreeSet<ChallengeKey> = BTreeSet::new();
-    let mut seen_with_otp: BTreeSet<ChallengeKey> = BTreeSet::new();
-
-    for note in wallet.orchard_notes_for(TREASURY_ACCOUNT) {
-        let Ok(request) = RequestMemo::parse(note.memo.as_array()) else { continue };
-        let Some(name) = Name::parse(request.name()) else { continue };
-        let locator = NoteLocator::orchard(TREASURY_ACCOUNT, note.note.rho());
-        if reserved.contains(&locator) { continue }
-
-        match &request {
-            RequestMemo::Claim { ua, .. } => {
-                if seen_claims.contains(&name) { continue }
-                let available = match registry.tip(&name) {
-                    None => true,
-                    Some(t) => t.action == Action::Release,
-                };
-                if !available { continue }
-                let value = note.note.value().inner();
-                if value < CLAIM_PRICE {
-                    metrics::inc_request_invalid("insufficient_payment");
-                    continue;
-                }
-                metrics::inc_request_received("claim");
-                seen_claims.insert(name.clone());
-                work.push(WorkItem::Claim {
-                    name, ua: UnifiedAddress::from_string(ua.clone()),
-                    payment_locator: locator,
-                });
-            }
-            RequestMemo::Update { ua, otp, .. } => {
-                let ua = UnifiedAddress::from_string(ua.clone());
-                let tip = match registry.tip(&name) {
-                    Some(t) if t.action != Action::Release => t,
-                    _ => continue,
-                };
-                let controller_ua = tip.received()
-                    .map(|r| r.payload().ua().clone())
-                    .unwrap_or_else(UnifiedAddress::empty);
-
-                match otp {
-                    None => {
-                        let key = ChallengeKey::new(name.clone(), Action::Update, ua.clone());
-                        if ops.pending_otps.contains(&key) || seen_no_otp.contains(&key) { continue }
-                        let value = note.note.value().inner();
-                        if value < MIN_REQUEST_VALUE {
-                            metrics::inc_request_invalid("insufficient_request_value");
-                            continue;
-                        }
-                        if !has_orchard_receiver(&controller_ua) {
-                            metrics::inc_request_invalid("no_orchard_receiver");
-                            continue;
-                        }
-                        metrics::inc_request_received("update");
-                        seen_no_otp.insert(key);
-                        work.push(WorkItem::NeedsOtpRelay {
-                            name, action: Action::Update, controller_ua,
-                            request_locator: locator, request_value: value,
-                        });
-                    }
-                    Some(otp_bytes) => {
-                        let key = ChallengeKey::new(name.clone(), Action::Update, ua.clone());
-                        if seen_with_otp.contains(&key) { continue }
-                        metrics::inc_request_received("update");
-                        seen_with_otp.insert(key);
-                        work.push(WorkItem::VerifyAndTransition {
-                            name, action: Action::Update, ua, otp: *otp_bytes,
-                        });
-                    }
-                }
-            }
-            RequestMemo::Release { ua, otp, .. } => {
-                let ua = UnifiedAddress::from_string(ua.clone());
-                let tip = match registry.tip(&name) {
-                    Some(t) if t.action != Action::Release => t,
-                    _ => continue,
-                };
-                let controller_ua = tip.received()
-                    .map(|r| r.payload().ua().clone())
-                    .unwrap_or_else(UnifiedAddress::empty);
-
-                match otp {
-                    None => {
-                        let key = ChallengeKey::new(name.clone(), Action::Release, ua.clone());
-                        if ops.pending_otps.contains(&key) || seen_no_otp.contains(&key) { continue }
-                        let value = note.note.value().inner();
-                        if value < MIN_REQUEST_VALUE {
-                            metrics::inc_request_invalid("insufficient_request_value");
-                            continue;
-                        }
-                        if !has_orchard_receiver(&controller_ua) {
-                            metrics::inc_request_invalid("no_orchard_receiver");
-                            continue;
-                        }
-                        metrics::inc_request_received("release");
-                        seen_no_otp.insert(key);
-                        work.push(WorkItem::NeedsOtpRelay {
-                            name, action: Action::Release, controller_ua,
-                            request_locator: locator, request_value: value,
-                        });
-                    }
-                    Some(otp_bytes) => {
-                        let key = ChallengeKey::new(name.clone(), Action::Release, ua.clone());
-                        if seen_with_otp.contains(&key) { continue }
-                        metrics::inc_request_received("release");
-                        seen_with_otp.insert(key);
-                        work.push(WorkItem::VerifyAndTransition {
-                            name, action: Action::Release, ua, otp: *otp_bytes,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    // Registry fee-note liquidity (subtracting reserved Ironwood notes).
-    let reserved_ironwood = ops.reserved_locators().iter()
-        .filter(|loc| matches!(loc, NoteLocator::Ironwood { .. }))
-        .count();
-    let mut liquidity = RegistryFeeLiquidity::from_wallet(wallet);
-    liquidity.fee_note_count = liquidity.fee_note_count.saturating_sub(reserved_ironwood);
-    let has_pending_replenish = ops.submissions.values()
-        .any(|s| s.kind == SubmissionKind::Replenish && s.confirmed_at.is_none());
-    if let Some(plan) = liquidity.treasury_funding_plan() {
-        if !has_pending_replenish {
-            work.push(WorkItem::ReplenishRegistry { plan });
-        }
-    }
-
-    // Treasury auto-sweep.
-    let balance = wallet.balance(TREASURY_ACCOUNT).into_u64();
-    let has_pending_sweep = ops.submissions.values()
-        .any(|s| s.kind == SubmissionKind::AutoSweep && s.confirmed_at.is_none());
-    if let Some(amount) = sweep::sweep_policy(balance) {
-        if !has_pending_sweep {
-            work.push(WorkItem::AutoSweep { sweep_amount: amount });
-        }
-    }
-
-    work
-}
-
-/// Marks submissions confirmed if their txid appears in a block.
-/// Expires and drains old submissions.
-pub fn check_confirmations(ops: &mut OperationalState, txids: &[TxId], height: BlockHeight) {
-    for txid in txids {
-        if let Some(confirmed) = ops.submissions.get_mut(txid) {
-            if confirmed.confirmed_at.is_none() {
-                confirmed.confirmed_at = Some(height);
-            }
-            let confirmed = confirmed.clone();
-            tracing::info!(txid = %txid, kind = confirmed.kind.as_str(), "confirmed");
-            match confirmed.kind {
-                SubmissionKind::Claim => { metrics::inc_names_claimed(); metrics::inc_tx_confirmed("claim"); }
-                SubmissionKind::Update => { metrics::inc_names_updated(); metrics::inc_tx_confirmed("update"); }
-                SubmissionKind::Release => { metrics::inc_names_released(); metrics::inc_tx_confirmed("release"); }
-                SubmissionKind::OtpRelay => { metrics::inc_tx_confirmed("otp_relay"); }
-                SubmissionKind::Replenish => { metrics::inc_tx_confirmed("replenish"); }
-                SubmissionKind::AutoSweep => { metrics::inc_tx_confirmed("sweep"); }
-            }
-        }
-    }
-    let expired: Vec<TxId> = ops.submissions.iter()
-        .filter(|(_, s)| s.is_expired(height))
-        .map(|(txid, _)| *txid)
-        .collect();
-    for txid in &expired {
-        if let Some(sub) = ops.submissions.remove(txid) {
-            tracing::warn!(txid = %sub.txid, kind = sub.kind.as_str(), "expired");
-            metrics::inc_tx_expired(sub.kind.as_str());
-        }
-    }
-    let confirmed_txids: Vec<TxId> = ops.submissions.iter()
-        .filter(|(_, s)| s.confirmed_at.is_some())
-        .map(|(txid, _)| *txid)
-        .collect();
-    for txid in confirmed_txids { ops.submissions.remove(&txid); }
 }
 
 // ===========================================================================
@@ -552,6 +569,8 @@ pub enum AssemblyError {
     InsufficientFunds,
     #[error("note value insufficient for the required fee")]
     InsufficientValue,
+    #[error("OTP relay request value must equal exactly twice the ZIP-317 fee")]
+    IncorrectRelayValue,
     #[error("builder creation failed")]
     BuilderCreation,
     #[error("builder add operation failed")]

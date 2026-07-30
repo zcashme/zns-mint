@@ -55,7 +55,7 @@ pub fn assemble_replenishment(
 ) -> Result<ReplenishAssembly, crate::mint::AssemblyError> {
     use rand::rngs::OsRng;
     use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
-    use zcash_protocol::consensus::MAIN_NETWORK;
+    use crate::zcash::NETWORK;
 
     let funding_total = plan.total_amount;
 
@@ -83,7 +83,7 @@ pub fn assemble_replenishment(
 
         fee = FeeRule::standard()
             .fee_required(
-                &MAIN_NETWORK,
+                &NETWORK,
                 target_height,
                 std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
                 std::iter::empty::<usize>(),

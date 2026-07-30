@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 
+use pasta_curves::group::ff::PrimeField;
+use subtle::ConstantTimeEq;
 use incrementalmerkletree::{Marking, Position, Retention};
 use zcash_client_backend::{
     data_api::BlockMetadata,
@@ -17,7 +19,7 @@ use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters, TxIndex};
 use zip32::AccountId;
 
-use crate::mint::{decode_name_note_payload, Memo, NameNotePayload, REGISTRY_ACCOUNT};
+use crate::mint::{Memo, REGISTRY_ACCOUNT};
 
 /// A non-secret scanner failure that prevents atomic block application.
 #[derive(Debug, thiserror::Error)]
@@ -241,8 +243,9 @@ pub struct NameNoteLocator {
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReceivedNameNote {
     locator: NameNoteLocator,
-    nullifier: orchard::note::Nullifier,
-    validated: orchard::note_encryption::ValidatedZnsNote<NameNotePayload>,
+    note: orchard::Note,
+    payload: crate::mint::note::NameNotePayload,
+    cmx: orchard::note::ExtractedNoteCommitment,
 }
 
 impl ReceivedNameNote {
@@ -250,16 +253,19 @@ impl ReceivedNameNote {
         self.locator
     }
 
-    pub fn nullifier(&self) -> orchard::note::Nullifier {
-        self.nullifier
+    /// The raw decrypted Note — carries recipient, value, rho, rseed.
+    pub fn note(&self) -> &orchard::Note {
+        &self.note
     }
 
-    pub fn validated(&self) -> &orchard::note_encryption::ValidatedZnsNote<NameNotePayload> {
-        &self.validated
+    /// The decoded ZNS payload from the note's memo.
+    pub fn payload(&self) -> &crate::mint::note::NameNotePayload {
+        &self.payload
     }
 
-    pub fn payload(&self) -> &NameNotePayload {
-        self.validated.payload()
+    /// The on-chain cmx for this note (from the Action).
+    pub fn cmx(&self) -> &orchard::note::ExtractedNoteCommitment {
+        &self.cmx
     }
 }
 
@@ -277,8 +283,9 @@ struct PendingNameNote {
     txid: TxId,
     action_index: usize,
     global_action_ordinal: usize,
-    nullifier: orchard::note::Nullifier,
-    validated: orchard::note_encryption::ValidatedZnsNote<NameNotePayload>,
+    note: orchard::Note,
+    payload: crate::mint::note::NameNotePayload,
+    cmx: orchard::note::ExtractedNoteCommitment,
 }
 
 /// An Ironwood nullifier we recognize — same type as Orchard but tracked
@@ -350,28 +357,40 @@ where
                 if bundle.bundle_version() == orchard::bundle::BundleVersion::ironwood_v3()
                     && bundle.flags().outputs_enabled()
                 {
-                    if let Some(validated) = orchard::note_encryption::try_zns_note_decryption(
-                        action,
-                        &registry_ivk,
-                        |memo| {
-                            let payload = decode_name_note_payload(memo)?;
-                            let (rcm, psi) = payload.opening();
-                            Some((rcm, psi, payload))
-                        },
-                    ) {
-                        if validated.value() == orchard::value::NoteValue::ZERO
-                            && validated.recipient() == registry_recipient
+                    if let Some((note, recipient, memo)) =
+                        orchard::note_encryption::ZnsIronwoodDomain::for_action(action)
+                            .try_decrypt(action, &registry_ivk, |note, memo, cmx| {
+                                let payload = match crate::mint::note::decode_name_note_payload(memo) {
+                                    Some(p) => p,
+                                    None => return subtle::Choice::from(0),
+                                };
+                                let (rcm, psi) = payload.opening();
+                                let (g_d, pk_d) = note.recipient().zns_commitment_keys();
+                                let rho_bytes = note.rho().to_bytes();
+                                let rho = Option::from(pasta_curves::pallas::Base::from_repr(rho_bytes))
+                                    .expect("valid rho");
+                                let computed = match crate::mint::note::note_commitment_cmx(
+                                    g_d, pk_d, 0, rho, psi, rcm,
+                                ) {
+                                    Some(c) => c,
+                                    None => return subtle::Choice::from(0),
+                                };
+                                computed.to_repr().ct_eq(&cmx.to_bytes())
+                            })
+                    {
+                        if note.value() == orchard::value::NoteValue::ZERO
+                            && recipient == registry_recipient
                         {
-                            let nullifier = validated
-                                .nullifier(registry_fvk)
-                                .ok_or(ScanError::RegistryOwnershipMismatch)?;
+                            let payload = crate::mint::note::decode_name_note_payload(&memo)
+                                .expect("memo was validated in callback");
                             pending_name_notes.push(PendingNameNote {
                                 block_index: tx_index,
                                 txid: tx.txid(),
                                 action_index,
                                 global_action_ordinal,
-                                nullifier,
-                                validated,
+                                note,
+                                payload,
+                                cmx: *action.cmx(),
                             });
                         }
                     }
@@ -556,7 +575,7 @@ where
         let commitment = ironwood_commitments
             .get_mut(pending.global_action_ordinal)
             .ok_or(ScanError::CommitmentStreamMismatch)?;
-        if commitment.0 != orchard::tree::MerkleHashOrchard::from_cmx(&pending.validated.cmx()) {
+        if commitment.0 != orchard::tree::MerkleHashOrchard::from_cmx(&pending.cmx) {
             return Err(ScanError::CommitmentStreamMismatch);
         }
         commitment.1 = match commitment.1 {
@@ -602,8 +621,9 @@ where
                 action_index: pending.action_index,
                 position,
             },
-            nullifier: pending.nullifier,
-            validated: pending.validated,
+            note: pending.note,
+            payload: pending.payload,
+            cmx: pending.cmx,
         });
     }
 

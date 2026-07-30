@@ -3,10 +3,10 @@
 
 use secrecy::{ExposeSecret, Secret};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
-use zcash_protocol::consensus::MAIN_NETWORK;
 use zip32::AccountId;
 
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::zcash::NETWORK;
 
 // ===========================================================================
 // AccountKeys — per-account keys, generated at boot, held by each module
@@ -104,7 +104,7 @@ impl Drop for AccountKeys {
 /// condition. The upstream derivation code rejects invalid seeds (zero ask,
 /// invalid IVKs); a panic here means the seed is cryptographically broken.
 fn derive_account(seed: &Secret<[u8; 32]>, account: AccountId) -> AccountKeys {
-    let usk = UnifiedSpendingKey::from_seed(&MAIN_NETWORK, seed.expose_secret(), account)
+    let usk = UnifiedSpendingKey::from_seed(&NETWORK, seed.expose_secret(), account)
         .expect("key derivation");
     AccountKeys { spending: usk }
 }

@@ -1,5 +1,17 @@
 # Treasury claim assembly changelog
 
+## 2026-07-28 — Claim excess returns to the claimed UA
+
+- A claim's `name_ua` is now the refund destination; it must contain a
+  mainnet Orchard receiver. No separate payer/refund address is added to the
+  request grammar.
+- The Treasury Orchard bundle retains exactly the one-ZEC price as a
+  Treasury-controlled change output. The remaining payment value crosses to
+  Ironwood and is returned to `name_ua` as the excess refund.
+- Registry fee notes fund only the aggregate ZIP-317 fee. The paired Orchard
+  and Ironwood bundle balances sum to that fee; the claim price and refund are
+  never treated as miner fee.
+
 ## 2026-07-24 — Atomic claim transaction assembly
 
 - Added `src/treasury/claim.rs` with `assemble_atomic_claim` — builds both

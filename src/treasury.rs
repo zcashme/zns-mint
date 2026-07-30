@@ -10,6 +10,7 @@ pub mod sweep;
 
 use crate::wallet::transaction::ReceivedOrchardNote;
 use crate::wallet::Wallet;
+use crate::{mint::Name, registry::Registry};
 
 /// Owned Treasury policy state.
 ///
@@ -37,6 +38,7 @@ impl Treasury {
     pub fn match_payment<'w>(
         &self,
         wallet: &'w Wallet,
+        registry: &Registry,
         request: &crate::treasury::memo::RequestMemo,
         price: u64,
     ) -> Option<&'w ReceivedOrchardNote> {
@@ -44,11 +46,14 @@ impl Treasury {
         if !matches!(request, crate::treasury::memo::RequestMemo::Claim { .. }) {
             return None;
         }
+        let name = Name::parse(request.name())?;
+        let tip_height = registry.tip(&name).map(|tip| tip.confirmed_height);
 
         wallet
             .orchard_notes_for(TREASURY_ACCOUNT)
             .find(|note| {
                 note.note.value().inner() >= price_zat.into_u64()
+                    && tip_height.map_or(true, |height| note.confirmed_height > height)
                     && crate::treasury::memo::RequestMemo::parse(note.memo.as_array())
                         .is_ok_and(|parsed| &parsed == request)
             })

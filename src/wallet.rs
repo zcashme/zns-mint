@@ -5,7 +5,7 @@ pub mod selection;
 pub mod transaction;
 pub mod trees;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use incrementalmerkletree::Position;
 use zcash_keys::keys::UnifiedFullViewingKey;
@@ -57,6 +57,27 @@ impl NoteLocator {
     pub fn ironwood(account_id: AccountId, rho: orchard::note::Rho) -> Self {
         Self::Ironwood { account_id, rho }
     }
+}
+
+/// Projects Treasury Orchard note rho values from a note-exclusion set.
+///
+/// Treasury assembly functions consume `&BTreeSet<Rho>` — they need to know
+/// which Treasury note nullifiers are already spoken for when selecting inputs.
+/// This translates the wallet's `NoteLocator`-keyed exclusion set into that form.
+pub fn treasury_excluded_rhos(
+    excluded: &BTreeSet<NoteLocator>,
+) -> BTreeSet<orchard::note::Rho> {
+    excluded
+        .iter()
+        .filter_map(|loc| match loc {
+            NoteLocator::Orchard { account_id, rho }
+                if *account_id == crate::mint::TREASURY_ACCOUNT =>
+            {
+                Some(*rho)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The in-memory ZNS wallet engine: a notes table and a tree.
@@ -191,6 +212,17 @@ impl Wallet {
             return None;
         };
         self.balance.unspent.ironwood.get(&account_id)?.get(&rho)
+    }
+
+    /// Returns whether this exact planning locator is currently unspent.
+    pub fn contains_unspent_locator(&self, locator: NoteLocator) -> bool {
+        match locator {
+            NoteLocator::Orchard { .. } => self.orchard_note(locator).is_some(),
+            NoteLocator::Ironwood { .. } => self.ironwood_note(locator).is_some(),
+            NoteLocator::Sapling { account_id, position } => self
+                .sapling_notes_for(account_id)
+                .any(|note| note.position == position),
+        }
     }
 
     pub fn balance(&self, account: AccountId) -> Zatoshis {

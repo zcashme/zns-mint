@@ -2,7 +2,7 @@
 //! and produces typed [`NameNoteRequest`]s for the transaction-assembly path.
 
 use crate::mint::{Action, Name, NameCommitment, UnifiedAddress};
-use crate::registry::state::{Registry, Tip};
+use crate::registry::{Registry, Tip};
 
 /// A requested Name Note transition, ready for the transaction-assembly path.
 ///
@@ -83,8 +83,8 @@ pub fn authorize_claim(
 
 /// Authorizes an update request, producing a [`NameNoteRequest`].
 ///
-/// Verifies the name is live and calls `auth::verify_consume` to validate the
-/// OTP (not yet wired).
+/// Verifies the name is live and consumes an OTP bound to its exact current
+/// predecessor commitment.
 pub fn authorize_update(
     registry: &Registry,
     pending_otps: &mut crate::auth::PendingOtps,
@@ -98,7 +98,12 @@ pub fn authorize_update(
         return None;
     }
 
-    let key = crate::auth::ChallengeKey::new(name.clone(), Action::Update, new_ua.clone());
+    let key = crate::auth::ChallengeKey::new(
+        name.clone(),
+        Action::Update,
+        new_ua.clone(),
+        tip.commitment,
+    );
     if !pending_otps.verify(&key, otp, current_height) {
         return None;
     }
@@ -112,8 +117,8 @@ pub fn authorize_update(
 
 /// Authorizes a release request, producing a [`NameNoteRequest`].
 ///
-/// Verifies the name is live and calls `auth::verify_consume` to validate the
-/// OTP (not yet wired).
+/// Verifies the name is live and consumes an OTP bound to its exact current
+/// predecessor commitment.
 pub fn authorize_release(
     registry: &Registry,
     pending_otps: &mut crate::auth::PendingOtps,
@@ -127,7 +132,19 @@ pub fn authorize_release(
         return None;
     }
 
-    let key = crate::auth::ChallengeKey::new(name.clone(), Action::Release, current_ua);
+    let controller = tip
+        .received()
+        .map(|received| received.payload().ua())
+        ?;
+    if controller != &current_ua {
+        return None;
+    }
+    let key = crate::auth::ChallengeKey::new(
+        name.clone(),
+        Action::Release,
+        controller.clone(),
+        tip.commitment,
+    );
     if !pending_otps.verify(&key, otp, current_height) {
         return None;
     }
@@ -252,10 +269,85 @@ mod tests {
             Name::parse("carol").unwrap(),
             Action::Update,
             UnifiedAddress::from_string("u1new".into()),
+            dummy_commitment(),
         );
-        let issued_otp = otps.issue(key, height);
+        let issued_otp = crate::auth::OtpCode::generate();
         let real_otp = issued_otp.expose_for_test();
+        otps.record_issued(key, &issued_otp, height);
         let req = authorize_update(&reg, &mut otps, height, name.clone(), ua, &real_otp).unwrap();
         assert_eq!(req.action(), Action::Update);
+    }
+}
+
+/// Validates a transition request (update or release with OTP), reserves the name,
+/// authorizes the transition, and assembles the transaction.
+/// Returns `None` if the request is invalid, the name is locked, or authorization fails.
+#[allow(clippy::too_many_arguments)]
+pub fn process_transition(
+    name: Name,
+    action: Action,
+    ua: UnifiedAddress,
+    otp: &[u8; 16],
+    tip_commitment: NameCommitment,
+    cursor_height: zcash_protocol::consensus::BlockHeight,
+    target_height: zcash_protocol::consensus::BlockHeight,
+    excluded: &std::collections::BTreeSet<crate::wallet::NoteLocator>,
+    wallet: &mut crate::wallet::Wallet,
+    registry: &Registry,
+    registry_keys: &crate::key::RegistryKeys,
+    ops: &mut crate::mint::OperationalState,
+    seen_with_otp: &mut std::collections::BTreeSet<crate::auth::ChallengeKey>,
+) -> Option<crate::mint::RequestOutcome> {
+    use crate::auth::ChallengeKey;
+    use crate::mint::{SubmissionKind, RequestOutcome};
+
+    let key = ChallengeKey::new(name.clone(), action, ua.clone(), tip_commitment);
+    if seen_with_otp.contains(&key) {
+        return None;
+    }
+    crate::metrics::inc_request_received(action.as_str());
+    seen_with_otp.insert(key);
+
+    let lock = ops.reserve_name(&name, Some(tip_commitment))?;
+    let name_binding = lock.binding();
+
+    let req = match action {
+        Action::Update => authorize_update(registry, &mut ops.pending_otps, cursor_height, name, ua, otp),
+        Action::Release => authorize_release(registry, &mut ops.pending_otps, cursor_height, name, ua, otp),
+        Action::Claim => unreachable!(),
+    };
+
+    match req {
+        None => {
+            crate::metrics::inc_request_invalid("authorization_failed");
+            ops.release_name(&lock);
+            None
+        }
+        Some(r) => {
+            crate::metrics::inc_otps_verified();
+            let result = crate::registry::transaction::execute_transition(
+                wallet,
+                registry,
+                registry_keys,
+                r,
+                excluded,
+                cursor_height,
+                target_height,
+            )
+            .map(|(txid, hex, notes)| {
+                let kind = match action {
+                    Action::Update => SubmissionKind::Update,
+                    Action::Release => SubmissionKind::Release,
+                    _ => unreachable!(),
+                };
+                (kind, txid, hex, notes)
+            });
+            Some(RequestOutcome {
+                result,
+                name_lock: Some(lock),
+                name_binding: Some(name_binding),
+                relay_challenge: None,
+            })
+        }
     }
 }

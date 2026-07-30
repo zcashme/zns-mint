@@ -24,7 +24,7 @@ pub enum MemoError {
 }
 
 /// A parsed, typed request memo sent by a user to the Treasury.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum RequestMemo {
     /// A claim request: `ZNS:claim:<name>:<ua>`
     Claim { name: String, ua: String },
@@ -41,6 +41,46 @@ pub enum RequestMemo {
         otp: Option<[u8; 16]>,
     },
 }
+
+impl PartialEq for RequestMemo {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        match (self, other) {
+            (
+                Self::Claim { name: l_name, ua: l_ua },
+                Self::Claim { name: r_name, ua: r_ua },
+            ) => l_name == r_name && l_ua == r_ua,
+            (
+                Self::Update { name: l_name, ua: l_ua, otp: l_otp },
+                Self::Update { name: r_name, ua: r_ua, otp: r_otp },
+            ) => {
+                if l_name != r_name || l_ua != r_ua {
+                    return false;
+                }
+                match (l_otp, r_otp) {
+                    (Some(l), Some(r)) => bool::from(l.ct_eq(r)),
+                    (None, None) => true,
+                    _ => false,
+                }
+            }
+            (
+                Self::Release { name: l_name, ua: l_ua, otp: l_otp },
+                Self::Release { name: r_name, ua: r_ua, otp: r_otp },
+            ) => {
+                if l_name != r_name || l_ua != r_ua {
+                    return false;
+                }
+                match (l_otp, r_otp) {
+                    (Some(l), Some(r)) => bool::from(l.ct_eq(r)),
+                    (None, None) => true,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+}
+impl Eq for RequestMemo {}
 
 impl fmt::Debug for RequestMemo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -157,16 +197,31 @@ fn decode_otp(s: &str) -> Result<[u8; 16], MemoError> {
     if bytes.len() != 32 {
         return Err(MemoError::InvalidOtp);
     }
-    let nibble = |b: u8| match b {
-        b'0'..=b'9' => Ok(b - b'0'),
-        b'a'..=b'f' => Ok(b - b'a' + 10),
-        _ => Err(MemoError::InvalidOtp),
-    };
     let mut out = [0u8; 16];
+    let mut valid = 1u8;
     for (i, pair) in bytes.chunks_exact(2).enumerate() {
-        out[i] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+        let mut v = 0u8;
+        for (j, &b) in pair.iter().enumerate() {
+            let is_digit = (b.wrapping_sub(b'0') <= 9) as u8;
+            let is_hex = (b.wrapping_sub(b'a') <= 5) as u8;
+            valid &= is_digit | is_hex;
+            
+            let val = is_digit.wrapping_mul(b.wrapping_sub(b'0'))
+                | is_hex.wrapping_mul(b.wrapping_sub(b'a').wrapping_add(10));
+            
+            if j == 0 {
+                v |= val << 4;
+            } else {
+                v |= val;
+            }
+        }
+        out[i] = v;
     }
-    Ok(out)
+    if valid == 1 {
+        Ok(out)
+    } else {
+        Err(MemoError::InvalidOtp)
+    }
 }
 
 #[cfg(test)]

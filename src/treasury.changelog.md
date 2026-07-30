@@ -1,5 +1,11 @@
 # Treasury design record
 
+## 2026-07-28 — Stale claim-payment exclusion
+
+- Claim matching receives the canonical Registry view and rejects an unspent
+  payment confirmed at or before the current tip for that name. A payment
+  cannot be reused after a release/reclaim boundary.
+
 Tracks design-relevant changes to `src/treasury.rs`.
 
 ## 2026-07-24 — No exclusion-free sweep or funding selection

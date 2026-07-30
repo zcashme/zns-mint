@@ -1,5 +1,12 @@
 # Wallet changelog
 
+## 2026-07-28 — Exact locator validation after reorg
+
+- Added a read-only `contains_unspent_locator` boundary across Orchard,
+  Sapling, and ordinary Ironwood notes. Live reorg handling uses it to discard
+  an unconfirmed submission only when its exact planned funding input no
+  longer exists on the rebuilt canonical branch.
+
 Tracks design-relevant changes to `src/wallet.rs` and `src/wallet/trees.rs`.
 
 ## 2026-07-24 — Preflighted canonical rewind
