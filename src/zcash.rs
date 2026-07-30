@@ -21,8 +21,53 @@ use serde::{Deserialize, Serialize};
 use zcash_client_backend::data_api::BlockMetadata;
 use zcash_primitives::block::{Block, BlockHash};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
-use zcash_protocol::consensus::{BlockHeight, MAIN_NETWORK};
+use zcash_protocol::consensus::{BlockHeight, MainNetwork};
 use zebra_indexer_proto::{BlockHashAndHeight, ZebraClient};
+
+/// Zebra regtest activation heights (from the harness `zebrad.toml`).
+#[cfg(feature = "pre-nu63-activation")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegtestNetwork;
+
+#[cfg(feature = "pre-nu63-activation")]
+impl Parameters for RegtestNetwork {
+    fn network_type(&self) -> NetworkType {
+        NetworkType::Regtest
+    }
+
+    fn activation_height(&self, nu: NetworkUpgrade) -> Option<BlockHeight> {
+        match nu {
+            NetworkUpgrade::Overwinter => Some(BlockHeight(1)),
+            NetworkUpgrade::Sapling => Some(BlockHeight(1)),
+            NetworkUpgrade::Blossom => Some(BlockHeight(1)),
+            NetworkUpgrade::Heartwood => Some(BlockHeight(1)),
+            NetworkUpgrade::Canopy => Some(BlockHeight(1)),
+            NetworkUpgrade::Nu5 => Some(BlockHeight(1)),
+            NetworkUpgrade::Nu6 => Some(BlockHeight(1)),
+            NetworkUpgrade::Nu6_1 => Some(BlockHeight(4)),
+            NetworkUpgrade::Nu6_2 => Some(BlockHeight(4)),
+            NetworkUpgrade::Nu6_3 => Some(BlockHeight(4)),
+            #[cfg(zcash_unstable = "nu7")]
+            NetworkUpgrade::Nu7 => None,
+        }
+    }
+}
+
+/// The consensus network parameters used by this build.
+///
+/// Mainnet in production; the Zebra regtest config when `pre-nu63-activation`
+/// is enabled (dev/regtest only).
+#[cfg(not(feature = "pre-nu63-activation"))]
+pub type NetworkParams = MainNetwork;
+
+#[cfg(feature = "pre-nu63-activation")]
+pub type NetworkParams = RegtestNetwork;
+
+#[cfg(not(feature = "pre-nu63-activation"))]
+pub const NETWORK: NetworkParams = zcash_protocol::consensus::MAIN_NETWORK;
+
+#[cfg(feature = "pre-nu63-activation")]
+pub const NETWORK: NetworkParams = RegtestNetwork;
 
 use orchard::tree::MerkleHashOrchard;
 
@@ -165,7 +210,7 @@ impl JsonRpc {
 
         let bytes =
             hex::decode(hex_str).map_err(|_| TransportError::BadNodeData("getblock hex"))?;
-        let block = Block::read(&bytes[..], &MAIN_NETWORK)
+        let block = Block::read(&bytes[..], &NETWORK)
             .map_err(|_| TransportError::BadNodeData("getblock parse"))?;
         if block.claimed_height() != height {
             return Err(TransportError::BadNodeData(
@@ -257,6 +302,20 @@ impl Default for JsonRpc {
     }
 }
 
+/// The outcome of submitting a signed transaction to the node.
+pub enum SubmitOutcome {
+    /// The node accepted the transaction.
+    Accepted,
+    /// The transaction was already in the chain (node returned -27).
+    AlreadyInChain,
+    /// The canonical tip changed between assembly and submission.
+    TipChanged,
+    /// The node returned a different txid than what we signed.
+    TxIdMismatch { returned_txid: String },
+    /// The node rejected the transaction (non-retryable error).
+    Rejected(TransportError),
+}
+
 /// Read-only JSON-RPC capability for canonical block reconstruction.
 ///
 /// The wrapped transport is private and this facade intentionally exposes no
@@ -275,6 +334,32 @@ impl CanonicalBlockSource {
 
     pub async fn get_block(&self, height: BlockHeight) -> Result<Block, TransportError> {
         self.0.get_block(height).await
+    }
+
+    /// Verifies the canonical tip hasn't moved, then broadcasts a signed transaction.
+    ///
+    /// Returns [`SubmitOutcome`] for application-level results (accepted, rejected,
+    /// tip changed) or `Err(TransportError)` for retryable transport failures.
+    pub async fn submit_transaction(
+        &self,
+        hex: &str,
+        expected_txid: &str,
+        expected_height: BlockHeight,
+        expected_hash: BlockHash,
+    ) -> Result<SubmitOutcome, TransportError> {
+        let tip = self.exact_tip().await?;
+        if tip.height() != expected_height || tip.hash() != expected_hash {
+            return Ok(SubmitOutcome::TipChanged);
+        }
+        match self.0.send(hex).await {
+            Ok(returned_txid) if returned_txid == expected_txid => Ok(SubmitOutcome::Accepted),
+            Ok(returned_txid) => Ok(SubmitOutcome::TxIdMismatch { returned_txid }),
+            Err(TransportError::Rpc(ref rpc_err)) if rpc_err.is_tx_already_in_chain() => {
+                Ok(SubmitOutcome::AlreadyInChain)
+            }
+            Err(e) if e.is_retryable() => Err(e),
+            Err(e) => Ok(SubmitOutcome::Rejected(e)),
+        }
     }
 }
 

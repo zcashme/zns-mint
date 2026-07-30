@@ -368,3 +368,51 @@ mod tests {
         assert_ne!(update_psi, release_psi);
     }
 }
+
+// ---------------------------------------------------------------------------
+// cmx helper — copied from zns-verify (standalone Sinsemilla, no orchard dep)
+// ---------------------------------------------------------------------------
+
+use sinsemilla::CommitDomain;
+use pasta_curves::group::ff::PrimeField;
+
+/// Sinsemilla personalization tag for Orchard note commitments.
+const NOTE_COMMITMENT_PERSONALIZATION: &str = "z.cash:Orchard-NoteCommit";
+
+/// Number of bits taken from each Pallas base-field input (rho, psi).
+/// Matches orchard's L_ORCHARD_BASE.
+const L_ORCHARD_BASE: usize = 255;
+
+fn le_bytes_lsb0(bytes: &[u8]) -> impl Iterator<Item = bool> + '_ {
+    bytes
+        .iter()
+        .copied()
+        .flat_map(|b| (0..8).map(move |i| (b >> i) & 1 != 0))
+}
+
+/// Computes cmx (the x-coordinate of the Sinsemilla note commitment) from
+/// raw note components plus caller-supplied (psi, rcm).
+///
+/// Used by the scanner to validate that a decrypted Name Note's ZNS-derived
+/// commitment matches the on-chain cmx.
+pub fn note_commitment_cmx(
+    g_d: [u8; 32],
+    pk_d: [u8; 32],
+    value: u64,
+    rho: pasta_curves::pallas::Base,
+    psi: pasta_curves::pallas::Base,
+    rcm: pasta_curves::pallas::Scalar,
+) -> Option<pasta_curves::pallas::Base> {
+    let domain = CommitDomain::new(NOTE_COMMITMENT_PERSONALIZATION);
+    let value_bytes = value.to_le_bytes();
+    let rho_bytes = rho.to_repr();
+    let psi_bytes = psi.to_repr();
+
+    let bits = le_bytes_lsb0(&g_d)
+        .chain(le_bytes_lsb0(&pk_d))
+        .chain(le_bytes_lsb0(&value_bytes))
+        .chain(le_bytes_lsb0(rho_bytes.as_ref()).take(L_ORCHARD_BASE))
+        .chain(le_bytes_lsb0(psi_bytes.as_ref()).take(L_ORCHARD_BASE));
+
+    Option::<pasta_curves::pallas::Base>::from(domain.short_commit(bits, &rcm))
+}

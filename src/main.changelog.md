@@ -4,6 +4,44 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-07-30 — process_cycle extraction
+
+- The entire request-processing, replenishment, and sweep block — previously
+  inline in the main loop — extracted to `async fn process_cycle(wallet,
+  registry, ops, treasury_keys, registry_keys, block_source, cursor)`.
+- The main loop now calls `ops.reconcile()` (was `check_confirmations()`),
+  then `process_cycle()`. The `new_subs` accumulator vector and its
+  end-of-cycle metrics loop are gone — `metrics::inc_tx_submitted` is now
+  called inline at each of the three `record_submission` call sites.
+- `check_confirmations` import removed; `BlockMetadata`, `Registry`,
+  `Wallet`, `TreasuryKeys`, `RegistryKeys` imports added for the extracted
+  function signature.
+
+## 2026-07-28 — One-ZEC claim price
+
+- The fixed claim price is `100_000_000` zatoshis (one ZEC). Claim payment
+  matching accepts a note at or above this price; atomic settlement retains the
+  price and returns any excess to the claimed `name_ua`'s Orchard receiver.
+
+## 2026-07-28 — Canonical live authorization boundaries
+
+- OTP relays go to the current Name Note controller but display the requested
+  UA, with the fixed-width OTP first. A relay request funds exactly two
+  ZIP-317 fees: one for the network and one paid to that controller.
+- OTP challenges bind the requested tuple and predecessor commitment. Relay
+  deduplication does not lock a name; only a canonically observed valid OTP
+  acquires the exclusive lifecycle lock for that name tip.
+- Submission expiry advances on every successful canonical catch-up, including
+  empty blocks. A changed-tip reorg invalidates only work bound to that tip.
+- Immediately before broadcast, the live execution path re-reads Zebra's exact
+  tip and requires it to equal the fully-applied cursor. A changed tip discards
+  the assembled bytes and releases the in-memory reservation for reconciliation.
+- A restart begins with a full transaction-expiry recovery window before Live
+  reconstructs any external action, avoiding a replacement that races an
+  unconfirmed pre-crash transaction.
+- Registry fee replenishment takes precedence over a Treasury auto-sweep when
+  both are eligible in the same canonical block.
+
 ## 2026-07-24 — Live phase wired into main loop
 
 - The main loop now enters Live after Rebuild reaches the exact Zebra tip.

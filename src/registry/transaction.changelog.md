@@ -2,6 +2,17 @@
 
 Tracks design-relevant changes to `src/registry/transaction.rs`.
 
+## 2026-07-28 — Aggregate fee includes paired Orchard claim actions
+
+- Registry fee selection and assembly now receive the action count of a paired
+  Orchard bundle. Atomic claims supply two actions (Treasury spend and
+  Treasury-controlled price change), and standalone lifecycle operations supply
+  zero.
+- An Ironwood claim refund is a cross-pool transfer, not Registry-funded
+  change: its bundle balance is `aggregate_fee - refund`. The paired Orchard
+  bundle contributes the offset, so the transaction-wide balance remains the
+  exact ZIP-317 fee.
+
 ## 2026-07-24 — Refund output and extra-outputs fee parameter
 
 - `build_transaction` now accepts `refund: Option<(orchard::Address, u64)>` for

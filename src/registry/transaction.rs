@@ -10,7 +10,7 @@
 use crate::key::RegistryKeys;
 use crate::mint::Action;
 use crate::registry::authorize::NameNoteRequest;
-use crate::registry::state::Registry;
+use crate::registry::Registry;
 use crate::wallet::NoteLocator;
 use std::collections::BTreeSet;
 use transparent::address::TransparentAddress;
@@ -64,6 +64,7 @@ fn registry_fee(
     funding_spends: usize,
     extra_outputs: usize,
     has_change: bool,
+    orchard_actions: usize,
 ) -> Result<u64, crate::mint::AssemblyError> {
     use orchard::builder::BundleType;
     use orchard::bundle::BundleVersion;
@@ -81,13 +82,13 @@ fn registry_fee(
         .map_err(|_| crate::mint::AssemblyError::ActionOverflow)?;
     FeeRule::standard()
         .fee_required(
-            &zcash_protocol::consensus::MAIN_NETWORK,
+            &crate::zcash::NETWORK,
             target_height,
             std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
             std::iter::empty::<usize>(),
             0,
             0,
-            0,
+            orchard_actions,
             actions,
         )
         .map(Zatoshis::into_u64)
@@ -102,6 +103,7 @@ pub fn select_registry_fee_inputs(
     target_height: BlockHeight,
     excluded: &BTreeSet<NoteLocator>,
     extra_outputs: usize,
+    orchard_actions: usize,
 ) -> Result<RegistryFeeInputs, crate::mint::AssemblyError> {
     let lifecycle_spends = usize::from(request.action() != Action::Claim);
     let mut candidates: Vec<_> = wallet
@@ -123,13 +125,26 @@ pub fn select_registry_fee_inputs(
     let mut locators = BTreeSet::new();
     let mut total = 0u64;
     for funding_spends in 0..=candidates.len() {
-        let fee_without_change =
-            registry_fee(target_height, lifecycle_spends, funding_spends, extra_outputs, false)?;
+        let fee_without_change = registry_fee(
+            target_height,
+            lifecycle_spends,
+            funding_spends,
+            extra_outputs,
+            false,
+            orchard_actions,
+        )?;
         if total == fee_without_change {
             return Ok(RegistryFeeInputs { locators });
         }
 
-        let fee_with_change = registry_fee(target_height, lifecycle_spends, funding_spends, extra_outputs, true)?;
+        let fee_with_change = registry_fee(
+            target_height,
+            lifecycle_spends,
+            funding_spends,
+            extra_outputs,
+            true,
+            orchard_actions,
+        )?;
         if total > fee_without_change && total >= fee_with_change {
             return Ok(RegistryFeeInputs { locators });
         }
@@ -157,8 +172,9 @@ pub fn select_registry_fee_inputs(
 /// mints the new Name Note via `add_zns_output`, and self-funds the ZIP-317
 /// fee using the Registry's own Ironwood ZEC reserves.
 ///
-/// The bundle's value balance is asserted to equal the computed fee before
-/// returning — a misbalanced transaction must not reach the signing path.
+/// The bundle's value balance is asserted to equal its computed fee minus any
+/// cross-pool refund. The paired Orchard bundle supplies that value, and their
+/// sum is the transaction fee.
 #[allow(clippy::too_many_arguments)]
 pub fn build_transaction(
     wallet: &mut crate::wallet::Wallet,
@@ -169,9 +185,12 @@ pub fn build_transaction(
     anchor_height: BlockHeight,
     target_height: BlockHeight,
     // Optional Ironwood refund output (address, value). For atomic claims,
-    // this returns the excess payment (payment - price) to the Treasury.
+    // this returns the excess payment (payment - price) to the claimed UA.
     // Always present for claims, including value-zero. None for update/release.
     refund: Option<(orchard::Address, u64)>,
+    // Number of actions in a paired Orchard bundle. Claims use two actions:
+    // one Treasury payment spend and one Treasury-controlled change output.
+    orchard_actions: usize,
 ) -> Result<
     orchard::Bundle<
         orchard::builder::InProgress<orchard::builder::Unproven, orchard::builder::Unauthorized>,
@@ -235,11 +254,14 @@ pub fn build_transaction(
             .flatten()
             .ok_or(crate::mint::AssemblyError::NoWitness)?;
 
+        let (rcm, psi) = previous.payload().opening();
         builder
-            .add_validated_zns_spend(
+            .add_zns_spend(
                 fvk.clone(),
-                previous.validated().clone(),
+                previous.note().clone(),
                 merkle_path.into(),
+                orchard::note::NoteCommitTrapdoor::from_inner(rcm),
+                psi,
             )
             .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
     }
@@ -258,7 +280,7 @@ pub fn build_transaction(
             address,
             value,
             memo,
-            new_rcm,
+            orchard::note::NoteCommitTrapdoor::from_inner(new_rcm),
             new_psi,
         )
         .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
@@ -285,13 +307,25 @@ pub fn build_transaction(
 
     let funding_spends = funding_notes.len();
     let extra_outputs = usize::from(refund.is_some());
-    let fee_without_change =
-        registry_fee(target_height, committed_spends, funding_spends, extra_outputs, false)?;
+    let fee_without_change = registry_fee(
+        target_height,
+        committed_spends,
+        funding_spends,
+        extra_outputs,
+        false,
+        orchard_actions,
+    )?;
     let (fee, change) = if total_funded == fee_without_change {
         (fee_without_change, 0)
     } else {
-        let fee_with_change =
-            registry_fee(target_height, committed_spends, funding_spends, extra_outputs, true)?;
+        let fee_with_change = registry_fee(
+            target_height,
+            committed_spends,
+            funding_spends,
+            extra_outputs,
+            true,
+            orchard_actions,
+        )?;
         if total_funded < fee_with_change {
             return Err(crate::mint::AssemblyError::InsufficientValue);
         }
@@ -349,16 +383,18 @@ pub fn build_transaction(
         .map_err(|_| crate::mint::AssemblyError::BuildFailed)?
         .ok_or(crate::mint::AssemblyError::BuildFailed)?;
 
-    // Assert the bundle's value balance equals the intended fee. The Ironwood
-    // value balance is (sum of spend values) - (sum of output values). For a
-    // correctly balanced transaction, this equals the fee the network will
-    // charge. A mismatch means the transaction is misbalanced or the fee was
-    // computed wrong — either way it must not be broadcast.
+    // A claim refund is paid by the paired Orchard bundle's positive value
+    // balance. Therefore this bundle's balance is the aggregate fee less that
+    // cross-pool value; for standalone lifecycle transactions it is the fee.
     let actual_fee: i64 = bundle.value_balance().into();
+    let cross_pool_refund = refund.map_or(0, |(_, value)| value);
+    let intended_balance = i64::try_from(fee)
+        .and_then(|fee| i64::try_from(cross_pool_refund).map(|refund| fee - refund))
+        .map_err(|_| crate::mint::AssemblyError::ValueOverflow)?;
     assert_eq!(
-        actual_fee, fee as i64,
-        "bundle value balance {} != intended fee {} — transaction is misbalanced",
-        actual_fee, fee,
+        actual_fee, intended_balance,
+        "bundle value balance {} != intended balance {} — transaction is misbalanced",
+        actual_fee, intended_balance,
     );
 
     // Note: the full cryptographic self-verification (proof + commitment) is
@@ -368,4 +404,53 @@ pub fn build_transaction(
     // so `verify_proof` is the authoritative check.
 
     Ok(bundle)
+}
+
+/// Assembles, proves, signs, and serializes a transition transaction (update or release)
+/// from a typed [`NameNoteRequest`].
+///
+/// This is the complete Registry transition path: selects fee notes, builds the
+/// Ironwood bundle, and signs it into a broadcastable V6 transaction.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_transition(
+    wallet: &mut crate::wallet::Wallet,
+    registry: &Registry,
+    registry_keys: &RegistryKeys,
+    request: NameNoteRequest,
+    excluded: &BTreeSet<NoteLocator>,
+    anchor_height: BlockHeight,
+    target_height: BlockHeight,
+) -> Result<(zcash_primitives::transaction::TxId, String, Vec<NoteLocator>), crate::mint::AssemblyError> {
+    let fee_inputs = select_registry_fee_inputs(
+        wallet,
+        &request,
+        target_height,
+        excluded,
+        0,
+        0,
+    )?;
+    let bundle = build_transaction(
+        wallet,
+        registry,
+        registry_keys,
+        request,
+        &fee_inputs,
+        anchor_height,
+        target_height,
+        None,
+        0,
+    )?;
+    let (txid, hex) = crate::registry::signing::assemble_v6_transaction(
+        None,
+        Some(bundle),
+        None,
+        Some(registry_keys),
+        None,
+        target_height,
+    )?;
+    Ok((
+        txid,
+        hex,
+        fee_inputs.locators().iter().copied().collect(),
+    ))
 }

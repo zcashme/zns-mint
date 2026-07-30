@@ -1,5 +1,14 @@
 # Treasury OTP relay changelog
 
+## 2026-07-28 — Owner-visible relay and fixed relay value
+
+- Relay memos begin with the fixed-width OTP:
+  `ZNS:otp:<otp>:<name>:<verb>:<requested_ua>`. The output is encrypted to the
+  current controller while the plaintext shows the requested update target.
+- A relay request note must equal exactly twice the final ZIP-317 fee. One fee
+  pays the network; the other is delivered to the original owner. Treasury
+  retains no relay value.
+
 ## 2026-07-24 — OTP relay transaction assembly
 
 - Added `src/treasury/relay.rs` with `assemble_otp_relay` — builds a standard

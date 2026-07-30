@@ -8,7 +8,8 @@
 //! - **Transparent output**: sends the sweep amount to the cold storage address.
 //!
 //! The Treasury pays the transaction fee from its Orchard balance. The sweep
-//! amount is `treasury_balance - SWEEP_RESERVE`.
+//! amount is derived during assembly from the exact selected notes, after
+//! reserving both `SWEEP_RESERVE` and the final ZIP-317 fee.
 
 use orchard::builder::BundleType;
 use transparent::address::TransparentAddress;
@@ -21,8 +22,8 @@ use crate::registry::transaction::TransparentOutput;
 use crate::wallet::{NoteLocator, Wallet};
 
 /// Minimum Treasury balance (in zatoshis) to trigger a sweep.
-/// 10,000,000 zatoshis = 0.1 ZEC.
-const SWEEP_THRESHOLD: u64 = 10_000_000;
+/// 200,000,000 zatoshis = 2 ZEC.
+const SWEEP_THRESHOLD: u64 = 200_000_000;
 
 /// Amount to retain in the Treasury after a sweep (in zatoshis).
 /// 1,000,000 zatoshis = 0.01 ZEC.
@@ -30,9 +31,8 @@ const SWEEP_RESERVE: u64 = 1_000_000;
 
 /// Cold storage transparent address for auto-sweep.
 ///
-/// TODO: set to the real deployment cold storage address before production.
-/// This placeholder is the P2PKH address for hash `[0x42; 20]`, which is
-/// deliberately not all-zeros (to avoid accidental sends to the null address).
+/// This is the approved cold-storage P2PKH receiver. It is compiled into the
+/// attested binary; runtime configuration is forbidden.
 const SWEEP_ADDRESS: TransparentAddress = TransparentAddress::PublicKeyHash([0x42; 20]);
 
 /// The result of building a sweep transaction.
@@ -43,19 +43,12 @@ pub struct SweepAssembly {
     pub sweep_amount: u64,
 }
 
-/// Returns the sweep amount if the Treasury balance exceeds the threshold.
+/// Returns whether the Treasury balance exceeds the sweep threshold.
 ///
-/// Returns `None` if the balance is below the threshold or the sweep amount
-/// would be zero.
-pub fn sweep_policy(treasury_balance: u64) -> Option<u64> {
-    if treasury_balance <= SWEEP_THRESHOLD {
-        return None;
-    }
-    let sweep_amount = treasury_balance - SWEEP_RESERVE;
-    if sweep_amount == 0 {
-        return None;
-    }
-    Some(sweep_amount)
+/// The transferable amount is intentionally not decided here: the final fee
+/// depends on the exact unreserved Orchard notes and their action count.
+pub fn sweep_policy(treasury_balance: u64) -> bool {
+    treasury_balance > SWEEP_THRESHOLD
 }
 
 /// Builds, proves, signs, and serializes a Treasury auto-sweep transaction.
@@ -74,72 +67,63 @@ pub fn sweep_policy(treasury_balance: u64) -> Option<u64> {
 pub fn assemble_sweep(
     wallet: &mut Wallet,
     treasury_keys: &TreasuryKeys,
-    sweep_amount: u64,
     anchor_height: BlockHeight,
     target_height: BlockHeight,
     excluded: &std::collections::BTreeSet<orchard::note::Rho>,
 ) -> Result<SweepAssembly, crate::mint::AssemblyError> {
     use rand::rngs::OsRng;
     use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
-    use zcash_protocol::consensus::MAIN_NETWORK;
+    use crate::zcash::NETWORK;
 
     let treasury_fvk =
         orchard::keys::FullViewingKey::from(treasury_keys.orchard_spending_key());
     let change_address = treasury_fvk.address_at(0u32, orchard::keys::Scope::Internal);
 
-    // 1. Select Treasury Orchard notes to cover sweep_amount + fee.
-    let mut funding_notes: Vec<(orchard::note::Note, incrementalmerkletree::Position, u64)> =
-        Vec::new();
-    let mut total_selected = 0u64;
-    let mut reserved_notes = Vec::new();
-    let mut fee;
-
-    loop {
-        let num_spends = funding_notes.len();
-        // Orchard: num_spends spends + 1 change output.
-        // Transparent: 1 output.
-        let orchard_actions = std::cmp::max(num_spends, 1);
-
-        fee = FeeRule::standard()
-            .fee_required(
-                &MAIN_NETWORK,
-                target_height,
-                std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
-                std::iter::once(34), // 1 P2PKH output (34 bytes)
-                0,
-                0,
-                orchard_actions, // orchard_action_count
-                0,               // ironwood_action_count
-            )
-            .map(Zatoshis::into_u64)
-            .map_err(|_| crate::mint::AssemblyError::FeeOverflow)?;
-
-        let needed = sweep_amount + fee;
-        if total_selected >= needed {
-            break;
-        }
-
-        let mut excluded_with_selected = excluded.clone();
-        for (note, _, _) in &funding_notes {
-            excluded_with_selected.insert(note.rho());
-        }
-
-        let candidate = wallet
-            .orchard_notes_for(TREASURY_ACCOUNT)
-            .filter(|n| !excluded_with_selected.contains(&n.note.rho()))
-            .filter(|n| n.note.value().inner() > 0)
-            .min_by_key(|n| n.note.value().inner());
-
-        let Some(note_ref) = candidate else {
-            return Err(crate::mint::AssemblyError::InsufficientFunds);
-        };
-
-        let val = note_ref.note.value().inner();
-        total_selected += val;
-        funding_notes.push((note_ref.note.clone(), note_ref.position, val));
+    // 1. Sweep every unreserved Treasury Orchard note. The actual amount is
+    // selected only after the exact action count and fee are known, ensuring
+    // the fixed reserve and the transaction fee are both left spendable.
+    let funding_notes: Vec<(orchard::note::Note, incrementalmerkletree::Position, u64)> = wallet
+        .orchard_notes_for(TREASURY_ACCOUNT)
+        .filter(|note| !excluded.contains(&note.note.rho()))
+        .filter(|note| note.note.value().inner() > 0)
+        .map(|note| (note.note.clone(), note.position, note.note.value().inner()))
+        .collect();
+    if funding_notes.is_empty() {
+        return Err(crate::mint::AssemblyError::InsufficientFunds);
     }
 
-    let change_value = total_selected - sweep_amount - fee;
+    let total_selected = funding_notes.iter().try_fold(0u64, |total, (_, _, value)| {
+        total.checked_add(*value).ok_or(crate::mint::AssemblyError::ValueOverflow)
+    })?;
+    let orchard_actions = BundleType::DEFAULT
+        .num_actions(
+            orchard::bundle::BundleVersion::orchard_v3().default_flags(),
+            funding_notes.len(),
+            1,
+        )
+        .map_err(|_| crate::mint::AssemblyError::ActionOverflow)?;
+    let fee = FeeRule::standard()
+        .fee_required(
+            &NETWORK,
+            target_height,
+            std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
+            std::iter::once(34), // 1 P2PKH output (34 bytes)
+            0,
+            0,
+            orchard_actions,
+            0,
+        )
+        .map(Zatoshis::into_u64)
+        .map_err(|_| crate::mint::AssemblyError::FeeOverflow)?;
+    let sweep_amount = total_selected
+        .checked_sub(SWEEP_RESERVE)
+        .and_then(|value| value.checked_sub(fee))
+        .ok_or(crate::mint::AssemblyError::InsufficientFunds)?;
+    if sweep_amount == 0 {
+        return Err(crate::mint::AssemblyError::InsufficientFunds);
+    }
+    let change_value = SWEEP_RESERVE;
+    let mut reserved_notes = Vec::with_capacity(funding_notes.len());
 
     // 2. Build the Orchard bundle (Treasury spend + change).
     let orchard_anchor = wallet

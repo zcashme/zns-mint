@@ -3,7 +3,7 @@
 //! OTPs are transported by shielded memos:
 //!
 //! 1. user -> Treasury: `ZNS:update:<name>:<ua>` or `ZNS:release:<name>:<ua>`
-//! 2. Treasury -> current controller: `ZNS:otp:<name>:<verb>:<ua>:<otp>`
+//! 2. Treasury -> current controller: `ZNS:otp:<otp>:<name>:<verb>:<ua>`
 //! 3. user -> Treasury: same request with `:<otp>` appended
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
@@ -12,7 +12,7 @@ use rand::{rngs::OsRng, RngCore};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
-use crate::mint::{Action, Name, UnifiedAddress};
+use crate::mint::{Action, Name, NameCommitment, UnifiedAddress};
 
 /// OTPs are scoped to the exact requested transition.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -20,6 +20,7 @@ pub struct ChallengeKey {
     name: Name,
     action: Action,
     ua: UnifiedAddress,
+    tip_commitment: [u8; 32],
 }
 
 impl fmt::Debug for ChallengeKey {
@@ -29,8 +30,24 @@ impl fmt::Debug for ChallengeKey {
 }
 
 impl ChallengeKey {
-    pub fn new(name: Name, action: Action, ua: UnifiedAddress) -> Self {
-        Self { name, action, ua }
+    pub fn new(
+        name: Name,
+        action: Action,
+        ua: UnifiedAddress,
+        tip_commitment: NameCommitment,
+    ) -> Self {
+        Self {
+            name,
+            action,
+            ua,
+            tip_commitment: tip_commitment.to_bytes(),
+        }
+    }
+
+    fn matches_registry(&self, registry: &crate::registry::Registry) -> bool {
+        registry
+            .tip(&self.name)
+            .is_some_and(|tip| tip.commitment.to_bytes() == self.tip_commitment)
     }
 }
 use zcash_protocol::consensus::BlockHeight;
@@ -51,12 +68,26 @@ impl fmt::Debug for OtpCode {
 }
 
 impl OtpCode {
+    /// Generates a new OTP without recording it as deliverable.
+    ///
+    /// The orchestrator records the code only after the relay transaction has
+    /// been assembled and definitively accepted for broadcast.
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 16];
+        OsRng.fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+
     fn lowercase_hex(&self) -> [u8; 32] {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut encoded = [0u8; 32];
         for (index, byte) in self.0.iter().copied().enumerate() {
-            encoded[index * 2] = HEX[usize::from(byte >> 4)];
-            encoded[index * 2 + 1] = HEX[usize::from(byte & 0x0f)];
+            let hi = byte >> 4;
+            let lo = byte & 0x0f;
+            // Constant-time hex encoding to avoid cache-timing side-channels.
+            // If n < 10, (n + 6) >> 4 is 0. If n >= 10, it's 1.
+            // We add 48 (b'0') for 0..9, and 48 + 39 = 87 (b'a' - 10) for 10..15.
+            encoded[index * 2] = hi + 48 + (((hi + 6) >> 4) * 39);
+            encoded[index * 2 + 1] = lo + 48 + (((lo + 6) >> 4) * 39);
         }
         encoded
     }
@@ -123,21 +154,28 @@ impl PendingOtps {
         self.reserved.retain(|key| !keys.contains(key));
     }
 
+    /// Discards every relay reservation and deliverable OTP bound to a name
+    /// tip that is no longer canonical after a reorg.
+    pub fn invalidate_changed_tips(&mut self, registry: &crate::registry::Registry) {
+        self.pending.retain(|key, _| key.matches_registry(registry));
+        self.reserved.retain(|key| key.matches_registry(registry));
+    }
+
     /// Issues a new highly secure 128-bit hex OTP, valid for the configured
     /// number of blocks from `current_height`.
-    pub fn issue(&mut self, key: ChallengeKey, current_height: BlockHeight) -> OtpCode {
-        let mut bytes = [0u8; 16];
-        OsRng.fill_bytes(&mut bytes);
-
+    pub fn record_issued(
+        &mut self,
+        key: ChallengeKey,
+        otp: &OtpCode,
+        current_height: BlockHeight,
+    ) {
         self.pending.insert(
             key,
             OtpEntry {
-                otp: OtpSecret(bytes),
+                otp: OtpSecret(otp.0),
                 expires_at: current_height + Self::OTP_VALIDITY_BLOCKS,
             },
         );
-
-        OtpCode(bytes)
     }
 
     /// Verifies and burns the OTP if it is valid.
@@ -206,7 +244,7 @@ pub fn otp_relay_memo_fits(name: &Name, action: Action, ua: &UnifiedAddress) -> 
         .is_some_and(|length| length <= 512)
 }
 
-/// Encodes an OTP relay memo: `ZNS:otp:<name>:<verb>:<ua>:<otp>`, zero-padded
+/// Encodes an OTP relay memo: `ZNS:otp:<otp>:<name>:<verb>:<ua>`, zero-padded
 /// to 512 bytes.
 ///
 /// This memo is sent from the Treasury to the current controller's address so
@@ -228,13 +266,13 @@ pub fn encode_otp_relay_memo(
     let mut offset = 0usize;
     for field in [
         b"ZNS:otp:".as_slice(),
+        otp_hex.as_slice(),
+        b":".as_slice(),
         name.as_str().as_bytes(),
         b":".as_slice(),
         verb.as_bytes(),
         b":".as_slice(),
         ua.as_str().as_bytes(),
-        b":".as_slice(),
-        otp_hex.as_slice(),
     ] {
         let end = offset + field.len();
         memo[offset..end].copy_from_slice(field);

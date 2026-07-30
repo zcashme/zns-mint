@@ -260,3 +260,28 @@ pub fn inc_tx_expired(kind: &str) {
     TX_PENDING.dec();
 }
 
+// ---------------------------------------------------------------------------
+// Composite gauge publishing
+// ---------------------------------------------------------------------------
+
+/// Publishes all wallet-derived canonical-state gauges.
+///
+/// Called once at boot and then on every live-phase cycle (when the cursor
+/// is at the canonical tip) to refresh observability with post-sync state.
+pub fn publish_wallet_gauges(
+    wallet: &crate::wallet::Wallet,
+    height: zcash_protocol::consensus::BlockHeight,
+) {
+    use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+    use crate::registry::{classify_registry_ironwood_note, RegistryNoteClass};
+
+    set_chain_height(u32::from(height));
+    set_treasury_balance(wallet.balance(TREASURY_ACCOUNT).into_u64());
+    set_registry_fee_notes(
+        wallet
+            .ironwood_notes_for(REGISTRY_ACCOUNT)
+            .filter(|note| classify_registry_ironwood_note(note) == RegistryNoteClass::Fee)
+            .count() as u64,
+    );
+}
+

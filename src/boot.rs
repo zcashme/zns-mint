@@ -22,7 +22,8 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use secrecy::{ExposeSecret, Secret};
-use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters, MAIN_NETWORK};
+use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
+use crate::zcash::NETWORK;
 use zip32::fingerprint::SeedFingerprint;
 
 #[cfg(not(feature = "dev-seed"))]
@@ -257,48 +258,56 @@ async fn verify_chain_integrity(info: &zcash::BlockchainInfo) -> (ChainClient, B
         "FATAL: split-brain — JSON-RPC tip hash != gRPC tip hash"
     );
 
-    // Network identity: Zebra must be on mainnet. The SEV-SNP measurement of
-    // the container image is the primary guarantee; this genesis check is a
-    // cheap secondary guarantee that does not depend on build determinism.
     let rpc = zcash::JsonRpc::new();
-    let genesis = rpc
-        .get_block(BlockHeight::from_u32(0))
-        .await
-        .expect("FATAL: failed to fetch genesis block via JSON-RPC");
-    assert_eq!(
-        genesis.header().hash(),
-        zcash::MAINNET_GENESIS_HASH,
-        "FATAL: genesis block hash mismatch — Zebra is not on mainnet"
-    );
 
-    // Fetch and verify the tip block via JSON-RPC since Zebra gRPC doesn't implement get_block
+    // Network identity check: mainnet genesis hash in production builds only.
+    #[cfg(not(feature = "pre-nu63-activation"))]
+    {
+        let genesis = rpc
+            .get_block(BlockHeight::from_u32(0))
+            .await
+            .expect("FATAL: failed to fetch genesis block via JSON-RPC");
+        assert_eq!(
+            genesis.header().hash(),
+            zcash::MAINNET_GENESIS_HASH,
+            "FATAL: genesis block hash mismatch — Zebra is not on mainnet"
+        );
+    }
+
+    // Fetch the tip block via JSON-RPC since Zebra gRPC doesn't implement get_block.
     let block = rpc
         .get_block(tip_height)
         .await
         .expect("FATAL: failed to fetch tip block via JSON-RPC");
 
-    // Consensus baseline: NU5 must be active
-    const NU5_MAINNET_ACTIVATION_HEIGHT: u32 = 1_687_104;
-    assert!(
-        u32::from(tip_height) >= NU5_MAINNET_ACTIVATION_HEIGHT,
-        "FATAL: node is on a pre-NU5 branch (tip {}, NU5 at {})",
-        u32::from(tip_height),
-        NU5_MAINNET_ACTIVATION_HEIGHT
-    );
+    // Consensus baseline: NU5 must be active. Skipped in dev/regtest builds.
+    #[cfg(not(feature = "pre-nu63-activation"))]
+    {
+        const NU5_MAINNET_ACTIVATION_HEIGHT: u32 = 1_687_104;
+        assert!(
+            u32::from(tip_height) >= NU5_MAINNET_ACTIVATION_HEIGHT,
+            "FATAL: node is on a pre-NU5 branch (tip {}, NU5 at {})",
+            u32::from(tip_height),
+            NU5_MAINNET_ACTIVATION_HEIGHT
+        );
+    }
 
-    // Freshness: tip must be within 2 hours of wall clock
-    let tip_time = block.header().time;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("FATAL: system time before UNIX epoch")
-        .as_secs() as u32;
+    // Freshness: tip must be within 2 hours of wall clock. Skipped in dev/regtest.
+    #[cfg(not(feature = "pre-nu63-activation"))]
+    {
+        let tip_time = block.header().time;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("FATAL: system time before UNIX epoch")
+            .as_secs() as u32;
 
-    assert!(
-        now.saturating_sub(tip_time) <= 7200,
-        "FATAL: liveness failure — tip block is too old (tip_time={}, now={}). Node may be stuck.",
-        tip_time,
-        now
-    );
+        assert!(
+            now.saturating_sub(tip_time) <= 7200,
+            "FATAL: liveness failure — tip block is too old (tip_time={}, now={}). Node may be stuck.",
+            tip_time,
+            now
+        );
+    }
 
     tracing::info!(
         height = u32::from(tip_height),
@@ -312,7 +321,7 @@ async fn verify_chain_integrity(info: &zcash::BlockchainInfo) -> (ChainClient, B
 #[cfg(not(feature = "pre-nu63-activation"))]
 fn require_nu6_3_active(tip_height: BlockHeight) {
     assert!(
-        MAIN_NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, tip_height),
+        NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, tip_height),
         "FATAL: NU6.3/Ironwood is not active at Zebra tip {}",
         u32::from(tip_height),
     );
@@ -321,7 +330,7 @@ fn require_nu6_3_active(tip_height: BlockHeight) {
 
 #[cfg(feature = "pre-nu63-activation")]
 fn require_nu6_3_active(tip_height: BlockHeight) {
-    if MAIN_NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, tip_height) {
+    if NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, tip_height) {
         tracing::info!("boot: NU6.3/Ironwood active");
     } else {
         tracing::warn!(
@@ -338,7 +347,7 @@ fn require_nu6_3_active(tip_height: BlockHeight) {
 /// The Ironwood (NU6.3) activation height on mainnet, sourced from
 /// `zcash_protocol` so it tracks upstream automatically.
 pub fn ironwood_activation_height() -> BlockHeight {
-    MAIN_NETWORK
+    NETWORK
         .activation_height(NetworkUpgrade::Nu6_3)
         .expect("NU6.3 activation height must be set in zcash_protocol")
 }
@@ -442,8 +451,8 @@ fn generate_attestation_report_data(
         .fvk()
         .default_address(UnifiedAddressRequest::SHIELDED)
         .expect("FATAL: Treasury FVK missing default address");
-    let treasury_addr_str = treasury_addr.encode(&MAIN_NETWORK);
-    let registry_fvk_str = registry_keys.fvk().encode(&MAIN_NETWORK);
+    let treasury_addr_str = treasury_addr.encode(&NETWORK);
+    let registry_fvk_str = registry_keys.fvk().encode(&NETWORK);
 
     let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
     hasher.update(treasury_addr_str.as_bytes());

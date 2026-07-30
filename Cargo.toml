@@ -2,7 +2,7 @@
 name = "zns-mint"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 publish = false
 
 [features]
@@ -50,6 +50,11 @@ incrementalmerkletree = "0.8.2"
 # them direct adds no new compiled code to the graph.
 blake2b_simd = "1"
 pasta_curves = "0.5"
+
+# Sinsemilla commitment for ZNS cmx validation in the scanner. Same crate
+# zns-verify uses — computes the Orchard note commitment from raw bytes
+# without pulling in the full orchard crate.
+sinsemilla = "0.1"
 
 # CSPRNG for Orchard spend-auth + binding nonces in the signer. Already a
 # transitive dep (orchard); pulled direct with default features so `OsRng` is
