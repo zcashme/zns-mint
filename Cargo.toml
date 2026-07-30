@@ -8,7 +8,6 @@ publish = false
 [features]
 default = []
 dev-seed = []
-pre-nu63-activation = []
 
 [[bin]]
 name = "zns-mint"

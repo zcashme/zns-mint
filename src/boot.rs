@@ -13,8 +13,7 @@
 //! 5. **Wallet initialization** — UFVKs registered, commitment trees seeded from
 //!    the birthday checkpoint's `z_gettreestate`.
 //! 6. **NU6.3 enforcement** — production boot refuses to start before
-//!    Ironwood activation. The `pre-nu63-activation` feature is the explicit
-//!    development exception.
+//!    Ironwood activation.
 //! 7. **Attestation** — SEV-SNP attestation report (Linux) or skip (non-Linux).
 //!
 use chacha20poly1305::{
@@ -104,26 +103,12 @@ impl Boot {
         // 7. ZNS Origin Checkpoint: fetch tree state from Zebra and seed ShardTrees
         let origin_height = u32::from(ironwood_activation_height());
 
-        #[cfg(not(feature = "pre-nu63-activation"))]
-        {
-            assert!(
-                u32::from(tip_height) >= origin_height - 1,
-                "FATAL: Zebra tip {} is before Ironwood activation {}",
-                u32::from(tip_height),
-                origin_height
-            );
-        }
-
-        #[cfg(feature = "pre-nu63-activation")]
-        {
-            if u32::from(tip_height) < origin_height - 1 {
-                tracing::warn!(
-                    "dev: tip {} below Ironwood activation {}, continuing (pre-nu63-activation)",
-                    u32::from(tip_height),
-                    origin_height
-                );
-            }
-        }
+        assert!(
+            u32::from(tip_height) >= origin_height - 1,
+            "FATAL: Zebra tip {} is before Ironwood activation {}",
+            u32::from(tip_height),
+            origin_height
+        );
 
         let rpc = zcash::JsonRpc::new();
         let checkpoint = origin_checkpoint(&rpc).await;
@@ -260,8 +245,7 @@ async fn verify_chain_integrity(info: &zcash::BlockchainInfo) -> (ChainClient, B
 
     let rpc = zcash::JsonRpc::new();
 
-    // Network identity check: mainnet genesis hash in production builds only.
-    #[cfg(not(feature = "pre-nu63-activation"))]
+    // Network identity check: mainnet genesis hash.
     {
         let genesis = rpc
             .get_block(BlockHeight::from_u32(0))
@@ -280,8 +264,7 @@ async fn verify_chain_integrity(info: &zcash::BlockchainInfo) -> (ChainClient, B
         .await
         .expect("FATAL: failed to fetch tip block via JSON-RPC");
 
-    // Consensus baseline: NU5 must be active. Skipped in dev/regtest builds.
-    #[cfg(not(feature = "pre-nu63-activation"))]
+    // Consensus baseline: NU5 must be active.
     {
         const NU5_MAINNET_ACTIVATION_HEIGHT: u32 = 1_687_104;
         assert!(
@@ -292,8 +275,7 @@ async fn verify_chain_integrity(info: &zcash::BlockchainInfo) -> (ChainClient, B
         );
     }
 
-    // Freshness: tip must be within 2 hours of wall clock. Skipped in dev/regtest.
-    #[cfg(not(feature = "pre-nu63-activation"))]
+    // Freshness: tip must be within 2 hours of wall clock.
     {
         let tip_time = block.header().time;
         let now = std::time::SystemTime::now()
@@ -318,7 +300,6 @@ async fn verify_chain_integrity(info: &zcash::BlockchainInfo) -> (ChainClient, B
     (chain, tip_height)
 }
 
-#[cfg(not(feature = "pre-nu63-activation"))]
 fn require_nu6_3_active(tip_height: BlockHeight) {
     assert!(
         NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, tip_height),
@@ -326,18 +307,6 @@ fn require_nu6_3_active(tip_height: BlockHeight) {
         u32::from(tip_height),
     );
     tracing::info!("boot: NU6.3/Ironwood active");
-}
-
-#[cfg(feature = "pre-nu63-activation")]
-fn require_nu6_3_active(tip_height: BlockHeight) {
-    if NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, tip_height) {
-        tracing::info!("boot: NU6.3/Ironwood active");
-    } else {
-        tracing::warn!(
-            height = u32::from(tip_height),
-            "boot: pre-nu63-activation feature enabled; starting before Ironwood activation"
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------

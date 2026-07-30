@@ -449,7 +449,6 @@ impl Wallet {
     }
 }
 
-#[cfg(not(feature = "pre-nu63-activation"))]
 fn ironwood_frontier(
     checkpoint: &CheckpointData,
 ) -> incrementalmerkletree::frontier::Frontier<
@@ -461,18 +460,4 @@ fn ironwood_frontier(
         .as_ref()
         .expect("FATAL: NU6.3 active but checkpoint has no Ironwood tree")
         .to_frontier()
-}
-
-#[cfg(feature = "pre-nu63-activation")]
-fn ironwood_frontier(
-    checkpoint: &CheckpointData,
-) -> incrementalmerkletree::frontier::Frontier<
-    orchard::tree::MerkleHashOrchard,
-    { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
-> {
-    checkpoint
-        .ironwood_tree
-        .as_ref()
-        .map(|tree| tree.to_frontier())
-        .unwrap_or_else(incrementalmerkletree::frontier::Frontier::empty)
 }
