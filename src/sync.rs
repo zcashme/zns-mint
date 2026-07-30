@@ -3,7 +3,7 @@ use std::convert::Infallible;
 
 use pasta_curves::group::ff::PrimeField;
 use subtle::ConstantTimeEq;
-use incrementalmerkletree::{Marking, Position, Retention};
+use incrementalmerkletree::{Marking, Retention};
 use zcash_client_backend::{
     data_api::BlockMetadata,
     decrypt_transaction,
@@ -13,7 +13,7 @@ use zcash_client_backend::{
     },
 };
 use zcash_keys::keys::UnifiedFullViewingKey;
-use zcash_primitives::block::{Block as ZcashBlock, BlockHash};
+use zcash_primitives::block::Block as ZcashBlock;
 use zcash_primitives::transaction::Transaction;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters, TxIndex};
@@ -34,8 +34,6 @@ pub enum ScanError {
     Upstream,
     #[error("Ironwood action position arithmetic overflowed")]
     PositionOverflow,
-    #[error("upstream Ironwood tree-size metadata is missing or inconsistent")]
-    InvalidIronwoodTreeSize,
     #[error("a supplemental Name Note did not match the upstream commitment stream")]
     CommitmentStreamMismatch,
     #[error("one Ironwood action was classified as both standard and ZcashName")]
@@ -112,14 +110,10 @@ impl BlockOutput {
 /// index during `apply`). One `TxOutput` = one `TxId` = one transaction.
 pub struct TxOutput {
     txid: TxId,
-    block_index: TxIndex,
     received_orchard: Vec<ReceivedOrchard>,
     received_sapling: Vec<ReceivedSapling>,
     received_ironwood: Vec<ReceivedIronwood>,
     received_name_notes: Vec<ReceivedNameNote>,
-    spent_orchard: Vec<SpentOrchard>,
-    spent_sapling: Vec<SpentSapling>,
-    spent_ironwood: Vec<SpentIronwood>,
     /// Every public Orchard action nullifier. The wallet resolves these
     /// against its rewindable local index instead of an ephemeral scan cache.
     orchard_nullifiers: Vec<orchard::note::Nullifier>,
@@ -131,17 +125,13 @@ pub struct TxOutput {
 }
 
 impl TxOutput {
-    fn empty(txid: TxId, block_index: TxIndex) -> Self {
+    fn empty(txid: TxId) -> Self {
         Self {
             txid,
-            block_index,
             received_orchard: Vec::new(),
             received_sapling: Vec::new(),
             received_ironwood: Vec::new(),
             received_name_notes: Vec::new(),
-            spent_orchard: Vec::new(),
-            spent_sapling: Vec::new(),
-            spent_ironwood: Vec::new(),
             orchard_nullifiers: Vec::new(),
             sapling_nullifiers: Vec::new(),
             ironwood_nullifiers: Vec::new(),
@@ -203,19 +193,6 @@ pub struct ReceivedSapling {
     pub position: incrementalmerkletree::Position,
 }
 
-/// An Orchard nullifier we recognize — the wallet resolves this to the
-/// original note via its nullifier index during `apply`.
-pub struct SpentOrchard {
-    pub account_id: AccountId,
-    pub nullifier: orchard::note::Nullifier,
-}
-
-/// A Sapling nullifier we recognize.
-pub struct SpentSapling {
-    pub account_id: AccountId,
-    pub nullifier: sapling::Nullifier,
-}
-
 /// An Ironwood (NU6.3) note we received, with its decrypted memo and tree position.
 pub struct ReceivedIronwood {
     pub account_id: AccountId,
@@ -228,29 +205,17 @@ pub struct ReceivedIronwood {
     pub position: incrementalmerkletree::Position,
 }
 
-/// The canonical location of a validated Name Note on one best-chain branch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NameNoteLocator {
-    pub block_hash: BlockHash,
-    pub block_height: BlockHeight,
-    pub block_index: TxIndex,
-    pub txid: TxId,
-    pub action_index: usize,
-    pub position: Position,
-}
-
 /// A cryptographically validated Name Note received at the exact Registry address.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ReceivedNameNote {
-    locator: NameNoteLocator,
+    action_index: usize,
     note: orchard::Note,
     payload: crate::mint::note::NameNotePayload,
-    cmx: orchard::note::ExtractedNoteCommitment,
 }
 
 impl ReceivedNameNote {
-    pub fn locator(&self) -> NameNoteLocator {
-        self.locator
+    pub fn action_index(&self) -> usize {
+        self.action_index
     }
 
     /// The raw decrypted Note — carries recipient, value, rho, rseed.
@@ -262,17 +227,12 @@ impl ReceivedNameNote {
     pub fn payload(&self) -> &crate::mint::note::NameNotePayload {
         &self.payload
     }
-
-    /// The on-chain cmx for this note (from the Action).
-    pub fn cmx(&self) -> &orchard::note::ExtractedNoteCommitment {
-        &self.cmx
-    }
 }
 
 impl std::fmt::Debug for ReceivedNameNote {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReceivedNameNote")
-            .field("locator", &self.locator)
+            .field("action_index", &self.action_index)
             .field("payload", &"<redacted>")
             .finish()
     }
@@ -286,13 +246,6 @@ struct PendingNameNote {
     note: orchard::Note,
     payload: crate::mint::note::NameNotePayload,
     cmx: orchard::note::ExtractedNoteCommitment,
-}
-
-/// An Ironwood nullifier we recognize — same type as Orchard but tracked
-/// separately to avoid cross-pool collision in the nullifier index.
-pub struct SpentIronwood {
-    pub account_id: AccountId,
-    pub nullifier: orchard::note::Nullifier,
 }
 
 /// Scans one verified block and returns the wallet-relevant subset plus the
@@ -451,7 +404,7 @@ where
     let mut transactions: BTreeMap<u16, TxOutput> = raw_shielded_transactions
         .into_iter()
         .map(|(index, (txid, orchard, sapling, ironwood))| {
-            let mut tx = TxOutput::empty(txid, TxIndex::from(index));
+            let mut tx = TxOutput::empty(txid);
             tx.orchard_nullifiers = orchard;
             tx.sapling_nullifiers = sapling;
             tx.ironwood_nullifiers = ironwood;
@@ -464,7 +417,7 @@ where
         let index = u16::from(block_index);
         let tx_output = transactions
             .entry(index)
-            .or_insert_with(|| TxOutput::empty(txid, block_index));
+            .or_insert_with(|| TxOutput::empty(txid));
         if tx_output.txid != txid {
             return Err(ScanError::TransactionIdentityMismatch);
         }
@@ -514,39 +467,9 @@ where
             }
         }
 
-        let spent_orchard = wtx
-            .orchard_spends()
-            .iter()
-            .map(|s| SpentOrchard {
-                account_id: *s.account_id(),
-                nullifier: *s.nf(),
-            })
-            .collect();
-
-        let spent_sapling = wtx
-            .sapling_spends()
-            .iter()
-            .map(|s| SpentSapling {
-                account_id: *s.account_id(),
-                nullifier: *s.nf(),
-            })
-            .collect();
-
-        let spent_ironwood = wtx
-            .ironwood_spends()
-            .iter()
-            .map(|s| SpentIronwood {
-                account_id: *s.account_id(),
-                nullifier: *s.nf(),
-            })
-            .collect();
-
         tx_output.received_orchard = received_orchard;
         tx_output.received_sapling = received_sapling;
         tx_output.received_ironwood = received_ironwood;
-        tx_output.spent_orchard = spent_orchard;
-        tx_output.spent_sapling = spent_sapling;
-        tx_output.spent_ironwood = spent_ironwood;
     }
 
     // 4. Block-level commitments: every action's cmx / every output's cmu, in
@@ -561,15 +484,6 @@ where
     if global_action_ordinal != ironwood_commitments.len() {
         return Err(ScanError::CommitmentStreamMismatch);
     }
-
-    let final_ironwood_size = metadata
-        .ironwood_tree_size()
-        .ok_or(ScanError::InvalidIronwoodTreeSize)?;
-    let block_action_count =
-        u32::try_from(ironwood_commitments.len()).map_err(|_| ScanError::PositionOverflow)?;
-    let block_start = final_ironwood_size
-        .checked_sub(block_action_count)
-        .ok_or(ScanError::InvalidIronwoodTreeSize)?;
 
     for pending in pending_name_notes {
         let commitment = ironwood_commitments
@@ -586,17 +500,10 @@ where
             _ => Retention::Marked,
         };
 
-        let ordinal = u32::try_from(pending.global_action_ordinal)
-            .map_err(|_| ScanError::PositionOverflow)?;
-        let position = Position::from(u64::from(
-            block_start
-                .checked_add(ordinal)
-                .ok_or(ScanError::PositionOverflow)?,
-        ));
         let index = u16::from(pending.block_index);
         let tx_output = transactions
             .entry(index)
-            .or_insert_with(|| TxOutput::empty(pending.txid, pending.block_index));
+            .or_insert_with(|| TxOutput::empty(pending.txid));
         if tx_output.txid != pending.txid {
             return Err(ScanError::TransactionIdentityMismatch);
         }
@@ -607,23 +514,15 @@ where
             || tx_output
                 .received_name_notes
                 .iter()
-                .any(|note| note.locator.action_index == pending.action_index)
+                .any(|note| note.action_index() == pending.action_index)
         {
             return Err(ScanError::AmbiguousIronwoodAction);
         }
 
         tx_output.received_name_notes.push(ReceivedNameNote {
-            locator: NameNoteLocator {
-                block_hash: metadata.block_hash(),
-                block_height: metadata.block_height(),
-                block_index: pending.block_index,
-                txid: pending.txid,
-                action_index: pending.action_index,
-                position,
-            },
+            action_index: pending.action_index,
             note: pending.note,
             payload: pending.payload,
-            cmx: pending.cmx,
         });
     }
 
