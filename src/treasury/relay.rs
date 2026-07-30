@@ -223,7 +223,7 @@ pub fn process_otp_relay(
     action: crate::mint::Action,
     requested_ua: &crate::mint::UnifiedAddress,
     controller_ua: &crate::mint::UnifiedAddress,
-    tip_commitment: crate::mint::NameCommitment,
+    record_commitment: crate::mint::NameCommitment,
     locator: NoteLocator,
     value: u64,
     cursor_height: BlockHeight,
@@ -237,7 +237,7 @@ pub fn process_otp_relay(
     use crate::auth::{ChallengeKey, OtpCode};
     use crate::mint::{SubmissionKind, RequestOutcome, has_orchard_receiver};
 
-    let key = ChallengeKey::new(name.clone(), action, requested_ua.clone(), tip_commitment);
+    let key = ChallengeKey::new(name.clone(), action, requested_ua.clone(), record_commitment);
     if ops.pending_otps.contains(&key)
         || ops.pending_otps.is_challenge_reserved(&key)
         || seen_no_otp.contains(&key)
@@ -255,7 +255,7 @@ pub fn process_otp_relay(
     crate::metrics::inc_request_received(action.as_str());
     seen_no_otp.insert(key.clone());
 
-    let name_binding = ops.name_binding(name, Some(tip_commitment));
+    let name_binding = ops.name_binding(name, Some(record_commitment));
     if !ops.pending_otps.reserve_challenge(&key) {
         return None;
     }

@@ -20,7 +20,7 @@ pub struct ChallengeKey {
     name: Name,
     action: Action,
     ua: UnifiedAddress,
-    tip_commitment: [u8; 32],
+    record_commitment: [u8; 32],
 }
 
 impl fmt::Debug for ChallengeKey {
@@ -34,20 +34,20 @@ impl ChallengeKey {
         name: Name,
         action: Action,
         ua: UnifiedAddress,
-        tip_commitment: NameCommitment,
+        record_commitment: NameCommitment,
     ) -> Self {
         Self {
             name,
             action,
             ua,
-            tip_commitment: tip_commitment.to_bytes(),
+            record_commitment: record_commitment.to_bytes(),
         }
     }
 
     fn matches_registry(&self, registry: &crate::registry::Registry) -> bool {
         registry
-            .tip(&self.name)
-            .is_some_and(|tip| tip.commitment.to_bytes() == self.tip_commitment)
+            .record(&self.name)
+            .is_some_and(|record| record.commitment.to_bytes() == self.record_commitment)
     }
 }
 use zcash_protocol::consensus::BlockHeight;

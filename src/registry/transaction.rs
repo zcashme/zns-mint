@@ -229,36 +229,48 @@ pub fn build_transaction(
 
     if action == Action::Claim
         && registry
-            .tip(name)
-            .is_some_and(|tip| tip.action != Action::Release)
+            .record(name)
+            .is_some_and(|record| record.action != Action::Release)
     {
         return Err(crate::mint::AssemblyError::NameUnavailable);
     }
 
     // 3. Spend previous Name Note if updating or releasing
     //
-    // The previous Name Note is the exact validated Registry tip. It is not an
-    // ordinary wallet note and is never selected by parsing arbitrary memos.
+    // The previous Name Note is the exact validated Registry record. We look
+    // it up from the wallet by `rho` — the wallet indexes notes by `rho`,
+    // and one lookup gives us the note, its Merkle position, and its memo
+    // (from which we recompute the ZNS opening `(rcm, psi)`).
     if action == Action::Update || action == Action::Release {
-        let tip = registry.tip(name).ok_or(crate::mint::AssemblyError::NoteNotFound)?;
-        if tip.commitment != prev_commitment.ok_or(crate::mint::AssemblyError::PredecessorMismatch)? {
+        let record = registry.record(name).ok_or(crate::mint::AssemblyError::NoteNotFound)?;
+        if record.commitment != prev_commitment.ok_or(crate::mint::AssemblyError::PredecessorMismatch)? {
             return Err(crate::mint::AssemblyError::PredecessorMismatch);
         }
-        let previous = tip
-            .received()
-            .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
+
+        // Extract note data from the wallet (immutable borrow ends here).
+        let (note, position, memo_bytes) = {
+            let w = wallet
+                .ironwood_note(crate::wallet::NoteLocator::ironwood(
+                    crate::mint::REGISTRY_ACCOUNT,
+                    record.rho,
+                ))
+                .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
+            (w.note.clone(), w.position, *w.memo.as_array())
+        };
 
         let merkle_path = wallet
-            .ironwood_witness(previous.locator().position, anchor_height)
+            .ironwood_witness(position, anchor_height)
             .ok()
             .flatten()
             .ok_or(crate::mint::AssemblyError::NoWitness)?;
 
-        let (rcm, psi) = previous.payload().opening();
+        let payload = crate::mint::decode_name_note_payload(&memo_bytes)
+            .ok_or(crate::mint::AssemblyError::MemoEncode)?;
+        let (rcm, psi) = payload.opening();
         builder
             .add_zns_spend(
                 fvk.clone(),
-                previous.note().clone(),
+                note,
                 merkle_path.into(),
                 orchard::note::NoteCommitTrapdoor::from_inner(rcm),
                 psi,

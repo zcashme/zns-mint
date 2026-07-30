@@ -330,25 +330,22 @@ async fn process_cycle(
             }
             RequestMemo::Update { ua, otp, .. } => {
                 let ua = UnifiedAddress::from_string(ua.clone());
-                let tip = match registry.tip(&name) {
-                    Some(t) if t.action != Action::Release => t,
+                let record = match registry.record(&name) {
+                    Some(r) if r.action != Action::Release => r,
                     _ => continue,
                 };
-                let controller_ua = tip
-                    .received()
-                    .map(|r| r.payload().ua().clone())
-                    .unwrap_or_else(UnifiedAddress::empty);
+                let controller_ua = record.ua.clone();
                 match otp {
                     None => process_otp_relay(
                         &name, Action::Update, &ua, &controller_ua,
-                        tip.commitment, locator, value,
+                        record.commitment, locator, value,
                         cursor_height, target_height, &excluded,
                         wallet, treasury_keys, ops, &mut seen_no_otp,
                     ),
                     Some(otp_bytes) => {
                         authorize::process_transition(
                             name, Action::Update, ua, otp_bytes,
-                            tip.commitment,
+                            record.commitment,
                             cursor_height, target_height, &excluded,
                             wallet, registry, registry_keys,
                             ops, &mut seen_with_otp,
@@ -358,14 +355,11 @@ async fn process_cycle(
             }
             RequestMemo::Release { ua, otp, .. } => {
                 let ua = UnifiedAddress::from_string(ua.clone());
-                let tip = match registry.tip(&name) {
-                    Some(t) if t.action != Action::Release => t,
+                let record = match registry.record(&name) {
+                    Some(r) if r.action != Action::Release => r,
                     _ => continue,
                 };
-                let controller_ua = tip
-                    .received()
-                    .map(|r| r.payload().ua().clone())
-                    .unwrap_or_else(UnifiedAddress::empty);
+                let controller_ua = record.ua.clone();
                 if ua != controller_ua {
                     metrics::inc_request_invalid("release_owner_mismatch");
                     continue;
@@ -373,14 +367,14 @@ async fn process_cycle(
                 match otp {
                     None => process_otp_relay(
                         &name, Action::Release, &ua, &controller_ua,
-                        tip.commitment, locator, value,
+                        record.commitment, locator, value,
                         cursor_height, target_height, &excluded,
                         wallet, treasury_keys, ops, &mut seen_no_otp,
                     ),
                     Some(otp_bytes) => {
                         authorize::process_transition(
                             name, Action::Release, ua, otp_bytes,
-                            tip.commitment,
+                            record.commitment,
                             cursor_height, target_height, &excluded,
                             wallet, registry, registry_keys,
                             ops, &mut seen_with_otp,

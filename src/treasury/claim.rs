@@ -288,9 +288,9 @@ pub fn process_claim(
     if seen_claims.contains(&name) {
         return None;
     }
-    let available = match registry.tip(&name) {
+    let available = match registry.record(&name) {
         None => true,
-        Some(t) => t.action == Action::Release,
+        Some(r) => r.action == Action::Release,
     };
     if !available {
         return None;
@@ -300,8 +300,8 @@ pub fn process_claim(
         return None;
     }
     if registry
-        .tip(&name)
-        .is_some_and(|tip| confirmed_height <= tip.confirmed_height)
+        .record(&name)
+        .is_some_and(|record| confirmed_height <= record.confirmed_height)
     {
         crate::metrics::inc_request_invalid("stale_payment");
         return None;
@@ -309,8 +309,8 @@ pub fn process_claim(
     crate::metrics::inc_request_received("claim");
     seen_claims.insert(name.clone());
 
-    let tip_commitment = registry.tip(&name).map(|tip| tip.commitment);
-    let lock = ops.reserve_name(&name, tip_commitment)?;
+    let record_commitment = registry.record(&name).map(|record| record.commitment);
+    let lock = ops.reserve_name(&name, record_commitment)?;
     let name_binding = lock.binding();
     let result = execute_claim(
         wallet,

@@ -292,7 +292,7 @@ pub struct NameLock {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NameBinding {
     name: Name,
-    tip_commitment: Option<[u8; 32]>,
+    record_commitment: Option<[u8; 32]>,
 }
 
 /// In-memory operational state for the active mint phase.
@@ -381,13 +381,13 @@ impl OperationalState {
     pub fn reserve_name(
         &mut self,
         name: &Name,
-        tip_commitment: Option<NameCommitment>,
+        record_commitment: Option<NameCommitment>,
     ) -> Option<NameLock> {
         if self.is_name_locked(name) {
             return None;
         }
 
-        let binding = self.name_binding(name, tip_commitment);
+        let binding = self.name_binding(name, record_commitment);
         self.pre_submit_locks.insert(binding.clone());
         Some(NameLock { binding })
     }
@@ -484,11 +484,11 @@ impl OperationalState {
     pub fn name_binding(
         &self,
         name: &Name,
-        tip_commitment: Option<NameCommitment>,
+        record_commitment: Option<NameCommitment>,
     ) -> NameBinding {
         NameBinding {
             name: name.clone(),
-            tip_commitment: tip_commitment.map(|commitment| commitment.to_bytes()),
+            record_commitment: record_commitment.map(|commitment| commitment.to_bytes()),
         }
     }
 
@@ -513,11 +513,11 @@ impl NameLock {
 
 impl NameBinding {
     fn matches_registry(&self, registry: &Registry) -> bool {
-        match self.tip_commitment {
+        match self.record_commitment {
             Some(expected) => registry
-                .tip(&self.name)
-                .is_some_and(|tip| tip.commitment.to_bytes() == expected),
-            None => registry.tip(&self.name).is_none(),
+                .record(&self.name)
+                .is_some_and(|record| record.commitment.to_bytes() == expected),
+            None => registry.record(&self.name).is_none(),
         }
     }
 }

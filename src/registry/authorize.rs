@@ -2,7 +2,7 @@
 //! and produces typed [`NameNoteRequest`]s for the transaction-assembly path.
 
 use crate::mint::{Action, Name, NameCommitment, UnifiedAddress};
-use crate::registry::{Registry, Tip};
+use crate::registry::{Registry, Record};
 
 /// A requested Name Note transition, ready for the transaction-assembly path.
 ///
@@ -56,24 +56,24 @@ pub struct ReleaseRequest {
     pub prev_commitment: NameCommitment,
 }
 
-/// Reads the current tip of the name chain for `name`.
-pub fn current_tip(registry: &Registry, name: &Name) -> Option<Tip> {
-    registry.tip(name).cloned()
+/// Reads the current record of the name chain for `name`.
+pub fn current_record(registry: &Registry, name: &Name) -> Option<Record> {
+    registry.record(name).cloned()
 }
 
 /// Authorizes a claim request, producing a [`NameNoteRequest`].
 ///
 /// The Treasury layer must have already verified that the claim payment was
-/// made. This function verifies that the name is available (either no tip, or
-/// tip is `Release`).
+/// made. This function verifies that the name is available (either no record,
+/// or record is `Release`).
 pub fn authorize_claim(
     registry: &Registry,
     name: Name,
     ua: UnifiedAddress,
 ) -> Option<NameNoteRequest> {
-    match current_tip(registry, &name) {
+    match current_record(registry, &name) {
         None => Some(NameNoteRequest::Claim(ClaimRequest { name, ua })),
-        Some(Tip {
+        Some(Record {
             action: Action::Release,
             ..
         }) => Some(NameNoteRequest::Claim(ClaimRequest { name, ua })),
@@ -93,8 +93,8 @@ pub fn authorize_update(
     new_ua: UnifiedAddress,
     otp: &[u8; 16],
 ) -> Option<NameNoteRequest> {
-    let tip = current_tip(registry, &name)?;
-    if tip.action == Action::Release {
+    let record = current_record(registry, &name)?;
+    if record.action == Action::Release {
         return None;
     }
 
@@ -102,7 +102,7 @@ pub fn authorize_update(
         name.clone(),
         Action::Update,
         new_ua.clone(),
-        tip.commitment,
+        record.commitment,
     );
     if !pending_otps.verify(&key, otp, current_height) {
         return None;
@@ -111,7 +111,7 @@ pub fn authorize_update(
     Some(NameNoteRequest::Update(UpdateRequest {
         name,
         new_ua,
-        prev_commitment: tip.commitment,
+        prev_commitment: record.commitment,
     }))
 }
 
@@ -127,15 +127,12 @@ pub fn authorize_release(
     current_ua: UnifiedAddress,
     otp: &[u8; 16],
 ) -> Option<NameNoteRequest> {
-    let tip = current_tip(registry, &name)?;
-    if tip.action == Action::Release {
+    let record = current_record(registry, &name)?;
+    if record.action == Action::Release {
         return None;
     }
 
-    let controller = tip
-        .received()
-        .map(|received| received.payload().ua())
-        ?;
+    let controller = &record.ua;
     if controller != &current_ua {
         return None;
     }
@@ -143,7 +140,7 @@ pub fn authorize_release(
         name.clone(),
         Action::Release,
         controller.clone(),
-        tip.commitment,
+        record.commitment,
     );
     if !pending_otps.verify(&key, otp, current_height) {
         return None;
@@ -151,7 +148,7 @@ pub fn authorize_release(
 
     Some(NameNoteRequest::Release(ReleaseRequest {
         name,
-        prev_commitment: tip.commitment,
+        prev_commitment: record.commitment,
     }))
 }
 
@@ -175,6 +172,12 @@ mod tests {
         crate::auth::PendingOtps::new()
     }
 
+    fn dummy_rho() -> orchard::note::Rho {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 1;
+        orchard::note::Rho::from_bytes(&bytes).into_option().unwrap()
+    }
+
     #[test]
     fn claim_fits_unseen_or_released_name() {
         let mut reg = mock_registry();
@@ -187,17 +190,17 @@ mod tests {
         assert_eq!(req.action(), Action::Claim);
 
         // Released name is claimable
-        reg.set_tip_for_test(name.clone(), Action::Release, dummy_commitment(), height);
+        reg.set_record_for_test(name.clone(), Action::Release, UnifiedAddress::empty(), dummy_commitment(), height, dummy_rho());
         let req2 = authorize_claim(&reg, name.clone(), ua.clone()).unwrap();
         assert_eq!(req2.action(), Action::Claim);
 
         // Live name is NOT claimable
-        reg.set_tip_for_test(name.clone(), Action::Claim, dummy_commitment(), height);
+        reg.set_record_for_test(name.clone(), Action::Claim, ua.clone(), dummy_commitment(), height, dummy_rho());
         assert!(authorize_claim(&reg, name, ua).is_none());
     }
 
     #[test]
-    fn update_release_need_live_tip() {
+    fn update_release_need_live_record() {
         let mut reg = mock_registry();
         let mut otps = mock_pending_otps();
         let name = Name::parse("bob").unwrap();
@@ -226,7 +229,7 @@ mod tests {
         .is_none());
 
         // Released name cannot be updated/released
-        reg.set_tip_for_test(name.clone(), Action::Release, dummy_commitment(), height);
+        reg.set_record_for_test(name.clone(), Action::Release, UnifiedAddress::empty(), dummy_commitment(), height, dummy_rho());
         assert!(authorize_update(
             &reg,
             &mut otps,
@@ -255,7 +258,7 @@ mod tests {
         let ua = UnifiedAddress::from_string("u1new".into());
         let height = BlockHeight::from_u32(100);
 
-        reg.set_tip_for_test(name.clone(), Action::Update, dummy_commitment(), height);
+        reg.set_record_for_test(name.clone(), Action::Update, ua.clone(), dummy_commitment(), height, dummy_rho());
 
         // Invalid OTP fails
         let mut bad_otp = [0u8; 16];
@@ -288,7 +291,7 @@ pub fn process_transition(
     action: Action,
     ua: UnifiedAddress,
     otp: &[u8; 16],
-    tip_commitment: NameCommitment,
+    record_commitment: NameCommitment,
     cursor_height: zcash_protocol::consensus::BlockHeight,
     target_height: zcash_protocol::consensus::BlockHeight,
     excluded: &std::collections::BTreeSet<crate::wallet::NoteLocator>,
@@ -301,14 +304,14 @@ pub fn process_transition(
     use crate::auth::ChallengeKey;
     use crate::mint::{SubmissionKind, RequestOutcome};
 
-    let key = ChallengeKey::new(name.clone(), action, ua.clone(), tip_commitment);
+    let key = ChallengeKey::new(name.clone(), action, ua.clone(), record_commitment);
     if seen_with_otp.contains(&key) {
         return None;
     }
     crate::metrics::inc_request_received(action.as_str());
     seen_with_otp.insert(key);
 
-    let lock = ops.reserve_name(&name, Some(tip_commitment))?;
+    let lock = ops.reserve_name(&name, Some(record_commitment))?;
     let name_binding = lock.binding();
 
     let req = match action {

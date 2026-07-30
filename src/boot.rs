@@ -149,7 +149,7 @@ impl Boot {
             chain: chain_client,
             wallet,
             registry: Registry::new(),
-            treasury: Treasury::new(),
+            treasury: Treasury::default(),
             cursor: ChainCursor::from_metadata(checkpoint.metadata),
             treasury_keys,
             registry_keys,
