@@ -15,7 +15,7 @@ use crate::wallet::NoteLocator;
 use std::collections::BTreeSet;
 use transparent::address::TransparentAddress;
 use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 
 // ---------------------------------------------------------------------------
@@ -58,7 +58,8 @@ impl RegistryFeeInputs {
     }
 }
 
-fn registry_fee(
+fn registry_fee<P: Parameters>(
+    network: &P,
     target_height: BlockHeight,
     lifecycle_spends: usize,
     funding_spends: usize,
@@ -82,7 +83,7 @@ fn registry_fee(
         .map_err(|_| crate::mint::AssemblyError::ActionOverflow)?;
     FeeRule::standard()
         .fee_required(
-            &crate::zcash::NETWORK,
+            network,
             target_height,
             std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
             std::iter::empty::<usize>(),
@@ -97,7 +98,8 @@ fn registry_fee(
 
 /// Selects the exact ordinary Registry notes required to fund `request` at
 /// `target_height`, excluding every locator held by another Live operation.
-pub fn select_registry_fee_inputs(
+pub fn select_registry_fee_inputs<P: Parameters>(
+    network: &P,
     wallet: &crate::wallet::Wallet,
     request: &NameNoteRequest,
     target_height: BlockHeight,
@@ -126,6 +128,7 @@ pub fn select_registry_fee_inputs(
     let mut total = 0u64;
     for funding_spends in 0..=candidates.len() {
         let fee_without_change = registry_fee(
+            network,
             target_height,
             lifecycle_spends,
             funding_spends,
@@ -138,6 +141,7 @@ pub fn select_registry_fee_inputs(
         }
 
         let fee_with_change = registry_fee(
+            network,
             target_height,
             lifecycle_spends,
             funding_spends,
@@ -176,7 +180,8 @@ pub fn select_registry_fee_inputs(
 /// cross-pool refund. The paired Orchard bundle supplies that value, and their
 /// sum is the transaction fee.
 #[allow(clippy::too_many_arguments)]
-pub fn build_transaction(
+pub fn build_transaction<P: Parameters>(
+    network: &P,
     wallet: &mut crate::wallet::Wallet,
     registry: &Registry,
     registry_keys: &RegistryKeys,
@@ -320,6 +325,7 @@ pub fn build_transaction(
     let funding_spends = funding_notes.len();
     let extra_outputs = usize::from(refund.is_some());
     let fee_without_change = registry_fee(
+        network,
         target_height,
         committed_spends,
         funding_spends,
@@ -331,6 +337,7 @@ pub fn build_transaction(
         (fee_without_change, 0)
     } else {
         let fee_with_change = registry_fee(
+            network,
             target_height,
             committed_spends,
             funding_spends,
@@ -424,7 +431,8 @@ pub fn build_transaction(
 /// This is the complete Registry transition path: selects fee notes, builds the
 /// Ironwood bundle, and signs it into a broadcastable V6 transaction.
 #[allow(clippy::too_many_arguments)]
-pub fn execute_transition(
+pub fn execute_transition<P: Parameters>(
+    network: &P,
     wallet: &mut crate::wallet::Wallet,
     registry: &Registry,
     registry_keys: &RegistryKeys,
@@ -434,6 +442,7 @@ pub fn execute_transition(
     target_height: BlockHeight,
 ) -> Result<(zcash_primitives::transaction::TxId, String, Vec<NoteLocator>), crate::mint::AssemblyError> {
     let fee_inputs = select_registry_fee_inputs(
+        network,
         wallet,
         &request,
         target_height,
@@ -442,6 +451,7 @@ pub fn execute_transition(
         0,
     )?;
     let bundle = build_transaction(
+        network,
         wallet,
         registry,
         registry_keys,
@@ -453,6 +463,7 @@ pub fn execute_transition(
         0,
     )?;
     let (txid, hex) = crate::registry::signing::assemble_v6_transaction(
+        network,
         None,
         Some(bundle),
         None,

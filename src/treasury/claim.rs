@@ -37,7 +37,7 @@
 
 use orchard::builder::{BundleType, InProgress, Unauthorized, Unproven};
 use orchard::bundle::BundleVersion;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::ZatBalance;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
@@ -155,7 +155,8 @@ fn build_treasury_orchard_bundle(
 /// - `anchor_height`: the fully-applied cursor height for witness binding
 /// - `target_height`: the next mineable height for fee and expiry binding
 #[allow(clippy::too_many_arguments)]
-pub fn assemble_atomic_claim(
+pub fn assemble_atomic_claim<P: Parameters>(
+    network: &P,
     wallet: &mut Wallet,
     registry: &Registry,
     treasury_keys: &TreasuryKeys,
@@ -183,10 +184,11 @@ pub fn assemble_atomic_claim(
     //
     // Ironwood allows the cross-address transfer required to return excess to
     // the claimed UA. A claim without an Orchard receiver is not settleable.
-    let refund_address = crate::treasury::relay::extract_orchard_address(ua.as_str())
+    let refund_address = crate::treasury::relay::extract_orchard_address(network, ua.as_str())
         .ok_or(crate::mint::AssemblyError::NoOrchardReceiver)?;
 
     let ironwood_bundle = transaction::build_transaction(
+        network,
         wallet,
         registry,
         registry_keys,
@@ -202,6 +204,7 @@ pub fn assemble_atomic_claim(
 
     // 3. Prove, sign, and serialize both bundles in one V6 transaction.
     let (txid, hex) = signing::assemble_v6_transaction(
+        network,
         Some(orchard_bundle),
         Some(ironwood_bundle),
         Some(treasury_keys),
@@ -220,7 +223,8 @@ pub fn assemble_atomic_claim(
 /// (payment spend + change) and the Registry Ironwood bundle (Name Note +
 /// refund + fee + change), and signs them into one broadcastable V6 transaction.
 #[allow(clippy::too_many_arguments)]
-pub fn execute_claim(
+pub fn execute_claim<P: Parameters>(
+    network: &P,
     wallet: &mut Wallet,
     registry: &Registry,
     treasury_keys: &TreasuryKeys,
@@ -239,6 +243,7 @@ pub fn execute_claim(
         },
     );
     let fee_inputs = crate::registry::transaction::select_registry_fee_inputs(
+        network,
         wallet,
         &claim_req,
         target_height,
@@ -247,6 +252,7 @@ pub fn execute_claim(
         2,
     )?;
     let (txid, hex, _) = assemble_atomic_claim(
+        network,
         wallet,
         registry,
         treasury_keys,
@@ -267,7 +273,8 @@ pub fn execute_claim(
 /// Validates a claim request, reserves the name, and assembles the transaction.
 /// Returns `None` if the request is invalid or the name is already locked.
 #[allow(clippy::too_many_arguments)]
-pub fn process_claim(
+pub fn process_claim<P: Parameters>(
+    network: &P,
     name: crate::mint::Name,
     ua: &str,
     locator: NoteLocator,
@@ -313,6 +320,7 @@ pub fn process_claim(
     let lock = ops.reserve_name(&name, record_commitment)?;
     let name_binding = lock.binding();
     let result = execute_claim(
+        network,
         wallet,
         registry,
         treasury_keys,

@@ -21,13 +21,8 @@ use serde::{Deserialize, Serialize};
 use zcash_client_backend::data_api::BlockMetadata;
 use zcash_primitives::block::{Block, BlockHash};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
-use zcash_protocol::consensus::{BlockHeight, MainNetwork};
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zebra_indexer_proto::{BlockHashAndHeight, ZebraClient};
-
-/// The consensus network parameters used by this build.
-pub type NetworkParams = MainNetwork;
-
-pub const NETWORK: NetworkParams = zcash_protocol::consensus::MAIN_NETWORK;
 
 use orchard::tree::MerkleHashOrchard;
 
@@ -144,6 +139,25 @@ impl JsonRpc {
             ))
     }
 
+    /// Fetches a best-chain block hash by height without parsing its block bytes.
+    ///
+    /// This is required for genesis identity checks: upstream [`Block::read`]
+    /// intentionally rejects the genesis block because its coinbase input
+    /// predates the BIP 34 height commitment.
+    pub async fn get_block_hash(&self, height: BlockHeight) -> Result<BlockHash, TransportError> {
+        let index = i32::try_from(u32::from(height))
+            .map_err(|_| TransportError::BadNodeData("getblockhash height"))?;
+        let hash_hex: String = self
+            .send_request("getblockhash", [index])
+            .await?
+            .ok_or(TransportError::BadNodeData("getblockhash returned null"))?;
+
+        let display_bytes =
+            hex::decode(hash_hex).map_err(|_| TransportError::BadNodeData("getblockhash hex"))?;
+        block_hash_from_display(&display_bytes)
+            .ok_or(TransportError::BadNodeData("getblockhash length"))
+    }
+
     /// Fetches the shielded tree state for a block through Zebra JSON-RPC.
     pub(crate) async fn get_checkpoint(
         &self,
@@ -159,10 +173,14 @@ impl JsonRpc {
 
     /// Fetches a full block by height through Zebra JSON-RPC and parses it.
     ///
-    /// This proves the node returned bytes that are structurally parseable as a
-    /// Zcash mainnet block. Best-chain membership and full consensus validity
-    /// remain Zebra's responsibility.
-    pub async fn get_block(&self, height: BlockHeight) -> Result<Block, TransportError> {
+    /// This proves the node returned bytes that are structurally parseable under
+    /// the boot-proven consensus parameters. Best-chain membership and full
+    /// consensus validity remain Zebra's responsibility.
+    pub async fn get_block<P: Parameters>(
+        &self,
+        network: &P,
+        height: BlockHeight,
+    ) -> Result<Block, TransportError> {
         let hex_str: String = self
             .send_request("getblock", (u32::from(height).to_string(), 0))
             .await?
@@ -170,7 +188,7 @@ impl JsonRpc {
 
         let bytes =
             hex::decode(hex_str).map_err(|_| TransportError::BadNodeData("getblock hex"))?;
-        let block = Block::read(&bytes[..], &NETWORK)
+        let block = Block::read(&bytes[..], network)
             .map_err(|_| TransportError::BadNodeData("getblock parse"))?;
         if block.claimed_height() != height {
             return Err(TransportError::BadNodeData(
@@ -292,8 +310,12 @@ impl CanonicalBlockSource {
         self.0.get_blockchain_info().await?.canonical_tip()
     }
 
-    pub async fn get_block(&self, height: BlockHeight) -> Result<Block, TransportError> {
-        self.0.get_block(height).await
+    pub async fn get_block<P: Parameters>(
+        &self,
+        network: &P,
+        height: BlockHeight,
+    ) -> Result<Block, TransportError> {
+        self.0.get_block(network, height).await
     }
 
     /// Verifies the canonical tip hasn't moved, then broadcasts a signed transaction.

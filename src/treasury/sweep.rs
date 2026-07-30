@@ -13,7 +13,7 @@
 
 use orchard::builder::BundleType;
 use transparent::address::TransparentAddress;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::{ZatBalance, Zatoshis};
 
 use crate::key::TreasuryKeys;
@@ -64,7 +64,8 @@ pub fn sweep_policy(treasury_balance: u64) -> bool {
 /// The Treasury pays the network fee. The sweep amount goes to the cold
 /// storage transparent address.
 #[allow(clippy::too_many_arguments)]
-pub fn assemble_sweep(
+pub fn assemble_sweep<P: Parameters>(
+    network: &P,
     wallet: &mut Wallet,
     treasury_keys: &TreasuryKeys,
     anchor_height: BlockHeight,
@@ -73,7 +74,6 @@ pub fn assemble_sweep(
 ) -> Result<SweepAssembly, crate::mint::AssemblyError> {
     use rand::rngs::OsRng;
     use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
-    use crate::zcash::NETWORK;
 
     let treasury_fvk =
         orchard::keys::FullViewingKey::from(treasury_keys.orchard_spending_key());
@@ -104,7 +104,7 @@ pub fn assemble_sweep(
         .map_err(|_| crate::mint::AssemblyError::ActionOverflow)?;
     let fee = FeeRule::standard()
         .fee_required(
-            &NETWORK,
+            network,
             target_height,
             std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
             std::iter::once(34), // 1 P2PKH output (34 bytes)
@@ -184,6 +184,7 @@ pub fn assemble_sweep(
     // 4. Prove, sign, and serialize.
     use crate::registry::signing;
     let (txid, hex) = signing::assemble_v6_transaction(
+        network,
         Some(orchard_bundle),
         None,
         Some(treasury_keys),

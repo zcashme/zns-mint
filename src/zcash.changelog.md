@@ -1,5 +1,14 @@
 # Zcash I/O changelog
 
+## 2026-07-30 — Boot-proven consensus parameters
+
+- Removed the global `NETWORK` constant. Network-sensitive block parsing now
+  accepts the immutable consensus parameters established by boot, so this I/O
+  module owns transport and parsing but does not choose a network.
+- Added hash-only `getblockhash` retrieval for the boot identity check.
+  [`zcash_primitives::block::Block::read`] deliberately rejects height 0, so
+  genesis identity must not be coupled to full-block parsing.
+
 ## 2026-07-25 — Mainnet genesis hash constant
 
 - Added `MAINNET_GENESIS_HASH`, a protocol-constant `BlockHash` in internal

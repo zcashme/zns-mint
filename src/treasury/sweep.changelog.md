@@ -1,5 +1,10 @@
 # Treasury auto-sweep changelog
 
+## 2026-07-30 — Boot-proven fee network
+
+- Sweep fee calculation and V6 assembly receive the boot-proven consensus
+  parameters rather than a global default.
+
 ## 2026-07-28 — Two-ZEC sweep trigger
 
 - Raised `SWEEP_THRESHOLD` from 0.1 ZEC to 2 ZEC. The independent 0.01 ZEC

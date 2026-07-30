@@ -16,7 +16,7 @@
 //! The requester funds the entire transaction.
 
 use orchard::builder::BundleType;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::{ZatBalance, Zatoshis};
 
 use crate::auth::{encode_otp_relay_memo, OtpCode};
@@ -25,20 +25,21 @@ use crate::mint::{Action, Name, UnifiedAddress, TREASURY_ACCOUNT};
 use crate::wallet::{NoteLocator, Wallet};
 
 use zcash_keys::address::Address as ParsedAddress;
-use zcash_protocol::consensus::Parameters;
-use crate::zcash::NETWORK;
 
 /// Returns the exact request-note value for an OTP relay at `target_height`.
 ///
 /// The relay has two padded Orchard-family bundles, so the user provides two
 /// identical ZIP-317 fee units: one for the network and one for the original
 /// controller.
-pub fn required_relay_value(target_height: BlockHeight) -> Result<u64, crate::mint::AssemblyError> {
+pub fn required_relay_value<P: Parameters>(
+    network: &P,
+    target_height: BlockHeight,
+) -> Result<u64, crate::mint::AssemblyError> {
     use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
 
     FeeRule::standard()
         .fee_required(
-            &NETWORK,
+            network,
             target_height,
             std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
             std::iter::empty::<usize>(),
@@ -64,10 +65,13 @@ pub struct RelayAssembly {
 ///
 /// Both OTP relay delivery and claim-excess settlement require an Orchard
 /// receiver because their cross-pool outputs are Ironwood outputs.
-pub(crate) fn extract_orchard_address(ua_str: &str) -> Option<orchard::Address> {
+pub(crate) fn extract_orchard_address<P: Parameters>(
+    network: &P,
+    ua_str: &str,
+) -> Option<orchard::Address> {
     let zaddr: zcash_address::ZcashAddress = ua_str.parse().ok()?;
     let parsed: ParsedAddress = zaddr
-        .convert_if_network(NETWORK.network_type())
+        .convert_if_network(network.network_type())
         .ok()?;
     match parsed {
         ParsedAddress::Unified(ua) => ua.orchard().copied(),
@@ -81,7 +85,8 @@ pub(crate) fn extract_orchard_address(ua_str: &str) -> Option<orchard::Address> 
 /// exactly twice the ZIP-317 fee: one fee funds the transaction and the other
 /// is delivered to the current controller with the OTP relay memo.
 #[allow(clippy::too_many_arguments)]
-pub fn assemble_otp_relay(
+pub fn assemble_otp_relay<P: Parameters>(
+    network: &P,
     wallet: &mut Wallet,
     treasury_keys: &TreasuryKeys,
     name: &Name,
@@ -102,12 +107,12 @@ pub fn assemble_otp_relay(
     }
 
     let controller_orchard =
-        extract_orchard_address(controller_ua.as_str()).ok_or(crate::mint::AssemblyError::NoOrchardReceiver)?;
+        extract_orchard_address(network, controller_ua.as_str()).ok_or(crate::mint::AssemblyError::NoOrchardReceiver)?;
 
     let memo = encode_otp_relay_memo(name, action, requested_ua, otp)
         .ok_or(crate::mint::AssemblyError::MemoEncode)?;
 
-    let required_value = required_relay_value(target_height)?;
+    let required_value = required_relay_value(network, target_height)?;
     if request_note_value != required_value {
         return Err(crate::mint::AssemblyError::IncorrectRelayValue);
     }
@@ -199,6 +204,7 @@ pub fn assemble_otp_relay(
     // --- Prove, sign, serialize both bundles in one V6 transaction ---
     use crate::registry::signing;
     let (txid, hex) = signing::assemble_v6_transaction(
+        network,
         Some(orchard_bundle),
         Some(ironwood_bundle),
         Some(treasury_keys),
@@ -218,7 +224,8 @@ pub fn assemble_otp_relay(
 /// challenge, and assembles the relay transaction.
 /// Returns `None` if the request is invalid or the challenge is already reserved.
 #[allow(clippy::too_many_arguments)]
-pub fn process_otp_relay(
+pub fn process_otp_relay<P: Parameters>(
+    network: &P,
     name: &crate::mint::Name,
     action: crate::mint::Action,
     requested_ua: &crate::mint::UnifiedAddress,
@@ -244,11 +251,11 @@ pub fn process_otp_relay(
     {
         return None;
     }
-    if required_relay_value(target_height).ok() != Some(value) {
+    if required_relay_value(network, target_height).ok() != Some(value) {
         crate::metrics::inc_request_invalid("incorrect_relay_value");
         return None;
     }
-    if !has_orchard_receiver(controller_ua) {
+    if !has_orchard_receiver(network, controller_ua) {
         crate::metrics::inc_request_invalid("no_orchard_receiver");
         return None;
     }
@@ -262,6 +269,7 @@ pub fn process_otp_relay(
     let otp = OtpCode::generate();
     let excluded_rhos = crate::wallet::treasury_excluded_rhos(excluded);
     let result = assemble_otp_relay(
+        network,
         wallet,
         treasury_keys,
         name,

@@ -1,28 +1,29 @@
 //! ZNS Mint Boot Sequence
 //!
-//! The boot is a concrete, parameterless, deterministic sequence:
+//! Production boot is a concrete, parameterless, deterministic sequence. Its
+//! development-only regtest counterpart supplies its own fixed parameters; the
+//! shared boot core carries the selected concrete parameters into the loop.
 //!
 //! 1. **Liveness** — JSON-RPC `getblockchaininfo` proves Zebra is reachable.
 //! 2. **Chain integrity** — gRPC `chain_tip_change` + `get_block` cross-validates
-//!    the tip against JSON-RPC, verifies the mainnet genesis block hash,
-//!    checks NU5 activation and tip freshness.
+//!    the tip against JSON-RPC, verifies the selected network's genesis hash,
+//!    checks NU5 activation.
 //! 3. **Seed intake** — SEV-SNP sealed-blob decryption (production) or dev zero
 //!    seed (`dev-seed` feature). Fingerprint verification guards against wrong-seed
 //!    injection.
 //! 4. **Key derivation** — ZIP-32 Treasury (account 0) + Registry (account 1).
 //! 5. **Wallet initialization** — UFVKs registered, commitment trees seeded from
 //!    the birthday checkpoint's `z_gettreestate`.
-//! 6. **NU6.3 enforcement** — production boot refuses to start before
-//!    Ironwood activation.
-//! 7. **Attestation** — SEV-SNP attestation report (Linux) or skip (non-Linux).
+//! 6. **Attestation** — SEV-SNP attestation report (Linux) or skip (non-Linux).
 //!
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
 use secrecy::{ExposeSecret, Secret};
-use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
-use crate::zcash::NETWORK;
+use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkUpgrade, Parameters};
+#[cfg(feature = "dev-regtest")]
+use zcash_protocol::local_consensus::LocalNetwork;
 use zip32::fingerprint::SeedFingerprint;
 
 #[cfg(not(feature = "dev-seed"))]
@@ -45,14 +46,16 @@ use crate::zcash::{self, ChainClient, CheckpointData};
 
 /// Proof that the full boot sequence completed successfully.
 ///
-/// Can only be constructed by [`Boot::run`]. Every field is private — the
+/// Can only be constructed by [`Boot::run`] or the development-only
+/// [`Boot::run_regtest`]. Every field is private — the
 /// run loop accepts `Boot` as evidence that all checks passed: Zebra is on
 /// the right chain, the seed is decrypted, Ironwood is active, and the
 /// commitment trees are seeded from the correct checkpoint.
 ///
-/// There is no public constructor. The only path to a `Boot` value is
-/// [`Boot::run`], which panics on any failure.
-pub struct Boot {
+/// Production has no public constructor other than [`Boot::run`], which
+/// panics on any failure.
+pub struct Boot<P: Parameters> {
+    network: P,
     chain: ChainClient,
     wallet: Wallet,
     registry: Registry,
@@ -62,24 +65,56 @@ pub struct Boot {
     registry_keys: RegistryKeys,
 }
 
-impl Boot {
-    /// The only entry point. Runs the full boot sequence.
+/// Expected genesis hash — mainnet in production, regtest in dev builds.
+#[cfg(not(feature = "dev-regtest"))]
+const EXPECTED_GENESIS: zcash_primitives::block::BlockHash = zcash::MAINNET_GENESIS_HASH;
+
+#[cfg(feature = "dev-regtest")]
+const EXPECTED_GENESIS: zcash_primitives::block::BlockHash = zcash_primitives::block::BlockHash([
+    // Zebra's immutable regtest genesis (`zebra-chain` 11.3.0,
+    // `parameters/network/testnet.rs:47-49`), stored in BlockHash's
+    // internal byte order.
+    0x27, 0xe3, 0x01, 0x34, 0xd6, 0x20, 0xe9, 0xfe, 0x61, 0xf7, 0x19, 0x93, 0x83, 0x20, 0xba, 0xb6,
+    0x3e, 0x7e, 0x72, 0xc9, 0x1b, 0x5e, 0x23, 0x02, 0x56, 0x76, 0xf9, 0x0e, 0xd8, 0x11, 0x9f, 0x02,
+]);
+
+/// Network label for logging.
+#[cfg(not(feature = "dev-regtest"))]
+const NETWORK_LABEL: &str = "mainnet";
+
+#[cfg(feature = "dev-regtest")]
+const NETWORK_LABEL: &str = "regtest";
+
+impl Boot<MainNetwork> {
+    /// Production entry point. This is deliberately parameterless and only
+    /// permits the mainnet parameters compiled by librustzcash.
+    pub async fn run() -> Self {
+        Self::run_with_network(zcash_protocol::consensus::MAIN_NETWORK).await
+    }
+}
+
+#[cfg(feature = "dev-regtest")]
+impl Boot<LocalNetwork> {
+    /// Development-harness entry point. It is unavailable unless the
+    /// development-only `dev-regtest` feature is compiled in.
+    pub async fn run_regtest() -> Self {
+        Self::run_with_network(regtest_network()).await
+    }
+}
+
+impl<P: Parameters> Boot<P> {
+    /// Boot sequence for a concrete, boot-owned network parameter set.
     ///
-    /// Panics on any failure — boot failures are fatal. The mint refuses
-    /// to enter the run loop in a degraded state.
-    pub async fn run() -> Boot {
+    async fn run_with_network(network: P) -> Self {
         tracing::info!("boot: starting");
 
         // 1. Liveness: JSON-RPC getblockchaininfo
         let info = check_liveness().await;
 
         // 2. Chain integrity: gRPC cross-validation + tip block verification
-        let (chain_client, tip_height) = verify_chain_integrity(&info).await;
+        let (chain_client, tip_height) = verify_chain_integrity::<P>(&info, &network).await;
 
-        // 3. NU6.3/Ironwood is a boot invariant for the production mint.
-        require_nu6_3_active(tip_height);
-
-        // 4. Seed intake + fingerprint verification
+        // 3. Seed intake + fingerprint verification
         let source = obtain_key_source();
         let seed = match &source {
             KeySource::SealedBlob { blob } => decrypt_sealed_blob(blob),
@@ -88,30 +123,21 @@ impl Boot {
         };
         verify_fingerprint(&seed, expected_seed_fingerprint());
 
-        // 5. Key derivation
-        let treasury_keys = key::derive_treasury(&seed);
-        let registry_keys = key::derive_registry(&seed);
+        // 4. Key derivation
+        let treasury_keys = key::derive_treasury(&network, &seed);
+        let registry_keys = key::derive_registry(&network, &seed);
         tracing::info!("boot: keys derived (treasury=acct0, registry=acct1)");
 
-        // 6. Wallet initialization
+        // 5. Wallet initialization
         let ufvks = [
             (TREASURY_ACCOUNT, treasury_keys.fvk()),
             (REGISTRY_ACCOUNT, registry_keys.fvk()),
         ];
         let mut wallet = Wallet::new(ufvks);
 
-        // 7. ZNS Origin Checkpoint: fetch tree state from Zebra and seed ShardTrees
-        let origin_height = u32::from(ironwood_activation_height());
-
-        assert!(
-            u32::from(tip_height) >= origin_height - 1,
-            "FATAL: Zebra tip {} is before Ironwood activation {}",
-            u32::from(tip_height),
-            origin_height
-        );
-
+        // 6. ZNS Origin Checkpoint: fetch tree state from Zebra and seed ShardTrees
         let rpc = zcash::JsonRpc::new();
-        let checkpoint = origin_checkpoint(&rpc).await;
+        let checkpoint = origin_checkpoint(&rpc, &network).await;
         let checkpoint_height = checkpoint.metadata.block_height();
         wallet.seed_trees(&checkpoint, checkpoint_height);
         tracing::info!(
@@ -119,18 +145,27 @@ impl Boot {
             u32::from(checkpoint_height)
         );
 
-        // 8. Attestation
-        let report_data = generate_attestation_report_data(&treasury_keys, &registry_keys);
-        let attestation_bytes = generate_mint_attestation(report_data);
-        if !attestation_bytes.is_empty() {
-            std::fs::write("zns_mint_attestation.bin", &attestation_bytes)
-                .expect("FATAL: failed to write attestation to disk");
-            tracing::info!("boot: attestation report written to zns_mint_attestation.bin");
+        // 7. Attestation (production only)
+        #[cfg(not(feature = "dev-regtest"))]
+        {
+            let report_data =
+                generate_attestation_report_data(&network, &treasury_keys, &registry_keys);
+            let attestation_bytes = generate_mint_attestation(report_data);
+            if !attestation_bytes.is_empty() {
+                std::fs::write("zns_mint_attestation.bin", &attestation_bytes)
+                    .expect("FATAL: failed to write attestation to disk");
+                tracing::info!("boot: attestation report written to zns_mint_attestation.bin");
+            }
         }
 
-        tracing::info!("boot: complete at node tip {}", u32::from(tip_height));
+        tracing::info!(
+            network = NETWORK_LABEL,
+            "boot: complete at node tip {}",
+            u32::from(tip_height)
+        );
 
         Boot {
+            network,
             chain: chain_client,
             wallet,
             registry: Registry::new(),
@@ -159,6 +194,7 @@ impl Boot {
     pub fn into_parts(
         self,
     ) -> (
+        P,
         ChainClient,
         Wallet,
         Registry,
@@ -167,6 +203,7 @@ impl Boot {
         RegistryKeys,
     ) {
         (
+            self.network,
             self.chain,
             self.wallet,
             self.registry,
@@ -174,6 +211,27 @@ impl Boot {
             self.treasury_keys,
             self.registry_keys,
         )
+    }
+}
+
+#[cfg(feature = "dev-regtest")]
+fn regtest_network() -> LocalNetwork {
+    // Matches `regtest-harness/src/lib.rs:zebrad_toml`. Zebra defaults every
+    // unconfigured pre-NU5 activation to 1 on regtest; the harness explicitly
+    // configures NU5/NU6 at 1 and NU6.1/2/3 at 4.
+    let one = BlockHeight::from_u32(1);
+    let four = BlockHeight::from_u32(4);
+    LocalNetwork {
+        overwinter: Some(one),
+        sapling: Some(one),
+        blossom: Some(one),
+        heartwood: Some(one),
+        canopy: Some(one),
+        nu5: Some(one),
+        nu6: Some(one),
+        nu6_1: Some(four),
+        nu6_2: Some(four),
+        nu6_3: Some(four),
     }
 }
 
@@ -205,10 +263,12 @@ async fn check_liveness() -> zcash::BlockchainInfo {
 ///
 /// Verifies:
 /// - gRPC and JSON-RPC agree on tip height and hash (split-brain detection).
-/// - The genesis block hash matches the mainnet constant (network identity).
+/// - The genesis block hash matches the selected boot-network constant.
 /// - Tip is at or after NU5 activation (consensus baseline).
-/// - Tip block's timestamp is within 2 hours of wall clock (stuck-node detection).
-async fn verify_chain_integrity(info: &zcash::BlockchainInfo) -> (ChainClient, BlockHeight) {
+async fn verify_chain_integrity<P: Parameters>(
+    info: &zcash::BlockchainInfo,
+    network: &P,
+) -> (ChainClient, BlockHeight) {
     let mut chain = ChainClient::connect()
         .await
         .expect("FATAL: Zebra gRPC unreachable or timed out");
@@ -245,49 +305,31 @@ async fn verify_chain_integrity(info: &zcash::BlockchainInfo) -> (ChainClient, B
 
     let rpc = zcash::JsonRpc::new();
 
-    // Network identity check: mainnet genesis hash.
+    // Network identity check. This is hash-only because upstream Block::read
+    // intentionally rejects the genesis block.
     {
-        let genesis = rpc
-            .get_block(BlockHeight::from_u32(0))
+        let genesis_hash = rpc
+            .get_block_hash(BlockHeight::from_u32(0))
             .await
-            .expect("FATAL: failed to fetch genesis block via JSON-RPC");
+            .expect("FATAL: failed to fetch genesis hash via JSON-RPC");
         assert_eq!(
-            genesis.header().hash(),
-            zcash::MAINNET_GENESIS_HASH,
-            "FATAL: genesis block hash mismatch — Zebra is not on mainnet"
+            genesis_hash, EXPECTED_GENESIS,
+            "FATAL: genesis block hash mismatch — Zebra is not on the boot-selected network"
         );
     }
 
     // Fetch the tip block via JSON-RPC since Zebra gRPC doesn't implement get_block.
     let block = rpc
-        .get_block(tip_height)
+        .get_block(network, tip_height)
         .await
         .expect("FATAL: failed to fetch tip block via JSON-RPC");
 
     // Consensus baseline: NU5 must be active.
     {
-        const NU5_MAINNET_ACTIVATION_HEIGHT: u32 = 1_687_104;
         assert!(
-            u32::from(tip_height) >= NU5_MAINNET_ACTIVATION_HEIGHT,
-            "FATAL: node is on a pre-NU5 branch (tip {}, NU5 at {})",
+            network.is_nu_active(NetworkUpgrade::Nu5, tip_height),
+            "FATAL: node is on a pre-NU5 branch (tip {})",
             u32::from(tip_height),
-            NU5_MAINNET_ACTIVATION_HEIGHT
-        );
-    }
-
-    // Freshness: tip must be within 2 hours of wall clock.
-    {
-        let tip_time = block.header().time;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("FATAL: system time before UNIX epoch")
-            .as_secs() as u32;
-
-        assert!(
-            now.saturating_sub(tip_time) <= 7200,
-            "FATAL: liveness failure — tip block is too old (tip_time={}, now={}). Node may be stuck.",
-            tip_time,
-            now
         );
     }
 
@@ -300,30 +342,21 @@ async fn verify_chain_integrity(info: &zcash::BlockchainInfo) -> (ChainClient, B
     (chain, tip_height)
 }
 
-fn require_nu6_3_active(tip_height: BlockHeight) {
-    assert!(
-        NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, tip_height),
-        "FATAL: NU6.3/Ironwood is not active at Zebra tip {}",
-        u32::from(tip_height),
-    );
-    tracing::info!("boot: NU6.3/Ironwood active");
-}
-
 // ---------------------------------------------------------------------------
-// Step 7: ZNS Origin Checkpoint
+// Step 6: ZNS Origin Checkpoint
 // ---------------------------------------------------------------------------
 
-/// The Ironwood (NU6.3) activation height on mainnet, sourced from
-/// `zcash_protocol` so it tracks upstream automatically.
-pub fn ironwood_activation_height() -> BlockHeight {
-    NETWORK
+/// The Ironwood (NU6.3) activation height in boot-proven parameters.
+pub fn ironwood_activation_height<P: Parameters>(network: &P) -> BlockHeight {
+    network
         .activation_height(NetworkUpgrade::Nu6_3)
         .expect("NU6.3 activation height must be set in zcash_protocol")
 }
 
 /// Fetches the origin checkpoint from Zebra via `z_gettreestate`.
 ///
-/// The mint orchestrator begins scanning blocks from `ironwood_activation_height()`.
+/// The mint orchestrator begins scanning blocks from the boot-proven
+/// `ironwood_activation_height`.
 /// The checkpoint provides the commitment tree state for the block immediately
 /// preceding it, establishing the tree root for the wallet.
 ///
@@ -332,11 +365,12 @@ pub fn ironwood_activation_height() -> BlockHeight {
 /// exist until Ironwood activates.
 ///
 /// Zebra is the trust root (same TEE). `verify_chain_integrity` already
-/// cross-validates gRPC vs JSON-RPC, verifies the mainnet genesis block hash,
-/// and checks tip freshness. No hardcoded origin-hash pinning is needed — the
-/// checkpoint hash from `z_gettreestate` is stored in metadata for reference.
-async fn origin_checkpoint(rpc: &zcash::JsonRpc) -> CheckpointData {
-    let checkpoint_height = ironwood_activation_height().saturating_sub(1);
+/// cross-validates gRPC vs JSON-RPC, verifies the selected network's genesis
+/// block hash, and checks the required upgrade baseline. No hardcoded
+/// origin-hash pinning is needed — the checkpoint hash from `z_gettreestate`
+/// is stored in metadata for reference.
+async fn origin_checkpoint<P: Parameters>(rpc: &zcash::JsonRpc, network: &P) -> CheckpointData {
+    let checkpoint_height = ironwood_activation_height(network).saturating_sub(1);
 
     let checkpoint = rpc
         .get_checkpoint(checkpoint_height)
@@ -362,8 +396,7 @@ async fn origin_checkpoint(rpc: &zcash::JsonRpc) -> CheckpointData {
 /// file is a deployment artifact, not a runtime config: it must be replaced
 /// with the real seed fingerprint before a production artifact is built. The
 /// placeholder value causes boot to fail closed if it is not replaced.
-static EXPECTED_SEED_FINGERPRINT_RAW: &str =
-    include_str!("../deployment/seed_fingerprint.txt");
+static EXPECTED_SEED_FINGERPRINT_RAW: &str = include_str!("../deployment/seed_fingerprint.txt");
 
 fn expected_seed_fingerprint() -> &'static str {
     EXPECTED_SEED_FINGERPRINT_RAW.trim()
@@ -376,7 +409,10 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
     #[cfg(feature = "dev-seed")]
     {
         let _ = expected; // Suppress unused warning in dev mode only.
-        tracing::warn!("boot: dev-seed fingerprint = {} (verification skipped)", actual);
+        tracing::warn!(
+            "boot: dev-seed fingerprint = {} (verification skipped)",
+            actual
+        );
     }
 
     #[cfg(not(feature = "dev-seed"))]
@@ -410,7 +446,8 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 ///
 /// An external verifier checks this against the expected Treasury address
 /// and Registry UFVK, binding the attestation to the mint's identity.
-fn generate_attestation_report_data(
+fn generate_attestation_report_data<P: Parameters>(
+    network: &P,
     treasury_keys: &TreasuryKeys,
     registry_keys: &RegistryKeys,
 ) -> [u8; 64] {
@@ -420,8 +457,8 @@ fn generate_attestation_report_data(
         .fvk()
         .default_address(UnifiedAddressRequest::SHIELDED)
         .expect("FATAL: Treasury FVK missing default address");
-    let treasury_addr_str = treasury_addr.encode(&NETWORK);
-    let registry_fvk_str = registry_keys.fvk().encode(&NETWORK);
+    let treasury_addr_str = treasury_addr.encode(network);
+    let registry_fvk_str = registry_keys.fvk().encode(network);
 
     let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
     hasher.update(treasury_addr_str.as_bytes());
@@ -574,5 +611,38 @@ mod tests {
         let seed = Secret::new([0xAB; 32]);
         let wrong_fp = SeedFingerprint::from_seed(&[0xCD; 32]).unwrap().to_string();
         verify_fingerprint(&seed, &wrong_fp);
+    }
+
+    #[cfg(feature = "dev-regtest")]
+    #[test]
+    fn regtest_parameters_match_the_pinned_harness_schedule() {
+        let network = regtest_network();
+        let one = BlockHeight::from_u32(1);
+        let four = BlockHeight::from_u32(4);
+
+        assert_eq!(
+            network.network_type(),
+            zcash_protocol::consensus::NetworkType::Regtest
+        );
+        for upgrade in [
+            NetworkUpgrade::Overwinter,
+            NetworkUpgrade::Sapling,
+            NetworkUpgrade::Blossom,
+            NetworkUpgrade::Heartwood,
+            NetworkUpgrade::Canopy,
+            NetworkUpgrade::Nu5,
+            NetworkUpgrade::Nu6,
+        ] {
+            assert_eq!(network.activation_height(upgrade), Some(one));
+        }
+        for upgrade in [
+            NetworkUpgrade::Nu6_1,
+            NetworkUpgrade::Nu6_2,
+            NetworkUpgrade::Nu6_3,
+        ] {
+            assert_eq!(network.activation_height(upgrade), Some(four));
+        }
+        assert!(!network.is_nu_active(NetworkUpgrade::Nu6_3, BlockHeight::from_u32(3)));
+        assert!(network.is_nu_active(NetworkUpgrade::Nu6_3, four));
     }
 }

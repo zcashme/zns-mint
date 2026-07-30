@@ -2,11 +2,38 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-07-30 — Boot-proven consensus parameters
+
+- Production `Boot::run()` remains parameterless and hardcodes upstream
+  `MAIN_NETWORK`; its mainnet identity, activation, seed, and attestation
+  requirements remain intact.
+- The debug-only `Boot::run_regtest()` pins Zebra's harness schedule and
+  immutable regtest genesis, then uses the same boot core. It is unavailable
+  without `dev-regtest`, which is rejected in release builds.
+- `Boot<P>` carries the exact concrete `P: Parameters` that validated boot into
+  the run loop. No global mutable network and no runtime parameter discovery
+  are permitted.
+
+## 2026-07-30 — Removed wall-clock freshness gate
+
+- Removed the two-hour wall-clock freshness assertion from boot. It conflated
+  block timestamps with consensus/network identity and rejects deterministic
+  regtest chains for a non-consensus reason. Boot still proves local Zebra
+  reachability, gRPC/JSON-RPC tip agreement, pinned genesis identity, and the
+  required consensus-upgrade baseline before key derivation.
+
+## 2026-07-30 — Hash-only genesis identity
+
+- Changed the genesis identity check from full-block parsing to Zebra's
+  `getblockhash(0)`. Upstream `Block::read` deliberately rejects the genesis
+  block, so parsing it would make every correct boot fail before identity could
+  be established.
+
 ## 2026-07-25 — Mainnet genesis network-identity check
 
-- `verify_chain_integrity` now fetches the genesis block via JSON-RPC and
-  asserts its hash equals `zcash::MAINNET_GENESIS_HASH` before deriving keys
-  or fetching the Ironwood origin checkpoint.
+- `verify_chain_integrity` now obtains the genesis hash via JSON-RPC and
+  asserts it equals `zcash::MAINNET_GENESIS_HASH` before deriving keys or
+  fetching the Ironwood origin checkpoint.
 - The genesis check is a secondary guarantee: the primary guarantee that
   only mainnet Zebra runs inside the TEE remains the SEV-SNP image measurement.
 - Removed the placeholder `PINNED_ORIGIN_HASH` assertion from

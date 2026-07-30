@@ -286,7 +286,8 @@ mod tests {
 /// authorizes the transition, and assembles the transaction.
 /// Returns `None` if the request is invalid, the name is locked, or authorization fails.
 #[allow(clippy::too_many_arguments)]
-pub fn process_transition(
+pub fn process_transition<P: zcash_protocol::consensus::Parameters>(
+    network: &P,
     name: Name,
     action: Action,
     ua: UnifiedAddress,
@@ -328,6 +329,7 @@ pub fn process_transition(
         }
         Some(r) => {
             let result = crate::registry::transaction::execute_transition(
+                network,
                 wallet,
                 registry,
                 registry_keys,

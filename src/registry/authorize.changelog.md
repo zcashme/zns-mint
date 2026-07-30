@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/registry/authorize.rs`.
 
+## 2026-07-30 — Boot-proven transition parameters
+
+- Authorized update and release assembly forwards the boot-proven consensus
+  parameters into Registry fee selection and signing. OTP authorization itself
+  remains independent of network selection.
+
 ## 2026-07-23 — Test fixtures follow opaque production tips
 
 - Authorization continues to consume only the public action and predecessor

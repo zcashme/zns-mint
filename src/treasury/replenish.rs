@@ -15,7 +15,7 @@
 //! the transaction fee. The Registry receives spendable Ironwood fee notes.
 
 use orchard::builder::BundleType;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::{ZatBalance, Zatoshis};
 
 use crate::key::TreasuryKeys;
@@ -45,7 +45,8 @@ pub struct ReplenishAssembly {
 /// (`output_count * output_value`) is transferred cross-pool from Orchard to
 /// Ironwood.
 #[allow(clippy::too_many_arguments)]
-pub fn assemble_replenishment(
+pub fn assemble_replenishment<P: Parameters>(
+    network: &P,
     wallet: &mut Wallet,
     treasury_keys: &TreasuryKeys,
     plan: &RegistryFundingPlan,
@@ -55,7 +56,6 @@ pub fn assemble_replenishment(
 ) -> Result<ReplenishAssembly, crate::mint::AssemblyError> {
     use rand::rngs::OsRng;
     use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
-    use crate::zcash::NETWORK;
 
     let funding_total = plan.total_amount;
 
@@ -83,7 +83,7 @@ pub fn assemble_replenishment(
 
         fee = FeeRule::standard()
             .fee_required(
-                &NETWORK,
+                network,
                 target_height,
                 std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
                 std::iter::empty::<usize>(),
@@ -228,6 +228,7 @@ pub fn assemble_replenishment(
     // output-only (no real spend key needed).
     use crate::registry::signing;
     let (txid, hex) = signing::assemble_v6_transaction(
+        network,
         Some(orchard_bundle),
         Some(ironwood_bundle),
         Some(treasury_keys),

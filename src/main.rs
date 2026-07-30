@@ -4,8 +4,7 @@ use std::time::Duration;
 use zcash_client_backend::data_api::BlockMetadata;
 use zcash_client_backend::scanning::ScanningKeys;
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::consensus::BlockHeight;
-use zns_mint::zcash::NETWORK;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use zns_mint::auth::ChallengeKey;
 use zns_mint::boot::Boot;
@@ -48,12 +47,15 @@ async fn main() {
     tracing::info!("zns-mint starting");
     tokio::spawn(metrics::serve());
 
+    #[cfg(feature = "dev-regtest")]
+    let boot = Boot::run_regtest().await;
+    #[cfg(not(feature = "dev-regtest"))]
     let boot = Boot::run().await;
     metrics::set_boot_success(true);
 
     let boot_height = boot.height();
     let mut cursor = *boot.cursor().metadata();
-    let (mut chain, mut wallet, mut registry, _treasury, treasury_keys, registry_keys) =
+    let (network, mut chain, mut wallet, mut registry, _treasury, treasury_keys, registry_keys) =
         boot.into_parts();
     let block_source = CanonicalBlockSource::new();
     let mut ops = OperationalState::recovering(cursor.block_height());
@@ -136,7 +138,7 @@ async fn main() {
                             tip.hash()
                         } else {
                             block_source
-                                .get_block(cursor.block_height())
+                                .get_block(&network, cursor.block_height())
                                 .await?
                                 .header()
                                 .hash()
@@ -170,7 +172,7 @@ async fn main() {
                 let mut continuity_broke = false;
                 while cursor.block_height() < tip.height() {
                     let next_height = cursor.block_height() + 1;
-                    let block = block_source.get_block(next_height).await?;
+                    let block = block_source.get_block(&network, next_height).await?;
 
                     if block.header().prev_block != cursor.block_hash() {
                         tracing::warn!(
@@ -185,7 +187,7 @@ async fn main() {
                     }
 
                     let output = scan_block(
-                        &NETWORK,
+                        &network,
                         Some(&cursor),
                         block,
                         &ufvks,
@@ -230,6 +232,7 @@ async fn main() {
 
                     // ── request processing ──
                     process_cycle(
+                        &network,
                         &mut wallet,
                         &registry,
                         &mut ops,
@@ -263,7 +266,8 @@ async fn main() {
 /// This is the sole entry point that mutates `ops` with new submissions.
 /// The caller has already run [`OperationalState::reconcile`] to prune
 /// confirmed/expired submissions before calling this function.
-async fn process_cycle(
+async fn process_cycle<P: Parameters>(
+    network: &P,
     wallet: &mut Wallet,
     registry: &Registry,
     ops: &mut OperationalState,
@@ -320,6 +324,7 @@ async fn process_cycle(
         let outcome = match &request {
             RequestMemo::Claim { ua, .. } => {
                 process_claim(
+                    network,
                     name, ua, locator, value, confirmed_height,
                     cursor_height, target_height, &excluded,
                     wallet, registry, treasury_keys, registry_keys,
@@ -335,6 +340,7 @@ async fn process_cycle(
                 let controller_ua = record.ua.clone();
                 match otp {
                     None => process_otp_relay(
+                        network,
                         &name, Action::Update, &ua, &controller_ua,
                         record.commitment, locator, value,
                         cursor_height, target_height, &excluded,
@@ -342,6 +348,7 @@ async fn process_cycle(
                     ),
                     Some(otp_bytes) => {
                         authorize::process_transition(
+                            network,
                             name, Action::Update, ua, otp_bytes,
                             record.commitment,
                             cursor_height, target_height, &excluded,
@@ -364,6 +371,7 @@ async fn process_cycle(
                 }
                 match otp {
                     None => process_otp_relay(
+                        network,
                         &name, Action::Release, &ua, &controller_ua,
                         record.commitment, locator, value,
                         cursor_height, target_height, &excluded,
@@ -371,6 +379,7 @@ async fn process_cycle(
                     ),
                     Some(otp_bytes) => {
                         authorize::process_transition(
+                            network,
                             name, Action::Release, ua, otp_bytes,
                             record.commitment,
                             cursor_height, target_height, &excluded,
@@ -508,6 +517,7 @@ async fn process_cycle(
                     zns_mint::wallet::treasury_excluded_rhos(&excluded);
                 let result =
                     zns_mint::treasury::replenish::assemble_replenishment(
+                        network,
                         wallet,
                         treasury_keys,
                         &plan,
@@ -577,6 +587,7 @@ async fn process_cycle(
             zns_mint::wallet::treasury_excluded_rhos(&excluded);
         let result =
             zns_mint::treasury::sweep::assemble_sweep(
+                network,
                 wallet,
                 treasury_keys,
                 cursor_height,
@@ -625,4 +636,3 @@ async fn process_cycle(
         }
     }
 }
-

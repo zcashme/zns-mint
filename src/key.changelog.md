@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/key.rs`.
 
+## 2026-07-30 — Boot-proven ZIP-32 network parameters
+
+- Treasury and Registry derivation now require the consensus parameters that
+  boot validated. This keeps ZIP-32 coin-type derivation aligned with parsing,
+  scanning, address encoding, fees, and transaction branch selection.
+
 ## 2026-07-25 — Sound zeroization of UnifiedSpendingKey
 
 - Added a compile-time assertion `!std::mem::needs_drop::<UnifiedSpendingKey>()`
@@ -22,4 +28,3 @@ Tracks design-relevant changes to `src/key.rs`.
   so Treasury authority cannot satisfy a Registry signer parameter or vice
   versa.
 - Viewing-key access remains available for boot attestation and scanner setup.
-

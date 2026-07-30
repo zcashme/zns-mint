@@ -1,5 +1,10 @@
 # Treasury OTP relay changelog
 
+## 2026-07-30 — Boot-proven address and fee network
+
+- Relay fee calculation and Unified Address decoding receive the same
+  boot-proven consensus parameters used by the loop and signer.
+
 ## 2026-07-28 — Owner-visible relay and fixed relay value
 
 - Relay memos begin with the fixed-width OTP:

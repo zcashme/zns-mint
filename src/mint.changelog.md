@@ -1,5 +1,11 @@
 # Mint live-work design record
 
+## 2026-07-30 — Boot-proven Unified Address validation
+
+- Unified Address receiver validation accepts the immutable consensus
+  parameters established at boot. Address interpretation cannot diverge from
+  scan, fee, and transaction-signing parameters.
+
 ## 2026-07-30 — In-flight tracking redesign
 
 - **Submission** slimmed from 8 fields to 5: dropped `txid` (redundant — it's the

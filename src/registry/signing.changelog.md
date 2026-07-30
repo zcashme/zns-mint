@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/registry/signing.rs`.
 
+## 2026-07-30 — Boot-proven branch selection
+
+- V6 assembly receives the immutable consensus parameters established by boot.
+  NU6.3 enforcement and `BranchId::for_height` therefore use the same
+  parameters as block parsing, scanning, and fee calculation.
+
 ## 2026-07-23 — Pool-role signer separation
 
 - The mixed V6 assembler no longer accepts one role-neutral Orchard spending

@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/registry/transaction.rs`.
 
+## 2026-07-30 — Boot-proven ZIP-317 parameters
+
+- Registry fee selection and transaction assembly receive the boot-proven
+  parameters rather than consulting a global network. The selected fee and
+  signed branch ID cannot disagree about the active consensus upgrade.
+
 ## 2026-07-28 — Aggregate fee includes paired Orchard claim actions
 
 - Registry fee selection and assembly now receive the action count of a paired

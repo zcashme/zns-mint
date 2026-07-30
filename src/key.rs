@@ -4,9 +4,9 @@
 use secrecy::{ExposeSecret, Secret};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zip32::AccountId;
+use zcash_protocol::consensus::Parameters;
 
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
-use crate::zcash::NETWORK;
 
 // ===========================================================================
 // AccountKeys — per-account keys, generated at boot, held by each module
@@ -103,16 +103,16 @@ impl Drop for AccountKeys {
 /// Panics if derivation fails — a zero-seed on mainnet is a bug, not a runtime
 /// condition. The upstream derivation code rejects invalid seeds (zero ask,
 /// invalid IVKs); a panic here means the seed is cryptographically broken.
-fn derive_account(seed: &Secret<[u8; 32]>, account: AccountId) -> AccountKeys {
-    let usk = UnifiedSpendingKey::from_seed(&NETWORK, seed.expose_secret(), account)
+fn derive_account<P: Parameters>(network: &P, seed: &Secret<[u8; 32]>, account: AccountId) -> AccountKeys {
+    let usk = UnifiedSpendingKey::from_seed(network, seed.expose_secret(), account)
         .expect("key derivation");
     AccountKeys { spending: usk }
 }
 
-pub fn derive_treasury(seed: &Secret<[u8; 32]>) -> TreasuryKeys {
-    TreasuryKeys(derive_account(seed, TREASURY_ACCOUNT))
+pub fn derive_treasury<P: Parameters>(network: &P, seed: &Secret<[u8; 32]>) -> TreasuryKeys {
+    TreasuryKeys(derive_account(network, seed, TREASURY_ACCOUNT))
 }
 
-pub fn derive_registry(seed: &Secret<[u8; 32]>) -> RegistryKeys {
-    RegistryKeys(derive_account(seed, REGISTRY_ACCOUNT))
+pub fn derive_registry<P: Parameters>(network: &P, seed: &Secret<[u8; 32]>) -> RegistryKeys {
+    RegistryKeys(derive_account(network, seed, REGISTRY_ACCOUNT))
 }

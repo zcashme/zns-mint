@@ -1,5 +1,10 @@
 # Treasury replenishment changelog
 
+## 2026-07-30 — Boot-proven fee network
+
+- Replenishment fee calculation and mixed-bundle signing receive the
+  boot-proven consensus parameters rather than a global default.
+
 ## 2026-07-24 — Registry fee-note replenishment
 
 - Added `src/treasury/replenish.rs` with `assemble_replenishment()` — builds

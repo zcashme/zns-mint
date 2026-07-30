@@ -59,7 +59,8 @@ type UnsignedBundle = orchard::Bundle<
 /// that exact commitment.
 ///
 /// Returns the transaction ID and the serialized transaction as a hex string.
-pub fn assemble_v6_transaction(
+pub fn assemble_v6_transaction<P: Parameters>(
+    network: &P,
     orchard_bundle: Option<UnsignedBundle>,
     ironwood_bundle: Option<UnsignedBundle>,
     treasury_signer: Option<&TreasuryKeys>,
@@ -81,7 +82,7 @@ pub fn assemble_v6_transaction(
         return Err(crate::mint::AssemblyError::BuilderCreation);
     }
 
-    if !crate::zcash::NETWORK.is_nu_active(NetworkUpgrade::Nu6_3, target_height) {
+    if !network.is_nu_active(NetworkUpgrade::Nu6_3, target_height) {
         return Err(crate::mint::AssemblyError::Nu63NotActive);
     }
 
@@ -102,7 +103,7 @@ pub fn assemble_v6_transaction(
     static PK: OnceLock<ProvingKey> = OnceLock::new();
     static VK: OnceLock<VerifyingKey> = OnceLock::new();
 
-    let branch_id = BranchId::for_height(&crate::zcash::NETWORK, target_height);
+    let branch_id = BranchId::for_height(network, target_height);
     let expiry_height = BlockHeight::from_u32(
         u32::from(target_height)
             .checked_add(TX_EXPIRY_BUFFER)
@@ -317,13 +318,15 @@ pub fn assemble_v6_transaction(
 /// This is a convenience wrapper around [`assemble_v6_transaction`] that keeps the
 /// original Registry-only call signature. It returns only the serialized hex; callers
 /// that need the transaction ID should use [`assemble_v6_transaction`] directly.
-pub fn assemble_and_sign_transaction(
+pub fn assemble_and_sign_transaction<P: Parameters>(
+    network: &P,
     unproven_bundle: UnsignedBundle,
     registry_keys: &RegistryKeys,
     transparent_outputs: Option<&[TransparentOutput]>,
     target_height: BlockHeight,
 ) -> Result<String, crate::mint::AssemblyError> {
     assemble_v6_transaction(
+        network,
         None,
         Some(unproven_bundle),
         None,

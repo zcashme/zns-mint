@@ -1,5 +1,12 @@
 # Treasury claim assembly changelog
 
+## 2026-07-30 — Boot-proven claim settlement parameters
+
+- Claim fee selection, claimed-UA receiver decoding, and paired V6 signing use
+  the immutable consensus parameters established by boot. The production claim
+  policy is unchanged; only ownership of network parameters moved out of the
+  Zcash transport module.
+
 ## 2026-07-28 — Claim excess returns to the claimed UA
 
 - A claim's `name_ua` is now the refund destination; it must contain a

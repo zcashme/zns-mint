@@ -532,13 +532,16 @@ pub struct RequestOutcome {
 
 /// Whether a UA string contains an Orchard receiver. Protocol constraint:
 /// all ZNS UAs must have one so the Treasury can deliver OTP relay notes.
-pub fn has_orchard_receiver(ua: &UnifiedAddress) -> bool {
+pub fn has_orchard_receiver<P: Parameters>(
+    network: &P,
+    ua: &UnifiedAddress,
+) -> bool {
     let zaddr: zcash_address::ZcashAddress = match ua.as_str().parse() {
         Ok(z) => z,
         Err(_) => return false,
     };
     let parsed: zcash_keys::address::Address = match zaddr
-        .convert_if_network(crate::zcash::NETWORK.network_type())
+        .convert_if_network(network.network_type())
     {
         Ok(p) => p,
         Err(_) => return false,

@@ -455,9 +455,11 @@ fn ironwood_frontier(
     orchard::tree::MerkleHashOrchard,
     { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
 > {
+    // The checkpoint is at activation_height - 1, one block before Ironwood
+    // exists. An empty frontier is the correct starting state.
     checkpoint
         .ironwood_tree
         .as_ref()
-        .expect("FATAL: NU6.3 active but checkpoint has no Ironwood tree")
-        .to_frontier()
+        .map(|tree| tree.to_frontier())
+        .unwrap_or_else(incrementalmerkletree::frontier::Frontier::empty)
 }

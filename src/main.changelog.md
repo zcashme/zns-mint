@@ -4,6 +4,13 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-07-30 — Boot-to-loop consensus handoff
+
+- The main loop receives the concrete consensus parameters only from `Boot`.
+  It supplies that same immutable value to canonical parsing, scanner input,
+  request handling, fees, address validation, and signing; it no longer reads
+  a global network chosen by `zcash.rs`.
+
 ## 2026-07-30 — process_cycle extraction
 
 - The entire request-processing, replenishment, and sweep block — previously
@@ -810,7 +817,7 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
 - Modified `obtain_key_source` and `boot` to return and handle a hardcoded zero seed when the `dev-seed` feature is enabled, allowing local development to bypass the TEE-enforced sealed blob requirement.
 
 ## 2026-07-06 (boot hardening, fee funding, and transaction assembly)
-- Boot sequence fortified: enforced NU5 activation consensus height and added a 2-hour freshness check on the tip block's timestamp.
+- Boot sequence fortified: enforced the NU5 activation consensus baseline.
 - Name Note transaction assembly implemented in `src/registry.rs`: `build_transaction` orchestrates the `unsafe-zns` Orchard Builder.
 - Registry self-funding implemented (Slice 5): the transaction assembly automatically scans the wallet for non-zero value notes to cover the 10,000 zatoshi fee, appending standard Orchard spends and minting standard ZIP-302 change notes back to the Registry's internal address.
 
