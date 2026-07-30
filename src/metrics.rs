@@ -1,7 +1,8 @@
-use lazy_static::lazy_static;
+use std::sync::LazyLock;
+
 use prometheus::{
-    register_histogram, register_int_counter, register_int_counter_vec, register_int_gauge,
-    Encoder, Histogram, IntCounter, IntCounterVec, IntGauge,
+    register_int_counter, register_int_counter_vec, register_int_gauge, Encoder, IntCounter,
+    IntCounterVec, IntGauge,
 };
 
 /// The bind address of the Prometheus exposition endpoint.
@@ -39,136 +40,135 @@ pub async fn serve() {
         .expect("metrics server: axum::serve failed");
 }
 
-lazy_static! {
-    // --- 1. Liveness & Progress ---
-    pub static ref BOOT_SUCCESS: IntGauge = register_int_gauge!(
+// ---------------------------------------------------------------------------
+// Metric definitions (14 total: 8 counters, 6 gauges)
+//
+// Counters — events that happen. Watch their rate.
+// Gauges   — state that exists right now. Watch the value.
+// ---------------------------------------------------------------------------
+
+// --- Gauges: state ---
+
+static BOOT_SUCCESS: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
         "zns_mint_boot_success",
         "Boot success, 1 for success and 0 for failure"
     )
-    .unwrap();
-    pub static ref CHAIN_HEIGHT: IntGauge = register_int_gauge!(
+    .expect("metric zns_mint_boot_success registration")
+});
+
+static CHAIN_HEIGHT: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
         "zns_mint_chain_height",
         "The highest block height the scanner has processed"
     )
-    .unwrap();
-    pub static ref BLOCKS_SCANNED: IntCounter = register_int_counter!(
-        "zns_mint_blocks_scanned_total",
-        "Total number of blocks fully applied by the scanner"
-    )
-    .unwrap();
+    .expect("metric zns_mint_chain_height registration")
+});
 
-    // --- 2. Authentication (OTPs) ---
-    pub static ref OTPS_ISSUED: IntCounter = register_int_counter!(
-        "zns_mint_otps_issued_total",
-        "Total number of OTP challenges issued to current controllers"
+static TIP_HEIGHT: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
+        "zns_mint_tip_height",
+        "The current chain tip height from Zebra"
     )
-    .unwrap();
-    pub static ref OTPS_IN_FLIGHT: IntGauge = register_int_gauge!(
-        "zns_mint_otps_in_flight",
-        "Current number of pending OTP challenges awaiting user response"
-    )
-    .unwrap();
-    pub static ref OTPS_VERIFIED: IntCounter = register_int_counter!(
-        "zns_mint_otps_verified_total",
-        "Total number of OTP challenges successfully verified and burned"
-    )
-    .unwrap();
-    pub static ref OTPS_NEVER_RETURNED: IntCounter = register_int_counter!(
-        "zns_mint_otps_never_returned_total",
-        "Total number of OTP challenges pruned due to expiration without response"
-    )
-    .unwrap();
+    .expect("metric zns_mint_tip_height registration")
+});
 
-    // --- 3. Treasury & Requests ---
-    pub static ref REQUESTS_RECEIVED: IntCounterVec = register_int_counter_vec!(
+static TREASURY_BALANCE: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
+        "zns_mint_treasury_balance_zatoshis",
+        "Current unspent balance of the Treasury account in zatoshis"
+    )
+    .expect("metric zns_mint_treasury_balance_zatoshis registration")
+});
+
+static REGISTRY_FEE_NOTES: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
+        "zns_mint_registry_fee_notes",
+        "Current number of unspent UTXOs held by the Registry for fees"
+    )
+    .expect("metric zns_mint_registry_fee_notes registration")
+});
+
+static TX_PENDING: LazyLock<IntGauge> = LazyLock::new(|| {
+    register_int_gauge!(
+        "zns_mint_transactions_pending",
+        "Current number of submitted but unconfirmed transactions"
+    )
+    .expect("metric zns_mint_transactions_pending registration")
+});
+
+// --- Counters: events ---
+
+static REORGS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    register_int_counter!(
+        "zns_mint_reorgs_total",
+        "Total number of chain reorganizations detected by the scanner"
+    )
+    .expect("metric zns_mint_reorgs_total registration")
+});
+
+static REQUESTS_RECEIVED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
         "zns_mint_requests_received_total",
         "Total number of valid request memos received",
         &["action"] // claim, update, release
     )
-    .unwrap();
-    pub static ref REQUESTS_INVALID: IntCounterVec = register_int_counter_vec!(
+    .expect("metric zns_mint_requests_received_total registration")
+});
+
+static REQUESTS_INVALID: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
         "zns_mint_requests_invalid_total",
         "Total number of invalid request memos rejected",
-        &["reason"] // parse_error, invalid_state, bad_otp
+        &["reason"]
     )
-    .unwrap();
-    pub static ref TREASURY_BALANCE: IntGauge = register_int_gauge!(
-        "zns_mint_treasury_balance_zatoshis",
-        "Current unspent balance of the Treasury account in zatoshis"
-    )
-    .unwrap();
+    .expect("metric zns_mint_requests_invalid_total registration")
+});
 
-    // --- 4. Registry & Names ---
-    pub static ref NAMES_CLAIMED: IntCounter = register_int_counter!(
-        "zns_mint_names_claimed_total",
-        "Total number of new names successfully claimed"
-    )
-    .unwrap();
-    pub static ref NAMES_UPDATED: IntCounter = register_int_counter!(
-        "zns_mint_names_updated_total",
-        "Total number of names successfully updated"
-    )
-    .unwrap();
-    pub static ref NAMES_RELEASED: IntCounter = register_int_counter!(
-        "zns_mint_names_released_total",
-        "Total number of names successfully released"
-    )
-    .unwrap();
-    pub static ref REGISTRY_FEE_NOTES: IntGauge = register_int_gauge!(
-        "zns_mint_registry_fee_notes",
-        "Current number of unspent UTXOs held by the Registry for fees"
-    )
-    .unwrap();
-
-    // --- 4b. Submissions ---
-    pub static ref TX_SUBMITTED: IntCounterVec = register_int_counter_vec!(
+static TX_SUBMITTED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
         "zns_mint_transactions_submitted_total",
         "Total number of transactions submitted to Zebra",
-        &["kind"] // claim, update, release, otp_relay
+        &["kind"] // claim, update, release, otp_relay, replenish, sweep
     )
-    .unwrap();
-    pub static ref TX_CONFIRMED: IntCounterVec = register_int_counter_vec!(
+    .expect("metric zns_mint_transactions_submitted_total registration")
+});
+
+static TX_CONFIRMED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
         "zns_mint_transactions_confirmed_total",
         "Total number of transactions confirmed in a block",
         &["kind"]
     )
-    .unwrap();
-    pub static ref TX_EXPIRED: IntCounterVec = register_int_counter_vec!(
+    .expect("metric zns_mint_transactions_confirmed_total registration")
+});
+
+static TX_EXPIRED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
         "zns_mint_transactions_expired_total",
         "Total number of transactions that expired without confirmation",
         &["kind"]
     )
-    .unwrap();
-    pub static ref TX_PENDING: IntGauge = register_int_gauge!(
-        "zns_mint_transactions_pending",
-        "Current number of submitted but unconfirmed transactions"
-    )
-    .unwrap();
+    .expect("metric zns_mint_transactions_expired_total registration")
+});
 
-    // --- 5. Errors & Performance ---
-    pub static ref RPC_ERRORS: IntCounterVec = register_int_counter_vec!(
+static RPC_ERRORS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
         "zns_mint_rpc_errors_total",
         "Total number of Zebra RPC connection or request errors",
-        &["endpoint"] // getblockchaininfo, chain_tip_change, etc.
+        &["endpoint"]
     )
-    .unwrap();
-    pub static ref SPEND_ERRORS: IntCounterVec = register_int_counter_vec!(
+    .expect("metric zns_mint_rpc_errors_total registration")
+});
+
+static SPEND_ERRORS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
         "zns_mint_spend_errors_total",
         "Total number of transaction spend/assembly errors",
         &["reason"]
     )
-    .unwrap();
-    pub static ref TRANSACTION_ASSEMBLY_SECONDS: Histogram = register_histogram!(
-        "zns_mint_transaction_assembly_seconds",
-        "Time spent building and proving Orchard/ZNS transactions"
-    )
-    .unwrap();
-    pub static ref NO_FEE_LIQUIDITY_BLOCKS: IntCounter = register_int_counter!(
-        "zns_mint_no_fee_liquidity_blocks_total",
-        "Total number of blocks where operations were blocked due to unspendable/insufficient fee notes"
-    )
-    .unwrap();
-}
+    .expect("metric zns_mint_spend_errors_total registration")
+});
 
 // ---------------------------------------------------------------------------
 // Strongly-typed accessors
@@ -182,23 +182,20 @@ pub fn set_chain_height(height: u32) {
     CHAIN_HEIGHT.set(height as i64);
 }
 
-pub fn inc_blocks_scanned() {
-    BLOCKS_SCANNED.inc();
+pub fn set_tip_height(height: u32) {
+    TIP_HEIGHT.set(height as i64);
 }
 
-pub fn inc_otps_issued() {
-    OTPS_ISSUED.inc();
-    OTPS_IN_FLIGHT.inc();
+pub fn set_treasury_balance(zatoshis: u64) {
+    TREASURY_BALANCE.set(zatoshis as i64);
 }
 
-pub fn inc_otps_verified() {
-    OTPS_VERIFIED.inc();
-    OTPS_IN_FLIGHT.dec();
+pub fn set_registry_fee_notes(count: u64) {
+    REGISTRY_FEE_NOTES.set(count as i64);
 }
 
-pub fn inc_otps_never_returned(count: u64) {
-    OTPS_NEVER_RETURNED.inc_by(count);
-    OTPS_IN_FLIGHT.sub(count as i64);
+pub fn inc_reorg() {
+    REORGS_TOTAL.inc();
 }
 
 pub fn inc_request_received(action: &str) {
@@ -207,42 +204,6 @@ pub fn inc_request_received(action: &str) {
 
 pub fn inc_request_invalid(reason: &str) {
     REQUESTS_INVALID.with_label_values(&[reason]).inc();
-}
-
-pub fn set_treasury_balance(zatoshis: u64) {
-    TREASURY_BALANCE.set(zatoshis as i64);
-}
-
-pub fn inc_names_claimed() {
-    NAMES_CLAIMED.inc();
-}
-
-pub fn inc_names_updated() {
-    NAMES_UPDATED.inc();
-}
-
-pub fn inc_names_released() {
-    NAMES_RELEASED.inc();
-}
-
-pub fn set_registry_fee_notes(count: u64) {
-    REGISTRY_FEE_NOTES.set(count as i64);
-}
-
-pub fn inc_rpc_error(endpoint: &str) {
-    RPC_ERRORS.with_label_values(&[endpoint]).inc();
-}
-
-pub fn inc_spend_error(reason: &str) {
-    SPEND_ERRORS.with_label_values(&[reason]).inc();
-}
-
-pub fn observe_transaction_assembly_seconds(seconds: f64) {
-    TRANSACTION_ASSEMBLY_SECONDS.observe(seconds);
-}
-
-pub fn inc_no_fee_liquidity_blocks() {
-    NO_FEE_LIQUIDITY_BLOCKS.inc();
 }
 
 pub fn inc_tx_submitted(kind: &str) {
@@ -258,6 +219,14 @@ pub fn inc_tx_confirmed(kind: &str) {
 pub fn inc_tx_expired(kind: &str) {
     TX_EXPIRED.with_label_values(&[kind]).inc();
     TX_PENDING.dec();
+}
+
+pub fn inc_rpc_error(endpoint: &str) {
+    RPC_ERRORS.with_label_values(&[endpoint]).inc();
+}
+
+pub fn inc_spend_error(reason: &str) {
+    SPEND_ERRORS.with_label_values(&[reason]).inc();
 }
 
 // ---------------------------------------------------------------------------
@@ -284,4 +253,3 @@ pub fn publish_wallet_gauges(
             .count() as u64,
     );
 }
-
