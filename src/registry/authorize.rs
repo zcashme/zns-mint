@@ -324,7 +324,6 @@ pub fn process_transition(
             None
         }
         Some(r) => {
-            crate::metrics::inc_otps_verified();
             let result = crate::registry::transaction::execute_transition(
                 wallet,
                 registry,

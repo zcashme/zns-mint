@@ -161,6 +161,7 @@ async fn main() {
                     reorg_ancestor = Some(
                         reorg_ancestor.map_or(prev_height, |h: BlockHeight| h.min(prev_height)),
                     );
+                    metrics::inc_reorg();
                     tracing::info!(
                         height = u32::from(prev_height),
                         "rewound to common ancestor"
@@ -180,6 +181,7 @@ async fn main() {
                             actual = %block.header().prev_block,
                             "reorg detected: block prev_hash does not match cursor"
                         );
+                        metrics::inc_reorg();
                         continuity_broke = true;
                         break;
                     }
@@ -215,6 +217,7 @@ async fn main() {
 
         match sync_result {
             Ok(tip) => {
+                metrics::set_tip_height(u32::from(tip.height()));
                 // ── live phase ──
                 if cursor.block_height() == tip.height() && cursor.block_hash() == tip.hash() {
                     metrics::publish_wallet_gauges(&wallet, cursor.block_height());
@@ -286,7 +289,7 @@ async fn process_cycle(
 
     let pruned = ops.pending_otps.prune(cursor_height);
     if pruned > 0 {
-        metrics::inc_otps_never_returned(pruned as u64);
+        tracing::debug!(pruned, "pruned expired OTP challenges");
     }
 
     let mut excluded = ops.reserved_locators();
@@ -419,7 +422,6 @@ async fn process_cycle(
                                     .release_challenge(&key);
                                 ops.pending_otps
                                     .record_issued(key, &otp, cursor_height);
-                                metrics::inc_otps_issued();
                             }
                             ops.record_submission(
                                 kind,

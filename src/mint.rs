@@ -456,9 +456,9 @@ impl OperationalState {
                     sub.confirmed_at = Some(height);
                     tracing::info!(txid = %txid, kind = sub.kind.as_str(), "confirmed");
                     match sub.kind {
-                        SubmissionKind::Claim    => { metrics::inc_names_claimed();  metrics::inc_tx_confirmed("claim"); }
-                        SubmissionKind::Update   => { metrics::inc_names_updated();  metrics::inc_tx_confirmed("update"); }
-                        SubmissionKind::Release  => { metrics::inc_names_released(); metrics::inc_tx_confirmed("release"); }
+                        SubmissionKind::Claim    => { metrics::inc_tx_confirmed("claim"); }
+                        SubmissionKind::Update   => { metrics::inc_tx_confirmed("update"); }
+                        SubmissionKind::Release  => { metrics::inc_tx_confirmed("release"); }
                         SubmissionKind::OtpRelay => { metrics::inc_tx_confirmed("otp_relay"); }
                         SubmissionKind::Replenish=> { metrics::inc_tx_confirmed("replenish"); }
                         SubmissionKind::AutoSweep=> { metrics::inc_tx_confirmed("sweep"); }
