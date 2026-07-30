@@ -100,25 +100,6 @@ impl std::fmt::Debug for Record {
     }
 }
 
-/// A canonical block transaction could not advance Registry state.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum RegistryApplyError {
-    #[error("one transaction contained multiple validated Name Note candidates")]
-    AmbiguousNameNotes,
-    #[error("a Name Note transition lacked a recognized Registry fee-note spend")]
-    MissingRegistryFeeSpend,
-    #[error("a claim attempted to replace a live name")]
-    NameAlreadyLive,
-    #[error("an update or release had no live predecessor")]
-    MissingLiveRecord,
-    #[error("an update or release did not name the current predecessor commitment")]
-    WrongPredecessor,
-    #[error("an update or release did not spend the exact current Name Note")]
-    MissingRecordSpend,
-    #[error("a current Name Note was spent without exactly one legal successor")]
-    RecordSpentWithoutSuccessor,
-}
-
 // ---------------------------------------------------------------------------
 // Registry — name-chain state with reorg undo
 // ---------------------------------------------------------------------------
@@ -154,16 +135,20 @@ impl Registry {
         self.records.get(name)
     }
 
-    /// Validates and simulates every Registry transition in block order.
+    /// Applies every Registry transition in block order.
     ///
     /// The evidence boundary takes the scanner's complete transaction and the
     /// wallet's ordinary-note state directly. Callers cannot supply a detached
     /// authorship boolean or nullifier list.
+    ///
+    /// All ZNS invariant checks are assertions — only the mint can create or
+    /// spend Name Notes, and its assembly code prevents every violation by
+    /// construction. If an assertion fires, it's a bug in the assembly path.
     pub fn apply_block(
         &self,
         wallet: &Wallet,
         output: &BlockOutput,
-    ) -> Result<Self, RegistryApplyError> {
+    ) -> Self {
         let mut next = self.clone();
         let mut available_registry_fees: Vec<_> = wallet
             .ironwood_notes_for(REGISTRY_ACCOUNT)
@@ -193,16 +178,18 @@ impl Registry {
 
             match tx.received_name_notes() {
                 [] => {
-                    if !spent_record_names.is_empty() {
-                        return Err(RegistryApplyError::RecordSpentWithoutSuccessor);
-                    }
+                    assert!(spent_record_names.is_empty(),
+                        "record commitment matched a prev_rcm but no Name Notes were received \
+                         — impossible: spent_record_names is derived from received_name_notes \
+                         which is empty");
                 }
                 notes if notes.len() > 1 => {
                     // Public output construction is not Registry authorship.
                     // Ignore attacker-created ambiguity unless this transaction
                     // also spends Registry authority.
                     if has_registry_fee_spend || !spent_record_names.is_empty() {
-                        return Err(RegistryApplyError::AmbiguousNameNotes);
+                        panic!("mint produced multiple Name Notes in one transaction \
+                                — assembly creates exactly one");
                     }
                 }
                 [note] => {
@@ -216,35 +203,35 @@ impl Registry {
                         );
                         continue;
                     }
-                    if !has_registry_fee_spend {
-                        return Err(RegistryApplyError::MissingRegistryFeeSpend);
-                    }
+                    assert!(has_registry_fee_spend,
+                        "mint transition transaction missing Registry fee-note spend \
+                         — assembly always includes fee funding");
 
                     let payload = note.payload();
                     let name = payload.name();
                     match payload.action() {
                         Action::Claim => {
-                            if !spent_record_names.is_empty() {
-                                return Err(RegistryApplyError::RecordSpentWithoutSuccessor);
-                            }
-                            if next
-                                .record(name)
-                                .is_some_and(|record| record.action != Action::Release)
-                            {
-                                return Err(RegistryApplyError::NameAlreadyLive);
-                            }
+                            assert!(spent_record_names.is_empty(),
+                                "claim transaction spent a record — assembly never \
+                                 spends a Name Note when claiming");
+                            assert!(
+                                next.record(name).is_none_or(|r| r.action == Action::Release),
+                                "claim attempted to replace live name {name:?} \
+                                 — authorize_claim checks availability"
+                            );
                         }
                         Action::Update | Action::Release => {
                             let record = next
                                 .record(name)
                                 .filter(|record| record.action != Action::Release)
-                                .ok_or(RegistryApplyError::MissingLiveRecord)?;
-                            if payload.prev_rcm() != Some(record.commitment) {
-                                return Err(RegistryApplyError::WrongPredecessor);
-                            }
-                            if spent_record_names.as_slice() != [name.clone()] {
-                                return Err(RegistryApplyError::MissingRecordSpend);
-                            }
+                                .expect("update/release has no live predecessor \
+                                        — assembly checks liveness before transitioning");
+                            assert!(payload.prev_rcm() == Some(record.commitment),
+                                "predecessor mismatch — assembly reads commitment \
+                                 from the same registry");
+                            assert!(spent_record_names.as_slice() == [name.clone()],
+                                "update/release did not spend the exact current Name Note \
+                                 — assembly spends the exact current note");
                         }
                     }
 
@@ -264,7 +251,7 @@ impl Registry {
             );
         }
 
-        Ok(next)
+        next
     }
 
     fn advance_fee_set(

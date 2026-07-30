@@ -35,8 +35,6 @@ pub enum RuntimeError {
     Transport(#[from] TransportError),
     #[error("block scan failed: {0}")]
     Scan(#[from] zns_mint::sync::ScanError),
-    #[error("Registry transition rejected: {0}")]
-    Registry(#[from] zns_mint::registry::RegistryApplyError),
     #[error("wallet block application failed: {0}")]
     Wallet(#[from] zns_mint::wallet::WalletApplyError),
 }
@@ -194,7 +192,7 @@ async fn main() {
                         &scanning_keys,
                     )?;
 
-                    let next_registry = registry.apply_block(&wallet, &output)?;
+                    let next_registry = registry.apply_block(&wallet, &output);
                     wallet.apply_block(&output, cursor.block_height())?;
                     registry = next_registry;
 
