@@ -122,24 +122,33 @@ impl<P: Parameters> Boot<P> {
             KeySource::Dev => Secret::new([0u8; 32]),
         };
         verify_fingerprint(&seed, expected_seed_fingerprint());
-
         // 4. Key derivation
         let treasury_keys = key::derive_treasury(&network, &seed);
         let registry_keys = key::derive_registry(&network, &seed);
         tracing::info!("boot: keys derived (treasury=acct0, registry=acct1)");
 
         // 5. Wallet initialization
-        let ufvks = [
+        let mut wallet = Wallet::new([
             (TREASURY_ACCOUNT, treasury_keys.fvk()),
             (REGISTRY_ACCOUNT, registry_keys.fvk()),
-        ];
-        let mut wallet = Wallet::new(ufvks);
+        ]);
 
         // 6. ZNS Origin Checkpoint: fetch tree state from Zebra and seed ShardTrees
         let rpc = zcash::JsonRpc::new();
         let checkpoint = origin_checkpoint(&rpc, &network).await;
         let checkpoint_height = checkpoint.metadata.block_height();
-        wallet.seed_trees(&checkpoint, checkpoint_height);
+        wallet
+            .seed_trees(
+                checkpoint.sapling_tree.to_frontier(),
+                checkpoint.orchard_tree.to_frontier(),
+                checkpoint
+                    .ironwood_tree
+                    .as_ref()
+                    .map(|tree| tree.to_frontier())
+                    .unwrap_or_else(incrementalmerkletree::frontier::Frontier::empty),
+                checkpoint_height,
+            )
+            .expect("FATAL: failed to seed commitment trees from the verified Zebra checkpoint");
         tracing::info!(
             "boot: commitment trees seeded from origin checkpoint at height {}",
             u32::from(checkpoint_height)

@@ -1,465 +1,335 @@
-//! ZNS mint wallet.
-//!
-pub mod balance;
-pub mod selection;
-pub mod transaction;
-pub mod trees;
+//! In-memory wallet database for the ZNS mint.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use incrementalmerkletree::Position;
+use incrementalmerkletree::{frontier::Frontier, Address};
+use shardtree::{
+    error::ShardTreeError,
+    store::{memory::MemoryShardStore, ShardStore},
+    ShardTree,
+};
+use transparent::bundle::OutPoint;
+use zcash_client_backend::{
+    data_api::chain::CommitmentTreeRoot,
+    data_api::locking::LockOwner,
+    data_api::{
+        BlockMetadata, SentTransactionOutput, TransactionStatus, WalletCommitmentTrees,
+        ORCHARD_SHARD_HEIGHT, SAPLING_SHARD_HEIGHT,
+    },
+    wallet::{
+        NoteId, OutputRef, WalletIronwoodOutput, WalletSaplingOutput, WalletTransparentOutput,
+    },
+};
 use zcash_keys::keys::UnifiedFullViewingKey;
-use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::value::Zatoshis;
+use zcash_primitives::transaction::{Transaction, TxId};
+use zcash_protocol::{
+    consensus::{BlockHeight, TxIndex},
+    memo::Memo,
+};
 use zip32::AccountId;
 
-use crate::sync::BlockOutput;
-use crate::zcash::CheckpointData;
-use balance::WalletBalance;
-use transaction::{
-    ReceivedIronwoodNote, ReceivedOrchardNote, ReceivedSaplingNote, SpentIronwoodNote,
-    SpentOrchardNote, SpentSaplingNote, TransactionRecord,
-};
-use trees::ShardTrees;
-
-/// A globally-unique note identity across all shielded pools.
+/// The in-memory backing store for the two fixed mint accounts.
 ///
-/// Transaction planning uses this identity to bind assembly to one exact note.
-/// Live exclusion and reservation state belongs outside this canonical cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum NoteLocator {
-    Orchard {
-        account_id: AccountId,
-        rho: orchard::note::Rho,
-    },
-    Sapling {
-        account_id: AccountId,
-        position: Position,
-    },
-    Ironwood {
-        account_id: AccountId,
-        rho: orchard::note::Rho,
-    },
-}
-
-impl NoteLocator {
-    pub fn orchard(account_id: AccountId, rho: orchard::note::Rho) -> Self {
-        Self::Orchard { account_id, rho }
-    }
-
-    pub fn sapling(account_id: AccountId, position: Position) -> Self {
-        Self::Sapling {
-            account_id,
-            position,
-        }
-    }
-
-    pub fn ironwood(account_id: AccountId, rho: orchard::note::Rho) -> Self {
-        Self::Ironwood { account_id, rho }
-    }
-}
-
-/// Projects Treasury Orchard note rho values from a note-exclusion set.
-///
-/// Treasury assembly functions consume `&BTreeSet<Rho>` — they need to know
-/// which Treasury note nullifiers are already spoken for when selecting inputs.
-/// This translates the wallet's `NoteLocator`-keyed exclusion set into that form.
-pub fn treasury_excluded_rhos(
-    excluded: &BTreeSet<NoteLocator>,
-) -> BTreeSet<orchard::note::Rho> {
-    excluded
-        .iter()
-        .filter_map(|loc| match loc {
-            NoteLocator::Orchard { account_id, rho }
-                if *account_id == crate::mint::TREASURY_ACCOUNT =>
-            {
-                Some(*rho)
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// The in-memory ZNS wallet engine: a notes table and a tree.
+/// The values are the current upstream wallet/scanner values. The wallet is a
+/// disposable projection of the Zebra chain; it deliberately has no scan queue
+/// or mutable account registry.
 pub struct Wallet {
-    // Identity / scanning inputs (read-only after boot).
-    ufvk_map: BTreeMap<AccountId, UnifiedFullViewingKey>,
+    /// Exactly account 0 (Treasury) and account 1 (Registry).
+    ufvks: BTreeMap<AccountId, UnifiedFullViewingKey>,
 
-    // Tracks unspent notes and spent nullifiers. Private so all mutation
-    // flows through `Wallet` methods and can be kept in sync with `trees`.
-    balance: WalletBalance,
+    /// The Zebra consensus tip last supplied through `WalletWrite::update_chain_tip`.
+    last_zebra_tip: Option<BlockHeight>,
 
-    // The running commitment trees for Orchard and Sapling. Private for the
-    // same reason as `balance`: must stay in sync with the note set.
-    trees: ShardTrees,
-}
+    /// Canonical Zebra blocks this in-memory projection has applied.
+    blocks: BTreeMap<BlockHeight, BlockMetadata>,
 
-#[derive(Debug, thiserror::Error)]
-pub enum WalletApplyError {
-    #[error("commitment-tree application failed: {0}")]
-    Tree(#[from] trees::TreeError),
-    #[error("commitment-tree rollback to the prior accepted checkpoint failed: {0}")]
-    Rollback(trees::TreeError),
+    transactions: BTreeMap<TxId, Transaction>,
+    transaction_statuses: BTreeMap<TxId, TransactionStatus>,
+    transaction_indices: BTreeMap<TxId, TxIndex>,
+
+    sapling_notes: BTreeMap<NoteId, WalletSaplingOutput<AccountId>>,
+    ironwood_notes: BTreeMap<NoteId, WalletIronwoodOutput<AccountId>>,
+    memos: BTreeMap<NoteId, Memo>,
+
+    sapling_note_spends: BTreeMap<NoteId, TxId>,
+    ironwood_note_spends: BTreeMap<NoteId, TxId>,
+    sapling_nullifiers: BTreeMap<sapling::Nullifier, NoteId>,
+    ironwood_nullifiers: BTreeMap<orchard::note::Nullifier, NoteId>,
+
+    sent_outputs: BTreeMap<TxId, Vec<SentTransactionOutput<AccountId>>>,
+
+    transparent_outputs: BTreeMap<OutPoint, WalletTransparentOutput<AccountId>>,
+    transparent_output_spends: BTreeMap<OutPoint, TxId>,
+    transparent_spends: BTreeSet<(TxId, OutPoint)>,
+
+    /// Advisory locks use upstream `OutputRef` and `LockOwner` values directly.
+    locks: BTreeMap<OutputRef, (LockOwner, BlockHeight)>,
+
+    sapling_tree: ShardTree<
+        MemoryShardStore<sapling::Node, BlockHeight>,
+        { sapling::NOTE_COMMITMENT_TREE_DEPTH },
+        SAPLING_SHARD_HEIGHT,
+    >,
+    sapling_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
+    orchard_tree: ShardTree<
+        MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>,
+        { ORCHARD_SHARD_HEIGHT * 2 },
+        ORCHARD_SHARD_HEIGHT,
+    >,
+    orchard_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
+    ironwood_tree: ShardTree<
+        MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>,
+        { ORCHARD_SHARD_HEIGHT * 2 },
+        ORCHARD_SHARD_HEIGHT,
+    >,
+    ironwood_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
 }
 
 impl Wallet {
-    /// Create a new, empty wallet.
+    /// Creates the database for the boot-established Treasury and Registry UFVKs.
     pub fn new(ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>) -> Self {
         Self {
-            ufvk_map: ufvks.into_iter().collect(),
-            balance: WalletBalance::new(),
-            trees: ShardTrees::new(),
+            ufvks: ufvks.into_iter().collect(),
+            last_zebra_tip: None,
+            blocks: BTreeMap::new(),
+            transactions: BTreeMap::new(),
+            transaction_statuses: BTreeMap::new(),
+            transaction_indices: BTreeMap::new(),
+            sapling_notes: BTreeMap::new(),
+            ironwood_notes: BTreeMap::new(),
+            memos: BTreeMap::new(),
+            sapling_note_spends: BTreeMap::new(),
+            ironwood_note_spends: BTreeMap::new(),
+            sapling_nullifiers: BTreeMap::new(),
+            ironwood_nullifiers: BTreeMap::new(),
+            sent_outputs: BTreeMap::new(),
+            transparent_outputs: BTreeMap::new(),
+            transparent_output_spends: BTreeMap::new(),
+            transparent_spends: BTreeSet::new(),
+            locks: BTreeMap::new(),
+            sapling_tree: ShardTree::new(MemoryShardStore::empty(), 101),
+            sapling_tree_shard_end_heights: BTreeMap::new(),
+            orchard_tree: ShardTree::new(MemoryShardStore::empty(), 101),
+            orchard_tree_shard_end_heights: BTreeMap::new(),
+            ironwood_tree: ShardTree::new(MemoryShardStore::empty(), 101),
+            ironwood_tree_shard_end_heights: BTreeMap::new(),
         }
     }
 
-    /// Read-only access to an account's unified full viewing key.
-    /// Used by the scanner to derive IVKs for trial decryption.
-    pub fn ufvk_for(&self, account: AccountId) -> Option<&UnifiedFullViewingKey> {
-        self.ufvk_map.get(&account)
-    }
-
-    /// Read-only access to the full account -> UFVK map, for scanning-key construction.
+    /// Returns the fixed account UFVKs for scanner construction.
     pub fn ufvk_map(&self) -> &BTreeMap<AccountId, UnifiedFullViewingKey> {
-        &self.ufvk_map
+        &self.ufvks
     }
 
-    /// Seeds the commitment trees from the birthday checkpoint.
+    /// Returns the viewing key of one fixed mint account.
+    pub fn ufvk_for(&self, account: AccountId) -> Option<&UnifiedFullViewingKey> {
+        self.ufvks.get(&account)
+    }
+
+    /// Seeds all three commitment trees from the verified Zebra checkpoint.
     ///
-    /// Called once at boot after [`Wallet::new`]. Converts each
-    /// `CommitmentTree` from `z_gettreestate` into a `Frontier` and inserts
-    /// it as a checkpoint at `birthday_height`.
-    pub fn seed_trees(&mut self, checkpoint: &CheckpointData, birthday_height: BlockHeight) {
-        // Sapling
-        let sapling_frontier = checkpoint.sapling_tree.to_frontier();
-        self.trees
-            .insert_sapling_frontier(sapling_frontier, birthday_height)
-            .expect("FATAL: failed to seed Sapling commitment tree from checkpoint");
-
-        // Orchard
-        let orchard_frontier = checkpoint.orchard_tree.to_frontier();
-        self.trees
-            .insert_orchard_frontier(orchard_frontier, birthday_height)
-            .expect("FATAL: failed to seed Orchard commitment tree from checkpoint");
-
-        let ironwood_frontier = ironwood_frontier(checkpoint);
-        self.trees
-            .insert_ironwood_frontier(ironwood_frontier, birthday_height)
-            .expect("FATAL: failed to seed Ironwood commitment tree from checkpoint");
-        tracing::info!(
-            "wallet: Ironwood commitment tree seeded at height {}",
-            u32::from(birthday_height)
-        );
-    }
-
-    pub fn orchard_notes_for(
-        &self,
-        account: AccountId,
-    ) -> impl Iterator<Item = &crate::wallet::transaction::ReceivedOrchardNote> {
-        self.balance
-            .unspent
-            .orchard
-            .get(&account)
-            .into_iter()
-            .flat_map(|m| m.values())
-    }
-
-    pub fn sapling_notes_for(
-        &self,
-        account: AccountId,
-    ) -> impl Iterator<Item = &crate::wallet::transaction::ReceivedSaplingNote> {
-        self.balance
-            .unspent
-            .sapling
-            .get(&account)
-            .into_iter()
-            .flat_map(|m| m.values())
-    }
-
-    pub fn ironwood_notes_for(
-        &self,
-        account: AccountId,
-    ) -> impl Iterator<Item = &ReceivedIronwoodNote> {
-        self.balance
-            .unspent
-            .ironwood
-            .get(&account)
-            .into_iter()
-            .flat_map(|m| m.values())
-    }
-
-    /// Returns the ordinary unspent Ironwood note identified by `nullifier`.
-    ///
-    /// Name Notes are deliberately absent from this index. Callers use this
-    /// only to authenticate same-transaction spends of ordinary account notes.
-    pub fn ironwood_note_by_nullifier(
-        &self,
-        nullifier: &orchard::note::Nullifier,
-    ) -> Option<&ReceivedIronwoodNote> {
-        self.balance.get_ironwood_note_by_nf(nullifier)
-    }
-
-    /// Resolves one exact Orchard locator without performing selection.
-    pub fn orchard_note(&self, locator: NoteLocator) -> Option<&ReceivedOrchardNote> {
-        let NoteLocator::Orchard { account_id, rho } = locator else {
-            return None;
+    /// The checkpoint height is chain state, not an account birthday.
+    pub fn seed_trees(
+        &mut self,
+        sapling_frontier: Frontier<sapling::Node, { sapling::NOTE_COMMITMENT_TREE_DEPTH }>,
+        orchard_frontier: Frontier<orchard::tree::MerkleHashOrchard, 32>,
+        ironwood_frontier: Frontier<orchard::tree::MerkleHashOrchard, 32>,
+        checkpoint_height: BlockHeight,
+    ) -> Result<(), shardtree::error::ShardTreeError<std::convert::Infallible>> {
+        let retention = incrementalmerkletree::Retention::Checkpoint {
+            id: checkpoint_height,
+            marking: incrementalmerkletree::Marking::Reference,
         };
-        self.balance.unspent.orchard.get(&account_id)?.get(&rho)
+        self.sapling_tree
+            .insert_frontier(sapling_frontier, retention)?;
+        self.orchard_tree
+            .insert_frontier(orchard_frontier, retention)?;
+        self.ironwood_tree
+            .insert_frontier(ironwood_frontier, retention)?;
+        Ok(())
+    }
+}
+
+impl WalletCommitmentTrees for Wallet {
+    type Error = std::convert::Infallible;
+    type SaplingShardStore<'a> = MemoryShardStore<sapling::Node, BlockHeight>;
+
+    fn with_sapling_tree_mut<F, A, E>(&mut self, mut callback: F) -> Result<A, E>
+    where
+        for<'a> F: FnMut(
+            &'a mut ShardTree<
+                Self::SaplingShardStore<'a>,
+                { sapling::NOTE_COMMITMENT_TREE_DEPTH },
+                SAPLING_SHARD_HEIGHT,
+            >,
+        ) -> Result<A, E>,
+        E: From<ShardTreeError<Self::Error>>,
+    {
+        callback(&mut self.sapling_tree)
     }
 
-    /// Resolves one exact ordinary Ironwood locator without performing selection.
-    pub fn ironwood_note(&self, locator: NoteLocator) -> Option<&ReceivedIronwoodNote> {
-        let NoteLocator::Ironwood { account_id, rho } = locator else {
-            return None;
-        };
-        self.balance.unspent.ironwood.get(&account_id)?.get(&rho)
-    }
-
-    /// Returns whether this exact planning locator is currently unspent.
-    pub fn contains_unspent_locator(&self, locator: NoteLocator) -> bool {
-        match locator {
-            NoteLocator::Orchard { .. } => self.orchard_note(locator).is_some(),
-            NoteLocator::Ironwood { .. } => self.ironwood_note(locator).is_some(),
-            NoteLocator::Sapling { account_id, position } => self
-                .sapling_notes_for(account_id)
-                .any(|note| note.position == position),
-        }
-    }
-
-    pub fn balance(&self, account: AccountId) -> Zatoshis {
-        let orchard_val: u64 = self
-            .balance
-            .unspent
-            .orchard
-            .get(&account)
-            .map(|m| m.values().map(|n| n.note.value().inner()).sum())
-            .unwrap_or(0);
-        let ironwood_val: u64 = self
-            .balance
-            .unspent
-            .ironwood
-            .get(&account)
-            .map(|m| m.values().map(|n| n.note.value().inner()).sum())
-            .unwrap_or(0);
-        let sapling_val: u64 = self
-            .balance
-            .unspent
-            .sapling
-            .get(&account)
-            .map(|m| m.values().map(|n| n.note.value().inner()).sum())
-            .unwrap_or(0);
-        Zatoshis::from_u64(orchard_val + ironwood_val + sapling_val).unwrap()
-    }
-
-    pub fn orchard_anchor(
+    fn put_sapling_subtree_roots(
         &mut self,
-        height: BlockHeight,
-    ) -> Result<Option<orchard::tree::MerkleHashOrchard>, trees::TreeError> {
-        self.trees.orchard_anchor(height)
-    }
-
-    pub fn orchard_witness(
-        &mut self,
-        position: incrementalmerkletree::Position,
-        height: BlockHeight,
-    ) -> Result<
-        Option<incrementalmerkletree::MerklePath<orchard::tree::MerkleHashOrchard, 32>>,
-        trees::TreeError,
-    > {
-        self.trees.orchard_witness(position, height)
-    }
-
-    pub fn ironwood_anchor(
-        &mut self,
-        height: BlockHeight,
-    ) -> Result<Option<orchard::tree::MerkleHashOrchard>, trees::TreeError> {
-        self.trees.ironwood_anchor(height)
-    }
-
-    /// Returns the newest retained Ironwood checkpoint root.
-    ///
-    /// Used for output-only Ironwood bundles, which require a real pool root
-    /// but do not require an exact-height spend witness.
-    pub fn latest_ironwood_anchor(
-        &mut self,
-    ) -> Result<Option<orchard::tree::MerkleHashOrchard>, trees::TreeError> {
-        self.trees.latest_ironwood_anchor()
-    }
-
-    pub fn ironwood_witness(
-        &mut self,
-        position: incrementalmerkletree::Position,
-        height: BlockHeight,
-    ) -> Result<
-        Option<incrementalmerkletree::MerklePath<orchard::tree::MerkleHashOrchard, 32>>,
-        trees::TreeError,
-    > {
-        self.trees.ironwood_witness(position, height)
-    }
-
-    /// Applies a scanned block to the wallet: converts `BlockOutput` into
-    /// `TransactionRecord`s, appends commitments to `ShardTree`s, and updates
-    /// the balance.
-    ///
-    /// Called by the orchestrator after `scan_block` returns. This is the
-    /// connective tissue between the pure scanner and the wallet's mutable state.
-    pub fn apply_block(
-        &mut self,
-        output: &BlockOutput,
-        prior_height: BlockHeight,
-    ) -> Result<(), WalletApplyError> {
-        let height = output.metadata().block_height();
-        let mut next_balance = self.balance.clone();
-
-        // 1. Build TransactionRecords and apply to balance, per-tx in order.
-        for tx in output.transactions() {
-            // Look up original notes for spent nullifiers BEFORE
-            // add_transaction removes them from the unspent set.
-            let spent_orchard: Vec<_> = tx
-                .orchard_nullifiers()
-                .iter()
-                .filter_map(|nullifier| {
-                    next_balance
-                        .get_orchard_note_by_nf(nullifier)
-                        .map(|note| SpentOrchardNote {
-                            account_id: note.account_id,
-                            nullifier: *nullifier,
-                            original_note: note.clone(),
-                        })
-                })
-                .collect();
-
-            let spent_sapling: Vec<_> = tx
-                .sapling_nullifiers()
-                .iter()
-                .filter_map(|nullifier| {
-                    next_balance
-                        .get_sapling_note_by_nf(nullifier)
-                        .map(|note| SpentSaplingNote {
-                            account_id: note.account_id,
-                            nullifier: *nullifier,
-                            original_note: note.clone(),
-                        })
-                })
-                .collect();
-
-            let spent_ironwood: Vec<_> = tx
-                .ironwood_nullifiers()
-                .iter()
-                .filter_map(|nullifier| {
-                    next_balance
-                        .get_ironwood_note_by_nf(nullifier)
-                        .map(|note| SpentIronwoodNote {
-                            account_id: note.account_id,
-                            nullifier: *nullifier,
-                            original_note: note.clone(),
-                        })
-                })
-                .collect();
-
-            // Convert received notes, adding confirmed_height.
-            let received_orchard: Vec<_> = tx
-                .received_orchard()
-                .iter()
-                .map(|r| ReceivedOrchardNote {
-                    account_id: r.account_id,
-                    note: r.note,
-                    nullifier: r.nullifier,
-                    memo: r.memo.clone(),
-                    position: r.position,
-                    confirmed_height: height,
-                })
-                .collect();
-
-            let received_sapling: Vec<_> = tx
-                .received_sapling()
-                .iter()
-                .map(|r| ReceivedSaplingNote {
-                    account_id: r.account_id,
-                    note: r.note.clone(),
-                    nullifier: r.nullifier,
-                    memo: r.memo.clone(),
-                    position: r.position,
-                    confirmed_height: height,
-                })
-                .collect();
-
-            let received_ironwood: Vec<_> = tx
-                .received_ironwood()
-                .iter()
-                .map(|r| ReceivedIronwoodNote {
-                    account_id: r.account_id,
-                    note: r.note,
-                    nullifier: r.nullifier,
-                    memo: r.memo.clone(),
-                    position: r.position,
-                    confirmed_height: height,
-                })
-                .collect();
-
-            let record = TransactionRecord {
-                txid: tx.txid(),
-                block_height: height,
-                received_orchard,
-                received_sapling,
-                received_ironwood,
-                spent_orchard,
-                spent_sapling,
-                spent_ironwood,
-            };
-
-            next_balance.add_transaction(&record);
-        }
-
-        // 2. Append all commitments to ShardTrees for Merkle witness integrity.
-        // Any failure rewinds every pool to the exact prior accepted checkpoint
-        // before the prepared balance becomes visible.
-        let append_result = (|| -> Result<(), trees::TreeError> {
-            for (cmx, retention) in output.orchard_commitments() {
-                self.trees.append_orchard(*cmx, *retention)?;
+        start_index: u64,
+        roots: &[CommitmentTreeRoot<sapling::Node>],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        self.with_sapling_tree_mut(|tree| {
+            for (root, index) in roots.iter().zip(start_index..) {
+                tree.insert(
+                    Address::from_parts(SAPLING_SHARD_HEIGHT.into(), index),
+                    *root.root_hash(),
+                )?;
             }
-            for (node, retention) in output.sapling_commitments() {
-                self.trees.append_sapling(*node, *retention)?;
-            }
-            for (cmx, retention) in output.ironwood_commitments() {
-                self.trees.append_ironwood(*cmx, *retention)?;
-            }
-            self.trees.checkpoint_all(height)?;
             Ok(())
-        })();
-        if let Err(error) = append_result {
-            self.trees
-                .truncate_to_checkpoint(prior_height)
-                .map_err(WalletApplyError::Rollback)?;
-            return Err(WalletApplyError::Tree(error));
+        })?;
+
+        for (root, index) in roots.iter().zip(start_index..) {
+            self.sapling_tree_shard_end_heights.insert(
+                Address::from_parts(SAPLING_SHARD_HEIGHT.into(), index),
+                root.subtree_end_height(),
+            );
         }
-
-        self.balance = next_balance;
         Ok(())
     }
 
-    /// Rewinds all canonical Wallet state to one retained exact checkpoint.
-    ///
-    /// Tree checkpoints are preflighted before any mutation. Trees rewind
-    /// first because that is the only fallible step; balance and nullifier
-    /// history truncate only after every pool has accepted the target.
-    pub fn rewind_to_height(&mut self, height: BlockHeight) -> Result<(), WalletApplyError> {
-        self.trees.truncate_to_checkpoint(height)?;
-        self.balance.truncate_to_height(height);
+    fn get_sapling_subtree_root(
+        &mut self,
+        index: u64,
+    ) -> Result<Option<sapling::Node>, ShardTreeError<Self::Error>> {
+        self.with_sapling_tree_mut(|tree| {
+            let address = Address::from_parts(SAPLING_SHARD_HEIGHT.into(), index);
+            Ok(tree
+                .store()
+                .get_shard(address)
+                .map_err(ShardTreeError::Storage)?
+                .and_then(|shard| match shard.root() {
+                    root if root.is_leaf() => root.leaf_value().copied(),
+                    root => root
+                        .annotation()
+                        .and_then(|annotation| annotation.as_deref().copied()),
+                }))
+        })
+    }
+
+    type OrchardShardStore<'a> = MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>;
+
+    fn with_orchard_tree_mut<F, A, E>(&mut self, mut callback: F) -> Result<A, E>
+    where
+        for<'a> F: FnMut(
+            &'a mut ShardTree<
+                Self::OrchardShardStore<'a>,
+                { ORCHARD_SHARD_HEIGHT * 2 },
+                ORCHARD_SHARD_HEIGHT,
+            >,
+        ) -> Result<A, E>,
+        E: From<ShardTreeError<Self::Error>>,
+    {
+        callback(&mut self.orchard_tree)
+    }
+
+    fn put_orchard_subtree_roots(
+        &mut self,
+        start_index: u64,
+        roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        self.with_orchard_tree_mut(|tree| {
+            for (root, index) in roots.iter().zip(start_index..) {
+                tree.insert(
+                    Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index),
+                    *root.root_hash(),
+                )?;
+            }
+            Ok(())
+        })?;
+
+        for (root, index) in roots.iter().zip(start_index..) {
+            self.orchard_tree_shard_end_heights.insert(
+                Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index),
+                root.subtree_end_height(),
+            );
+        }
         Ok(())
+    }
+
+    fn get_orchard_subtree_root(
+        &mut self,
+        index: u64,
+    ) -> Result<Option<orchard::tree::MerkleHashOrchard>, ShardTreeError<Self::Error>> {
+        self.with_orchard_tree_mut(|tree| {
+            let address = Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index);
+            Ok(tree
+                .store()
+                .get_shard(address)
+                .map_err(ShardTreeError::Storage)?
+                .and_then(|shard| match shard.root() {
+                    root if root.is_leaf() => root.leaf_value().copied(),
+                    root => root
+                        .annotation()
+                        .and_then(|annotation| annotation.as_deref().copied()),
+                }))
+        })
+    }
+
+    fn with_ironwood_tree_mut<F, A, E>(&mut self, mut callback: F) -> Result<Option<A>, E>
+    where
+        for<'a> F: FnMut(
+            &'a mut ShardTree<
+                Self::OrchardShardStore<'a>,
+                { ORCHARD_SHARD_HEIGHT * 2 },
+                ORCHARD_SHARD_HEIGHT,
+            >,
+        ) -> Result<A, E>,
+        E: From<ShardTreeError<Self::Error>>,
+    {
+        callback(&mut self.ironwood_tree).map(Some)
+    }
+
+    fn put_ironwood_subtree_roots(
+        &mut self,
+        start_index: u64,
+        roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
+    ) -> Result<(), ShardTreeError<Self::Error>> {
+        self.with_ironwood_tree_mut(|tree| {
+            for (root, index) in roots.iter().zip(start_index..) {
+                tree.insert(
+                    Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index),
+                    *root.root_hash(),
+                )?;
+            }
+            Ok(())
+        })?;
+
+        for (root, index) in roots.iter().zip(start_index..) {
+            self.ironwood_tree_shard_end_heights.insert(
+                Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index),
+                root.subtree_end_height(),
+            );
+        }
+        Ok(())
+    }
+
+    fn get_ironwood_subtree_root(
+        &mut self,
+        index: u64,
+    ) -> Result<Option<orchard::tree::MerkleHashOrchard>, ShardTreeError<Self::Error>> {
+        self.with_ironwood_tree_mut(|tree| {
+            let address = Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index);
+            Ok(tree
+                .store()
+                .get_shard(address)
+                .map_err(ShardTreeError::Storage)?
+                .and_then(|shard| match shard.root() {
+                    root if root.is_leaf() => root.leaf_value().copied(),
+                    root => root
+                        .annotation()
+                        .and_then(|annotation| annotation.as_deref().copied()),
+                }))
+        })
+        .map(|result| result.flatten())
     }
 }
 
-fn ironwood_frontier(
-    checkpoint: &CheckpointData,
-) -> incrementalmerkletree::frontier::Frontier<
-    orchard::tree::MerkleHashOrchard,
-    { orchard::NOTE_COMMITMENT_TREE_DEPTH as u8 },
-> {
-    // The checkpoint is at activation_height - 1, one block before Ironwood
-    // exists. An empty frontier is the correct starting state.
-    checkpoint
-        .ironwood_tree
-        .as_ref()
-        .map(|tree| tree.to_frontier())
-        .unwrap_or_else(incrementalmerkletree::frontier::Frontier::empty)
-}
+const _: () = {
+    assert!(sapling::NOTE_COMMITMENT_TREE_DEPTH == SAPLING_SHARD_HEIGHT * 2);
+    assert!(32 == ORCHARD_SHARD_HEIGHT * 2);
+};

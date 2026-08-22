@@ -1,5 +1,66 @@
 # Wallet changelog
 
+## 2026-08-22 — Upstream-shaped in-memory WalletDb storage
+
+- Replaced the stored `MintAccount` registry with the fixed
+  `BTreeMap<AccountId, UnifiedFullViewingKey>` requested by the mint. Account
+  birthday and ZIP-32 derivation facts remain application identity, not wallet
+  table columns.
+- Replaced the bespoke `ShardTrees`, `SubtreeRoot`, and local tree-alias module
+  with the three direct upstream `ShardTree<MemoryShardStore<...>>` values and the same
+  `Address -> BlockHeight` subtree-end-height maps used by
+  `zcash_client_memory::MemoryWalletDb`.
+- The database now has only upstream transaction, scanned-output, memo,
+  nullifier, sent-output, transparent-output, lock, and block-metadata values
+  in standard B-tree indexes. There is no scan queue, custom note identity,
+  custom nullifier enum, block-delta log, or mutable account registry.
+- `last_zebra_tip` is retained because upstream `WalletRead::chain_height`
+  explicitly reports the height supplied to `WalletWrite::update_chain_tip`;
+  it is not a scan queue or a second chain authority.
+- Boot extracts verified Zebra frontiers and passes them to `Wallet::seed_trees`;
+  wallet storage no longer depends on the chain-client `CheckpointData` type.
+
+## 2026-08-22 — Remove the bespoke wallet API before adopting the upstream one
+
+- Deleted the local `WalletRead` and `WalletWrite` traits and their bespoke
+  implementations. The replacement boundary is the current
+  `zcash_client_backend` data API; it will be introduced only after its table
+  and trait contracts have been read against the mint's exact dependency.
+- Deleted the position-based `NoteRef`, cross-pool `Nullifier` enum,
+  `NoteEntry`, `BlockDelta`, `tracked_nullifiers`, and `history`. A commitment
+  position is witness data, not the identity of a transaction output, and the
+  hand-maintained undo journal is not carried into the upstream-shaped store.
+- Retained only the boot-installed UFVK map and Sapling/Ironwood tree seeding.
+  The next refactor slice will replace the removed state using upstream
+  `NoteId`, `OutputRef`, and the current `WalletRead`, `InputSource`,
+  `OutputLockStore`, `WalletWrite`, and `WalletCommitmentTrees` contracts.
+- This deliberately leaves the worktree architecturally incomplete; no Cargo
+  command was run and compilation is not a goal of this deletion pass.
+
+## 2026-08-15 — Orchard state deleted; Ironwood is the only Orchard-family lane
+
+- The wallet holds no Orchard state of any kind: `NoteLocator::Orchard`,
+  `ReceivedOrchardNote`/`SpentOrchardNote`, the Orchard unspent/nullifier
+  indexes, the Orchard `ShardTree` (and its seeding, appends, anchors,
+  witnesses), and the Orchard accessors are deleted. Checkpoint and reorg
+  atomicity (`checkpoint_all`, `truncate_to_checkpoint`) now covers exactly
+  the Sapling and Ironwood pools with the same preflight discipline.
+- Rationale: NU6.3 disables Orchard cross-address transfers, so no user can
+  send the wallet an Orchard note, the mint never builds Orchard outputs, and
+  the mint is undeployed (no legacy balance). An Orchard anchor or witness can
+  never be needed. Ironwood — the mint's only Orchard-family pool — keeps
+  using the Orchard-family note, nullifier, and `MerkleHashOrchard` types.
+- `treasury_excluded_rhos` projects `NoteLocator::Ironwood` entries for the
+  Treasury account instead of Orchard locators.
+- Deleted the dead Orchard selector `wallet::selection::select_funds`;
+  `select_sapling_funds` is retained untouched.
+- The upstream scanner still trial-decrypts Orchard outputs with the
+  accounts' Orchard-family keys (excluding them requires naming
+  `zcash_client_backend`'s `pub(crate)` Ironwood domain types); no Orchard
+  result is surfaced or stored. The Orchard tree in boot's
+  `z_gettreestate` checkpoint is still parsed because upstream
+  `BlockMetadata` continuity carries its size.
+
 ## 2026-07-28 — Exact locator validation after reorg
 
 - Added a read-only `contains_unspent_locator` boundary across Orchard,

@@ -2,6 +2,14 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-08-22 — Direct fixed-UFVK WalletDb construction
+
+- Boot now passes the two fixed Treasury/Registry UFVKs directly to `Wallet`.
+  The wallet does not own a mutable account registry, ZIP-32 derivation record,
+  or account birthday. No seed or spending key enters the database.
+- Boot extracts the three verified Zebra frontiers before calling
+  `Wallet::seed_trees`; the wallet layer does not depend on `CheckpointData`.
+
 ## 2026-07-30 — Boot-proven consensus parameters
 
 - Production `Boot::run()` remains parameterless and hardcodes upstream
