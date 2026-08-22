@@ -1,5 +1,67 @@
 # Wallet changelog
 
+## 2026-08-22 — Upstream trait layer completed
+
+- Implemented `WalletRead` (`wallet/read.rs`), `InputSource`
+  (`wallet/input.rs`), and `WalletWrite` + `OutputLockStore`
+  (`wallet/write.rs`) against the pinned `zcash_client_backend`
+  0.24.0-rc.7 trait surface. Every feature-gated method (our features are
+  `orchard` + `transparent-inputs`) is overridden with an honest
+  non-panicking value; inherited defaults panic inside the TEE.
+- The unit error `FixedAccountsOnly` was replaced by the `WalletError` enum
+  (`FixedAccountsOnly`, `AccountUnknown(AccountId)`, `ChainDiscontinuity`,
+  `TruncationTargetUnavailable`, `CommitmentTree`, `Balance`): the completed
+  write surface has real failure modes beyond fixed-account refusal, and one
+  unit type can no longer express them. `AccountUnknown(account)` separates
+  "named a nonexistent account" from "this wallet categorically cannot",
+  following the upstream in-memory backend's error precedent
+  (`zcash_client_memory` `error.rs:32`). The single shared type is forced by
+  the upstream `WalletWrite` supertrait, which pins `OutputLockStore::Error`
+  to `WalletRead::Error` (`data_api.rs:3540`).
+- Added exactly one wallet field: `trusted_transactions: BTreeSet<TxId>`,
+  required by `WalletWrite::set_tx_trust` and consulted by the shared
+  trusted/untrusted confirmation classifier in `wallet/input.rs` ([ZIP 315]).
+  Balance reporting (`get_wallet_summary`) and input selection reuse that
+  one classifier, so they cannot disagree.
+- `put_blocks` is the sole note-lifecycle writer. It validates sequential
+  heights and `from_state` continuity (height and recorded block hash)
+  before any mutation, appends commitments with the scanner-provided
+  retention markers, backfills a checkpoint at every accepted height in all
+  three pools (the Orchard tree included, as compatibility state), and only
+  then applies the infallible tables. Spends are resolved from the block's
+  full `nullifier_map` so a note created and spent within one batch is
+  still marked spent (the scanner's prior-nullifier set cannot see
+  same-batch spends). Tree failure leaves tables untouched; truncation
+  repairs trees that are ahead.
+- `store_decrypted_tx` stores the raw transaction, memos, and status only;
+  it never creates notes, because a `DecryptedOutput` carries no nullifier
+  or commitment position. `store_transactions_to_be_sent` records spends
+  from the raw bundle nullifiers and transparent inputs and releases the
+  lock on every output recorded as spent, as the upstream contract
+  requires.
+- Truncation follows the upstream sqlite/memory policy: un-mine
+  transactions above the truncation point, retain notes/memos/sent outputs
+  (unrecoverable data; un-mined notes are excluded from spendability by the
+  status-based eligibility rules), drop block records, and truncate all
+  three trees to the largest common retained checkpoint. `rewind_to_chain_state`
+  never lowers the fixed birthdays; it returns `RewindBeyondBirthdays` when
+  a reset was requested below the birthday floor.
+- Selection admits only exact-`NoteId`, unspent, lock-admitted, mined
+  notes with a retained spending key scope; there is deliberately no dust
+  threshold (upstream in-memory wallets apply a 5000-zat heuristic — the
+  mint spends exactly what it plans). `select_spendable_notes` accumulates
+  oldest-first by commitment position in the caller's pool order,
+  `AllFunds` selects everything, and ordinary Orchard is never selected.
+  `max_shielding_input_height` is always `None`: the mint never shields
+  transparent funds, so no shielded note of this wallet descends from
+  transparent inputs.
+- Transparent observations (`put_received_transparent_utxo`, scanned
+  `WalletTx` outputs) are recorded but never surfaced as spendable inputs
+  or balances — the outbound-only policy — and `get_orchard_nullifiers`
+  returns empty because the ordinary Orchard tree is compatibility state.
+
+[ZIP 315]: https://zips.z.cash/zip-0315
+
 ## 2026-08-22 — Upstream-shaped in-memory WalletDb storage
 
 - Replaced the stored `MintAccount` registry with the fixed
@@ -19,6 +81,25 @@
   it is not a scan queue or a second chain authority.
 - Boot extracts verified Zebra frontiers and passes them to `Wallet::seed_trees`;
   wallet storage no longer depends on the chain-client `CheckpointData` type.
+- Split the upstream trait boundary into the requested private modules:
+  `wallet/read.rs` (`WalletRead`), `wallet/input.rs` (`InputSource`),
+  `wallet/write.rs` (`OutputLockStore` and `WalletWrite`), and
+  `wallet/trees.rs` (`WalletCommitmentTrees`). The tree implementation is a
+  move of the direct adapter, not a new wrapper layer.
+- Added only the concrete return value that upstream `WalletRead::Account`
+  requires: a private, ephemeral `FixedAccount` in `wallet/read.rs`. It is
+  created from an existing account-0/account-1 UFVK entry, retains no seed or
+  spending key, and is not wallet storage. Its fixed birthday is the mint's
+  deployment scan floor, `3_400_000`.
+- The ordinary Orchard tree is retained solely as a compatibility commitment
+  tree: it receives every scanned Orchard commitment and checkpoint, but the
+  mint has no ordinary-Orchard received-note, nullifier, or input-selection
+  state. Sapling and Ironwood are the only owned shielded input lanes.
+- Transparent support is outbound-only. The mint may construct a payment to an
+  external transparent recipient, but neither fixed account owns, derives, or
+  reserves a transparent receiver. Feature-gated transparent wallet queries
+  must therefore return empty results rather than inherit upstream panic
+  defaults.
 
 ## 2026-08-22 — Remove the bespoke wallet API before adopting the upstream one
 
