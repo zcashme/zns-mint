@@ -1,7 +1,75 @@
 # Zcash I/O changelog
 
+## 2026-09-01 — `CanonicalTip` deleted; tips are `(BlockHeight, BlockHash)` tuples
+
+- `CanonicalBlockSource::exact_tip()` returns `(BlockHeight, BlockHash)` —
+  the same shape as the gRPC side's `tip_height_hash`. One concept (a
+  best-chain tip observation), one shape across both transports.
+- The parse-atomicity guarantee the struct documented ("height and hash
+  parsed from the same response") always lived in the parse function, not
+  the type: it now lives in `BlockchainInfo::canonical_tip()`'s doc, where
+  it is enforced. The private-field struct additionally prevented external
+  fabrication of a tip, but `exact_tip` was already the sole producer with
+  no hand-assemblers — that protection had nothing to stop. The tuple can
+  be hand-assembled; accepted because no fabricator exists and `BlockMetadata`
+  remains the distinct scan-cursor concept (never conflated with tip
+  identity — the reorg loop compares them deliberately).
+
+## 2026-09-01 — Mempool-ready transport
+
+- Bumped `zebra-indexer-proto` to 2.5 and adopted its typed layer. The
+  bespoke `MempoolEvent` enum is deleted: it re-wrapped
+  `(MempoolChangeKind, TxId)` — both upstream types — with no added
+  invariant. `mempool_events()` now streams that pair directly; the
+  correspondence between wire values and meaning is owned by the proto
+  crate's generated enum, and this module keeps only the display-order →
+  `TxId` byte reversal (the proto crate carries no librustzcash
+  dependency, by design).
+- `mempool_events` returns `impl Stream` over `Result<(kind, txid),
+  TransportError>` items, not `tonic::codec::Streaming<...>`:
+  `StreamExt::map` yields a `Map` adaptor (futures-util
+  `stream/stream/map.rs:15`), never a `Streaming` (whose inherent
+  methods are constructors plus `message`/`trailers`, tonic
+  `codec/decode.rs:60-361`), and every item is a `Result`
+  (`decode.rs:398`). `Status` items are folded into `TransportError`
+  inside the closure via the `Tonic` variant; the `and_then` conversion
+  runs after `map_err` because the two error types cannot unify in the
+  other direction. Errors are terminal: `Streaming` yields one `Err`
+  then `None` forever (`decode.rs:405-407`), so the caller contract is
+  any-`Err` → reconnect + `get_raw_mempool` re-baseline. Unknown
+  discriminants surface as `BadNodeData`; the run-loop slice should
+  decide whether newer-server values are ignorable (proto3 open enums)
+  instead of errors. (`txid_from_display` is retained —
+  `get_raw_mempool` consumes it too.)
+- The mempool surface is now usable end to end, with lifecycle policy left
+  to the future live owner:
+  - `ChainClient::mempool_events()` replaces `mempool_change_stream()`,
+    converting the generated `MempoolChangeMessage` into a typed
+    `MempoolEvent {Added, Invalidated, Mined}(TxId)`; the generated type no
+    longer crosses the module boundary. `auth_digest` is dropped — it only
+    disambiguates pre-v5 malleable IDs, and every transaction this mint can
+    see is v5+. `tx_hash` is `mined_id` in display byte order (pinned from
+    the Zebra indexer server, `indexer/methods.rs`), reversed by the same
+    idiom as `block_hash_from_display`.
+  - `JsonRpc::raw` (stringly, zero callers) is replaced by
+    `get_raw_transaction(network, TxId) -> Option<Transaction>` — mempool
+    first then chain, parsed under boot-proven parameters. RPC -5 (no
+    information) and a null result map to `Ok(None)`: a normal outcome when
+    racing an `Invalidated`, not a transport failure.
+  - `JsonRpc::get_raw_mempool() -> Vec<TxId>` is the reconnect snapshot —
+    the server drops stalled consumers after its send timeout, so the owner
+    re-baselines by diffing the snapshot against its pending set.
+
 ## 2026-09-01 — `z_gettreestate` returns the upstream `ChainState`
 
+- Ironwood `finalState` decode no longer swallows errors, and the tree
+  state is treated as mandatory (NU6.3 is active): a missing `ironwood`
+  field or a present-but-undecodable value fails with `BadNodeData` /
+  `BadCheckpoint` (the same paths as Sapling/Orchard) instead of silently
+  seeding an empty tree — which would desynchronize every later Ironwood
+  commitment position. A null or empty `finalState` still decodes to the
+  empty frontier, which is the genuine value Zebra returns for the
+  activation−1 height boot's origin checkpoint queries.
 - Deleted the bespoke `CheckpointData` struct. `JsonRpc::get_checkpoint` is
   now `JsonRpc::chain_state_at(height) -> ChainState` — the upstream
   `zcash_client_backend::data_api::ChainState` value (chain.rs:506), which is

@@ -3,6 +3,7 @@
 use std::{any::type_name, fmt, time::Duration};
 
 use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
 use http_body_util::{BodyExt, Full};
 use hyper::Request;
 use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
@@ -14,8 +15,9 @@ use zcash_client_backend::data_api::chain::ChainState;
 use zcash_client_backend::data_api::BlockMetadata;
 use zcash_primitives::block::{Block, BlockHash};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
+use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
-use zebra_indexer_proto::{BlockHashAndHeight, Empty, MempoolChangeMessage, ZebraClient};
+use zebra_indexer_proto::{BlockHashAndHeight, Empty, MempoolChangeKind, ZebraClient};
 
 use orchard::tree::MerkleHashOrchard;
 
@@ -23,9 +25,6 @@ const ZEBRA_INDEXER_URL: &str = "http://127.0.0.1:8230";
 const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:8232";
 
 /// The mainnet genesis block hash, in `BlockHash` internal byte order.
-///
-/// Display-form RPC responses (e.g. `getblockchaininfo`) reverse these bytes.
-/// This protocol constant is used as a secondary network-identity check at boot.
 pub const MAINNET_GENESIS_HASH: BlockHash = BlockHash([
     0x08, 0xce, 0x3d, 0x97, 0x31, 0xb0, 0x00, 0xc0, 0x83, 0x38, 0x45, 0x5c, 0x8a, 0x4a, 0x6b, 0xd0,
     0x5d, 0xa1, 0x6e, 0x26, 0xb1, 0x1d, 0xaa, 0x1b, 0x91, 0x71, 0x84, 0xec, 0xe8, 0x0f, 0x04, 0x00,
@@ -37,6 +36,19 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 // ============================================================================
 // gRPC Chain Observer
 // ============================================================================
+
+/// Decodes a 32-byte transaction ID in display byte order (the Zebra
+/// convention for hashes on the wire) into a [`TxId`].
+fn txid_from_display(bytes: &[u8]) -> Option<TxId> {
+    let mut arr = [0u8; 32];
+    if bytes.len() == 32 {
+        arr.copy_from_slice(bytes);
+        arr.reverse();
+        Some(TxId::from_bytes(arr))
+    } else {
+        None
+    }
+}
 
 /// A client for observing best-chain tip changes.
 #[derive(Clone)]
@@ -63,15 +75,41 @@ impl ChainClient {
             .map_err(TransportError::from)
     }
 
-    /// Opens the gRPC stream of mempool changes.
-    pub async fn mempool_change_stream(
+    /// Opens the gRPC stream of mempool lifecycle changes as
+    /// `(MempoolChangeKind, TxId)` pairs — the proto crate's typed layer
+    /// plus this module's display-order → `TxId` reversal. The generated
+    /// message type does not cross this module boundary.
+    ///
+    /// Items are `Result`: transport and decode failures surface as
+    /// `Err(TransportError)`. An error is terminal — the stream yields
+    /// nothing after it — so the caller's response to any `Err` is
+    /// reconnect plus re-baseline. The server drops consumers whose reads
+    /// stall beyond its send timeout, so a gap after a reconnect is a
+    /// when, not an if: re-baseline with [`JsonRpc::get_raw_mempool`] and
+    /// diff against the pending set.
+    pub async fn mempool_events(
         &mut self,
-    ) -> Result<tonic::codec::Streaming<MempoolChangeMessage>, TransportError> {
-        self.0
+    ) -> Result<impl Stream<Item = Result<(MempoolChangeKind, TxId), TransportError>>, TransportError>
+    {
+        let stream = self
+            .0
             .mempool_change(Empty {})
             .await
-            .map(|r| r.into_inner())
-            .map_err(TransportError::from)
+            .map_err(TransportError::from)?
+            .into_inner();
+
+        Ok(stream.map(|result| {
+            result.map_err(TransportError::from).and_then(|message| {
+                let kind = message
+                    .kind()
+                    .ok_or(TransportError::BadNodeData("mempool change type"))?;
+                let txid = message
+                    .tx_hash_display_order()
+                    .and_then(txid_from_display)
+                    .ok_or(TransportError::BadNodeData("mempool tx hash"))?;
+                Ok((kind, txid))
+            })
+        }))
     }
 }
 
@@ -89,26 +127,6 @@ pub(crate) fn block_hash_from_display(bytes: &[u8]) -> Option<BlockHash> {
         Some(BlockHash(arr))
     } else {
         None
-    }
-}
-
-/// One point-in-time Zebra best-chain identity.
-///
-/// Height and hash are parsed from the same `getblockchaininfo` response so
-/// callers cannot accidentally combine observations from different tips.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CanonicalTip {
-    height: BlockHeight,
-    hash: BlockHash,
-}
-
-impl CanonicalTip {
-    pub fn height(&self) -> BlockHeight {
-        self.height
-    }
-
-    pub fn hash(&self) -> BlockHash {
-        self.hash
     }
 }
 
@@ -210,13 +228,57 @@ impl JsonRpc {
         Ok(block)
     }
 
-    /// Fetches the raw transaction hex for a given transaction ID.
-    pub(crate) async fn raw(&self, txid_hex: &str) -> Result<String, TransportError> {
-        self.send_request("getrawtransaction", (txid_hex, 0))
+    /// Fetches a transaction by ID — Zebra's `getrawtransaction` checks the
+    /// mempool first, then the chain — parses it under the boot-proven
+    /// consensus parameters, and returns it.
+    ///
+    /// `Ok(None)` means the transaction is in neither the mempool nor the
+    /// chain (RPC -5): a normal outcome when racing an `Invalidated`
+    /// event, not a transport failure.
+    pub async fn get_raw_transaction<P: Parameters>(
+        &self,
+        network: &P,
+        txid: TxId,
+    ) -> Result<Option<Transaction>, TransportError> {
+        let txid_hex = txid.to_string();
+        match self
+            .send_request::<_, String>("getrawtransaction", (txid_hex, 0))
+            .await
+        {
+            Ok(Some(hex_str)) => {
+                let bytes = hex::decode(hex_str)
+                    .map_err(|_| TransportError::BadNodeData("getrawtransaction hex"))?;
+                let tx = Transaction::read(&bytes[..], network)
+                    .map_err(|_| TransportError::BadNodeData("getrawtransaction parse"))?;
+                Ok(Some(tx))
+            }
+            Ok(None) => Ok(None),
+            // "No information about the transaction" — racing a mempool
+            // eviction or a chain reorg; indistinguishable from never-existed,
+            // which is the caller's normal not-found case.
+            Err(TransportError::Rpc(ref rpc)) if rpc.code == -5 => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Fetches every transaction ID currently in the mempool — the
+    /// re-baseline snapshot after a [`ChainClient::mempool_events`]
+    /// reconnect. Diff against the pending set: unseen IDs are `Added`,
+    /// missing IDs are `Invalidated`.
+    pub async fn get_raw_mempool(&self) -> Result<Vec<TxId>, TransportError> {
+        let txids: Vec<String> = self
+            .send_request("getrawmempool", [(); 0])
             .await?
-            .ok_or(TransportError::BadNodeData(
-                "getrawtransaction returned null",
-            ))
+            .ok_or(TransportError::BadNodeData("getrawmempool returned null"))?;
+
+        txids
+            .iter()
+            .map(|hex| {
+                let bytes = hex::decode(hex)
+                    .map_err(|_| TransportError::BadNodeData("getrawmempool hex"))?;
+                txid_from_display(&bytes).ok_or(TransportError::BadNodeData("getrawmempool length"))
+            })
+            .collect()
     }
 
     /// Broadcasts a signed raw transaction hex to the network and returns its transaction ID.
@@ -318,7 +380,12 @@ impl CanonicalBlockSource {
         Self(JsonRpc::new())
     }
 
-    pub async fn exact_tip(&self) -> Result<CanonicalTip, TransportError> {
+    /// Returns the exact `(height, hash)` pair for the current best-chain
+    /// tip. Both values are parsed from a single `getblockchaininfo`
+    /// response (see [`BlockchainInfo::canonical_tip`]), so callers cannot
+    /// combine observations from different tips — the same tuple shape as
+    /// the gRPC side's [`tip_height_hash`].
+    pub async fn exact_tip(&self) -> Result<(BlockHeight, BlockHash), TransportError> {
         self.0.get_blockchain_info().await?.canonical_tip()
     }
 
@@ -341,8 +408,8 @@ impl CanonicalBlockSource {
         expected_height: BlockHeight,
         expected_hash: BlockHash,
     ) -> Result<SubmitOutcome, TransportError> {
-        let tip = self.exact_tip().await?;
-        if tip.height() != expected_height || tip.hash() != expected_hash {
+        let (tip_height, tip_hash) = self.exact_tip().await?;
+        if tip_height != expected_height || tip_hash != expected_hash {
             return Ok(SubmitOutcome::TipChanged);
         }
         match self.0.send(hex).await {
@@ -366,8 +433,6 @@ impl Default for CanonicalBlockSource {
 // ============================================================================
 // JSON-RPC Envelopes and Errors
 // ============================================================================
-
-// We hand-roll these narrow JSON-RPC 2.0 envelopes instead of pulling in `jsonrpsee`.
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct RpcRequest<T> {
@@ -457,16 +522,17 @@ pub struct BlockchainInfo {
 
 impl BlockchainInfo {
     /// Parses the exact height/hash pair carried by this one response.
-    pub fn canonical_tip(&self) -> Result<CanonicalTip, TransportError> {
+    ///
+    /// Both values come from the same `getblockchaininfo` response — the
+    /// one place this guarantee lives — so callers cannot combine
+    /// observations from different tips.
+    pub fn canonical_tip(&self) -> Result<(BlockHeight, BlockHash), TransportError> {
         let display_bytes = hex::decode(&self.bestblockhash)
             .map_err(|_| TransportError::BadNodeData("bestblockhash hex"))?;
         let hash = block_hash_from_display(&display_bytes)
             .ok_or(TransportError::BadNodeData("bestblockhash length"))?;
 
-        Ok(CanonicalTip {
-            height: BlockHeight::from_u32(self.blocks),
-            hash,
-        })
+        Ok((BlockHeight::from_u32(self.blocks), hash))
     }
 }
 
@@ -477,8 +543,6 @@ struct TreeStateResponse {
     time: u32,
     sapling: ShieldedTreeState,
     orchard: ShieldedTreeState,
-    /// Ironwood tree state. Absent in Zebra responses for pre-NU6.3 blocks.
-    #[serde(default)]
     ironwood: Option<ShieldedTreeState>,
 }
 
@@ -519,14 +583,14 @@ fn chain_state_from_rpc_response(
         .ok_or(TransportError::BadNodeData("missing Orchard finalState"))?;
     let orchard_tree = decode_tree::<MerkleHashOrchard>(&orchard_final_state, "Orchard")?;
 
-    // Ironwood is optional: pre-NU6.3 blocks have no Ironwood tree. Zebra
-    // may omit the `ironwood` field or return an empty `finalState`; both
-    // normalize to the empty frontier.
-    let ironwood_tree = response
+    let ironwood_state = response
         .ironwood
-        .and_then(|state| state.commitments.final_state)
-        .and_then(|hex| decode_tree::<MerkleHashOrchard>(&hex, "Ironwood").ok())
-        .unwrap_or_else(Frontier::empty);
+        .ok_or(TransportError::BadNodeData("missing ironwood tree state"))?;
+
+    let ironwood_tree = match ironwood_state.commitments.final_state {
+        Some(hex) if !hex.is_empty() => decode_tree::<MerkleHashOrchard>(&hex, "Ironwood")?,
+        _ => Frontier::empty(),
+    };
 
     let expected_hash_bytes =
         hex::decode(&response.hash).map_err(|_| TransportError::BadNodeData("invalid hash hex"))?;
@@ -543,10 +607,6 @@ fn chain_state_from_rpc_response(
 }
 
 /// Decodes one `finalState` hex into the upstream frontier value.
-///
-/// `read_commitment_tree` parses into a `CommitmentTree`; every consumer of
-/// this module wants the equivalent frontier (what `ChainState` carries), so
-/// the conversion folds in here.
 fn decode_tree<Node>(
     hex_state: &str,
     name: &'static str,

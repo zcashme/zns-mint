@@ -39,6 +39,9 @@ hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
 http-body-util = "0.1"
 http = "1"
 bytes = "1"
+# `StreamExt`/`Stream` for the mempool stream adaptor. Already compiled via
+# tonic — direct listing adds no code.
+futures-util = "0.3"
 sev = { version = "8.0.0", default-features = false, features = ["snp"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 hex = "0.4"
@@ -60,7 +63,7 @@ sinsemilla = "0.1"
 # available (orchard itself uses `default-features = false`).
 rand = "0.8"
 
-zebra-indexer-proto = "2.3"
+zebra-indexer-proto = "2.5"
 
 # Key derivation (ZIP-32 Orchard)
 # Treasury (account 0) is user-facing and accepts Orchard + Sapling + Transparent
