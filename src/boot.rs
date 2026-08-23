@@ -33,7 +33,7 @@ use std::str::FromStr;
 use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
 use zeroize::Zeroize;
 
-use crate::key::{self, RegistryKeys, TreasuryKeys};
+use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::{ChainCursor, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::registry::Registry;
 use crate::treasury::Treasury;
@@ -114,18 +114,25 @@ impl<P: Parameters> Boot<P> {
         // 2. Chain integrity: gRPC cross-validation + tip block verification
         let (chain_client, tip_height) = verify_chain_integrity::<P>(&info, &network).await;
 
-        // 3. Seed intake + fingerprint verification
-        let source = obtain_key_source();
-        let seed = match &source {
-            KeySource::SealedBlob { blob } => decrypt_sealed_blob(blob),
-            #[cfg(feature = "dev-seed")]
-            KeySource::Dev => Secret::new([0u8; 32]),
+        // 3. Seed intake + fingerprint verification, then derivation.
+        //
+        // The seed lives only inside this block: the moment both capabilities
+        // exist, `Secret`'s `Drop` wipes it. No copy of the seed outlives
+        // derivation.
+        let (treasury_keys, registry_keys) = {
+            let source = obtain_key_source();
+            let seed = match &source {
+                KeySource::SealedBlob { blob } => decrypt_sealed_blob(blob),
+                #[cfg(feature = "dev-seed")]
+                KeySource::Dev => Secret::new([0u8; 32]),
+            };
+            verify_fingerprint(&seed, expected_seed_fingerprint());
+            (
+                TreasuryKeys::derive(&network, &seed),
+                RegistryKeys::derive(&network, &seed),
+            )
         };
-        verify_fingerprint(&seed, expected_seed_fingerprint());
-        // 4. Key derivation
-        let treasury_keys = key::derive_treasury(&network, &seed);
-        let registry_keys = key::derive_registry(&network, &seed);
-        tracing::info!("boot: keys derived (treasury=acct0, registry=acct1)");
+        tracing::info!("boot: keys derived (treasury=acct0, registry=acct1); seed wiped");
 
         // 5. Wallet initialization
         let mut wallet = Wallet::new([

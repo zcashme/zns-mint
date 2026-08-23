@@ -2,6 +2,14 @@
 
 Tracks design-relevant dependency and build-configuration changes.
 
+## 2026-09-01 — Dev-only ZIP-316 test vectors
+
+- Added a `[dev-dependencies]` entry for `zcash_address` with the crate's
+  `test-dependencies` feature, exposing
+  `zcash_address::test_vectors::UNIFIED` to `key.rs`'s derivation regression
+  tests. The feature is dev-only by construction (dev-dependencies never
+  apply to a release build), so the production dependency graph is unchanged.
+
 ## 2026-07-25 — Production build guards for development escape hatches
 
 - Added `compile_error!` guards in `src/lib.rs` so `dev-seed` and

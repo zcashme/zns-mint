@@ -99,3 +99,9 @@ shardtree = "0.6.2"
 # the ZNS fork so the whole graph builds against the same source.
 [patch.crates-io]
 orchard = { path = "/Users/jules/ZcashNames/zns-orchard" }
+
+# Upstream ZIP-316 unified test vectors for the key-derivation regression
+# tests (`zcash_address::test_vectors::UNIFIED` is gated behind the crate's
+# `test-dependencies` feature). Dev-only; never part of a release build.
+[dev-dependencies]
+zcash_address = { version = "0.13.0", features = ["test-dependencies"] }
