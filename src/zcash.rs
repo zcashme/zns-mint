@@ -1,12 +1,4 @@
-//! Zcash Blockchain I/O boundary for the mint.
-//!
-//! This module provides the clients for interacting with the Zebra node:
-//! - `ChainClient`: a streaming HTTP/2 gRPC client for tip wake-ups.
-//! - `CanonicalBlockSource`: read-only JSON-RPC capability for passive replay.
-//! - `JsonRpc`: the underlying point-in-time JSON-RPC client, including
-//!   transaction lookup and submission for a future Live owner.
-//!
-//! This module owns transport, not submission lifecycle state.
+//! Zcash Chain I/O boundary for the mint.
 
 use std::{any::type_name, fmt, time::Duration};
 
@@ -15,14 +7,15 @@ use http_body_util::{BodyExt, Full};
 use hyper::Request;
 use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
 use hyper_util::rt::TokioExecutor;
-use incrementalmerkletree::frontier::CommitmentTree;
+use incrementalmerkletree::frontier::Frontier;
 use sapling::Node as SaplingNode;
 use serde::{Deserialize, Serialize};
+use zcash_client_backend::data_api::chain::ChainState;
 use zcash_client_backend::data_api::BlockMetadata;
 use zcash_primitives::block::{Block, BlockHash};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
-use zebra_indexer_proto::{BlockHashAndHeight, ZebraClient};
+use zebra_indexer_proto::{BlockHashAndHeight, Empty, MempoolChangeMessage, ZebraClient};
 
 use orchard::tree::MerkleHashOrchard;
 
@@ -34,9 +27,8 @@ const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:8232";
 /// Display-form RPC responses (e.g. `getblockchaininfo`) reverse these bytes.
 /// This protocol constant is used as a secondary network-identity check at boot.
 pub const MAINNET_GENESIS_HASH: BlockHash = BlockHash([
-    0x08, 0xce, 0x3d, 0x97, 0x31, 0xb0, 0x00, 0xc0, 0x83, 0x38, 0x45, 0x5c, 0x8a, 0x4a, 0x6b,
-    0xd0, 0x5d, 0xa1, 0x6e, 0x26, 0xb1, 0x1d, 0xaa, 0x1b, 0x91, 0x71, 0x84, 0xec, 0xe8, 0x0f,
-    0x04, 0x00,
+    0x08, 0xce, 0x3d, 0x97, 0x31, 0xb0, 0x00, 0xc0, 0x83, 0x38, 0x45, 0x5c, 0x8a, 0x4a, 0x6b, 0xd0,
+    0x5d, 0xa1, 0x6e, 0x26, 0xb1, 0x1d, 0xaa, 0x1b, 0x91, 0x71, 0x84, 0xec, 0xe8, 0x0f, 0x04, 0x00,
 ]);
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -60,8 +52,26 @@ impl ChainClient {
         Ok(Self(client))
     }
 
-    pub fn client(&mut self) -> &mut ZebraClient {
-        &mut self.0
+    /// Opens the gRPC stream of best-chain tip changes.
+    pub async fn chain_tip_change_stream(
+        &mut self,
+    ) -> Result<tonic::codec::Streaming<BlockHashAndHeight>, TransportError> {
+        self.0
+            .chain_tip_change(Empty {})
+            .await
+            .map(|r| r.into_inner())
+            .map_err(TransportError::from)
+    }
+
+    /// Opens the gRPC stream of mempool changes.
+    pub async fn mempool_change_stream(
+        &mut self,
+    ) -> Result<tonic::codec::Streaming<MempoolChangeMessage>, TransportError> {
+        self.0
+            .mempool_change(Empty {})
+            .await
+            .map(|r| r.into_inner())
+            .map_err(TransportError::from)
     }
 }
 
@@ -158,17 +168,19 @@ impl JsonRpc {
             .ok_or(TransportError::BadNodeData("getblockhash length"))
     }
 
-    /// Fetches the shielded tree state for a block through Zebra JSON-RPC.
-    pub(crate) async fn get_checkpoint(
+    /// Fetches the shielded tree state for a block through Zebra JSON-RPC and
+    /// returns it as the upstream [`ChainState`] value — the same type the
+    /// run loop hands to `WalletWrite::put_blocks` as its connection point.
+    pub(crate) async fn chain_state_at(
         &self,
         height: BlockHeight,
-    ) -> Result<CheckpointData, TransportError> {
+    ) -> Result<ChainState, TransportError> {
         let response: TreeStateResponse = self
             .send_request("z_gettreestate", [u32::from(height).to_string()])
             .await?
             .ok_or(TransportError::BadNodeData("z_gettreestate returned null"))?;
 
-        CheckpointData::from_rpc_response(response)
+        chain_state_from_rpc_response(response)
     }
 
     /// Fetches a full block by height through Zebra JSON-RPC and parses it.
@@ -415,6 +427,8 @@ pub enum TransportError {
     BadCheckpoint(String),
     #[error("{0}")]
     Rpc(RpcError),
+    #[error("gRPC status: {0}")]
+    Tonic(#[from] tonic::Status),
 }
 
 impl TransportError {
@@ -427,7 +441,7 @@ impl TransportError {
         matches!(
             self,
             Self::Client(_) | Self::Hyper(_) | Self::Timeout | Self::HttpStatus(500..=599)
-        )
+        ) || matches!(self, Self::Tonic(status) if matches!(status.code(), tonic::Code::Unavailable))
     }
 }
 
@@ -483,87 +497,60 @@ struct TreeCommitments {
 // ZNS Birthday Checkpoint
 // ============================================================================
 
-/// Tree state parsed from Zebra's `z_gettreestate` JSON-RPC response.
+/// `z_gettreestate` parsed into the upstream [`ChainState`].
 ///
-/// `ironwood_tree` is `None` for blocks before NU6.3 activation — Zebra
-/// omits the `ironwood` field entirely in the JSON response for pre-NU6.3
-/// blocks.
-pub struct CheckpointData {
-    pub metadata: BlockMetadata,
-    pub sapling_tree: CommitmentTree<SaplingNode, 32>,
-    pub orchard_tree: CommitmentTree<MerkleHashOrchard, 32>,
-    pub ironwood_tree: Option<CommitmentTree<MerkleHashOrchard, 32>>,
+/// "No tree at this height yet" is normalized to an empty frontier, not an
+/// `Option`: an absent Ironwood tree (pre-NU6.3 block) and an empty Ironwood
+/// tree are the same value to every consumer — `Frontier::empty()`.
+fn chain_state_from_rpc_response(
+    response: TreeStateResponse,
+) -> Result<ChainState, TransportError> {
+    let sapling_final_state = response
+        .sapling
+        .commitments
+        .final_state
+        .ok_or(TransportError::BadNodeData("missing Sapling finalState"))?;
+    let sapling_tree = decode_tree::<SaplingNode>(&sapling_final_state, "Sapling")?;
+
+    let orchard_final_state = response
+        .orchard
+        .commitments
+        .final_state
+        .ok_or(TransportError::BadNodeData("missing Orchard finalState"))?;
+    let orchard_tree = decode_tree::<MerkleHashOrchard>(&orchard_final_state, "Orchard")?;
+
+    // Ironwood is optional: pre-NU6.3 blocks have no Ironwood tree. Zebra
+    // may omit the `ironwood` field or return an empty `finalState`; both
+    // normalize to the empty frontier.
+    let ironwood_tree = response
+        .ironwood
+        .and_then(|state| state.commitments.final_state)
+        .and_then(|hex| decode_tree::<MerkleHashOrchard>(&hex, "Ironwood").ok())
+        .unwrap_or_else(Frontier::empty);
+
+    let expected_hash_bytes =
+        hex::decode(&response.hash).map_err(|_| TransportError::BadNodeData("invalid hash hex"))?;
+    let expected_hash = block_hash_from_display(&expected_hash_bytes)
+        .ok_or(TransportError::BadNodeData("malformed 32-byte hash"))?;
+
+    Ok(ChainState::new(
+        BlockHeight::from_u32(response.height),
+        expected_hash,
+        sapling_tree,
+        orchard_tree,
+        ironwood_tree,
+    ))
 }
 
-impl CheckpointData {
-    fn from_rpc_response(response: TreeStateResponse) -> Result<Self, TransportError> {
-        let sapling_final_state = response
-            .sapling
-            .commitments
-            .final_state
-            .ok_or(TransportError::BadNodeData("missing Sapling finalState"))?;
-        let orchard_final_state = response
-            .orchard
-            .commitments
-            .final_state
-            .ok_or(TransportError::BadNodeData("missing Orchard finalState"))?;
-
-        let sapling_tree = decode_tree::<SaplingNode>(&sapling_final_state, "Sapling")?;
-        let orchard_tree = decode_tree::<MerkleHashOrchard>(&orchard_final_state, "Orchard")?;
-
-        // Ironwood is optional: pre-NU6.3 blocks do not have an Ironwood tree.
-        // Zebra may either omit the `ironwood` field entirely or return an empty
-        // `finalState`. We treat both as "no Ironwood tree at this height".
-        let ironwood_tree = response
-            .ironwood
-            .and_then(|state| state.commitments.final_state)
-            .and_then(|hex_state| decode_tree::<MerkleHashOrchard>(&hex_state, "Ironwood").ok());
-
-        let expected_hash_bytes = hex::decode(&response.hash)
-            .map_err(|_| TransportError::BadNodeData("invalid hash hex"))?;
-
-        let expected_hash = block_hash_from_display(&expected_hash_bytes)
-            .ok_or(TransportError::BadNodeData("malformed 32-byte hash"))?;
-
-        let ironwood_tree_size = ironwood_tree
-            .as_ref()
-            .map(|t| {
-                t.size()
-                    .try_into()
-                    .map_err(|_| TransportError::BadCheckpoint("Ironwood tree too large".into()))
-            })
-            .transpose()?;
-
-        let metadata =
-            BlockMetadata::from_parts(
-                BlockHeight::from_u32(response.height),
-                expected_hash,
-                Some(
-                    sapling_tree.size().try_into().map_err(|_| {
-                        TransportError::BadCheckpoint("Sapling tree too large".into())
-                    })?,
-                ),
-                Some(
-                    orchard_tree.size().try_into().map_err(|_| {
-                        TransportError::BadCheckpoint("Orchard tree too large".into())
-                    })?,
-                ),
-                ironwood_tree_size,
-            );
-
-        Ok(Self {
-            metadata,
-            sapling_tree,
-            orchard_tree,
-            ironwood_tree,
-        })
-    }
-}
-
+/// Decodes one `finalState` hex into the upstream frontier value.
+///
+/// `read_commitment_tree` parses into a `CommitmentTree`; every consumer of
+/// this module wants the equivalent frontier (what `ChainState` carries), so
+/// the conversion folds in here.
 fn decode_tree<Node>(
     hex_state: &str,
     name: &'static str,
-) -> Result<CommitmentTree<Node, 32>, TransportError>
+) -> Result<Frontier<Node, 32>, TransportError>
 where
     Node: HashSer,
 {
@@ -572,5 +559,6 @@ where
     })?;
 
     read_commitment_tree::<Node, _, 32>(&bytes[..])
+        .map(|tree| tree.to_frontier())
         .map_err(|e| TransportError::BadCheckpoint(format!("{name} tree decode failed: {e}")))
 }
