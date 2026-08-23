@@ -1,5 +1,66 @@
 # `sync.rs` design record
 
+## 2026-09-01 — Wrapper types killed; upstream `ScannedBlock` passes through
+
+- Deleted every bespoke translation type between the upstream scanner and
+  its consumers: `BlockOutput`, `TxOutput`, `ReceivedSapling`,
+  `ReceivedIronwood`, `BlockMemos`, and `decrypt_block_memos`. They existed
+  to reshape the scan result for the old bespoke wallet; the upstream-shaped
+  wallet (`WalletWrite::put_blocks`, `store_decrypted_tx`) consumes upstream
+  values directly, so the translation layer had no consumer.
+- `scan_block` now returns `(ScannedBlock<AccountId>, Vec<ReceivedNameNote>)`
+  — the upstream value unmodified plus the supplemental ZNS lane. Nullifier
+  streams (per-pool `nullifier_map()`), commitment streams, wallet-relevant
+  transactions, and block metadata all ride on `ScannedBlock`; the run loop
+  hands it to `put_blocks`.
+- `ReceivedNameNote` now carries its own `(block_index, txid, action_index)`
+  attribution so the Registry groups Name Notes without a transaction
+  wrapper.
+- The Name Note retention-mark surgery on the Ironwood commitment stream is
+  deleted with the wrappers (it mutated `into_commitments()`'s owned
+  vectors, impossible once `ScannedBlock` passes through whole). Name Note
+  witness retention now depends on the never-pruned `MemoryShardStore`;
+  if a pruning floor is ever introduced, name-note retention must be
+  redesigned as a first-class feature.
+- `ScanError::TransactionIdentityMismatch` deleted with the identity checks
+  that produced it; upstream `scan_block`'s own continuity validation is
+  the authority. (The dead `RegistryOwnershipMismatch` variant was already
+  deleted earlier this cycle.)
+- Downstream callers (`registry.rs::apply_block`, the `main.rs` loop) are
+  broken pending their migration to the upstream shape; that is the next
+  slice.
+
+## 2026-09-01 — Manual nullifier collection deleted
+
+- The first loop no longer iterates raw Sapling/Ironwood bundles to collect
+  nullifiers into `raw_shielded_transactions`. Since `Nullifiers::empty()` is
+  passed to upstream `scan_block`, every nullifier is "unlinked" and appears
+  in `ScannedBundles::nullifier_map()`. The scan now reads nullifiers from
+  `scanned.ironwood().nullifier_map()` and `scanned.sapling().nullifier_map()`
+  instead.
+- `raw_shielded_transactions` BTreeMap deleted.
+- `ScanError::RegistryOwnershipMismatch` deleted (dead code, never
+  constructed).
+- The first loop now does only the ZNS supplemental Name Note scan and
+  `global_action_ordinal` tracking.
+
+## 2026-08-15 — Orchard surfaces deleted from scan output
+
+- `BlockOutput`/`TxOutput` no longer carry Orchard commitments, Orchard
+  nullifiers, or received Orchard notes; `BlockMemos` drops the Orchard map.
+  The wallet (two-pool: Sapling + Ironwood) consumes nothing Orchard. A
+  transaction whose only shielded activity is an Orchard bundle no longer
+  produces a `TxOutput` at all.
+- The upstream scanner's Orchard trial-decryption keys remain (they cannot be
+  excluded without naming `zcash_client_backend`'s `pub(crate)` Ironwood
+  domain types), but NU6.3 disables Orchard cross-address transfers, so no
+  Orchard note can ever be addressed to this wallet and nothing Orchard is
+  surfaced. The block's Orchard commitment stream is discarded rather than
+  appended to a tree.
+- Registry Name-Note scanning is unchanged: it uses the Registry's
+  Orchard-family FVK under `ZnsIronwoodDomain` — Ironwood keys, not the
+  Orchard pool.
+
 ## 2026-07-24 — Scanner metadata is the sole accepted-height source
 
 - Removed the duplicate `BlockOutput` height field and accessor.
