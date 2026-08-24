@@ -26,7 +26,7 @@ pub use liquidity::{
 };
 pub use transaction::{build_transaction, select_registry_fee_inputs, RegistryFeeInputs};
 
-use crate::mint::{Action, Name, NameCommitment, REGISTRY_ACCOUNT, UnifiedAddress};
+use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, REGISTRY_ACCOUNT, UnifiedAddress};
 use crate::wallet::Wallet;
 use std::collections::BTreeMap;
 use zcash_client_backend::data_api::ScannedBlock;
@@ -48,7 +48,7 @@ pub struct ReceivedNameNote {
     txid: TxId,
     action_index: usize,
     note: orchard::note::Note,
-    payload: crate::mint::note::NameNotePayload,
+    payload: NameNote,
 }
 
 impl ReceivedNameNote {
@@ -56,7 +56,7 @@ impl ReceivedNameNote {
         txid: TxId,
         action_index: usize,
         note: orchard::note::Note,
-        payload: crate::mint::note::NameNotePayload,
+        payload: NameNote,
     ) -> Self {
         Self { txid, action_index, note, payload }
     }
@@ -74,8 +74,8 @@ impl ReceivedNameNote {
         &self.note
     }
 
-    /// The decoded ZNS payload from the note's memo.
-    pub fn payload(&self) -> &crate::mint::note::NameNotePayload {
+    /// The decoded typed transition from the note's memo.
+    pub fn payload(&self) -> &NameNote {
         &self.payload
     }
 }
@@ -107,6 +107,8 @@ impl std::fmt::Debug for ReceivedNameNote {
 pub struct Record {
     pub action: Action,
     pub ua: UnifiedAddress,
+    /// The committed expiration (§4.5); absent for the post-release state.
+    pub expires_at: Expiry,
     pub commitment: NameCommitment,
     /// The block height at which this Name Note was confirmed.
     pub confirmed_height: BlockHeight,
@@ -116,11 +118,12 @@ pub struct Record {
 
 impl Record {
     fn from_received(received: ReceivedNameNote, confirmed_height: BlockHeight) -> Self {
-        let payload = received.payload();
-        let (rcm, _) = payload.opening();
+        let note = received.payload();
+        let (rcm, _) = note.opening();
         Self {
-            action: payload.action(),
-            ua: payload.ua().clone(),
+            action: note.action(),
+            ua: note.ua(),
+            expires_at: note.expires_at().unwrap_or(Expiry::Never),
             commitment: NameCommitment::from_inner(orchard::note::NoteCommitTrapdoor::from_inner(
                 rcm,
             )),
@@ -133,6 +136,7 @@ impl Record {
     pub(crate) fn for_test(
         action: Action,
         ua: UnifiedAddress,
+        expires_at: Expiry,
         commitment: NameCommitment,
         confirmed_height: BlockHeight,
         rho: orchard::note::Rho,
@@ -140,6 +144,7 @@ impl Record {
         Self {
             action,
             ua,
+            expires_at,
             commitment,
             confirmed_height,
             rho,
@@ -400,11 +405,16 @@ impl Registry {
         name: Name,
         action: Action,
         ua: UnifiedAddress,
+        expires_at: Expiry,
         commitment: NameCommitment,
         height: BlockHeight,
         rho: orchard::note::Rho,
     ) {
-        self.set_record(name, Record::for_test(action, ua, commitment, height, rho), height);
+        self.set_record(
+            name,
+            Record::for_test(action, ua, expires_at, commitment, height, rho),
+            height,
+        );
     }
 }
 

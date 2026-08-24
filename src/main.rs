@@ -40,7 +40,7 @@ struct NameNoteCandidate {
     note: orchard::note::Note,
     ephemeral_key: zcash_note_encryption::EphemeralKeyBytes,
     memo: [u8; 512],
-    payload: zns_mint::mint::note::NameNotePayload,
+    payload: zns_mint::mint::NameNote,
 }
 
 struct RunLoop<P: zcash_protocol::consensus::Parameters> {
@@ -785,7 +785,7 @@ fn decrypt_name_notes(
                         action,
                         registry_ivk,
                         |note, memo, cmx| {
-                            let payload = match zns_mint::mint::note::decode_name_note_payload(memo)
+                            let payload = match zns_mint::mint::note::decode_name_note(memo)
                             {
                                 Some(p) => p,
                                 None => return subtle::Choice::from(0),
@@ -809,7 +809,7 @@ fn decrypt_name_notes(
                     if note.value() == orchard::value::NoteValue::ZERO
                         && recipient == registry_recipient
                     {
-                        let payload = zns_mint::mint::note::decode_name_note_payload(&memo)
+                        let payload = zns_mint::mint::note::decode_name_note(&memo)
                             .expect("memo was validated in callback");
                         candidates.push(NameNoteCandidate {
                             txid: tx.txid(),

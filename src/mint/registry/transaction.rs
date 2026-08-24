@@ -220,11 +220,26 @@ pub fn build_transaction<P: Parameters>(
     let address = fvk.address_at(0u32, orchard::keys::Scope::External);
     let name = request.name();
 
-    let (action, ua_str, prev_commitment) = match &request {
-        NameNoteRequest::Claim(b) => (Action::Claim, b.ua.as_str(), None),
-        NameNoteRequest::Update(b) => (Action::Update, b.new_ua.as_str(), Some(b.prev_commitment)),
-        NameNoteRequest::Release(b) => (Action::Release, "", Some(b.prev_commitment)),
+    // The typed transition this transaction commits (§3.2): every field
+    // below — the spend check, the memo, and the opening — derives from it.
+    let transition = match &request {
+        NameNoteRequest::Claim(b) => crate::mint::NameNote::Claim {
+            name: b.name.clone(),
+            ua: b.ua.clone(),
+            expires_at: b.expires_at,
+        },
+        NameNoteRequest::Update(b) => crate::mint::NameNote::Update {
+            name: b.name.clone(),
+            ua: b.new_ua.clone(),
+            expires_at: b.expires_at,
+            prev: b.prev_commitment,
+        },
+        NameNoteRequest::Release(b) => crate::mint::NameNote::Release {
+            name: b.name.clone(),
+            prev: b.prev_commitment,
+        },
     };
+    let (action, prev_commitment) = (transition.action(), transition.prev_rcm());
 
     if action == Action::Claim
         && registry
@@ -263,9 +278,9 @@ pub fn build_transaction<P: Parameters>(
             .flatten()
             .ok_or(crate::mint::AssemblyError::NoWitness)?;
 
-        let payload = crate::mint::decode_name_note_payload(&memo_bytes)
+        let prev_transition = crate::mint::decode_name_note(&memo_bytes)
             .ok_or(crate::mint::AssemblyError::MemoEncode)?;
-        let (rcm, psi) = payload.opening();
+        let (rcm, psi) = prev_transition.opening();
         builder
             .add_zns_spend(
                 fvk.clone(),
@@ -277,10 +292,11 @@ pub fn build_transaction<P: Parameters>(
             .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
     }
 
-    // 4. Create new ZNS output
-    let (new_rcm, new_psi) = crate::mint::zns_psi_rcm(name, action, ua_str, prev_commitment);
+    // 4. Create new ZNS output — the opening and memo derive from the same
+    // typed transition, so the commitment and memo cannot disagree.
+    let (new_rcm, new_psi) = transition.opening();
 
-    let memo = crate::mint::encode_name_note(name, action, ua_str, prev_commitment)
+    let memo = transition.encode()
         .ok_or(crate::mint::AssemblyError::MemoEncode)?;
 
     let value = orchard::value::NoteValue::from_raw(0);

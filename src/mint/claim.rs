@@ -104,7 +104,11 @@ pub fn assemble_atomic_claim<P: Parameters>(
         registry,
         registry_keys,
         crate::mint::registry::authorize::NameNoteRequest::Claim(
-            crate::mint::registry::authorize::ClaimRequest { name, ua },
+            crate::mint::registry::authorize::ClaimRequest {
+                name,
+                ua,
+                expires_at: crate::mint::Expiry::Never,
+            },
         ),
         fee_inputs,
         anchor_height,
@@ -157,6 +161,7 @@ pub fn execute_claim<P: Parameters>(
         crate::mint::registry::authorize::ClaimRequest {
             name: name.clone(),
             ua: ua.clone(),
+            expires_at: crate::mint::Expiry::Never,
         }
     );
     // One extra output (the always-present refund) plus the Treasury

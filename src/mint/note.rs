@@ -1,146 +1,227 @@
-//! Name Note derivation and memo codec.
+//! Name Notes: the typed transition, its memo codec, and the ZNS commitment
+//! derivation.
 //!
-//! This module houses the cryptographic scalar derivation ([`zns_psi_rcm`])
-//! and the 512-byte memo encode/decode pair ([`encode_name_note`],
-//! [`decode_name_note`]) that together define the Name Note's on-chain
-//! representation.
+//! A [`NameNote`] is one name transition as the whitepaper defines it — a
+//! variant enum in which illegal field combinations are unrepresentable
+//! (a claim has no predecessor, a release has no address and no expiry).
+//! The 512-byte memo grammar and the σ-hash are functions *over* the type,
+//! not constructors of it.
 
-use super::{Action, Name, NameCommitment, UnifiedAddress};
+use crate::mint::{Action, Name, NameCommitment, UnifiedAddress};
 
-/// A canonical parsed Name Note memo payload.
-#[derive(Clone, PartialEq, Eq)]
-pub struct NameNotePayload {
-    name: Name,
-    action: Action,
-    ua: UnifiedAddress,
-    prev_rcm: Option<NameCommitment>,
-}
+/// A Unix timestamp in whole seconds — the wire and MTP time base.
+///
+/// The only time source the protocol recognizes is canonical-chain Median
+/// Time Past (§4.5), which has one-second granularity. Wall-clock types
+/// (`SystemTime`, `OffsetDateTime`) never appear inside the protocol layer.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct UnixSeconds(pub u64);
 
-impl std::fmt::Debug for NameNotePayload {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("NameNotePayload(<redacted>)")
+impl UnixSeconds {
+    /// The §4.5.2 expiration test: `canonical_chain_mtp >= expires_at`.
+    pub fn reached_by(self, mtp: UnixSeconds) -> bool {
+        mtp >= self
+    }
+
+    /// Parses canonical ASCII decimal: digits only, no sign, no leading
+    /// zeroes (except `0` itself). Non-canonical spellings are rejected
+    /// because the raw field bytes are hashed into σ — `1` and `01` are
+    /// different transitions with different commitments.
+    pub fn parse_canonical(s: &str) -> Option<Self> {
+        if s.is_empty() || s.len() > 20 || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if s.len() > 1 && s.starts_with('0') {
+            return None;
+        }
+        s.parse().ok().map(Self)
+    }
+
+    pub fn as_u64(self) -> u64 {
+        self.0
     }
 }
 
-impl NameNotePayload {
-    /// Constructs a canonical action-consistent Name Note payload.
-    pub fn new(
-        name: Name,
-        action: Action,
-        ua: UnifiedAddress,
-        prev_rcm: Option<NameCommitment>,
-    ) -> Option<Self> {
-        let ua_bytes = ua.as_str().as_bytes();
+/// A duration in whole seconds — what a user requests as a registration
+/// term or extension (§4.5.3). Never an instant; never compared to MTP.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct TermSeconds(pub u64);
+
+/// The `expires_at` field of a transition: a fixed Unix instant, or the
+/// exact ASCII value `none` for a registration without fixed expiration.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Expiry {
+    /// The exact ASCII bytes `none`.
+    Never,
+    /// A Unix timestamp in whole seconds.
+    At(UnixSeconds),
+}
+
+impl Expiry {
+    /// The canonical memo-field bytes.
+    pub fn field_bytes(&self) -> Vec<u8> {
+        match self {
+            Expiry::Never => b"none".to_vec(),
+            Expiry::At(t) => t.0.to_string().into_bytes(),
+        }
+    }
+
+    /// Parses the memo field: canonical decimal, or exactly `none`.
+    pub fn parse(field: &str) -> Option<Self> {
+        match field {
+            "none" => Some(Expiry::Never),
+            digits => UnixSeconds::parse_canonical(digits).map(Expiry::At),
+        }
+    }
+
+    /// The §4.5.2 expiration test against canonical-chain MTP.
+    /// `Never` never expires (liveness still applies; §4.5.4).
+    pub fn expired(self, mtp: UnixSeconds) -> bool {
+        match self {
+            Expiry::Never => false,
+            Expiry::At(t) => t.reached_by(mtp),
+        }
+    }
+}
+
+/// One name transition (§3.2), typed so every action carries exactly its
+/// legal fields.
+#[derive(Clone, PartialEq, Eq)]
+pub enum NameNote {
+    /// Bind `name` to `ua` for `expires_at`; no predecessor exists.
+    Claim { name: Name, ua: UnifiedAddress, expires_at: Expiry },
+    /// Rebind and/or extend an existing registration. `expires_at` is the
+    /// carried-forward (§4.5.3) or extension-resulting expiration.
+    Update { name: Name, ua: UnifiedAddress, expires_at: Expiry, prev: NameCommitment },
+    /// Terminate the registration; no address, no expiry.
+    Release { name: Name, prev: NameCommitment },
+}
+
+impl std::fmt::Debug for NameNote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NameNote(<redacted>)")
+    }
+}
+
+impl NameNote {
+    pub fn name(&self) -> &Name {
+        match self {
+            NameNote::Claim { name, .. } | NameNote::Update { name, .. } | NameNote::Release { name, .. } => name,
+        }
+    }
+
+    pub fn action(&self) -> Action {
+        match self {
+            NameNote::Claim { .. } => Action::Claim,
+            NameNote::Update { .. } => Action::Update,
+            NameNote::Release { .. } => Action::Release,
+        }
+    }
+
+    /// The bound Unified Address; empty for a release.
+    pub fn ua(&self) -> UnifiedAddress {
+        match self {
+            NameNote::Claim { ua, .. } | NameNote::Update { ua, .. } => ua.clone(),
+            NameNote::Release { .. } => UnifiedAddress::empty(),
+        }
+    }
+
+    /// The committed expiration; absent only for a release.
+    pub fn expires_at(&self) -> Option<Expiry> {
+        match self {
+            NameNote::Claim { expires_at, .. } | NameNote::Update { expires_at, .. } => Some(*expires_at),
+            NameNote::Release { .. } => None,
+        }
+    }
+
+    /// The predecessor chain commitment, absent only for a claim.
+    pub fn prev_rcm(&self) -> Option<NameCommitment> {
+        match self {
+            NameNote::Claim { .. } => None,
+            NameNote::Update { prev, .. } | NameNote::Release { prev, .. } => Some(*prev),
+        }
+    }
+
+    /// The ZNS commitment opening bound to this exact transition.
+    pub fn opening(&self) -> (pasta_curves::pallas::Scalar, pasta_curves::pallas::Base) {
+        let verb: &[u8] = match self {
+            NameNote::Claim { .. } => b"claim",
+            NameNote::Update { .. } => b"update",
+            NameNote::Release { .. } => b"release",
+        };
+        let name = self.name().as_str().as_bytes();
+        let ua_owned = self.ua();
+        let ua = ua_owned.as_str().as_bytes();
+        let expiry = self.expires_field_bytes();
+        let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
+        zns_psi_rcm_raw(verb, name, ua, &expiry, &prev)
+    }
+
+    /// The `expires_at` field bytes as the memo and σ encode them: `none`
+    /// for a release (§3.1: a release MUST encode `none`).
+    fn expires_field_bytes(&self) -> Vec<u8> {
+        self.expires_at().unwrap_or(Expiry::Never).field_bytes()
+    }
+
+    /// Encodes into the canonical zero-padded 512-byte memo.
+    /// `None` when the UA charset is not memo-legal or the fields overflow.
+    pub fn encode(&self) -> Option<[u8; 512]> {
+        let ua_owned = self.ua();
+        let ua_bytes = ua_owned.as_str().as_bytes();
         if !ua_bytes.is_ascii() || ua_bytes.contains(&b':') || ua_bytes.contains(&0) {
             return None;
         }
-
-        let fields_match_action = match action {
-            Action::Claim => !ua.is_empty() && prev_rcm.is_none(),
-            Action::Update => !ua.is_empty() && prev_rcm.is_some(),
-            Action::Release => ua.is_empty() && prev_rcm.is_some(),
-        };
-        fields_match_action.then_some(Self {
-            name,
-            action,
-            ua,
-            prev_rcm,
-        })
-    }
-
-    /// Returns the canonical name.
-    pub fn name(&self) -> &Name {
-        &self.name
-    }
-
-    /// Returns the lifecycle action.
-    pub fn action(&self) -> Action {
-        self.action
-    }
-
-    /// Returns the bound Unified Address string.
-    pub fn ua(&self) -> &UnifiedAddress {
-        &self.ua
-    }
-
-    /// Returns the predecessor chain commitment, absent only for claims.
-    pub fn prev_rcm(&self) -> Option<NameCommitment> {
-        self.prev_rcm
-    }
-
-    /// Derives the commitment opening bound to this exact parsed payload.
-    pub fn opening(&self) -> (pasta_curves::pallas::Scalar, pasta_curves::pallas::Base) {
-        zns_psi_rcm(&self.name, self.action, self.ua.as_str(), self.prev_rcm)
-    }
-
-    /// Encodes this payload into its canonical zero-padded memo form.
-    pub fn encode(&self) -> Option<[u8; 512]> {
-        encode_name_note_fields(&self.name, self.action, self.ua.as_str(), self.prev_rcm)
+        let verb = self.action().as_str();
+        let hex_rcm = hex::encode(self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]));
+        let expires_field = self.expires_field_bytes();
+        let memo_string = format!(
+            "ZNS:{}:{}:{}:{}:{}",
+            verb,
+            self.name().as_str(),
+            ua_owned.as_str(),
+            String::from_utf8(expires_field).ok()?,
+            hex_rcm,
+        );
+        let bytes = memo_string.as_bytes();
+        if bytes.len() > 512 {
+            return None;
+        }
+        let mut memo = [0u8; 512];
+        memo[..bytes.len()].copy_from_slice(bytes);
+        Some(memo)
     }
 }
 
-/// Derives the ZNS payload scalars `(rcm, psi)` for the Orchard `unsafe-zns` circuit.
-///
-/// Hashes the ZNS properties (name, action, unified address, and previous commitment)
-/// using BLAKE2b-512, wide-reduced into Pallas field elements.
-pub fn zns_psi_rcm(
-    name: &Name,
-    action: Action,
-    ua: &str,
-    prev_rcm: Option<NameCommitment>,
-) -> (pasta_curves::pallas::Scalar, pasta_curves::pallas::Base) {
-    let prev_rcm_bytes = prev_rcm.map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
-    zns_psi_rcm_raw(name, action, ua, &prev_rcm_bytes)
-}
-
-/// A raw byte-level variant of `zns_psi_rcm` for cross-language test vectors
-/// that may use out-of-field byte arrays for testing the Sinsemilla construction.
+/// Derives the ZNS commitment inputs `(rcm, ψ)` for a transition (§3.3):
+/// BLAKE2b-512 over the length-prefixed fields with tag `rcm` / `psi`,
+/// wide-reduced into the Pallas scalar and base fields respectively.
 pub fn zns_psi_rcm_raw(
-    name: &Name,
-    action: Action,
-    ua: &str,
+    verb: &[u8],
+    name: &[u8],
+    ua: &[u8],
+    expires_at: &[u8],
     prev_rcm_bytes: &[u8; 32],
 ) -> (pasta_curves::pallas::Scalar, pasta_curves::pallas::Base) {
     use pasta_curves::group::ff::FromUniformBytes;
 
-    let action_bytes: &[u8] = match action {
-        Action::Claim => b"claim",
-        Action::Update => b"update",
-        Action::Release => b"release",
-    };
-
-    // Release action forces an empty UA
-    let ua_bytes = if action == Action::Release {
-        b""
-    } else {
-        ua.as_bytes()
-    };
-    let name_bytes = name.as_str().as_bytes();
-
     let psi = pasta_curves::pallas::Base::from_uniform_bytes(&tagged_zns_hash(
-        b"psi",
-        action_bytes,
-        name_bytes,
-        ua_bytes,
-        prev_rcm_bytes,
+        b"psi", verb, name, ua, expires_at, prev_rcm_bytes,
     ));
     let rcm = pasta_curves::pallas::Scalar::from_uniform_bytes(&tagged_zns_hash(
-        b"rcm",
-        action_bytes,
-        name_bytes,
-        ua_bytes,
-        prev_rcm_bytes,
+        b"rcm", verb, name, ua, expires_at, prev_rcm_bytes,
     ));
 
     (rcm, psi)
 }
 
-/// Compute the domain-tagged, length-prefixed BLAKE2b-512 hash.
+/// The domain-tagged, length-prefixed BLAKE2b-512 of σ (§3.3).
+/// Field order: `LP(T) || LP(t) || LP(α) || LP(n) || LP(u) || LP(e) || p`.
 fn tagged_zns_hash(
     field_tag: &[u8],
-    action: &[u8],
+    verb: &[u8],
     name: &[u8],
     ua: &[u8],
+    expires_at: &[u8],
     prev_rcm: &[u8; 32],
 ) -> [u8; 64] {
     let mut h = blake2b_simd::Params::new().hash_length(64).to_state();
@@ -150,9 +231,10 @@ fn tagged_zns_hash(
     };
     absorb(b"ZcashName/v1");
     absorb(field_tag);
-    absorb(action);
+    absorb(verb);
     absorb(name);
     absorb(ua);
+    absorb(expires_at);
     h.update(prev_rcm);
 
     let mut out = [0u8; 64];
@@ -160,227 +242,95 @@ fn tagged_zns_hash(
     out
 }
 
-/// Encodes the ZNS properties into a 512-byte array to be stored in the Orchard memo field.
+/// Decodes a 512-byte memo into a typed [`NameNote`].
 ///
-/// Follows the strict `zns-verify` protocol spec:
-/// `ZNS:action:name:ua:prev_rcm` (zero-padded to 512 bytes).
-pub fn encode_name_note(
-    name: &Name,
-    action: Action,
-    ua: &str,
-    prev_rcm: Option<NameCommitment>,
-) -> Option<[u8; 512]> {
-    let payload = NameNotePayload::new(
-        name.clone(),
-        action,
-        UnifiedAddress::from_string(ua.to_string()),
-        prev_rcm,
-    )?;
-    payload.encode()
-}
-
-fn encode_name_note_fields(
-    name: &Name,
-    action: Action,
-    ua: &str,
-    prev_rcm: Option<NameCommitment>,
-) -> Option<[u8; 512]> {
-    let action_str = match action {
-        Action::Claim => "claim",
-        Action::Update => "update",
-        Action::Release => "release",
-    };
-
-    // A release note explicitly has an empty UA
-    let ua_str = if action == Action::Release { "" } else { ua };
-    let prev_rcm_bytes = prev_rcm.map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
-    let hex_rcm = hex::encode(prev_rcm_bytes);
-
-    let memo_string = format!(
-        "ZNS:{}:{}:{}:{}",
-        action_str,
-        name.as_str(),
-        ua_str,
-        hex_rcm
-    );
-    let bytes = memo_string.as_bytes();
-
-    if bytes.len() > 512 {
-        return None;
-    }
-
-    let mut memo = [0u8; 512];
-    memo[..bytes.len()].copy_from_slice(bytes);
-    Some(memo)
-}
-
-/// Decodes a 512-byte Orchard memo back into ZNS properties.
-///
-/// Strips trailing zeros and parses the colon-separated fields.
-pub fn decode_name_note(
-    memo: &[u8; 512],
-) -> Option<(Name, Action, String, Option<NameCommitment>)> {
-    let payload = decode_name_note_payload(memo)?;
-    Some((
-        payload.name,
-        payload.action,
-        payload.ua.into_string(),
-        payload.prev_rcm,
-    ))
-}
-
-/// Decodes a canonical 512-byte Name Note memo into a typed payload.
-pub fn decode_name_note_payload(memo: &[u8; 512]) -> Option<NameNotePayload> {
-    // Strip trailing zeros
+/// Accepts exactly the canonical encoding: trailing-zero stripping, the
+/// six-field grammar, canonical decimal or `none` expiry, 64-char lowercase
+/// hex predecessor, action-consistent fields (release: empty UA and `none`
+/// expiry; claim: zero predecessor; update/release: nonzero predecessor),
+/// and a re-encode that reproduces the input byte-for-byte.
+pub fn decode_name_note(memo: &[u8; 512]) -> Option<NameNote> {
     let end = memo.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
     let memo_str = std::str::from_utf8(&memo[..end]).ok()?;
 
     let parts: Vec<&str> = memo_str.split(':').collect();
-    if parts.len() != 5 || parts[0] != "ZNS" {
+    if parts.len() != 6 || parts[0] != "ZNS" {
         return None;
     }
 
-    let action = match parts[1] {
-        "claim" => Action::Claim,
-        "update" => Action::Update,
-        "release" => Action::Release,
+    let name = Name::parse(parts[2])?;
+    let ua_str = parts[3];
+    let expires_at = Expiry::parse(parts[4])?;
+
+    let mut prev_rcm_bytes = [0u8; 32];
+    if parts[5].len() != 64 || !parts[5].bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    hex::decode_to_slice(parts[5], &mut prev_rcm_bytes).ok()?;
+
+    let note = match parts[1] {
+        "claim" => {
+            if prev_rcm_bytes != [0u8; 32] || ua_str.is_empty() {
+                return None;
+            }
+            NameNote::Claim {
+                name,
+                ua: UnifiedAddress::from_string(ua_str.to_string()),
+                expires_at,
+            }
+        }
+        "update" => {
+            if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                return None;
+            }
+            NameNote::Update {
+                name,
+                ua: UnifiedAddress::from_string(ua_str.to_string()),
+                expires_at,
+                prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+            }
+        }
+        // A release MUST encode an empty UA and the exact value `none`.
+        "release" => {
+            if !ua_str.is_empty() || expires_at != Expiry::Never {
+                return None;
+            }
+            NameNote::Release {
+                name,
+                prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+            }
+        }
         _ => return None,
     };
 
-    let name = Name::parse(parts[2])?;
-
-    // Releases must have an explicitly empty UA field
-    if action == Action::Release && !parts[3].is_empty() {
-        return None;
-    }
-    let ua = parts[3].to_string();
-
-    let mut prev_rcm_bytes = [0u8; 32];
-    if parts[4].len() != 64 {
-        return None;
-    }
-    if !parts[4]
-        .as_bytes()
-        .iter()
-        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        return None;
-    }
-    hex::decode_to_slice(parts[4], &mut prev_rcm_bytes).ok()?;
-
-    let prev_rcm = if prev_rcm_bytes == [0u8; 32] {
-        None
-    } else {
-        Some(NameCommitment::from_bytes(&prev_rcm_bytes)?)
-    };
-
-    let payload = NameNotePayload::new(name, action, UnifiedAddress::from_string(ua), prev_rcm)?;
-
-    (payload.encode()?.as_slice() == memo).then_some(payload)
+    (note.encode()?.as_slice() == memo).then_some(note)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::mint::{Action, Name, NameCommitment};
-    use pasta_curves::group::ff::PrimeField;
-
-    /// The ZNS memo round-trip: encode → decode must preserve all fields.
-    #[test]
-    fn name_note_memo_round_trip() {
-        let name = Name::parse("alice").unwrap();
-        let ua = "u1abc123";
-
-        // Claim: prev_rcm = None (zero bytes)
-        let memo = encode_name_note(&name, Action::Claim, ua, None).unwrap();
-        let (n, a, u, p) = decode_name_note(&memo).unwrap();
-        assert_eq!(n, name);
-        assert_eq!(a, Action::Claim);
-        assert_eq!(u, ua);
-        assert_eq!(p, None);
-
-        // Update with a prev_rcm
-        let prev_rcm_bytes = [1u8; 32];
-        let prev_rcm = NameCommitment::from_bytes(&prev_rcm_bytes).unwrap();
-        let memo = encode_name_note(&name, Action::Update, ua, Some(prev_rcm)).unwrap();
-        let (n, a, u, p) = decode_name_note(&memo).unwrap();
-        assert_eq!(n, name);
-        assert_eq!(a, Action::Update);
-        assert_eq!(u, ua);
-        assert_eq!(p, Some(prev_rcm));
-
-        // Release: UA must be empty
-        let memo = encode_name_note(&name, Action::Release, "", Some(prev_rcm)).unwrap();
-        let (n, a, u, p) = decode_name_note(&memo).unwrap();
-        assert_eq!(n, name);
-        assert_eq!(a, Action::Release);
-        assert_eq!(u, "");
-        assert_eq!(p, Some(prev_rcm));
-    }
-
-    /// The chain rule: a claim's rcm must differ from an update's rcm, and
-    /// the update's rcm must depend on the claim's rcm (via prev_rcm).
-    #[test]
-    fn zns_psi_rcm_chain_rule() {
-        let name = Name::parse("bob").unwrap();
-        let ua = "u1def456";
-
-        // Claim: no prev_rcm
-        let (claim_rcm, claim_psi) = zns_psi_rcm(&name, Action::Claim, ua, None);
-
-        // Update: prev_rcm = claim's rcm (encoded as NameCommitment)
-        let claim_commitment = NameCommitment::from_inner(
-            orchard::note::NoteCommitTrapdoor::from_bytes(&{
-                let mut bytes = [0u8; 32];
-                let rcm_bytes = claim_rcm.to_repr();
-                bytes.copy_from_slice(rcm_bytes.as_ref());
-                bytes
-            })
-            .into_option()
-            .unwrap(),
-        );
-        let (update_rcm, update_psi) =
-            zns_psi_rcm(&name, Action::Update, ua, Some(claim_commitment));
-
-        // The chain: claim and update must produce different (rcm, psi)
-        assert_ne!(
-            claim_rcm.to_repr(),
-            update_rcm.to_repr(),
-            "claim and update rcm must differ"
-        );
-        assert_ne!(claim_psi, update_psi, "claim and update psi must differ");
-
-        // Release from update: prev_rcm = update's rcm
-        let update_commitment = NameCommitment::from_inner(
-            orchard::note::NoteCommitTrapdoor::from_bytes(&{
-                let mut bytes = [0u8; 32];
-                let rcm_bytes = update_rcm.to_repr();
-                bytes.copy_from_slice(rcm_bytes.as_ref());
-                bytes
-            })
-            .into_option()
-            .unwrap(),
-        );
-        let (release_rcm, release_psi) =
-            zns_psi_rcm(&name, Action::Release, "", Some(update_commitment));
-
-        assert_ne!(update_rcm.to_repr(), release_rcm.to_repr());
-        assert_ne!(update_psi, release_psi);
-    }
+/// Compatibility wrapper preserving the tuple-returning call sites.
+pub fn decode_name_note_tuple(
+    memo: &[u8; 512],
+) -> Option<(Name, Action, String, Expiry, Option<NameCommitment>)> {
+    let note = decode_name_note(memo)?;
+    Some((
+        note.name().clone(),
+        note.action(),
+        note.ua().into_string(),
+        note.expires_at().unwrap_or(Expiry::Never),
+        note.prev_rcm(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // cmx helper — copied from zns-verify (standalone Sinsemilla, no orchard dep)
 // ---------------------------------------------------------------------------
 
-use sinsemilla::CommitDomain;
 use pasta_curves::group::ff::PrimeField;
+use sinsemilla::CommitDomain;
 
 /// Sinsemilla personalization tag for Orchard note commitments.
 const NOTE_COMMITMENT_PERSONALIZATION: &str = "z.cash:Orchard-NoteCommit";
 
 /// Number of bits taken from each Pallas base-field input (rho, psi).
-/// Matches orchard's L_ORCHARD_BASE.
 const L_ORCHARD_BASE: usize = 255;
 
 fn le_bytes_lsb0(bytes: &[u8]) -> impl Iterator<Item = bool> + '_ {
@@ -390,11 +340,9 @@ fn le_bytes_lsb0(bytes: &[u8]) -> impl Iterator<Item = bool> + '_ {
         .flat_map(|b| (0..8).map(move |i| (b >> i) & 1 != 0))
 }
 
-/// Computes cmx (the x-coordinate of the Sinsemilla note commitment) from
-/// raw note components plus caller-supplied (psi, rcm).
-///
-/// Used by the scanner to validate that a decrypted Name Note's ZNS-derived
-/// commitment matches the on-chain cmx.
+/// Computes cmx from raw note components plus caller-supplied (ψ, rcm).
+/// Used by the scanner to validate a decrypted Name Note's ZNS-derived
+/// commitment against the on-chain cmx.
 pub fn note_commitment_cmx(
     g_d: [u8; 32],
     pk_d: [u8; 32],
@@ -415,4 +363,107 @@ pub fn note_commitment_cmx(
         .chain(le_bytes_lsb0(psi_bytes.as_ref()).take(L_ORCHARD_BASE));
 
     Option::<pasta_curves::pallas::Base>::from(domain.short_commit(bits, &rcm))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn note_for_encode() -> (Name, UnifiedAddress) {
+        (Name::parse("alice").unwrap(), UnifiedAddress::from_string("u1abc123".into()))
+    }
+
+    /// The memo round-trip: encode → decode must preserve every field of
+    /// every action, including the expiry.
+    #[test]
+    fn memo_round_trip_all_actions() {
+        let (name, ua) = note_for_encode();
+        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
+
+        let claim = NameNote::Claim { name: name.clone(), ua: ua.clone(), expires_at: Expiry::Never };
+        assert_eq!(decode_name_note(&claim.encode().unwrap()).as_ref(), Some(&claim));
+
+        let t = UnixSeconds(1_775_000_000);
+        let claim_t = NameNote::Claim { name: name.clone(), ua: ua.clone(), expires_at: Expiry::At(t) };
+        assert_eq!(decode_name_note(&claim_t.encode().unwrap()).as_ref(), Some(&claim_t));
+
+        let update = NameNote::Update { name: name.clone(), ua: ua.clone(), expires_at: Expiry::At(t), prev };
+        assert_eq!(decode_name_note(&update.encode().unwrap()).as_ref(), Some(&update));
+
+        let release = NameNote::Release { name, prev };
+        assert_eq!(decode_name_note(&release.encode().unwrap()).as_ref(), Some(&release));
+    }
+
+    /// The chain rule: claim/update/release openings all differ, and the
+    /// expiry is cryptographically bound (changing only `e` changes both
+    /// field elements).
+    #[test]
+    fn openings_bind_expiry_and_chain() {
+        let (name, ua) = note_for_encode();
+        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
+        let t = UnixSeconds(1_000);
+
+        let (rcm_never, psi_never) = NameNote::Claim {
+            name: name.clone(), ua: ua.clone(), expires_at: Expiry::Never,
+        }.opening();
+        let (rcm_at, psi_at) = NameNote::Claim {
+            name: name.clone(), ua: ua.clone(), expires_at: Expiry::At(t),
+        }.opening();
+        assert_ne!(rcm_never.to_repr(), rcm_at.to_repr());
+        assert_ne!(psi_never, psi_at);
+
+        let (rcm_upd, _) = NameNote::Update {
+            name, ua, expires_at: Expiry::At(t), prev,
+        }.opening();
+        assert_ne!(rcm_at.to_repr(), rcm_upd.to_repr());
+    }
+
+    /// Canonical-decimal strictness: `e` bytes are hashed into σ, so
+    /// non-canonical spellings must be rejected by the parser rather than
+    /// silently accepted as the same value.
+    #[test]
+    fn expiry_parsing_is_canonical() {
+        assert_eq!(UnixSeconds::parse_canonical("0"), Some(UnixSeconds(0)));
+        assert_eq!(UnixSeconds::parse_canonical("1"), Some(UnixSeconds(1)));
+        assert_eq!(UnixSeconds::parse_canonical("01"), None);
+        assert_eq!(UnixSeconds::parse_canonical("+1"), None);
+        assert_eq!(UnixSeconds::parse_canonical(""), None);
+        assert_eq!(UnixSeconds::parse_canonical("1a"), None);
+
+        assert_eq!(Expiry::parse("none"), Some(Expiry::Never));
+        assert_eq!(Expiry::parse("None"), None);
+        assert_eq!(Expiry::parse("1000"), Some(Expiry::At(UnixSeconds(1000))));
+    }
+
+    /// A release must encode an empty UA and exactly `none`; a claim must
+    /// use the zero predecessor; an update must have a nonzero one.
+    #[test]
+    fn grammar_rejects_inconsistent_fields() {
+        let name = Name::parse("bob").unwrap();
+        let ua = UnifiedAddress::from_string("u1x".into());
+        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
+        let t = Expiry::At(UnixSeconds(5));
+
+        // Release with a UA or a timestamp: not encodable as a release.
+        let mut m = NameNote::Release { name: name.clone(), prev }.encode().unwrap();
+        assert!(decode_name_note(&m).is_some());
+        let forged = "ZNS:release:bob:u1x:1000:".to_string() + &hex::encode([1u8; 32]);
+        m[..forged.len()].copy_from_slice(forged.as_bytes());
+        assert!(decode_name_note(&m).is_none());
+
+        // Claim with a nonzero predecessor is not a claim.
+        let forged = "ZNS:claim:bob:u1x:none:".to_string() + &hex::encode([1u8; 32]);
+        let mut m2 = NameNote::Claim { name, ua, expires_at: t }.encode().unwrap();
+        m2[..forged.len()].copy_from_slice(forged.as_bytes());
+        assert!(decode_name_note(&m2).is_none());
+    }
+
+    #[test]
+    fn expiry_test_semantics() {
+        let t = UnixSeconds(1_000);
+        assert!(Expiry::At(t).expired(UnixSeconds(1_000))); // mtp >= expires_at
+        assert!(Expiry::At(t).expired(UnixSeconds(1_001)));
+        assert!(!Expiry::At(t).expired(UnixSeconds(999)));
+        assert!(!Expiry::Never.expired(UnixSeconds(u64::MAX)));
+    }
 }

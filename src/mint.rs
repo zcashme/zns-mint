@@ -7,12 +7,10 @@ pub mod registry;
 pub mod treasury;
 pub mod v6;
 
-// Re-export note functions so existing `crate::mint::` paths keep working.
+// The Name Note type and its codec.
 pub use note::{
-    decode_name_note, decode_name_note_payload, encode_name_note,
-    zns_psi_rcm, zns_psi_rcm_raw,
-    note_commitment_cmx,
-    NameNotePayload,
+    decode_name_note, decode_name_note_tuple, note_commitment_cmx,
+    zns_psi_rcm_raw, Expiry, NameNote, TermSeconds, UnixSeconds,
 };
 
 use zcash_client_backend::data_api::BlockMetadata;

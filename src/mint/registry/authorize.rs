@@ -5,7 +5,7 @@
 
 use zcash_protocol::consensus::BlockHeight;
 
-use crate::mint::{Action, Name, NameCommitment, UnifiedAddress};
+use crate::mint::{Action, Expiry, Name, NameCommitment, UnifiedAddress};
 use crate::mint::registry::{Registry, Record};
 
 // OTP challenge state lives at kernel level in [`crate::mint::otp`];
@@ -51,6 +51,9 @@ impl NameNoteRequest {
 pub struct ClaimRequest {
     pub name: Name,
     pub ua: UnifiedAddress,
+    /// The committed expiration (§4.5.1). Until term-request plumbing
+    /// exists in the intake path, claims register without fixed expiration.
+    pub expires_at: Expiry,
 }
 
 /// Request to update an existing name (requires previous commitment).
@@ -58,6 +61,10 @@ pub struct ClaimRequest {
 pub struct UpdateRequest {
     pub name: Name,
     pub new_ua: UnifiedAddress,
+    /// The carried-forward expiration (§4.5.3: an ordinary update MUST NOT
+    /// change the registration period). Extension requests arrive as terms
+    /// elsewhere; this field holds the resulting value.
+    pub expires_at: Expiry,
     pub prev_commitment: NameCommitment,
 }
 
@@ -84,11 +91,11 @@ pub fn authorize_claim(
     ua: UnifiedAddress,
 ) -> Option<NameNoteRequest> {
     match current_record(registry, &name) {
-        None => Some(NameNoteRequest::Claim(ClaimRequest { name, ua })),
+        None => Some(NameNoteRequest::Claim(ClaimRequest { name, ua, expires_at: Expiry::Never })),
         Some(Record {
             action: Action::Release,
             ..
-        }) => Some(NameNoteRequest::Claim(ClaimRequest { name, ua })),
+        }) => Some(NameNoteRequest::Claim(ClaimRequest { name, ua, expires_at: Expiry::Never })),
         Some(_) => None, // Name is already live
     }
 }
@@ -123,6 +130,7 @@ pub fn authorize_update(
     Some(NameNoteRequest::Update(UpdateRequest {
         name,
         new_ua,
+        expires_at: record.expires_at,
         prev_commitment: record.commitment,
     }))
 }
@@ -203,12 +211,12 @@ mod tests {
         assert_eq!(req.action(), Action::Claim);
 
         // Released name is claimable
-        reg.set_record_for_test(name.clone(), Action::Release, UnifiedAddress::empty(), dummy_commitment(), height, dummy_rho());
+        reg.set_record_for_test(name.clone(), Action::Release, UnifiedAddress::empty(), crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
         let req2 = authorize_claim(&reg, name.clone(), ua.clone()).unwrap();
         assert_eq!(req2.action(), Action::Claim);
 
         // Live name is NOT claimable
-        reg.set_record_for_test(name.clone(), Action::Claim, ua.clone(), dummy_commitment(), height, dummy_rho());
+        reg.set_record_for_test(name.clone(), Action::Claim, ua.clone(), crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
         assert!(authorize_claim(&reg, name, ua).is_none());
     }
 
@@ -242,7 +250,7 @@ mod tests {
         .is_none());
 
         // Released name cannot be updated/released
-        reg.set_record_for_test(name.clone(), Action::Release, UnifiedAddress::empty(), dummy_commitment(), height, dummy_rho());
+        reg.set_record_for_test(name.clone(), Action::Release, UnifiedAddress::empty(), crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
         assert!(authorize_update(
             &reg,
             &mut otps,
@@ -271,7 +279,7 @@ mod tests {
         let ua = UnifiedAddress::from_string("u1new".into());
         let height = BlockHeight::from_u32(100);
 
-        reg.set_record_for_test(name.clone(), Action::Update, ua.clone(), dummy_commitment(), height, dummy_rho());
+        reg.set_record_for_test(name.clone(), Action::Update, ua.clone(), crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
 
         // Invalid OTP fails
         let mut bad_otp = [0u8; 16];
