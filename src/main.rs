@@ -29,73 +29,6 @@ const INTAKE_CONFIRMATIONS: u32 = 10;
 /// Pause between retries of chain I/O (fetch, scan, submit).
 const RETRY_PAUSE: Duration = Duration::from_secs(5);
 
-/// Evidence from the mempool watcher.
-enum MempoolEvent {
-    /// The node invalidated a transaction.
-    Invalidated(zcash_primitives::transaction::TxId),
-    /// The watcher (re)connected; `txids` is the post-connect mempool
-    /// baseline. A pending submission absent from it is eviction evidence
-    /// only — it may have been mined in the gap — so the handler verifies
-    /// against the node before releasing anything.
-    Rebaselined(Vec<zcash_primitives::transaction::TxId>),
-}
-
-/// The mempool watcher: a dedicated task translating Zebra's mempool
-/// lifecycle stream into compact evidence for the run loop.
-///
-/// Only `Invalidated` is reported: `Mined` is a reorg-sensitive preview of
-/// what the block pipeline will authoritatively confirm, and `Added` for a
-/// transaction we did not build carries no decision for this mint. After
-/// every (re)connect the watcher re-baselines and reports the snapshot, so
-/// evictions that happen during a disconnect are still surfaced.
-async fn mempool_watcher(
-    mut chain: ChainClient,
-    rpc: JsonRpc,
-    events: tokio::sync::mpsc::Sender<MempoolEvent>,
-) {
-    use futures_util::StreamExt as _;
-    use zebra_indexer_proto::MempoolChangeKind;
-
-    loop {
-        let stream = match chain.mempool_events().await {
-            Ok(stream) => stream,
-            Err(e) => {
-                tracing::warn!(%e, "mempool stream open failed; retrying");
-                tokio::time::sleep(RETRY_PAUSE).await;
-                continue;
-            }
-        };
-        tokio::pin!(stream);
-
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok((MempoolChangeKind::Invalidated, txid)) => {
-                    if events.send(MempoolEvent::Invalidated(txid)).await.is_err() {
-                        return; // run loop gone; nothing to watch for
-                    }
-                }
-                Ok((_kind, txid)) => {
-                    tracing::trace!(%txid, "mempool event (informational)")
-                }
-                Err(e) => {
-                    tracing::warn!(%e, "mempool stream error; reconnecting");
-                    break;
-                }
-            }
-        }
-
-        // Reconnected (or first connect): re-baseline and report the
-        // snapshot so the run loop can re-verify its pending set.
-        tokio::time::sleep(RETRY_PAUSE).await;
-        match rpc.get_raw_mempool().await {
-            Ok(txids) => {
-                let _ = events.send(MempoolEvent::Rebaselined(txids)).await;
-            }
-            Err(e) => tracing::warn!(%e, "mempool re-baseline failed"),
-        }
-    }
-}
-
 /// One decrypted Name Note candidate from the ZNS pass, with the facts the
 /// wallet store and the Registry evidence need.
 struct NameNoteCandidate {
@@ -149,7 +82,7 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
         self.catch_up(tip_height).await;
         self.settle().await;
 
-        let mut mempool_rx = self.spawn_mempool_watcher();
+        let mut mempool_stream: Option<_> = None;
 
         loop {
             let stream = match self.chain.chain_tip_change_stream().await {
@@ -163,16 +96,58 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
             tokio::pin!(stream);
 
             use futures_util::StreamExt as _;
+            let mut mempool_alive = false;
             loop {
+                // The mempool stream is opened lazily on first use and
+                // re-opened after every end: each reconnect re-baselines
+                // against `getrawmempool` so evictions that happen while the
+                // stream is down are still surfaced.
+                if !mempool_alive {
+                    match self.chain.mempool_events().await {
+                        Ok(stream) => {
+                            self.rebaseline_mempool().await;
+                            mempool_stream = Some(stream);
+                            mempool_alive = true;
+                        }
+                        Err(e) => {
+                            tracing::warn!(%e, "mempool stream open failed");
+                            tokio::time::sleep(RETRY_PAUSE).await;
+                            continue;
+                        }
+                    }
+                }
                 tokio::select! {
-                    event = mempool_rx.recv() => {
-                        match event {
-                            Some(event) => self.on_mempool_event(event).await,
+                    item = mempool_stream
+                        .as_mut()
+                        .expect("mempool_alive implies present")
+                        .next() => {
+                        let item = match item {
+                            Some(item) => item,
                             None => {
-                                // The watcher never exits by design; a closed
-                                // channel means it panicked — respawn it.
-                                tracing::error!("mempool watcher died; respawning");
-                                mempool_rx = self.spawn_mempool_watcher();
+                                // Stream ended (error or server-side close):
+                                // drop it; the top of this loop reconnects and
+                                // re-baselines.
+                                mempool_alive = false;
+                                mempool_stream = None;
+                                continue;
+                            }
+                        };
+                        match item {
+                            Ok((zebra_indexer_proto::MempoolChangeKind::Invalidated, txid)) => {
+                                self.on_evicted(txid).await;
+                            }
+                            Ok((_kind, txid)) => {
+                                // `Mined` is a reorg-sensitive preview of what
+                                // the block pipeline authoritatively confirms;
+                                // `Added` for a transaction we did not build
+                                // carries no decision for this mint.
+                                tracing::trace!(%txid, "mempool event (informational)");
+                            }
+                            Err(e) => {
+                                tracing::warn!(%e, "mempool stream error; reconnecting");
+                                mempool_alive = false;
+                                mempool_stream = None;
+                                continue;
                             }
                         }
                     }
@@ -220,23 +195,21 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
         }
     }
 
-    fn spawn_mempool_watcher(&self) -> tokio::sync::mpsc::Receiver<MempoolEvent> {
-        let (tx, rx) = tokio::sync::mpsc::channel(256);
-        tokio::spawn(mempool_watcher(self.chain.clone(), JsonRpc::new(), tx));
-        rx
-    }
-
-    /// Mempool evidence: eviction candidates are verified against the node
-    /// (mempool + chain) before anything is released.
-    async fn on_mempool_event(&mut self, event: MempoolEvent) {
-        match event {
-            MempoolEvent::Invalidated(txid) => self.on_evicted(txid).await,
-            MempoolEvent::Rebaselined(present) => {
-                for txid in self.ops.unconfirmed_txids() {
-                    if !present.contains(&txid) {
-                        self.on_evicted(txid).await;
-                    }
-                }
+    /// Post-(re)connect mempool re-baseline: every unconfirmed submission
+    /// absent from the snapshot is eviction evidence only — it may have been
+    /// mined in the gap — so each goes through the same on-node verification
+    /// as an `Invalidated` event before anything is released.
+    async fn rebaseline_mempool(&mut self) {
+        let txids = match self.rpc.get_raw_mempool().await {
+            Ok(txids) => txids,
+            Err(e) => {
+                tracing::warn!(%e, "mempool re-baseline failed");
+                return;
+            }
+        };
+        for txid in self.ops.unconfirmed_txids() {
+            if !txids.contains(&txid) {
+                self.on_evicted(txid).await;
             }
         }
     }
