@@ -356,27 +356,27 @@ pub fn process_transition<P: Parameters>(
     wallet: &mut crate::wallet::Wallet,
     registry: &Registry,
     registry_keys: &crate::key::RegistryKeys,
-    ops: &mut crate::mint::OperationalState,
+    mint: &mut crate::mint::MintState,
 ) -> Option<crate::mint::RequestOutcome> {
     use crate::mint::{SubmissionKind, RequestOutcome};
 
     let key = ChallengeKey::new(network, name.clone(), action, ua.clone(), record_commitment);
-    if !ops.transition_challenge_check_and_mark(&key) {
+    if !mint.transition_challenge_check_and_mark(&key) {
         return None;
     }
 
-    let lock = ops.reserve_name(&name, Some(record_commitment))?;
+    let lock = mint.reserve_name(&name, Some(record_commitment))?;
     let name_binding = lock.binding();
 
     let req = match action {
-        Action::Update => authorize_update(network, registry, &mut ops.pending_otps, cursor_height, name, ua, otp),
-        Action::Release => authorize_release(network, registry, &mut ops.pending_otps, cursor_height, name, ua, otp),
+        Action::Update => authorize_update(network, registry, &mut mint.pending_otps, cursor_height, name, ua, otp),
+        Action::Release => authorize_release(network, registry, &mut mint.pending_otps, cursor_height, name, ua, otp),
         Action::Claim => unreachable!(),
     };
 
     match req {
         None => {
-            ops.release_name(&lock);
+            mint.release_name(&lock);
             None
         }
         Some(r) => {

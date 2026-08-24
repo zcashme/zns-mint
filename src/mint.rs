@@ -232,8 +232,8 @@ impl Submission {
 /// transaction is being assembled but not yet submitted.
 ///
 /// This is a capability token: only the caller that acquired it via
-/// [`OperationalState::reserve_name`] can release it via
-/// [`OperationalState::release_name`]. Once the transaction is submitted,
+/// [`MintState::reserve_name`] can release it via
+/// [`MintState::release_name`]. Once the transaction is submitted,
 /// the binding moves into the [`Submission`] and the name is locked by
 /// derivation — the pre-submit lock is consumed.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -262,7 +262,7 @@ pub struct NameBinding {
 /// 3. **OTPs issued** — [`PendingOtps`], already its own well-designed struct.
 /// 4. **Recovery cooldown** — `recovery_until` blocks all work after restart
 ///    until previous-process mempool txs confirm or expire.
-pub struct OperationalState {
+pub struct MintState {
     pub pending_otps: PendingOtps,
     pub submissions: BTreeMap<TxId, Submission>,
     pre_submit_locks: BTreeSet<NameBinding>,
@@ -278,13 +278,13 @@ pub struct OperationalState {
     transition_challenges_seen: BTreeSet<ChallengeKey>,
 }
 
-impl Default for OperationalState {
+impl Default for MintState {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl OperationalState {
+impl MintState {
     pub fn new() -> Self {
         Self {
             pending_otps: PendingOtps::new(),

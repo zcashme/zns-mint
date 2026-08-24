@@ -3,7 +3,7 @@
 //! Boot (chain integrity, seed unseal, key derivation, wallet seeding) then
 //! one loop forever: watch Zebra's tip stream and mempool stream, apply
 //! blocks, settle requests. Every state machine is a library type
-//! (`Wallet`, `Registry`, `OperationalState`); this function owns the
+//! (`Wallet`, `Registry`, `MintState`); this function owns the
 //! values and sequences the calls, top to bottom:
 //!
 //! 1. Setup: boot parts, clients, scan keys, recovery state.
@@ -32,7 +32,7 @@ use zns_mint::boot::Boot;
 use zns_mint::mint::treasury::memo::RequestMemo;
 use zns_mint::mint::{decrypt_name_notes, signer};
 use zns_mint::mint::{
-    Name, NameNote, OperationalState, SubmissionKind, TREASURY_ACCOUNT,
+    Name, NameNote, MintState, SubmissionKind, TREASURY_ACCOUNT,
     TX_EXPIRY_BUFFER,
 };
 use zns_mint::wallet::NoteLocator;
@@ -55,7 +55,7 @@ async fn main() {
 
     let mut wallet = wallet;
     let mut registry = registry;
-    let mut ops = OperationalState::recovering(boot_height);
+    let mut mint = MintState::recovering(boot_height);
 
     let scanning_keys = ScanningKeys::from_account_ufvks(wallet.ufvk_map().clone());
     let registry_orchard = registry_keys
@@ -98,7 +98,7 @@ async fn main() {
                     Ok(new_stream) => {
                         match rpc.get_raw_mempool().await {
                             Ok(present) => {
-                                for txid in ops.unconfirmed_txids() {
+                                for txid in mint.unconfirmed_txids() {
                                     if !present.contains(&txid) {
                                         eviction_candidates.push(txid);
                                     }
@@ -121,7 +121,7 @@ async fn main() {
             // releasing anything — a transaction that re-entered the mempool,
             // or was mined in the gap between evidence and check, is alive.
             while let Some(txid) = eviction_candidates.pop() {
-                let Some(submission) = ops.submissions.get(&txid) else {
+                let Some(submission) = mint.submissions.get(&txid) else {
                     continue; // not ours, or already gone
                 };
                 if submission.confirmed_at.is_some() {
@@ -150,7 +150,7 @@ async fn main() {
                 // node still considers valid could later be mined — a
                 // double-spend race with exactly one winner. Availability,
                 // never safety.
-                if let Some(submission) = ops.evict(&txid) {
+                if let Some(submission) = mint.evict(&txid) {
                     tracing::warn!(
                         %txid,
                         kind = submission.kind.as_str(),
@@ -243,7 +243,7 @@ async fn main() {
                                 Err(e) => tracing::error!(?e, "wallet truncation failed"),
                             }
                             registry.truncate_to_height(ancestor);
-                            ops.invalidate_after_reorg(&registry, &wallet, ancestor);
+                            mint.invalidate_after_reorg(&registry, &wallet, ancestor);
                         }
                         // Advance (taller tip, or fresh boot with nothing
                         // applied yet).
@@ -375,7 +375,7 @@ async fn main() {
                                     .collect();
                                 let scanned_height = scanned.height();
                                 match wallet.put_blocks(&from_state, vec![scanned]) {
-                                    Ok(()) => ops.reconcile(&confirmed, scanned_height),
+                                    Ok(()) => mint.reconcile(&confirmed, scanned_height),
                                     Err(e) => tracing::error!(?e, "put_blocks failed"),
                                 }
                             }
@@ -390,14 +390,14 @@ async fn main() {
                     // observed tip, after the restart recovery window.
                     if let Some(applied) = wallet.applied_tip_metadata() {
                         let tip = applied.block_height();
-                        if !ops.recovery_complete(tip) {
+                        if !mint.recovery_complete(tip) {
                             tracing::info!(until = ?tip, "recovery window active; settlement paused");
                         } else {
                             let target = zcash_protocol::consensus::BlockHeight::from_u32(
                                 u32::from(tip) + 1,
                             );
                             let tip_hash = applied.block_hash();
-                            let mut excluded = ops.reserved_locators();
+                            let mut excluded = mint.reserved_locators();
 
                             // Intake: every matured Treasury request note,
                             // exactly once (10 confirmations).
@@ -412,7 +412,7 @@ async fn main() {
                             for note in intake {
                                 let locator =
                                     NoteLocator::ironwood(TREASURY_ACCOUNT, note.note.rho());
-                                if ops.intake_seen(locator) {
+                                if mint.intake_seen(locator) {
                                     continue;
                                 }
                                 let memo = match RequestMemo::parse(&note.memo) {
@@ -420,7 +420,7 @@ async fn main() {
                                     Err(_) => {
                                         // Not a ZNS request memo (or
                                         // malformed): never revisit.
-                                        ops.mark_intake_seen(locator);
+                                        mint.mark_intake_seen(locator);
                                         continue;
                                     }
                                 };
@@ -428,14 +428,14 @@ async fn main() {
                                 let confirmed_height =
                                     note.mined_height.expect("filtered on Some");
                                 let Some(name) = Name::parse(memo.name()) else {
-                                    ops.mark_intake_seen(locator);
+                                    mint.mark_intake_seen(locator);
                                     continue;
                                 };
                                 // The request's UA validated at the single
                                 // boundary; invalid UAs end this note's
                                 // handling (never revisited).
                                 let Some(ua) = NameNote::parse_ua(&network, memo.ua()) else {
-                                    ops.mark_intake_seen(locator);
+                                    mint.mark_intake_seen(locator);
                                     continue;
                                 };
                                 let ua_string = memo.ua().to_string();
@@ -456,7 +456,7 @@ async fn main() {
                                             &registry,
                                             &treasury_keys,
                                             &registry_keys,
-                                            &mut ops,
+                                            &mut mint,
                                         )
                                     }
                                     // OTP relay request: the controller (the
@@ -482,7 +482,7 @@ async fn main() {
                                             target,
                                             &mut wallet,
                                             &treasury_keys,
-                                            &mut ops,
+                                            &mut mint,
                                         )
                                     }
                                     // Transition with OTP: update binds to the
@@ -510,7 +510,7 @@ async fn main() {
                                             &mut wallet,
                                             &registry,
                                             &registry_keys,
-                                            &mut ops,
+                                            &mut mint,
                                         )
                                     }
                                 };
@@ -568,13 +568,13 @@ async fn main() {
                                                 .map(|(key, _)| key.clone());
                                             if let Some((key, otp)) = outcome.relay_challenge {
                                                 if accepted {
-                                                    ops.pending_otps
+                                                    mint.pending_otps
                                                         .record_issued(key, &otp, tip);
                                                 } else {
-                                                    ops.pending_otps.release_challenge(&key);
+                                                    mint.pending_otps.release_challenge(&key);
                                                 }
                                             }
-                                            ops.record_submission(
+                                            mint.record_submission(
                                                 kind,
                                                 txid,
                                                 reserved,
@@ -585,7 +585,7 @@ async fn main() {
                                                 ),
                                                 &mut excluded,
                                             );
-                                            ops.mark_intake_seen(locator);
+                                            mint.mark_intake_seen(locator);
                                         }
                                         Err(error) => {
                                             tracing::warn!(
@@ -594,10 +594,10 @@ async fn main() {
                                                 "assembly failed"
                                             );
                                             if let Some(lock) = outcome.name_lock {
-                                                ops.release_name(&lock);
+                                                mint.release_name(&lock);
                                             }
                                             if let Some((key, _)) = outcome.relay_challenge {
-                                                ops.pending_otps.release_challenge(&key);
+                                                mint.pending_otps.release_challenge(&key);
                                             }
                                             // Invalid request or held lock: not
                                             // marked seen — the next cycle
@@ -666,7 +666,7 @@ async fn main() {
                                                     "submit not accepted"
                                                 ),
                                             }
-                                            ops.record_submission(
+                                            mint.record_submission(
                                                 kind,
                                                 txid,
                                                 Vec::new(),

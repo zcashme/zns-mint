@@ -200,15 +200,15 @@ pub fn process_otp_relay<P: Parameters>(
     target_height: BlockHeight,
     wallet: &mut Wallet,
     treasury_keys: &TreasuryKeys,
-    ops: &mut crate::mint::OperationalState,
+    mint: &mut crate::mint::MintState,
 ) -> Option<crate::mint::RequestOutcome> {
     use crate::mint::otp::{ChallengeKey, OtpCode};
     use crate::mint::{SubmissionKind, RequestOutcome};
 
     let key = ChallengeKey::new(network, name.clone(), action, requested_ua.clone(), record_commitment);
-    if ops.pending_otps.contains(&key)
-        || ops.pending_otps.is_challenge_reserved(&key)
-        || !ops.relay_challenge_check_and_mark(&key)
+    if mint.pending_otps.contains(&key)
+        || mint.pending_otps.is_challenge_reserved(&key)
+        || !mint.relay_challenge_check_and_mark(&key)
     {
         return None;
     }
@@ -219,8 +219,8 @@ pub fn process_otp_relay<P: Parameters>(
         return None;
     }
 
-    let name_binding = ops.name_binding(name, Some(record_commitment));
-    if !ops.pending_otps.reserve_challenge(&key) {
+    let name_binding = mint.name_binding(name, Some(record_commitment));
+    if !mint.pending_otps.reserve_challenge(&key) {
         return None;
     }
     let otp = OtpCode::generate();

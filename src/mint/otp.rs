@@ -1,7 +1,7 @@
 //! OTP challenge machinery for ZNS name transitions.
 //!
 //! Kernel-level state shared by both authorities: `PendingOtps` is a field of
-//! [`crate::mint::OperationalState`], the Registry's `authorize_update`/
+//! [`crate::mint::MintState`], the Registry's `authorize_update`/
 //! `authorize_release` consume challenges from it, and the Treasury's OTP
 //! relay delivers the codes it generates. Also home to the OTP relay memo
 //! codec (`ZNS:otp:<otp>:<name>:<verb>:<ua>`).
