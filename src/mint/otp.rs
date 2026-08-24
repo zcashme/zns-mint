@@ -218,6 +218,15 @@ impl PendingOtps {
         before - self.pending.len()
     }
 
+    /// Discards a challenge entirely: its relay reservation and any issued
+    /// OTP. Called when the relay transaction carrying the OTP is evicted
+    /// from the mempool dead — the controller can never decrypt a code whose
+    /// transaction will not confirm.
+    pub fn discard(&mut self, key: &ChallengeKey) {
+        self.pending.remove(key);
+        self.reserved.remove(key);
+    }
+
     /// Whether an unexpired OTP exists for this challenge.
     pub fn contains(&self, key: &ChallengeKey) -> bool {
         self.pending.contains_key(key)

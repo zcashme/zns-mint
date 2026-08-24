@@ -1,28 +1,4 @@
 //! zns-mint run loop.
-//!
-//! Boot (chain integrity, seed unseal, key derivation, wallet seeding from the
-//! origin checkpoint) then a single linear pipeline, one block at a time:
-//!
-//! 1. **Observe** — Zebra's gRPC best-chain tip stream. New tip → catch up;
-//!    shorter/divergent tip → rewind to the common ancestor and catch up.
-//! 2. **Scan** — upstream `decrypt_block` + `scan_block` produce the
-//!    `ScannedBlock` (commitment streams, per-tx nullifier map, ordinary
-//!    received notes with scanner-derived nullifiers).
-//! 3. **ZNS pass** — `ZnsIronwoodDomain` trial-decryption over Ironwood
-//!    actions; each candidate's memo-derived ZNS commitment is checked against
-//!    the action's real cmx before the note is exposed. The standard lane
-//!    cannot see these notes (it re-derives the commitment from rseed).
-//! 4. **Apply** — `Registry::apply_block` (pre-put wallet + scanned evidence),
-//!    `store_name_note` (the wallet's own record of its name notes),
-//!    `WalletWrite::put_blocks`, `OperationalState::reconcile`.
-//! 5. **Settle** — once per new tip, after the restart recovery window:
-//!    Treasury intake (request memos on received notes → claims, OTP relays,
-//!    transitions), broadcast, record submissions; then vault sweep and
-//!    Registry fee replenishment.
-//!
-//! Mempool monitoring is deliberately absent: submissions carry expiry
-//! heights, `reconcile` prunes them, and the post-restart recovery window
-//! fences double-spends across process lifetimes.
 
 use std::collections::BTreeSet;
 use std::convert::Infallible;
@@ -30,9 +6,9 @@ use std::time::Duration;
 
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::data_api::WalletWrite as _;
+use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
 use zcash_client_backend::scanning::Nullifiers;
 use zcash_client_backend::scanning::ScanningKeys;
-use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
 use zip32::AccountId;
 
 use zns_mint::boot::Boot;
@@ -52,6 +28,73 @@ const INTAKE_CONFIRMATIONS: u32 = 10;
 
 /// Pause between retries of chain I/O (fetch, scan, submit).
 const RETRY_PAUSE: Duration = Duration::from_secs(5);
+
+/// Evidence from the mempool watcher.
+enum MempoolEvent {
+    /// The node invalidated a transaction.
+    Invalidated(zcash_primitives::transaction::TxId),
+    /// The watcher (re)connected; `txids` is the post-connect mempool
+    /// baseline. A pending submission absent from it is eviction evidence
+    /// only — it may have been mined in the gap — so the handler verifies
+    /// against the node before releasing anything.
+    Rebaselined(Vec<zcash_primitives::transaction::TxId>),
+}
+
+/// The mempool watcher: a dedicated task translating Zebra's mempool
+/// lifecycle stream into compact evidence for the run loop.
+///
+/// Only `Invalidated` is reported: `Mined` is a reorg-sensitive preview of
+/// what the block pipeline will authoritatively confirm, and `Added` for a
+/// transaction we did not build carries no decision for this mint. After
+/// every (re)connect the watcher re-baselines and reports the snapshot, so
+/// evictions that happen during a disconnect are still surfaced.
+async fn mempool_watcher(
+    mut chain: ChainClient,
+    rpc: JsonRpc,
+    events: tokio::sync::mpsc::Sender<MempoolEvent>,
+) {
+    use futures_util::StreamExt as _;
+    use zebra_indexer_proto::MempoolChangeKind;
+
+    loop {
+        let stream = match chain.mempool_events().await {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::warn!(%e, "mempool stream open failed; retrying");
+                tokio::time::sleep(RETRY_PAUSE).await;
+                continue;
+            }
+        };
+        tokio::pin!(stream);
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok((MempoolChangeKind::Invalidated, txid)) => {
+                    if events.send(MempoolEvent::Invalidated(txid)).await.is_err() {
+                        return; // run loop gone; nothing to watch for
+                    }
+                }
+                Ok((_kind, txid)) => {
+                    tracing::trace!(%txid, "mempool event (informational)")
+                }
+                Err(e) => {
+                    tracing::warn!(%e, "mempool stream error; reconnecting");
+                    break;
+                }
+            }
+        }
+
+        // Reconnected (or first connect): re-baseline and report the
+        // snapshot so the run loop can re-verify its pending set.
+        tokio::time::sleep(RETRY_PAUSE).await;
+        match rpc.get_raw_mempool().await {
+            Ok(txids) => {
+                let _ = events.send(MempoolEvent::Rebaselined(txids)).await;
+            }
+            Err(e) => tracing::warn!(%e, "mempool re-baseline failed"),
+        }
+    }
+}
 
 /// One decrypted Name Note candidate from the ZNS pass, with the facts the
 /// wallet store and the Registry evidence need.
@@ -106,6 +149,8 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
         self.catch_up(tip_height).await;
         self.settle().await;
 
+        let mut mempool_rx = self.spawn_mempool_watcher();
+
         loop {
             let stream = match self.chain.chain_tip_change_stream().await {
                 Ok(stream) => stream,
@@ -118,41 +163,128 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
             tokio::pin!(stream);
 
             use futures_util::StreamExt as _;
-            while let Some(message) = stream.next().await {
-                let Ok(message) = message else {
-                    tracing::warn!("tip stream ended; reconnecting");
-                    break;
-                };
-                let (height, hash) = zcash::tip_height_hash(&message);
+            loop {
+                tokio::select! {
+                    event = mempool_rx.recv() => {
+                        match event {
+                            Some(event) => self.on_mempool_event(event).await,
+                            None => {
+                                // The watcher never exits by design; a closed
+                                // channel means it panicked — respawn it.
+                                tracing::error!("mempool watcher died; respawning");
+                                mempool_rx = self.spawn_mempool_watcher();
+                            }
+                        }
+                    }
+                    message = stream.next() => {
+                        let Some(Ok(message)) = message else {
+                            tracing::warn!("tip stream ended; reconnecting");
+                            break;
+                        };
+                        let (height, hash) = zcash::tip_height_hash(&message);
 
-                match self.wallet.applied_tip_metadata() {
-                    Some(applied) if height > applied.block_height() => {
-                        self.catch_up(height).await;
-                        self.settle().await;
-                    }
-                    Some(applied) if height == applied.block_height() && hash == applied.block_hash() => {
-                        // Duplicate event at our tip — nothing to do.
-                    }
-                    Some(applied) => {
-                        // Shorter tip, or same height under a different hash:
-                        // the best chain diverged from our applied prefix.
-                        tracing::warn!(
-                            applied = u32::from(applied.block_height()),
-                            best = u32::from(height),
-                            "reorg detected; rewinding to common ancestor"
-                        );
-                        self.rewind().await;
-                        self.catch_up(height).await;
-                        self.settle().await;
-                    }
-                    None => {
-                        // No block applied yet (fresh boot): catch up from the
-                        // seeded origin checkpoint.
-                        self.catch_up(height).await;
-                        self.settle().await;
+                        match self.wallet.applied_tip_metadata() {
+                            Some(applied) if height > applied.block_height() => {
+                                self.catch_up(height).await;
+                                self.settle().await;
+                            }
+                            Some(applied)
+                                if height == applied.block_height()
+                                    && hash == applied.block_hash() =>
+                            {
+                                // Duplicate event at our tip — nothing to do.
+                            }
+                            Some(applied) => {
+                                // Shorter tip, or same height under a different
+                                // hash: the best chain diverged from our applied
+                                // prefix.
+                                tracing::warn!(
+                                    applied = u32::from(applied.block_height()),
+                                    best = u32::from(height),
+                                    "reorg detected; rewinding to common ancestor"
+                                );
+                                self.rewind().await;
+                                self.catch_up(height).await;
+                                self.settle().await;
+                            }
+                            None => {
+                                // No block applied yet (fresh boot): catch up
+                                // from the seeded origin checkpoint.
+                                self.catch_up(height).await;
+                                self.settle().await;
+                            }
+                        }
                     }
                 }
             }
+        }
+    }
+
+    fn spawn_mempool_watcher(&self) -> tokio::sync::mpsc::Receiver<MempoolEvent> {
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        tokio::spawn(mempool_watcher(self.chain.clone(), JsonRpc::new(), tx));
+        rx
+    }
+
+    /// Mempool evidence: eviction candidates are verified against the node
+    /// (mempool + chain) before anything is released.
+    async fn on_mempool_event(&mut self, event: MempoolEvent) {
+        match event {
+            MempoolEvent::Invalidated(txid) => self.on_evicted(txid).await,
+            MempoolEvent::Rebaselined(present) => {
+                for txid in self.ops.unconfirmed_txids() {
+                    if !present.contains(&txid) {
+                        self.on_evicted(txid).await;
+                    }
+                }
+            }
+        }
+    }
+
+    /// One of our unconfirmed submissions was reported invalidated (or is
+    /// absent from a fresh mempool baseline). Establishes death against the
+    /// node before releasing: a transaction that re-entered the mempool, or
+    /// was mined in the gap between evidence and check, is alive.
+    ///
+    /// Residual risk, accepted and logged: a queue-evicted transaction the
+    /// node still considers valid could in principle be mined later. The
+    /// outcome is a double-spend race in which exactly one transaction
+    /// confirms — an availability cost, never a safety violation.
+    async fn on_evicted(&mut self, txid: zcash_primitives::transaction::TxId) {
+        let Some(submission) = self.ops.submissions.get(&txid) else {
+            return; // not ours, or already gone
+        };
+        if submission.confirmed_at.is_some() {
+            return; // already reconciled through a block
+        }
+        let at = self
+            .wallet
+            .applied_tip_metadata()
+            .map(|m| m.block_height())
+            .unwrap_or(self.boot_height);
+        let branch_id =
+            zcash_protocol::consensus::BranchId::for_height(&self.network, at);
+
+        let present = loop {
+            match self.rpc.get_raw_transaction(branch_id, txid).await {
+                Ok(found) => break found.is_some(),
+                Err(e) => {
+                    tracing::warn!(%e, %txid, "eviction verification failed; retrying");
+                    tokio::time::sleep(RETRY_PAUSE).await;
+                }
+            }
+        };
+        if present {
+            tracing::debug!(%txid, "invalidation raced re-entry or mining; alive");
+            return;
+        }
+
+        if let Some(submission) = self.ops.evict(&txid) {
+            tracing::warn!(
+                %txid,
+                kind = submission.kind.as_str(),
+                "submission evicted from mempool; reservations released"
+            );
         }
     }
 
@@ -227,40 +359,37 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
         &mut self,
         from_state: zcash_client_backend::data_api::chain::ChainState,
     ) -> Result<(), zcash::TransportError> {
-        let next_height =
-            zcash_protocol::consensus::BlockHeight::from_u32(u32::from(from_state.block_height()) + 1);
+        let next_height = zcash_protocol::consensus::BlockHeight::from_u32(
+            u32::from(from_state.block_height()) + 1,
+        );
         let block = self.rpc.get_block(&self.network, next_height).await?;
 
         // ZNS pass first (needs `&block`); the standard pass consumes it.
-        let candidates = decrypt_name_notes(
-            &block,
-            &self.registry_ivk,
-            self.registry_recipient,
-        );
+        let candidates = decrypt_name_notes(&block, &self.registry_ivk, self.registry_recipient);
 
         let prior_metadata = self.wallet.applied_tip_metadata();
-        let (header, batches) =
-            decrypt_block(&self.network, block, &self.scanning_keys);
+        let (header, batches) = decrypt_block(&self.network, block, &self.scanning_keys);
         let nullifiers = Nullifiers::empty();
         // The published Treasury UA omits a transparent receiver, so no
         // transparent output is ever attributed to a wallet account: the
         // account-resolution closure permanently yields `None`.
-        let scanned = scan_block(
-            &self.network,
-            next_height,
-            &header,
-            batches,
-            &self.scanning_keys,
-            &nullifiers,
-            prior_metadata.as_ref(),
-            |_| {
-                Ok::<
-                    Option<(AccountId, Option<transparent::keys::TransparentKeyScope>)>,
-                    Infallible,
-                >(None)
-            },
-        )
-        .map_err(|_| zcash::TransportError::BadNodeData("scan_block"))?;
+        let scanned =
+            scan_block(
+                &self.network,
+                next_height,
+                &header,
+                batches,
+                &self.scanning_keys,
+                &nullifiers,
+                prior_metadata.as_ref(),
+                |_| {
+                    Ok::<
+                        Option<(AccountId, Option<transparent::keys::TransparentKeyScope>)>,
+                        Infallible,
+                    >(None)
+                },
+            )
+            .map_err(|_| zcash::TransportError::BadNodeData("scan_block"))?;
 
         // Registry evidence is judged against the pre-put wallet (its fee-note
         // set evolves per transaction inside `apply_block` itself).
@@ -268,11 +397,16 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
             .iter()
             .map(|c| {
                 zns_mint::mint::registry::ReceivedNameNote::new(
-                    c.txid, c.action_index, c.note.clone(), c.payload.clone(),
+                    c.txid,
+                    c.action_index,
+                    c.note.clone(),
+                    c.payload.clone(),
                 )
             })
             .collect();
-        self.registry = self.registry.apply_block(&self.wallet, &scanned, &name_notes);
+        self.registry = self
+            .registry
+            .apply_block(&self.wallet, &scanned, &name_notes);
 
         // The wallet's own record of its Name Notes — before `put_blocks`
         // consumes the `ScannedBlock`.
@@ -409,29 +543,26 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
             let ua = memo.ua().to_string();
 
             let outcome = match &memo {
-                RequestMemo::Claim { .. } => {
-                    zns_mint::mint::claim::process_claim(
-                        &self.network,
-                        name.clone(),
-                        &ua,
-                        locator,
-                        value,
-                        confirmed_height,
-                        tip,
-                        target,
-                        excluded,
-                        &mut self.wallet,
-                        &self.registry,
-                        &self.treasury_keys,
-                        &self.registry_keys,
-                        &mut self.ops,
-                        &mut self.seen_claims,
-                    )
-                }
+                RequestMemo::Claim { .. } => zns_mint::mint::claim::process_claim(
+                    &self.network,
+                    name.clone(),
+                    &ua,
+                    locator,
+                    value,
+                    confirmed_height,
+                    tip,
+                    target,
+                    excluded,
+                    &mut self.wallet,
+                    &self.registry,
+                    &self.treasury_keys,
+                    &self.registry_keys,
+                    &mut self.ops,
+                    &mut self.seen_claims,
+                ),
                 // OTP relay request: the controller (the record's bound UA)
                 // receives the OTP, the requester's UA rides the memo.
-                RequestMemo::Update { otp: None, .. }
-                | RequestMemo::Release { otp: None, .. } => {
+                RequestMemo::Update { otp: None, .. } | RequestMemo::Release { otp: None, .. } => {
                     let Some(record) = self.registry.record(&name) else {
                         continue;
                     };
@@ -545,7 +676,12 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
         }
 
         // A relay's OTP becomes deliverable only once its transaction is
-        // definitively accepted for broadcast.
+        // definitively accepted for broadcast. The challenge travels with the
+        // submission so eviction can discard it later.
+        let relay_challenge = outcome
+            .relay_challenge
+            .as_ref()
+            .map(|(key, _)| key.clone());
         if let Some((key, otp)) = outcome.relay_challenge {
             if accepted {
                 self.ops.pending_otps.record_issued(key, &otp, tip);
@@ -559,8 +695,8 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
             txid,
             reserved,
             outcome.name_binding,
-            zcash_protocol::consensus::BlockHeight::from_u32(u32::from(target)
-                + TX_EXPIRY_BUFFER),
+            relay_challenge,
+            zcash_protocol::consensus::BlockHeight::from_u32(u32::from(target) + TX_EXPIRY_BUFFER),
             excluded,
         );
     }
@@ -640,9 +776,8 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
             txid,
             Vec::new(),
             None,
-            zcash_protocol::consensus::BlockHeight::from_u32(
-                u32::from(tip) + 1 + TX_EXPIRY_BUFFER,
-            ),
+            None,
+            zcash_protocol::consensus::BlockHeight::from_u32(u32::from(tip) + 1 + TX_EXPIRY_BUFFER),
             excluded,
         );
     }
@@ -668,8 +803,7 @@ fn decrypt_name_notes(
         let Some(bundle) = tx.ironwood_bundle() else {
             continue;
         };
-        let zns_capable = bundle.bundle_version()
-            == orchard::bundle::BundleVersion::ironwood_v3()
+        let zns_capable = bundle.bundle_version() == orchard::bundle::BundleVersion::ironwood_v3()
             && bundle.flags().outputs_enabled();
         for (action_index, action) in bundle.actions().iter().enumerate() {
             if zns_capable {
@@ -678,24 +812,23 @@ fn decrypt_name_notes(
                         action,
                         registry_ivk,
                         |note, memo, cmx| {
-                            let payload =
-                                match zns_mint::mint::note::decode_name_note_payload(memo) {
-                                    Some(p) => p,
-                                    None => return subtle::Choice::from(0),
-                                };
+                            let payload = match zns_mint::mint::note::decode_name_note_payload(memo)
+                            {
+                                Some(p) => p,
+                                None => return subtle::Choice::from(0),
+                            };
                             let (rcm, psi) = payload.opening();
                             let (g_d, pk_d) = note.recipient().zns_commitment_keys();
                             let rho = Option::from(pasta_curves::pallas::Base::from_repr(
                                 note.rho().to_bytes(),
                             ))
                             .expect("valid rho");
-                            let computed =
-                                match zns_mint::mint::note::note_commitment_cmx(
-                                    g_d, pk_d, 0, rho, psi, rcm,
-                                ) {
-                                    Some(c) => c,
-                                    None => return subtle::Choice::from(0),
-                                };
+                            let computed = match zns_mint::mint::note::note_commitment_cmx(
+                                g_d, pk_d, 0, rho, psi, rcm,
+                            ) {
+                                Some(c) => c,
+                                None => return subtle::Choice::from(0),
+                            };
                             computed.to_repr().ct_eq(&cmx.to_bytes())
                         },
                     )
@@ -751,10 +884,7 @@ async fn main() {
         .prepare();
     let registry_recipient = registry_orchard.address_at(0u32, orchard::keys::Scope::External);
 
-    tracing::info!(
-        boot = u32::from(boot_height),
-        "run loop starting"
-    );
+    tracing::info!(boot = u32::from(boot_height), "run loop starting");
 
     RunLoop {
         network,

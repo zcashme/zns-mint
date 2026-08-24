@@ -270,6 +270,10 @@ pub struct Submission {
     pub expiry_height: BlockHeight,
     pub reserved_notes: Vec<NoteLocator>,
     pub name_binding: Option<NameBinding>,
+    /// The relay challenge this submission delivers, if any. Carried here so
+    /// the full relay lifecycle — reserve, issue, release-on-eviction — is
+    /// derivable from the submission itself.
+    pub relay_challenge: Option<ChallengeKey>,
     pub confirmed_at: Option<BlockHeight>,
 }
 
@@ -428,6 +432,7 @@ impl OperationalState {
         txid: TxId,
         reserved_notes: Vec<NoteLocator>,
         name_binding: Option<NameBinding>,
+        relay_challenge: Option<ChallengeKey>,
         expiry_height: BlockHeight,
         excluded: &mut BTreeSet<NoteLocator>,
     ) {
@@ -442,8 +447,34 @@ impl OperationalState {
             expiry_height,
             reserved_notes,
             name_binding,
+            relay_challenge,
             confirmed_at: None,
         });
+    }
+
+    /// The txids of every submission not yet confirmed.
+    pub fn unconfirmed_txids(&self) -> Vec<TxId> {
+        self.submissions
+            .iter()
+            .filter(|(_, sub)| sub.confirmed_at.is_none())
+            .map(|(txid, _)| *txid)
+            .collect()
+    }
+
+    /// Removes a submission the node has invalidated and that exists in
+    /// neither its mempool nor its chain, releasing every reservation it
+    /// derived: the name unlock and note reservations follow from removal,
+    /// and a carried relay challenge — reservation and issued OTP — is
+    /// discarded with it.
+    ///
+    /// The caller must have verified absence against the node; this method
+    /// trusts that check.
+    pub fn evict(&mut self, txid: &TxId) -> Option<Submission> {
+        let submission = self.submissions.remove(txid)?;
+        if let Some(key) = &submission.relay_challenge {
+            self.pending_otps.discard(key);
+        }
+        Some(submission)
     }
 
     /// Reconciles in-flight submissions with confirmed blocks.
