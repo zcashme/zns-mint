@@ -4,21 +4,39 @@
 //! ordinary-note lane. These notes are ordinary value notes used to pay
 //! ZIP-317 fees for Registry-origin transactions.
 
+use std::num::NonZeroU32;
+
+use zcash_client_backend::data_api::wallet::input_selection::{LockFilter, LockedInputPolicy};
+use zcash_client_backend::data_api::{InputSource, NoteFilter, WalletRead};
+use zcash_protocol::value::Zatoshis;
+use zcash_protocol::ShieldedPool;
+
 use crate::mint::REGISTRY_ACCOUNT;
-use crate::wallet::{transaction::ReceivedIronwoodNote, Wallet};
+use crate::wallet::Wallet;
 
 /// Target value for one Registry fee note.
 ///
-/// This is intentionally larger than the minimum current Name Note fee so a
-/// single fee note can cover ordinary claim/update/release transactions with
-/// room for fee-policy changes and change output overhead.
+/// A Name Note lifecycle bundle is two to five actions; ZIP-317 prices it at
+/// 10,000–25,000 zatoshis padded (`MINIMUM_FEE` = 10,000 and 5,000 per
+/// action past two grace actions, `zcash_primitives`
+/// `transaction/fees/zip317.rs:19-40`). This value — five minimum fees —
+/// lets one fee note cover one lifecycle op with headroom for fee drift and
+/// per-note change overhead. Overshoot is safe: an unspent remainder returns
+/// as Registry change, itself a fresh fee note.
 pub const REGISTRY_FEE_NOTE_TARGET_VALUE: u64 = 50_000;
 
-/// If the Registry has fewer fee notes than this, Treasury should refill it.
+/// Unspent fee notes below which the Treasury refills the pool.
+///
+/// The floor is the burst the pool must absorb while one refill confirms:
+/// each lifecycle op burns roughly half a fee note on average (the change
+/// returns as a new note), and a refill needs one confirmation to land.
+/// Twenty funded lifecycle ops of in-flight headroom.
 pub const MIN_REGISTRY_FEE_NOTES: usize = 20;
 
-/// Number of fee-note outputs created by one Treasury -> Registry refill.
-pub const REGISTRY_FUNDING_BATCH_SIZE: usize = 100;
+/// Pool size a refill restores: twice the floor — comfortable steady state
+/// without overshoot. (Supersedes a fixed batch of 100, which jumped the
+/// pool to six times the floor for no recorded reason.)
+pub const REGISTRY_FEE_POOL_TARGET: usize = 40;
 
 /// Registry Ironwood note classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,9 +58,14 @@ pub fn classify_registry_note_parts(value: u64) -> RegistryNoteClass {
     }
 }
 
-/// Classifies a decrypted Registry Ironwood note.
-pub fn classify_registry_ironwood_note(note: &ReceivedIronwoodNote) -> RegistryNoteClass {
-    classify_registry_note_parts(note.note.value().inner())
+/// Classifies a received Registry Ironwood note.
+pub fn classify_registry_ironwood_note(
+    note: &zcash_client_backend::wallet::ReceivedNote<
+        zcash_client_backend::wallet::NoteId,
+        orchard::note::Note,
+    >,
+) -> RegistryNoteClass {
+    classify_registry_note_parts(note.note().value().inner())
 }
 
 /// Count of Registry fee notes rebuilt from wallet state.
@@ -56,28 +79,55 @@ impl RegistryFeeLiquidity {
         Self { fee_note_count: 0 }
     }
 
+    /// Counts the pool's unspent fee notes from wallet state, through
+    /// upstream `InputSource::get_account_metadata` with
+    /// `NoteFilter::ExceedsMinValue(ZERO)` — strictly positive value, which
+    /// excludes value-0 Name Notes by construction — under the same
+    /// spendability rules (one confirmation, unspent, lock-excluded) that
+    /// fee selection itself applies, so the count can never disagree with
+    /// what a lifecycle op can actually draw on.
+    ///
+    /// Note *count* is the metric, not summed value: one fee note ≈ one
+    /// lifecycle op, and change regenerates the pool while only the fee
+    /// proper (10k–25k per op) grinds it down.
     pub fn from_wallet(wallet: &Wallet) -> Self {
-        let mut snapshot = Self::empty();
+        // Counting needs a target height; before the wallet has observed a
+        // tip there is nothing scanned to count. An empty pool at boot is
+        // the true pre-replenishment state, not an error.
+        let Some((target, _anchor)) = wallet
+            .get_target_and_anchor_heights(NonZeroU32::MIN)
+            .ok()
+            .flatten()
+        else {
+            return Self::empty();
+        };
 
-        for note in wallet.ironwood_notes_for(REGISTRY_ACCOUNT) {
-            if classify_registry_ironwood_note(note) == RegistryNoteClass::Fee {
-                snapshot.fee_note_count += 1;
-            }
-        }
-
-        snapshot
+        let fee_note_count = wallet
+            .get_account_metadata(
+                REGISTRY_ACCOUNT,
+                &NoteFilter::ExceedsMinValue(Zatoshis::ZERO),
+                target,
+                &[],
+                LockFilter::Policy(&LockedInputPolicy::default()),
+            )
+            .ok()
+            .and_then(|meta| meta.ironwood())
+            .map(|pool| pool.note_count())
+            .unwrap_or(0);
+        Self { fee_note_count }
     }
 
-    /// Returns the Treasury funding plan needed to restore the target fee pool.
+    /// Returns the Treasury funding plan that restores the target fee pool.
     pub fn treasury_funding_plan(&self) -> Option<RegistryFundingPlan> {
         if self.fee_note_count >= MIN_REGISTRY_FEE_NOTES {
             return None;
         }
 
+        let output_count = REGISTRY_FEE_POOL_TARGET - self.fee_note_count;
         Some(RegistryFundingPlan {
-            output_count: REGISTRY_FUNDING_BATCH_SIZE,
+            output_count,
             output_value: REGISTRY_FEE_NOTE_TARGET_VALUE,
-            total_amount: REGISTRY_FEE_NOTE_TARGET_VALUE * REGISTRY_FUNDING_BATCH_SIZE as u64,
+            total_amount: REGISTRY_FEE_NOTE_TARGET_VALUE * output_count as u64,
         })
     }
 }

@@ -1,5 +1,32 @@
 # Treasury design record
 
+## 2026-09-02 — Treasury is a keyless policy layer over the wallet
+
+- The `Treasury` view struct and its two methods (`unspent_notes`,
+  `balance`) are deleted: zero callers remained after the vault and
+  replenish rewrites, both of which read balances and notes through the
+  upstream wallet traits directly. No exclusion-free wrapper survives to
+  re-grow (the 2026-07-24 rule).
+- Module docs now state the five responsibilities and the keyless boundary:
+  Treasury holds no keys and no notes — not even viewing keys; every fact
+  flows through a wallet projection, every signing capability arrives as a
+  borrowed argument. Spending authority flows through `AccountKeys`
+  (key.rs), viewing facts through the wallet.
+
+## 2026-08-16 — Treasury carries live pricing
+
+- `Treasury` gains `refresh_price(tip)` / `price(name, tip)` / `rate(tip)`
+  delegating to the embedded `pricing::RateOracle`. The run loop refreshes
+  once per block before evaluating requests; every claim in a cycle prices
+  against one rate. Pricing is evaluation-time only — see
+  `treasury/pricing.changelog.md` — so `Treasury` carries no historical
+  pricing state and rebuilds cold on boot.
+
+## 2026-08-15 — Treasury view projects Ironwood notes
+
+- `Treasury::unspent_notes` returns the Treasury account's Ironwood notes.
+  Treasury notes are Ironwood notes; the Orchard spend lane is deleted.
+
 ## 2026-07-28 — Stale claim-payment exclusion
 
 - Claim matching receives the canonical Registry view and rejects an unspent

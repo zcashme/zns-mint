@@ -19,37 +19,11 @@
 //! 4. **Deposit to the vault** (`vault`) — when the spendable balance exceeds
 //!    the threshold, send the excess to the project vault's transparent
 //!    address, retaining a fixed reserve.
-//! 5. **Fund the Registry** (`replenish`) — mint fresh fee notes from
-//!    Treasury value when the Registry's fee liquidity runs low.
-
-use crate::mint::TREASURY_ACCOUNT;
+//! 5. **Fund the Registry** (`replenish`) — refill the Registry's fee-note
+//!    pool from Treasury value when it drops below its floor.
 
 pub mod claim;
 pub mod memo;
 pub mod replenish;
 pub mod relay;
 pub mod vault;
-use crate::wallet::transaction::ReceivedIronwoodNote;
-use crate::wallet::Wallet;
-/// Treasury wallet view.
-///
-/// The Treasury does not own notes; `Wallet` owns all notes and commitment
-/// trees. These methods project the Treasury account's slice of the wallet.
-#[derive(Default)]
-pub struct Treasury;
-
-impl Treasury {
-    /// The Treasury's unspent notes. Treasury notes are Ironwood notes:
-    /// NU6.3 disables Orchard cross-address transfers, so users cannot send
-    /// the Treasury Orchard notes.
-    pub fn unspent_notes<'w>(
-        &self,
-        wallet: &'w Wallet,
-    ) -> impl Iterator<Item = &'w ReceivedIronwoodNote> {
-        wallet.ironwood_notes_for(TREASURY_ACCOUNT)
-    }
-
-    pub fn balance(&self, wallet: &Wallet) -> u64 {
-        wallet.balance(TREASURY_ACCOUNT).into_u64()
-    }
-}
