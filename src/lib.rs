@@ -10,6 +10,5 @@ compile_error!("dev-regtest is a development-only feature and must not be enable
 pub mod boot;
 pub mod key;
 pub mod mint;
-pub mod sync;
 pub mod wallet;
 pub mod zcash;

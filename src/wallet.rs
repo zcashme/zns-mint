@@ -160,4 +160,20 @@ impl Wallet {
     pub fn ufvk_for(&self, account: AccountId) -> Option<&UnifiedFullViewingKey> {
         self.ufvks.get(&account)
     }
+
+    /// The wallet's applied-tip continuity metadata, if any block is applied.
+    ///
+    /// This is the `prior_metadata` input to the next block scan and the
+    /// reorg-detection baseline.
+    pub fn applied_tip_metadata(&self) -> Option<BlockMetadata> {
+        self.blocks.last_key_value().map(|(_, m)| m.clone())
+    }
+
+    /// The applied block metadata at `height`, if that height was applied.
+    ///
+    /// Reorg detection walks applied heights backwards until one matches the
+    /// node's best chain, yielding the common ancestor.
+    pub fn block_metadata_at(&self, height: BlockHeight) -> Option<BlockMetadata> {
+        self.blocks.get(&height).cloned()
+    }
 }

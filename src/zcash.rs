@@ -188,7 +188,7 @@ impl JsonRpc {
     /// Fetches the shielded tree state for a block through Zebra JSON-RPC and
     /// returns it as the upstream [`ChainState`] value — the same type the
     /// run loop hands to `WalletWrite::put_blocks` as its connection point.
-    pub(crate) async fn chain_state_at(
+    pub async fn chain_state_at(
         &self,
         height: BlockHeight,
     ) -> Result<ChainState, TransportError> {
@@ -360,6 +360,7 @@ impl Default for JsonRpc {
 }
 
 /// The outcome of submitting a signed transaction to the node.
+#[derive(Debug)]
 pub enum SubmitOutcome {
     /// The node accepted the transaction.
     Accepted,

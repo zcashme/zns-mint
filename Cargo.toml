@@ -58,6 +58,7 @@ pasta_curves = "0.5"
 # zns-verify uses — computes the Orchard note commitment from raw bytes
 # without pulling in the full orchard crate.
 sinsemilla = "0.1"
+zcash_note_encryption = "0.4"
 
 # CSPRNG for Orchard spend-auth + binding nonces in the signer. Already a
 # transitive dep (orchard); pulled direct with default features so `OsRng` is

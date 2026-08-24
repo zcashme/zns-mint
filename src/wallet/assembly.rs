@@ -10,11 +10,15 @@
 //! scanner's own derivation.
 
 use incrementalmerkletree::{MerklePath, Position};
-use zcash_client_backend::data_api::WalletCommitmentTrees;
+use zcash_client_backend::data_api::{ScannedBlock, WalletCommitmentTrees};
 use zcash_client_backend::wallet::NoteId;
+use zcash_primitives::transaction::TxId;
+use zcash_protocol::ShieldedPool;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::memo::Memo;
 use zip32::AccountId;
+
+use crate::mint::REGISTRY_ACCOUNT;
 
 use super::{TreeError, Wallet};
 
@@ -57,6 +61,10 @@ impl NoteLocator {
 pub struct IronwoodNote {
     /// The owning wallet account (Treasury or Registry).
     pub account_id: AccountId,
+    /// The creating transaction's ID.
+    pub txid: TxId,
+    /// The height at which the creating transaction mined, once applied.
+    pub mined_height: Option<BlockHeight>,
     /// The decrypted note — recipient, value, rho, rseed.
     pub note: orchard::note::Note,
     /// The note's position in the Ironwood commitment tree.
@@ -77,7 +85,7 @@ impl Wallet {
 
     /// Projects every unspent Ironwood note of `account`, oldest-first by
     /// commitment tree position.
-    pub(crate) fn ironwood_notes_for(
+    pub fn ironwood_notes_for(
         &self,
         account: AccountId,
     ) -> impl Iterator<Item = IronwoodNote> + '_ {
@@ -124,6 +132,58 @@ impl Wallet {
         Ok(root.flatten().map(Into::into))
     }
 
+    /// Stores one decrypted ZNS Name Note as the Registry account's ordinary
+    /// received Ironwood note, at its consensus-derived tree position.
+    ///
+    /// The standard scanning lane cannot see Name Notes (its domain re-derives
+    /// the commitment from rseed and rejects the ZNS-derived cmx), so the
+    /// orchestrator's ZNS pass supplies them here. Storage mirrors
+    /// `put_blocks`: note table + memo + mined status. `ordinal` is the
+    /// action's index in the block's full Ironwood commitment stream.
+    pub fn store_name_note(
+        &mut self,
+        scanned: &ScannedBlock<AccountId>,
+        ordinal: usize,
+        txid: TxId,
+        action_index: usize,
+        note: orchard::note::Note,
+        ephemeral_key: zcash_note_encryption::EphemeralKeyBytes,
+        memo: [u8; 512],
+    ) -> Option<()> {
+        let fvk = self.ufvks.get(&REGISTRY_ACCOUNT)?.orchard()?.clone();
+        let bundles = scanned.ironwood();
+        let start_size = bundles
+            .final_tree_size()
+            .checked_sub(u32::try_from(bundles.commitments().len()).ok()?)?;
+        let position = Position::from(u64::from(start_size) + ordinal as u64);
+        let note_id = NoteId::new(txid, ShieldedPool::Ironwood, u16::try_from(action_index).ok()?);
+        self.ironwood_notes.insert(
+            note_id,
+            zcash_client_backend::wallet::WalletIronwoodOutput::from_parts(
+                action_index,
+                ephemeral_key,
+                (note.clone(), orchard::ValuePool::Ironwood),
+                false,
+                position,
+                Some(note.nullifier(&fvk)),
+                REGISTRY_ACCOUNT,
+                Some(zip32::Scope::External),
+            ),
+        );
+        self.ironwood_nullifiers
+            .insert(note.nullifier(&fvk), note_id);
+        self.memos.insert(
+            note_id,
+            Memo::Future(
+                zcash_protocol::memo::MemoBytes::from_bytes(&memo)
+                    .expect("512-byte memo always parses"),
+            ),
+        );
+        self.transaction_statuses
+            .insert(txid, zcash_client_backend::data_api::TransactionStatus::Mined(scanned.height()));
+        Some(())
+    }
+
     // -- internals ----------------------------------------------------------
 
     fn locate_ironwood(&self, locator: NoteLocator) -> Option<IronwoodNote> {
@@ -166,6 +226,8 @@ impl Wallet {
         };
         Some(IronwoodNote {
             account_id: *output.account_id(),
+            txid: *note_id.txid(),
+            mined_height: self.mined_height(note_id.txid()),
             nullifier: note.nullifier(&fvk),
             note,
             position: output.note_commitment_tree_position(),

@@ -127,7 +127,7 @@ impl Wallet {
 
     /// The mined height of `txid`, if the wallet has applied a block mining
     /// it.
-    fn mined_height(&self, txid: &TxId) -> Option<BlockHeight> {
+    pub(crate) fn mined_height(&self, txid: &TxId) -> Option<BlockHeight> {
         match self.transaction_statuses.get(txid) {
             Some(zcash_client_backend::data_api::TransactionStatus::Mined(height)) => Some(*height),
             _ => None,

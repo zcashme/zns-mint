@@ -27,10 +27,68 @@ pub use liquidity::{
 pub use transaction::{build_transaction, select_registry_fee_inputs, RegistryFeeInputs};
 
 use crate::mint::{Action, Name, NameCommitment, REGISTRY_ACCOUNT, UnifiedAddress};
-use crate::sync::{BlockOutput, ReceivedNameNote};
 use crate::wallet::Wallet;
 use std::collections::BTreeMap;
+use zcash_client_backend::data_api::ScannedBlock;
+use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
+use zip32::AccountId;
+
+// ---------------------------------------------------------------------------
+// ReceivedNameNote — scanner evidence for one Name Note
+// ---------------------------------------------------------------------------
+
+/// A cryptographically validated Name Note received at the exact Registry address.
+///
+/// Produced by the orchestrator's ZNS decryption pass over an applied block
+/// (each candidate's ZNS-derived cmx is checked against the action's actual
+/// cmx before the note is exposed) and consumed by [`Registry::apply_block`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReceivedNameNote {
+    txid: TxId,
+    action_index: usize,
+    note: orchard::note::Note,
+    payload: crate::mint::note::NameNotePayload,
+}
+
+impl ReceivedNameNote {
+    pub fn new(
+        txid: TxId,
+        action_index: usize,
+        note: orchard::note::Note,
+        payload: crate::mint::note::NameNotePayload,
+    ) -> Self {
+        Self { txid, action_index, note, payload }
+    }
+
+    pub fn txid(&self) -> &TxId {
+        &self.txid
+    }
+
+    pub fn action_index(&self) -> usize {
+        self.action_index
+    }
+
+    /// The raw decrypted note — carries recipient, value, rho, rseed.
+    pub fn note(&self) -> &orchard::note::Note {
+        &self.note
+    }
+
+    /// The decoded ZNS payload from the note's memo.
+    pub fn payload(&self) -> &crate::mint::note::NameNotePayload {
+        &self.payload
+    }
+}
+
+impl std::fmt::Debug for ReceivedNameNote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceivedNameNote")
+            .field("txid", &self.txid)
+            .field("action_index", &self.action_index)
+            .field("payload", &"<redacted>")
+            .finish()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Record — the current state of a name chain
@@ -138,9 +196,13 @@ impl Registry {
 
     /// Applies every Registry transition in block order.
     ///
-    /// The evidence boundary takes the scanner's complete transaction and the
-    /// wallet's ordinary-note state directly. Callers cannot supply a detached
-    /// authorship boolean or nullifier list.
+    /// Takes the upstream [`ScannedBlock`] directly, plus the supplemental
+    /// [`ReceivedNameNote`] lane from the orchestrator's ZNS decryption pass;
+    /// per-transaction grouping (spent nullifiers, ordinary received Ironwood
+    /// notes) is read from the scanner's own structures — `nullifier_map` and
+    /// `WalletTx::ironwood_outputs`, whose nullifiers the scanner already
+    /// derived. Callers cannot supply a detached authorship boolean or
+    /// nullifier list.
     ///
     /// All ZNS invariant checks are assertions — only the mint can create or
     /// spend Name Notes, and its assembly code prevents every violation by
@@ -148,18 +210,45 @@ impl Registry {
     pub fn apply_block(
         &self,
         wallet: &Wallet,
-        output: &BlockOutput,
+        scanned: &ScannedBlock<AccountId>,
+        name_notes: &[ReceivedNameNote],
     ) -> Self {
         let mut next = self.clone();
+        let height = scanned.height();
         let mut available_registry_fees: Vec<_> = wallet
             .ironwood_notes_for(REGISTRY_ACCOUNT)
             .filter(|note| note.note.value().inner() > 0)
             .map(|note| note.nullifier)
             .collect();
 
-        for tx in output.transactions() {
-            let has_registry_fee_spend = tx
-                .ironwood_nullifiers()
+        // Group the supplemental Name Note lane and the scanner's spent
+        // nullifiers by txid, in one pass each.
+        let mut name_notes_by_tx: BTreeMap<TxId, Vec<&ReceivedNameNote>> = BTreeMap::new();
+        for note in name_notes {
+            name_notes_by_tx.entry(*note.txid()).or_default().push(note);
+        }
+        let mut nullifiers_by_tx: BTreeMap<TxId, Vec<orchard::note::Nullifier>> =
+            BTreeMap::new();
+        for (_index, txid, nullifiers) in scanned.ironwood().nullifier_map() {
+            nullifiers_by_tx
+                .entry(*txid)
+                .or_default()
+                .extend(nullifiers.iter().copied());
+        }
+
+        for wtx in scanned.transactions() {
+            let txid = wtx.txid();
+            let ironwood_nullifiers: &[orchard::note::Nullifier] = nullifiers_by_tx
+                .get(&txid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let received_name_notes: &[&ReceivedNameNote] = name_notes_by_tx
+                .get(&txid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let received_ironwood = wtx.ironwood_outputs();
+
+            let has_registry_fee_spend = ironwood_nullifiers
                 .iter()
                 .any(|nullifier| available_registry_fees.contains(nullifier));
             let spent_record_names: Vec<_> = next
@@ -170,16 +259,18 @@ impl Registry {
                     // its chain — i.e., the new note's prev_rcm matches this
                     // record's commitment. This replaces nullifier matching.
                     let record_commitment = record.commitment;
-                    tx.received_name_notes()
+                    received_name_notes
                         .iter()
-                        .any(|new_note| new_note.payload().prev_rcm() == Some(record_commitment))
+                        .any(|new_note| {
+                            new_note.payload().prev_rcm() == Some(record_commitment)
+                        })
                         .then(|| name.clone())
                 })
                 .collect();
 
-            match tx.received_name_notes() {
+            match received_name_notes {
                 [] => {
-                    assert!(spent_record_names.is_empty(),
+                    debug_assert!(spent_record_names.is_empty(),
                         "record commitment matched a prev_rcm but no Name Notes were received \
                          — impossible: spent_record_names is derived from received_name_notes \
                          which is empty");
@@ -199,8 +290,8 @@ impl Registry {
                     if !has_registry_fee_spend && spent_record_names.is_empty() {
                         Self::advance_fee_set(
                             &mut available_registry_fees,
-                            tx.ironwood_nullifiers(),
-                            tx.received_ironwood(),
+                            ironwood_nullifiers,
+                            received_ironwood,
                         );
                         continue;
                     }
@@ -238,8 +329,8 @@ impl Registry {
 
                     next.set_record(
                         name.clone(),
-                        Record::from_received(note.clone(), output.metadata().block_height()),
-                        output.metadata().block_height(),
+                        Record::from_received((*note).clone(), height),
+                        height,
                     );
                 }
                 _ => unreachable!("slice cardinality was handled above"),
@@ -247,8 +338,8 @@ impl Registry {
 
             Self::advance_fee_set(
                 &mut available_registry_fees,
-                tx.ironwood_nullifiers(),
-                tx.received_ironwood(),
+                ironwood_nullifiers,
+                received_ironwood,
             );
         }
 
@@ -258,14 +349,16 @@ impl Registry {
     fn advance_fee_set(
         available: &mut Vec<orchard::note::Nullifier>,
         spent: &[orchard::note::Nullifier],
-        received: &[crate::sync::ReceivedIronwood],
+        received: &[zcash_client_backend::wallet::WalletIronwoodOutput<AccountId>],
     ) {
         available.retain(|nullifier| !spent.contains(nullifier));
         available.extend(
             received
                 .iter()
-                .filter(|note| note.account_id == REGISTRY_ACCOUNT && note.note.value().inner() > 0)
-                .map(|note| note.nullifier),
+                .filter(|output| {
+                    *output.account_id() == REGISTRY_ACCOUNT && output.note().0.value().inner() > 0
+                })
+                .filter_map(|output| output.nf().copied()),
         );
     }
 
