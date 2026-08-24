@@ -214,7 +214,6 @@ pub fn process_claim<P: Parameters>(
     treasury_keys: &TreasuryKeys,
     registry_keys: &RegistryKeys,
     ops: &mut crate::mint::OperationalState,
-    seen_claims: &mut std::collections::BTreeSet<crate::mint::Name>,
 ) -> Option<crate::mint::RequestOutcome> {
     use crate::mint::{Action, NameNote, SubmissionKind, CLAIM_PRICE, RequestOutcome};
 
@@ -228,7 +227,7 @@ pub fn process_claim<P: Parameters>(
         return None;
     }
 
-    if seen_claims.contains(&name) {
+    if !ops.claim_check_and_mark(&name) {
         return None;
     }
     let available = match registry.record(&name) {
@@ -247,7 +246,6 @@ pub fn process_claim<P: Parameters>(
     {
         return None;
     }
-    seen_claims.insert(name.clone());
 
     let record_commitment = registry.record(&name).map(|record| record.commitment);
     let lock = ops.reserve_name(&name, record_commitment)?;

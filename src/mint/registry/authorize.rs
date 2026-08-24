@@ -357,15 +357,13 @@ pub fn process_transition<P: Parameters>(
     registry: &Registry,
     registry_keys: &crate::key::RegistryKeys,
     ops: &mut crate::mint::OperationalState,
-    seen_with_otp: &mut std::collections::BTreeSet<ChallengeKey>,
 ) -> Option<crate::mint::RequestOutcome> {
     use crate::mint::{SubmissionKind, RequestOutcome};
 
     let key = ChallengeKey::new(network, name.clone(), action, ua.clone(), record_commitment);
-    if seen_with_otp.contains(&key) {
+    if !ops.transition_challenge_check_and_mark(&key) {
         return None;
     }
-    seen_with_otp.insert(key);
 
     let lock = ops.reserve_name(&name, Some(record_commitment))?;
     let name_binding = lock.binding();

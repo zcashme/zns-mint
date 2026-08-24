@@ -266,6 +266,15 @@ pub struct OperationalState {
     pub submissions: BTreeMap<TxId, Submission>,
     pre_submit_locks: BTreeSet<NameBinding>,
     recovery_until: Option<BlockHeight>,
+    /// Intake notes definitively handled (invalid, or settled to a
+    /// submission): never revisited.
+    intake_seen: BTreeSet<NoteLocator>,
+    /// Claim names already evaluated this process lifetime.
+    claims_seen: BTreeSet<Name>,
+    /// Relay challenges already evaluated (no-OTP requests).
+    relay_challenges_seen: BTreeSet<ChallengeKey>,
+    /// Transition challenges already evaluated (with-OTP requests).
+    transition_challenges_seen: BTreeSet<ChallengeKey>,
 }
 
 impl Default for OperationalState {
@@ -281,7 +290,38 @@ impl OperationalState {
             submissions: BTreeMap::new(),
             pre_submit_locks: BTreeSet::new(),
             recovery_until: None,
+            intake_seen: BTreeSet::new(),
+            claims_seen: BTreeSet::new(),
+            relay_challenges_seen: BTreeSet::new(),
+            transition_challenges_seen: BTreeSet::new(),
         }
+    }
+
+    /// Intake dedup: `true` when the locator had NOT been handled before
+    /// (and is now marked). Callers mark only on definitive outcomes; use
+    /// [`peek_intake_seen`]/[`mark_intake_seen`] for the check-then-act form.
+    pub fn intake_seen(&self, locator: NoteLocator) -> bool {
+        self.intake_seen.contains(&locator)
+    }
+
+    pub fn mark_intake_seen(&mut self, locator: NoteLocator) {
+        self.intake_seen.insert(locator);
+    }
+
+    /// Claim dedup inside `process_claim`: `true` when fresh (now marked).
+    pub(crate) fn claim_check_and_mark(&mut self, name: &Name) -> bool {
+        self.claims_seen.insert(name.clone())
+    }
+
+    /// Relay-challenge dedup inside `process_otp_relay`: `true` when fresh.
+    pub(crate) fn relay_challenge_check_and_mark(&mut self, key: &ChallengeKey) -> bool {
+        self.relay_challenges_seen.insert(key.clone())
+    }
+
+    /// Transition-challenge dedup inside `process_transition`: `true` when
+    /// fresh (now marked).
+    pub(crate) fn transition_challenge_check_and_mark(&mut self, key: &ChallengeKey) -> bool {
+        self.transition_challenges_seen.insert(key.clone())
     }
 
     /// Creates Live state after a process restart.
