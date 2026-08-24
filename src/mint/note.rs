@@ -352,6 +352,103 @@ pub fn decode_name_note_tuple<P: Parameters>(
 }
 
 // ---------------------------------------------------------------------------
+// Block scan: ZNS trial-decryption pass
+// ---------------------------------------------------------------------------
+
+use subtle::ConstantTimeEq as _;
+use zcash_primitives::block::Block;
+use zcash_primitives::transaction::TxId;
+
+/// One decrypted Name Note from the ZNS scan pass, with the facts the wallet
+/// store and the Registry evidence need.
+pub struct DecryptedNameNote {
+    pub txid: TxId,
+    pub action_index: usize,
+    /// The action's index in the block's full Ironwood commitment stream —
+    /// fixes the note's tree position.
+    pub ordinal: usize,
+    pub note: orchard::note::Note,
+    /// The epk bytes directly — the `ShieldedOutput` trait method is
+    /// ambiguous across the three Ironwood-family domains.
+    pub ephemeral_key: zcash_note_encryption::EphemeralKeyBytes,
+    pub memo: [u8; 512],
+    pub payload: NameNote,
+}
+
+/// Trial-decrypts the block's Ironwood actions under the ZNS domain.
+///
+/// A candidate is exposed only if its memo parses as a Name Note and the
+/// payload-derived ZNS commitment reproduces the action's actual cmx — the
+/// cryptographic authorship check. Value must be zero and the recipient must
+/// be the exact Registry address; anything else is not a Name Note.
+pub fn decrypt_name_notes<P: Parameters>(
+    network: &P,
+    block: &Block,
+    registry_ivk: &orchard::keys::PreparedIncomingViewingKey,
+    registry_recipient: orchard::Address,
+) -> Vec<DecryptedNameNote> {
+    use pasta_curves::group::ff::PrimeField as _;
+
+    let mut candidates = Vec::new();
+    let mut ordinal = 0usize;
+    for tx in block.vtx() {
+        let Some(bundle) = tx.ironwood_bundle() else {
+            continue;
+        };
+        let zns_capable = bundle.bundle_version() == orchard::bundle::BundleVersion::ironwood_v3()
+            && bundle.flags().outputs_enabled();
+        for (action_index, action) in bundle.actions().iter().enumerate() {
+            if zns_capable {
+                if let Some((note, recipient, memo)) =
+                    orchard::note_encryption::ZnsIronwoodDomain::for_action(action).try_decrypt(
+                        action,
+                        registry_ivk,
+                        |note, memo, cmx| {
+                            let payload = match decode_name_note(network, memo) {
+                                Some(p) => p,
+                                None => return subtle::Choice::from(0),
+                            };
+                            let (rcm, psi) = payload.opening(network);
+                            let (g_d, pk_d) = note.recipient().zns_commitment_keys();
+                            let rho = Option::from(pasta_curves::pallas::Base::from_repr(
+                                note.rho().to_bytes(),
+                            ))
+                            .expect("valid rho");
+                            let computed =
+                                match note_commitment_cmx(g_d, pk_d, 0, rho, psi, rcm) {
+                                    Some(c) => c,
+                                    None => return subtle::Choice::from(0),
+                                };
+                            computed.to_repr().ct_eq(&cmx.to_bytes())
+                        },
+                    )
+                {
+                    if note.value() == orchard::value::NoteValue::ZERO
+                        && recipient == registry_recipient
+                    {
+                        let payload = decode_name_note(network, &memo)
+                            .expect("memo was validated in callback");
+                        candidates.push(DecryptedNameNote {
+                            txid: tx.txid(),
+                            action_index,
+                            ordinal,
+                            note,
+                            ephemeral_key: zcash_note_encryption::EphemeralKeyBytes(
+                                action.encrypted_note().epk_bytes,
+                            ),
+                            memo,
+                            payload,
+                        });
+                    }
+                }
+            }
+            ordinal += 1;
+        }
+    }
+    candidates
+}
+
+// ---------------------------------------------------------------------------
 // cmx helper — copied from zns-verify (standalone Sinsemilla, no orchard dep)
 // ---------------------------------------------------------------------------
 

@@ -9,8 +9,9 @@ pub mod signer;
 
 // The Name Note type and its codec.
 pub use note::{
-    decode_name_note, decode_name_note_tuple, note_commitment_cmx,
-    zns_psi_rcm_raw, Expiry, NameNote, TermSeconds, UnixSeconds,
+    decode_name_note, decode_name_note_tuple, decrypt_name_notes,
+    note_commitment_cmx, zns_psi_rcm_raw, DecryptedNameNote, Expiry, NameNote,
+    TermSeconds, UnixSeconds,
 };
 
 /// The typed Unified Address — upstream's `zcash_keys` type, validated at
