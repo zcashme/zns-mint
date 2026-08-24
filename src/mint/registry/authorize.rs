@@ -6,6 +6,7 @@
 use zcash_protocol::consensus::BlockHeight;
 
 use crate::mint::{Action, Expiry, Name, NameCommitment, UnifiedAddress};
+use zcash_protocol::consensus::Parameters;
 use crate::mint::registry::{Registry, Record};
 
 // OTP challenge state lives at kernel level in [`crate::mint::otp`];
@@ -104,7 +105,8 @@ pub fn authorize_claim(
 ///
 /// Verifies the name is live and consumes an OTP bound to its exact current
 /// predecessor commitment.
-pub fn authorize_update(
+pub fn authorize_update<P: Parameters>(
+    network: &P,
     registry: &Registry,
     pending_otps: &mut PendingOtps,
     current_height: BlockHeight,
@@ -118,6 +120,7 @@ pub fn authorize_update(
     }
 
     let key = ChallengeKey::new(
+        network,
         name.clone(),
         Action::Update,
         new_ua.clone(),
@@ -139,7 +142,8 @@ pub fn authorize_update(
 ///
 /// Verifies the name is live and consumes an OTP bound to its exact current
 /// predecessor commitment.
-pub fn authorize_release(
+pub fn authorize_release<P: Parameters>(
+    network: &P,
     registry: &Registry,
     pending_otps: &mut PendingOtps,
     current_height: BlockHeight,
@@ -152,11 +156,14 @@ pub fn authorize_release(
         return None;
     }
 
-    let controller = &record.ua;
+    let Some(controller) = &record.ua else {
+        return None; // released bindings have no controller
+    };
     if controller != &current_ua {
         return None;
     }
     let key = ChallengeKey::new(
+        network,
         name.clone(),
         Action::Release,
         controller.clone(),
@@ -193,6 +200,13 @@ mod tests {
         PendingOtps::new()
     }
 
+    fn mock_ua() -> UnifiedAddress {
+        crate::mint::NameNote::parse_ua(&MAIN_NETWORK, TEST_UA).expect("vector UA")
+    }
+
+    const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
+    use zcash_protocol::consensus::MAIN_NETWORK;
+
     fn dummy_rho() -> orchard::note::Rho {
         let mut bytes = [0u8; 32];
         bytes[0] = 1;
@@ -203,7 +217,7 @@ mod tests {
     fn claim_fits_unseen_or_released_name() {
         let mut reg = mock_registry();
         let name = Name::parse("alice").unwrap();
-        let ua = UnifiedAddress::from_string("u1xxx".into());
+        let ua = mock_ua();
         let height = BlockHeight::from_u32(100);
 
         // Unseen name is claimable
@@ -211,12 +225,12 @@ mod tests {
         assert_eq!(req.action(), Action::Claim);
 
         // Released name is claimable
-        reg.set_record_for_test(name.clone(), Action::Release, UnifiedAddress::empty(), crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
+        reg.set_record_for_test(name.clone(), Action::Release, None, crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
         let req2 = authorize_claim(&reg, name.clone(), ua.clone()).unwrap();
         assert_eq!(req2.action(), Action::Claim);
 
         // Live name is NOT claimable
-        reg.set_record_for_test(name.clone(), Action::Claim, ua.clone(), crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
+        reg.set_record_for_test(name.clone(), Action::Claim, Some(ua.clone()), crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
         assert!(authorize_claim(&reg, name, ua).is_none());
     }
 
@@ -225,12 +239,13 @@ mod tests {
         let mut reg = mock_registry();
         let mut otps = mock_pending_otps();
         let name = Name::parse("bob").unwrap();
-        let ua = UnifiedAddress::from_string("u1new".into());
+        let ua = mock_ua();
         let height = BlockHeight::from_u32(100);
 
         let dummy_otp = [0u8; 16];
         // Unseen name cannot be updated/released
         assert!(authorize_update(
+            &MAIN_NETWORK,
             &reg,
             &mut otps,
             height,
@@ -240,6 +255,7 @@ mod tests {
         )
         .is_none());
         assert!(authorize_release(
+            &MAIN_NETWORK,
             &reg,
             &mut otps,
             height,
@@ -250,8 +266,9 @@ mod tests {
         .is_none());
 
         // Released name cannot be updated/released
-        reg.set_record_for_test(name.clone(), Action::Release, UnifiedAddress::empty(), crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
+        reg.set_record_for_test(name.clone(), Action::Release, None, crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
         assert!(authorize_update(
+            &MAIN_NETWORK,
             &reg,
             &mut otps,
             height,
@@ -261,6 +278,7 @@ mod tests {
         )
         .is_none());
         assert!(authorize_release(
+            &MAIN_NETWORK,
             &reg,
             &mut otps,
             height,
@@ -276,29 +294,31 @@ mod tests {
         let mut reg = mock_registry();
         let mut otps = mock_pending_otps();
         let name = Name::parse("carol").unwrap();
-        let ua = UnifiedAddress::from_string("u1new".into());
+        let ua = mock_ua();
         let height = BlockHeight::from_u32(100);
 
-        reg.set_record_for_test(name.clone(), Action::Update, ua.clone(), crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
+        reg.set_record_for_test(name.clone(), Action::Update, Some(ua.clone()), crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
 
         // Invalid OTP fails
         let mut bad_otp = [0u8; 16];
         bad_otp[0] = 0xFF;
         assert!(
-            authorize_update(&reg, &mut otps, height, name.clone(), ua.clone(), &bad_otp).is_none()
+            authorize_update(&MAIN_NETWORK, &reg, &mut otps, height, name.clone(), ua.clone(), &bad_otp)
+                .is_none()
         );
 
         // Issue real OTP and it succeeds
         let key = ChallengeKey::new(
+            &MAIN_NETWORK,
             Name::parse("carol").unwrap(),
             Action::Update,
-            UnifiedAddress::from_string("u1new".into()),
+            mock_ua(),
             dummy_commitment(),
         );
         let issued_otp = OtpCode::generate();
         let real_otp = issued_otp.expose_for_test();
         otps.record_issued(key, &issued_otp, height);
-        let req = authorize_update(&reg, &mut otps, height, name.clone(), ua, &real_otp).unwrap();
+        let req = authorize_update(&MAIN_NETWORK, &reg, &mut otps, height, name.clone(), ua, &real_otp).unwrap();
         assert_eq!(req.action(), Action::Update);
     }
 
@@ -307,10 +327,10 @@ mod tests {
         // OTP relay memos use verb "otp", which is not a valid request verb.
         // treasury::memo::RequestMemo::parse must reject them.
         let name = Name::parse("alice").unwrap();
-        let ua = UnifiedAddress::from_string("u1test".into());
+        let ua = mock_ua();
         let otp = OtpCode::for_test([0xdeu8; 16]);
 
-        let memo = encode_otp_relay_memo(&name, Action::Update, &ua, &otp).unwrap();
+        let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp).unwrap();
         let result = crate::mint::treasury::memo::RequestMemo::parse(&memo);
         assert!(
             result.is_err(),
@@ -323,7 +343,7 @@ mod tests {
 /// authorizes the transition, and assembles the transaction.
 /// Returns `None` if the request is invalid, the name is locked, or authorization fails.
 #[allow(clippy::too_many_arguments)]
-pub fn process_transition<P: zcash_protocol::consensus::Parameters>(
+pub fn process_transition<P: Parameters>(
     network: &P,
     name: Name,
     action: Action,
@@ -341,7 +361,7 @@ pub fn process_transition<P: zcash_protocol::consensus::Parameters>(
 ) -> Option<crate::mint::RequestOutcome> {
     use crate::mint::{SubmissionKind, RequestOutcome};
 
-    let key = ChallengeKey::new(name.clone(), action, ua.clone(), record_commitment);
+    let key = ChallengeKey::new(network, name.clone(), action, ua.clone(), record_commitment);
     if seen_with_otp.contains(&key) {
         return None;
     }
@@ -351,8 +371,8 @@ pub fn process_transition<P: zcash_protocol::consensus::Parameters>(
     let name_binding = lock.binding();
 
     let req = match action {
-        Action::Update => authorize_update(registry, &mut ops.pending_otps, cursor_height, name, ua, otp),
-        Action::Release => authorize_release(registry, &mut ops.pending_otps, cursor_height, name, ua, otp),
+        Action::Update => authorize_update(network, registry, &mut ops.pending_otps, cursor_height, name, ua, otp),
+        Action::Release => authorize_release(network, registry, &mut ops.pending_otps, cursor_height, name, ua, otp),
         Action::Claim => unreachable!(),
     };
 

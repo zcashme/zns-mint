@@ -7,7 +7,10 @@
 //! The 512-byte memo grammar and the σ-hash are functions *over* the type,
 //! not constructors of it.
 
-use crate::mint::{Action, Name, NameCommitment, UnifiedAddress};
+use zcash_keys::address::UnifiedAddress;
+use zcash_protocol::consensus::Parameters;
+
+use crate::mint::{Action, Name, NameCommitment};
 
 /// A Unix timestamp in whole seconds — the wire and MTP time base.
 ///
@@ -118,11 +121,23 @@ impl NameNote {
         }
     }
 
-    /// The bound Unified Address; empty for a release.
-    pub fn ua(&self) -> UnifiedAddress {
+    /// The bound Unified Address; absent for a release.
+    pub fn ua(&self) -> Option<&UnifiedAddress> {
         match self {
-            NameNote::Claim { ua, .. } | NameNote::Update { ua, .. } => ua.clone(),
-            NameNote::Release { .. } => UnifiedAddress::empty(),
+            NameNote::Claim { ua, .. } | NameNote::Update { ua, .. } => Some(ua),
+            NameNote::Release { .. } => None,
+        }
+    }
+
+    /// Parses a UA string into the typed upstream form for this network.
+    /// The single validation boundary: ZIP 316 grammar, receiver order, and
+    /// network prefix are all enforced here (§3.5 — invalid UAs must fail
+    /// validation before a transition affects registry state).
+    pub fn parse_ua<P: Parameters>(params: &P, s: &str) -> Option<UnifiedAddress> {
+        let zaddr: zcash_address::ZcashAddress = s.parse().ok()?;
+        match zaddr.convert_if_network(params.network_type()).ok()? {
+            zcash_keys::address::Address::Unified(ua) => Some(ua),
+            _ => None,
         }
     }
 
@@ -142,16 +157,21 @@ impl NameNote {
         }
     }
 
-    /// The ZNS commitment opening bound to this exact transition.
-    pub fn opening(&self) -> (pasta_curves::pallas::Scalar, pasta_curves::pallas::Base) {
+    /// The ZNS commitment opening bound to this exact transition. The UA
+    /// field's canonical encoding (network prefix included) is hashed into
+    /// σ, so the opening is parameter-dependent.
+    pub fn opening<P: Parameters>(
+        &self,
+        params: &P,
+    ) -> (pasta_curves::pallas::Scalar, pasta_curves::pallas::Base) {
         let verb: &[u8] = match self {
             NameNote::Claim { .. } => b"claim",
             NameNote::Update { .. } => b"update",
             NameNote::Release { .. } => b"release",
         };
         let name = self.name().as_str().as_bytes();
-        let ua_owned = self.ua();
-        let ua = ua_owned.as_str().as_bytes();
+        let ua_owned = self.ua().map(|ua| ua.encode(params));
+        let ua = ua_owned.as_deref().unwrap_or("").as_bytes();
         let expiry = self.expires_field_bytes();
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
         zns_psi_rcm_raw(verb, name, ua, &expiry, &prev)
@@ -163,14 +183,21 @@ impl NameNote {
         self.expires_at().unwrap_or(Expiry::Never).field_bytes()
     }
 
-    /// Encodes into the canonical zero-padded 512-byte memo.
-    /// `None` when the UA charset is not memo-legal or the fields overflow.
-    pub fn encode(&self) -> Option<[u8; 512]> {
-        let ua_owned = self.ua();
-        let ua_bytes = ua_owned.as_str().as_bytes();
-        if !ua_bytes.is_ascii() || ua_bytes.contains(&b':') || ua_bytes.contains(&0) {
-            return None;
+    /// The `ua` field string: the canonical encoding, empty for a release.
+    fn ua_field_string<P: Parameters>(&self, params: &P) -> Option<String> {
+        match self.ua() {
+            Some(ua) => Some(ua.encode(params)),
+            None => Some(String::new()),
         }
+    }
+
+    /// Encodes into the canonical zero-padded 512-byte memo under `params`.
+    ///
+    /// `None` when the fields overflow 512 bytes. The UA field is the
+    /// canonical ZIP 316 encoding (bech32m: ASCII, no colon, no NUL), empty
+    /// for a release.
+    pub fn encode<P: Parameters>(&self, params: &P) -> Option<[u8; 512]> {
+        let ua_field = self.ua_field_string(params)?;
         let verb = self.action().as_str();
         let hex_rcm = hex::encode(self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]));
         let expires_field = self.expires_field_bytes();
@@ -178,7 +205,7 @@ impl NameNote {
             "ZNS:{}:{}:{}:{}:{}",
             verb,
             self.name().as_str(),
-            ua_owned.as_str(),
+            ua_field,
             String::from_utf8(expires_field).ok()?,
             hex_rcm,
         );
@@ -249,7 +276,7 @@ fn tagged_zns_hash(
 /// hex predecessor, action-consistent fields (release: empty UA and `none`
 /// expiry; claim: zero predecessor; update/release: nonzero predecessor),
 /// and a re-encode that reproduces the input byte-for-byte.
-pub fn decode_name_note(memo: &[u8; 512]) -> Option<NameNote> {
+pub fn decode_name_note<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<NameNote> {
     let end = memo.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
     let memo_str = std::str::from_utf8(&memo[..end]).ok()?;
 
@@ -259,6 +286,9 @@ pub fn decode_name_note(memo: &[u8; 512]) -> Option<NameNote> {
     }
 
     let name = Name::parse(parts[2])?;
+    // The single UA validation boundary: a memo whose ua field is not a
+    // valid ZIP 316 Unified Address for this network decodes to no note
+    // (§3.5). A release's empty field is exempt.
     let ua_str = parts[3];
     let expires_at = Expiry::parse(parts[4])?;
 
@@ -275,7 +305,7 @@ pub fn decode_name_note(memo: &[u8; 512]) -> Option<NameNote> {
             }
             NameNote::Claim {
                 name,
-                ua: UnifiedAddress::from_string(ua_str.to_string()),
+                ua: NameNote::parse_ua(params, ua_str)?,
                 expires_at,
             }
         }
@@ -285,7 +315,7 @@ pub fn decode_name_note(memo: &[u8; 512]) -> Option<NameNote> {
             }
             NameNote::Update {
                 name,
-                ua: UnifiedAddress::from_string(ua_str.to_string()),
+                ua: NameNote::parse_ua(params, ua_str)?,
                 expires_at,
                 prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
             }
@@ -303,18 +333,19 @@ pub fn decode_name_note(memo: &[u8; 512]) -> Option<NameNote> {
         _ => return None,
     };
 
-    (note.encode()?.as_slice() == memo).then_some(note)
+    (note.encode(params)?.as_slice() == memo).then_some(note)
 }
 
 /// Compatibility wrapper preserving the tuple-returning call sites.
-pub fn decode_name_note_tuple(
+pub fn decode_name_note_tuple<P: Parameters>(
+    params: &P,
     memo: &[u8; 512],
 ) -> Option<(Name, Action, String, Expiry, Option<NameCommitment>)> {
-    let note = decode_name_note(memo)?;
+    let note = decode_name_note(params, memo)?;
     Some((
         note.name().clone(),
         note.action(),
-        note.ua().into_string(),
+        note.ua().map(|ua| ua.encode(params)).unwrap_or_default(),
         note.expires_at().unwrap_or(Expiry::Never),
         note.prev_rcm(),
     ))
@@ -368,30 +399,64 @@ pub fn note_commitment_cmx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zcash_protocol::consensus::MAIN_NETWORK;
 
-    fn note_for_encode() -> (Name, UnifiedAddress) {
-        (Name::parse("alice").unwrap(), UnifiedAddress::from_string("u1abc123".into()))
+    /// A valid mainnet ZIP-316 UA with an Orchard receiver (zcash_address
+    /// test vector): parses, round-trips byte-exact, and carries orchard().
+    const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
+
+    fn test_ua() -> UnifiedAddress {
+        NameNote::parse_ua(&MAIN_NETWORK, TEST_UA).expect("vector UA parses")
+    }
+
+    fn test_name() -> Name {
+        Name::parse("alice").unwrap()
     }
 
     /// The memo round-trip: encode → decode must preserve every field of
     /// every action, including the expiry.
     #[test]
     fn memo_round_trip_all_actions() {
-        let (name, ua) = note_for_encode();
+        let name = test_name();
+        let ua = test_ua();
         let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
 
         let claim = NameNote::Claim { name: name.clone(), ua: ua.clone(), expires_at: Expiry::Never };
-        assert_eq!(decode_name_note(&claim.encode().unwrap()).as_ref(), Some(&claim));
+        assert_eq!(
+            decode_name_note(&MAIN_NETWORK, &claim.encode(&MAIN_NETWORK).unwrap()).as_ref(),
+            Some(&claim)
+        );
 
         let t = UnixSeconds(1_775_000_000);
         let claim_t = NameNote::Claim { name: name.clone(), ua: ua.clone(), expires_at: Expiry::At(t) };
-        assert_eq!(decode_name_note(&claim_t.encode().unwrap()).as_ref(), Some(&claim_t));
+        assert_eq!(
+            decode_name_note(&MAIN_NETWORK, &claim_t.encode(&MAIN_NETWORK).unwrap()).as_ref(),
+            Some(&claim_t)
+        );
 
         let update = NameNote::Update { name: name.clone(), ua: ua.clone(), expires_at: Expiry::At(t), prev };
-        assert_eq!(decode_name_note(&update.encode().unwrap()).as_ref(), Some(&update));
+        assert_eq!(
+            decode_name_note(&MAIN_NETWORK, &update.encode(&MAIN_NETWORK).unwrap()).as_ref(),
+            Some(&update)
+        );
 
         let release = NameNote::Release { name, prev };
-        assert_eq!(decode_name_note(&release.encode().unwrap()).as_ref(), Some(&release));
+        assert_eq!(
+            decode_name_note(&MAIN_NETWORK, &release.encode(&MAIN_NETWORK).unwrap()).as_ref(),
+            Some(&release)
+        );
+    }
+
+    /// §3.5: a memo whose UA is not a valid ZIP 316 address decodes to no
+    /// note. `u1xxx` is the whitepaper's own example.
+    #[test]
+    fn invalid_ua_is_rejected() {
+        let name = test_name();
+        let forged = format!("ZNS:claim:{}:u1xxx:none:{}", name.as_str(), hex::encode([0u8; 32]));
+        let mut m = [0u8; 512];
+        m[..forged.len()].copy_from_slice(forged.as_bytes());
+        assert!(decode_name_note(&MAIN_NETWORK, &m).is_none());
+        assert!(NameNote::parse_ua(&MAIN_NETWORK, "u1xxx").is_none());
     }
 
     /// The chain rule: claim/update/release openings all differ, and the
@@ -399,22 +464,23 @@ mod tests {
     /// field elements).
     #[test]
     fn openings_bind_expiry_and_chain() {
-        let (name, ua) = note_for_encode();
+        let name = test_name();
+        let ua = test_ua();
         let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
         let t = UnixSeconds(1_000);
 
         let (rcm_never, psi_never) = NameNote::Claim {
             name: name.clone(), ua: ua.clone(), expires_at: Expiry::Never,
-        }.opening();
+        }.opening(&MAIN_NETWORK);
         let (rcm_at, psi_at) = NameNote::Claim {
             name: name.clone(), ua: ua.clone(), expires_at: Expiry::At(t),
-        }.opening();
+        }.opening(&MAIN_NETWORK);
         assert_ne!(rcm_never.to_repr(), rcm_at.to_repr());
         assert_ne!(psi_never, psi_at);
 
         let (rcm_upd, _) = NameNote::Update {
             name, ua, expires_at: Expiry::At(t), prev,
-        }.opening();
+        }.opening(&MAIN_NETWORK);
         assert_ne!(rcm_at.to_repr(), rcm_upd.to_repr());
     }
 
@@ -440,22 +506,22 @@ mod tests {
     #[test]
     fn grammar_rejects_inconsistent_fields() {
         let name = Name::parse("bob").unwrap();
-        let ua = UnifiedAddress::from_string("u1x".into());
+        let ua = test_ua();
         let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
         let t = Expiry::At(UnixSeconds(5));
 
         // Release with a UA or a timestamp: not encodable as a release.
-        let mut m = NameNote::Release { name: name.clone(), prev }.encode().unwrap();
-        assert!(decode_name_note(&m).is_some());
-        let forged = "ZNS:release:bob:u1x:1000:".to_string() + &hex::encode([1u8; 32]);
+        let mut m = NameNote::Release { name: name.clone(), prev }.encode(&MAIN_NETWORK).unwrap();
+        assert!(decode_name_note(&MAIN_NETWORK, &m).is_some());
+        let forged = format!("ZNS:release:{}:{}:1000:{}", name.as_str(), TEST_UA, hex::encode([1u8; 32]));
         m[..forged.len()].copy_from_slice(forged.as_bytes());
-        assert!(decode_name_note(&m).is_none());
+        assert!(decode_name_note(&MAIN_NETWORK, &m).is_none());
 
         // Claim with a nonzero predecessor is not a claim.
-        let forged = "ZNS:claim:bob:u1x:none:".to_string() + &hex::encode([1u8; 32]);
-        let mut m2 = NameNote::Claim { name, ua, expires_at: t }.encode().unwrap();
+        let mut m2 = NameNote::Claim { name, ua, expires_at: t }.encode(&MAIN_NETWORK).unwrap();
+        let forged = format!("ZNS:claim:bob:{}:none:{}", TEST_UA, hex::encode([1u8; 32]));
         m2[..forged.len()].copy_from_slice(forged.as_bytes());
-        assert!(decode_name_note(&m2).is_none());
+        assert!(decode_name_note(&MAIN_NETWORK, &m2).is_none());
     }
 
     #[test]

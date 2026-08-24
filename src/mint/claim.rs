@@ -95,7 +95,9 @@ pub fn assemble_atomic_claim<P: Parameters>(
     // Ironwood output addressed to the claimed UA's Orchard receiver. A claim
     // without one is not settleable — and the controller could never receive
     // an OTP either.
-    let refund_address = crate::mint::treasury::relay::extract_orchard_address(network, ua.as_str())
+    let refund_address = ua
+        .orchard()
+        .copied()
         .ok_or(crate::mint::AssemblyError::NoOrchardReceiver)?;
 
     let bundle = transaction::build_transaction(
@@ -214,15 +216,15 @@ pub fn process_claim<P: Parameters>(
     ops: &mut crate::mint::OperationalState,
     seen_claims: &mut std::collections::BTreeSet<crate::mint::Name>,
 ) -> Option<crate::mint::RequestOutcome> {
-    use crate::mint::{
-        Action, SubmissionKind, CLAIM_PRICE, RequestOutcome, has_orchard_receiver,
-    };
+    use crate::mint::{Action, NameNote, SubmissionKind, CLAIM_PRICE, RequestOutcome};
 
-    let ua = crate::mint::UnifiedAddress::from_string(ua.to_string());
-    // A UA without an Orchard receiver can never receive an OTP or a refund;
-    // binding a name to one would brick it. Rejected at validation time —
-    // assembly retains its own check as defense in depth.
-    if !has_orchard_receiver(network, &ua) {
+    // The single UA validation boundary: ZIP 316 grammar, receiver order,
+    // network prefix. A UA without an Orchard receiver can never receive an
+    // OTP or a refund — binding a name to one would brick it.
+    let Some(ua) = NameNote::parse_ua(network, ua) else {
+        return None;
+    };
+    if ua.orchard().is_none() {
         return None;
     }
 

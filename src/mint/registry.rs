@@ -26,7 +26,8 @@ pub use liquidity::{
 };
 pub use transaction::{build_transaction, select_registry_fee_inputs, RegistryFeeInputs};
 
-use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, REGISTRY_ACCOUNT, UnifiedAddress};
+use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, UnifiedAddress, REGISTRY_ACCOUNT};
+use zcash_protocol::consensus::Parameters;
 use crate::wallet::Wallet;
 use std::collections::BTreeMap;
 use zcash_client_backend::data_api::ScannedBlock;
@@ -106,7 +107,9 @@ impl std::fmt::Debug for ReceivedNameNote {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Record {
     pub action: Action,
-    pub ua: UnifiedAddress,
+    /// The bound UA; `None` once released (§3.1 encodes the field empty;
+    /// §4.6 retains knowledge of the released binding via history).
+    pub ua: Option<UnifiedAddress>,
     /// The committed expiration (§4.5); absent for the post-release state.
     pub expires_at: Expiry,
     pub commitment: NameCommitment,
@@ -117,12 +120,16 @@ pub struct Record {
 }
 
 impl Record {
-    fn from_received(received: ReceivedNameNote, confirmed_height: BlockHeight) -> Self {
+    fn from_received<P: Parameters>(
+        params: &P,
+        received: ReceivedNameNote,
+        confirmed_height: BlockHeight,
+    ) -> Self {
         let note = received.payload();
-        let (rcm, _) = note.opening();
+        let (rcm, _) = note.opening(params);
         Self {
             action: note.action(),
-            ua: note.ua(),
+            ua: note.ua().cloned(),
             expires_at: note.expires_at().unwrap_or(Expiry::Never),
             commitment: NameCommitment::from_inner(orchard::note::NoteCommitTrapdoor::from_inner(
                 rcm,
@@ -135,7 +142,7 @@ impl Record {
     #[cfg(test)]
     pub(crate) fn for_test(
         action: Action,
-        ua: UnifiedAddress,
+        ua: Option<UnifiedAddress>,
         expires_at: Expiry,
         commitment: NameCommitment,
         confirmed_height: BlockHeight,
@@ -212,8 +219,9 @@ impl Registry {
     /// All ZNS invariant checks are assertions — only the mint can create or
     /// spend Name Notes, and its assembly code prevents every violation by
     /// construction. If an assertion fires, it's a bug in the assembly path.
-    pub fn apply_block(
+    pub fn apply_block<P: Parameters>(
         &self,
+        params: &P,
         wallet: &Wallet,
         scanned: &ScannedBlock<AccountId>,
         name_notes: &[ReceivedNameNote],
@@ -334,7 +342,7 @@ impl Registry {
 
                     next.set_record(
                         name.clone(),
-                        Record::from_received((*note).clone(), height),
+                        Record::from_received(params, (*note).clone(), height),
                         height,
                     );
                 }
@@ -404,7 +412,7 @@ impl Registry {
         &mut self,
         name: Name,
         action: Action,
-        ua: UnifiedAddress,
+        ua: Option<UnifiedAddress>,
         expires_at: Expiry,
         commitment: NameCommitment,
         height: BlockHeight,

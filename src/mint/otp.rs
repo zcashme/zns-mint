@@ -26,7 +26,9 @@ use crate::mint::registry::Registry;
 pub struct ChallengeKey {
     name: Name,
     action: Action,
-    ua: UnifiedAddress,
+    /// The canonical UA encoding (string form: upstream's `UnifiedAddress`
+    /// implements neither `Hash` nor `Ord`, which keyed sets require).
+    ua: String,
     record_commitment: [u8; 32],
 }
 
@@ -37,7 +39,8 @@ impl fmt::Debug for ChallengeKey {
 }
 
 impl ChallengeKey {
-    pub fn new(
+    pub fn new<P: zcash_protocol::consensus::Parameters>(
+        network: &P,
         name: Name,
         action: Action,
         ua: UnifiedAddress,
@@ -46,7 +49,7 @@ impl ChallengeKey {
         Self {
             name,
             action,
-            ua,
+            ua: ua.encode(network),
             record_commitment: record_commitment.to_bytes(),
         }
     }
@@ -254,14 +257,19 @@ fn verb_str(action: Action) -> Option<&'static str> {
 }
 
 /// Whether the fixed-width OTP relay form fits in one Zcash memo.
-pub fn otp_relay_memo_fits(name: &Name, action: Action, ua: &UnifiedAddress) -> bool {
+pub fn otp_relay_memo_fits<P: zcash_protocol::consensus::Parameters>(
+    network: &P,
+    name: &Name,
+    action: Action,
+    ua: &UnifiedAddress,
+) -> bool {
     let Some(verb) = verb_str(action) else {
         return false;
     };
     8usize
         .checked_add(name.as_str().len())
         .and_then(|length| length.checked_add(1 + verb.len()))
-        .and_then(|length| length.checked_add(1 + ua.as_str().len()))
+        .and_then(|length| length.checked_add(1 + ua.encode(network).len()))
         .and_then(|length| length.checked_add(1 + 32))
         .is_some_and(|length| length <= 512)
 }
@@ -272,17 +280,19 @@ pub fn otp_relay_memo_fits(name: &Name, action: Action, ua: &UnifiedAddress) -> 
 /// This memo is sent from the Treasury to the current controller's address so
 /// only they can decrypt it and echo the OTP back. Returns `None` if the action
 /// is `Claim` (claims don't use OTPs) or if the encoded text exceeds 512 bytes.
-pub fn encode_otp_relay_memo(
+pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
+    network: &P,
     name: &Name,
     action: Action,
     ua: &UnifiedAddress,
     otp: &OtpCode,
 ) -> Option<[u8; 512]> {
     let verb = verb_str(action)?;
-    if !otp_relay_memo_fits(name, action, ua) {
+    if !otp_relay_memo_fits(network, name, action, ua) {
         return None;
     }
 
+    let ua_field = ua.encode(network);
     let mut memo = [0u8; 512];
     let mut otp_hex = otp.lowercase_hex();
     let mut offset = 0usize;
@@ -294,7 +304,7 @@ pub fn encode_otp_relay_memo(
         b":".as_slice(),
         verb.as_bytes(),
         b":".as_slice(),
-        ua.as_str().as_bytes(),
+        ua_field.as_bytes(),
     ] {
         let end = offset + field.len();
         memo[offset..end].copy_from_slice(field);

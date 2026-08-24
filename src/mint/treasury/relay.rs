@@ -19,7 +19,6 @@ use crate::key::TreasuryKeys;
 use crate::mint::{Action, Name, UnifiedAddress, TREASURY_ACCOUNT};
 use crate::wallet::{NoteLocator, Wallet};
 
-use zcash_keys::address::Address as ParsedAddress;
 
 /// Returns the exact request-note value for an OTP relay at `target_height`.
 ///
@@ -61,18 +60,8 @@ pub struct RelayAssembly {
 ///
 /// Both OTP relay delivery and claim-excess settlement require an Orchard
 /// receiver because their cross-address outputs are Ironwood outputs.
-pub(crate) fn extract_orchard_address<P: Parameters>(
-    network: &P,
-    ua_str: &str,
-) -> Option<orchard::Address> {
-    let zaddr: zcash_address::ZcashAddress = ua_str.parse().ok()?;
-    let parsed: ParsedAddress = zaddr
-        .convert_if_network(network.network_type())
-        .ok()?;
-    match parsed {
-        ParsedAddress::Unified(ua) => ua.orchard().copied(),
-        _ => None,
-    }
+pub(crate) fn extract_orchard_address(ua: &UnifiedAddress) -> Option<orchard::Address> {
+    ua.orchard().copied()
 }
 
 /// Builds, proves, signs, and serializes an OTP relay transaction.
@@ -102,10 +91,10 @@ pub fn assemble_otp_relay<P: Parameters>(
         return Err(crate::mint::AssemblyError::ClaimNoOtp);
     }
 
-    let controller_orchard =
-        extract_orchard_address(network, controller_ua.as_str()).ok_or(crate::mint::AssemblyError::NoOrchardReceiver)?;
+    let controller_orchard = extract_orchard_address(controller_ua)
+        .ok_or(crate::mint::AssemblyError::NoOrchardReceiver)?;
 
-    let memo = encode_otp_relay_memo(name, action, requested_ua, otp)
+    let memo = encode_otp_relay_memo(network, name, action, requested_ua, otp)
         .ok_or(crate::mint::AssemblyError::MemoEncode)?;
 
     let required_value = required_relay_value(network, target_height)?;
@@ -215,9 +204,9 @@ pub fn process_otp_relay<P: Parameters>(
     seen_no_otp: &mut std::collections::BTreeSet<crate::mint::otp::ChallengeKey>,
 ) -> Option<crate::mint::RequestOutcome> {
     use crate::mint::otp::{ChallengeKey, OtpCode};
-    use crate::mint::{SubmissionKind, RequestOutcome, has_orchard_receiver};
+    use crate::mint::{SubmissionKind, RequestOutcome};
 
-    let key = ChallengeKey::new(name.clone(), action, requested_ua.clone(), record_commitment);
+    let key = ChallengeKey::new(network, name.clone(), action, requested_ua.clone(), record_commitment);
     if ops.pending_otps.contains(&key)
         || ops.pending_otps.is_challenge_reserved(&key)
         || seen_no_otp.contains(&key)
@@ -227,7 +216,7 @@ pub fn process_otp_relay<P: Parameters>(
     if required_relay_value(network, target_height).ok() != Some(value) {
         return None;
     }
-    if !has_orchard_receiver(network, controller_ua) {
+    if controller_ua.orchard().is_none() {
         return None;
     }
     seen_no_otp.insert(key.clone());

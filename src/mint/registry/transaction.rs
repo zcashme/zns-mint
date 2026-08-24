@@ -278,9 +278,9 @@ pub fn build_transaction<P: Parameters>(
             .flatten()
             .ok_or(crate::mint::AssemblyError::NoWitness)?;
 
-        let prev_transition = crate::mint::decode_name_note(&memo_bytes)
+        let prev_transition = crate::mint::decode_name_note(network, &memo_bytes)
             .ok_or(crate::mint::AssemblyError::MemoEncode)?;
-        let (rcm, psi) = prev_transition.opening();
+        let (rcm, psi) = prev_transition.opening(network);
         builder
             .add_zns_spend(
                 fvk.clone(),
@@ -294,9 +294,9 @@ pub fn build_transaction<P: Parameters>(
 
     // 4. Create new ZNS output — the opening and memo derive from the same
     // typed transition, so the commitment and memo cannot disagree.
-    let (new_rcm, new_psi) = transition.opening();
+    let (new_rcm, new_psi) = transition.opening(network);
 
-    let memo = transition.encode()
+    let memo = transition.encode(network)
         .ok_or(crate::mint::AssemblyError::MemoEncode)?;
 
     let value = orchard::value::NoteValue::from_raw(0);

@@ -13,6 +13,11 @@ pub use note::{
     zns_psi_rcm_raw, Expiry, NameNote, TermSeconds, UnixSeconds,
 };
 
+/// The typed Unified Address — upstream's `zcash_keys` type, validated at
+/// parse (ZIP 316 grammar, receiver order, network prefix) rather than
+/// carried as an opaque string.
+pub use zcash_keys::address::UnifiedAddress;
+
 use zcash_client_backend::data_api::BlockMetadata;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::memo::MemoBytes;
@@ -171,40 +176,6 @@ impl Name {
     }
 }
 
-/// A Zcash unified address string (e.g. `u1qz...`).
-///
-/// Newtype over `String` to distinguish a UA from arbitrary text. The mint
-/// never parses or validates UAs — it hashes the string into the ZNS
-/// commitment and stores it in the Name Note memo. The resolver/verifier
-/// is what parses the UA to extract payment receivers.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct UnifiedAddress(String);
-
-impl UnifiedAddress {
-    /// Constructs a `UnifiedAddress` from a string. No validation — the mint
-    /// treats the UA as an opaque string.
-    pub fn from_string(s: String) -> Self {
-        Self(s)
-    }
-
-    /// The empty UA, used for release actions.
-    pub fn empty() -> Self {
-        Self(String::new())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn into_string(self) -> String {
-        self.0
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
 
 // ===========================================================================
 // Operational state
@@ -213,7 +184,6 @@ impl UnifiedAddress {
 use std::collections::{BTreeMap, BTreeSet};
 
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::consensus::Parameters;
 use zcash_protocol::value::COIN;
 
 use crate::mint::otp::{ChallengeKey, OtpCode, PendingOtps};
@@ -552,25 +522,6 @@ pub struct RequestOutcome {
     pub name_lock: Option<NameLock>,
     pub name_binding: Option<NameBinding>,
     pub relay_challenge: Option<(ChallengeKey, OtpCode)>,
-}
-
-/// Whether a UA string contains an Orchard receiver. Protocol constraint:
-/// all ZNS UAs must have one so the Treasury can deliver OTP relay notes.
-pub fn has_orchard_receiver<P: Parameters>(
-    network: &P,
-    ua: &UnifiedAddress,
-) -> bool {
-    let zaddr: zcash_address::ZcashAddress = match ua.as_str().parse() {
-        Ok(z) => z,
-        Err(_) => return false,
-    };
-    let parsed: zcash_keys::address::Address = match zaddr
-        .convert_if_network(network.network_type())
-    {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    matches!(parsed, zcash_keys::address::Address::Unified(ref ua) if ua.orchard().is_some())
 }
 
 // ===========================================================================

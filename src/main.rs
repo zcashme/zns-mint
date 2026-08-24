@@ -338,7 +338,12 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
         let block = self.rpc.get_block(&self.network, next_height).await?;
 
         // ZNS pass first (needs `&block`); the standard pass consumes it.
-        let candidates = decrypt_name_notes(&block, &self.registry_ivk, self.registry_recipient);
+        let candidates = decrypt_name_notes(
+            &self.network,
+            &block,
+            &self.registry_ivk,
+            self.registry_recipient,
+        );
 
         let prior_metadata = self.wallet.applied_tip_metadata();
         let (header, batches) = decrypt_block(&self.network, block, &self.scanning_keys);
@@ -379,7 +384,7 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
             .collect();
         self.registry = self
             .registry
-            .apply_block(&self.wallet, &scanned, &name_notes);
+            .apply_block(&self.network, &self.wallet, &scanned, &name_notes);
 
         // The wallet's own record of its Name Notes — before `put_blocks`
         // consumes the `ScannedBlock`.
@@ -513,13 +518,19 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
                 self.processed.insert(locator);
                 continue;
             };
-            let ua = memo.ua().to_string();
+            // The request's UA validated at the single boundary; invalid
+            // UAs end this note's handling (never revisited).
+            let Some(ua) = zns_mint::mint::NameNote::parse_ua(&self.network, memo.ua()) else {
+                self.processed.insert(locator);
+                continue;
+            };
+            let ua_string = memo.ua().to_string();
 
             let outcome = match &memo {
                 RequestMemo::Claim { .. } => zns_mint::mint::claim::process_claim(
                     &self.network,
                     name.clone(),
-                    &ua,
+                    &ua_string,
                     locator,
                     value,
                     confirmed_height,
@@ -543,8 +554,8 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
                         &self.network,
                         &name,
                         memo.action(),
-                        &zns_mint::mint::UnifiedAddress::from_string(ua),
-                        &record.ua.clone(),
+                        &ua,
+                        record.ua.as_ref().expect("relay requires a live controller"),
                         record.commitment,
                         locator,
                         value,
@@ -564,10 +575,8 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
                         continue;
                     };
                     let bound_ua = match memo.action() {
-                        zns_mint::mint::Action::Update => {
-                            zns_mint::mint::UnifiedAddress::from_string(ua)
-                        }
-                        _ => record.ua.clone(),
+                        zns_mint::mint::Action::Update => ua.clone(),
+                        _ => record.ua.clone().expect("live record has a UA"),
                     };
                     zns_mint::mint::registry::authorize::process_transition(
                         &self.network,
@@ -762,7 +771,8 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
 /// the payload-derived ZNS commitment reproduces the action's actual cmx —
 /// the cryptographic authorship check. Value must be zero and the recipient
 /// must be the exact Registry address; anything else is not a Name Note.
-fn decrypt_name_notes(
+fn decrypt_name_notes<P: zcash_protocol::consensus::Parameters>(
+    network: &P,
     block: &zcash_primitives::block::Block,
     registry_ivk: &orchard::keys::PreparedIncomingViewingKey,
     registry_recipient: orchard::Address,
@@ -785,12 +795,12 @@ fn decrypt_name_notes(
                         action,
                         registry_ivk,
                         |note, memo, cmx| {
-                            let payload = match zns_mint::mint::note::decode_name_note(memo)
-                            {
-                                Some(p) => p,
-                                None => return subtle::Choice::from(0),
-                            };
-                            let (rcm, psi) = payload.opening();
+                            let payload =
+                                match zns_mint::mint::note::decode_name_note(network, memo) {
+                                    Some(p) => p,
+                                    None => return subtle::Choice::from(0),
+                                };
+                            let (rcm, psi) = payload.opening(network);
                             let (g_d, pk_d) = note.recipient().zns_commitment_keys();
                             let rho = Option::from(pasta_curves::pallas::Base::from_repr(
                                 note.rho().to_bytes(),
@@ -809,7 +819,7 @@ fn decrypt_name_notes(
                     if note.value() == orchard::value::NoteValue::ZERO
                         && recipient == registry_recipient
                     {
-                        let payload = zns_mint::mint::note::decode_name_note(&memo)
+                        let payload = zns_mint::mint::note::decode_name_note(network, &memo)
                             .expect("memo was validated in callback");
                         candidates.push(NameNoteCandidate {
                             txid: tx.txid(),
