@@ -2,28 +2,29 @@
 //! transaction assembly path.
 //!
 //! Submodules:
-//! - [`authorize`] — `NameNoteRequest`, `authorize_claim`/`update`/`release`
+//! - [`authorize`] — `NameNoteRequest`, `authorize_claim`/`update`/`release`,
+//!   OTP challenge state (`ChallengeKey`, `PendingOtps`), relay memo encoding
 //! - [`liquidity`] — Registry fee-note classification and top-up policy
-//! - [`transaction`] — `build_transaction`, `TransparentOutput`
-//! - [`signing`] — `assemble_and_sign_transaction`
+//! - [`transaction`] — `build_transaction`
+//!
+//! V6 assembly/proving/signing lives in [`crate::mint::v6`]; transparent
+//! outputs ([`crate::mint::v6::TransparentOutput`]) moved with it.
 
 pub mod authorize;
 pub mod liquidity;
-pub mod signing;
 pub mod transaction;
 
-// Re-export the primary public API so existing `crate::registry::` paths work.
+// The module's primary public API — the authorization functions and the
+// request types they produce.
 pub use authorize::{
-    authorize_claim, authorize_release, authorize_update, current_record, NameNoteRequest,
+    authorize_claim, authorize_release, authorize_update, current_record,
+    NameNoteRequest,
 };
 pub use liquidity::{
     classify_registry_ironwood_note, classify_registry_note_parts, RegistryFeeLiquidity,
     RegistryFundingPlan, RegistryNoteClass,
 };
-pub use signing::assemble_and_sign_transaction;
-pub use transaction::{
-    build_transaction, select_registry_fee_inputs, RegistryFeeInputs, TransparentOutput,
-};
+pub use transaction::{build_transaction, select_registry_fee_inputs, RegistryFeeInputs};
 
 use crate::mint::{Action, Name, NameCommitment, REGISTRY_ACCOUNT, UnifiedAddress};
 use crate::sync::{BlockOutput, ReceivedNameNote};

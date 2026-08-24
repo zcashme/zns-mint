@@ -1,155 +1,77 @@
 //! Atomic claim transaction assembly.
 //!
-//! An atomic claim is one V6 transaction that settles the user's name payment
-//! and creates the value-0 Name Note in a single indivisible operation:
+//! An atomic claim is one V6 transaction whose single Ironwood bundle settles
+//! the user's name payment and creates the value-0 Name Note in one
+//! indivisible operation:
 //!
-//! - **Orchard bundle** (Treasury authority): spends the user's payment note
-//!   received at the Treasury address and creates a Treasury-controlled change
-//!   output equal to the fixed claim price. Its remaining positive value
-//!   balance moves to Ironwood for the excess-refund output.
-//!
-//! - **Ironwood bundle** (Registry authority): creates the new Name Note
+//! - **Treasury authority, in the same bundle**: spends the user's payment
+//!   note (an Ironwood note received at the Treasury address) and retains the
+//!   fixed claim price as a Treasury change note.
+//! - **Registry authority, in the same bundle**: creates the new Name Note
 //!   (value 0), returns the excess to the claimed Unified Address's Orchard
-//!   receiver, spends Registry fee notes, and creates Registry change. The
-//!   Registry funds the complete transaction's aggregate ZIP-317 fee.
+//!   receiver, spends Registry fee notes, and creates Registry change.
 //!
-//! Both bundles share one V6 sighash via [`assemble_v6_transaction`]. The
-//! Orchard bundle is signed with the Treasury spending key; the Ironwood
-//! bundle is signed with the Registry spending key.
+//! A V6 transaction carries exactly one `ironwood_bundle`, so both accounts
+//! settle in it; per-action authority is resolved by spending key at signing
+//! time. The bundle is signed by both the Treasury and Registry keys under one
+//! shared V6 sighash.
 //!
 //! # Value flow
 //!
 //! ```text
-//! Orchard value balance  = payment_value - price   (spend, Treasury change)
-//! Ironwood value balance  = fee_note_value
-//!                         - refund_value
-//!                         - change_value
-//! Total fee              = payment_value
-//!                         - price
-//!                         + fee_note_value
-//!                         - refund_value
-//!                         - change_value
-//!                        = ironwood_fee
+//! Bundle value balance = payment_value + fee_note_value
+//!                        - price                    (Treasury change)
+//!                        - 0                        (Name Note)
+//!                        - refund_value             (excess to claimant)
+//!                        - registry_change
+//! Total fee             = fee_note_value - registry_change
 //! ```
 //!
-//! where `refund_value = payment_value - price` and `change_value =
-//! fee_note_value - ironwood_fee`.
+//! where `refund_value = payment_value - price`. The payment, price, and
+//! refund cancel in-bundle; the Registry fee notes fund the aggregate ZIP-317
+//! fee.
 
-use orchard::builder::{BundleType, InProgress, Unauthorized, Unproven};
-use orchard::bundle::BundleVersion;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
-use zcash_protocol::value::ZatBalance;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
+use crate::mint::registry::transaction::{self, RegistryFeeInputs};
+use crate::mint::v6;
 use crate::mint::{Name, UnifiedAddress};
-use crate::registry::Registry;
-use crate::registry::transaction::{self, RegistryFeeInputs};
-use crate::registry::signing;
+use crate::mint::registry::Registry;
 use crate::wallet::{NoteLocator, Wallet};
 
-/// The result of assembling an atomic claim: both unproven bundles and the
-/// refund value, ready for [`signing::assemble_v6_transaction`].
-pub struct ClaimAssembly {
-    pub orchard_bundle:
-        Option<orchard::Bundle<InProgress<Unproven, Unauthorized>, ZatBalance>>,
-    pub ironwood_bundle:
-        orchard::Bundle<InProgress<Unproven, Unauthorized>, ZatBalance>,
-    pub refund_value: u64,
-    pub payment_locator: NoteLocator,
-}
-
-/// Builds the Orchard (Treasury) side of the atomic claim: spends the payment
-/// note and returns exactly `price` to Treasury-owned change.
+/// The Treasury side of an atomic claim, settled inside the same Ironwood
+/// bundle as the Registry's Name Note.
 ///
-/// Orchard V3 forbids cross-address outputs, so the excess becomes this
-/// bundle's positive value balance and is settled by the paired Ironwood
-/// refund output.
-fn build_treasury_orchard_bundle(
-    wallet: &mut Wallet,
-    treasury_keys: &TreasuryKeys,
-    payment_locator: NoteLocator,
-    price: u64,
-    anchor_height: BlockHeight,
-) -> Result<
-    (
-        orchard::Bundle<InProgress<Unproven, Unauthorized>, ZatBalance>,
-        u64,
-    ),
-    crate::mint::AssemblyError,
-> {
-    use rand::rngs::OsRng;
-
-    let anchor = wallet
-        .orchard_anchor(anchor_height)
-        .ok()
-        .flatten()
-        .ok_or(crate::mint::AssemblyError::NoAnchor)?;
-
-    let bundle_version = BundleVersion::orchard_v3();
-    let flags = bundle_version.default_flags();
-    let mut builder =
-        orchard::builder::Builder::new(BundleType::DEFAULT, bundle_version, flags, anchor.into())
-            .map_err(|_| crate::mint::AssemblyError::BuilderCreation)?;
-
-    let fvk = orchard::keys::FullViewingKey::from(treasury_keys.orchard_spending_key());
-
-    let (note, position, payment_value) = {
-        let note = wallet
-            .orchard_note(payment_locator)
-            .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
-        if note.account_id != crate::mint::TREASURY_ACCOUNT {
-            return Err(crate::mint::AssemblyError::WrongAccount);
-        }
-        (note.note.clone(), note.position, note.note.value().inner())
-    };
-
-    if payment_value < price {
-        return Err(crate::mint::AssemblyError::InsufficientValue);
-    }
-
-    let merkle_path = wallet
-        .orchard_witness(position, anchor_height)
-        .ok()
-        .flatten()
-        .ok_or(crate::mint::AssemblyError::NoWitness)?;
-
-    builder
-        .add_spend(fvk.clone(), note, merkle_path.into())
-        .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
-
-    let treasury_change = fvk.address_at(0u32, orchard::keys::Scope::Internal);
-    let mut change_memo = [0u8; 512];
-    change_memo[0] = 0xF6; // ZIP-302 empty memo
-    builder
-        .add_change_output(
-            fvk.clone(),
-            Some(fvk.to_ovk(orchard::keys::Scope::Internal)),
-            treasury_change,
-            orchard::value::NoteValue::from_raw(price),
-            change_memo,
-        )
-        .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
-
-    let (bundle, _meta) = builder
-        .build::<ZatBalance>(&mut OsRng)
-        .map_err(|_| crate::mint::AssemblyError::BuildFailed)?
-        .ok_or(crate::mint::AssemblyError::BuildFailed)?;
-
-    Ok((bundle, payment_value))
+/// One V6 transaction carries exactly one `ironwood_bundle`, so the payment
+/// spend, the retained price, the refund, the Name Note, and the fee funding
+/// must all coexist in one bundle signed by both authorities. Per-action
+/// authority is resolved by key at signing time (`ak` matching). Bundling the
+/// refund address with the payment makes the claim-only coupling structural:
+/// transitions pass `None` and can never emit a refund.
+#[derive(Clone, Debug)]
+pub struct ClaimSettlement {
+    /// The exact Treasury Ironwood note carrying the claim payment.
+    pub locator: NoteLocator,
+    /// The claim price retained by the Treasury as an Ironwood change note.
+    pub price: u64,
+    /// The claimed UA's Orchard receiver, where the payment excess is
+    /// refunded (always emitted for claims, including value-zero).
+    pub refund_address: orchard::Address,
 }
 
-/// Assembles the complete atomic claim transaction: both Orchard and Ironwood
-/// bundles, proven, signed, and serialized into broadcastable hex.
+/// Assembles the complete atomic claim transaction: one Ironwood bundle,
+/// proven, signed by both authorities, and serialized into broadcastable hex.
 ///
 /// # Parameters
 ///
 /// - `wallet`: the canonical wallet (mutated for witness lookup)
 /// - `registry`: the canonical name-chain state
-/// - `treasury_keys`: Treasury spending key (signs the Orchard bundle)
-/// - `registry_keys`: Registry spending key (signs the Ironwood bundle)
+/// - `treasury_keys`: Treasury spending key (signs the payment spend)
+/// - `registry_keys`: Registry spending key (signs the Name Note and fee spends)
 /// - `name`: the canonical name to claim
 /// - `ua`: the unified address to bind the name to
-/// - `payment_locator`: the exact Treasury Orchard note carrying the payment
+/// - `payment_locator`: the exact Treasury Ironwood note carrying the payment
 /// - `fee_inputs`: the exact Registry fee notes selected for funding
 /// - `price`: the claim price in zatoshis (Treasury retains this)
 /// - `anchor_height`: the fully-applied cursor height for witness binding
@@ -168,60 +90,55 @@ pub fn assemble_atomic_claim<P: Parameters>(
     price: u64,
     anchor_height: BlockHeight,
     target_height: BlockHeight,
-) -> Result<(zcash_primitives::transaction::TxId, String, u64), crate::mint::AssemblyError> {
-    // 1. Build the Treasury Orchard bundle (payment spend, one-ZEC change).
-    let (orchard_bundle, payment_value) = build_treasury_orchard_bundle(
-        wallet,
-        treasury_keys,
-        payment_locator,
-        price,
-        anchor_height,
-    )?;
-
-    let refund_value = payment_value - price;
-
-    // 2. Build the Registry Ironwood bundle (Name Note + refund + fee + change).
-    //
-    // Ironwood allows the cross-address transfer required to return excess to
-    // the claimed UA. A claim without an Orchard receiver is not settleable.
-    let refund_address = crate::treasury::relay::extract_orchard_address(network, ua.as_str())
+) -> Result<(zcash_primitives::transaction::TxId, String), crate::mint::AssemblyError> {
+    // The refund requires an Orchard receiver: the excess is returned as an
+    // Ironwood output addressed to the claimed UA's Orchard receiver. A claim
+    // without one is not settleable — and the controller could never receive
+    // an OTP either.
+    let refund_address = crate::mint::treasury::relay::extract_orchard_address(network, ua.as_str())
         .ok_or(crate::mint::AssemblyError::NoOrchardReceiver)?;
 
-    let ironwood_bundle = transaction::build_transaction(
+    let bundle = transaction::build_transaction(
         network,
         wallet,
         registry,
         registry_keys,
-        crate::registry::authorize::NameNoteRequest::Claim(
-            crate::registry::authorize::ClaimRequest { name, ua },
+        crate::mint::registry::authorize::NameNoteRequest::Claim(
+            crate::mint::registry::authorize::ClaimRequest { name, ua },
         ),
         fee_inputs,
         anchor_height,
         target_height,
-        Some((refund_address, refund_value)),
-        2,
+        Some((
+            treasury_keys,
+            ClaimSettlement {
+                locator: payment_locator,
+                price,
+                refund_address,
+            },
+        )),
     )?;
 
-    // 3. Prove, sign, and serialize both bundles in one V6 transaction.
-    let (txid, hex) = signing::assemble_v6_transaction(
+    // Prove, sign, and freeze the single bundle in one V6 transaction.
+    // Both authorities sign: the bundle carries a Treasury payment spend and
+    // Registry lifecycle spends.
+    let tx = v6::assemble_v6_transaction(
         network,
-        Some(orchard_bundle),
-        Some(ironwood_bundle),
+        Some(bundle),
         Some(treasury_keys),
         Some(registry_keys),
         None,
         target_height,
     )?;
-
-    Ok((txid, hex, refund_value))
+    Ok((tx.txid(), v6::serialize_tx(&tx)?))
 }
 
 /// Assembles, proves, signs, and serializes a complete atomic claim transaction.
 ///
 /// This is the complete claim path: selects Registry fee notes, then calls
-/// [`assemble_atomic_claim`] to build both the Treasury Orchard bundle
-/// (payment spend + change) and the Registry Ironwood bundle (Name Note +
-/// refund + fee + change), and signs them into one broadcastable V6 transaction.
+/// [`assemble_atomic_claim`] to build the single Ironwood bundle (payment
+/// spend + price change + Name Note + refund + fee spends + change) and signs
+/// it with both authorities into one broadcastable V6 transaction.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_claim<P: Parameters>(
     network: &P,
@@ -236,22 +153,24 @@ pub fn execute_claim<P: Parameters>(
     anchor_height: BlockHeight,
     target_height: BlockHeight,
 ) -> Result<(zcash_primitives::transaction::TxId, String, Vec<NoteLocator>), crate::mint::AssemblyError> {
-    let claim_req = crate::registry::authorize::NameNoteRequest::Claim(
-        crate::registry::authorize::ClaimRequest {
+    let claim_req = crate::mint::registry::authorize::NameNoteRequest::Claim(
+        crate::mint::registry::authorize::ClaimRequest {
             name: name.clone(),
             ua: ua.clone(),
-        },
+        }
     );
-    let fee_inputs = crate::registry::transaction::select_registry_fee_inputs(
+    // One extra output (the always-present refund) plus the Treasury
+    // payment spend and price change in the same bundle.
+    let fee_inputs = crate::mint::registry::transaction::select_registry_fee_inputs(
         network,
         wallet,
         &claim_req,
         target_height,
         excluded,
         1,
-        2,
+        true,
     )?;
-    let (txid, hex, _) = assemble_atomic_claim(
+    let (txid, hex) = assemble_atomic_claim(
         network,
         wallet,
         registry,
@@ -290,7 +209,17 @@ pub fn process_claim<P: Parameters>(
     ops: &mut crate::mint::OperationalState,
     seen_claims: &mut std::collections::BTreeSet<crate::mint::Name>,
 ) -> Option<crate::mint::RequestOutcome> {
-    use crate::mint::{Action, SubmissionKind, CLAIM_PRICE, RequestOutcome};
+    use crate::mint::{
+        Action, SubmissionKind, CLAIM_PRICE, RequestOutcome, has_orchard_receiver,
+    };
+
+    let ua = crate::mint::UnifiedAddress::from_string(ua.to_string());
+    // A UA without an Orchard receiver can never receive an OTP or a refund;
+    // binding a name to one would brick it. Rejected at validation time —
+    // assembly retains its own check as defense in depth.
+    if !has_orchard_receiver(network, &ua) {
+        return None;
+    }
 
     if seen_claims.contains(&name) {
         return None;
@@ -303,17 +232,14 @@ pub fn process_claim<P: Parameters>(
         return None;
     }
     if value < CLAIM_PRICE {
-        crate::metrics::inc_request_invalid("insufficient_payment");
         return None;
     }
     if registry
         .record(&name)
         .is_some_and(|record| confirmed_height <= record.confirmed_height)
     {
-        crate::metrics::inc_request_invalid("stale_payment");
         return None;
     }
-    crate::metrics::inc_request_received("claim");
     seen_claims.insert(name.clone());
 
     let record_commitment = registry.record(&name).map(|record| record.commitment);
@@ -326,7 +252,7 @@ pub fn process_claim<P: Parameters>(
         treasury_keys,
         registry_keys,
         name,
-        crate::mint::UnifiedAddress::from_string(ua.to_string()),
+        ua,
         locator,
         excluded,
         cursor_height,

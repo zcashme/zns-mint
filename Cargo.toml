@@ -17,8 +17,6 @@ path = "src/main.rs"
 [dependencies]
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
-prometheus = "0.13"
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
@@ -30,6 +28,9 @@ sha2 = "0.10"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# `OffsetDateTime` for `SentTransaction::new` (zcash_client_backend data-api);
+# same crate upstream depends on, lockfile-shared at 0.3.x.
+time = "0.3"
 # JSON-RPC transport over plaintext HTTP/1.1 to the local Zebra node (same
 # TEE). All five crates are already compiled via tonic/gRPC — listing them as
 # direct deps just makes them importable. No TLS, no reqwest, no ring.
@@ -70,33 +71,34 @@ zebra-indexer-proto = "2.5"
 # payments from users. Registry (account 1) is name-notes-only (Orchard). Both
 # accounts derive all enabled pools via `from_seed`; the Registry's Sapling and
 # Transparent components are unused (its address is not published).
-zcash_keys = { git = "https://github.com/zcash/librustzcash", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
-zcash_protocol = { git = "https://github.com/zcash/librustzcash", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1", default-features = false }
+zcash_keys = { version = "0.16.1", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
+zcash_protocol = { version = "0.10.4", default-features = false }
 
 # Address parsing for OTP relay (extracting Orchard receiver from UA string).
 # Already a transitive dep via zcash_keys; listed direct for importability.
-zcash_address = { git = "https://github.com/zcash/librustzcash", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1" }
+zcash_address = "0.13.0"
 
 # Transparent key types (Treasury accepts transparent payments from users).
 # The workspace crate is `zcash_transparent`, published as `transparent`.
-transparent = { package = "zcash_transparent", git = "https://github.com/zcash/librustzcash", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1", default-features = false }
+transparent = { package = "zcash_transparent", version = "0.10.0", default-features = false }
 zip32 = "0.2.1"
 
 # Block parsing
-zcash_primitives = { git = "https://github.com/zcash/librustzcash", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1", default-features = false }
+zcash_primitives = { version = "0.30.0", default-features = false }
 sapling = { package = "sapling-crypto", version = "0.7", default-features = false }
 
 # Full-block wallet scanning. `transparent-inputs` enables transparent UTXO
 # detection (Treasury accepts transparent payments from users).
-zcash_client_backend = { git = "https://github.com/zcash/librustzcash", rev = "a97a3d5f46d096b94ceb71271c7d38f20af4e1f1", default-features = false, features = ["orchard", "transparent-inputs"] }
+zcash_client_backend = { version = "0.24.0-rc.7", default-features = false, features = ["orchard", "transparent-inputs"] }
 
 # Orchard with the `unsafe-zns` feature: Name Notes override the standard
 # note commitment so a note commits to a ZNS payload. The fork lives at
-# https://github.com/zcashme/orchard (branch `main`, rev pinned below).
+# https://github.com/zcashme/orchard (branch `main`); this is a local path
+# dependency on a checkout of that branch.
 # zns-mint calls `Builder::add_zns_output` / `add_zns_spend` directly, so
 # this is a first-class dep, not just a transitive one.
 orchard = { path = "/Users/jules/ZcashNames/zns-orchard", default-features = false, features = ["unsafe-zns", "circuit"] }
-shardtree = "0.6.2"
+shardtree = "0.7.1"
 
 # Redirect the crates.io `orchard` consumed transitively by librustzcash to
 # the ZNS fork so the whole graph builds against the same source.

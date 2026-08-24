@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-pub use crate::mint::Action;
+use crate::mint::Action;
 
 /// Why a memo failed to parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -9,7 +9,6 @@ use std::num::NonZeroU32;
 use zcash_client_backend::data_api::wallet::input_selection::{LockFilter, LockedInputPolicy};
 use zcash_client_backend::data_api::{InputSource, NoteFilter, WalletRead};
 use zcash_protocol::value::Zatoshis;
-use zcash_protocol::ShieldedPool;
 
 use crate::mint::REGISTRY_ACCOUNT;
 use crate::wallet::Wallet;
@@ -111,8 +110,7 @@ impl RegistryFeeLiquidity {
                 LockFilter::Policy(&LockedInputPolicy::default()),
             )
             .ok()
-            .and_then(|meta| meta.ironwood())
-            .map(|pool| pool.note_count())
+            .and_then(|meta| meta.ironwood().map(|pool| pool.note_count()))
             .unwrap_or(0);
         Self { fee_note_count }
     }

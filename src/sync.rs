@@ -1,6 +1,6 @@
 //! Block scanning for the ZNS mint.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 
 use pasta_curves::group::ff::PrimeField;
@@ -15,7 +15,7 @@ use zcash_client_backend::{
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::block::Block as ZcashBlock;
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::consensus::{BlockHeight, Parameters, TxIndex};
+use zcash_protocol::consensus::{Parameters, TxIndex};
 use zip32::AccountId;
 
 use crate::mint::REGISTRY_ACCOUNT;
@@ -205,8 +205,8 @@ where
         scanning_keys,
         &nullifiers,
         prior_metadata,
-        // The published Treasury UA omits a transparent receiver (shielded-only,
-        // see docs/protocol.md §2–3), so no transparent output
+        // The published Treasury UA omits a transparent receiver (shielded-only
+        // by protocol design), so no transparent output
         // is ever attributed to a wallet account. The closure permanently
         // returns `Ok(None)`; this is not a stub awaiting wiring.
         |_| {
@@ -254,4 +254,145 @@ where
     }
 
     Ok((scanned, name_notes))
+}
+
+// ---------------------------------------------------------------------------
+// Block output — the applied-block evidence bundle
+// ---------------------------------------------------------------------------
+
+/// An ordinary (non-Name-Note) Ironwood note received by a wallet account.
+///
+/// Carries its derived nullifier so the Registry's fee-tracking can match
+/// it against spent nullifiers without re-deriving per comparison.
+#[derive(Clone, Debug)]
+pub struct ReceivedIronwood {
+    pub account_id: AccountId,
+    pub note: orchard::note::Note,
+    pub nullifier: orchard::note::Nullifier,
+}
+
+/// One wallet-relevant transaction of an applied block, with the per-tx
+/// evidence the Registry's chain-following needs: spent Ironwood nullifiers,
+/// received ordinary Ironwood notes, and received Name Notes.
+#[derive(Clone, Debug)]
+pub struct BlockTx {
+    txid: TxId,
+    ironwood_nullifiers: Vec<orchard::note::Nullifier>,
+    received_ironwood: Vec<ReceivedIronwood>,
+    received_name_notes: Vec<ReceivedNameNote>,
+}
+
+impl BlockTx {
+    pub fn txid(&self) -> &TxId {
+        &self.txid
+    }
+
+    pub fn ironwood_nullifiers(&self) -> &[orchard::note::Nullifier] {
+        &self.ironwood_nullifiers
+    }
+
+    pub fn received_ironwood(&self) -> &[ReceivedIronwood] {
+        &self.received_ironwood
+    }
+
+    pub fn received_name_notes(&self) -> &[ReceivedNameNote] {
+        &self.received_name_notes
+    }
+}
+
+/// One applied block: the upstream [`ScannedBlock`] plus the supplemental
+/// ZNS lanes, grouped per transaction.
+///
+/// Constructed from a successful [`scan_block`] pair; consumed by the
+/// Registry's `apply_block` and the wallet's `put_blocks`.
+pub struct BlockOutput {
+    scanned: ScannedBlock<AccountId>,
+    transactions: Vec<BlockTx>,
+}
+
+impl BlockOutput {
+    /// Assembles the block output from the scanner's pair, grouping the
+    /// supplemental lanes per transaction and deriving received-note
+    /// nullifiers through the receiving accounts' viewing keys.
+    pub fn new(
+        scanned: ScannedBlock<AccountId>,
+        name_notes: Vec<ReceivedNameNote>,
+        ufvks: &HashMap<AccountId, UnifiedFullViewingKey>,
+    ) -> Self {
+        // Group the supplemental Name Note lane by txid.
+        let mut name_notes_by_tx: BTreeMap<TxId, Vec<ReceivedNameNote>> = BTreeMap::new();
+        for note in name_notes {
+            name_notes_by_tx
+                .entry(*note.txid())
+                .or_default()
+                .push(note);
+        }
+
+        // Spent nullifiers, grouped by txid from the block-level map.
+        let mut nullifiers_by_tx: BTreeMap<TxId, Vec<orchard::note::Nullifier>> =
+            BTreeMap::new();
+        for (_index, txid, nullifiers) in scanned.ironwood().nullifier_map() {
+            nullifiers_by_tx
+                .entry(*txid)
+                .or_default()
+                .extend(nullifiers.iter().copied());
+        }
+
+        let transactions = scanned
+            .transactions()
+            .iter()
+            .map(|wtx| {
+                let txid = wtx.txid();
+                let received_ironwood = wtx
+                    .ironwood_outputs()
+                    .iter()
+                    .filter_map(|output| {
+                        let account_id = *output.account_id();
+                        let fvk = ufvks.get(&account_id)?.orchard()?.clone();
+                        let note = output.note().0.clone();
+                        let nullifier = note.nullifier(&fvk);
+                        Some(ReceivedIronwood {
+                            account_id,
+                            note,
+                            nullifier,
+                        })
+                    })
+                    .collect();
+                BlockTx {
+                    txid,
+                    ironwood_nullifiers: nullifiers_by_tx.remove(&txid).unwrap_or_default(),
+                    received_ironwood,
+                    received_name_notes: name_notes_by_tx
+                        .remove(&txid)
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+
+        Self {
+            scanned,
+            transactions,
+        }
+    }
+
+    /// The block's continuity metadata (height, hash, tree sizes).
+    pub fn metadata(&self) -> BlockMetadata {
+        BlockMetadata::from_parts(
+            self.scanned.height(),
+            self.scanned.block_hash(),
+            Some(self.scanned.sapling().final_tree_size()),
+            Some(self.scanned.orchard().final_tree_size()),
+            Some(self.scanned.ironwood().final_tree_size()),
+        )
+    }
+
+    /// The per-transaction evidence, in block order.
+    pub fn transactions(&self) -> &[BlockTx] {
+        &self.transactions
+    }
+
+    /// The upstream scanned block (for `put_blocks`).
+    pub fn scanned(&self) -> &ScannedBlock<AccountId> {
+        &self.scanned
+    }
 }

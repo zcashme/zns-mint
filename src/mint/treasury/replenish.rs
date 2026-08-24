@@ -2,11 +2,11 @@
 //! pool stocked.
 //!
 //! When the Registry's unspent fee-note count drops below
-//! [`MIN_REGISTRY_FEE_NOTES`](crate::registry::liquidity::MIN_REGISTRY_FEE_NOTES),
+//! [`MIN_REGISTRY_FEE_NOTES`](crate::mint::registry::liquidity::MIN_REGISTRY_FEE_NOTES),
 //! the Treasury refills it to
-//! [`REGISTRY_FEE_POOL_TARGET`](crate::registry::liquidity::REGISTRY_FEE_POOL_TARGET)
+//! [`REGISTRY_FEE_POOL_TARGET`](crate::mint::registry::liquidity::REGISTRY_FEE_POOL_TARGET)
 //! with notes of
-//! [`REGISTRY_FEE_NOTE_TARGET_VALUE`](crate::registry::liquidity::REGISTRY_FEE_NOTE_TARGET_VALUE),
+//! [`REGISTRY_FEE_NOTE_TARGET_VALUE`](crate::mint::registry::liquidity::REGISTRY_FEE_NOTE_TARGET_VALUE),
 //! by spending Treasury Ironwood notes and creating Ironwood outputs to the
 //! Registry's address.
 //!
@@ -19,7 +19,7 @@
 //! pool from the wallet, derives heights, selects funding notes, builds,
 //! proves, signs, and records the transaction in the wallet — returning only
 //! its [`TxId`]. Repeat safety is the wallet's, exactly as in
-//! [`crate::treasury::vault`]: storing the sent transaction records every
+//! [`crate::mint::treasury::vault`]: storing the sent transaction records every
 //! consumed note as spent, blocking re-selection until it confirms or
 //! expires.
 
@@ -29,7 +29,7 @@ use orchard::builder::BundleType;
 use shardtree::error::ShardTreeError;
 use time::OffsetDateTime;
 use zcash_client_backend::data_api::wallet::input_selection::{LockFilter, LockedInputPolicy};
-use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
+use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::{
     InputSource, SentTransaction, TargetValue, WalletCommitmentTrees, WalletRead, WalletWrite,
 };
@@ -41,7 +41,7 @@ use zcash_protocol::ShieldedPool;
 
 use crate::key::TreasuryKeys;
 use crate::mint::{AssemblyError, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
-use crate::registry::liquidity::{RegistryFeeLiquidity, RegistryFundingPlan};
+use crate::mint::registry::liquidity::RegistryFeeLiquidity;
 use crate::wallet::Wallet;
 
 /// Refills the Registry's fee-note pool from Treasury value.
@@ -85,7 +85,7 @@ pub fn replenish_registry_fees<P: Parameters>(
     let mut total_selected = Zatoshis::ZERO;
     let funding_total =
         Zatoshis::from_u64(plan.total_amount).map_err(|_| AssemblyError::ValueOverflow)?;
-    let fee;
+    let mut fee;
 
     loop {
         let requirement = (funding_total + fee_estimate(
@@ -134,7 +134,6 @@ pub fn replenish_registry_fees<P: Parameters>(
                 .map(Zatoshis::into_u64)
                 .map_err(|_| AssemblyError::FeeOverflow)?;
             total_selected = batch_total;
-            selected = batch_notes.iter().map(|n| *n.internal_note_id()).collect();
             selected_notes = batch_notes;
             break;
         }
@@ -156,19 +155,17 @@ pub fn replenish_registry_fees<P: Parameters>(
         selected = batch_notes.iter().map(|n| *n.internal_note_id()).collect();
         selected_notes = batch_notes;
 
-        let met = (total_selected - funding_total)
-            .and_then(|v| v.checked_sub(Zatoshis::from_u64(fee).map_err(|_| AssemblyError::FeeOverflow)?))
-            .is_some();
+        let fee_zat = Zatoshis::from_u64(fee).map_err(|_| AssemblyError::FeeOverflow)?;
+        let met = (total_selected - funding_total - fee_zat).is_some();
         if met {
             break;
         }
     }
 
-    let change_value = (total_selected
-        - funding_total)
-    .and_then(|v| v.checked_sub(Zatoshis::from_u64(fee).map_err(|_| AssemblyError::FeeOverflow)?))
-    .ok_or(AssemblyError::InsufficientFunds)?
-    .into_u64();
+    let fee_zat = Zatoshis::from_u64(fee).map_err(|_| AssemblyError::FeeOverflow)?;
+    let change_value = (total_selected - funding_total - fee_zat)
+        .ok_or(AssemblyError::InsufficientFunds)?
+        .into_u64();
 
     // 4. Anchor root and per-note witnesses, in one tree session.
     let (anchor, merkle_paths) = wallet
@@ -264,7 +261,7 @@ pub fn replenish_registry_fees<P: Parameters>(
     //    Registry spend. Written against the signer's planned return of the
     //    built `Transaction` (step 7 records it in the wallet); the signer
     //    currently returns `(TxId, String)`, changed with the signing slice.
-    let tx = crate::registry::signing::assemble_v6_transaction(
+    let tx = crate::mint::v6::assemble_v6_transaction(
         network,
         Some(bundle),
         Some(treasury_keys),

@@ -8,13 +8,13 @@ use shardtree::{
     error::ShardTreeError,
     store::{ShardStore, memory::MemoryShardStore},
 };
-use zcash_client_backend::data_api::{
-    ORCHARD_SHARD_HEIGHT, SAPLING_SHARD_HEIGHT, WalletCommitmentTrees,
-    chain::CommitmentTreeRoot,
-};
+use zcash_client_backend::data_api::{WalletCommitmentTrees, chain::CommitmentTreeRoot};
 use zcash_protocol::consensus::BlockHeight;
 
-use super::Wallet;
+use super::{
+    ORCHARD_NOTE_COMMITMENT_TREE_DEPTH, ORCHARD_SHARD_HEIGHT, SAPLING_NOTE_COMMITMENT_TREE_DEPTH,
+    SAPLING_SHARD_HEIGHT, Wallet,
+};
 
 impl WalletCommitmentTrees for Wallet {
     type Error = Infallible;
@@ -25,7 +25,7 @@ impl WalletCommitmentTrees for Wallet {
         for<'a> F: FnMut(
             &'a mut ShardTree<
                 Self::SaplingShardStore<'a>,
-                { sapling::NOTE_COMMITMENT_TREE_DEPTH },
+                SAPLING_NOTE_COMMITMENT_TREE_DEPTH,
                 SAPLING_SHARD_HEIGHT,
             >,
         ) -> Result<A, E>,
@@ -46,7 +46,7 @@ impl WalletCommitmentTrees for Wallet {
                     *root.root_hash(),
                 )?;
             }
-            Ok(())
+            Ok::<_, ShardTreeError<Self::Error>>(())
         })?;
 
         for (root, index) in roots.iter().zip(start_index..) {
@@ -84,7 +84,7 @@ impl WalletCommitmentTrees for Wallet {
         for<'a> F: FnMut(
             &'a mut ShardTree<
                 Self::OrchardShardStore<'a>,
-                { ORCHARD_SHARD_HEIGHT * 2 },
+                ORCHARD_NOTE_COMMITMENT_TREE_DEPTH,
                 ORCHARD_SHARD_HEIGHT,
             >,
         ) -> Result<A, E>,
@@ -105,7 +105,7 @@ impl WalletCommitmentTrees for Wallet {
                     *root.root_hash(),
                 )?;
             }
-            Ok(())
+            Ok::<_, ShardTreeError<Self::Error>>(())
         })?;
 
         for (root, index) in roots.iter().zip(start_index..) {
@@ -141,7 +141,7 @@ impl WalletCommitmentTrees for Wallet {
         for<'a> F: FnMut(
             &'a mut ShardTree<
                 Self::OrchardShardStore<'a>,
-                { ORCHARD_SHARD_HEIGHT * 2 },
+                ORCHARD_NOTE_COMMITMENT_TREE_DEPTH,
                 ORCHARD_SHARD_HEIGHT,
             >,
         ) -> Result<A, E>,
@@ -162,7 +162,7 @@ impl WalletCommitmentTrees for Wallet {
                     *root.root_hash(),
                 )?;
             }
-            Ok(())
+            Ok::<_, ShardTreeError<Self::Error>>(())
         })?;
 
         for (root, index) in roots.iter().zip(start_index..) {

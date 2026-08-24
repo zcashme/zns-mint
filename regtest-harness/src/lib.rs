@@ -229,10 +229,8 @@ cache_dir = "{cache_dir}"
 
 [rpc]
 listen_addr = "127.0.0.1:{rpc_port}"
+indexer_listen_addr = "127.0.0.1:{indexer_port}"
 enable_cookie_auth = false
-
-[indexer]
-listen_addr = "127.0.0.1:{indexer_port}"
 "#
     )
 }
@@ -250,13 +248,13 @@ pub fn zns_mint_bin() -> PathBuf {
     
     let status = Command::new("cargo")
         .current_dir(workspace_root)
-        .args(["build", "--release", "--bin", "zns-mint", "--features", "dev-seed"])
+        .args(["build", "--bin", "zns-mint", "--features", "dev-regtest"])
         .status()
         .expect("failed to execute cargo build for zns-mint");
         
-    assert!(status.success(), "cargo build --features dev-seed failed for zns-mint");
+    assert!(status.success(), "cargo build --features dev-regtest failed for zns-mint");
 
-    workspace_root.join("target/release/zns-mint")
+    workspace_root.join("target/debug/zns-mint")
 }
 
 pub struct ZnsMint {
@@ -288,32 +286,13 @@ impl ZnsMint {
             .spawn()
             .context("spawn zns-mint daemon")?;
 
-        // Wait for the mint to boot successfully by polling its Prometheus metrics.
-        // It starts listening on port 9090 immediately, but `zns_mint_boot_success` is 
-        // only set to 1 after the `boot::boot()` sequence finishes syncing the initial state.
-        let rpc = reqwest::Client::new();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let mut booted = false;
-        
-        while Instant::now() < deadline {
-            if let Ok(Some(status)) = child.try_wait() {
-                bail!("zns-mint exited prematurely during startup ({status})");
-            }
-            
-            if let Ok(resp) = rpc.get("http://127.0.0.1:9090/metrics").send().await {
-                if let Ok(text) = resp.text().await {
-                    if text.contains("zns_mint_boot_success 1") {
-                        booted = true;
-                        break;
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-
-        if !booted {
-            let _ = child.kill();
-            bail!("zns-mint failed to boot within 30s (zns_mint_boot_success metric not found)");
+        // Wait for the mint to settle. zns-mint exposes no externally
+        // observable boot signal (the metrics endpoint was removed); boot
+        // success here means "still running after a grace period". A stub
+        // main cannot do better until the run loop lands.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if let Ok(Some(status)) = child.try_wait() {
+            bail!("zns-mint exited prematurely during startup ({status})");
         }
 
         Ok(ZnsMint { child })
@@ -349,6 +328,9 @@ fn zallet_toml(zebra_rpc_port: u16, zallet_rpc_port: u16) -> String {
     format!(
         r#"backend = "zaino"
 
+[builder]
+[builder.limits]
+
 [consensus]
 network = "regtest"
 regtest_nuparams = [
@@ -359,11 +341,23 @@ regtest_nuparams = [
     "37a5165b:4",
 ]
 
+[database]
+
+[external]
+
 [features]
 as_of_version = "0.1.0-beta.1"
 
+[features.deprecated]
+
+[features.experimental]
+
 [indexer]
 validator_address = "127.0.0.1:{zebra_rpc_port}"
+
+[keystore]
+
+[note_management]
 
 [rpc]
 bind = ["127.0.0.1:{zallet_rpc_port}"]
@@ -381,7 +375,7 @@ password = "pass"
 /// address captured during regtest account creation. The temp directory is
 /// dropped (cleaned up) when this struct is dropped.
 pub struct Zallet {
-    child: Child,
+    child: Option<Child>,
     rpc_port: u16,
     http: reqwest::Client,
     /// Transparent address for mining coinbase to this wallet.
@@ -390,12 +384,13 @@ pub struct Zallet {
 }
 
 impl Zallet {
-    /// Start a Zallet wallet in regtest mode connected to the given Zebra RPC port.
+    /// Initialize a Zallet wallet in regtest mode without starting the daemon.
     ///
-    /// Creates a temp directory, writes `zallet.toml`, generates a mnemonic,
-    /// creates a regtest account (capturing the miner address), spawns the
-    /// daemon, and waits for JSON-RPC to come up.
-    pub async fn start(zebra_rpc_port: u16) -> Result<Zallet> {
+    /// Creates a temp directory, writes `zallet.toml`, generates the
+    /// encryption identity, initializes wallet encryption, generates a
+    /// mnemonic, and creates a regtest account (capturing the miner address).
+    /// Call [`Zallet::start_daemon`] afterwards to launch the RPC server.
+    pub async fn init(zebra_rpc_port: u16) -> Result<Zallet> {
         let dir = tempfile::tempdir().context("create zallet datadir")?;
         let datadir = dir.path();
         let bin = zallet_bin();
@@ -407,7 +402,6 @@ impl Zallet {
             );
         }
 
-        // Write the config file (zallet looks for <datadir>/zallet.toml).
         let rpc_port = 8234u16;
         std::fs::write(
             datadir.join("zallet.toml"),
@@ -415,24 +409,44 @@ impl Zallet {
         )
         .context("write zallet.toml")?;
 
+        // Generate the wallet's age encryption identity.
+        let status = Command::new(&bin)
+            .args(["--datadir", datadir.to_str().unwrap(), "generate-encryption-identity"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("spawn zallet generate-encryption-identity")?;
+        if !status.success() {
+            bail!("zallet generate-encryption-identity failed with {status}");
+        }
+
+        // Initialize wallet encryption (binds the identity to the wallet DB).
+        let status = Command::new(&bin)
+            .args(["--datadir", datadir.to_str().unwrap(), "init-wallet-encryption"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("spawn zallet init-wallet-encryption")?;
+        if !status.success() {
+            bail!("zallet init-wallet-encryption failed with {status}");
+        }
+
         // Generate the wallet seed.
-        let init_status = Command::new(&bin)
+        let status = Command::new(&bin)
             .args(["--datadir", datadir.to_str().unwrap(), "generate-mnemonic"])
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .status()
             .context("spawn zallet generate-mnemonic")?;
-        if !init_status.success() {
-            bail!("zallet generate-mnemonic failed with {init_status}");
+        if !status.success() {
+            bail!("zallet generate-mnemonic failed with {status}");
         }
 
         // Create the default account and capture the transparent miner address.
         let miner_out = Command::new(&bin)
             .args([
-                "--datadir",
-                datadir.to_str().unwrap(),
-                "regtest",
-                "generate-account-and-miner-address",
+                "--datadir", datadir.to_str().unwrap(),
+                "regtest", "generate-account-and-miner-address",
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -448,29 +462,36 @@ impl Zallet {
             .trim()
             .to_string();
 
-        // Spawn the daemon.
+        Ok(Zallet {
+            child: None,
+            rpc_port,
+            http: reqwest::Client::new(),
+            miner_address,
+            _dir: dir,
+        })
+    }
+
+    /// Spawn the Zallet daemon and wait for JSON-RPC to come up.
+    ///
+    /// Requires that [`Zallet::init`] has been called first. The Zebra node
+    /// must be running and reachable at the configured `validator_address`.
+    pub async fn start_daemon(&mut self) -> Result<()> {
+        let bin = zallet_bin();
         let (out, err) = if std::env::var_os("ZALLET_STDERR").is_some() {
             (Stdio::inherit(), Stdio::inherit())
         } else {
             (Stdio::null(), Stdio::null())
         };
-        let child = Command::new(&bin)
-            .args(["--datadir", datadir.to_str().unwrap(), "start"])
-            .stdout(out)
-            .stderr(err)
-            .spawn()
-            .context("spawn zallet daemon")?;
-
-        let zallet = Zallet {
-            child,
-            rpc_port,
-            http: reqwest::Client::new(),
-            miner_address,
-            _dir: dir,
-        };
-
-        zallet.wait_until_rpc_up().await?;
-        Ok(zallet)
+        self.child = Some(
+            Command::new(&bin)
+                .args(["--datadir", self._dir.path().to_str().unwrap(), "start"])
+                .stdout(out)
+                .stderr(err)
+                .spawn()
+                .context("spawn zallet daemon")?,
+        );
+        self.wait_until_rpc_up().await?;
+        Ok(())
     }
 
     fn rpc_url(&self) -> String {
@@ -496,15 +517,17 @@ impl Zallet {
     }
 
     /// Poll until the wallet's JSON-RPC endpoint responds.
-    async fn wait_until_rpc_up(&self) -> Result<()> {
+    async fn wait_until_rpc_up(&mut self) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
-            if let Ok(Some(status)) = self.child.try_wait() {
-                if !status.success() {
-                    bail!("zallet exited during startup ({status})");
+            if let Some(child) = self.child.as_mut() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    if !status.success() {
+                        bail!("zallet exited during startup ({status})");
+                    }
                 }
             }
-            if self.call("uptime", json!([])).await.is_ok() {
+            if self.call("getwalletstatus", json!([])).await.is_ok() {
                 return Ok(());
             }
             if Instant::now() >= deadline {
@@ -534,7 +557,9 @@ impl Zallet {
 
 impl Drop for Zallet {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }

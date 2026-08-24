@@ -31,7 +31,7 @@ use super::Wallet;
 
 /// Errors produced by the mint's fixed-account in-memory WalletDb.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WalletError {
+pub enum WalletError {
     /// A lifecycle operation that cannot exist in this wallet: account
     /// creation, import, or deletion, address generation or reservation.
     FixedAccountsOnly,
@@ -61,6 +61,12 @@ impl From<shardtree::error::ShardTreeError<Infallible>> for WalletError {
 impl From<BalanceError> for WalletError {
     fn from(e: BalanceError) -> Self {
         WalletError::Balance(e)
+    }
+}
+
+impl From<Infallible> for WalletError {
+    fn from(e: Infallible) -> Self {
+        match e {}
     }
 }
 
@@ -114,7 +120,7 @@ pub(super) fn next_height(height: BlockHeight) -> BlockHeight {
 /// Upstream provides the `Account` trait but no production record type. This
 /// value is constructed only for an existing UFVK map entry and is never held
 /// by `Wallet`; the database itself remains the fixed account-0/account-1 map.
-pub(super) struct FixedAccount {
+pub struct FixedAccount {
     id: AccountId,
     ufvk: UnifiedFullViewingKey,
     source: AccountSource,
@@ -239,7 +245,7 @@ impl Wallet {
             .get(&OutputRef::from(*note_id))
             .is_some_and(|(_, expiry)| *expiry >= BlockHeight::from(target_height));
 
-        let with_pool = |f: &mut dyn FnMut(&mut Balance) -> Result<(), WalletError>| match pool {
+        let mut with_pool = |f: &mut dyn FnMut(&mut Balance) -> Result<(), WalletError>| match pool {
             ShieldedPool::Sapling => balance.with_sapling_balance_mut(|b| f(b)),
             ShieldedPool::Orchard => balance.with_orchard_balance_mut(|b| f(b)),
             ShieldedPool::Ironwood => balance.with_ironwood_balance_mut(|b| f(b)),
@@ -255,9 +261,9 @@ impl Wallet {
                 Ok(())
             })
         } else if locked {
-            with_pool(&mut |pool_balance| pool_balance.add_locked_value(value))
+            with_pool(&mut |pool_balance| Ok(pool_balance.add_locked_value(value)?))
         } else {
-            with_pool(&mut |pool_balance| pool_balance.add_spendable_value(value))
+            with_pool(&mut |pool_balance| Ok(pool_balance.add_spendable_value(value)?))
         }
     }
 }
@@ -374,7 +380,7 @@ impl WalletRead for Wallet {
         &self,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Option<WalletSummary<Self::AccountId>>, Self::Error> {
-        let Some(chain_tip_height) = self.last_zebra_tip else {
+        let Some(chain_tip_height) = self.zebra_tip else {
             return Ok(None);
         };
         let target_height = TargetHeight::from(next_height(chain_tip_height));
@@ -449,7 +455,7 @@ impl WalletRead for Wallet {
     }
 
     fn chain_height(&self) -> Result<Option<BlockHeight>, Self::Error> {
-        Ok(self.last_zebra_tip)
+        Ok(self.zebra_tip)
     }
 
     fn get_block_hash(&self, block_height: BlockHeight) -> Result<Option<BlockHash>, Self::Error> {
@@ -482,7 +488,7 @@ impl WalletRead for Wallet {
     }
 
     fn suggest_scan_ranges(&self) -> Result<Vec<ScanRange>, Self::Error> {
-        let Some(tip) = self.last_zebra_tip else {
+        let Some(tip) = self.zebra_tip else {
             return Ok(Vec::new());
         };
         let start = self
@@ -505,7 +511,7 @@ impl WalletRead for Wallet {
         &self,
         min_confirmations: NonZeroU32,
     ) -> Result<Option<(TargetHeight, BlockHeight)>, Self::Error> {
-        let Some(tip) = self.last_zebra_tip else {
+        let Some(tip) = self.zebra_tip else {
             return Ok(None);
         };
         let target = next_height(tip);

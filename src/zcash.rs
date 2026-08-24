@@ -12,11 +12,10 @@ use incrementalmerkletree::frontier::Frontier;
 use sapling::Node as SaplingNode;
 use serde::{Deserialize, Serialize};
 use zcash_client_backend::data_api::chain::ChainState;
-use zcash_client_backend::data_api::BlockMetadata;
 use zcash_primitives::block::{Block, BlockHash};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
 use zcash_primitives::transaction::{Transaction, TxId};
-use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::consensus::{BranchId, BlockHeight, Parameters};
 use zebra_indexer_proto::{BlockHashAndHeight, Empty, MempoolChangeKind, ZebraClient};
 
 use orchard::tree::MerkleHashOrchard;
@@ -232,12 +231,18 @@ impl JsonRpc {
     /// mempool first, then the chain — parses it under the boot-proven
     /// consensus parameters, and returns it.
     ///
+    /// `branch_id` is the consensus branch ID to parse under; callers should
+    /// pass `BranchId::for_height(network, target_height)` for the block they
+    /// expect the transaction to confirm in. It is only consulted for
+    /// pre-v5 transaction versions; every transaction the mint produces or
+    /// observes at NU6.3+ is v5/v6, where it is unused.
+    ///
     /// `Ok(None)` means the transaction is in neither the mempool nor the
     /// chain (RPC -5): a normal outcome when racing an `Invalidated`
     /// event, not a transport failure.
-    pub async fn get_raw_transaction<P: Parameters>(
+    pub async fn get_raw_transaction(
         &self,
-        network: &P,
+        branch_id: BranchId,
         txid: TxId,
     ) -> Result<Option<Transaction>, TransportError> {
         let txid_hex = txid.to_string();
@@ -248,7 +253,7 @@ impl JsonRpc {
             Ok(Some(hex_str)) => {
                 let bytes = hex::decode(hex_str)
                     .map_err(|_| TransportError::BadNodeData("getrawtransaction hex"))?;
-                let tx = Transaction::read(&bytes[..], network)
+                let tx = Transaction::read(&bytes[..], branch_id)
                     .map_err(|_| TransportError::BadNodeData("getrawtransaction parse"))?;
                 Ok(Some(tx))
             }
@@ -612,7 +617,7 @@ fn decode_tree<Node>(
     name: &'static str,
 ) -> Result<Frontier<Node, 32>, TransportError>
 where
-    Node: HashSer,
+    Node: HashSer + incrementalmerkletree::Hashable + Clone,
 {
     let bytes = hex::decode(hex_state).map_err(|e| {
         TransportError::BadCheckpoint(format!("{name} tree hex decode failed: {e}"))

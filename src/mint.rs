@@ -1,6 +1,11 @@
 //! Shared protocol logic for ZNS minting and wallet operations.
 
+pub mod claim;
 pub mod note;
+pub mod otp;
+pub mod registry;
+pub mod treasury;
+pub mod v6;
 
 // Re-export note functions so existing `crate::mint::` paths keep working.
 pub use note::{
@@ -41,7 +46,7 @@ impl ChainCursor {
     }
 }
 
-/// A ZNS memo: the fixed 512-byte payload carried by an Orchard note.
+/// A ZNS memo: the fixed 512-byte payload carried by a shielded note.
 ///
 /// A newtype around upstream [`MemoBytes`] (`zcash_protocol::memo`) that keeps
 /// the Zcash memo representation upstream-faithful while overriding `Debug` to
@@ -213,9 +218,8 @@ use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::Parameters;
 use zcash_protocol::value::COIN;
 
-use crate::auth::{ChallengeKey, OtpCode, PendingOtps};
-use crate::metrics;
-use crate::registry::Registry;
+use crate::mint::otp::{ChallengeKey, OtpCode, PendingOtps};
+use crate::mint::registry::Registry;
 use crate::wallet::NoteLocator;
 
 /// Claim price and request minimum in zatoshis. Protocol policy.
@@ -455,14 +459,6 @@ impl OperationalState {
                 if sub.confirmed_at.is_none() {
                     sub.confirmed_at = Some(height);
                     tracing::info!(txid = %txid, kind = sub.kind.as_str(), "confirmed");
-                    match sub.kind {
-                        SubmissionKind::Claim    => { metrics::inc_tx_confirmed("claim"); }
-                        SubmissionKind::Update   => { metrics::inc_tx_confirmed("update"); }
-                        SubmissionKind::Release  => { metrics::inc_tx_confirmed("release"); }
-                        SubmissionKind::OtpRelay => { metrics::inc_tx_confirmed("otp_relay"); }
-                        SubmissionKind::Replenish=> { metrics::inc_tx_confirmed("replenish"); }
-                        SubmissionKind::AutoSweep=> { metrics::inc_tx_confirmed("sweep"); }
-                    }
                 }
             }
         }
@@ -472,7 +468,6 @@ impl OperationalState {
                 false
             } else if sub.is_expired(height) {
                 tracing::warn!(txid = %txid, kind = sub.kind.as_str(), "expired");
-                metrics::inc_tx_expired(sub.kind.as_str());
                 false
             } else {
                 true
@@ -588,8 +583,6 @@ pub enum AssemblyError {
     SigningAuth,
     #[error("transaction serialization failed")]
     Serialize,
-    #[error("NU6.3 is not active at the target height")]
-    Nu63NotActive,
     #[error("wrong bundle version for the pool")]
     WrongVersion,
     #[error("orchard and ironwood circuit versions disagree")]

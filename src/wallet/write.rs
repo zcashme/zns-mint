@@ -5,16 +5,17 @@ use std::collections::{BTreeSet, HashSet};
 use std::convert::Infallible;
 use std::time::SystemTime;
 
-use incrementalmerkletree::Position;
+use incrementalmerkletree::{Hashable, Position};
 use secrecy::SecretVec;
 use shardtree::store::{Checkpoint, ShardStore, TreeState};
 use shardtree::ShardTree;
 use transparent::bundle::OutPoint;
 use zcash_client_backend::data_api::{
-    AccountBirthday, AccountPurpose, ChainState, DecryptedTransaction, ScanPriority,
-    ScannedBlock, ScannedBundles, SentTransaction, TransactionStatus,
-    TransactionsInvolvingAddress, WalletWrite, error::RewindError,
-    locking::{LockError, LockOwner, OutputLockStore},
+    AccountBirthday, AccountPurpose, DecryptedTransaction,
+    ScannedBlock, ScannedBundles, SentTransaction, SentTransactionOutput, TransactionStatus,
+    TransactionsInvolvingAddress, WalletWrite, chain::ChainState,
+    error::RewindError, locking::{LockError, LockOwner, OutputLockStore},
+    scanning::ScanPriority,
 };
 use zcash_client_backend::wallet::{NoteId, OutputRef, WalletTransparentOutput};
 use zcash_keys::address::UnifiedAddress;
@@ -65,7 +66,7 @@ impl Wallet {
     fn is_foreign_lock_active(&self, output: &OutputRef, owner: LockOwner) -> bool {
         match self.locks.get(output) {
             Some((existing_owner, expiry)) if *existing_owner != owner => {
-                match self.last_zebra_tip {
+                match self.zebra_tip {
                     Some(tip) => *expiry >= tip,
                     None => true,
                 }
@@ -172,6 +173,7 @@ fn ensure_block_checkpoint<H, const DEPTH: u8, const SHARD_HEIGHT: u8>(
 where
     shardtree::store::memory::MemoryShardStore<H, BlockHeight>:
         ShardStore<H = H, CheckpointId = BlockHeight, Error = Infallible>,
+    H: Hashable + PartialEq + Clone,
 {
     if tree.store().get_checkpoint(&height)?.is_none() {
         let tree_state = if final_tree_size == 0 {
@@ -200,7 +202,7 @@ fn append_block_commitments<H, Nf, const DEPTH: u8, const SHARD_HEIGHT: u8>(
 where
     shardtree::store::memory::MemoryShardStore<H, BlockHeight>:
         ShardStore<H = H, CheckpointId = BlockHeight, Error = Infallible>,
-    H: Clone,
+    H: Hashable + PartialEq + Clone,
 {
     for (commitment, retention) in bundles.commitments() {
         tree.append(commitment.clone(), *retention)?;
@@ -217,7 +219,7 @@ impl WalletWrite for Wallet {
         _seed: &SecretVec<u8>,
         _birthday: &AccountBirthday,
         _key_source: Option<&str>,
-    ) -> Result<(Self::AccountId, UnifiedSpendingKey), Self::Error> {
+    ) -> Result<(AccountId, UnifiedSpendingKey), WalletError> {
         // Accounts 0 and 1 are installed once at boot; the database never
         // creates spending keys, and no seed crosses this boundary.
         Err(WalletError::FixedAccountsOnly)
@@ -230,7 +232,7 @@ impl WalletWrite for Wallet {
         _account_index: zip32::AccountId,
         _birthday: &AccountBirthday,
         _key_source: Option<&str>,
-    ) -> Result<(Self::Account, UnifiedSpendingKey), Self::Error> {
+    ) -> Result<(Self::Account, UnifiedSpendingKey), WalletError> {
         Err(WalletError::FixedAccountsOnly)
     }
 
@@ -241,21 +243,21 @@ impl WalletWrite for Wallet {
         _birthday: &AccountBirthday,
         _purpose: AccountPurpose,
         _key_source: Option<&str>,
-    ) -> Result<Self::Account, Self::Error> {
+    ) -> Result<Self::Account, WalletError> {
         // The viewing keys of accounts 0 and 1 are installed once at boot.
         Err(WalletError::FixedAccountsOnly)
     }
 
-    fn delete_account(&mut self, _account: Self::AccountId) -> Result<(), Self::Error> {
+    fn delete_account(&mut self, _account: AccountId) -> Result<(), WalletError> {
         // The namespace cannot survive deletion of either account.
         Err(WalletError::FixedAccountsOnly)
     }
 
     fn get_next_available_address(
         &mut self,
-        _account: Self::AccountId,
+        _account: AccountId,
         _request: UnifiedAddressRequest,
-    ) -> Result<Option<(UnifiedAddress, DiversifierIndex)>, Self::Error> {
+    ) -> Result<Option<(UnifiedAddress, DiversifierIndex)>, WalletError> {
         // This wallet generates no addresses; receivers are derived on demand
         // from the fixed UFVKs by the application.
         Err(WalletError::FixedAccountsOnly)
@@ -263,17 +265,17 @@ impl WalletWrite for Wallet {
 
     fn get_address_for_index(
         &mut self,
-        _account: Self::AccountId,
+        _account: AccountId,
         _diversifier_index: DiversifierIndex,
         _request: UnifiedAddressRequest,
-    ) -> Result<Option<UnifiedAddress>, Self::Error> {
+    ) -> Result<Option<UnifiedAddress>, WalletError> {
         Err(WalletError::FixedAccountsOnly)
     }
 
-    fn update_chain_tip(&mut self, tip_height: BlockHeight) -> Result<(), Self::Error> {
+    fn update_chain_tip(&mut self, tip_height: BlockHeight) -> Result<(), WalletError> {
         // The Zebra consensus tip is chain state, recorded exactly as
         // supplied; reorg handling is the caller's truncate/rescan loop.
-        self.last_zebra_tip = Some(tip_height);
+        self.zebra_tip = Some(tip_height);
         Ok(())
     }
 
@@ -281,7 +283,7 @@ impl WalletWrite for Wallet {
         &mut self,
         _height: BlockHeight,
         _retain_with_priority: Option<ScanPriority>,
-    ) -> Result<u64, Self::Error> {
+    ) -> Result<u64, WalletError> {
         // There is no scan queue: scanning is one linear range.
         Ok(0)
     }
@@ -289,8 +291,8 @@ impl WalletWrite for Wallet {
     fn put_blocks(
         &mut self,
         from_state: &ChainState,
-        blocks: Vec<ScannedBlock<Self::AccountId>>,
-    ) -> Result<(), Self::Error> {
+        blocks: Vec<ScannedBlock<AccountId>>,
+    ) -> Result<(), WalletError> {
         let Some(first) = blocks.first() else {
             return Ok(());
         };
@@ -369,7 +371,7 @@ impl WalletWrite for Wallet {
                 }
                 for utxo in wtx.transparent_outputs() {
                     self.transparent_outputs
-                        .insert(*utxo.outpoint(), utxo.clone());
+                        .insert(utxo.outpoint().clone(), utxo.clone());
                 }
             }
 
@@ -400,19 +402,19 @@ impl WalletWrite for Wallet {
 
     fn put_received_transparent_utxo(
         &mut self,
-        output: &WalletTransparentOutput<Self::AccountId>,
-    ) -> Result<Self::UtxoRef, Self::Error> {
+        output: &WalletTransparentOutput<AccountId>,
+    ) -> Result<Self::UtxoRef, WalletError> {
         // Stored as a chain observation only: under the outbound-only
         // transparent policy it is never surfaced as a spendable input.
-        let outpoint = *output.outpoint();
-        self.transparent_outputs.insert(outpoint, output.clone());
+        let outpoint = output.outpoint().clone();
+        self.transparent_outputs.insert(outpoint.clone(), output.clone());
         Ok(outpoint)
     }
 
     fn store_decrypted_tx(
         &mut self,
-        received_tx: DecryptedTransaction<Transaction, Self::AccountId>,
-    ) -> Result<(), Self::Error> {
+        received_tx: DecryptedTransaction<Transaction, AccountId>,
+    ) -> Result<(), WalletError> {
         let tx = received_tx.tx();
         let txid = tx.txid();
         self.transactions.insert(txid, tx.clone());
@@ -463,7 +465,7 @@ impl WalletWrite for Wallet {
         Ok(())
     }
 
-    fn set_tx_trust(&mut self, txid: TxId, trusted: bool) -> Result<(), Self::Error> {
+    fn set_tx_trust(&mut self, txid: TxId, trusted: bool) -> Result<(), WalletError> {
         if trusted {
             self.trusted_transactions.insert(txid);
         } else {
@@ -474,8 +476,8 @@ impl WalletWrite for Wallet {
 
     fn store_transactions_to_be_sent(
         &mut self,
-        transactions: &[SentTransaction<Self::AccountId>],
-    ) -> Result<(), Self::Error> {
+        transactions: &[SentTransaction<AccountId>],
+    ) -> Result<(), WalletError> {
         for sent in transactions {
             let tx = sent.tx();
             let txid = tx.txid();
@@ -486,7 +488,14 @@ impl WalletWrite for Wallet {
                 .entry(txid)
                 .or_insert(TransactionStatus::NotInMainChain);
             self.sent_outputs
-                .insert(txid, sent.outputs().to_vec());
+                .insert(txid, sent.outputs().iter().map(|o| {
+                    SentTransactionOutput::from_parts(
+                        o.output_index(),
+                        o.recipient().clone(),
+                        o.value(),
+                        o.memo().cloned(),
+                    )
+                }).collect());
 
             // Record spends of wallet outputs from the raw bundles, then
             // release the locks on every output now recorded as spent: the
@@ -499,7 +508,7 @@ impl WalletWrite for Wallet {
                     }
                 }
             }
-            if let Some(bundle) = tx.orchard_bundle() {
+            if let Some(bundle) = tx.ironwood_bundle() {
                 for action in bundle.actions() {
                     if let Some(note_id) = self.ironwood_nullifiers.get(action.nullifier()) {
                         self.ironwood_note_spends.insert(*note_id, txid);
@@ -508,19 +517,20 @@ impl WalletWrite for Wallet {
                 }
             }
             for outpoint in sent.utxos_spent() {
-                self.transparent_spends.insert((txid, *outpoint));
-                self.transparent_output_spends.insert(*outpoint, txid);
+                let outpoint = outpoint.clone();
                 self.locks.remove(&OutputRef::new(
                     *outpoint.txid(),
                     PoolType::TRANSPARENT,
                     outpoint.n(),
                 ));
+                self.transparent_spends.insert((txid, outpoint.clone()));
+                self.transparent_output_spends.insert(outpoint, txid);
             }
         }
         Ok(())
     }
 
-    fn truncate_to_height(&mut self, max_height: BlockHeight) -> Result<BlockHeight, Self::Error> {
+    fn truncate_to_height(&mut self, max_height: BlockHeight) -> Result<BlockHeight, WalletError> {
         let Some(target) = self.common_truncation_height(max_height) else {
             if self.blocks.is_empty() {
                 // Nothing has been applied; there is nothing to truncate.
@@ -555,7 +565,7 @@ impl WalletWrite for Wallet {
         Ok(target)
     }
 
-    fn truncate_to_chain_state(&mut self, chain_state: ChainState) -> Result<(), Self::Error> {
+    fn truncate_to_chain_state(&mut self, chain_state: ChainState) -> Result<(), WalletError> {
         let height = chain_state.block_height();
         match self.blocks.get(&height) {
             Some(metadata) if metadata.block_hash() == chain_state.block_hash() => {}
@@ -573,8 +583,8 @@ impl WalletWrite for Wallet {
     fn rewind_to_chain_state(
         &mut self,
         chain_state: ChainState,
-        reset_account_birthdays: HashSet<Self::AccountId>,
-    ) -> Result<(), RewindError<Self::AccountId, Self::Error>> {
+        reset_account_birthdays: HashSet<AccountId>,
+    ) -> Result<(), RewindError<AccountId, WalletError>> {
         for account in &reset_account_birthdays {
             if !self.ufvks.contains_key(account) {
                 return Err(RewindError::DataSource(WalletError::AccountUnknown(
@@ -601,9 +611,9 @@ impl WalletWrite for Wallet {
 
     fn reserve_next_n_ephemeral_addresses(
         &mut self,
-        _account_id: Self::AccountId,
+        _account_id: AccountId,
         _n: usize,
-    ) -> Result<Vec<(transparent::address::TransparentAddress, zcash_client_backend::wallet::TransparentAddressMetadata)>, Self::Error>
+    ) -> Result<Vec<(transparent::address::TransparentAddress, zcash_client_backend::wallet::TransparentAddressMetadata)>, WalletError>
     {
         // Neither fixed account owns, derives, or reserves a transparent
         // receiver.
@@ -612,9 +622,9 @@ impl WalletWrite for Wallet {
 
     fn reserve_next_n_internal_addresses(
         &mut self,
-        _account_id: Self::AccountId,
+        _account_id: AccountId,
         _n: usize,
-    ) -> Result<Vec<(transparent::address::TransparentAddress, zcash_client_backend::wallet::TransparentAddressMetadata)>, Self::Error>
+    ) -> Result<Vec<(transparent::address::TransparentAddress, zcash_client_backend::wallet::TransparentAddressMetadata)>, WalletError>
     {
         Err(WalletError::FixedAccountsOnly)
     }
@@ -623,7 +633,7 @@ impl WalletWrite for Wallet {
         &mut self,
         txid: TxId,
         status: TransactionStatus,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), WalletError> {
         self.transaction_statuses.insert(txid, status);
         Ok(())
     }
@@ -632,7 +642,7 @@ impl WalletWrite for Wallet {
         &mut self,
         _address: &transparent::address::TransparentAddress,
         _offset_seconds: u32,
-    ) -> Result<Option<SystemTime>, Self::Error> {
+    ) -> Result<Option<SystemTime>, WalletError> {
         // No transparent address is tracked, so there is nothing to schedule.
         Ok(None)
     }
@@ -640,7 +650,7 @@ impl WalletWrite for Wallet {
     fn mark_transparent_addresses_exposed(
         &mut self,
         exposures: &[(transparent::address::TransparentAddress, BlockHeight)],
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), WalletError> {
         // The wallet tracks no transparent addresses; an empty request is a
         // no-op, any other is unrecognized.
         if exposures.is_empty() {
@@ -654,7 +664,7 @@ impl WalletWrite for Wallet {
         &mut self,
         _request: TransactionsInvolvingAddress,
         _as_of_height: BlockHeight,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), WalletError> {
         // No address-check state is maintained.
         Ok(())
     }

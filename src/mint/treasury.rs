@@ -22,7 +22,6 @@
 //! 5. **Fund the Registry** (`replenish`) — refill the Registry's fee-note
 //!    pool from Treasury value when it drops below its floor.
 
-pub mod claim;
 pub mod memo;
 pub mod replenish;
 pub mod relay;

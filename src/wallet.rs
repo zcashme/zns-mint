@@ -1,21 +1,23 @@
 //! In-memory wallet database for the ZNS mint.
 
+mod assembly;
 mod input;
 mod read;
 mod trees;
 mod write;
 
-use std::collections::{BTreeMap, BTreeSet};
+pub use assembly::{IronwoodNote, NoteLocator};
 
-use incrementalmerkletree::{frontier::Frontier, Address};
-use shardtree::{store::memory::MemoryShardStore, ShardTree};
+use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
+
+use incrementalmerkletree::{Address, Marking, Retention};
+use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTree};
 use transparent::bundle::OutPoint;
 use zcash_client_backend::{
     data_api::locking::LockOwner,
-    data_api::{
-        BlockMetadata, SentTransactionOutput, TransactionStatus, ORCHARD_SHARD_HEIGHT,
-        SAPLING_SHARD_HEIGHT,
-    },
+    data_api::{BlockMetadata, SentTransactionOutput, TransactionStatus},
+    data_api::chain::ChainState,
     wallet::{
         NoteId, OutputRef, WalletIronwoodOutput, WalletSaplingOutput, WalletTransparentOutput,
     },
@@ -28,17 +30,29 @@ use zcash_protocol::{
 };
 use zip32::AccountId;
 
-/// The in-memory backing store for the two fixed mint accounts.
-///
-/// The values are the current upstream wallet/scanner values. The wallet is a
-/// disposable projection of the Zebra chain; it deliberately has no scan queue
-/// or mutable account registry.
+/// Depth of the Sapling note commitment tree,
+const SAPLING_NOTE_COMMITMENT_TREE_DEPTH: u8 = 32;
+
+/// Depth of the Orchard and Ironwood note commitment tree;
+const ORCHARD_NOTE_COMMITMENT_TREE_DEPTH: u8 = 32;
+
+/// Shard height of the Sapling note commitment tree;
+const SAPLING_SHARD_HEIGHT: u8 = 16;
+
+/// Shard height of the Orchard and Ironwood note commitment trees;
+const ORCHARD_SHARD_HEIGHT: u8 = 16;
+
+/// Shard-tree error over the infallible in-memory store: only tree-structural
+/// failures (`Query`, `Insert`) are reachable, never storage failures.
+type TreeError = ShardTreeError<Infallible>;
+
+/// The in-memory wallet for the two fixed mint accounts.
 pub struct Wallet {
     /// Exactly account 0 (Treasury) and account 1 (Registry).
     ufvks: BTreeMap<AccountId, UnifiedFullViewingKey>,
 
     /// The Zebra consensus tip last supplied through `WalletWrite::update_chain_tip`.
-    last_zebra_tip: Option<BlockHeight>,
+    zebra_tip: Option<BlockHeight>,
 
     /// Canonical Zebra blocks this in-memory projection has applied.
     blocks: BTreeMap<BlockHeight, BlockMetadata>,
@@ -47,16 +61,16 @@ pub struct Wallet {
     transaction_statuses: BTreeMap<TxId, TransactionStatus>,
     transaction_indices: BTreeMap<TxId, TxIndex>,
 
-    /// Transactions whose outputs are trusted at the ZIP 315 "trusted"
-    /// confirmation depth, set via `WalletWrite::set_tx_trust`.
     trusted_transactions: BTreeSet<TxId>,
 
     sapling_notes: BTreeMap<NoteId, WalletSaplingOutput<AccountId>>,
     ironwood_notes: BTreeMap<NoteId, WalletIronwoodOutput<AccountId>>,
+
     memos: BTreeMap<NoteId, Memo>,
 
     sapling_note_spends: BTreeMap<NoteId, TxId>,
     ironwood_note_spends: BTreeMap<NoteId, TxId>,
+
     sapling_nullifiers: BTreeMap<sapling::Nullifier, NoteId>,
     ironwood_nullifiers: BTreeMap<orchard::note::Nullifier, NoteId>,
 
@@ -71,30 +85,32 @@ pub struct Wallet {
 
     sapling_tree: ShardTree<
         MemoryShardStore<sapling::Node, BlockHeight>,
-        { sapling::NOTE_COMMITMENT_TREE_DEPTH },
+        SAPLING_NOTE_COMMITMENT_TREE_DEPTH,
         SAPLING_SHARD_HEIGHT,
     >,
     sapling_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
     orchard_tree: ShardTree<
         MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>,
-        { ORCHARD_SHARD_HEIGHT * 2 },
+        ORCHARD_NOTE_COMMITMENT_TREE_DEPTH,
         ORCHARD_SHARD_HEIGHT,
     >,
     orchard_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
     ironwood_tree: ShardTree<
         MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>,
-        { ORCHARD_SHARD_HEIGHT * 2 },
+        ORCHARD_NOTE_COMMITMENT_TREE_DEPTH,
         ORCHARD_SHARD_HEIGHT,
     >,
     ironwood_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
 }
 
 impl Wallet {
-    /// Creates the database for the boot-established Treasury and Registry UFVKs.
-    pub fn new(ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>) -> Self {
-        Self {
+    pub fn new(
+        ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
+        chain_state: &ChainState,
+    ) -> Result<Self, TreeError> {
+        let mut wallet = Self {
             ufvks: ufvks.into_iter().collect(),
-            last_zebra_tip: None,
+            zebra_tip: None,
             blocks: BTreeMap::new(),
             transactions: BTreeMap::new(),
             transaction_statuses: BTreeMap::new(),
@@ -118,7 +134,21 @@ impl Wallet {
             orchard_tree_shard_end_heights: BTreeMap::new(),
             ironwood_tree: ShardTree::new(MemoryShardStore::empty(), 101),
             ironwood_tree_shard_end_heights: BTreeMap::new(),
-        }
+        };
+        let retention = Retention::Checkpoint {
+            id: chain_state.block_height(),
+            marking: Marking::Reference,
+        };
+        wallet
+            .sapling_tree
+            .insert_frontier(chain_state.final_sapling_tree().clone(), retention)?;
+        wallet
+            .orchard_tree
+            .insert_frontier(chain_state.final_orchard_tree().clone(), retention)?;
+        wallet
+            .ironwood_tree
+            .insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
+        Ok(wallet)
     }
 
     /// Returns the fixed account UFVKs for scanner construction.
@@ -130,32 +160,4 @@ impl Wallet {
     pub fn ufvk_for(&self, account: AccountId) -> Option<&UnifiedFullViewingKey> {
         self.ufvks.get(&account)
     }
-
-    /// Seeds all three commitment trees from the verified Zebra checkpoint.
-    ///
-    /// The checkpoint height is chain state, not an account birthday.
-    pub fn seed_trees(
-        &mut self,
-        sapling_frontier: Frontier<sapling::Node, { sapling::NOTE_COMMITMENT_TREE_DEPTH }>,
-        orchard_frontier: Frontier<orchard::tree::MerkleHashOrchard, 32>,
-        ironwood_frontier: Frontier<orchard::tree::MerkleHashOrchard, 32>,
-        checkpoint_height: BlockHeight,
-    ) -> Result<(), shardtree::error::ShardTreeError<std::convert::Infallible>> {
-        let retention = incrementalmerkletree::Retention::Checkpoint {
-            id: checkpoint_height,
-            marking: incrementalmerkletree::Marking::Reference,
-        };
-        self.sapling_tree
-            .insert_frontier(sapling_frontier, retention)?;
-        self.orchard_tree
-            .insert_frontier(orchard_frontier, retention)?;
-        self.ironwood_tree
-            .insert_frontier(ironwood_frontier, retention)?;
-        Ok(())
-    }
 }
-
-const _: () = {
-    assert!(sapling::NOTE_COMMITMENT_TREE_DEPTH == SAPLING_SHARD_HEIGHT * 2);
-    assert!(32 == ORCHARD_SHARD_HEIGHT * 2);
-};

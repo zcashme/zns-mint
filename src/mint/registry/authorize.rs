@@ -1,8 +1,20 @@
 //! Transition authorization: validates requests against the name-chain state
 //! and produces typed [`NameNoteRequest`]s for the transaction-assembly path.
+//! The OTP challenges those requests authorize with live in
+//! [`crate::mint::otp`].
+
+use zcash_protocol::consensus::BlockHeight;
 
 use crate::mint::{Action, Name, NameCommitment, UnifiedAddress};
-use crate::registry::{Registry, Record};
+use crate::mint::registry::{Registry, Record};
+
+// OTP challenge state lives at kernel level in [`crate::mint::otp`];
+// re-exported here for the `authorize_*` signatures in this module.
+use crate::mint::otp::{ChallengeKey, PendingOtps};
+
+// ---------------------------------------------------------------------------
+// Transition requests
+// ---------------------------------------------------------------------------
 
 /// A requested Name Note transition, ready for the transaction-assembly path.
 ///
@@ -87,8 +99,8 @@ pub fn authorize_claim(
 /// predecessor commitment.
 pub fn authorize_update(
     registry: &Registry,
-    pending_otps: &mut crate::auth::PendingOtps,
-    current_height: zcash_protocol::consensus::BlockHeight,
+    pending_otps: &mut PendingOtps,
+    current_height: BlockHeight,
     name: Name,
     new_ua: UnifiedAddress,
     otp: &[u8; 16],
@@ -98,7 +110,7 @@ pub fn authorize_update(
         return None;
     }
 
-    let key = crate::auth::ChallengeKey::new(
+    let key = ChallengeKey::new(
         name.clone(),
         Action::Update,
         new_ua.clone(),
@@ -121,8 +133,8 @@ pub fn authorize_update(
 /// predecessor commitment.
 pub fn authorize_release(
     registry: &Registry,
-    pending_otps: &mut crate::auth::PendingOtps,
-    current_height: zcash_protocol::consensus::BlockHeight,
+    pending_otps: &mut PendingOtps,
+    current_height: BlockHeight,
     name: Name,
     current_ua: UnifiedAddress,
     otp: &[u8; 16],
@@ -136,7 +148,7 @@ pub fn authorize_release(
     if controller != &current_ua {
         return None;
     }
-    let key = crate::auth::ChallengeKey::new(
+    let key = ChallengeKey::new(
         name.clone(),
         Action::Release,
         controller.clone(),
@@ -156,7 +168,8 @@ pub fn authorize_release(
 mod tests {
     use super::*;
     use crate::mint::NameCommitment;
-    use zcash_protocol::consensus::BlockHeight;
+    use crate::mint::otp::{OtpCode, encode_otp_relay_memo};
+    
 
     fn mock_registry() -> Registry {
         Registry::new()
@@ -168,8 +181,8 @@ mod tests {
         NameCommitment::from_bytes(&b).unwrap()
     }
 
-    fn mock_pending_otps() -> crate::auth::PendingOtps {
-        crate::auth::PendingOtps::new()
+    fn mock_pending_otps() -> PendingOtps {
+        PendingOtps::new()
     }
 
     fn dummy_rho() -> orchard::note::Rho {
@@ -268,17 +281,33 @@ mod tests {
         );
 
         // Issue real OTP and it succeeds
-        let key = crate::auth::ChallengeKey::new(
+        let key = ChallengeKey::new(
             Name::parse("carol").unwrap(),
             Action::Update,
             UnifiedAddress::from_string("u1new".into()),
             dummy_commitment(),
         );
-        let issued_otp = crate::auth::OtpCode::generate();
+        let issued_otp = OtpCode::generate();
         let real_otp = issued_otp.expose_for_test();
         otps.record_issued(key, &issued_otp, height);
         let req = authorize_update(&reg, &mut otps, height, name.clone(), ua, &real_otp).unwrap();
         assert_eq!(req.action(), Action::Update);
+    }
+
+    #[test]
+    fn relay_memo_is_not_a_request_memo() {
+        // OTP relay memos use verb "otp", which is not a valid request verb.
+        // treasury::memo::RequestMemo::parse must reject them.
+        let name = Name::parse("alice").unwrap();
+        let ua = UnifiedAddress::from_string("u1test".into());
+        let otp = OtpCode::for_test([0xdeu8; 16]);
+
+        let memo = encode_otp_relay_memo(&name, Action::Update, &ua, &otp).unwrap();
+        let result = crate::mint::treasury::memo::RequestMemo::parse(&memo);
+        assert!(
+            result.is_err(),
+            "relay memo must not parse as a request memo"
+        );
     }
 }
 
@@ -300,16 +329,14 @@ pub fn process_transition<P: zcash_protocol::consensus::Parameters>(
     registry: &Registry,
     registry_keys: &crate::key::RegistryKeys,
     ops: &mut crate::mint::OperationalState,
-    seen_with_otp: &mut std::collections::BTreeSet<crate::auth::ChallengeKey>,
+    seen_with_otp: &mut std::collections::BTreeSet<ChallengeKey>,
 ) -> Option<crate::mint::RequestOutcome> {
-    use crate::auth::ChallengeKey;
     use crate::mint::{SubmissionKind, RequestOutcome};
 
     let key = ChallengeKey::new(name.clone(), action, ua.clone(), record_commitment);
     if seen_with_otp.contains(&key) {
         return None;
     }
-    crate::metrics::inc_request_received(action.as_str());
     seen_with_otp.insert(key);
 
     let lock = ops.reserve_name(&name, Some(record_commitment))?;
@@ -323,12 +350,11 @@ pub fn process_transition<P: zcash_protocol::consensus::Parameters>(
 
     match req {
         None => {
-            crate::metrics::inc_request_invalid("authorization_failed");
             ops.release_name(&lock);
             None
         }
         Some(r) => {
-            let result = crate::registry::transaction::execute_transition(
+            let result = crate::mint::registry::transaction::execute_transition(
                 network,
                 wallet,
                 registry,

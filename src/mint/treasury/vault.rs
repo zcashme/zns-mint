@@ -27,9 +27,8 @@ use orchard::builder::BundleType;
 use shardtree::error::ShardTreeError;
 use time::OffsetDateTime;
 use transparent::address::TransparentAddress;
-use zcash_address::ZcashAddress;
 use zcash_client_backend::data_api::wallet::input_selection::{LockFilter, LockedInputPolicy};
-use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
+use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::{
     InputSource, SentTransaction, SentTransactionOutput, WalletCommitmentTrees, WalletRead,
     WalletWrite,
@@ -42,7 +41,7 @@ use zcash_protocol::{PoolType, ShieldedPool};
 
 use crate::key::TreasuryKeys;
 use crate::mint::{AssemblyError, TREASURY_ACCOUNT};
-use crate::registry::transaction::TransparentOutput;
+use crate::mint::v6::TransparentOutput;
 use crate::wallet::Wallet;
 
 /// Minimum spendable Treasury balance (zatoshis) to trigger a deposit.
@@ -237,7 +236,7 @@ pub fn sweep_to_vault<P: Parameters>(
         address: VAULT_ADDRESS,
         value: Zatoshis::from_u64(sweep_amount).map_err(|_| AssemblyError::ValueOverflow)?,
     }];
-    let tx = crate::registry::signing::assemble_v6_transaction(
+    let tx = crate::mint::v6::assemble_v6_transaction(
         network,
         Some(bundle),
         Some(treasury_keys),
@@ -246,7 +245,6 @@ pub fn sweep_to_vault<P: Parameters>(
         target_height,
     )?;
     let txid = tx.txid();
-
     // 8. Record the sent transaction. This is what makes the deposit safe to
     //    repeat: the wallet records each spent note, blocking re-selection
     //    until the deposit confirms or its expiry height passes. Only the
@@ -255,7 +253,8 @@ pub fn sweep_to_vault<P: Parameters>(
     let sent_outputs = [SentTransactionOutput::from_parts(
         0,
         Recipient::External {
-            recipient_address: ZcashAddress::from_transparent(network.coin_type(), VAULT_ADDRESS),
+            recipient_address: zcash_keys::address::Address::Transparent(VAULT_ADDRESS)
+                .to_zcash_address(network),
             output_pool: PoolType::TRANSPARENT,
         },
         Zatoshis::from_u64(sweep_amount).map_err(|_| AssemblyError::ValueOverflow)?,

@@ -35,10 +35,11 @@ use zeroize::Zeroize;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::{ChainCursor, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
-use crate::registry::Registry;
-use crate::treasury::Treasury;
+use crate::mint::registry::Registry;
 use crate::wallet::Wallet;
-use crate::zcash::{self, ChainClient, CheckpointData};
+use crate::zcash::{self, ChainClient};
+use zcash_client_backend::data_api::{BlockMetadata};
+use zcash_client_backend::data_api::chain::ChainState;
 
 // ---------------------------------------------------------------------------
 // boot — the concrete entry point
@@ -59,7 +60,6 @@ pub struct Boot<P: Parameters> {
     chain: ChainClient,
     wallet: Wallet,
     registry: Registry,
-    treasury: Treasury,
     cursor: ChainCursor,
     treasury_keys: TreasuryKeys,
     registry_keys: RegistryKeys,
@@ -134,30 +134,42 @@ impl<P: Parameters> Boot<P> {
         };
         tracing::info!("boot: keys derived (treasury=acct0, registry=acct1); seed wiped");
 
-        // 5. Wallet initialization
-        let mut wallet = Wallet::new([
-            (TREASURY_ACCOUNT, treasury_keys.fvk()),
-            (REGISTRY_ACCOUNT, registry_keys.fvk()),
-        ]);
-
-        // 6. ZNS Origin Checkpoint: fetch tree state from Zebra and seed ShardTrees
+        // 5. ZNS Origin Checkpoint: fetch tree state from Zebra; the wallet is
+        // born from it (trees seeded) and the cursor derives from it.
+        //
+        // `ChainState` (frontiers) seeds the trees; the cursor carries
+        // `BlockMetadata` (height, hash, tree sizes) — the upstream continuity
+        // value `scan_block`'s `prior_metadata` and every `to_block_metadata()`
+        // call produce. Sizes derive from the frontiers (`Frontier::tree_size`),
+        // mirroring upstream's `ScannedBlock::to_block_metadata`.
         let rpc = zcash::JsonRpc::new();
-        let checkpoint = origin_checkpoint(&rpc, &network).await;
-        let checkpoint_height = checkpoint.metadata.block_height();
-        wallet
-            .seed_trees(
-                checkpoint.sapling_tree.to_frontier(),
-                checkpoint.orchard_tree.to_frontier(),
-                checkpoint
-                    .ironwood_tree
-                    .as_ref()
-                    .map(|tree| tree.to_frontier())
-                    .unwrap_or_else(incrementalmerkletree::frontier::Frontier::empty),
-                checkpoint_height,
-            )
-            .expect("FATAL: failed to seed commitment trees from the verified Zebra checkpoint");
+        let chain_state = origin_checkpoint(&rpc, &network).await;
+        let checkpoint_height = chain_state.block_height();
+        let sapling_size =
+            u32::try_from(chain_state.final_sapling_tree().tree_size()).expect("tree size fits u32");
+        let orchard_size = u32::try_from(chain_state.final_orchard_tree().tree_size())
+            .expect("tree size fits u32");
+        let ironwood_size = u32::try_from(chain_state.final_ironwood_tree().tree_size())
+            .expect("tree size fits u32");
+        let checkpoint_metadata = BlockMetadata::from_parts(
+            checkpoint_height,
+            chain_state.block_hash(),
+            Some(sapling_size),
+            Some(orchard_size),
+            Some(ironwood_size),
+        );
+
+        // 6. Wallet initialization
+        let wallet = Wallet::new(
+            [
+                (TREASURY_ACCOUNT, treasury_keys.fvk()),
+                (REGISTRY_ACCOUNT, registry_keys.fvk()),
+            ],
+            &chain_state,
+        )
+        .expect("FATAL: failed to seed commitment trees from the verified Zebra checkpoint");
         tracing::info!(
-            "boot: commitment trees seeded from origin checkpoint at height {}",
+            "boot: wallet initialized with trees seeded from origin checkpoint at height {}",
             u32::from(checkpoint_height)
         );
 
@@ -185,8 +197,7 @@ impl<P: Parameters> Boot<P> {
             chain: chain_client,
             wallet,
             registry: Registry::new(),
-            treasury: Treasury::default(),
-            cursor: ChainCursor::from_metadata(checkpoint.metadata),
+            cursor: ChainCursor::from_metadata(checkpoint_metadata),
             treasury_keys,
             registry_keys,
         }
@@ -214,7 +225,6 @@ impl<P: Parameters> Boot<P> {
         ChainClient,
         Wallet,
         Registry,
-        Treasury,
         TreasuryKeys,
         RegistryKeys,
     ) {
@@ -223,7 +233,6 @@ impl<P: Parameters> Boot<P> {
             self.chain,
             self.wallet,
             self.registry,
-            self.treasury,
             self.treasury_keys,
             self.registry_keys,
         )
@@ -290,13 +299,10 @@ async fn verify_chain_integrity<P: Parameters>(
         .expect("FATAL: Zebra gRPC unreachable or timed out");
 
     // Open the tip stream and read the first message
-    use zebra_indexer_proto::Empty;
-    let resp = chain
-        .client()
-        .chain_tip_change(Empty {})
+    let mut stream = chain
+        .chain_tip_change_stream()
         .await
         .expect("FATAL: chain_tip_change gRPC call failed");
-    let mut stream = resp.into_inner();
     let tip_msg = stream
         .message()
         .await
@@ -385,21 +391,21 @@ pub fn ironwood_activation_height<P: Parameters>(network: &P) -> BlockHeight {
 /// block hash, and checks the required upgrade baseline. No hardcoded
 /// origin-hash pinning is needed — the checkpoint hash from `z_gettreestate`
 /// is stored in metadata for reference.
-async fn origin_checkpoint<P: Parameters>(rpc: &zcash::JsonRpc, network: &P) -> CheckpointData {
+async fn origin_checkpoint<P: Parameters>(rpc: &zcash::JsonRpc, network: &P) -> ChainState {
     let checkpoint_height = ironwood_activation_height(network).saturating_sub(1);
 
-    let checkpoint = rpc
-        .get_checkpoint(checkpoint_height)
+    let chain_state = rpc
+        .chain_state_at(checkpoint_height)
         .await
         .expect("FATAL: failed to fetch origin checkpoint from Zebra");
 
     tracing::info!(
         "boot: origin checkpoint at height {}, hash {}",
         u32::from(checkpoint_height),
-        checkpoint.metadata.block_hash()
+        chain_state.block_hash()
     );
 
-    checkpoint
+    chain_state
 }
 
 // ---------------------------------------------------------------------------

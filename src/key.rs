@@ -82,6 +82,16 @@ impl<A: MintAccount> AccountKeys<A> {
         self.spending.to_unified_full_viewing_key()
     }
 
+    /// The account's Orchard-family spending key — the raw
+    /// `orchard::keys::SpendingKey` from which FVKs and spend-authorizing
+    /// keys derive. Callers that need a specific capability should prefer
+    /// [`orchard_fvk`](Self::orchard_fvk) or [`orchard_ask`](Self::orchard_ask);
+    /// this accessor exists for the assembly paths that wrap the spending key
+    /// into upstream types themselves (`FullViewingKey::from`, etc.).
+    pub(crate) fn orchard_spending_key(&self) -> &orchard::keys::SpendingKey {
+        self.spending.orchard()
+    }
+
     /// The account's Orchard-family full viewing key — the Ironwood
     /// viewing lane: note commitment addresses, OVKs, and builder spends.
     /// Ironwood notes are signed by the Orchard-family keys, so the accessor
