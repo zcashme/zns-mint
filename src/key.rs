@@ -82,12 +82,19 @@ impl<A: MintAccount> AccountKeys<A> {
         self.spending.to_unified_full_viewing_key()
     }
 
-    /// The account's Orchard-family spending key — the shielded spending
-    /// lane both accounts use (Ironwood notes, Name Notes). Sapling and
-    /// transparent components are not surfaced; an account-specific impl
-    /// block is the place to add one if a caller ever needs it.
-    pub(crate) fn orchard_spending_key(&self) -> &orchard::keys::SpendingKey {
-        self.spending.orchard()
+    /// The account's Orchard-family full viewing key — the Ironwood
+    /// viewing lane: note commitment addresses, OVKs, and builder spends.
+    /// Ironwood notes are signed by the Orchard-family keys, so the accessor
+    /// names the family, not the pool (upstream `add_ironwood_spend` likewise
+    /// consumes `ufvk.orchard()`, zcash_client_backend `wallet.rs:2009`).
+    pub(crate) fn orchard_fvk(&self) -> orchard::keys::FullViewingKey {
+        self.spending.orchard().into()
+    }
+
+    /// The account's Orchard-family spend-authorizing key (`ask` in the
+    /// spec) — the sole Ironwood signing capability.
+    pub(crate) fn orchard_ask(&self) -> orchard::keys::SpendAuthorizingKey {
+        self.spending.orchard().into()
     }
 }
 

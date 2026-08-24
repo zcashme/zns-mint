@@ -2,6 +2,38 @@
 
 Tracks design-relevant changes to `src/key.rs`.
 
+## 2026-09-02 — Derived-artifact accessors replace raw spending-key exposure
+
+- Deleted `orchard_spending_key`: the raw `&SpendingKey` no longer becomes
+  nameable outside this module. Every consumer already narrowed it at the
+  call site via `From` conversions; the narrowing now lives at the boundary
+  where the master key lives.
+- Added two derived-artifact accessors, both generic over the account because
+  both accounts use them:
+  - `orchard_fvk` returns the Orchard-family full viewing key (the Ironwood
+    viewing lane: addresses, OVKs, builder spends), via the fork's
+    `From<&SpendingKey> for FullViewingKey` (zns-orchard keys.rs:324).
+  - `orchard_ask` returns the spend-authorizing key (`ask` in the spec), the
+    sole Ironwood signing capability, via the fork's `From<&SpendingKey> for
+    SpendAuthorizingKey` (zns-orchard keys.rs:140).
+- Accessors name the key family (`orchard_`), not the pool, because Ironwood
+  notes are signed by Orchard-family keys — the same shape as upstream's
+  `add_ironwood_spend`, which consumes `ufvk.orchard()` (zcash_client_backend
+  `wallet.rs:2009`).
+- No clones, no new key material, no stored derived state: both artifacts
+  derive from the borrowed USK on demand. The struct's `never cloned`
+  invariant is untouched.
+- The capability lattice this fixes: spending authority flows through
+  `AccountKeys` (only code holding the role type can reach it); viewing
+  facts flow through the wallet (`ufvk_for`). Treasury flows that need the
+  Registry's address (e.g. replenishment) receive it as viewing data from
+  the wallet, never as `RegistryKeys`.
+- Call sites will be rewired in their own slices; the generic impl surface
+  is now `derive`, `fvk`, `orchard_fvk`, `orchard_ask`. A Treasury-only
+  `spending_keys` accessor (the one sanctioned transient USK clone for the
+  upstream generic payment path) is designed but parked until the
+  replenishment slice, since its only consumer does not exist yet.
+
 ## 2026-09-01 — Upstream ZIP-316 vector regression tests
 
 - Added two tests using upstream's own cross-implementation vectors
