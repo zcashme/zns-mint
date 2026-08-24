@@ -35,7 +35,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::registry::transaction::{self, RegistryFeeInputs};
-use crate::mint::v6;
+use crate::mint::signer;
 use crate::mint::{Name, UnifiedAddress};
 use crate::mint::registry::Registry;
 use crate::wallet::{NoteLocator, Wallet};
@@ -128,7 +128,7 @@ pub fn assemble_atomic_claim<P: Parameters>(
     // Prove, sign, and freeze the single bundle in one V6 transaction.
     // Both authorities sign: the bundle carries a Treasury payment spend and
     // Registry lifecycle spends.
-    let tx = v6::assemble_v6_transaction(
+    let tx = signer::assemble_v6_transaction(
         network,
         Some(bundle),
         Some(treasury_keys),
@@ -136,7 +136,7 @@ pub fn assemble_atomic_claim<P: Parameters>(
         None,
         target_height,
     )?;
-    Ok((tx.txid(), v6::serialize_tx(&tx)?))
+    Ok((tx.txid(), signer::serialize_tx(&tx)?))
 }
 
 /// Assembles, proves, signs, and serializes a complete atomic claim transaction.

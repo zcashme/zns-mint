@@ -166,8 +166,8 @@ pub fn assemble_otp_relay<P: Parameters>(
     // Prove, sign, and serialize the single Ironwood bundle in one V6
     // transaction. Only the Treasury signs: the bundle carries no Registry
     // spend.
-    use crate::mint::v6;
-    let tx = v6::assemble_v6_transaction(
+    use crate::mint::signer;
+    let tx = signer::assemble_v6_transaction(
         network,
         Some(bundle),
         Some(treasury_keys),
@@ -178,7 +178,7 @@ pub fn assemble_otp_relay<P: Parameters>(
 
     Ok(RelayAssembly {
         txid: tx.txid(),
-        hex: v6::serialize_tx(&tx)?,
+        hex: signer::serialize_tx(&tx)?,
         reserved_notes: vec![request_note_locator],
     })
 }

@@ -5,7 +5,7 @@ pub mod note;
 pub mod otp;
 pub mod registry;
 pub mod treasury;
-pub mod v6;
+pub mod signer;
 
 // The Name Note type and its codec.
 pub use note::{
@@ -18,36 +18,12 @@ pub use note::{
 /// carried as an opaque string.
 pub use zcash_keys::address::UnifiedAddress;
 
-use zcash_client_backend::data_api::BlockMetadata;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::memo::MemoBytes;
 use zip32::AccountId;
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
-
-/// The fully-applied local chain prefix.
-///
-/// Upstream names this scanner continuity value [`BlockMetadata`]. The mint
-/// cursor is a local semantic wrapper around it: the mint has applied every
-/// block through this metadata's height/hash/tree sizes.
-pub struct ChainCursor {
-    metadata: BlockMetadata,
-}
-
-impl ChainCursor {
-    pub(crate) fn from_metadata(metadata: BlockMetadata) -> Self {
-        Self { metadata }
-    }
-
-    pub fn metadata(&self) -> &BlockMetadata {
-        &self.metadata
-    }
-
-    pub fn height(&self) -> BlockHeight {
-        self.metadata.block_height()
-    }
-}
 
 /// A ZNS memo: the fixed 512-byte payload carried by a shielded note.
 ///

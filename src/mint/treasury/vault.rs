@@ -41,7 +41,7 @@ use zcash_protocol::{PoolType, ShieldedPool};
 
 use crate::key::TreasuryKeys;
 use crate::mint::{AssemblyError, TREASURY_ACCOUNT};
-use crate::mint::v6::TransparentOutput;
+use crate::mint::signer::TransparentOutput;
 use crate::wallet::Wallet;
 
 /// Minimum spendable Treasury balance (zatoshis) to trigger a deposit.
@@ -236,7 +236,7 @@ pub fn sweep_to_vault<P: Parameters>(
         address: VAULT_ADDRESS,
         value: Zatoshis::from_u64(sweep_amount).map_err(|_| AssemblyError::ValueOverflow)?,
     }];
-    let tx = crate::mint::v6::assemble_v6_transaction(
+    let tx = crate::mint::signer::assemble_v6_transaction(
         network,
         Some(bundle),
         Some(treasury_keys),

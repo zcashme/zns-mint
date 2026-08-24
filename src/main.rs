@@ -16,7 +16,7 @@ use zns_mint::key::{RegistryKeys, TreasuryKeys};
 use zns_mint::mint::otp::ChallengeKey;
 use zns_mint::mint::registry::Registry;
 use zns_mint::mint::treasury::memo::RequestMemo;
-use zns_mint::mint::v6;
+use zns_mint::mint::signer;
 use zns_mint::mint::{
     Name, OperationalState, RequestOutcome, SubmissionKind, TREASURY_ACCOUNT, TX_EXPIRY_BUFFER,
 };
@@ -736,7 +736,7 @@ impl<P: zcash_protocol::consensus::Parameters + Send + 'static> RunLoop<P> {
                 return;
             }
         };
-        let hex = match v6::serialize_tx(&tx) {
+        let hex = match signer::serialize_tx(&tx) {
             Ok(hex) => hex,
             Err(e) => {
                 tracing::error!(?e, %txid, "serialization failed");

@@ -7,8 +7,8 @@
 //! - [`liquidity`] — Registry fee-note classification and top-up policy
 //! - [`transaction`] — `build_transaction`
 //!
-//! V6 assembly/proving/signing lives in [`crate::mint::v6`]; transparent
-//! outputs ([`crate::mint::v6::TransparentOutput`]) moved with it.
+//! V6 assembly/proving/signing lives in [`crate::mint::signer`]; transparent
+//! outputs ([`crate::mint::signer::TransparentOutput`]) moved with it.
 
 pub mod authorize;
 pub mod liquidity;

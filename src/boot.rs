@@ -34,7 +34,7 @@ use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
 use zeroize::Zeroize;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
-use crate::mint::{ChainCursor, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::mint::registry::Registry;
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
@@ -60,7 +60,10 @@ pub struct Boot<P: Parameters> {
     chain: ChainClient,
     wallet: Wallet,
     registry: Registry,
-    cursor: ChainCursor,
+    /// The origin-checkpoint continuity metadata the wallet was seeded
+    /// from — the pre-first-block baseline. Upstream's type; the wallet's
+    /// `applied_tip_metadata` owns the semantic once blocks flow.
+    checkpoint_metadata: BlockMetadata,
     treasury_keys: TreasuryKeys,
     registry_keys: RegistryKeys,
 }
@@ -197,7 +200,7 @@ impl<P: Parameters> Boot<P> {
             chain: chain_client,
             wallet,
             registry: Registry::new(),
-            cursor: ChainCursor::from_metadata(checkpoint_metadata),
+            checkpoint_metadata,
             treasury_keys,
             registry_keys,
         }
@@ -205,12 +208,12 @@ impl<P: Parameters> Boot<P> {
 
     /// The chain height at the boot checkpoint.
     pub fn height(&self) -> BlockHeight {
-        self.cursor.height()
+        self.checkpoint_metadata.block_height()
     }
 
-    /// The chain cursor — fully-applied chain prefix.
-    pub fn cursor(&self) -> &ChainCursor {
-        &self.cursor
+    /// The boot checkpoint's continuity metadata.
+    pub fn checkpoint_metadata(&self) -> &BlockMetadata {
+        &self.checkpoint_metadata
     }
 
     /// Consumes the boot evidence and returns the mutable run-loop components.

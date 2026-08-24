@@ -261,7 +261,7 @@ pub fn replenish_registry_fees<P: Parameters>(
     //    Registry spend. Written against the signer's planned return of the
     //    built `Transaction` (step 7 records it in the wallet); the signer
     //    currently returns `(TxId, String)`, changed with the signing slice.
-    let tx = crate::mint::v6::assemble_v6_transaction(
+    let tx = crate::mint::signer::assemble_v6_transaction(
         network,
         Some(bundle),
         Some(treasury_keys),

@@ -483,7 +483,7 @@ pub fn build_transaction<P: Parameters>(
     );
 
     // Note: the full cryptographic self-verification (proof + commitment) is
-    // performed by `verify_proof` in `crate::mint::v6::assemble_v6_transaction`.
+    // performed by `verify_proof` in `crate::mint::signer::assemble_v6_transaction`.
     // The ZNS payload (rcm, ψ) → cmx path cannot be independently recomputed
     // outside the orchard circuit (it requires the fork's Sinsemilla hash),
     // so `verify_proof` is the authoritative check.
@@ -527,7 +527,7 @@ pub fn execute_transition<P: Parameters>(
         target_height,
         None,
     )?;
-    let tx = crate::mint::v6::assemble_v6_transaction(
+    let tx = crate::mint::signer::assemble_v6_transaction(
         network,
         Some(bundle),
         None,
@@ -537,7 +537,7 @@ pub fn execute_transition<P: Parameters>(
     )?;
     Ok((
         tx.txid(),
-        crate::mint::v6::serialize_tx(&tx)?,
+        crate::mint::signer::serialize_tx(&tx)?,
         fee_inputs.locators().iter().copied().collect(),
     ))
 }
