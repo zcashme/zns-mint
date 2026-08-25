@@ -1,65 +1,29 @@
 //! OTP challenge machinery for ZNS name transitions.
 //!
-//! Kernel-level state shared by both authorities: `PendingOtps` is a field of
-//! [`crate::mint::MintState`], the Registry's `authorize_update`/
-//! `authorize_release` consume challenges from it, and the Treasury's OTP
-//! relay delivers the codes it generates. Also home to the OTP relay memo
-//! codec (`ZNS:otp:<otp>:<name>:<verb>:<ua>`).
+//! The OTP queue is a single-use TTL cache: each entry binds a 6-digit
+//! passcode to a specific (name, action, target UA) and expires after
+//! 30 minutes of chain MTP. Entries are pushed when a relay transaction
+//! is accepted and burned on first successful verification — one-shot,
+//! never reusable.
+//!
+//! Also home to the OTP relay memo codec
+//! (`ZNS:otp:<name>:<verb>:<ua>:<otp>`).
 
-use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use rand::Rng;
 use subtle::ConstantTimeEq;
-use zcash_protocol::consensus::BlockHeight;
+use time::Timestamp;
 use zeroize::Zeroize;
 
-use crate::mint::{Action, Name, NameCommitment, UnifiedAddress};
-use crate::mint::registry::Registry;
+use crate::mint::{Action, Name, UnifiedAddress};
+
+/// OTP validity window (whitepaper §5.3: D_OTP). 30 minutes in seconds.
+pub const D_OTP: i64 = 1800;
 
 // ---------------------------------------------------------------------------
-// OTP challenge state
+// OtpCode
 // ---------------------------------------------------------------------------
-
-/// OTPs are scoped to the exact requested transition.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ChallengeKey {
-    name: Name,
-    action: Action,
-    /// The canonical UA encoding (string form: upstream's `UnifiedAddress`
-    /// implements neither `Hash` nor `Ord`, which keyed sets require).
-    ua: String,
-    record_commitment: [u8; 32],
-}
-
-impl fmt::Debug for ChallengeKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ChallengeKey(<redacted>)")
-    }
-}
-
-impl ChallengeKey {
-    pub fn new<P: zcash_protocol::consensus::Parameters>(
-        network: &P,
-        name: Name,
-        action: Action,
-        ua: UnifiedAddress,
-        record_commitment: NameCommitment,
-    ) -> Self {
-        Self {
-            name,
-            action,
-            ua: ua.encode(network),
-            record_commitment: record_commitment.to_bytes(),
-        }
-    }
-
-    fn matches_registry(&self, registry: &Registry) -> bool {
-        registry
-            .record(&self.name)
-            .is_some_and(|record| record.commitment.to_bytes() == self.record_commitment)
-    }
-}
 
 /// A six-digit decimal one-time passcode for update/release authorization.
 ///
@@ -77,9 +41,6 @@ impl fmt::Debug for OtpCode {
 
 impl OtpCode {
     /// Generates a new uniformly random six-digit decimal OTP.
-    ///
-    /// The orchestrator records the code only after the relay transaction has
-    /// been assembled and definitively accepted for broadcast.
     pub fn generate() -> Self {
         Self(rand::thread_rng().gen_range(0..1_000_000))
     }
@@ -122,137 +83,79 @@ impl OtpCode {
     }
 }
 
-pub struct OtpEntry {
-    code: OtpCode,
-    expires_at: BlockHeight,
+// ---------------------------------------------------------------------------
+// OtpRequest — one pending OTP bound to a specific transition
+// ---------------------------------------------------------------------------
+
+/// A pending OTP bound to a specific (name, action, target UA).
+///
+/// Pushed onto the [`OtpQueue`] after the relay transaction is accepted.
+/// Burned on first successful verification — one-shot, never reusable.
+/// Expires after `D_OTP` seconds of chain MTP.
+pub struct OtpRequest {
+    pub name: Name,
+    pub action: Action,
+    pub ua: UnifiedAddress,
+    pub code: OtpCode,
+    pub expires_at: Timestamp,
 }
 
-pub struct PendingOtps {
-    pending: HashMap<ChallengeKey, OtpEntry>,
-    /// Challenges currently reserved by an in-flight OTP relay transaction.
-    /// The orchestrator owns the lifecycle: reserve when the relay is queued,
-    /// release on confirm/fail/rewind. A challenge can be issued (in `pending`)
-    /// without being reserved.
-    reserved: BTreeSet<ChallengeKey>,
-}
+// ---------------------------------------------------------------------------
+// OtpQueue — single-use TTL cache of pending OTPs
+// ---------------------------------------------------------------------------
 
-impl Default for PendingOtps {
+/// A bag of pending OTP requests. Push appends with no checks; every
+/// accepted relay gets an entry. Verification scans for a match on
+/// (name, action, ua, code) plus the expiry check, and removes the
+/// first match — burning it permanently.
+pub struct OtpQueue(Vec<OtpRequest>);
+
+impl Default for OtpQueue {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PendingOtps {
+impl OtpQueue {
     pub fn new() -> Self {
-        Self {
-            pending: HashMap::new(),
-            reserved: BTreeSet::new(),
-        }
+        Self(Vec::new())
     }
 
-    /// Reserve a challenge for an in-flight OTP relay transaction.
-    ///
-    /// Returns `true` if the challenge was free and is now reserved; returns
-    /// `false` if another relay is already in flight for it.
-    pub fn reserve_challenge(&mut self, key: &ChallengeKey) -> bool {
-        self.reserved.insert(key.clone())
+    /// Appends a pending OTP request. No checks — every accepted relay
+    /// gets an entry. Multiple entries per name are allowed.
+    pub fn push(&mut self, req: OtpRequest) {
+        self.0.push(req);
     }
 
-    /// Release a previously reserved challenge.
-    pub fn release_challenge(&mut self, key: &ChallengeKey) {
-        self.reserved.remove(key);
-    }
-
-    /// True if the challenge is currently reserved by an in-flight relay.
-    pub fn is_challenge_reserved(&self, key: &ChallengeKey) -> bool {
-        self.reserved.contains(key)
-    }
-
-    /// All currently reserved challenges.
-    pub fn reserved_challenges(&self) -> &BTreeSet<ChallengeKey> {
-        &self.reserved
-    }
-
-    /// Release every challenge in `keys` from the reserved set.
-    pub fn release_all(&mut self, keys: &BTreeSet<ChallengeKey>) {
-        self.reserved.retain(|key| !keys.contains(key));
-    }
-
-    /// Discards every relay reservation and deliverable OTP bound to a name
-    /// tip that is no longer canonical after a reorg.
-    pub fn invalidate_changed_tips(&mut self, registry: &Registry) {
-        self.pending.retain(|key, _| key.matches_registry(registry));
-        self.reserved.retain(|key| key.matches_registry(registry));
-    }
-
-    /// Issues a new six-digit decimal OTP, valid for the configured number of
-    /// blocks from `current_height`.
-    pub fn record_issued(
+    /// Scans for an entry matching (name, action, ua) with an unexpired
+    /// timestamp and a code that equals `provided` under constant-time
+    /// comparison. Removes and returns `true` on first match — the OTP
+    /// is burned. Failed verification leaves the entry intact.
+    pub fn verify_and_burn(
         &mut self,
-        key: ChallengeKey,
-        otp: &OtpCode,
-        current_height: BlockHeight,
-    ) {
-        self.pending.insert(
-            key,
-            OtpEntry {
-                code: OtpCode(otp.0),
-                expires_at: current_height + Self::OTP_VALIDITY_BLOCKS,
-            },
-        );
-    }
-
-    /// Verifies and burns the OTP if it is valid.
-    pub fn verify(
-        &mut self,
-        key: &ChallengeKey,
+        name: &Name,
+        action: Action,
+        ua: &UnifiedAddress,
         provided: &[u8; 6],
-        current_height: BlockHeight,
+        mtp: Timestamp,
     ) -> bool {
-        self.prune(current_height);
-
-        let Some(entry) = self.pending.get(key) else {
-            return false;
-        };
-
         let Some(provided_code) = OtpCode::from_digits(provided) else {
             return false;
         };
-
-        if bool::from(entry.code.0.ct_eq(&provided_code.0)) {
-            self.pending.remove(key); // Burn it!
-            return true;
+        for i in 0..self.0.len() {
+            let req = &self.0[i];
+            if req.name == *name
+                && req.action == action
+                && &req.ua == ua
+                && mtp < req.expires_at
+                && bool::from(req.code.0.ct_eq(&provided_code.0))
+            {
+                self.0.remove(i);
+                return true;
+            }
         }
         false
     }
-
-    /// Removes expired OTPs to prevent memory exhaustion.
-    /// Prunes expired OTPs and returns how many were removed.
-    pub fn prune(&mut self, current_height: BlockHeight) -> usize {
-        let before = self.pending.len();
-        self.pending
-            .retain(|_, entry| u32::from(entry.expires_at) >= u32::from(current_height));
-        before - self.pending.len()
-    }
-
-    /// Discards a challenge entirely: its relay reservation and any issued
-    /// OTP. Called when the relay transaction carrying the OTP is evicted
-    /// from the mempool dead — the controller can never decrypt a code whose
-    /// transaction will not confirm.
-    pub fn discard(&mut self, key: &ChallengeKey) {
-        self.pending.remove(key);
-        self.reserved.remove(key);
-    }
-
-    /// Whether an unexpired OTP exists for this challenge.
-    pub fn contains(&self, key: &ChallengeKey) -> bool {
-        self.pending.contains_key(key)
-    }
-
-    /// Configured OTP validity window, in blocks.
-    ///
-    /// 24 blocks ≈ 30 minutes at 75s block time.
-    pub const OTP_VALIDITY_BLOCKS: u32 = 24;
 }
 
 // ---------------------------------------------------------------------------
@@ -280,19 +183,19 @@ pub fn otp_relay_memo_fits<P: zcash_protocol::consensus::Parameters>(
     let Some(verb) = verb_str(action) else {
         return false;
     };
-    8usize
+    8usize // "ZNS:otp:"
         .checked_add(name.as_str().len())
-        .and_then(|length| length.checked_add(1 + verb.len()))
-        .and_then(|length| length.checked_add(1 + ua.encode(network).len()))
-        .and_then(|length| length.checked_add(1 + 6)) // 6-digit OTP
-        .is_some_and(|length| length <= 512)
+        .and_then(|l| l.checked_add(1 + verb.len()))
+        .and_then(|l| l.checked_add(1 + ua.encode(network).len()))
+        .and_then(|l| l.checked_add(1 + 6)) // ":<otp>" — 6-digit OTP
+        .is_some_and(|l| l <= 512)
 }
 
-/// Encodes an OTP relay memo: `ZNS:otp:<otp>:<name>:<verb>:<ua>`, zero-padded
+/// Encodes an OTP relay memo: `ZNS:otp:<name>:<verb>:<ua>:<otp>`, zero-padded
 /// to 512 bytes.
 ///
 /// This memo is sent from the Treasury to the current controller's address so
-/// only they can decrypt it and echo the OTP back. Returns `None` if the action
+/// only they can decrypt it and forward it back. Returns `None` if the action
 /// is `Claim` (claims don't use OTPs) or if the encoded text exceeds 512 bytes.
 pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
     network: &P,
@@ -312,13 +215,13 @@ pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
     let mut offset = 0usize;
     for field in [
         b"ZNS:otp:".as_slice(),
-        otp_digits.as_slice(),
-        b":".as_slice(),
         name.as_str().as_bytes(),
         b":".as_slice(),
         verb.as_bytes(),
         b":".as_slice(),
         ua_field.as_bytes(),
+        b":".as_slice(),
+        otp_digits.as_slice(),
     ] {
         let end = offset + field.len();
         memo[offset..end].copy_from_slice(field);
@@ -327,8 +230,8 @@ pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
     Some(memo)
 }
 
-/// Parses a 512-byte OTP relay memo and returns its OTP digits if the grammar
-/// matches. Returns `None` if the memo is not a valid OTP relay memo.
+/// Parses a 512-byte OTP relay memo and returns its fields if the grammar
+/// matches `ZNS:otp:<name>:<verb>:<ua>:<otp>`. Returns `None` otherwise.
 pub fn decode_otp_relay_memo(memo: &[u8; 512]) -> Option<(Name, Action, String, [u8; 6])> {
     let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
     let text = std::str::from_utf8(&memo[..end]).ok()?;
@@ -338,26 +241,32 @@ pub fn decode_otp_relay_memo(memo: &[u8; 512]) -> Option<(Name, Action, String, 
         return None;
     }
 
-    let digits = parts[2].as_bytes();
+    let name = Name::parse(parts[2])?;
+    let action = match parts[3] {
+        "update" => Action::Update,
+        "release" => Action::Release,
+        _ => return None,
+    };
+
+    let ua = parts[4].to_string();
+    if ua.is_empty() {
+        return None;
+    }
+
+    let digits = parts[5].as_bytes();
     if digits.len() != 6 || !digits.iter().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let mut otp = [0u8; 6];
     otp.copy_from_slice(digits);
 
-    let name = Name::parse(parts[3])?;
-    let action = match parts[4] {
-        "update" => Action::Update,
-        "release" => Action::Release,
-        _ => return None,
-    };
-
-    Some((name, action, parts[5].to_string(), otp))
+    Some((name, action, ua, otp))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use time::Duration;
     use zcash_protocol::consensus::MAIN_NETWORK;
 
     fn test_ua() -> UnifiedAddress {
@@ -391,6 +300,22 @@ mod tests {
     }
 
     #[test]
+    fn otp_relay_memo_format_is_name_verb_ua_otp() {
+        let name = test_name();
+        let ua = test_ua();
+        let otp = OtpCode::for_test(*b"004206");
+
+        let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp)
+            .expect("memo fits");
+
+        let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
+        let text = std::str::from_utf8(&memo[..end]).unwrap();
+        // OTP must be at the END: ZNS:otp:alice:update:<ua>:004206
+        assert!(text.ends_with(":004206"), "memo must end with OTP digits");
+        assert!(text.starts_with("ZNS:otp:alice:update:"), "memo must start with ZNS:otp:name:verb:");
+    }
+
+    #[test]
     fn otp_relay_memo_is_not_a_request_memo() {
         let name = test_name();
         let ua = test_ua();
@@ -408,5 +333,121 @@ mod tests {
         let digits = otp.digits();
         assert_eq!(digits.len(), 6);
         assert!(digits.iter().all(|b| b.is_ascii_digit()));
+    }
+
+    #[test]
+    fn otp_queue_verify_and_burn() {
+        let name = test_name();
+        let ua = test_ua();
+        // code is set in the OtpRequest below
+        let now = Timestamp::now();
+        let expires = now + Duration::seconds(D_OTP);
+
+        let mut queue = OtpQueue::new();
+        queue.push(OtpRequest {
+            name: name.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            code: OtpCode::for_test(*b"004206"),
+            expires_at: expires,
+        });
+
+        // Correct code burns the entry
+        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
+        // Second attempt fails — entry is gone
+        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
+    }
+
+    #[test]
+    fn otp_queue_wrong_code_does_not_burn() {
+        let name = test_name();
+        let ua = test_ua();
+        let now = Timestamp::now();
+        let expires = now + Duration::seconds(D_OTP);
+
+        let mut queue = OtpQueue::new();
+        queue.push(OtpRequest {
+            name: name.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            code: OtpCode::for_test(*b"004206"),
+            expires_at: expires,
+        });
+
+        // Wrong code — entry stays
+        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, b"999999", now));
+        // Correct code still works
+        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
+    }
+
+    #[test]
+    fn otp_queue_wrong_action_does_not_burn() {
+        let name = test_name();
+        let ua = test_ua();
+        let now = Timestamp::now();
+        let expires = now + Duration::seconds(D_OTP);
+
+        let mut queue = OtpQueue::new();
+        queue.push(OtpRequest {
+            name: name.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            code: OtpCode::for_test(*b"004206"),
+            expires_at: expires,
+        });
+
+        // Wrong action — entry stays
+        assert!(!queue.verify_and_burn(&name, Action::Release, &ua, b"004206", now));
+        // Correct action still works
+        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
+    }
+
+    #[test]
+    fn otp_queue_expired_does_not_burn() {
+        let name = test_name();
+        let ua = test_ua();
+        let now = Timestamp::now();
+        let expires = now; // already expired
+
+        let mut queue = OtpQueue::new();
+        queue.push(OtpRequest {
+            name: name.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            code: OtpCode::for_test(*b"004206"),
+            expires_at: expires,
+        });
+
+        // Expired — entry stays (just not consumed)
+        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
+    }
+
+    #[test]
+    fn otp_queue_multiple_entries_per_name() {
+        let name = test_name();
+        let ua = test_ua();
+        let now = Timestamp::now();
+        let expires = now + Duration::seconds(D_OTP);
+
+        let mut queue = OtpQueue::new();
+        queue.push(OtpRequest {
+            name: name.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            code: OtpCode::for_test(*b"111111"),
+            expires_at: expires,
+        });
+        queue.push(OtpRequest {
+            name: name.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            code: OtpCode::for_test(*b"222222"),
+            expires_at: expires,
+        });
+
+        // First code burns one entry, the other stays
+        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"111111", now));
+        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"222222", now));
+        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, b"111111", now));
     }
 }
