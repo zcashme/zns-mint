@@ -11,6 +11,7 @@ use hyper_util::rt::TokioExecutor;
 use incrementalmerkletree::frontier::Frontier;
 use sapling::Node as SaplingNode;
 use serde::{Deserialize, Serialize};
+use time::Timestamp;
 use zcash_client_backend::data_api::chain::ChainState;
 use zcash_primitives::block::{Block, BlockHash};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
@@ -35,19 +36,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 // ============================================================================
 // gRPC Chain Observer
 // ============================================================================
-
-/// Decodes a 32-byte transaction ID in display byte order (the Zebra
-/// convention for hashes on the wire) into a [`TxId`].
-fn txid_from_display(bytes: &[u8]) -> Option<TxId> {
-    let mut arr = [0u8; 32];
-    if bytes.len() == 32 {
-        arr.copy_from_slice(bytes);
-        arr.reverse();
-        Some(TxId::from_bytes(arr))
-    } else {
-        None
-    }
-}
 
 /// A client for observing best-chain tip changes.
 #[derive(Clone)]
@@ -102,10 +90,14 @@ impl ChainClient {
                 let kind = message
                     .kind()
                     .ok_or(TransportError::BadNodeData("mempool change type"))?;
-                let txid = message
-                    .tx_hash_display_order()
-                    .and_then(txid_from_display)
-                    .ok_or(TransportError::BadNodeData("mempool tx hash"))?;
+                let mut txid_bytes = [0u8; 32];
+                txid_bytes.copy_from_slice(
+                    message
+                        .tx_hash_display_order()
+                        .ok_or(TransportError::BadNodeData("mempool tx hash"))?,
+                );
+                txid_bytes.reverse();
+                let txid = TxId::from_bytes(txid_bytes);
                 Ok((kind, txid))
             })
         }))
@@ -200,6 +192,31 @@ impl JsonRpc {
         chain_state_from_rpc_response(response)
     }
 
+    /// Fetches a block header by height through Zebra JSON-RPC.
+    ///
+    /// Returns `(hash, height, time)` using proper upstream types. Used
+    /// for cold-start MTP warmup and historical MTP lookups; during
+    /// normal scan operation, `get_block` already provides the timestamp.
+    pub async fn get_block_header(
+        &self,
+        height: BlockHeight,
+    ) -> Result<(BlockHash, BlockHeight, Timestamp), TransportError> {
+        let response: BlockHeaderResponse = self
+            .send_request("getblockheader", (u32::from(height).to_string(), true))
+            .await?
+            .ok_or(TransportError::BadNodeData("getblockheader returned null"))?;
+
+        let display_bytes = hex::decode(&response.hash)
+            .map_err(|_| TransportError::BadNodeData("getblockheader hash hex"))?;
+        let hash = block_hash_from_display(&display_bytes)
+            .ok_or(TransportError::BadNodeData("getblockheader hash length"))?;
+
+        let time = Timestamp::from_seconds(response.time as i64)
+            .map_err(|_| TransportError::BadNodeData("getblockheader time"))?;
+
+        Ok((hash, BlockHeight::from_u32(response.height), time))
+    }
+
     /// Fetches a full block by height through Zebra JSON-RPC and parses it.
     ///
     /// This proves the node returned bytes that are structurally parseable under
@@ -279,9 +296,7 @@ impl JsonRpc {
         txids
             .iter()
             .map(|hex| {
-                let bytes = hex::decode(hex)
-                    .map_err(|_| TransportError::BadNodeData("getrawmempool hex"))?;
-                txid_from_display(&bytes).ok_or(TransportError::BadNodeData("getrawmempool length"))
+                TxId::from_hex(hex).ok_or(TransportError::BadNodeData("getrawmempool txid"))
             })
             .collect()
     }
@@ -353,11 +368,6 @@ impl JsonRpc {
     }
 }
 
-impl Default for JsonRpc {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// The outcome of submitting a signed transaction to the node.
 #[derive(Debug)]
@@ -540,6 +550,13 @@ impl BlockchainInfo {
 
         Ok((BlockHeight::from_u32(self.blocks), hash))
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct BlockHeaderResponse {
+    hash: String,
+    height: u32,
+    time: u32,
 }
 
 #[derive(Debug, Deserialize)]
