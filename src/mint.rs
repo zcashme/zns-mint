@@ -18,45 +18,10 @@ pub use time::Timestamp;
 pub use zcash_keys::address::UnifiedAddress;
 
 use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::memo::MemoBytes;
 use zip32::AccountId;
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
-
-/// A ZNS memo: the fixed 512-byte payload carried by a shielded note.
-#[derive(Clone)]
-pub struct Memo(MemoBytes);
-
-impl PartialEq for Memo {
-    fn eq(&self, other: &Self) -> bool {
-        use subtle::ConstantTimeEq;
-        bool::from(self.as_array().ct_eq(other.as_array()))
-    }
-}
-impl Eq for Memo {}
-
-impl Memo {
-    /// Constructs a `Memo` from a byte slice, padding with zeros if shorter
-    /// than 512 and rejecting slices longer than 512.
-    ///
-    /// Mirrors [`MemoBytes::from_bytes`]. Called at the sync extraction
-    /// boundary with the `[u8; 512]` from upstream note decryption; the
-    /// grammar parser (encode/decode) lives in `mint::note`.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, zcash_protocol::memo::Error> {
-        MemoBytes::from_bytes(bytes).map(Self)
-    }
-
-    /// Returns the raw 512-byte memo array by reference.
-    pub fn as_array(&self) -> &[u8; 512] {
-        self.0.as_array()
-    }
-
-    /// Consumes this `Memo` and returns the underlying 512-byte array.
-    pub fn into_bytes(self) -> [u8; 512] {
-        self.0.into_bytes()
-    }
-}
 
 /// ZNS action kinds.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -110,7 +75,7 @@ impl NameCommitment {
     }
 }
 
-/// A strongly-typed ZcashName
+/// A ZcashName
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Name(String);
 
@@ -210,10 +175,21 @@ impl Submission {
 }
 
 /// Nonexclusive canonical binding for any name-dependent live operation.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NameBinding {
     name: Name,
-    record_commitment: Option<[u8; 32]>,
+    record_commitment: Option<NameCommitment>,
+}
+
+impl NameBinding {
+    fn matches_registry(&self, registry: &Registry) -> bool {
+        match self.record_commitment {
+            Some(expected) => registry
+                .record(&self.name)
+                .is_some_and(|record| record.commitment == expected),
+            None => registry.record(&self.name).is_none(),
+        }
+    }
 }
 
 /// In-memory operational state for the active mint phase.
@@ -395,7 +371,7 @@ impl MintState {
     ) -> NameBinding {
         NameBinding {
             name: name.clone(),
-            record_commitment: record_commitment.map(|commitment| commitment.to_bytes()),
+            record_commitment,
         }
     }
 
@@ -407,17 +383,6 @@ impl MintState {
                 true
             }
             None => true,
-        }
-    }
-}
-
-impl NameBinding {
-    fn matches_registry(&self, registry: &Registry) -> bool {
-        match self.record_commitment {
-            Some(expected) => registry
-                .record(&self.name)
-                .is_some_and(|record| record.commitment.to_bytes() == expected),
-            None => registry.record(&self.name).is_none(),
         }
     }
 }
