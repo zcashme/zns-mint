@@ -1,6 +1,7 @@
 //! Shared protocol logic for ZNS minting and wallet operations.
 
 pub mod claim;
+pub mod mtp;
 pub mod note;
 pub mod otp;
 pub mod registry;
