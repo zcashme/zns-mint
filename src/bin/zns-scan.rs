@@ -107,7 +107,7 @@ async fn main() {
                     "ua": note.ua().map(|u| u.encode(&network)),
                     "expires": match note.expires_at() {
                         Some(zns_mint::mint::note::Expiry::Never) => "none".to_string(),
-                        Some(zns_mint::mint::note::Expiry::At(t)) => t.as_u64().to_string(),
+                        Some(zns_mint::mint::note::Expiry::At(t)) => t.as_seconds().to_string(),
                         None => "n/a".to_string(),
                     },
                     "prev_rcm": hex(&note.prev_rcm().map(|p| p.to_bytes()).unwrap_or([0u8; 32]).as_slice()),

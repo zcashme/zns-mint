@@ -15,9 +15,9 @@ use incrementalmerkletree::{Address, Marking, Retention};
 use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTree};
 use transparent::bundle::OutPoint;
 use zcash_client_backend::{
+    data_api::chain::ChainState,
     data_api::locking::LockOwner,
     data_api::{BlockMetadata, SentTransactionOutput, TransactionStatus},
-    data_api::chain::ChainState,
     wallet::{
         NoteId, OutputRef, WalletIronwoodOutput, WalletSaplingOutput, WalletTransparentOutput,
     },
@@ -42,9 +42,7 @@ const SAPLING_SHARD_HEIGHT: u8 = 16;
 /// Shard height of the Orchard and Ironwood note commitment trees;
 const ORCHARD_SHARD_HEIGHT: u8 = 16;
 
-/// Maximum checkpoints retained per note commitment tree. Matches upstream
-/// `zcash_client_sqlite::PRUNING_DEPTH`. Checkpoints pinned via `ensure_retained`
-/// (e.g. for ZIP-318 anchor retention) are exempt from this cap.
+/// Maximum checkpoints retained per note commitment tree.
 const MAX_CHECKPOINTS: usize = 100;
 
 /// Shard-tree error over the infallible in-memory store: only tree-structural

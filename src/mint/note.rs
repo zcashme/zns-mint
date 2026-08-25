@@ -7,42 +7,25 @@
 //! The 512-byte memo grammar and the σ-hash are functions *over* the type,
 //! not constructors of it.
 
+use time::Timestamp;
 use zcash_keys::address::UnifiedAddress;
 use zcash_protocol::consensus::Parameters;
 
 use crate::mint::{Action, Name, NameCommitment};
 
-/// A Unix timestamp in whole seconds — the wire and MTP time base.
-///
-/// The only time source the protocol recognizes is canonical-chain Median
-/// Time Past (§4.5), which has one-second granularity. Wall-clock types
-/// (`SystemTime`, `OffsetDateTime`) never appear inside the protocol layer.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct UnixSeconds(pub u64);
-
-impl UnixSeconds {
-    /// The §4.5.2 expiration test: `canonical_chain_mtp >= expires_at`.
-    pub fn reached_by(self, mtp: UnixSeconds) -> bool {
-        mtp >= self
+/// Parses canonical ASCII decimal into a [`Timestamp`]: digits only, no
+/// sign, no leading zeroes (except `0` itself). Non-canonical spellings
+/// are rejected because the raw field bytes are hashed into σ — `1` and
+/// `01` are different transitions with different commitments.
+pub fn parse_timestamp_canonical(s: &str) -> Option<Timestamp> {
+    if s.is_empty() || s.len() > 20 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
     }
-
-    /// Parses canonical ASCII decimal: digits only, no sign, no leading
-    /// zeroes (except `0` itself). Non-canonical spellings are rejected
-    /// because the raw field bytes are hashed into σ — `1` and `01` are
-    /// different transitions with different commitments.
-    pub fn parse_canonical(s: &str) -> Option<Self> {
-        if s.is_empty() || s.len() > 20 || !s.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        if s.len() > 1 && s.starts_with('0') {
-            return None;
-        }
-        s.parse().ok().map(Self)
+    if s.len() > 1 && s.starts_with('0') {
+        return None;
     }
-
-    pub fn as_u64(self) -> u64 {
-        self.0
-    }
+    let seconds: i64 = s.parse().ok()?;
+    Timestamp::from_seconds(seconds).ok()
 }
 
 /// A duration in whole seconds — what a user requests as a registration
@@ -57,7 +40,7 @@ pub enum Expiry {
     /// The exact ASCII bytes `none`.
     Never,
     /// A Unix timestamp in whole seconds.
-    At(UnixSeconds),
+    At(Timestamp),
 }
 
 impl Expiry {
@@ -65,7 +48,7 @@ impl Expiry {
     pub fn field_bytes(&self) -> Vec<u8> {
         match self {
             Expiry::Never => b"none".to_vec(),
-            Expiry::At(t) => t.0.to_string().into_bytes(),
+            Expiry::At(t) => t.as_seconds().to_string().into_bytes(),
         }
     }
 
@@ -73,16 +56,16 @@ impl Expiry {
     pub fn parse(field: &str) -> Option<Self> {
         match field {
             "none" => Some(Expiry::Never),
-            digits => UnixSeconds::parse_canonical(digits).map(Expiry::At),
+            digits => parse_timestamp_canonical(digits).map(Expiry::At),
         }
     }
 
     /// The §4.5.2 expiration test against canonical-chain MTP.
     /// `Never` never expires (liveness still applies; §4.5.4).
-    pub fn expired(self, mtp: UnixSeconds) -> bool {
+    pub fn expired(self, mtp: Timestamp) -> bool {
         match self {
             Expiry::Never => false,
-            Expiry::At(t) => t.reached_by(mtp),
+            Expiry::At(t) => mtp >= t,
         }
     }
 }
@@ -524,7 +507,7 @@ mod tests {
             Some(&claim)
         );
 
-        let t = UnixSeconds(1_775_000_000);
+        let t = Timestamp::from_seconds(1_775_000_000).unwrap();
         let claim_t = NameNote::Claim { name: name.clone(), ua: ua.clone(), expires_at: Expiry::At(t) };
         assert_eq!(
             decode_name_note(&MAIN_NETWORK, &claim_t.encode(&MAIN_NETWORK).unwrap()).as_ref(),
@@ -564,7 +547,7 @@ mod tests {
         let name = test_name();
         let ua = test_ua();
         let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
-        let t = UnixSeconds(1_000);
+        let t = Timestamp::from_seconds(1_000).unwrap();
 
         let (rcm_never, psi_never) = NameNote::Claim {
             name: name.clone(), ua: ua.clone(), expires_at: Expiry::Never,
@@ -586,16 +569,16 @@ mod tests {
     /// silently accepted as the same value.
     #[test]
     fn expiry_parsing_is_canonical() {
-        assert_eq!(UnixSeconds::parse_canonical("0"), Some(UnixSeconds(0)));
-        assert_eq!(UnixSeconds::parse_canonical("1"), Some(UnixSeconds(1)));
-        assert_eq!(UnixSeconds::parse_canonical("01"), None);
-        assert_eq!(UnixSeconds::parse_canonical("+1"), None);
-        assert_eq!(UnixSeconds::parse_canonical(""), None);
-        assert_eq!(UnixSeconds::parse_canonical("1a"), None);
+        assert_eq!(parse_timestamp_canonical("0"), Some(Timestamp::from_seconds(0).unwrap()));
+        assert_eq!(parse_timestamp_canonical("1"), Some(Timestamp::from_seconds(1).unwrap()));
+        assert_eq!(parse_timestamp_canonical("01"), None);
+        assert_eq!(parse_timestamp_canonical("+1"), None);
+        assert_eq!(parse_timestamp_canonical(""), None);
+        assert_eq!(parse_timestamp_canonical("1a"), None);
 
         assert_eq!(Expiry::parse("none"), Some(Expiry::Never));
         assert_eq!(Expiry::parse("None"), None);
-        assert_eq!(Expiry::parse("1000"), Some(Expiry::At(UnixSeconds(1000))));
+        assert_eq!(Expiry::parse("1000"), Some(Expiry::At(Timestamp::from_seconds(1000).unwrap())));
     }
 
     /// A release must encode an empty UA and exactly `none`; a claim must
@@ -605,7 +588,7 @@ mod tests {
         let name = Name::parse("bob").unwrap();
         let ua = test_ua();
         let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
-        let t = Expiry::At(UnixSeconds(5));
+        let t = Expiry::At(Timestamp::from_seconds(5).unwrap());
 
         // Release with a UA or a timestamp: not encodable as a release.
         let mut m = NameNote::Release { name: name.clone(), prev }.encode(&MAIN_NETWORK).unwrap();
@@ -623,10 +606,10 @@ mod tests {
 
     #[test]
     fn expiry_test_semantics() {
-        let t = UnixSeconds(1_000);
-        assert!(Expiry::At(t).expired(UnixSeconds(1_000))); // mtp >= expires_at
-        assert!(Expiry::At(t).expired(UnixSeconds(1_001)));
-        assert!(!Expiry::At(t).expired(UnixSeconds(999)));
-        assert!(!Expiry::Never.expired(UnixSeconds(u64::MAX)));
+        let t = Timestamp::from_seconds(1_000).unwrap();
+        assert!(Expiry::At(t).expired(Timestamp::from_seconds(1_000).unwrap())); // mtp >= expires_at
+        assert!(Expiry::At(t).expired(Timestamp::from_seconds(1_001).unwrap()));
+        assert!(!Expiry::At(t).expired(Timestamp::from_seconds(999).unwrap()));
+        assert!(!Expiry::Never.expired(Timestamp::MAX));
     }
 }
