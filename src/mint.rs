@@ -435,8 +435,6 @@ pub enum AssemblyError {
     NameUnavailable,
     #[error("request predecessor commitment does not match Registry tip")]
     PredecessorMismatch,
-    #[error("claims do not use OTPs")]
-    ClaimNoOtp,
     #[error("controller UA has no Orchard receiver")]
     NoOrchardReceiver,
     #[error("UFVK not found in wallet")]
