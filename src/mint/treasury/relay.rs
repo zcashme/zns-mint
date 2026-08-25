@@ -86,10 +86,6 @@ pub fn assemble_otp_relay<P: Parameters>(
 ) -> Result<RelayAssembly, crate::mint::AssemblyError> {
     use rand::rngs::OsRng;
 
-    if action == Action::Claim {
-        return Err(crate::mint::AssemblyError::ClaimNoOtp);
-    }
-
     let controller_orchard = extract_orchard_address(controller_ua)
         .ok_or(crate::mint::AssemblyError::NoOrchardReceiver)?;
 

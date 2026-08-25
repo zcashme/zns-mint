@@ -1,215 +1,92 @@
-//! Treasury memo parsing and classification.
+//! Treasury request memo parsing.
+//!
+//! A request memo is what a user sends to the Treasury to request a ZNS
+//! transition. The format is always `ZNS:<verb>:<name>:<ua>` — three
+//! colon-separated fields after the `ZNS` prefix. The verb is one of
+//! `claim`, `update`, or `release`. No other fields.
+//!
+//! OTPs are never carried in request memos. When a user wants to update or
+//! release, the Mint generates an OTP and sends it via a relay memo
+//! (`ZNS:otp:...`, handled by [`crate::mint::otp`]). The controller forwards
+//! that relay memo back to the Treasury to authorize the transition.
 
-use core::fmt;
+use zcash_keys::address::UnifiedAddress;
+use zcash_protocol::consensus::Parameters;
 
-use crate::mint::Action;
+use crate::mint::{Action, Name};
 
-/// Why a memo failed to parse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoError {
-    /// Zcash memos are exactly 512 bytes.
-    InvalidLength,
-    /// Not a ZNS memo at all (no `ZNS:` prefix, or not UTF-8).
-    NotZns,
-    /// A `ZNS:` memo with an unknown verb.
-    UnknownVerb,
-    /// Wrong number of `:`-separated fields for the verb.
-    FieldCount,
-    /// The name violates the DNS-label rule.
-    InvalidName,
-    /// A required unified-address argument is empty.
-    EmptyArg,
-    /// `otp` is not exactly six ASCII decimal digits.
-    InvalidOtp,
-}
-
-/// A parsed, typed request memo sent by a user to the Treasury.
-#[derive(Clone)]
-pub enum RequestMemo {
-    /// A claim request: `ZNS:claim:<name>:<ua>`
-    Claim { name: String, ua: String },
-    /// An update request: `ZNS:update:<name>:<ua>[:<otp>]`
-    Update {
-        name: String,
-        ua: String,
-        otp: Option<[u8; 6]>,
-    },
-    /// A release request: `ZNS:release:<name>:<ua>[:<otp>]`
-    Release {
-        name: String,
-        ua: String,
-        otp: Option<[u8; 6]>,
-    },
-}
-
-impl PartialEq for RequestMemo {
-    fn eq(&self, other: &Self) -> bool {
-        use subtle::ConstantTimeEq;
-        match (self, other) {
-            (
-                Self::Claim { name: l_name, ua: l_ua },
-                Self::Claim { name: r_name, ua: r_ua },
-            ) => l_name == r_name && l_ua == r_ua,
-            (
-                Self::Update { name: l_name, ua: l_ua, otp: l_otp },
-                Self::Update { name: r_name, ua: r_ua, otp: r_otp },
-            ) => {
-                if l_name != r_name || l_ua != r_ua {
-                    return false;
-                }
-                match (l_otp, r_otp) {
-                    (Some(l), Some(r)) => bool::from(l.ct_eq(r)),
-                    (None, None) => true,
-                    _ => false,
-                }
-            }
-            (
-                Self::Release { name: l_name, ua: l_ua, otp: l_otp },
-                Self::Release { name: r_name, ua: r_ua, otp: r_otp },
-            ) => {
-                if l_name != r_name || l_ua != r_ua {
-                    return false;
-                }
-                match (l_otp, r_otp) {
-                    (Some(l), Some(r)) => bool::from(l.ct_eq(r)),
-                    (None, None) => true,
-                    _ => false,
-                }
-            }
-            _ => false,
-        }
+/// Parses a 512-byte Treasury memo into typed request fields.
+///
+/// Returns `Some((Action, Name, UnifiedAddress))` on success — all validated
+/// at parse time, no re-parsing needed downstream. The network parameter is
+/// required to parse the unified address against the correct network type.
+///
+/// Returns `None` for anything that isn't a valid `ZNS:<verb>:<name>:<ua>`
+/// request memo. The intake loop tries [`crate::mint::otp::decode_otp_relay_memo`]
+/// next, and if that also returns `None`, marks the note as seen and skips.
+///
+/// Request memos are exactly `ZNS:<verb>:<name>:<ua>`. Any extra field
+/// (including an OTP) is rejected. OTP transitions arrive via the relay memo
+/// path, not the request memo.
+pub fn parse_request<P: Parameters>(
+    network: &P,
+    raw: &[u8; 512],
+) -> Option<(Action, Name, UnifiedAddress)> {
+    let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+    if raw[end..].iter().any(|b| *b != 0) {
+        return None;
     }
-}
-impl Eq for RequestMemo {}
+    let text = core::str::from_utf8(&raw[..end]).ok()?;
 
-impl fmt::Debug for RequestMemo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("RequestMemo(<redacted>)")
+    let mut fields = text.split(':');
+    if fields.next()? != "ZNS" {
+        return None;
+    }
+    let verb = fields.next()?;
+    let name_str = fields.next()?;
+    let name = Name::parse(name_str)?;
+
+    let ua_str = fields.next()?;
+    if ua_str.is_empty() {
+        return None;
+    }
+
+    // No fifth field — request memos are exactly four fields.
+    if fields.next().is_some() {
+        return None;
+    }
+
+    let ua = parse_ua(network, ua_str)?;
+
+    let action = match verb {
+        "claim" => Action::Claim,
+        "update" => Action::Update,
+        "release" => Action::Release,
+        _ => return None,
+    };
+
+    Some((action, name, ua))
+}
+
+/// Parses a unified address string against the network.
+fn parse_ua<P: Parameters>(network: &P, s: &str) -> Option<UnifiedAddress> {
+    let zaddr: zcash_address::ZcashAddress = s.parse().ok()?;
+    match zaddr.convert_if_network(network.network_type()).ok()? {
+        zcash_keys::address::Address::Unified(ua) => Some(ua),
+        _ => None,
     }
 }
 
-impl RequestMemo {
-    /// Returns the action type for this request.
-    pub fn action(&self) -> Action {
-        match self {
-            RequestMemo::Claim { .. } => Action::Claim,
-            RequestMemo::Update { .. } => Action::Update,
-            RequestMemo::Release { .. } => Action::Release,
-        }
-    }
-
-    /// Returns a short, metrics-safe string for the action.
-    pub fn action_str(&self) -> &'static str {
-        match self {
-            RequestMemo::Claim { .. } => "claim",
-            RequestMemo::Update { .. } => "update",
-            RequestMemo::Release { .. } => "release",
-        }
-    }
-
-    /// Returns the parsed canonical name for this request.
-    pub fn name(&self) -> &str {
-        match self {
-            RequestMemo::Claim { name, .. } => name,
-            RequestMemo::Update { name, .. } => name,
-            RequestMemo::Release { name, .. } => name,
-        }
-    }
-
-    /// Returns the parsed unified address for this request.
-    pub fn ua(&self) -> &str {
-        match self {
-            RequestMemo::Claim { ua, .. } => ua,
-            RequestMemo::Update { ua, .. } => ua,
-            RequestMemo::Release { ua, .. } => ua,
-        }
-    }
-
-    /// Parses a raw 512-byte request memo using strict grammar rules.
-    pub fn parse(raw: &[u8]) -> Result<Self, MemoError> {
-        if raw.len() != 512 {
-            return Err(MemoError::InvalidLength);
-        }
-        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
-        if raw[end..].iter().any(|b| *b != 0) {
-            return Err(MemoError::FieldCount);
-        }
-        let text = core::str::from_utf8(&raw[..end]).map_err(|_| MemoError::NotZns)?;
-
-        let mut fields = text.split(':');
-        if fields.next() != Some("ZNS") {
-            return Err(MemoError::NotZns);
-        }
-        let verb = fields.next().ok_or(MemoError::FieldCount)?;
-        let name = fields.next().ok_or(MemoError::FieldCount)?;
-        crate::mint::Name::parse(name).ok_or(MemoError::InvalidName)?;
-
-        let ua = fields.next().ok_or(MemoError::FieldCount)?;
-        if ua.is_empty() {
-            return Err(MemoError::EmptyArg);
-        }
-
-        let otp_str = fields.next();
-        if fields.next().is_some() {
-            return Err(MemoError::FieldCount);
-        }
-
-        match verb {
-            "claim" => {
-                if otp_str.is_some() {
-                    return Err(MemoError::FieldCount);
-                }
-                Ok(RequestMemo::Claim {
-                    name: name.to_string(),
-                    ua: ua.to_string(),
-                })
-            }
-            "update" => {
-                let otp = match otp_str {
-                    Some(s) => Some(decode_otp(s)?),
-                    None => None,
-                };
-                Ok(RequestMemo::Update {
-                    name: name.to_string(),
-                    ua: ua.to_string(),
-                    otp,
-                })
-            }
-            "release" => {
-                let otp = match otp_str {
-                    Some(s) => Some(decode_otp(s)?),
-                    None => None,
-                };
-                Ok(RequestMemo::Release {
-                    name: name.to_string(),
-                    ua: ua.to_string(),
-                    otp,
-                })
-            }
-            _ => Err(MemoError::UnknownVerb),
-        }
-    }
-}
-
-/// Decode an `otp` field: exactly six ASCII decimal digits.
-fn decode_otp(s: &str) -> Result<[u8; 6], MemoError> {
-    let bytes = s.as_bytes();
-    if bytes.len() != 6 {
-        return Err(MemoError::InvalidOtp);
-    }
-    let mut out = [0u8; 6];
-    for (i, &b) in bytes.iter().enumerate() {
-        if !b.is_ascii_digit() {
-            return Err(MemoError::InvalidOtp);
-        }
-        out[i] = b;
-    }
-    Ok(out)
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zcash_protocol::consensus::MainNetwork;
+
+    const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
 
     fn padded(s: &str) -> [u8; 512] {
         let mut m = [0u8; 512];
@@ -217,60 +94,48 @@ mod tests {
         m
     }
 
-
-
     #[test]
-    fn accepts_exactly_the_five_request_forms() {
-        let otp = "004206";
+    fn accepts_exactly_the_three_request_forms() {
+        let network = MainNetwork;
 
-        assert_eq!(
-            RequestMemo::parse(&padded("ZNS:claim:alice:u1owner")),
-            Ok(RequestMemo::Claim {
-                name: "alice".into(),
-                ua: "u1owner".into(),
-            })
-        );
-        assert_eq!(
-            RequestMemo::parse(&padded("ZNS:update:alice:u1new")),
-            Ok(RequestMemo::Update {
-                name: "alice".into(),
-                ua: "u1new".into(),
-                otp: None,
-            })
-        );
-        assert_eq!(
-            RequestMemo::parse(&padded(&format!("ZNS:update:alice:u1new:{otp}"))),
-            Ok(RequestMemo::Update {
-                name: "alice".into(),
-                ua: "u1new".into(),
-                otp: Some(*b"004206"),
-            })
-        );
-        assert_eq!(
-            RequestMemo::parse(&padded("ZNS:release:alice:u1owner")),
-            Ok(RequestMemo::Release {
-                name: "alice".into(),
-                ua: "u1owner".into(),
-                otp: None,
-            })
-        );
-        assert_eq!(
-            RequestMemo::parse(&padded(&format!("ZNS:release:alice:u1owner:{otp}"))),
-            Ok(RequestMemo::Release {
-                name: "alice".into(),
-                ua: "u1owner".into(),
-                otp: Some(*b"004206"),
-            })
-        );
+        let (action, name, _) =
+            parse_request(&network, &padded(&format!("ZNS:claim:alice:{TEST_UA}"))).unwrap();
+        assert_eq!(action, Action::Claim);
+        assert_eq!(name.as_str(), "alice");
+
+        let (action, name, _) =
+            parse_request(&network, &padded(&format!("ZNS:update:alice:{TEST_UA}"))).unwrap();
+        assert_eq!(action, Action::Update);
+        assert_eq!(name.as_str(), "alice");
+
+        let (action, name, _) =
+            parse_request(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))).unwrap();
+        assert_eq!(action, Action::Release);
+        assert_eq!(name.as_str(), "alice");
     }
 
+    #[test]
+    fn rejects_extra_field() {
+        let network = MainNetwork;
+        assert!(parse_request(&network, &padded(&format!("ZNS:update:alice:{TEST_UA}:004206"))).is_none());
+        assert!(parse_request(&network, &padded(&format!("ZNS:claim:alice:{TEST_UA}:extra"))).is_none());
+    }
 
+    #[test]
+    fn rejects_unknown_verb() {
+        let network = MainNetwork;
+        assert!(parse_request(&network, &padded(&format!("ZNS:otp:alice:{TEST_UA}"))).is_none());
+    }
 
+    #[test]
+    fn rejects_non_zns() {
+        let network = MainNetwork;
+        assert!(parse_request(&network, &padded("hello world")).is_none());
+    }
 
-
-
-
-
-
-
+    #[test]
+    fn rejects_invalid_name() {
+        let network = MainNetwork;
+        assert!(parse_request(&network, &padded(&format!("ZNS:claim:INVALID:{TEST_UA}"))).is_none());
+    }
 }

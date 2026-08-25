@@ -323,8 +323,8 @@ mod tests {
 
         let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp)
             .expect("memo fits");
-        let result = crate::mint::treasury::memo::RequestMemo::parse(&memo);
-        assert!(result.is_err(), "relay memo must not parse as a request memo");
+        let result = crate::mint::treasury::memo::parse_request(&MAIN_NETWORK, &memo);
+        assert!(result.is_none(), "relay memo must not parse as a request memo");
     }
 
     #[test]

@@ -277,15 +277,15 @@ mod tests {
     #[test]
     fn relay_memo_is_not_a_request_memo() {
         // OTP relay memos use verb "otp", which is not a valid request verb.
-        // treasury::memo::RequestMemo::parse must reject them.
+        // parse_request must reject them.
         let name = Name::parse("alice").unwrap();
         let ua = mock_ua();
         let otp = OtpCode::for_test(*b"123456");
 
         let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp).unwrap();
-        let result = crate::mint::treasury::memo::RequestMemo::parse(&memo);
+        let result = crate::mint::treasury::memo::parse_request(&MAIN_NETWORK, &memo);
         assert!(
-            result.is_err(),
+            result.is_none(),
             "relay memo must not parse as a request memo"
         );
     }

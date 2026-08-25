@@ -100,7 +100,7 @@ pub fn execute_claim<P: Parameters>(
 pub fn process_claim<P: Parameters>(
     network: &P,
     name: crate::mint::Name,
-    ua: &str,
+    ua: crate::mint::UnifiedAddress,
     value: u64,
     confirmed_height: BlockHeight,
     cursor_height: BlockHeight,
@@ -111,14 +111,8 @@ pub fn process_claim<P: Parameters>(
     registry_keys: &RegistryKeys,
     mint: &mut crate::mint::MintState,
 ) -> Option<crate::mint::RequestOutcome> {
-    use crate::mint::{Action, NameNote, SubmissionKind, CLAIM_PRICE, RequestOutcome};
+    use crate::mint::{Action, SubmissionKind, CLAIM_PRICE, RequestOutcome};
 
-    // The single UA validation boundary: ZIP 316 grammar, receiver order,
-    // network prefix. A UA without an Orchard receiver can never receive an
-    // OTP — binding a name to one would brick it.
-    let Some(ua) = NameNote::parse_ua(network, ua) else {
-        return None;
-    };
     if ua.orchard().is_none() {
         return None;
     }
