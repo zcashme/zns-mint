@@ -218,9 +218,8 @@ impl Wallet {
                         )
                     })
             })
-            .map(|(note_id, _)| self.sapling_received_note(*note_id))
-            .collect::<Option<_>>()
-            .unwrap_or_default();
+            .filter_map(|(note_id, _)| self.sapling_received_note(*note_id))
+            .collect();
         notes.sort_by_key(ReceivedNote::note_commitment_tree_position);
         notes
     }
@@ -253,9 +252,8 @@ impl Wallet {
                         )
                     })
             })
-            .map(|(note_id, _)| self.ironwood_received_note(*note_id))
-            .collect::<Option<_>>()
-            .unwrap_or_default();
+            .filter_map(|(note_id, _)| self.ironwood_received_note(*note_id))
+            .collect();
         notes.sort_by_key(ReceivedNote::note_commitment_tree_position);
         notes
     }

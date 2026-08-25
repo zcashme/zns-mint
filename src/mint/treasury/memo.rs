@@ -19,7 +19,7 @@ pub enum MemoError {
     InvalidName,
     /// A required unified-address argument is empty.
     EmptyArg,
-    /// `otp` is not exactly 32 lowercase hex chars.
+    /// `otp` is not exactly six ASCII decimal digits.
     InvalidOtp,
 }
 
@@ -32,13 +32,13 @@ pub enum RequestMemo {
     Update {
         name: String,
         ua: String,
-        otp: Option<[u8; 16]>,
+        otp: Option<[u8; 6]>,
     },
     /// A release request: `ZNS:release:<name>:<ua>[:<otp>]`
     Release {
         name: String,
         ua: String,
-        otp: Option<[u8; 16]>,
+        otp: Option<[u8; 6]>,
     },
 }
 
@@ -191,37 +191,20 @@ impl RequestMemo {
     }
 }
 
-/// Decode an `otp` field: exactly 32 lowercase hex chars.
-fn decode_otp(s: &str) -> Result<[u8; 16], MemoError> {
+/// Decode an `otp` field: exactly six ASCII decimal digits.
+fn decode_otp(s: &str) -> Result<[u8; 6], MemoError> {
     let bytes = s.as_bytes();
-    if bytes.len() != 32 {
+    if bytes.len() != 6 {
         return Err(MemoError::InvalidOtp);
     }
-    let mut out = [0u8; 16];
-    let mut valid = 1u8;
-    for (i, pair) in bytes.chunks_exact(2).enumerate() {
-        let mut v = 0u8;
-        for (j, &b) in pair.iter().enumerate() {
-            let is_digit = (b.wrapping_sub(b'0') <= 9) as u8;
-            let is_hex = (b.wrapping_sub(b'a') <= 5) as u8;
-            valid &= is_digit | is_hex;
-            
-            let val = is_digit.wrapping_mul(b.wrapping_sub(b'0'))
-                | is_hex.wrapping_mul(b.wrapping_sub(b'a').wrapping_add(10));
-            
-            if j == 0 {
-                v |= val << 4;
-            } else {
-                v |= val;
-            }
+    let mut out = [0u8; 6];
+    for (i, &b) in bytes.iter().enumerate() {
+        if !b.is_ascii_digit() {
+            return Err(MemoError::InvalidOtp);
         }
-        out[i] = v;
+        out[i] = b;
     }
-    if valid == 1 {
-        Ok(out)
-    } else {
-        Err(MemoError::InvalidOtp)
-    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -238,9 +221,7 @@ mod tests {
 
     #[test]
     fn accepts_exactly_the_five_request_forms() {
-        let otp_hex = "00112233445566778899aabbccddeeff";
-        let mut otp = [0u8; 16];
-        hex::decode_to_slice(otp_hex, &mut otp).unwrap();
+        let otp = "004206";
 
         assert_eq!(
             RequestMemo::parse(&padded("ZNS:claim:alice:u1owner")),
@@ -258,11 +239,11 @@ mod tests {
             })
         );
         assert_eq!(
-            RequestMemo::parse(&padded(&format!("ZNS:update:alice:u1new:{otp_hex}"))),
+            RequestMemo::parse(&padded(&format!("ZNS:update:alice:u1new:{otp}"))),
             Ok(RequestMemo::Update {
                 name: "alice".into(),
                 ua: "u1new".into(),
-                otp: Some(otp),
+                otp: Some(*b"004206"),
             })
         );
         assert_eq!(
@@ -274,11 +255,11 @@ mod tests {
             })
         );
         assert_eq!(
-            RequestMemo::parse(&padded(&format!("ZNS:release:alice:u1owner:{otp_hex}"))),
+            RequestMemo::parse(&padded(&format!("ZNS:release:alice:u1owner:{otp}"))),
             Ok(RequestMemo::Release {
                 name: "alice".into(),
                 ua: "u1owner".into(),
-                otp: Some(otp),
+                otp: Some(*b"004206"),
             })
         );
     }

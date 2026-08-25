@@ -22,7 +22,7 @@ use chacha20poly1305::{
 };
 use secrecy::{ExposeSecret, Secret};
 use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkUpgrade, Parameters};
-#[cfg(feature = "dev-regtest")]
+#[cfg(feature = "regtest")]
 use zcash_protocol::local_consensus::LocalNetwork;
 use zip32::fingerprint::SeedFingerprint;
 
@@ -69,10 +69,10 @@ pub struct Boot<P: Parameters> {
 }
 
 /// Expected genesis hash — mainnet in production, regtest in dev builds.
-#[cfg(not(feature = "dev-regtest"))]
+#[cfg(not(feature = "regtest"))]
 const EXPECTED_GENESIS: zcash_primitives::block::BlockHash = zcash::MAINNET_GENESIS_HASH;
 
-#[cfg(feature = "dev-regtest")]
+#[cfg(feature = "regtest")]
 const EXPECTED_GENESIS: zcash_primitives::block::BlockHash = zcash_primitives::block::BlockHash([
     // Zebra's immutable regtest genesis (`zebra-chain` 11.3.0,
     // `parameters/network/testnet.rs:47-49`), stored in BlockHash's
@@ -82,10 +82,10 @@ const EXPECTED_GENESIS: zcash_primitives::block::BlockHash = zcash_primitives::b
 ]);
 
 /// Network label for logging.
-#[cfg(not(feature = "dev-regtest"))]
+#[cfg(not(feature = "regtest"))]
 const NETWORK_LABEL: &str = "mainnet";
 
-#[cfg(feature = "dev-regtest")]
+#[cfg(feature = "regtest")]
 const NETWORK_LABEL: &str = "regtest";
 
 impl Boot<MainNetwork> {
@@ -96,10 +96,10 @@ impl Boot<MainNetwork> {
     }
 }
 
-#[cfg(feature = "dev-regtest")]
+#[cfg(feature = "regtest")]
 impl Boot<LocalNetwork> {
     /// Development-harness entry point. It is unavailable unless the
-    /// development-only `dev-regtest` feature is compiled in.
+    /// development-only `regtest` feature is compiled in.
     pub async fn run_regtest() -> Self {
         Self::run_with_network(regtest_network()).await
     }
@@ -177,7 +177,7 @@ impl<P: Parameters> Boot<P> {
         );
 
         // 7. Attestation (production only)
-        #[cfg(not(feature = "dev-regtest"))]
+        #[cfg(not(feature = "regtest"))]
         {
             let report_data =
                 generate_attestation_report_data(&network, &treasury_keys, &registry_keys);
@@ -242,7 +242,7 @@ impl<P: Parameters> Boot<P> {
     }
 }
 
-#[cfg(feature = "dev-regtest")]
+#[cfg(feature = "regtest")]
 fn regtest_network() -> LocalNetwork {
     // Matches `regtest-harness/src/lib.rs:zebrad_toml`. Zebra defaults every
     // unconfigured pre-NU5 activation to 1 on regtest; the harness explicitly
@@ -627,18 +627,18 @@ fn generate_mint_attestation(_report_data: [u8; 64]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secrecy::Secret;
 
     #[test]
     #[cfg(not(feature = "dev-seed"))]
     #[should_panic(expected = "FATAL: SEED FINGERPRINT MISMATCH")]
     fn verify_fingerprint_mismatch_is_redacted() {
+        use secrecy::Secret;
         let seed = Secret::new([0xAB; 32]);
         let wrong_fp = SeedFingerprint::from_seed(&[0xCD; 32]).unwrap().to_string();
         verify_fingerprint(&seed, &wrong_fp);
     }
 
-    #[cfg(feature = "dev-regtest")]
+    #[cfg(feature = "regtest")]
     #[test]
     fn regtest_parameters_match_the_pinned_harness_schedule() {
         let network = regtest_network();

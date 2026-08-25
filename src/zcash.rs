@@ -589,11 +589,14 @@ fn chain_state_from_rpc_response(
         .ok_or(TransportError::BadNodeData("missing Orchard finalState"))?;
     let orchard_tree = decode_tree::<MerkleHashOrchard>(&orchard_final_state, "Orchard")?;
 
-    let ironwood_state = response
+    // An absent `ironwood` section (zebra omits the key entirely for
+    // blocks before NU6.3 activation) and an empty Ironwood tree are the
+    // same value: `Frontier::empty()`. The boot checkpoint is fetched at
+    // activation-1, exactly the height where zebra omits the key.
+    let ironwood_tree = match response
         .ironwood
-        .ok_or(TransportError::BadNodeData("missing ironwood tree state"))?;
-
-    let ironwood_tree = match ironwood_state.commitments.final_state {
+        .and_then(|state| state.commitments.final_state)
+    {
         Some(hex) if !hex.is_empty() => decode_tree::<MerkleHashOrchard>(&hex, "Ironwood")?,
         _ => Frontier::empty(),
     };

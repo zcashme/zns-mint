@@ -2,6 +2,33 @@
 
 Tracks design-relevant changes to `src/registry/signing.rs`.
 
+## 2026-09-01 — Dead pre-activation guard deleted
+
+- Deleted the `is_nu_active(Nu6_3, target_height)` check and the
+  `AssemblyError::Nu63NotActive` variant (in `mint.rs`) it fed: boot pins
+  the origin checkpoint to `ironwood_activation_height − 1` and the run
+  loop only scans forward, so every signer-visible target height is at or
+  after activation. The state it guarded is unreachable — structural, not
+  runtime — matching the NU6.3-active posture established by the feature-flag
+  removal (`5954fd6`).
+
+## 2026-08-15 — Ironwood-only assembler with per-bundle authority list
+
+- The Orchard bundle parameter is deleted. NU6.3 disables Orchard
+  cross-address transfers, so users cannot send the Treasury Orchard notes and
+  the mint has no Orchard spend lane; every mint transaction is one Ironwood
+  bundle (plus optional outputs-only transparent components).
+- The pool-role signer separation ("Orchard spends = Treasury, Ironwood spends
+  = Registry") is superseded: with all spends in Ironwood it had no pool to
+  key on. Its replacement is an explicit per-bundle authority list — callers
+  pass exactly the signers their spends require (relay/sweep/replenish:
+  Treasury; lifecycle: Registry; atomic claim: both), and the builder's
+  `sign` resolves per-action authority by `ak` matching, so one key can never
+  satisfy another account's spend.
+- Least authority is unchanged in effect: `assemble_and_sign_transaction`
+  remains Registry-only, and no assembly path gains a signer it does not
+  spend with.
+
 ## 2026-07-30 — Boot-proven branch selection
 
 - V6 assembly receives the immutable consensus parameters established by boot.

@@ -112,7 +112,7 @@ pub fn authorize_update<P: Parameters>(
     current_height: BlockHeight,
     name: Name,
     new_ua: UnifiedAddress,
-    otp: &[u8; 16],
+    otp: &[u8; 6],
 ) -> Option<NameNoteRequest> {
     let record = current_record(registry, &name)?;
     if record.action == Action::Release {
@@ -149,7 +149,7 @@ pub fn authorize_release<P: Parameters>(
     current_height: BlockHeight,
     name: Name,
     current_ua: UnifiedAddress,
-    otp: &[u8; 16],
+    otp: &[u8; 6],
 ) -> Option<NameNoteRequest> {
     let record = current_record(registry, &name)?;
     if record.action == Action::Release {
@@ -242,7 +242,7 @@ mod tests {
         let ua = mock_ua();
         let height = BlockHeight::from_u32(100);
 
-        let dummy_otp = [0u8; 16];
+        let dummy_otp = *b"000000";
         // Unseen name cannot be updated/released
         assert!(authorize_update(
             &MAIN_NETWORK,
@@ -300,8 +300,8 @@ mod tests {
         reg.set_record_for_test(name.clone(), Action::Update, Some(ua.clone()), crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
 
         // Invalid OTP fails
-        let mut bad_otp = [0u8; 16];
-        bad_otp[0] = 0xFF;
+        let mut bad_otp = *b"000000";
+        bad_otp[0] = b'X';
         assert!(
             authorize_update(&MAIN_NETWORK, &reg, &mut otps, height, name.clone(), ua.clone(), &bad_otp)
                 .is_none()
@@ -328,7 +328,7 @@ mod tests {
         // treasury::memo::RequestMemo::parse must reject them.
         let name = Name::parse("alice").unwrap();
         let ua = mock_ua();
-        let otp = OtpCode::for_test([0xdeu8; 16]);
+        let otp = OtpCode::for_test(*b"123456");
 
         let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp).unwrap();
         let result = crate::mint::treasury::memo::RequestMemo::parse(&memo);
@@ -348,7 +348,7 @@ pub fn process_transition<P: Parameters>(
     name: Name,
     action: Action,
     ua: UnifiedAddress,
-    otp: &[u8; 16],
+    otp: &[u8; 6],
     record_commitment: NameCommitment,
     cursor_height: zcash_protocol::consensus::BlockHeight,
     target_height: zcash_protocol::consensus::BlockHeight,

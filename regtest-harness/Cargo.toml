@@ -16,5 +16,14 @@ tempfile = "3"
 
 [dev-dependencies]
 zcash_keys = { version = "0.16.1", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
-zcash_protocol = { version = "0.10.2", default-features = false }
+zcash_protocol = { version = "0.10.2", default-features = false, features = ["local-consensus"] }
 zcash_address = "0.13.0"
+zip32 = "0.2.1"
+
+[dev-dependencies.orchard]
+path = "/Users/jules/ZcashNames/zns-orchard"
+default-features = false
+features = ["unsafe-zns"]
+
+[patch.crates-io]
+orchard = { path = "/Users/jules/ZcashNames/zns-orchard" }

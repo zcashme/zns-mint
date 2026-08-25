@@ -133,18 +133,14 @@ pub fn sweep_to_vault<P: Parameters>(
 
     // 4. The exact deposit is derived from the selected notes: reserve and
     //    fee are retained, the remainder goes to the vault.
-    let total_selected = funding_notes.iter().try_fold(0u64, |total, (note, _)| {
-        total
-            .checked_add(note.value().inner())
-            .ok_or(AssemblyError::ValueOverflow)
-    })?;
+    let total_selected: u64 = funding_notes.iter().map(|(note, _)| note.value().inner()).sum();
     let ironwood_actions = BundleType::DEFAULT
         .num_actions(
             orchard::bundle::BundleVersion::ironwood_v3().default_flags(),
             funding_notes.len(),
             1, // Treasury change
         )
-        .map_err(|_| AssemblyError::ActionOverflow)?;
+        .expect("action count fits in bundle granularity");
     let fee = FeeRule::standard()
         .fee_required(
             network,
@@ -156,8 +152,8 @@ pub fn sweep_to_vault<P: Parameters>(
             0,
             ironwood_actions,
         )
-        .map(Zatoshis::into_u64)
-        .map_err(|_| AssemblyError::FeeOverflow)?;
+        .expect("ZIP-317 fee for realistic action count is representable")
+        .into_u64();
     let sweep_amount = total_selected
         .checked_sub(SWEEP_RESERVE)
         .and_then(|value| value.checked_sub(fee))
@@ -195,7 +191,7 @@ pub fn sweep_to_vault<P: Parameters>(
         bundle_version.default_flags(),
         anchor,
     )
-    .map_err(|_| AssemblyError::BuilderCreation)?;
+    .expect("ironwood_v3 builder with valid anchor and default flags");
 
     for ((note, _), path) in funding_notes.iter().zip(merkle_paths) {
         let merkle_path = path.ok_or(AssemblyError::NoWitness)?;
@@ -234,11 +230,12 @@ pub fn sweep_to_vault<P: Parameters>(
     //    the signing slice.
     let transparent_outputs = [TransparentOutput {
         address: VAULT_ADDRESS,
-        value: Zatoshis::from_u64(sweep_amount).map_err(|_| AssemblyError::ValueOverflow)?,
+        value: Zatoshis::from_u64(sweep_amount)
+            .expect("sweep_amount is at most the total Treasury balance"),
     }];
     let tx = crate::mint::signer::assemble_v6_transaction(
         network,
-        Some(bundle),
+        bundle,
         Some(treasury_keys),
         None,
         Some(&transparent_outputs),
@@ -257,7 +254,8 @@ pub fn sweep_to_vault<P: Parameters>(
                 .to_zcash_address(network),
             output_pool: PoolType::TRANSPARENT,
         },
-        Zatoshis::from_u64(sweep_amount).map_err(|_| AssemblyError::ValueOverflow)?,
+        Zatoshis::from_u64(sweep_amount)
+            .expect("sweep_amount is at most the total Treasury balance"),
         None,
     )];
     let sent = SentTransaction::new(
@@ -266,7 +264,7 @@ pub fn sweep_to_vault<P: Parameters>(
         target,
         TREASURY_ACCOUNT,
         &sent_outputs,
-        Zatoshis::from_u64(fee).map_err(|_| AssemblyError::FeeOverflow)?,
+        Zatoshis::from_u64(fee).expect("ZIP-317 fee is representable"),
         &[],
     );
     wallet

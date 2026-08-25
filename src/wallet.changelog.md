@@ -1,5 +1,38 @@
 # Wallet changelog
 
+## 2026-09-01 — Local named tree depths; `seed_trees` consumes `ChainState`
+
+- Depth and shard height are no longer spelled via pool-crate or
+  backend-crate constants. The wallet owns four private constants —
+  `SAPLING_NOTE_COMMITMENT_TREE_DEPTH: u8 = 32`,
+  `ORCHARD_NOTE_COMMITMENT_TREE_DEPTH: u8 = 32` (Ironwood shares the
+  Orchard shape), and the matching shard heights
+  `SAPLING_SHARD_HEIGHT`/`ORCHARD_SHARD_HEIGHT: u8 = 16` — and every
+  `ShardTree` parameter (storage fields in `wallet.rs`, trait callback bounds
+  in `trees.rs`) names them. The only pool-crate paths left are the
+  unavoidable value types (`sapling::Node`,
+  `orchard::tree::MerkleHashOrchard`).
+- Correctness does not trust the literals: the `WalletCommitmentTrees` impl
+  signatures must normalize to the upstream trait's declared types, and every
+  frontier meets a tree through `insert_frontier`'s `Frontier<H, DEPTH>`
+  parameter — a wrong number is a compile error, not a silent divergence.
+  This replaces the deleted `const _: ()` assertion (depth == 2 × shard
+  height), which existed only because depth was spelled in several unrelated
+  ways (including bare `32` in `seed_trees`).
+- `Wallet::seed_trees` is deleted; its work is folded into `Wallet::new`,
+  which now takes `(ufvks, &ChainState)` and returns
+  `Result<Self, TreeError>`. Every wallet is born from the verified Zebra
+  checkpoint, and an unseeded wallet — whose trees would witness against a
+  missing pre-checkpoint history, silently invalidating every later witness
+  — is no longer a representable state. Folding also makes construction
+  atomic: a mid-seed failure drops the partially-built `Self` instead of
+  leaving a mutated wallet in the caller's hands. Boot fetches the
+  checkpoint first and constructs the wallet in one step (`boot.rs`); the
+  `BlockMetadata` derivation from the frontiers is unchanged.
+- The chain-tip field is renamed `last_zebra_tip` → `zebra_tip`: it is the
+  tip as last supplied by `WalletWrite::update_chain_tip`, and the name
+  should say what it is, not when it was set.
+
 ## 2026-08-22 — Upstream trait layer completed
 
 - Implemented `WalletRead` (`wallet/read.rs`), `InputSource`

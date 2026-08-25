@@ -9,7 +9,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
-use rand::{rngs::OsRng, RngCore};
+use rand::Rng;
 use subtle::ConstantTimeEq;
 use zcash_protocol::consensus::BlockHeight;
 use zeroize::Zeroize;
@@ -61,14 +61,13 @@ impl ChallengeKey {
     }
 }
 
+/// A six-digit decimal one-time passcode for update/release authorization.
+///
+/// Stored as a `u32` in the range `0..=999_999`. The canonical relay form is
+/// six ASCII decimal digits, including leading zeroes.
 #[derive(Zeroize)]
 #[zeroize(drop)]
-pub struct OtpSecret([u8; 16]);
-
-/// A newly issued OTP held only long enough to construct its relay memo.
-#[derive(Zeroize)]
-#[zeroize(drop)]
-pub struct OtpCode([u8; 16]);
+pub struct OtpCode(u32);
 
 impl fmt::Debug for OtpCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -77,45 +76,54 @@ impl fmt::Debug for OtpCode {
 }
 
 impl OtpCode {
-    /// Generates a new OTP without recording it as deliverable.
+    /// Generates a new uniformly random six-digit decimal OTP.
     ///
     /// The orchestrator records the code only after the relay transaction has
     /// been assembled and definitively accepted for broadcast.
     pub fn generate() -> Self {
-        let mut bytes = [0u8; 16];
-        OsRng.fill_bytes(&mut bytes);
-        Self(bytes)
+        Self(rand::thread_rng().gen_range(0..1_000_000))
     }
 
-    fn lowercase_hex(&self) -> [u8; 32] {
-        let mut encoded = [0u8; 32];
-        for (index, byte) in self.0.iter().copied().enumerate() {
-            let hi = byte >> 4;
-            let lo = byte & 0x0f;
-            // Constant-time hex encoding to avoid cache-timing side-channels.
-            // If n < 10, (n + 6) >> 4 is 0. If n >= 10, it's 1.
-            // We add 48 (b'0') for 0..9, and 48 + 39 = 87 (b'a' - 10) for 10..15.
-            encoded[index * 2] = hi + 48 + (((hi + 6) >> 4) * 39);
-            encoded[index * 2 + 1] = lo + 48 + (((lo + 6) >> 4) * 39);
+    /// Returns the six ASCII decimal digits, including leading zeroes.
+    pub fn digits(&self) -> [u8; 6] {
+        let mut digits = [0u8; 6];
+        let mut n = self.0;
+        for i in (0..6).rev() {
+            digits[i] = b'0' + (n % 10) as u8;
+            n /= 10;
         }
-        encoded
+        digits
+    }
+
+    /// Parses six ASCII decimal digits into an OTP.
+    ///
+    /// Returns `None` if the input is not exactly six ASCII digits.
+    pub fn from_digits(digits: &[u8; 6]) -> Option<Self> {
+        let mut value = 0u32;
+        for &b in digits {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            value = value.checked_mul(10)? + (b - b'0') as u32;
+        }
+        Some(Self(value))
     }
 
     #[cfg(test)]
-    pub fn expose_for_test(&self) -> [u8; 16] {
-        self.0
+    pub fn expose_for_test(&self) -> [u8; 6] {
+        self.digits()
     }
 
-    /// Constructs a code from raw bytes. Test-only: the mint's only
+    /// Constructs a code from raw digits. Test-only: the mint's only
     /// production constructor is [`OtpCode::generate`].
     #[cfg(test)]
-    pub fn for_test(bytes: [u8; 16]) -> Self {
-        Self(bytes)
+    pub fn for_test(digits: [u8; 6]) -> Self {
+        Self::from_digits(&digits).expect("test digits are valid")
     }
 }
 
 pub struct OtpEntry {
-    otp: OtpSecret,
+    code: OtpCode,
     expires_at: BlockHeight,
 }
 
@@ -177,8 +185,8 @@ impl PendingOtps {
         self.reserved.retain(|key| key.matches_registry(registry));
     }
 
-    /// Issues a new highly secure 128-bit hex OTP, valid for the configured
-    /// number of blocks from `current_height`.
+    /// Issues a new six-digit decimal OTP, valid for the configured number of
+    /// blocks from `current_height`.
     pub fn record_issued(
         &mut self,
         key: ChallengeKey,
@@ -188,7 +196,7 @@ impl PendingOtps {
         self.pending.insert(
             key,
             OtpEntry {
-                otp: OtpSecret(otp.0),
+                code: OtpCode(otp.0),
                 expires_at: current_height + Self::OTP_VALIDITY_BLOCKS,
             },
         );
@@ -198,16 +206,22 @@ impl PendingOtps {
     pub fn verify(
         &mut self,
         key: &ChallengeKey,
-        provided: &[u8; 16],
+        provided: &[u8; 6],
         current_height: BlockHeight,
     ) -> bool {
         self.prune(current_height);
 
-        if let Some(entry) = self.pending.get(key) {
-            if bool::from(entry.otp.0.ct_eq(provided)) {
-                self.pending.remove(key); // Burn it!
-                return true;
-            }
+        let Some(entry) = self.pending.get(key) else {
+            return false;
+        };
+
+        let Some(provided_code) = OtpCode::from_digits(provided) else {
+            return false;
+        };
+
+        if bool::from(entry.code.0.ct_eq(&provided_code.0)) {
+            self.pending.remove(key); // Burn it!
+            return true;
         }
         false
     }
@@ -270,7 +284,7 @@ pub fn otp_relay_memo_fits<P: zcash_protocol::consensus::Parameters>(
         .checked_add(name.as_str().len())
         .and_then(|length| length.checked_add(1 + verb.len()))
         .and_then(|length| length.checked_add(1 + ua.encode(network).len()))
-        .and_then(|length| length.checked_add(1 + 32))
+        .and_then(|length| length.checked_add(1 + 6)) // 6-digit OTP
         .is_some_and(|length| length <= 512)
 }
 
@@ -293,12 +307,12 @@ pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
     }
 
     let ua_field = ua.encode(network);
+    let otp_digits = otp.digits();
     let mut memo = [0u8; 512];
-    let mut otp_hex = otp.lowercase_hex();
     let mut offset = 0usize;
     for field in [
         b"ZNS:otp:".as_slice(),
-        otp_hex.as_slice(),
+        otp_digits.as_slice(),
         b":".as_slice(),
         name.as_str().as_bytes(),
         b":".as_slice(),
@@ -310,6 +324,89 @@ pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
         memo[offset..end].copy_from_slice(field);
         offset = end;
     }
-    otp_hex.zeroize();
     Some(memo)
+}
+
+/// Parses a 512-byte OTP relay memo and returns its OTP digits if the grammar
+/// matches. Returns `None` if the memo is not a valid OTP relay memo.
+pub fn decode_otp_relay_memo(memo: &[u8; 512]) -> Option<(Name, Action, String, [u8; 6])> {
+    let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
+    let text = std::str::from_utf8(&memo[..end]).ok()?;
+
+    let parts: Vec<&str> = text.split(':').collect();
+    if parts.len() != 6 || parts[0] != "ZNS" || parts[1] != "otp" {
+        return None;
+    }
+
+    let digits = parts[2].as_bytes();
+    if digits.len() != 6 || !digits.iter().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut otp = [0u8; 6];
+    otp.copy_from_slice(digits);
+
+    let name = Name::parse(parts[3])?;
+    let action = match parts[4] {
+        "update" => Action::Update,
+        "release" => Action::Release,
+        _ => return None,
+    };
+
+    Some((name, action, parts[5].to_string(), otp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zcash_protocol::consensus::MAIN_NETWORK;
+
+    fn test_ua() -> UnifiedAddress {
+        crate::mint::NameNote::parse_ua(
+            &MAIN_NETWORK,
+            "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf",
+        )
+        .expect("vector UA")
+    }
+
+    fn test_name() -> Name {
+        Name::parse("alice").unwrap()
+    }
+
+    #[test]
+    fn round_trip_otp_relay_memo() {
+        let name = test_name();
+        let ua = test_ua();
+        let otp = OtpCode::for_test(*b"004206");
+
+        let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp)
+            .expect("memo fits");
+
+        let (decoded_name, decoded_action, decoded_ua, decoded_otp) =
+            decode_otp_relay_memo(&memo).expect("memo decodes");
+
+        assert_eq!(decoded_name, name);
+        assert_eq!(decoded_action, Action::Update);
+        assert_eq!(decoded_ua, ua.encode(&MAIN_NETWORK));
+        assert_eq!(decoded_otp, *b"004206");
+    }
+
+    #[test]
+    fn otp_relay_memo_is_not_a_request_memo() {
+        let name = test_name();
+        let ua = test_ua();
+        let otp = OtpCode::for_test(*b"123456");
+
+        let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp)
+            .expect("memo fits");
+        let result = crate::mint::treasury::memo::RequestMemo::parse(&memo);
+        assert!(result.is_err(), "relay memo must not parse as a request memo");
+    }
+
+    #[test]
+    fn generate_otp_is_six_digits() {
+        let otp = OtpCode::generate();
+        let digits = otp.digits();
+        assert_eq!(digits.len(), 6);
+        assert!(digits.iter().all(|b| b.is_ascii_digit()));
+    }
 }

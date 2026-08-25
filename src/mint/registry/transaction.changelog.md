@@ -2,6 +2,27 @@
 
 Tracks design-relevant changes to `src/registry/transaction.rs`.
 
+## 2026-08-15 — Atomic claim settles inside the lifecycle bundle
+
+- `build_transaction` replaces the paired-Orchard-bundle parameters
+  (`refund`, `orchard_actions`) with `Option<(&TreasuryKeys, ClaimSettlement)>`.
+  A V6 transaction carries exactly one `ironwood_bundle`, so the Treasury
+  payment spend, the retained price (a Treasury change note), the refund to
+  the claimed UA, the Name Note, and the fee funding all coexist in one
+  bundle signed by both authorities (per-action `ak` matching at signing).
+- `ClaimSettlement` bundles the payment locator, price, and refund address so
+  the claim-only coupling (payment + always-present refund) is structural;
+  transitions pass `None` and cannot emit a refund.
+- The refund value is derived inside assembly from the payment note
+  (`payment - price`), removing the caller-side value plumbing and the
+  `InsufficientValue` pre-check duplication.
+- The fee shape counts the Treasury payment spend and price change in the
+  same bundle's action count; `select_registry_fee_inputs`'s `orchard_actions`
+  parameter is replaced by a `treasury_payment` boolean.
+- The value-balance assertion simplifies to `bundle balance == aggregate fee`:
+  payment, price, and refund cancel in-bundle (the 2026-07-28 cross-pool
+  refund offset no longer exists).
+
 ## 2026-07-30 — Boot-proven ZIP-317 parameters
 
 - Registry fee selection and transaction assembly receive the boot-proven

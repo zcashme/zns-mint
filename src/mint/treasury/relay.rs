@@ -12,7 +12,7 @@
 
 use orchard::builder::BundleType;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
-use zcash_protocol::value::{ZatBalance, Zatoshis};
+use zcash_protocol::value::ZatBalance;
 
 use crate::mint::otp::{encode_otp_relay_memo, OtpCode};
 use crate::key::TreasuryKeys;
@@ -29,10 +29,10 @@ use crate::wallet::{NoteLocator, Wallet};
 pub fn required_relay_value<P: Parameters>(
     network: &P,
     target_height: BlockHeight,
-) -> Result<u64, crate::mint::AssemblyError> {
+) -> u64 {
     use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
 
-    FeeRule::standard()
+    let one_fee = FeeRule::standard()
         .fee_required(
             network,
             target_height,
@@ -43,10 +43,9 @@ pub fn required_relay_value<P: Parameters>(
             0,
             2,
         )
-        .map(Zatoshis::into_u64)
-        .map_err(|_| crate::mint::AssemblyError::FeeOverflow)?
-        .checked_mul(2)
-        .ok_or(crate::mint::AssemblyError::FeeOverflow)
+        .expect("ZIP-317 fee for 2 actions is representable")
+        .into_u64();
+    one_fee.checked_mul(2).expect("2x fee for relay fits in u64")
 }
 
 /// The result of building an OTP relay transaction.
@@ -95,9 +94,9 @@ pub fn assemble_otp_relay<P: Parameters>(
         .ok_or(crate::mint::AssemblyError::NoOrchardReceiver)?;
 
     let memo = encode_otp_relay_memo(network, name, action, requested_ua, otp)
-        .ok_or(crate::mint::AssemblyError::MemoEncode)?;
+        .expect("OTP relay memo fits in 512 bytes");
 
-    let required_value = required_relay_value(network, target_height)?;
+    let required_value = required_relay_value(network, target_height);
     if request_note_value != required_value {
         return Err(crate::mint::AssemblyError::IncorrectRelayValue);
     }
@@ -120,7 +119,7 @@ pub fn assemble_otp_relay<P: Parameters>(
         flags,
         anchor.into(),
     )
-    .map_err(|_| crate::mint::AssemblyError::BuilderCreation)?;
+    .expect("ironwood_v3 builder with valid anchor and default flags");
 
     let fvk = orchard::keys::FullViewingKey::from(treasury_keys.orchard_spending_key());
 
@@ -169,7 +168,7 @@ pub fn assemble_otp_relay<P: Parameters>(
     use crate::mint::signer;
     let tx = signer::assemble_v6_transaction(
         network,
-        Some(bundle),
+        bundle,
         Some(treasury_keys),
         None, // no Registry signer — the relay carries no Name Note authority
         None,
@@ -212,7 +211,7 @@ pub fn process_otp_relay<P: Parameters>(
     {
         return None;
     }
-    if required_relay_value(network, target_height).ok() != Some(value) {
+    if required_relay_value(network, target_height) != value {
         return None;
     }
     if controller_ua.orchard().is_none() {

@@ -84,7 +84,7 @@ type UnsignedBundle = orchard::Bundle<
 /// `tx.txid()`; broadcast serialization goes through [`serialize_tx`].
 pub fn assemble_v6_transaction<P: Parameters>(
     network: &P,
-    ironwood_bundle: Option<UnsignedBundle>,
+    ironwood_bundle: UnsignedBundle,
     treasury_signer: Option<&TreasuryKeys>,
     registry_signer: Option<&RegistryKeys>,
     transparent_outputs: Option<&[TransparentOutput]>,
@@ -100,13 +100,11 @@ pub fn assemble_v6_transaction<P: Parameters>(
     };
     use zcash_protocol::consensus::BranchId;
 
-    let Some(ref ironwood) = ironwood_bundle else {
-        return Err(crate::mint::AssemblyError::BuilderCreation);
-    };
-
-    if ironwood.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3() {
-        return Err(crate::mint::AssemblyError::WrongVersion);
-    }
+    assert_eq!(
+        ironwood_bundle.bundle_version(),
+        orchard::bundle::BundleVersion::ironwood_v3(),
+        "only ironwood_v3 bundles are constructed by the mint"
+    );
 
     // Cache the proving and verifying keys across calls. The circuit version
     // is PostNu6_3 for ironwood_v3 (and orchard_v3), so a single pair serves
@@ -118,7 +116,7 @@ pub fn assemble_v6_transaction<P: Parameters>(
     let expiry_height = BlockHeight::from_u32(
         u32::from(target_height)
             .checked_add(TX_EXPIRY_BUFFER)
-            .ok_or(crate::mint::AssemblyError::ValueOverflow)?,
+            .expect("target_height + TX_EXPIRY_BUFFER fits in u32"),
     );
 
     // --- Transparent bundle: phase 1 (unauthed) ---
@@ -151,7 +149,7 @@ pub fn assemble_v6_transaction<P: Parameters>(
         transparent_bundle_unauthed,
         None, // sapling (not supported in the attested boundary)
         None, // orchard (no Orchard spend lane; NU6.3 forbids user Orchard intake)
-        ironwood_bundle.clone(),
+        Some(ironwood_bundle.clone()),
     );
 
     let txid_parts = unauthed_tx.digest(TxIdDigester);
@@ -178,36 +176,28 @@ pub fn assemble_v6_transaction<P: Parameters>(
     }
     let mut rng = OsRng;
 
-    let circuit_version = ironwood_bundle
-        .as_ref()
-        .map(|b| b.circuit_version())
-        .ok_or(crate::mint::AssemblyError::BuilderCreation)?;
+    let circuit_version = ironwood_bundle.circuit_version();
 
     let pk = PK.get_or_init(|| ProvingKey::build(circuit_version));
     let vk = VK.get_or_init(|| VerifyingKey::build(circuit_version));
-    if pk.circuit_version() != circuit_version || vk.circuit_version() != circuit_version {
-        return Err(crate::mint::AssemblyError::CircuitMismatch);
-    }
+    assert_eq!(
+        pk.circuit_version(), circuit_version,
+        "proving key built from circuit version"
+    );
+    assert_eq!(
+        vk.circuit_version(), circuit_version,
+        "verifying key built from circuit version"
+    );
 
-    let authorized_ironwood = ironwood_bundle
-        .map(
-            |b| -> Result<
-                orchard::Bundle<orchard::bundle::Authorized, zcash_protocol::value::ZatBalance>,
-                crate::mint::AssemblyError,
-            > {
-                let proven = b
-                    .create_proof(pk, &mut rng)
-                    .map_err(|_| crate::mint::AssemblyError::ProofCreation)?;
-                let authorized = proven
-                    .apply_signatures(rng, *shielded_sig_commitment.as_ref(), &signing_keys)
-                    .map_err(|_| crate::mint::AssemblyError::SigningAuth)?;
-                authorized
-                    .verify_proof(vk)
-                    .map_err(|_| crate::mint::AssemblyError::ProofVerification)?;
-                Ok(authorized)
-            },
-        )
-        .transpose()?;
+    let proven = ironwood_bundle
+        .create_proof(pk, &mut rng)
+        .map_err(|_| crate::mint::AssemblyError::ProofCreation)?;
+    let authorized_ironwood = proven
+        .apply_signatures(rng, *shielded_sig_commitment.as_ref(), &signing_keys)
+        .map_err(|_| crate::mint::AssemblyError::SigningAuth)?;
+    authorized_ironwood
+        .verify_proof(vk)
+        .map_err(|_| crate::mint::AssemblyError::ProofVerification)?;
 
     // --- Transparent bundle: phase 2 (authorized) ---
     //
@@ -239,7 +229,7 @@ pub fn assemble_v6_transaction<P: Parameters>(
         transparent_bundle_authorized,
         None, // sapling (must match the unauthorized transaction)
         None, // orchard (must match the unauthorized transaction)
-        authorized_ironwood,
+        Some(authorized_ironwood),
     );
 
     // TX-005: authorization data may change across the two phases, but the

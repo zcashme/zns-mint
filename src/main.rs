@@ -1,22 +1,33 @@
-//! zns-mint — the whole process is this one function.
+//! The Zcash Name Service attested Mint.
 //!
-//! Boot (chain integrity, seed unseal, key derivation, wallet seeding) then
-//! one loop forever: watch Zebra's tip stream and mempool stream, apply
-//! blocks, settle requests. Every state machine is a library type
-//! (`Wallet`, `Registry`, `MintState`); this function owns the
-//! values and sequences the calls, top to bottom:
+//! `zns-mint` is the single registrar for the Zcash Name Service, a
+//! human-readable naming layer over the Zcash transaction log. It owns
+//! the sealed Treasury seed, derives the registry state from the
+//! canonical Zcash chain, evaluates the naming policy inside a TEE, and
+//! writes accepted transitions — claims, updates, and lifecycle releases —
+//! into Ironwood Name Notes whose memos and commitments are verifiable
+//! by any Resolver.
 //!
-//! 1. Setup: boot parts, clients, scan keys, recovery state.
-//! 2. Streams: the tip stream's first message drives the initial catch-up
-//!    (Zebra emits the current tip on stream open); every later advance
-//!    shares that same catch-up code.
-//! 3. Per tip event: advance or rewind, then catch up (scan → registry →
-//!    store name notes → put blocks → reconcile), then settle (intake →
-//!    claims/relays/transitions → broadcast; vault sweep; replenish).
-//! 4. Per mempool event: evictions queue for verified release (name lock,
-//!    notes, relay OTP) — verified against the node before anything is
-//!    released; re-baselines after every mempool reconnect feed the same
-//!    queue.
+//! The Mint listens to a co-located Zebra indexer for chain-tip and
+//! mempool changes, and polls for missed tips because the indexer
+//! chain-tip stream is change-only and emits no current tip on connect.
+//! Each new best-chain tip advances the wallet and registry forward
+//! block-by-block, scanning Name Notes with the published registry key,
+//! applying them to the on-chain registry, and reconciling pending
+//! submissions against confirmed transactions; reorgs are rolled back to the
+//! common ancestor before the chain catches up again.
+//!
+//! After catch-up, matured request Name Notes are settled exactly once:
+//! claim requests create new registrations, update and release requests
+//! complete their OTP authorization, lifecycle releases enforce
+//! expiration and liveness, and the resulting reply transactions are
+//! built, signed, and broadcast through the Zebra node. Housekeeping
+//! then sweeps Treasury funds to the vault and replenishes the fee-note
+//! pool. Mempool eviction events are verified against the node before any
+//! name lock, note reservation, or pending OTP challenge is released.
+//!
+//! State is held by `Wallet`, `Registry`, and `MintState`; this entry
+//! point only sequences their calls.
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -43,9 +54,9 @@ async fn main() {
     tracing_subscriber::fmt().init();
 
     // ── Setup ────────────────────────────────────────────────────────────
-    #[cfg(feature = "dev-regtest")]
+    #[cfg(feature = "regtest")]
     let boot = Boot::run_regtest().await;
-    #[cfg(not(feature = "dev-regtest"))]
+    #[cfg(not(feature = "regtest"))]
     let boot = Boot::run().await;
 
     let boot_height = boot.height();
@@ -399,15 +410,13 @@ async fn main() {
                             let tip_hash = applied.block_hash();
                             let mut excluded = mint.reserved_locators();
 
-                            // Intake: every matured Treasury request note,
-                            // exactly once (10 confirmations).
+                            // Intake: every confirmed Treasury request note,
+                            // exactly once. No maturity wait — claims mint
+                            // immediately, and other request types are gated
+                            // by witness/anchor availability in their builders.
                             let intake: Vec<_> = wallet
                                 .ironwood_notes_for(TREASURY_ACCOUNT)
-                                .filter(|note| {
-                                    note.mined_height.is_some_and(|mined| {
-                                        u32::from(tip).saturating_sub(u32::from(mined)) + 1 >= 10
-                                    })
-                                })
+                                .filter(|note| note.mined_height.is_some())
                                 .collect();
                             for note in intake {
                                 let locator =
@@ -446,7 +455,6 @@ async fn main() {
                                             &network,
                                             name.clone(),
                                             &ua_string,
-                                            locator,
                                             value,
                                             confirmed_height,
                                             tip,
@@ -454,7 +462,6 @@ async fn main() {
                                             &mut excluded,
                                             &mut wallet,
                                             &registry,
-                                            &treasury_keys,
                                             &registry_keys,
                                             &mut mint,
                                         )

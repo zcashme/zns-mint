@@ -4,6 +4,41 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-08-23 — Spec and governance docs deleted
+
+- Deleted `docs/protocol.md`, `docs/policy.md`, `REFERENCE.md`, and the
+  repo-local agent skill under `.agents/`. `docs/protocol.md` is recoverable
+  from git history; `docs/policy.md` and `REFERENCE.md` were never committed.
+  References to any of these in older entries below are historical records
+  only.
+
+## 2026-09-01 — Sync-loop tip is a tuple
+
+- `sync_result` is `Result<(BlockHeight, BlockHash), RuntimeError>` and the
+  live-phase arm destructures `Ok((tip_height, tip_hash))`. `CanonicalTip` is
+  gone; the sync loop's tip observation and the gRPC event handler's
+  `tip_height_hash` destructure now share one shape. `cursor` remains the
+  upstream `BlockMetadata` — the scan-cursor concept is unchanged and never
+  conflated with the tip pair.
+
+## 2026-08-15 — Update-target receiver validation
+
+- The Update dispatch arm rejects a requested UA without an Orchard receiver
+  (`update_target_no_orchard_receiver`) before either OTP relay issuance or
+  the OTP echo is considered. The target becomes the controller on success;
+  an unreachable controller could never receive an OTP and the name would be
+  permanently unmanageable. With this and claim-side validation, every UA a
+  name can ever be bound to carries an Orchard receiver; the relay's
+  incumbent-controller check remains only as a guard for pre-policy records.
+
+## 2026-08-15 — Ironwood request intake
+
+- `process_cycle` iterates Treasury Ironwood notes (`ironwood_notes_for`,
+  `NoteLocator::ironwood`) instead of Orchard notes. NU6.3 disables Orchard
+  cross-address transfers, so users cannot send the Treasury Orchard notes;
+  claim payments, OTP triggers, and OTP echoes all arrive as Ironwood notes
+  with the unchanged `ZNS:` memo grammar.
+
 ## 2026-07-30 — Boot-to-loop consensus handoff
 
 - The main loop receives the concrete consensus parameters only from `Boot`.

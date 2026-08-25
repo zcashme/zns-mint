@@ -17,7 +17,7 @@ Tracks design-relevant changes to `src/boot.rs`.
   requirements remain intact.
 - The debug-only `Boot::run_regtest()` pins Zebra's harness schedule and
   immutable regtest genesis, then uses the same boot core. It is unavailable
-  without `dev-regtest`, which is rejected in release builds.
+  without `regtest`, which is rejected in release builds.
 - `Boot<P>` carries the exact concrete `P: Parameters` that validated boot into
   the run loop. No global mutable network and no runtime parameter discovery
   are permitted.

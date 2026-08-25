@@ -1,0 +1,32 @@
+# Dependabot configuration for zns-mint.
+#
+# This repo vendors its own `librustzcash` workspace under `librustzcash/` and
+# pins an `unsafe-zns` Orchard fork via git. Dependency updates therefore span
+# three sources:
+#   1. the root crate's crates.io deps (Cargo.toml / Cargo.lock),
+#   2. the vendored `librustzcash` workspace,
+#   3. the git-pinned Orchard fork.
+#
+# Only crates.io is updated here. Updates to the vendored workspace and the
+# Orchard fork are deliberate, reviewed changes — NEVER automerged.
+
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"                 # root crate
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    # Patch-level (non-breaking) updates are safe to auto-merge via Mergify.
+    # Semver-minor updates need a review; major/breaking updates need manual
+    # review (Mergify's `security` label + review gate applies).
+
+  - package-ecosystem: "github-actions"
+    directory: "/"                 # workflow action versions
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"

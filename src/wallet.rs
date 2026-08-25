@@ -42,6 +42,11 @@ const SAPLING_SHARD_HEIGHT: u8 = 16;
 /// Shard height of the Orchard and Ironwood note commitment trees;
 const ORCHARD_SHARD_HEIGHT: u8 = 16;
 
+/// Maximum checkpoints retained per note commitment tree. Matches upstream
+/// `zcash_client_sqlite::PRUNING_DEPTH`. Checkpoints pinned via `ensure_retained`
+/// (e.g. for ZIP-318 anchor retention) are exempt from this cap.
+const MAX_CHECKPOINTS: usize = 100;
+
 /// Shard-tree error over the infallible in-memory store: only tree-structural
 /// failures (`Query`, `Insert`) are reachable, never storage failures.
 type TreeError = ShardTreeError<Infallible>;
@@ -128,11 +133,11 @@ impl Wallet {
             transparent_output_spends: BTreeMap::new(),
             transparent_spends: BTreeSet::new(),
             locks: BTreeMap::new(),
-            sapling_tree: ShardTree::new(MemoryShardStore::empty(), 101),
+            sapling_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),
             sapling_tree_shard_end_heights: BTreeMap::new(),
-            orchard_tree: ShardTree::new(MemoryShardStore::empty(), 101),
+            orchard_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),
             orchard_tree_shard_end_heights: BTreeMap::new(),
-            ironwood_tree: ShardTree::new(MemoryShardStore::empty(), 101),
+            ironwood_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),
             ironwood_tree_shard_end_heights: BTreeMap::new(),
         };
         let retention = Retention::Checkpoint {

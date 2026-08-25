@@ -63,6 +63,12 @@ fn spawn_zebrad(bin: &Path, config_path: &Path) -> Result<Child> {
 }
 
 impl Zebrad {
+    /// The zebrad state directory (inside this Zebrad's temp dir). A
+    /// zallet-zebra backend opens it as a read-only RocksDB secondary.
+    pub fn state_dir(&self) -> PathBuf {
+        self._dir.path().join("state")
+    }
+
     /// Launch `zebrad` in Regtest mode on fixed ports to match `zns-mint`'s hardcoded URLs.
     pub async fn start(bin: &Path) -> Result<Zebrad> {
         Self::start_with_miner(bin, DEFAULT_MINER_ADDRESS).await
@@ -248,11 +254,11 @@ pub fn zns_mint_bin() -> PathBuf {
     
     let status = Command::new("cargo")
         .current_dir(workspace_root)
-        .args(["build", "--bin", "zns-mint", "--features", "dev-regtest"])
+        .args(["build", "--bin", "zns-mint", "--features", "regtest"])
         .status()
         .expect("failed to execute cargo build for zns-mint");
         
-    assert!(status.success(), "cargo build --features dev-regtest failed for zns-mint");
+    assert!(status.success(), "cargo build --features regtest failed for zns-mint");
 
     workspace_root.join("target/debug/zns-mint")
 }
@@ -321,12 +327,15 @@ fn zallet_bin() -> PathBuf {
     PathBuf::from("zallet")
 }
 
-/// Generates a `zallet.toml` for regtest mode using the `zaino` backend
-/// (JSON-RPC only, no direct RocksDB access). Nuparams match the harness's
-/// zebrad config: NU5/NU6 at height 1, NU6.1/6.2/6.3 at height 4.
-fn zallet_toml(zebra_rpc_port: u16, zallet_rpc_port: u16) -> String {
+/// Generates a `zallet.toml` for regtest mode using the `zebra` backend
+/// (read-state-service: zebrad's gRPC indexer for the tip stream plus the
+/// zebrad state dir opened as a read-only RocksDB secondary). Nuparams
+/// match the harness's zebrad config: NU5/NU6 at height 1, NU6.1/6.2/6.3
+/// at height 4. The zaino backend (JSON-RPC only, `validator_address`
+/// under `[indexer]`) is the alternative when `zallet-zaino` is installed.
+fn zallet_toml(zebra_rpc_port: u16, zallet_rpc_port: u16, indexer_port: u16, zebra_state_path: &str) -> String {
     format!(
-        r#"backend = "zaino"
+        r#"backend = "zebra"
 
 [builder]
 [builder.limits]
@@ -354,6 +363,10 @@ as_of_version = "0.1.0-beta.1"
 
 [indexer]
 validator_address = "127.0.0.1:{zebra_rpc_port}"
+
+[indexer.read_state_service]
+grpc_address = "127.0.0.1:{indexer_port}"
+zebra_state_path = "{zebra_state_path}"
 
 [keystore]
 
@@ -390,7 +403,8 @@ impl Zallet {
     /// encryption identity, initializes wallet encryption, generates a
     /// mnemonic, and creates a regtest account (capturing the miner address).
     /// Call [`Zallet::start_daemon`] afterwards to launch the RPC server.
-    pub async fn init(zebra_rpc_port: u16) -> Result<Zallet> {
+    pub async fn init(zebra: &Zebrad) -> Result<Zallet> {
+        let zebra_rpc_port = zebra.rpc_port;
         let dir = tempfile::tempdir().context("create zallet datadir")?;
         let datadir = dir.path();
         let bin = zallet_bin();
@@ -405,7 +419,12 @@ impl Zallet {
         let rpc_port = 8234u16;
         std::fs::write(
             datadir.join("zallet.toml"),
-            zallet_toml(zebra_rpc_port, rpc_port),
+            zallet_toml(
+                zebra_rpc_port,
+                rpc_port,
+                zebra.indexer_port,
+                &zebra.state_dir().to_string_lossy(),
+            ),
         )
         .context("write zallet.toml")?;
 
@@ -538,12 +557,20 @@ impl Zallet {
     }
 
     /// Poll until the wallet has scanned to the target block height.
+    ///
+    /// Uses `getwalletstatus` (zallet's wallet-side sync view): zallet
+    /// 0.1.0-beta has no `getblockchaininfo` — that is a node RPC, and
+    /// polling it here always fails with Method-not-found.
     pub async fn wait_until_synced(&self, target: u64, timeout: Duration) -> Result<()> {
         let deadline = Instant::now() + timeout;
         loop {
-            if let Ok(info) = self.call("getblockchaininfo", json!([])).await {
-                let blocks = info.get("blocks").and_then(|b| b.as_u64()).unwrap_or(0);
-                if blocks >= target {
+            if let Ok(status) = self.call("getwalletstatus", json!([])).await {
+                let wallet = status
+                    .get("wallet_tip")
+                    .and_then(|t| t.get("height"))
+                    .and_then(|h| h.as_u64())
+                    .unwrap_or(0);
+                if wallet >= target {
                     return Ok(());
                 }
             }

@@ -1,5 +1,24 @@
 # Treasury claim assembly changelog
 
+## 2026-08-15 — Single-bundle atomic claim
+
+- The two-bundle structure (Orchard Treasury payment + Ironwood Registry
+  lifecycle) collapses into one Ironwood bundle: the payment spend (Treasury
+  authority), the retained price as a Treasury change note, the Name Note,
+  the refund to the claimed UA, the Registry fee spends, and Registry change
+  all settle in the single `ironwood_bundle` a V6 transaction carries.
+- The bundle is signed by both the Treasury and Registry keys under one
+  shared V6 sighash; per-action authority resolves by spending key at signing
+  time. The payment, price, and refund cancel in-bundle, so the bundle's net
+  balance is exactly the aggregate ZIP-317 fee funded by the Registry fee
+  notes (the 2026-07-28 joint-funding economics are unchanged).
+- Claim payments are Ironwood notes (NU6.3 disables Orchard cross-address
+  transfers; no user Orchard intake exists).
+- The claimed UA must carry an Orchard receiver: it is the refund destination
+  and the only address an OTP could ever be delivered to. Rejected at
+  validation time in `process_claim` (`no_orchard_receiver`); the
+  assembly-time `extract_orchard_address` check remains as defense in depth.
+
 ## 2026-07-30 — Boot-proven claim settlement parameters
 
 - Claim fee selection, claimed-UA receiver decoding, and paired V6 signing use

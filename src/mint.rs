@@ -270,8 +270,6 @@ pub struct MintState {
     /// Intake notes definitively handled (invalid, or settled to a
     /// submission): never revisited.
     intake_seen: BTreeSet<NoteLocator>,
-    /// Claim names already evaluated this process lifetime.
-    claims_seen: BTreeSet<Name>,
     /// Relay challenges already evaluated (no-OTP requests).
     relay_challenges_seen: BTreeSet<ChallengeKey>,
     /// Transition challenges already evaluated (with-OTP requests).
@@ -292,7 +290,6 @@ impl MintState {
             pre_submit_locks: BTreeSet::new(),
             recovery_until: None,
             intake_seen: BTreeSet::new(),
-            claims_seen: BTreeSet::new(),
             relay_challenges_seen: BTreeSet::new(),
             transition_challenges_seen: BTreeSet::new(),
         }
@@ -307,11 +304,6 @@ impl MintState {
 
     pub fn mark_intake_seen(&mut self, locator: NoteLocator) {
         self.intake_seen.insert(locator);
-    }
-
-    /// Claim dedup inside `process_claim`: `true` when fresh (now marked).
-    pub(crate) fn claim_check_and_mark(&mut self, name: &Name) -> bool {
-        self.claims_seen.insert(name.clone())
     }
 
     /// Relay-challenge dedup inside `process_otp_relay`: `true` when fresh.
@@ -566,8 +558,6 @@ pub enum AssemblyError {
     InsufficientValue,
     #[error("OTP relay request value must equal exactly twice the ZIP-317 fee")]
     IncorrectRelayValue,
-    #[error("builder creation failed")]
-    BuilderCreation,
     #[error("builder add operation failed")]
     BuilderAdd,
     #[error("bundle build produced no bundle")]
@@ -580,16 +570,6 @@ pub enum AssemblyError {
     SigningAuth,
     #[error("transaction serialization failed")]
     Serialize,
-    #[error("wrong bundle version for the pool")]
-    WrongVersion,
-    #[error("orchard and ironwood circuit versions disagree")]
-    CircuitMismatch,
-    #[error("action count overflow")]
-    ActionOverflow,
-    #[error("ZIP-317 fee computation overflow")]
-    FeeOverflow,
-    #[error("value arithmetic overflow")]
-    ValueOverflow,
     #[error("name became unavailable before assembly")]
     NameUnavailable,
     #[error("request predecessor commitment does not match Registry tip")]
@@ -598,8 +578,6 @@ pub enum AssemblyError {
     ClaimNoOtp,
     #[error("controller UA has no Orchard receiver")]
     NoOrchardReceiver,
-    #[error("failed to encode memo")]
-    MemoEncode,
     #[error("UFVK not found in wallet")]
     UfvkNotFound,
     #[error("sighash mismatch: effecting data changed after authorization")]

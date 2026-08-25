@@ -82,9 +82,8 @@ pub fn replenish_registry_fees<P: Parameters>(
     //    reports `InsufficientFunds`.
     let mut selected: Vec<NoteId> = Vec::new();
     let mut selected_notes = Vec::new();
-    let mut total_selected = Zatoshis::ZERO;
     let funding_total =
-        Zatoshis::from_u64(plan.total_amount).map_err(|_| AssemblyError::ValueOverflow)?;
+        Zatoshis::from_u64(plan.total_amount).expect("plan.total_amount is representable");
     let mut fee;
 
     loop {
@@ -93,8 +92,8 @@ pub fn replenish_registry_fees<P: Parameters>(
             target_height,
             plan.output_count,
             selected_notes.len(),
-        )?)
-        .ok_or(AssemblyError::ValueOverflow)?;
+        ))
+        .expect("funding_total + fee fits in monetary range");
 
         let batch = wallet
             .select_spendable_notes(
@@ -114,12 +113,14 @@ pub fn replenish_registry_fees<P: Parameters>(
 
         let batch_total = batch
             .ironwood_value()
-            .map_err(|_| AssemblyError::ValueOverflow)?;
-        if total_selected == batch_total
-            && selected_notes.len() == batch_notes.len()
-            && !selected.is_empty()
-        {
-            // Converged: the same notes now satisfy a larger requirement.
+            .expect("batch value is at most the Treasury balance");
+
+        // If this batch covers the requirement, we have converged: the
+        // selected notes suffice for the funding total plus the fee
+        // computed with the current spend count. (The original convergence
+        // check required a second call to return the same notes, but the
+        // exclude list prevents that — a single large note always failed.)
+        if batch_total >= requirement {
             fee = FeeRule::standard()
                 .fee_required(
                     network,
@@ -129,11 +130,10 @@ pub fn replenish_registry_fees<P: Parameters>(
                     0,
                     0,
                     0,
-                    ironwood_actions(plan.output_count, batch_notes.len())?,
+                    ironwood_actions(plan.output_count, batch_notes.len()),
                 )
-                .map(Zatoshis::into_u64)
-                .map_err(|_| AssemblyError::FeeOverflow)?;
-            total_selected = batch_total;
+                .expect("ZIP-317 fee for realistic action count is representable")
+                .into_u64();
             selected_notes = batch_notes;
             break;
         }
@@ -147,22 +147,27 @@ pub fn replenish_registry_fees<P: Parameters>(
                 0,
                 0,
                 0,
-                ironwood_actions(plan.output_count, batch_notes.len())?,
+                ironwood_actions(plan.output_count, batch_notes.len()),
             )
-            .map(Zatoshis::into_u64)
-            .map_err(|_| AssemblyError::FeeOverflow)?;
-        total_selected = batch_total;
+            .expect("ZIP-317 fee for realistic action count is representable")
+            .into_u64();
         selected = batch_notes.iter().map(|n| *n.internal_note_id()).collect();
         selected_notes = batch_notes;
 
-        let fee_zat = Zatoshis::from_u64(fee).map_err(|_| AssemblyError::FeeOverflow)?;
-        let met = (total_selected - funding_total - fee_zat).is_some();
+        let fee_zat = Zatoshis::from_u64(fee).expect("ZIP-317 fee is representable");
+        let met = (batch_total - funding_total - fee_zat).is_some();
         if met {
             break;
         }
     }
 
-    let fee_zat = Zatoshis::from_u64(fee).map_err(|_| AssemblyError::FeeOverflow)?;
+    let fee_zat = Zatoshis::from_u64(fee).expect("ZIP-317 fee is representable");
+    let total_selected: u64 = selected_notes
+        .iter()
+        .map(|note| note.note().value().inner())
+        .sum();
+    let total_selected = Zatoshis::from_u64(total_selected)
+        .expect("total_selected is at most the Treasury balance");
     let change_value = (total_selected - funding_total - fee_zat)
         .ok_or(AssemblyError::InsufficientFunds)?
         .into_u64();
@@ -198,7 +203,7 @@ pub fn replenish_registry_fees<P: Parameters>(
         bundle_version.default_flags(),
         anchor,
     )
-    .map_err(|_| AssemblyError::BuilderCreation)?;
+    .expect("ironwood_v3 builder with valid anchor and default flags");
 
     for (note, path) in selected_notes.iter().zip(merkle_paths) {
         let merkle_path = path.ok_or(AssemblyError::NoWitness)?;
@@ -263,7 +268,7 @@ pub fn replenish_registry_fees<P: Parameters>(
     //    currently returns `(TxId, String)`, changed with the signing slice.
     let tx = crate::mint::signer::assemble_v6_transaction(
         network,
-        Some(bundle),
+        bundle,
         Some(treasury_keys),
         None,
         None,
@@ -282,7 +287,7 @@ pub fn replenish_registry_fees<P: Parameters>(
         target,
         TREASURY_ACCOUNT,
         &[],
-        Zatoshis::from_u64(fee).map_err(|_| AssemblyError::FeeOverflow)?,
+        Zatoshis::from_u64(fee).expect("ZIP-317 fee is representable"),
         &[],
     );
     wallet
@@ -294,14 +299,14 @@ pub fn replenish_registry_fees<P: Parameters>(
 
 /// Padded Ironwood action count for `outputs` fee notes, `spends` funding
 /// notes, and one Treasury change output.
-fn ironwood_actions(outputs: usize, spends: usize) -> Result<usize, AssemblyError> {
+fn ironwood_actions(outputs: usize, spends: usize) -> usize {
     BundleType::DEFAULT
         .num_actions(
             orchard::bundle::BundleVersion::ironwood_v3().default_flags(),
             spends,
             outputs + 1, // Treasury change
         )
-        .map_err(|_| AssemblyError::ActionOverflow)
+        .expect("action count fits in bundle granularity")
 }
 
 /// ZIP-317 fee for the shape, given a provisional spend count.
@@ -310,7 +315,7 @@ fn fee_estimate<P: Parameters>(
     target_height: BlockHeight,
     outputs: usize,
     spends: usize,
-) -> Result<Zatoshis, AssemblyError> {
+) -> Zatoshis {
     use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
     FeeRule::standard()
         .fee_required(
@@ -321,7 +326,7 @@ fn fee_estimate<P: Parameters>(
             0,
             0,
             0,
-            ironwood_actions(outputs, spends)?,
+            ironwood_actions(outputs, spends),
         )
-        .map_err(|_| AssemblyError::FeeOverflow)
+        .expect("ZIP-317 fee for realistic action count is representable")
 }

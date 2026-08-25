@@ -67,7 +67,7 @@ impl Wallet {
         match self.locks.get(output) {
             Some((existing_owner, expiry)) if *existing_owner != owner => {
                 match self.zebra_tip {
-                    Some(tip) => *expiry >= tip,
+                    Some(tip) => *expiry > tip,
                     None => true,
                 }
             }

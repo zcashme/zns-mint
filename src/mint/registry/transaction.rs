@@ -9,7 +9,6 @@
 
 use crate::key::RegistryKeys;
 use crate::mint::Action;
-use crate::mint::claim::ClaimSettlement;
 use crate::mint::registry::authorize::NameNoteRequest;
 use crate::mint::registry::Registry;
 use crate::wallet::NoteLocator;
@@ -17,7 +16,6 @@ use std::collections::BTreeSet;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
-use zcash_protocol::value::Zatoshis;
 
 // ---------------------------------------------------------------------------
 // Fee input planning
@@ -53,27 +51,20 @@ fn registry_fee<P: Parameters>(
     funding_spends: usize,
     extra_outputs: usize,
     has_change: bool,
-    treasury_payment: bool,
-) -> Result<u64, crate::mint::AssemblyError> {
+) -> u64 {
     use orchard::builder::BundleType;
     use orchard::bundle::BundleVersion;
 
     let version = BundleVersion::ironwood_v3();
-    // Total spends: lifecycle Name Note + fee funding + the Treasury payment.
-    let total_spends =
-        lifecycle_spends + funding_spends + usize::from(treasury_payment);
-    // Total outputs: the ZNS Name Note, extra outputs (e.g. refund, always
-    // present for claims), Registry change, and the Treasury's price change.
-    let total_outputs =
-        1 + extra_outputs + usize::from(has_change) + usize::from(treasury_payment);
+    let total_spends = lifecycle_spends + funding_spends;
+    let total_outputs = 1 + extra_outputs + usize::from(has_change);
     let actions = BundleType::DEFAULT
         .num_actions(
             version.default_flags(),
             total_spends,
             total_outputs,
         )
-        
-        .map_err(|_| crate::mint::AssemblyError::ActionOverflow)?;
+        .expect("action count fits in bundle granularity");
     FeeRule::standard()
         .fee_required(
             network,
@@ -85,8 +76,8 @@ fn registry_fee<P: Parameters>(
             0,
             actions,
         )
-        .map(Zatoshis::into_u64)
-        .map_err(|_| crate::mint::AssemblyError::FeeOverflow)
+        .expect("ZIP-317 fee for realistic action count is representable")
+        .into_u64()
 }
 
 /// Selects the exact ordinary Registry notes required to fund `request` at
@@ -98,7 +89,6 @@ pub fn select_registry_fee_inputs<P: Parameters>(
     target_height: BlockHeight,
     excluded: &BTreeSet<NoteLocator>,
     extra_outputs: usize,
-    treasury_payment: bool,
 ) -> Result<RegistryFeeInputs, crate::mint::AssemblyError> {
     let lifecycle_spends = usize::from(request.action() != Action::Claim);
     let mut candidates: Vec<_> = wallet
@@ -128,8 +118,7 @@ pub fn select_registry_fee_inputs<P: Parameters>(
             funding_spends,
             extra_outputs,
             false,
-            treasury_payment,
-        )?;
+        );
         if total == fee_without_change {
             return Ok(RegistryFeeInputs { locators });
         }
@@ -141,8 +130,7 @@ pub fn select_registry_fee_inputs<P: Parameters>(
             funding_spends,
             extra_outputs,
             true,
-            treasury_payment,
-        )?;
+        );
         if total > fee_without_change && total >= fee_with_change {
             return Ok(RegistryFeeInputs { locators });
         }
@@ -150,9 +138,7 @@ pub fn select_registry_fee_inputs<P: Parameters>(
         let Some((locator, value)) = candidates.get(funding_spends) else {
             break;
         };
-        total = total
-            .checked_add(*value)
-            .ok_or(crate::mint::AssemblyError::ValueOverflow)?;
+        total += *value;
         locators.insert(*locator);
     }
 
@@ -169,14 +155,9 @@ pub fn select_registry_fee_inputs<P: Parameters>(
 /// builder boundary, mints the new Name Note via `add_zns_output`, and
 /// self-funds the ZIP-317 fee using the Registry's own Ironwood ZEC reserves.
 ///
-/// For atomic claims, `treasury` settles the user's payment inside this same
-/// bundle: the payment note is spent under Treasury authority, the price is
-/// retained as a Treasury change note, and the excess is refunded to the
-/// claimed UA's Orchard receiver (always emitted, including value-zero).
-///
-/// The bundle's value balance is asserted to equal its computed fee: the
-/// payment, price, and refund cancel in-bundle, so the net balance is exactly
-/// what the Registry fee notes contribute beyond their change.
+/// The bundle's value balance is asserted to equal its computed fee: the net
+/// balance is exactly what the Registry fee notes contribute beyond their
+/// change.
 #[allow(clippy::too_many_arguments)]
 pub fn build_transaction<P: Parameters>(
     network: &P,
@@ -187,9 +168,6 @@ pub fn build_transaction<P: Parameters>(
     fee_inputs: &RegistryFeeInputs,
     anchor_height: BlockHeight,
     target_height: BlockHeight,
-    // The Treasury side of an atomic claim (payment spend, retained price,
-    // refund). None for update/release, which are Registry-funded only.
-    treasury: Option<(&crate::key::TreasuryKeys, ClaimSettlement)>,
 ) -> Result<
     orchard::Bundle<
         orchard::builder::InProgress<orchard::builder::Unproven, orchard::builder::Unauthorized>,
@@ -214,7 +192,7 @@ pub fn build_transaction<P: Parameters>(
 
     let mut builder =
         orchard::builder::Builder::new(BundleType::DEFAULT, bundle_version, flags, anchor.into())
-            .map_err(|_| crate::mint::AssemblyError::BuilderCreation)?;
+            .expect("ironwood_v3 builder with valid anchor and default flags");
 
     let fvk = orchard::keys::FullViewingKey::from(registry_keys.orchard_spending_key());
     let address = fvk.address_at(0u32, orchard::keys::Scope::External);
@@ -279,7 +257,7 @@ pub fn build_transaction<P: Parameters>(
             .ok_or(crate::mint::AssemblyError::NoWitness)?;
 
         let prev_transition = crate::mint::decode_name_note(network, &memo_bytes)
-            .ok_or(crate::mint::AssemblyError::MemoEncode)?;
+            .expect("previous Name Note memo decodes (validated at scan time)");
         let (rcm, psi) = prev_transition.opening(network);
         builder
             .add_zns_spend(
@@ -296,8 +274,9 @@ pub fn build_transaction<P: Parameters>(
     // typed transition, so the commitment and memo cannot disagree.
     let (new_rcm, new_psi) = transition.opening(network);
 
-    let memo = transition.encode(network)
-        .ok_or(crate::mint::AssemblyError::MemoEncode)?;
+    let memo = transition
+        .encode(network)
+        .expect("typed NameNote encodes within 512-byte memo");
 
     let value = orchard::value::NoteValue::from_raw(0);
 
@@ -312,62 +291,7 @@ pub fn build_transaction<P: Parameters>(
         )
         .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
 
-    // 5. Settle the Treasury payment inside this bundle (atomic claims only).
-    //
-    // The payment spend is added under Treasury authority before the fee
-    // computation so the committed-spend count includes it. `add_spend` binds
-    // the action to the Treasury FVK; the Registry signing key cannot satisfy
-    // it.
-    let mut refund: Option<(orchard::Address, u64)> = None;
-    if let Some((treasury_keys, settlement)) = treasury.as_ref() {
-        let treasury_fvk =
-            orchard::keys::FullViewingKey::from(treasury_keys.orchard_spending_key());
-
-        let (payment_note, payment_position, payment_value) = {
-            let note = wallet
-                .ironwood_note(settlement.locator)
-                .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
-            if note.account_id != crate::mint::TREASURY_ACCOUNT {
-                return Err(crate::mint::AssemblyError::WrongAccount);
-            }
-            (
-                note.note.clone(),
-                note.position,
-                note.note.value().inner(),
-            )
-        };
-        if payment_value < settlement.price {
-            return Err(crate::mint::AssemblyError::InsufficientValue);
-        }
-
-        let merkle_path = wallet
-            .ironwood_witness(payment_position, anchor_height)
-            .ok()
-            .flatten()
-            .ok_or(crate::mint::AssemblyError::NoWitness)?;
-
-        builder
-            .add_spend(treasury_fvk.clone(), payment_note, merkle_path.into())
-            .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
-
-        // Retain the price as a Treasury change note.
-        let treasury_change = treasury_fvk.address_at(0u32, orchard::keys::Scope::Internal);
-        let mut change_memo = [0u8; 512];
-        change_memo[0] = 0xF6; // ZIP-302 empty memo
-        builder
-            .add_change_output(
-                treasury_fvk.clone(),
-                Some(treasury_fvk.to_ovk(orchard::keys::Scope::Internal)),
-                treasury_change,
-                orchard::value::NoteValue::from_raw(settlement.price),
-                change_memo,
-            )
-            .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
-
-        refund = Some((settlement.refund_address, payment_value - settlement.price));
-    }
-
-    // 6. Resolve only the exact fee notes retained in the caller's plan.
+    // 5. Resolve only the exact fee notes retained in the caller's plan.
     let committed_spends = builder.spends().len();
     let mut funding_notes = Vec::with_capacity(fee_inputs.locators.len());
     let mut total_funded = 0u64;
@@ -382,15 +306,12 @@ pub fn build_transaction<P: Parameters>(
         {
             return Err(crate::mint::AssemblyError::WrongAccount);
         }
-        total_funded = total_funded
-            .checked_add(note.note.value().inner())
-            .ok_or(crate::mint::AssemblyError::ValueOverflow)?;
+        total_funded += note.note.value().inner();
         funding_notes.push(note.clone());
     }
 
     let funding_spends = funding_notes.len();
-    let extra_outputs = usize::from(refund.is_some());
-    let has_treasury = treasury.is_some();
+    let extra_outputs = 0;
     let fee_without_change = registry_fee(
         network,
         target_height,
@@ -398,8 +319,7 @@ pub fn build_transaction<P: Parameters>(
         funding_spends,
         extra_outputs,
         false,
-        has_treasury,
-    )?;
+    );
     let (fee, change) = if total_funded == fee_without_change {
         (fee_without_change, 0)
     } else {
@@ -410,8 +330,7 @@ pub fn build_transaction<P: Parameters>(
             funding_spends,
             extra_outputs,
             true,
-            has_treasury,
-        )?;
+        );
         if total_funded < fee_with_change {
             return Err(crate::mint::AssemblyError::InsufficientValue);
         }
@@ -428,22 +347,6 @@ pub fn build_transaction<P: Parameters>(
 
         builder
             .add_spend(fvk.clone(), prev_note.note, merkle_path.into())
-            .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
-    }
-
-    // Refund the payment excess to the claimed UA (always present for claims,
-    // including value-zero).
-    if let Some((refund_address, refund_value)) = refund {
-        let mut refund_memo = [0u8; 512];
-        refund_memo[0] = 0xF6; // ZIP-302 empty memo
-
-        builder
-            .add_output(
-                Some(fvk.to_ovk(orchard::keys::Scope::Internal)),
-                refund_address,
-                orchard::value::NoteValue::from_raw(refund_value),
-                refund_memo,
-            )
             .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
     }
 
@@ -470,12 +373,10 @@ pub fn build_transaction<P: Parameters>(
         .map_err(|_| crate::mint::AssemblyError::BuildFailed)?
         .ok_or(crate::mint::AssemblyError::BuildFailed)?;
 
-    // The payment, retained price, and refund cancel inside this one bundle:
-    // payment - price - refund = 0, so the net balance is exactly what the
-    // fee notes contribute beyond the Registry change — the aggregate fee.
+    // The net balance is exactly what the Registry fee notes contribute
+    // beyond the Registry change — the aggregate fee.
     let actual_fee: i64 = bundle.value_balance().into();
-    let intended_balance =
-        i64::try_from(fee).map_err(|_| crate::mint::AssemblyError::ValueOverflow)?;
+    let intended_balance = i64::try_from(fee).expect("fee fits in i64");
     assert_eq!(
         actual_fee, intended_balance,
         "bundle value balance {} != intended balance {} — transaction is misbalanced",
@@ -514,7 +415,6 @@ pub fn execute_transition<P: Parameters>(
         target_height,
         excluded,
         0,
-        false,
     )?;
     let bundle = build_transaction(
         network,
@@ -525,11 +425,10 @@ pub fn execute_transition<P: Parameters>(
         &fee_inputs,
         anchor_height,
         target_height,
-        None,
     )?;
     let tx = crate::mint::signer::assemble_v6_transaction(
         network,
-        Some(bundle),
+        bundle,
         None,
         Some(registry_keys),
         None,
