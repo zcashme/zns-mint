@@ -5,8 +5,8 @@
 
 use time::Timestamp;
 use crate::mint::otp::OtpQueue;
-use crate::mint::{Action, Expiry, Name, NameCommitment, UnifiedAddress};
-use zcash_protocol::consensus::Parameters;
+use crate::mint::{Action, Expiry, Name, NameCommitment, UnifiedAddress, CLAIM_PRICE};
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use crate::mint::registry::{Registry, Record};
 
 // ---------------------------------------------------------------------------
@@ -289,6 +289,83 @@ mod tests {
             "relay memo must not parse as a request memo"
         );
     }
+}
+
+/// Validates a claim request and assembles the transaction.
+/// Returns `None` if the request is invalid, the name is already locked,
+/// or the name is not available.
+///
+/// Deduplication is by note locator (`intake_seen` in `MintState`), not by
+/// name — a failed claim on a live name must not block a future claim after
+/// that name is released.
+#[allow(clippy::too_many_arguments)]
+pub fn process_claim<P: Parameters>(
+    network: &P,
+    name: Name,
+    ua: UnifiedAddress,
+    value: u64,
+    confirmed_height: BlockHeight,
+    cursor_height: BlockHeight,
+    target_height: BlockHeight,
+    excluded: &std::collections::BTreeSet<crate::wallet::NoteLocator>,
+    wallet: &mut crate::wallet::Wallet,
+    registry: &Registry,
+    registry_keys: &crate::key::RegistryKeys,
+    mint: &mut crate::mint::MintState,
+) -> Option<crate::mint::RequestOutcome> {
+    use crate::mint::{SubmissionKind, RequestOutcome};
+
+    if ua.orchard().is_none() {
+        return None;
+    }
+
+    // Check availability — a claim on a live name is rejected here,
+    // but a future claim after release is still possible.
+    let available = match registry.record(&name) {
+        None => true,
+        Some(r) => r.action == Action::Release,
+    };
+    if !available {
+        return None;
+    }
+    if value < CLAIM_PRICE {
+        return None;
+    }
+    if registry
+        .record(&name)
+        .is_some_and(|record| confirmed_height <= record.confirmed_height)
+    {
+        return None;
+    }
+
+    let record_commitment = registry.record(&name).map(|record| record.commitment);
+    if mint.is_name_locked(&name) {
+        return None;
+    }
+    let name_binding = mint.name_binding(&name, record_commitment);
+
+    let request = NameNoteRequest::Claim(ClaimRequest {
+        name: name.clone(),
+        ua: ua.clone(),
+        expires_at: Expiry::Never,
+    });
+    let result = crate::mint::registry::transaction::execute_transition(
+        network,
+        wallet,
+        registry,
+        registry_keys,
+        request,
+        excluded,
+        cursor_height,
+        target_height,
+    )
+    .map(|(txid, hex, notes)| (SubmissionKind::Claim, txid, hex, notes));
+
+    Some(RequestOutcome {
+        result,
+        name_binding: Some(name_binding),
+        relay_otp: None,
+    })
 }
 
 /// Validates a transition request (update or release with OTP), reserves the name,

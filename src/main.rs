@@ -324,7 +324,7 @@ async fn main() {
                         let outcome = parse_request(&network, &note.memo)
                             .map(|(action, name, ua)| match action {
                                 zns_mint::mint::Action::Claim => {
-                                    zns_mint::mint::claim::process_claim(
+                                    zns_mint::mint::registry::authorize::process_claim(
                                         &network,
                                         name.clone(),
                                         ua,
