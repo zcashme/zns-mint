@@ -14,7 +14,7 @@ use orchard::builder::BundleType;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::ZatBalance;
 
-use crate::mint::otp::{encode_otp_relay_memo, OtpCode};
+use crate::mint::otp::{encode_otp_relay_memo, OtpCode, OtpRequest, D_OTP};
 use crate::key::TreasuryKeys;
 use crate::mint::{Action, Name, UnifiedAddress, TREASURY_ACCOUNT};
 use crate::wallet::{NoteLocator, Wallet};
@@ -182,9 +182,8 @@ pub fn assemble_otp_relay<P: Parameters>(
     })
 }
 
-/// Validates an OTP relay request (update or release without OTP), reserves the
-/// challenge, and assembles the relay transaction.
-/// Returns `None` if the request is invalid or the challenge is already reserved.
+/// Validates an OTP relay request (update or release without OTP) and
+/// assembles the relay transaction. Returns `None` if the request is invalid.
 #[allow(clippy::too_many_arguments)]
 pub fn process_otp_relay<P: Parameters>(
     network: &P,
@@ -197,20 +196,14 @@ pub fn process_otp_relay<P: Parameters>(
     value: u64,
     cursor_height: BlockHeight,
     target_height: BlockHeight,
+    mtp: time::Timestamp,
     wallet: &mut Wallet,
     treasury_keys: &TreasuryKeys,
     mint: &mut crate::mint::MintState,
 ) -> Option<crate::mint::RequestOutcome> {
-    use crate::mint::otp::{ChallengeKey, OtpCode};
     use crate::mint::{SubmissionKind, RequestOutcome};
+    use time::Duration;
 
-    let key = ChallengeKey::new(network, name.clone(), action, requested_ua.clone(), record_commitment);
-    if mint.pending_otps.contains(&key)
-        || mint.pending_otps.is_challenge_reserved(&key)
-        || !mint.relay_challenge_check_and_mark(&key)
-    {
-        return None;
-    }
     if required_relay_value(network, target_height) != value {
         return None;
     }
@@ -219,9 +212,6 @@ pub fn process_otp_relay<P: Parameters>(
     }
 
     let name_binding = mint.name_binding(name, Some(record_commitment));
-    if !mint.pending_otps.reserve_challenge(&key) {
-        return None;
-    }
     let otp = OtpCode::generate();
     let result = assemble_otp_relay(
         network,
@@ -241,8 +231,13 @@ pub fn process_otp_relay<P: Parameters>(
 
     Some(RequestOutcome {
         result,
-        name_lock: None,
         name_binding: Some(name_binding),
-        relay_challenge: Some((key, otp)),
+        relay_otp: Some(OtpRequest {
+            name: name.clone(),
+            action,
+            ua: requested_ua.clone(),
+            code: otp,
+            expires_at: mtp + Duration::seconds(D_OTP),
+        }),
     })
 }

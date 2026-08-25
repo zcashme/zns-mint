@@ -3,15 +3,11 @@
 //! The OTP challenges those requests authorize with live in
 //! [`crate::mint::otp`].
 
-use zcash_protocol::consensus::BlockHeight;
-
+use time::Timestamp;
+use crate::mint::otp::OtpQueue;
 use crate::mint::{Action, Expiry, Name, NameCommitment, UnifiedAddress};
 use zcash_protocol::consensus::Parameters;
 use crate::mint::registry::{Registry, Record};
-
-// OTP challenge state lives at kernel level in [`crate::mint::otp`];
-// re-exported here for the `authorize_*` signatures in this module.
-use crate::mint::otp::{ChallengeKey, PendingOtps};
 
 // ---------------------------------------------------------------------------
 // Transition requests
@@ -105,11 +101,10 @@ pub fn authorize_claim(
 ///
 /// Verifies the name is live and consumes an OTP bound to its exact current
 /// predecessor commitment.
-pub fn authorize_update<P: Parameters>(
-    network: &P,
+pub fn authorize_update(
     registry: &Registry,
-    pending_otps: &mut PendingOtps,
-    current_height: BlockHeight,
+    otp_queue: &mut OtpQueue,
+    mtp: Timestamp,
     name: Name,
     new_ua: UnifiedAddress,
     otp: &[u8; 6],
@@ -119,14 +114,7 @@ pub fn authorize_update<P: Parameters>(
         return None;
     }
 
-    let key = ChallengeKey::new(
-        network,
-        name.clone(),
-        Action::Update,
-        new_ua.clone(),
-        record.commitment,
-    );
-    if !pending_otps.verify(&key, otp, current_height) {
+    if !otp_queue.verify_and_burn(&name, Action::Update, &new_ua, otp, mtp) {
         return None;
     }
 
@@ -142,11 +130,10 @@ pub fn authorize_update<P: Parameters>(
 ///
 /// Verifies the name is live and consumes an OTP bound to its exact current
 /// predecessor commitment.
-pub fn authorize_release<P: Parameters>(
-    network: &P,
+pub fn authorize_release(
     registry: &Registry,
-    pending_otps: &mut PendingOtps,
-    current_height: BlockHeight,
+    otp_queue: &mut OtpQueue,
+    mtp: Timestamp,
     name: Name,
     current_ua: UnifiedAddress,
     otp: &[u8; 6],
@@ -162,14 +149,7 @@ pub fn authorize_release<P: Parameters>(
     if controller != &current_ua {
         return None;
     }
-    let key = ChallengeKey::new(
-        network,
-        name.clone(),
-        Action::Release,
-        controller.clone(),
-        record.commitment,
-    );
-    if !pending_otps.verify(&key, otp, current_height) {
+    if !otp_queue.verify_and_burn(&name, Action::Release, &current_ua, otp, mtp) {
         return None;
     }
 
@@ -183,7 +163,8 @@ pub fn authorize_release<P: Parameters>(
 mod tests {
     use super::*;
     use crate::mint::NameCommitment;
-    use crate::mint::otp::{OtpCode, encode_otp_relay_memo};
+    use crate::mint::otp::{OtpCode, OtpQueue, OtpRequest, encode_otp_relay_memo};
+    use time::{Duration, Timestamp};
     
 
     fn mock_registry() -> Registry {
@@ -196,8 +177,8 @@ mod tests {
         NameCommitment::from_bytes(&b).unwrap()
     }
 
-    fn mock_pending_otps() -> PendingOtps {
-        PendingOtps::new()
+    fn mock_otp_queue() -> OtpQueue {
+        OtpQueue::new()
     }
 
     fn mock_ua() -> UnifiedAddress {
@@ -206,6 +187,7 @@ mod tests {
 
     const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
     use zcash_protocol::consensus::MAIN_NETWORK;
+    use zcash_protocol::consensus::BlockHeight;
 
     fn dummy_rho() -> orchard::note::Rho {
         let mut bytes = [0u8; 32];
@@ -237,88 +219,58 @@ mod tests {
     #[test]
     fn update_release_need_live_record() {
         let mut reg = mock_registry();
-        let mut otps = mock_pending_otps();
+        let mut otps = mock_otp_queue();
         let name = Name::parse("bob").unwrap();
         let ua = mock_ua();
-        let height = BlockHeight::from_u32(100);
+        let now = Timestamp::now();
 
         let dummy_otp = *b"000000";
         // Unseen name cannot be updated/released
         assert!(authorize_update(
-            &MAIN_NETWORK,
-            &reg,
-            &mut otps,
-            height,
-            name.clone(),
-            ua.clone(),
-            &dummy_otp
-        )
-        .is_none());
+            &reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp
+        ).is_none());
         assert!(authorize_release(
-            &MAIN_NETWORK,
-            &reg,
-            &mut otps,
-            height,
-            name.clone(),
-            ua.clone(),
-            &dummy_otp
-        )
-        .is_none());
+            &reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp
+        ).is_none());
 
         // Released name cannot be updated/released
-        reg.set_record_for_test(name.clone(), Action::Release, None, crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
+        reg.set_record_for_test(name.clone(), Action::Release, None, crate::mint::Expiry::Never, dummy_commitment(), BlockHeight::from_u32(100), dummy_rho());
         assert!(authorize_update(
-            &MAIN_NETWORK,
-            &reg,
-            &mut otps,
-            height,
-            name.clone(),
-            ua.clone(),
-            &dummy_otp
-        )
-        .is_none());
+            &reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp
+        ).is_none());
         assert!(authorize_release(
-            &MAIN_NETWORK,
-            &reg,
-            &mut otps,
-            height,
-            name.clone(),
-            ua.clone(),
-            &dummy_otp
-        )
-        .is_none());
+            &reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp
+        ).is_none());
     }
 
     #[test]
     fn update_extends_update_tip_with_valid_otp() {
         let mut reg = mock_registry();
-        let mut otps = mock_pending_otps();
+        let mut otps = mock_otp_queue();
         let name = Name::parse("carol").unwrap();
         let ua = mock_ua();
-        let height = BlockHeight::from_u32(100);
+        let now = Timestamp::now();
 
-        reg.set_record_for_test(name.clone(), Action::Update, Some(ua.clone()), crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
+        reg.set_record_for_test(name.clone(), Action::Update, Some(ua.clone()), crate::mint::Expiry::Never, dummy_commitment(), BlockHeight::from_u32(100), dummy_rho());
 
         // Invalid OTP fails
         let mut bad_otp = *b"000000";
         bad_otp[0] = b'X';
         assert!(
-            authorize_update(&MAIN_NETWORK, &reg, &mut otps, height, name.clone(), ua.clone(), &bad_otp)
-                .is_none()
+            authorize_update(&reg, &mut otps, now, name.clone(), ua.clone(), &bad_otp).is_none()
         );
 
         // Issue real OTP and it succeeds
-        let key = ChallengeKey::new(
-            &MAIN_NETWORK,
-            Name::parse("carol").unwrap(),
-            Action::Update,
-            mock_ua(),
-            dummy_commitment(),
-        );
         let issued_otp = OtpCode::generate();
         let real_otp = issued_otp.expose_for_test();
-        otps.record_issued(key, &issued_otp, height);
-        let req = authorize_update(&MAIN_NETWORK, &reg, &mut otps, height, name.clone(), ua, &real_otp).unwrap();
+        otps.push(OtpRequest {
+            name: Name::parse("carol").unwrap(),
+            action: Action::Update,
+            ua: mock_ua(),
+            code: OtpCode::for_test(real_otp),
+            expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
+        });
+        let req = authorize_update(&reg, &mut otps, now, name.clone(), ua, &real_otp).unwrap();
         assert_eq!(req.action(), Action::Update);
     }
 
@@ -350,7 +302,8 @@ pub fn process_transition<P: Parameters>(
     ua: UnifiedAddress,
     otp: &[u8; 6],
     record_commitment: NameCommitment,
-    cursor_height: zcash_protocol::consensus::BlockHeight,
+    mtp: Timestamp,
+    anchor_height: zcash_protocol::consensus::BlockHeight,
     target_height: zcash_protocol::consensus::BlockHeight,
     excluded: &std::collections::BTreeSet<crate::wallet::NoteLocator>,
     wallet: &mut crate::wallet::Wallet,
@@ -360,25 +313,19 @@ pub fn process_transition<P: Parameters>(
 ) -> Option<crate::mint::RequestOutcome> {
     use crate::mint::{SubmissionKind, RequestOutcome};
 
-    let key = ChallengeKey::new(network, name.clone(), action, ua.clone(), record_commitment);
-    if !mint.transition_challenge_check_and_mark(&key) {
+    if mint.is_name_locked(&name) {
         return None;
     }
-
-    let lock = mint.reserve_name(&name, Some(record_commitment))?;
-    let name_binding = lock.binding();
+    let name_binding = mint.name_binding(&name, Some(record_commitment));
 
     let req = match action {
-        Action::Update => authorize_update(network, registry, &mut mint.pending_otps, cursor_height, name, ua, otp),
-        Action::Release => authorize_release(network, registry, &mut mint.pending_otps, cursor_height, name, ua, otp),
+        Action::Update => authorize_update(registry, &mut mint.otp_queue, mtp, name, ua, otp),
+        Action::Release => authorize_release(registry, &mut mint.otp_queue, mtp, name, ua, otp),
         Action::Claim => unreachable!(),
     };
 
     match req {
-        None => {
-            mint.release_name(&lock);
-            None
-        }
+        None => None,
         Some(r) => {
             let result = crate::mint::registry::transaction::execute_transition(
                 network,
@@ -387,7 +334,7 @@ pub fn process_transition<P: Parameters>(
                 registry_keys,
                 r,
                 excluded,
-                cursor_height,
+                anchor_height,
                 target_height,
             )
             .map(|(txid, hex, notes)| {
@@ -400,9 +347,8 @@ pub fn process_transition<P: Parameters>(
             });
             Some(RequestOutcome {
                 result,
-                name_lock: Some(lock),
                 name_binding: Some(name_binding),
-                relay_challenge: None,
+                relay_otp: None,
             })
         }
     }

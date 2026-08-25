@@ -4,19 +4,16 @@ pub mod claim;
 pub mod note;
 pub mod otp;
 pub mod registry;
-pub mod treasury;
 pub mod signer;
+pub mod treasury;
 
 // The Name Note type and its codec.
 pub use note::{
-    decode_name_note, decode_name_note_tuple, decrypt_name_notes,
-    note_commitment_cmx, zns_psi_rcm_raw, DecryptedNameNote, Expiry, NameNote,
-    TermSeconds, UnixSeconds,
+    decode_name_note, decode_name_note_tuple, decrypt_name_notes, note_commitment_cmx,
+    parse_timestamp_canonical, zns_psi_rcm_raw, DecryptedNameNote, Expiry, NameNote, TermSeconds,
 };
+pub use time::Timestamp;
 
-/// The typed Unified Address — upstream's `zcash_keys` type, validated at
-/// parse (ZIP 316 grammar, receiver order, network prefix) rather than
-/// carried as an opaque string.
 pub use zcash_keys::address::UnifiedAddress;
 
 use zcash_protocol::consensus::BlockHeight;
@@ -27,18 +24,6 @@ pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
 
 /// A ZNS memo: the fixed 512-byte payload carried by a shielded note.
-///
-/// A newtype around upstream [`MemoBytes`] (`zcash_protocol::memo`) that keeps
-/// the Zcash memo representation upstream-faithful while overriding `Debug` to
-/// redact the contents. ZNS memo contents are shielded user data (names,
-/// addresses, ZNS payloads); per AGENTS.md "treat key material as radioactive",
-/// they must not leak to logs — the upstream `MemoBytes::Debug` prints hex, which
-/// would leak the full payload on any `{:?}` log line.
-///
-/// Construction goes through [`Memo::from_bytes`] (mirrors upstream's checked
-/// constructor) and is called at the sync extraction boundary. Reading goes
-/// through [`Memo::as_array`] / [`Memo::into_bytes`], forwarded to the inner
-/// `MemoBytes`.
 #[derive(Clone)]
 pub struct Memo(MemoBytes);
 
@@ -153,7 +138,6 @@ impl Name {
     }
 }
 
-
 // ===========================================================================
 // Operational state
 // ===========================================================================
@@ -163,7 +147,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::value::COIN;
 
-use crate::mint::otp::{ChallengeKey, OtpCode, PendingOtps};
+use crate::mint::otp::OtpQueue;
 use crate::mint::registry::Registry;
 use crate::wallet::NoteLocator;
 
@@ -215,10 +199,6 @@ pub struct Submission {
     pub expiry_height: BlockHeight,
     pub reserved_notes: Vec<NoteLocator>,
     pub name_binding: Option<NameBinding>,
-    /// The relay challenge this submission delivers, if any. Carried here so
-    /// the full relay lifecycle — reserve, issue, release-on-eviction — is
-    /// derivable from the submission itself.
-    pub relay_challenge: Option<ChallengeKey>,
     pub confirmed_at: Option<BlockHeight>,
 }
 
@@ -226,19 +206,6 @@ impl Submission {
     pub fn is_expired(&self, current_height: BlockHeight) -> bool {
         self.confirmed_at.is_none() && current_height > self.expiry_height
     }
-}
-
-/// Exclusive ownership of one canonical name state while a lifecycle
-/// transaction is being assembled but not yet submitted.
-///
-/// This is a capability token: only the caller that acquired it via
-/// [`MintState::reserve_name`] can release it via
-/// [`MintState::release_name`]. Once the transaction is submitted,
-/// the binding moves into the [`Submission`] and the name is locked by
-/// derivation — the pre-submit lock is consumed.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct NameLock {
-    pub(crate) binding: NameBinding,
 }
 
 /// Nonexclusive canonical binding for any name-dependent live operation.
@@ -257,23 +224,19 @@ pub struct NameBinding {
 ///    reserved notes, kind, and expiry. Prevents re-spending. Pruned by
 ///    [`reconcile`](Self::reconcile) when confirmed or expired.
 /// 2. **Names locked** — derived from #1: a name is locked if any
-///    unconfirmed lifecycle submission carries its binding, or if a
-///    pre-submit lock is held during assembly. No separate set.
-/// 3. **OTPs issued** — [`PendingOtps`], already its own well-designed struct.
+///    unconfirmed lifecycle submission carries its binding. No separate
+///    lock set.
+/// 3. **OTPs issued** — [`OtpQueue`], a single-use TTL cache of
+///    pending one-time passcodes.
 /// 4. **Recovery cooldown** — `recovery_until` blocks all work after restart
 ///    until previous-process mempool txs confirm or expire.
 pub struct MintState {
-    pub pending_otps: PendingOtps,
+    pub otp_queue: OtpQueue,
     pub submissions: BTreeMap<TxId, Submission>,
-    pre_submit_locks: BTreeSet<NameBinding>,
     recovery_until: Option<BlockHeight>,
     /// Intake notes definitively handled (invalid, or settled to a
     /// submission): never revisited.
     intake_seen: BTreeSet<NoteLocator>,
-    /// Relay challenges already evaluated (no-OTP requests).
-    relay_challenges_seen: BTreeSet<ChallengeKey>,
-    /// Transition challenges already evaluated (with-OTP requests).
-    transition_challenges_seen: BTreeSet<ChallengeKey>,
 }
 
 impl Default for MintState {
@@ -285,13 +248,10 @@ impl Default for MintState {
 impl MintState {
     pub fn new() -> Self {
         Self {
-            pending_otps: PendingOtps::new(),
+            otp_queue: OtpQueue::new(),
             submissions: BTreeMap::new(),
-            pre_submit_locks: BTreeSet::new(),
             recovery_until: None,
             intake_seen: BTreeSet::new(),
-            relay_challenges_seen: BTreeSet::new(),
-            transition_challenges_seen: BTreeSet::new(),
         }
     }
 
@@ -304,17 +264,6 @@ impl MintState {
 
     pub fn mark_intake_seen(&mut self, locator: NoteLocator) {
         self.intake_seen.insert(locator);
-    }
-
-    /// Relay-challenge dedup inside `process_otp_relay`: `true` when fresh.
-    pub(crate) fn relay_challenge_check_and_mark(&mut self, key: &ChallengeKey) -> bool {
-        self.relay_challenges_seen.insert(key.clone())
-    }
-
-    /// Transition-challenge dedup inside `process_transition`: `true` when
-    /// fresh (now marked).
-    pub(crate) fn transition_challenge_check_and_mark(&mut self, key: &ChallengeKey) -> bool {
-        self.transition_challenges_seen.insert(key.clone())
     }
 
     /// Creates Live state after a process restart.
@@ -337,16 +286,24 @@ impl MintState {
         wallet: &crate::wallet::Wallet,
         ancestor_height: BlockHeight,
     ) {
-        self.pending_otps.invalidate_changed_tips(registry);
         for submission in self.submissions.values_mut() {
-            if submission.confirmed_at.is_some_and(|height| height > ancestor_height) {
+            if submission
+                .confirmed_at
+                .is_some_and(|height| height > ancestor_height)
+            {
                 submission.confirmed_at = None;
             }
         }
         self.submissions.retain(|_, submission| {
-            submission.name_binding.as_ref().is_none_or(|binding| binding.matches_registry(registry))
+            submission
+                .name_binding
+                .as_ref()
+                .is_none_or(|binding| binding.matches_registry(registry))
                 && (submission.confirmed_at.is_some()
-                    || submission.reserved_notes.iter().all(|locator| wallet.contains_unspent_locator(*locator)))
+                    || submission
+                        .reserved_notes
+                        .iter()
+                        .all(|locator| wallet.contains_unspent_locator(*locator)))
         });
     }
 
@@ -357,76 +314,38 @@ impl MintState {
             .collect()
     }
 
-    /// Acquires the only lifecycle lock for `name` at its observed tip.
-    ///
-    /// Returns a [`NameLock`] capability token. The lock lives in
-    /// `pre_submit_locks` until the transaction is recorded via
-    /// [`record_submission`](Self::record_submission) (which consumes it)
-    /// or released via [`release_name`](Self::release_name) (on failure).
-    pub fn reserve_name(
-        &mut self,
-        name: &Name,
-        record_commitment: Option<NameCommitment>,
-    ) -> Option<NameLock> {
-        if self.is_name_locked(name) {
-            return None;
-        }
-
-        let binding = self.name_binding(name, record_commitment);
-        self.pre_submit_locks.insert(binding.clone());
-        Some(NameLock { binding })
+    /// Whether `name` is locked by an in-flight lifecycle submission.
+    /// OTP relays carry a `name_binding` for reorg invalidation but do not
+    /// lock the name — only lifecycle kinds (claim/update/release) do.
+    pub fn is_name_locked(&self, name: &Name) -> bool {
+        self.submissions.values().any(|s| {
+            s.kind.is_lifecycle() && s.name_binding.as_ref().is_some_and(|b| &b.name == name)
+        })
     }
 
-    /// Releases a pre-submit name lock acquired by [`reserve_name`](Self::reserve_name).
-    ///
-    /// No-op if the binding was already consumed by `record_submission`.
-    pub fn release_name(&mut self, lock: &NameLock) {
-        self.pre_submit_locks.remove(&lock.binding);
-    }
-
-    /// Whether `name` is locked by a pre-submit lock or an in-flight lifecycle
-    /// submission. OTP relays carry a `name_binding` for reorg invalidation
-    /// but do not lock the name — only lifecycle kinds (claim/update/release) do.
-    fn is_name_locked(&self, name: &Name) -> bool {
-        self.pre_submit_locks.iter().any(|b| &b.name == name)
-            || self.submissions.values().any(|s| {
-                s.kind.is_lifecycle()
-                    && s.name_binding.as_ref().is_some_and(|b| &b.name == name)
-            })
-    }
-
-    /// Records a submitted transaction, reserves its notes, and consumes any
-    /// pre-submit name lock matching the binding.
-    ///
-    /// For lifecycle submissions (claim/update/release), the `name_binding`
-    /// was previously inserted into `pre_submit_locks` by `reserve_name`;
-    /// this method removes it — the name is now locked by derivation from
-    /// the submission itself. For relays and non-name work, the `remove` is
-    /// a no-op (the binding was never in `pre_submit_locks`).
+    /// Records a submitted transaction and reserves its notes.
     pub fn record_submission(
         &mut self,
         kind: SubmissionKind,
         txid: TxId,
         reserved_notes: Vec<NoteLocator>,
         name_binding: Option<NameBinding>,
-        relay_challenge: Option<ChallengeKey>,
         expiry_height: BlockHeight,
         excluded: &mut BTreeSet<NoteLocator>,
     ) {
-        if let Some(ref binding) = name_binding {
-            self.pre_submit_locks.remove(binding);
-        }
         for loc in &reserved_notes {
             excluded.insert(*loc);
         }
-        self.submissions.insert(txid, Submission {
-            kind,
-            expiry_height,
-            reserved_notes,
-            name_binding,
-            relay_challenge,
-            confirmed_at: None,
-        });
+        self.submissions.insert(
+            txid,
+            Submission {
+                kind,
+                expiry_height,
+                reserved_notes,
+                name_binding,
+                confirmed_at: None,
+            },
+        );
     }
 
     /// The txids of every submission not yet confirmed.
@@ -436,22 +355,6 @@ impl MintState {
             .filter(|(_, sub)| sub.confirmed_at.is_none())
             .map(|(txid, _)| *txid)
             .collect()
-    }
-
-    /// Removes a submission the node has invalidated and that exists in
-    /// neither its mempool nor its chain, releasing every reservation it
-    /// derived: the name unlock and note reservations follow from removal,
-    /// and a carried relay challenge — reservation and issued OTP — is
-    /// discarded with it.
-    ///
-    /// The caller must have verified absence against the node; this method
-    /// trusts that check.
-    pub fn evict(&mut self, txid: &TxId) -> Option<Submission> {
-        let submission = self.submissions.remove(txid)?;
-        if let Some(key) = &submission.relay_challenge {
-            self.pending_otps.discard(key);
-        }
-        Some(submission)
     }
 
     /// Reconciles in-flight submissions with confirmed blocks.
@@ -507,13 +410,6 @@ impl MintState {
     }
 }
 
-impl NameLock {
-    /// Returns the canonical binding carried into a submitted lifecycle action.
-    pub fn binding(&self) -> NameBinding {
-        self.binding.clone()
-    }
-}
-
 impl NameBinding {
     fn matches_registry(&self, registry: &Registry) -> bool {
         match self.record_commitment {
@@ -528,9 +424,8 @@ impl NameBinding {
 /// The result of processing a single Treasury note request.
 pub struct RequestOutcome {
     pub result: Result<(SubmissionKind, TxId, String, Vec<NoteLocator>), AssemblyError>,
-    pub name_lock: Option<NameLock>,
     pub name_binding: Option<NameBinding>,
-    pub relay_challenge: Option<(ChallengeKey, OtpCode)>,
+    pub relay_otp: Option<crate::mint::otp::OtpRequest>,
 }
 
 // ===========================================================================

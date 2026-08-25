@@ -143,8 +143,10 @@ pub fn process_claim<P: Parameters>(
     }
 
     let record_commitment = registry.record(&name).map(|record| record.commitment);
-    let lock = mint.reserve_name(&name, record_commitment)?;
-    let name_binding = lock.binding();
+    if mint.is_name_locked(&name) {
+        return None;
+    }
+    let name_binding = mint.name_binding(&name, record_commitment);
     let result = execute_claim(
         network,
         wallet,
@@ -160,8 +162,7 @@ pub fn process_claim<P: Parameters>(
 
     Some(RequestOutcome {
         result,
-        name_lock: Some(lock),
         name_binding: Some(name_binding),
-        relay_challenge: None,
+        relay_otp: None,
     })
 }

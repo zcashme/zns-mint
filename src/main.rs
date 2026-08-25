@@ -30,7 +30,7 @@
 //! point only sequences their calls.
 
 use std::convert::Infallible;
-use std::time::Duration;
+use std::time::Duration as StdDuration;
 
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::data_api::WalletWrite as _;
@@ -40,7 +40,9 @@ use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
 use zip32::AccountId;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::treasury::memo::RequestMemo;
+use zns_mint::mint::treasury::memo::{MemoError, RequestMemo};
+use zns_mint::mint::otp::decode_otp_relay_memo;
+use time::Timestamp;
 use zns_mint::mint::{decrypt_name_notes, signer};
 use zns_mint::mint::{
     Name, NameNote, MintState, SubmissionKind, TREASURY_ACCOUNT,
@@ -86,7 +88,7 @@ async fn main() {
             Ok(stream) => stream,
             Err(e) => {
                 tracing::warn!(%e, "tip stream open failed; reconnecting");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(StdDuration::from_secs(5)).await;
                 continue 'outer;
             }
         };
@@ -125,7 +127,7 @@ async fn main() {
                             Ok(hash) => hash,
                             Err(e) => {
                                 tracing::warn!(%e, "ancestor walk fetch failed; retrying");
-                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                tokio::time::sleep(StdDuration::from_secs(5)).await;
                                 continue;
                             }
                         };
@@ -173,7 +175,7 @@ async fn main() {
                         Ok(state) => break state,
                         Err(e) => {
                             tracing::warn!(%e, "treestate fetch failed; retrying");
-                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            tokio::time::sleep(StdDuration::from_secs(5)).await;
                         }
                     }
                 };
@@ -221,7 +223,7 @@ async fn main() {
                             Ok(scanned) => scanned,
                             Err(e) => {
                                 tracing::warn!(?e, "scan_block failed; retrying block");
-                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                tokio::time::sleep(StdDuration::from_secs(5)).await;
                                 continue;
                             }
                         };
@@ -283,7 +285,7 @@ async fn main() {
                     }
                     Err(e) => {
                         tracing::warn!(%e, "block fetch failed; retrying");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        tokio::time::sleep(StdDuration::from_secs(5)).await;
                     }
                 }
             }
@@ -315,101 +317,136 @@ async fn main() {
                         if mint.intake_seen(locator) {
                             continue;
                         }
-                        let memo = match RequestMemo::parse(&note.memo) {
-                            Ok(memo) => memo,
+                        let mtp = Timestamp::now();
+                        let value = note.note.value().inner();
+                        let confirmed_height =
+                            note.mined_height.expect("filtered on Some");
+                        let outcome = match RequestMemo::parse(&note.memo) {
+                            Ok(memo) => {
+                                let Some(name) = Name::parse(memo.name()) else {
+                                    mint.mark_intake_seen(locator);
+                                    continue;
+                                };
+                                let Some(ua) = NameNote::parse_ua(&network, memo.ua()) else {
+                                    mint.mark_intake_seen(locator);
+                                    continue;
+                                };
+                                let ua_string = memo.ua().to_string();
+                                match &memo {
+                                    RequestMemo::Claim { .. } => {
+                                        zns_mint::mint::claim::process_claim(
+                                            &network,
+                                            name.clone(),
+                                            &ua_string,
+                                            value,
+                                            confirmed_height,
+                                            tip,
+                                            target,
+                                            &mut excluded,
+                                            &mut wallet,
+                                            &registry,
+                                            &registry_keys,
+                                            &mut mint,
+                                        )
+                                    }
+                                    // OTP relay request: the controller (the
+                                    // record's bound UA) receives the OTP, the
+                                    // requester's UA rides the memo.
+                                    RequestMemo::Update { otp: None, .. }
+                                    | RequestMemo::Release { otp: None, .. } => {
+                                        let Some(record) = registry.record(&name) else {
+                                            continue;
+                                        };
+                                        zns_mint::mint::treasury::relay::process_otp_relay(
+                                            &network,
+                                            &name,
+                                            memo.action(),
+                                            &ua,
+                                            record.ua.as_ref().expect(
+                                                "relay requires a live controller",
+                                            ),
+                                            record.commitment,
+                                            locator,
+                                            value,
+                                            tip,
+                                            target,
+                                            mtp,
+                                            &mut wallet,
+                                            &treasury_keys,
+                                            &mut mint,
+                                        )
+                                    }
+                                    // Transition with OTP: update binds to the
+                                    // requested UA, release to the current
+                                    // controller UA.
+                                    RequestMemo::Update { otp: Some(otp), .. }
+                                    | RequestMemo::Release { otp: Some(otp), .. } => {
+                                        let Some(record) = registry.record(&name) else {
+                                            continue;
+                                        };
+                                        let bound_ua = match memo.action() {
+                                            zns_mint::mint::Action::Update => ua.clone(),
+                                            _ => record.ua.clone().expect("live record has a UA"),
+                                        };
+                                        zns_mint::mint::registry::authorize::process_transition(
+                                            &network,
+                                            name.clone(),
+                                            memo.action(),
+                                            bound_ua,
+                                            otp,
+                                            record.commitment,
+                                            mtp,
+                                            tip,
+                                            target,
+                                            &mut excluded,
+                                            &mut wallet,
+                                            &registry,
+                                            &registry_keys,
+                                            &mut mint,
+                                        )
+                                    }
+                                }
+                            }
+                            Err(MemoError::UnknownVerb) => {
+                                // Controller forwarded a relay memo back.
+                                match decode_otp_relay_memo(&note.memo) {
+                                    Some((otp_name, otp_action, otp_ua_str, otp_digits)) => {
+                                        let Some(otp_ua) = NameNote::parse_ua(&network, &otp_ua_str) else {
+                                            mint.mark_intake_seen(locator);
+                                            continue;
+                                        };
+                                        let Some(record) = registry.record(&otp_name) else {
+                                            mint.mark_intake_seen(locator);
+                                            continue;
+                                        };
+                                        zns_mint::mint::registry::authorize::process_transition(
+                                            &network,
+                                            otp_name,
+                                            otp_action,
+                                            otp_ua,
+                                            &otp_digits,
+                                            record.commitment,
+                                            mtp,
+                                            tip,
+                                            target,
+                                            &mut excluded,
+                                            &mut wallet,
+                                            &registry,
+                                            &registry_keys,
+                                            &mut mint,
+                                        )
+                                    }
+                                    None => {
+                                        mint.mark_intake_seen(locator);
+                                        continue;
+                                    }
+                                }
+                            }
                             Err(_) => {
                                 // Not a ZNS request memo (or
                                 // malformed): never revisit.
                                 mint.mark_intake_seen(locator);
                                 continue;
-                            }
-                        };
-                        let value = note.note.value().inner();
-                        let confirmed_height =
-                            note.mined_height.expect("filtered on Some");
-                        let Some(name) = Name::parse(memo.name()) else {
-                            mint.mark_intake_seen(locator);
-                            continue;
-                        };
-                        // The request's UA validated at the single
-                        // boundary; invalid UAs end this note's
-                        // handling (never revisited).
-                        let Some(ua) = NameNote::parse_ua(&network, memo.ua()) else {
-                            mint.mark_intake_seen(locator);
-                            continue;
-                        };
-                        let ua_string = memo.ua().to_string();
-
-                        let outcome = match &memo {
-                            RequestMemo::Claim { .. } => {
-                                zns_mint::mint::claim::process_claim(
-                                    &network,
-                                    name.clone(),
-                                    &ua_string,
-                                    value,
-                                    confirmed_height,
-                                    tip,
-                                    target,
-                                    &mut excluded,
-                                    &mut wallet,
-                                    &registry,
-                                    &registry_keys,
-                                    &mut mint,
-                                )
-                            }
-                            // OTP relay request: the controller (the
-                            // record's bound UA) receives the OTP, the
-                            // requester's UA rides the memo.
-                            RequestMemo::Update { otp: None, .. }
-                            | RequestMemo::Release { otp: None, .. } => {
-                                let Some(record) = registry.record(&name) else {
-                                    continue;
-                                };
-                                zns_mint::mint::treasury::relay::process_otp_relay(
-                                    &network,
-                                    &name,
-                                    memo.action(),
-                                    &ua,
-                                    record.ua.as_ref().expect(
-                                        "relay requires a live controller",
-                                    ),
-                                    record.commitment,
-                                    locator,
-                                    value,
-                                    tip,
-                                    target,
-                                    &mut wallet,
-                                    &treasury_keys,
-                                    &mut mint,
-                                )
-                            }
-                            // Transition with OTP: update binds to the
-                            // requested UA, release to the current
-                            // controller UA.
-                            RequestMemo::Update { otp: Some(otp), .. }
-                            | RequestMemo::Release { otp: Some(otp), .. } => {
-                                let Some(record) = registry.record(&name) else {
-                                    continue;
-                                };
-                                let bound_ua = match memo.action() {
-                                    zns_mint::mint::Action::Update => ua.clone(),
-                                    _ => record.ua.clone().expect("live record has a UA"),
-                                };
-                                zns_mint::mint::registry::authorize::process_transition(
-                                    &network,
-                                    name.clone(),
-                                    memo.action(),
-                                    bound_ua,
-                                    otp,
-                                    record.commitment,
-                                    tip,
-                                    target,
-                                    &mut excluded,
-                                    &mut wallet,
-                                    &registry,
-                                    &registry_keys,
-                                    &mut mint,
-                                )
                             }
                         };
 
@@ -456,20 +493,10 @@ async fn main() {
                                     }
                                     // A relay's OTP becomes deliverable
                                     // only once its transaction is
-                                    // definitively accepted for
-                                    // broadcast. The challenge travels
-                                    // with the submission so expiry
-                                    // can discard it later.
-                                    let relay_challenge = outcome
-                                        .relay_challenge
-                                        .as_ref()
-                                        .map(|(key, _)| key.clone());
-                                    if let Some((key, otp)) = outcome.relay_challenge {
+                                    // definitively accepted for broadcast.
+                                    if let Some(req) = outcome.relay_otp {
                                         if accepted {
-                                            mint.pending_otps
-                                                .record_issued(key, &otp, tip);
-                                        } else {
-                                            mint.pending_otps.release_challenge(&key);
+                                            mint.otp_queue.push(req);
                                         }
                                     }
                                     mint.record_submission(
@@ -477,7 +504,6 @@ async fn main() {
                                         txid,
                                         reserved,
                                         outcome.name_binding,
-                                        relay_challenge,
                                         zcash_protocol::consensus::BlockHeight::from_u32(
                                             u32::from(target) + TX_EXPIRY_BUFFER,
                                         ),
@@ -491,12 +517,6 @@ async fn main() {
                                         kind = ?outcome.name_binding.is_some(),
                                         "assembly failed"
                                     );
-                                    if let Some(lock) = outcome.name_lock {
-                                        mint.release_name(&lock);
-                                    }
-                                    if let Some((key, _)) = outcome.relay_challenge {
-                                        mint.pending_otps.release_challenge(&key);
-                                    }
                                     // Invalid request or held lock: not
                                     // marked seen — the next cycle
                                     // re-evaluates.
@@ -568,7 +588,6 @@ async fn main() {
                                         kind,
                                         txid,
                                         Vec::new(),
-                                        None,
                                         None,
                                         zcash_protocol::consensus::BlockHeight::from_u32(
                                             u32::from(sweep_tip) + 1 + TX_EXPIRY_BUFFER,
