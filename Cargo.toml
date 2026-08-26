@@ -94,17 +94,18 @@ zcash_client_backend = { version = "0.24.0-rc.7", default-features = false, feat
 
 # Orchard with the `unsafe-zns` feature: Name Notes override the standard
 # note commitment so a note commits to a ZNS payload. The fork lives at
-# https://github.com/zcashme/orchard (branch `main`); this is a local path
-# dependency on a checkout of that branch.
+# https://github.com/zcashme/orchard; consumed from crates.io (zns-orchard)
+# and unified with the librustzcash graph via the [patch.crates-io] git tag.
 # zns-mint calls `Builder::add_zns_output` / `add_zns_spend` directly, so
 # this is a first-class dep, not just a transitive one.
-orchard = { path = "/Users/jules/ZcashNames/zns-orchard", default-features = false, features = ["unsafe-zns", "circuit"] }
+orchard = { version = "0.15.5", default-features = false, features = ["unsafe-zns", "circuit"] }
 shardtree = "0.7.1"
 
 # Redirect the crates.io `orchard` consumed transitively by librustzcash to
 # the ZNS fork so the whole graph builds against the same source.
 [patch.crates-io]
-orchard = { path = "/Users/jules/ZcashNames/zns-orchard" }
+# Tag of the last commit whose package name is still `orchard` (pre-rename).
+orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.15.5" }
 
 # Upstream ZIP-316 unified test vectors for the key-derivation regression
 # tests (`zcash_address::test_vectors::UNIFIED` is gated behind the crate's
