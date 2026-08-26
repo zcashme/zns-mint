@@ -7,7 +7,7 @@
 //! never reusable.
 //!
 //! Also home to the OTP relay memo codec
-//! (`ZNS:otp:<name>:<verb>:<ua>:<otp>`).
+//! (`ZNS:otp:<otp>:<name>:<verb>:<ua>`).
 
 use std::fmt;
 
@@ -184,14 +184,14 @@ pub fn otp_relay_memo_fits<P: zcash_protocol::consensus::Parameters>(
         return false;
     };
     8usize // "ZNS:otp:"
-        .checked_add(name.as_str().len())
+        .checked_add(6) // six-digit OTP
+        .and_then(|l| l.checked_add(1 + name.as_str().len()))
         .and_then(|l| l.checked_add(1 + verb.len()))
         .and_then(|l| l.checked_add(1 + ua.encode(network).len()))
-        .and_then(|l| l.checked_add(1 + 6)) // ":<otp>" — 6-digit OTP
         .is_some_and(|l| l <= 512)
 }
 
-/// Encodes an OTP relay memo: `ZNS:otp:<name>:<verb>:<ua>:<otp>`, zero-padded
+/// Encodes an OTP relay memo: `ZNS:otp:<otp>:<name>:<verb>:<ua>`, zero-padded
 /// to 512 bytes.
 ///
 /// This memo is sent from the Treasury to the current controller's address so
@@ -215,13 +215,13 @@ pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
     let mut offset = 0usize;
     for field in [
         b"ZNS:otp:".as_slice(),
+        otp_digits.as_slice(),
+        b":".as_slice(),
         name.as_str().as_bytes(),
         b":".as_slice(),
         verb.as_bytes(),
         b":".as_slice(),
         ua_field.as_bytes(),
-        b":".as_slice(),
-        otp_digits.as_slice(),
     ] {
         let end = offset + field.len();
         memo[offset..end].copy_from_slice(field);
@@ -231,7 +231,7 @@ pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
 }
 
 /// Parses a 512-byte OTP relay memo and returns its fields if the grammar
-/// matches `ZNS:otp:<name>:<verb>:<ua>:<otp>`. Returns `None` otherwise.
+/// matches `ZNS:otp:<otp>:<name>:<verb>:<ua>`. Returns `None` otherwise.
 pub fn decode_otp_relay_memo(memo: &[u8; 512]) -> Option<(Name, Action, String, [u8; 6])> {
     let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
     let text = std::str::from_utf8(&memo[..end]).ok()?;
@@ -241,24 +241,24 @@ pub fn decode_otp_relay_memo(memo: &[u8; 512]) -> Option<(Name, Action, String, 
         return None;
     }
 
-    let name = Name::parse(parts[2])?;
-    let action = match parts[3] {
-        "update" => Action::Update,
-        "release" => Action::Release,
-        _ => return None,
-    };
-
-    let ua = parts[4].to_string();
-    if ua.is_empty() {
-        return None;
-    }
-
-    let digits = parts[5].as_bytes();
+    let digits = parts[2].as_bytes();
     if digits.len() != 6 || !digits.iter().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let mut otp = [0u8; 6];
     otp.copy_from_slice(digits);
+
+    let name = Name::parse(parts[3])?;
+    let action = match parts[4] {
+        "update" => Action::Update,
+        "release" => Action::Release,
+        _ => return None,
+    };
+
+    let ua = parts[5].to_string();
+    if ua.is_empty() {
+        return None;
+    }
 
     Some((name, action, ua, otp))
 }
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn otp_relay_memo_format_is_name_verb_ua_otp() {
+    fn otp_relay_memo_format_is_otp_name_verb_ua() {
         let name = test_name();
         let ua = test_ua();
         let otp = OtpCode::for_test(*b"004206");
@@ -310,9 +310,18 @@ mod tests {
 
         let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
         let text = std::str::from_utf8(&memo[..end]).unwrap();
-        // OTP must be at the END: ZNS:otp:alice:update:<ua>:004206
-        assert!(text.ends_with(":004206"), "memo must end with OTP digits");
-        assert!(text.starts_with("ZNS:otp:alice:update:"), "memo must start with ZNS:otp:name:verb:");
+        assert!(text.starts_with("ZNS:otp:004206:alice:update:"));
+        assert!(text.ends_with(&ua.encode(&MAIN_NETWORK)));
+    }
+
+    #[test]
+    fn otp_relay_rejects_the_legacy_otp_last_format() {
+        let ua = test_ua();
+        let legacy = format!("ZNS:otp:alice:update:{}:004206", ua.encode(&MAIN_NETWORK));
+        let mut memo = [0u8; 512];
+        memo[..legacy.len()].copy_from_slice(legacy.as_bytes());
+
+        assert!(decode_otp_relay_memo(&memo).is_none());
     }
 
     #[test]
@@ -324,7 +333,10 @@ mod tests {
         let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp)
             .expect("memo fits");
         let result = crate::mint::treasury::memo::parse_request(&MAIN_NETWORK, &memo);
-        assert!(result.is_none(), "relay memo must not parse as a request memo");
+        assert!(
+            result.is_none(),
+            "relay memo must not parse as a request memo"
+        );
     }
 
     #[test]

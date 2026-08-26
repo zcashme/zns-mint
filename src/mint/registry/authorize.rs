@@ -3,11 +3,11 @@
 //! The OTP challenges those requests authorize with live in
 //! [`crate::mint::otp`].
 
-use time::Timestamp;
 use crate::mint::otp::OtpQueue;
+use crate::mint::registry::{Record, Registry};
 use crate::mint::{Action, Expiry, Name, NameCommitment, UnifiedAddress, CLAIM_PRICE};
+use time::Timestamp;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
-use crate::mint::registry::{Registry, Record};
 
 // ---------------------------------------------------------------------------
 // Transition requests
@@ -69,6 +69,8 @@ pub struct UpdateRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseRequest {
     pub name: Name,
+    /// The current binding preserved in the release Name Note.
+    pub ua: UnifiedAddress,
     pub prev_commitment: NameCommitment,
 }
 
@@ -88,11 +90,19 @@ pub fn authorize_claim(
     ua: UnifiedAddress,
 ) -> Option<NameNoteRequest> {
     match current_record(registry, &name) {
-        None => Some(NameNoteRequest::Claim(ClaimRequest { name, ua, expires_at: Expiry::Never })),
+        None => Some(NameNoteRequest::Claim(ClaimRequest {
+            name,
+            ua,
+            expires_at: Expiry::Never,
+        })),
         Some(Record {
             action: Action::Release,
             ..
-        }) => Some(NameNoteRequest::Claim(ClaimRequest { name, ua, expires_at: Expiry::Never })),
+        }) => Some(NameNoteRequest::Claim(ClaimRequest {
+            name,
+            ua,
+            expires_at: Expiry::Never,
+        })),
         Some(_) => None, // Name is already live
     }
 }
@@ -144,7 +154,7 @@ pub fn authorize_release(
     }
 
     let Some(controller) = &record.ua else {
-        return None; // released bindings have no controller
+        return None;
     };
     if controller != &current_ua {
         return None;
@@ -155,6 +165,7 @@ pub fn authorize_release(
 
     Some(NameNoteRequest::Release(ReleaseRequest {
         name,
+        ua: current_ua,
         prev_commitment: record.commitment,
     }))
 }
@@ -162,10 +173,9 @@ pub fn authorize_release(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mint::otp::{encode_otp_relay_memo, OtpCode, OtpQueue, OtpRequest};
     use crate::mint::NameCommitment;
-    use crate::mint::otp::{OtpCode, OtpQueue, OtpRequest, encode_otp_relay_memo};
     use time::{Duration, Timestamp};
-    
 
     fn mock_registry() -> Registry {
         Registry::new()
@@ -186,13 +196,15 @@ mod tests {
     }
 
     const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
-    use zcash_protocol::consensus::MAIN_NETWORK;
     use zcash_protocol::consensus::BlockHeight;
+    use zcash_protocol::consensus::MAIN_NETWORK;
 
     fn dummy_rho() -> orchard::note::Rho {
         let mut bytes = [0u8; 32];
         bytes[0] = 1;
-        orchard::note::Rho::from_bytes(&bytes).into_option().unwrap()
+        orchard::note::Rho::from_bytes(&bytes)
+            .into_option()
+            .unwrap()
     }
 
     #[test]
@@ -207,12 +219,28 @@ mod tests {
         assert_eq!(req.action(), Action::Claim);
 
         // Released name is claimable
-        reg.set_record_for_test(name.clone(), Action::Release, None, crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
+        reg.set_record_for_test(
+            name.clone(),
+            Action::Release,
+            None,
+            crate::mint::Expiry::Never,
+            dummy_commitment(),
+            height,
+            dummy_rho(),
+        );
         let req2 = authorize_claim(&reg, name.clone(), ua.clone()).unwrap();
         assert_eq!(req2.action(), Action::Claim);
 
         // Live name is NOT claimable
-        reg.set_record_for_test(name.clone(), Action::Claim, Some(ua.clone()), crate::mint::Expiry::Never, dummy_commitment(), height, dummy_rho());
+        reg.set_record_for_test(
+            name.clone(),
+            Action::Claim,
+            Some(ua.clone()),
+            crate::mint::Expiry::Never,
+            dummy_commitment(),
+            height,
+            dummy_rho(),
+        );
         assert!(authorize_claim(&reg, name, ua).is_none());
     }
 
@@ -226,21 +254,29 @@ mod tests {
 
         let dummy_otp = *b"000000";
         // Unseen name cannot be updated/released
-        assert!(authorize_update(
-            &reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp
-        ).is_none());
-        assert!(authorize_release(
-            &reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp
-        ).is_none());
+        assert!(
+            authorize_update(&reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp).is_none()
+        );
+        assert!(
+            authorize_release(&reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp).is_none()
+        );
 
         // Released name cannot be updated/released
-        reg.set_record_for_test(name.clone(), Action::Release, None, crate::mint::Expiry::Never, dummy_commitment(), BlockHeight::from_u32(100), dummy_rho());
-        assert!(authorize_update(
-            &reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp
-        ).is_none());
-        assert!(authorize_release(
-            &reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp
-        ).is_none());
+        reg.set_record_for_test(
+            name.clone(),
+            Action::Release,
+            None,
+            crate::mint::Expiry::Never,
+            dummy_commitment(),
+            BlockHeight::from_u32(100),
+            dummy_rho(),
+        );
+        assert!(
+            authorize_update(&reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp).is_none()
+        );
+        assert!(
+            authorize_release(&reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp).is_none()
+        );
     }
 
     #[test]
@@ -251,7 +287,15 @@ mod tests {
         let ua = mock_ua();
         let now = Timestamp::now();
 
-        reg.set_record_for_test(name.clone(), Action::Update, Some(ua.clone()), crate::mint::Expiry::Never, dummy_commitment(), BlockHeight::from_u32(100), dummy_rho());
+        reg.set_record_for_test(
+            name.clone(),
+            Action::Update,
+            Some(ua.clone()),
+            crate::mint::Expiry::Never,
+            dummy_commitment(),
+            BlockHeight::from_u32(100),
+            dummy_rho(),
+        );
 
         // Invalid OTP fails
         let mut bad_otp = *b"000000";
@@ -272,6 +316,39 @@ mod tests {
         });
         let req = authorize_update(&reg, &mut otps, now, name.clone(), ua, &real_otp).unwrap();
         assert_eq!(req.action(), Action::Update);
+    }
+
+    #[test]
+    fn release_preserves_the_current_binding_in_the_name_note_request() {
+        let mut reg = mock_registry();
+        let mut otps = mock_otp_queue();
+        let name = Name::parse("dave").unwrap();
+        let ua = mock_ua();
+        let now = Timestamp::now();
+
+        reg.set_record_for_test(
+            name.clone(),
+            Action::Claim,
+            Some(ua.clone()),
+            crate::mint::Expiry::Never,
+            dummy_commitment(),
+            BlockHeight::from_u32(100),
+            dummy_rho(),
+        );
+        otps.push(OtpRequest {
+            name: name.clone(),
+            action: Action::Release,
+            ua: ua.clone(),
+            code: OtpCode::for_test(*b"004206"),
+            expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
+        });
+
+        let request = authorize_release(&reg, &mut otps, now, name, ua.clone(), b"004206")
+            .expect("valid OTP authorizes release");
+        match request {
+            NameNoteRequest::Release(release) => assert_eq!(release.ua, ua),
+            _ => panic!("expected release request"),
+        }
     }
 
     #[test]
@@ -310,7 +387,7 @@ pub fn process_claim<P: Parameters>(
     registry: &Registry,
     registry_keys: &crate::key::RegistryKeys,
 ) -> Option<crate::mint::RequestOutcome> {
-    use crate::mint::{SubmissionKind, RequestOutcome};
+    use crate::mint::{RequestOutcome, SubmissionKind};
 
     if ua.orchard().is_none() {
         return None;
@@ -334,7 +411,6 @@ pub fn process_claim<P: Parameters>(
     {
         return None;
     }
-
 
     let request = NameNoteRequest::Claim(ClaimRequest {
         name: name.clone(),
@@ -378,8 +454,7 @@ pub fn process_transition<P: Parameters>(
     registry: &Registry,
     registry_keys: &crate::key::RegistryKeys,
 ) -> Option<crate::mint::RequestOutcome> {
-    use crate::mint::{SubmissionKind, RequestOutcome};
-
+    use crate::mint::{RequestOutcome, SubmissionKind};
 
     let req = match action {
         Action::Update => authorize_update(registry, otp_queue, mtp, name, ua, otp),

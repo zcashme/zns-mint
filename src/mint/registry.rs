@@ -17,8 +17,7 @@ pub mod transaction;
 // The module's primary public API — the authorization functions and the
 // request types they produce.
 pub use authorize::{
-    authorize_claim, authorize_release, authorize_update, current_record,
-    NameNoteRequest,
+    authorize_claim, authorize_release, authorize_update, current_record, NameNoteRequest,
 };
 pub use liquidity::{
     classify_registry_ironwood_note, classify_registry_note_parts, RegistryFeeLiquidity,
@@ -26,13 +25,15 @@ pub use liquidity::{
 };
 pub use transaction::{build_transaction, select_registry_fee_inputs, RegistryFeeInputs};
 
-use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, UnifiedAddress, REGISTRY_ACCOUNT};
-use zcash_protocol::consensus::Parameters;
+use crate::mint::{
+    Action, Expiry, Name, NameCommitment, NameNote, UnifiedAddress, REGISTRY_ACCOUNT,
+};
 use crate::wallet::Wallet;
 use std::collections::BTreeMap;
 use zcash_client_backend::data_api::ScannedBlock;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::Parameters;
 use zip32::AccountId;
 
 // ---------------------------------------------------------------------------
@@ -59,7 +60,12 @@ impl ReceivedNameNote {
         note: orchard::note::Note,
         payload: NameNote,
     ) -> Self {
-        Self { txid, action_index, note, payload }
+        Self {
+            txid,
+            action_index,
+            note,
+            payload,
+        }
     }
 
     pub fn txid(&self) -> &TxId {
@@ -107,8 +113,8 @@ impl std::fmt::Debug for ReceivedNameNote {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Record {
     pub action: Action,
-    /// The bound UA; `None` once released (§3.1 encodes the field empty;
-    /// §4.6 retains knowledge of the released binding via history).
+    /// The binding UA. A release retains the address it terminated so the
+    /// on-chain transition remains historically complete.
     pub ua: Option<UnifiedAddress>,
     /// The committed expiration (§4.5); absent for the post-release state.
     pub expires_at: Expiry,
@@ -240,8 +246,7 @@ impl Registry {
         for note in name_notes {
             name_notes_by_tx.entry(*note.txid()).or_default().push(note);
         }
-        let mut nullifiers_by_tx: BTreeMap<TxId, Vec<orchard::note::Nullifier>> =
-            BTreeMap::new();
+        let mut nullifiers_by_tx: BTreeMap<TxId, Vec<orchard::note::Nullifier>> = BTreeMap::new();
         for (_index, txid, nullifiers) in scanned.ironwood().nullifier_map() {
             nullifiers_by_tx
                 .entry(*txid)
@@ -274,27 +279,29 @@ impl Registry {
                     let record_commitment = record.commitment;
                     received_name_notes
                         .iter()
-                        .any(|new_note| {
-                            new_note.payload().prev_rcm() == Some(record_commitment)
-                        })
+                        .any(|new_note| new_note.payload().prev_rcm() == Some(record_commitment))
                         .then(|| name.clone())
                 })
                 .collect();
 
             match received_name_notes {
                 [] => {
-                    debug_assert!(spent_record_names.is_empty(),
+                    debug_assert!(
+                        spent_record_names.is_empty(),
                         "record commitment matched a prev_rcm but no Name Notes were received \
                          — impossible: spent_record_names is derived from received_name_notes \
-                         which is empty");
+                         which is empty"
+                    );
                 }
                 notes if notes.len() > 1 => {
                     // Public output construction is not Registry authorship.
                     // Ignore attacker-created ambiguity unless this transaction
                     // also spends Registry authority.
                     if has_registry_fee_spend || !spent_record_names.is_empty() {
-                        panic!("mint produced multiple Name Notes in one transaction \
-                                — assembly creates exactly one");
+                        panic!(
+                            "mint produced multiple Name Notes in one transaction \
+                                — assembly creates exactly one"
+                        );
                     }
                 }
                 [note] => {
@@ -308,19 +315,24 @@ impl Registry {
                         );
                         continue;
                     }
-                    assert!(has_registry_fee_spend,
+                    assert!(
+                        has_registry_fee_spend,
                         "mint transition transaction missing Registry fee-note spend \
-                         — assembly always includes fee funding");
+                         — assembly always includes fee funding"
+                    );
 
                     let payload = note.payload();
                     let name = payload.name();
                     match payload.action() {
                         Action::Claim => {
-                            assert!(spent_record_names.is_empty(),
-                                "claim transaction spent a record — assembly never \
-                                 spends a Name Note when claiming");
                             assert!(
-                                next.record(name).is_none_or(|r| r.action == Action::Release),
+                                spent_record_names.is_empty(),
+                                "claim transaction spent a record — assembly never \
+                                 spends a Name Note when claiming"
+                            );
+                            assert!(
+                                next.record(name)
+                                    .is_none_or(|r| r.action == Action::Release),
                                 "claim attempted to replace live name {name:?} \
                                  — authorize_claim checks availability"
                             );
@@ -329,14 +341,20 @@ impl Registry {
                             let record = next
                                 .record(name)
                                 .filter(|record| record.action != Action::Release)
-                                .expect("update/release has no live predecessor \
-                                        — assembly checks liveness before transitioning");
-                            assert!(payload.prev_rcm() == Some(record.commitment),
+                                .expect(
+                                    "update/release has no live predecessor \
+                                        — assembly checks liveness before transitioning",
+                                );
+                            assert!(
+                                payload.prev_rcm() == Some(record.commitment),
                                 "predecessor mismatch — assembly reads commitment \
-                                 from the same registry");
-                            assert!(spent_record_names.as_slice() == [name.clone()],
+                                 from the same registry"
+                            );
+                            assert!(
+                                spent_record_names.as_slice() == [name.clone()],
                                 "update/release did not spend the exact current Name Note \
-                                 — assembly spends the exact current note");
+                                 — assembly spends the exact current note"
+                            );
                         }
                     }
 

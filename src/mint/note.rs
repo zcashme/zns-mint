@@ -3,7 +3,8 @@
 //!
 //! A [`NameNote`] is one name transition as the whitepaper defines it — a
 //! variant enum in which illegal field combinations are unrepresentable
-//! (a claim has no predecessor, a release has no address and no expiry).
+//! (a claim has no predecessor; a release retains the released address and
+//! always has the `none` expiry).
 //! The 512-byte memo grammar and the σ-hash are functions *over* the type,
 //! not constructors of it.
 
@@ -75,12 +76,26 @@ impl Expiry {
 #[derive(Clone, PartialEq, Eq)]
 pub enum NameNote {
     /// Bind `name` to `ua` for `expires_at`; no predecessor exists.
-    Claim { name: Name, ua: UnifiedAddress, expires_at: Expiry },
+    Claim {
+        name: Name,
+        ua: UnifiedAddress,
+        expires_at: Expiry,
+    },
     /// Rebind and/or extend an existing registration. `expires_at` is the
     /// carried-forward (§4.5.3) or extension-resulting expiration.
-    Update { name: Name, ua: UnifiedAddress, expires_at: Expiry, prev: NameCommitment },
-    /// Terminate the registration; no address, no expiry.
-    Release { name: Name, prev: NameCommitment },
+    Update {
+        name: Name,
+        ua: UnifiedAddress,
+        expires_at: Expiry,
+        prev: NameCommitment,
+    },
+    /// Terminate the registration, retaining the address that was released.
+    /// Releases always encode the exact expiry field `none`.
+    Release {
+        name: Name,
+        ua: UnifiedAddress,
+        prev: NameCommitment,
+    },
 }
 
 impl std::fmt::Debug for NameNote {
@@ -92,7 +107,9 @@ impl std::fmt::Debug for NameNote {
 impl NameNote {
     pub fn name(&self) -> &Name {
         match self {
-            NameNote::Claim { name, .. } | NameNote::Update { name, .. } | NameNote::Release { name, .. } => name,
+            NameNote::Claim { name, .. }
+            | NameNote::Update { name, .. }
+            | NameNote::Release { name, .. } => name,
         }
     }
 
@@ -104,11 +121,12 @@ impl NameNote {
         }
     }
 
-    /// The bound Unified Address; absent for a release.
+    /// The bound Unified Address, including the address retained by a release.
     pub fn ua(&self) -> Option<&UnifiedAddress> {
         match self {
-            NameNote::Claim { ua, .. } | NameNote::Update { ua, .. } => Some(ua),
-            NameNote::Release { .. } => None,
+            NameNote::Claim { ua, .. }
+            | NameNote::Update { ua, .. }
+            | NameNote::Release { ua, .. } => Some(ua),
         }
     }
 
@@ -127,7 +145,9 @@ impl NameNote {
     /// The committed expiration; absent only for a release.
     pub fn expires_at(&self) -> Option<Expiry> {
         match self {
-            NameNote::Claim { expires_at, .. } | NameNote::Update { expires_at, .. } => Some(*expires_at),
+            NameNote::Claim { expires_at, .. } | NameNote::Update { expires_at, .. } => {
+                Some(*expires_at)
+            }
             NameNote::Release { .. } => None,
         }
     }
@@ -166,11 +186,11 @@ impl NameNote {
         self.expires_at().unwrap_or(Expiry::Never).field_bytes()
     }
 
-    /// The `ua` field string: the canonical encoding, empty for a release.
+    /// The `ua` field string: the canonical encoding for every action.
     fn ua_field_string<P: Parameters>(&self, params: &P) -> Option<String> {
         match self.ua() {
             Some(ua) => Some(ua.encode(params)),
-            None => Some(String::new()),
+            None => None,
         }
     }
 
@@ -215,10 +235,20 @@ pub fn zns_psi_rcm_raw(
     use pasta_curves::group::ff::FromUniformBytes;
 
     let psi = pasta_curves::pallas::Base::from_uniform_bytes(&tagged_zns_hash(
-        b"psi", verb, name, ua, expires_at, prev_rcm_bytes,
+        b"psi",
+        verb,
+        name,
+        ua,
+        expires_at,
+        prev_rcm_bytes,
     ));
     let rcm = pasta_curves::pallas::Scalar::from_uniform_bytes(&tagged_zns_hash(
-        b"rcm", verb, name, ua, expires_at, prev_rcm_bytes,
+        b"rcm",
+        verb,
+        name,
+        ua,
+        expires_at,
+        prev_rcm_bytes,
     ));
 
     (rcm, psi)
@@ -256,7 +286,7 @@ fn tagged_zns_hash(
 ///
 /// Accepts exactly the canonical encoding: trailing-zero stripping, the
 /// six-field grammar, canonical decimal or `none` expiry, 64-char lowercase
-/// hex predecessor, action-consistent fields (release: empty UA and `none`
+/// hex predecessor, action-consistent fields (release: a valid UA and `none`
 /// expiry; claim: zero predecessor; update/release: nonzero predecessor),
 /// and a re-encode that reproduces the input byte-for-byte.
 pub fn decode_name_note<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<NameNote> {
@@ -270,13 +300,16 @@ pub fn decode_name_note<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<N
 
     let name = Name::parse(parts[2])?;
     // The single UA validation boundary: a memo whose ua field is not a
-    // valid ZIP 316 Unified Address for this network decodes to no note
-    // (§3.5). A release's empty field is exempt.
+    // valid ZIP 316 Unified Address for this network decodes to no note.
     let ua_str = parts[3];
     let expires_at = Expiry::parse(parts[4])?;
 
     let mut prev_rcm_bytes = [0u8; 32];
-    if parts[5].len() != 64 || !parts[5].bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+    if parts[5].len() != 64
+        || !parts[5]
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
         return None;
     }
     hex::decode_to_slice(parts[5], &mut prev_rcm_bytes).ok()?;
@@ -303,13 +336,15 @@ pub fn decode_name_note<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<N
                 prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
             }
         }
-        // A release MUST encode an empty UA and the exact value `none`.
+        // A release MUST retain the released UA and encode the exact value
+        // `none` for its expiry.
         "release" => {
-            if !ua_str.is_empty() || expires_at != Expiry::Never {
+            if ua_str.is_empty() || expires_at != Expiry::Never || prev_rcm_bytes == [0u8; 32] {
                 return None;
             }
             NameNote::Release {
                 name,
+                ua: NameNote::parse_ua(params, ua_str)?,
                 prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
             }
         }
@@ -397,11 +432,10 @@ pub fn decrypt_name_notes<P: Parameters>(
                                 note.rho().to_bytes(),
                             ))
                             .expect("valid rho");
-                            let computed =
-                                match note_commitment_cmx(g_d, pk_d, 0, rho, psi, rcm) {
-                                    Some(c) => c,
-                                    None => return subtle::Choice::from(0),
-                                };
+                            let computed = match note_commitment_cmx(g_d, pk_d, 0, rho, psi, rcm) {
+                                Some(c) => c,
+                                None => return subtle::Choice::from(0),
+                            };
                             computed.to_repr().ct_eq(&cmx.to_bytes())
                         },
                     )
@@ -501,26 +535,39 @@ mod tests {
         let ua = test_ua();
         let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
 
-        let claim = NameNote::Claim { name: name.clone(), ua: ua.clone(), expires_at: Expiry::Never };
+        let claim = NameNote::Claim {
+            name: name.clone(),
+            ua: ua.clone(),
+            expires_at: Expiry::Never,
+        };
         assert_eq!(
             decode_name_note(&MAIN_NETWORK, &claim.encode(&MAIN_NETWORK).unwrap()).as_ref(),
             Some(&claim)
         );
 
         let t = Timestamp::from_seconds(1_775_000_000).unwrap();
-        let claim_t = NameNote::Claim { name: name.clone(), ua: ua.clone(), expires_at: Expiry::At(t) };
+        let claim_t = NameNote::Claim {
+            name: name.clone(),
+            ua: ua.clone(),
+            expires_at: Expiry::At(t),
+        };
         assert_eq!(
             decode_name_note(&MAIN_NETWORK, &claim_t.encode(&MAIN_NETWORK).unwrap()).as_ref(),
             Some(&claim_t)
         );
 
-        let update = NameNote::Update { name: name.clone(), ua: ua.clone(), expires_at: Expiry::At(t), prev };
+        let update = NameNote::Update {
+            name: name.clone(),
+            ua: ua.clone(),
+            expires_at: Expiry::At(t),
+            prev,
+        };
         assert_eq!(
             decode_name_note(&MAIN_NETWORK, &update.encode(&MAIN_NETWORK).unwrap()).as_ref(),
             Some(&update)
         );
 
-        let release = NameNote::Release { name, prev };
+        let release = NameNote::Release { name, ua, prev };
         assert_eq!(
             decode_name_note(&MAIN_NETWORK, &release.encode(&MAIN_NETWORK).unwrap()).as_ref(),
             Some(&release)
@@ -532,7 +579,11 @@ mod tests {
     #[test]
     fn invalid_ua_is_rejected() {
         let name = test_name();
-        let forged = format!("ZNS:claim:{}:u1xxx:none:{}", name.as_str(), hex::encode([0u8; 32]));
+        let forged = format!(
+            "ZNS:claim:{}:u1xxx:none:{}",
+            name.as_str(),
+            hex::encode([0u8; 32])
+        );
         let mut m = [0u8; 512];
         m[..forged.len()].copy_from_slice(forged.as_bytes());
         assert!(decode_name_note(&MAIN_NETWORK, &m).is_none());
@@ -550,17 +601,27 @@ mod tests {
         let t = Timestamp::from_seconds(1_000).unwrap();
 
         let (rcm_never, psi_never) = NameNote::Claim {
-            name: name.clone(), ua: ua.clone(), expires_at: Expiry::Never,
-        }.opening(&MAIN_NETWORK);
+            name: name.clone(),
+            ua: ua.clone(),
+            expires_at: Expiry::Never,
+        }
+        .opening(&MAIN_NETWORK);
         let (rcm_at, psi_at) = NameNote::Claim {
-            name: name.clone(), ua: ua.clone(), expires_at: Expiry::At(t),
-        }.opening(&MAIN_NETWORK);
+            name: name.clone(),
+            ua: ua.clone(),
+            expires_at: Expiry::At(t),
+        }
+        .opening(&MAIN_NETWORK);
         assert_ne!(rcm_never.to_repr(), rcm_at.to_repr());
         assert_ne!(psi_never, psi_at);
 
         let (rcm_upd, _) = NameNote::Update {
-            name, ua, expires_at: Expiry::At(t), prev,
-        }.opening(&MAIN_NETWORK);
+            name,
+            ua,
+            expires_at: Expiry::At(t),
+            prev,
+        }
+        .opening(&MAIN_NETWORK);
         assert_ne!(rcm_at.to_repr(), rcm_upd.to_repr());
     }
 
@@ -569,8 +630,14 @@ mod tests {
     /// silently accepted as the same value.
     #[test]
     fn expiry_parsing_is_canonical() {
-        assert_eq!(parse_timestamp_canonical("0"), Some(Timestamp::from_seconds(0).unwrap()));
-        assert_eq!(parse_timestamp_canonical("1"), Some(Timestamp::from_seconds(1).unwrap()));
+        assert_eq!(
+            parse_timestamp_canonical("0"),
+            Some(Timestamp::from_seconds(0).unwrap())
+        );
+        assert_eq!(
+            parse_timestamp_canonical("1"),
+            Some(Timestamp::from_seconds(1).unwrap())
+        );
         assert_eq!(parse_timestamp_canonical("01"), None);
         assert_eq!(parse_timestamp_canonical("+1"), None);
         assert_eq!(parse_timestamp_canonical(""), None);
@@ -578,10 +645,13 @@ mod tests {
 
         assert_eq!(Expiry::parse("none"), Some(Expiry::Never));
         assert_eq!(Expiry::parse("None"), None);
-        assert_eq!(Expiry::parse("1000"), Some(Expiry::At(Timestamp::from_seconds(1000).unwrap())));
+        assert_eq!(
+            Expiry::parse("1000"),
+            Some(Expiry::At(Timestamp::from_seconds(1000).unwrap()))
+        );
     }
 
-    /// A release must encode an empty UA and exactly `none`; a claim must
+    /// A release must encode its released UA and exactly `none`; a claim must
     /// use the zero predecessor; an update must have a nonzero one.
     #[test]
     fn grammar_rejects_inconsistent_fields() {
@@ -590,15 +660,42 @@ mod tests {
         let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
         let t = Expiry::At(Timestamp::from_seconds(5).unwrap());
 
-        // Release with a UA or a timestamp: not encodable as a release.
-        let mut m = NameNote::Release { name: name.clone(), prev }.encode(&MAIN_NETWORK).unwrap();
+        let mut m = NameNote::Release {
+            name: name.clone(),
+            ua: ua.clone(),
+            prev,
+        }
+        .encode(&MAIN_NETWORK)
+        .unwrap();
         assert!(decode_name_note(&MAIN_NETWORK, &m).is_some());
-        let forged = format!("ZNS:release:{}:{}:1000:{}", name.as_str(), TEST_UA, hex::encode([1u8; 32]));
+        // Releases must use the literal expiry `none`.
+        let forged = format!(
+            "ZNS:release:{}:{}:1000:{}",
+            name.as_str(),
+            TEST_UA,
+            hex::encode([1u8; 32])
+        );
+        m[..forged.len()].copy_from_slice(forged.as_bytes());
+        assert!(decode_name_note(&MAIN_NETWORK, &m).is_none());
+
+        // The released UA is mandatory.
+        let forged = format!(
+            "ZNS:release:{}::none:{}",
+            name.as_str(),
+            hex::encode([1u8; 32])
+        );
+        m.fill(0);
         m[..forged.len()].copy_from_slice(forged.as_bytes());
         assert!(decode_name_note(&MAIN_NETWORK, &m).is_none());
 
         // Claim with a nonzero predecessor is not a claim.
-        let mut m2 = NameNote::Claim { name, ua, expires_at: t }.encode(&MAIN_NETWORK).unwrap();
+        let mut m2 = NameNote::Claim {
+            name,
+            ua,
+            expires_at: t,
+        }
+        .encode(&MAIN_NETWORK)
+        .unwrap();
         let forged = format!("ZNS:claim:bob:{}:none:{}", TEST_UA, hex::encode([1u8; 32]));
         m2[..forged.len()].copy_from_slice(forged.as_bytes());
         assert!(decode_name_note(&MAIN_NETWORK, &m2).is_none());

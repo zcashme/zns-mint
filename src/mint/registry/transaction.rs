@@ -8,9 +8,9 @@
 //! carries everything: ZNS spend, ZNS output, funding spends, and change.
 
 use crate::key::RegistryKeys;
-use crate::mint::Action;
 use crate::mint::registry::authorize::NameNoteRequest;
 use crate::mint::registry::Registry;
+use crate::mint::Action;
 use crate::wallet::NoteLocator;
 use std::collections::BTreeSet;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
@@ -59,11 +59,7 @@ fn registry_fee<P: Parameters>(
     let total_spends = lifecycle_spends + funding_spends;
     let total_outputs = 1 + extra_outputs + usize::from(has_change);
     let actions = BundleType::DEFAULT
-        .num_actions(
-            version.default_flags(),
-            total_spends,
-            total_outputs,
-        )
+        .num_actions(version.default_flags(), total_spends, total_outputs)
         .expect("action count fits in bundle granularity");
     FeeRule::standard()
         .fee_required(
@@ -214,6 +210,7 @@ pub fn build_transaction<P: Parameters>(
         },
         NameNoteRequest::Release(b) => crate::mint::NameNote::Release {
             name: b.name.clone(),
+            ua: b.ua.clone(),
             prev: b.prev_commitment,
         },
     };
@@ -234,8 +231,12 @@ pub fn build_transaction<P: Parameters>(
     // and one lookup gives us the note, its Merkle position, and its memo
     // (from which we recompute the ZNS opening `(rcm, psi)`).
     if action == Action::Update || action == Action::Release {
-        let record = registry.record(name).ok_or(crate::mint::AssemblyError::NoteNotFound)?;
-        if record.commitment != prev_commitment.ok_or(crate::mint::AssemblyError::PredecessorMismatch)? {
+        let record = registry
+            .record(name)
+            .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
+        if record.commitment
+            != prev_commitment.ok_or(crate::mint::AssemblyError::PredecessorMismatch)?
+        {
             return Err(crate::mint::AssemblyError::PredecessorMismatch);
         }
 
@@ -407,15 +408,16 @@ pub fn execute_transition<P: Parameters>(
     excluded: &BTreeSet<NoteLocator>,
     anchor_height: BlockHeight,
     target_height: BlockHeight,
-) -> Result<(zcash_primitives::transaction::TxId, String, Vec<NoteLocator>), crate::mint::AssemblyError> {
-    let fee_inputs = select_registry_fee_inputs(
-        network,
-        wallet,
-        &request,
-        target_height,
-        excluded,
-        0,
-    )?;
+) -> Result<
+    (
+        zcash_primitives::transaction::TxId,
+        String,
+        Vec<NoteLocator>,
+    ),
+    crate::mint::AssemblyError,
+> {
+    let fee_inputs =
+        select_registry_fee_inputs(network, wallet, &request, target_height, excluded, 0)?;
     let bundle = build_transaction(
         network,
         wallet,
