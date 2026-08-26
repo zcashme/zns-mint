@@ -61,8 +61,8 @@ pub struct Boot<P: Parameters> {
     wallet: Wallet,
     registry: Registry,
     /// The origin-checkpoint continuity metadata the wallet was seeded
-    /// from — the pre-first-block baseline. Upstream's type; the wallet's
-    /// `applied_tip_metadata` owns the semantic once blocks flow.
+    /// from — the pre-first-block baseline. Upstream's type; `chain_tip`
+    /// in the run loop owns the semantic once blocks flow.
     checkpoint_metadata: BlockMetadata,
     treasury_keys: TreasuryKeys,
     registry_keys: RegistryKeys,

@@ -187,7 +187,7 @@ pub fn process_otp_relay<P: Parameters>(
     action: crate::mint::Action,
     requested_ua: &crate::mint::UnifiedAddress,
     controller_ua: &crate::mint::UnifiedAddress,
-    record_commitment: crate::mint::NameCommitment,
+    _record_commitment: crate::mint::NameCommitment,
     locator: NoteLocator,
     value: u64,
     cursor_height: BlockHeight,
@@ -195,7 +195,6 @@ pub fn process_otp_relay<P: Parameters>(
     mtp: time::Timestamp,
     wallet: &mut Wallet,
     treasury_keys: &TreasuryKeys,
-    mint: &mut crate::mint::MintState,
 ) -> Option<crate::mint::RequestOutcome> {
     use crate::mint::{SubmissionKind, RequestOutcome};
     use time::Duration;
@@ -207,7 +206,6 @@ pub fn process_otp_relay<P: Parameters>(
         return None;
     }
 
-    let name_binding = mint.name_binding(name, Some(record_commitment));
     let otp = OtpCode::generate();
     let result = assemble_otp_relay(
         network,
@@ -227,7 +225,6 @@ pub fn process_otp_relay<P: Parameters>(
 
     Some(RequestOutcome {
         result,
-        name_binding: Some(name_binding),
         relay_otp: Some(OtpRequest {
             name: name.clone(),
             action,

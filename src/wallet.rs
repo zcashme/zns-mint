@@ -7,6 +7,7 @@ mod trees;
 mod write;
 
 pub use assembly::{IronwoodNote, NoteLocator};
+pub use read::WalletError;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -17,12 +18,13 @@ use transparent::bundle::OutPoint;
 use zcash_client_backend::{
     data_api::chain::ChainState,
     data_api::locking::LockOwner,
-    data_api::{BlockMetadata, SentTransactionOutput, TransactionStatus},
+    data_api::{BlockMetadata, SentTransactionOutput, TransactionStatus, WalletWrite},
     wallet::{
         NoteId, OutputRef, WalletIronwoodOutput, WalletSaplingOutput, WalletTransparentOutput,
     },
 };
 use zcash_keys::keys::UnifiedFullViewingKey;
+use zcash_primitives::block::BlockHash;
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
     consensus::{BlockHeight, TxIndex},
@@ -164,19 +166,22 @@ impl Wallet {
         self.ufvks.get(&account)
     }
 
-    /// The wallet's applied-tip continuity metadata, if any block is applied.
-    ///
-    /// This is the `prior_metadata` input to the next block scan and the
-    /// reorg-detection baseline.
-    pub fn applied_tip_metadata(&self) -> Option<BlockMetadata> {
-        self.blocks.last_key_value().map(|(_, m)| m.clone())
+    /// The block hash at `height`, if that height was applied.
+    /// Used for reorg walk hash comparison.
+    pub fn block_hash_at(&self, height: BlockHeight) -> Option<BlockHash> {
+        self.blocks.get(&height).map(|m| m.block_hash())
     }
 
-    /// The applied block metadata at `height`, if that height was applied.
-    ///
-    /// Reorg detection walks applied heights backwards until one matches the
-    /// node's best chain, yielding the common ancestor.
-    pub fn block_metadata_at(&self, height: BlockHeight) -> Option<BlockMetadata> {
-        self.blocks.get(&height).cloned()
+    /// Truncates the wallet to `max_height` and returns the
+    /// [`BlockMetadata`] at that height — the new chain tip after reorg.
+    pub fn truncate_to(
+        &mut self,
+        max_height: BlockHeight,
+    ) -> Result<BlockMetadata, WalletError> {
+        WalletWrite::truncate_to_height(self, max_height)?;
+        self.blocks
+            .get(&max_height)
+            .cloned()
+            .ok_or(WalletError::TruncationTargetUnavailable(max_height))
     }
 }

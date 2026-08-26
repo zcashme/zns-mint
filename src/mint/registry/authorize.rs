@@ -295,8 +295,7 @@ mod tests {
 /// Returns `None` if the request is invalid, the name is already locked,
 /// or the name is not available.
 ///
-/// Deduplication is by note locator (`intake_seen` in `MintState`), not by
-/// name — a failed claim on a live name must not block a future claim after
+/// Name availability is checked against the registry — a failed claim on a live name must not block a future claim after
 /// that name is released.
 #[allow(clippy::too_many_arguments)]
 pub fn process_claim<P: Parameters>(
@@ -307,11 +306,9 @@ pub fn process_claim<P: Parameters>(
     confirmed_height: BlockHeight,
     cursor_height: BlockHeight,
     target_height: BlockHeight,
-    excluded: &std::collections::BTreeSet<crate::wallet::NoteLocator>,
     wallet: &mut crate::wallet::Wallet,
     registry: &Registry,
     registry_keys: &crate::key::RegistryKeys,
-    mint: &mut crate::mint::MintState,
 ) -> Option<crate::mint::RequestOutcome> {
     use crate::mint::{SubmissionKind, RequestOutcome};
 
@@ -338,11 +335,6 @@ pub fn process_claim<P: Parameters>(
         return None;
     }
 
-    let record_commitment = registry.record(&name).map(|record| record.commitment);
-    if mint.is_name_locked(&name) {
-        return None;
-    }
-    let name_binding = mint.name_binding(&name, record_commitment);
 
     let request = NameNoteRequest::Claim(ClaimRequest {
         name: name.clone(),
@@ -355,7 +347,7 @@ pub fn process_claim<P: Parameters>(
         registry,
         registry_keys,
         request,
-        excluded,
+        &std::collections::BTreeSet::new(),
         cursor_height,
         target_height,
     )
@@ -363,7 +355,6 @@ pub fn process_claim<P: Parameters>(
 
     Some(RequestOutcome {
         result,
-        name_binding: Some(name_binding),
         relay_otp: None,
     })
 }
@@ -378,26 +369,21 @@ pub fn process_transition<P: Parameters>(
     action: Action,
     ua: UnifiedAddress,
     otp: &[u8; 6],
-    record_commitment: NameCommitment,
+    _record_commitment: NameCommitment,
     mtp: Timestamp,
     anchor_height: zcash_protocol::consensus::BlockHeight,
     target_height: zcash_protocol::consensus::BlockHeight,
-    excluded: &std::collections::BTreeSet<crate::wallet::NoteLocator>,
+    otp_queue: &mut crate::mint::otp::OtpQueue,
     wallet: &mut crate::wallet::Wallet,
     registry: &Registry,
     registry_keys: &crate::key::RegistryKeys,
-    mint: &mut crate::mint::MintState,
 ) -> Option<crate::mint::RequestOutcome> {
     use crate::mint::{SubmissionKind, RequestOutcome};
 
-    if mint.is_name_locked(&name) {
-        return None;
-    }
-    let name_binding = mint.name_binding(&name, Some(record_commitment));
 
     let req = match action {
-        Action::Update => authorize_update(registry, &mut mint.otp_queue, mtp, name, ua, otp),
-        Action::Release => authorize_release(registry, &mut mint.otp_queue, mtp, name, ua, otp),
+        Action::Update => authorize_update(registry, otp_queue, mtp, name, ua, otp),
+        Action::Release => authorize_release(registry, otp_queue, mtp, name, ua, otp),
         Action::Claim => unreachable!(),
     };
 
@@ -410,7 +396,7 @@ pub fn process_transition<P: Parameters>(
                 registry,
                 registry_keys,
                 r,
-                excluded,
+                &std::collections::BTreeSet::new(),
                 anchor_height,
                 target_height,
             )
@@ -424,7 +410,6 @@ pub fn process_transition<P: Parameters>(
             });
             Some(RequestOutcome {
                 result,
-                name_binding: Some(name_binding),
                 relay_otp: None,
             })
         }

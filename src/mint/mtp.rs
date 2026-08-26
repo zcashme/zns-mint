@@ -14,9 +14,8 @@
 //! the 10 headers below the scan floor via `get_block_header` so MTP is
 //! available from the first scanned block.
 //!
-//! MTP is **not** stored in [`MintState`](super::MintState): it is chain
-//! state, not operational state. The tracker lives as a local in the run
-//! loop alongside `wallet` and `mint`.
+//! MTP is chain state, not mint state. The tracker lives as a local in
+//! the run loop alongside `wallet` and `registry`.
 
 use std::collections::VecDeque;
 
