@@ -309,7 +309,10 @@ fn tagged_zns_hash(
 /// expiry; claim: zero predecessor; update/release: nonzero predecessor),
 /// and a re-encode that reproduces the input byte-for-byte.
 pub fn decode_name_note<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<NameNote> {
-    let end = memo.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
+    if memo[end..].iter().any(|&b| b != 0) {
+        return None;
+    }
     let memo_str = std::str::from_utf8(&memo[..end]).ok()?;
 
     let parts: Vec<&str> = memo_str.split(':').collect();

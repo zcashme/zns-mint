@@ -246,6 +246,9 @@ pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
 /// matches `ZNS:otp:<otp>:<name>:<verb>:<ua>`. Returns `None` otherwise.
 pub fn decode_otp_relay_memo(memo: &[u8; 512]) -> Option<(Name, Action, String, [u8; 6])> {
     let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
+    if memo[end..].iter().any(|&b| b != 0) {
+        return None;
+    }
     let text = std::str::from_utf8(&memo[..end]).ok()?;
 
     let parts: Vec<&str> = text.split(':').collect();
@@ -546,6 +549,25 @@ mod tests {
             result.is_none(),
             "relay memo must not parse as a request memo"
         );
+    }
+
+    #[test]
+    fn otp_relay_rejects_non_zero_bytes_after_nul_padding() {
+        let name = test_name();
+        let ua = test_ua();
+        let otp = OtpCode::for_test(*b"004206");
+
+        let mut memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp)
+            .expect("memo fits");
+
+        // Inject non-zero garbage after the NUL padding.
+        // `encode_otp_relay_memo` zero-pads, so the first NUL is right after
+        // the content.  Find it and write garbage further out.
+        let first_nul = memo.iter().position(|&b| b == 0).unwrap();
+        memo[first_nul + 10] = 0x42;
+
+        // The post-NUL check must reject this.
+        assert!(decode_otp_relay_memo(&memo).is_none());
     }
 
     #[test]
