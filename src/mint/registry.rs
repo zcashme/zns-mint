@@ -1,29 +1,24 @@
 //! Registry: the ZNS name-chain state machine, transition authorization, and
-//! transaction assembly path.
+//! issuance path.
 //!
 //! Submodules:
 //! - [`authorize`] — `NameNoteRequest`, `authorize_claim`/`update`/`release`,
 //!   OTP challenge state (`ChallengeKey`, `PendingOtps`), relay memo encoding
-//! - [`liquidity`] — Registry fee-note classification and top-up policy
-//! - [`transaction`] — `build_transaction`
+//! - [`issue`] — Name Note construction: builds the Ironwood bundle with
+//!   ZNS-specific commitment inputs
 //!
 //! V6 assembly/proving/signing lives in [`crate::mint::signer`]; transparent
 //! outputs ([`crate::mint::signer::TransparentOutput`]) moved with it.
 
 pub mod authorize;
-pub mod liquidity;
-pub mod transaction;
+pub mod issue;
 
 // The module's primary public API — the authorization functions and the
 // request types they produce.
 pub use authorize::{
     authorize_claim, authorize_release, authorize_update, current_record, NameNoteRequest,
 };
-pub use liquidity::{
-    classify_registry_ironwood_note, classify_registry_note_value, RegistryFeeLiquidity,
-    RegistryFundingPlan, RegistryNoteClass,
-};
-pub use transaction::{build_transaction, select_registry_fee_inputs, RegistryFeeInputs};
+pub use issue::{build_transaction, select_registry_fee_inputs, RegistryFeeInputs};
 
 use crate::mint::{
     Action, Expiry, Name, NameCommitment, NameNote, UnifiedAddress, REGISTRY_ACCOUNT,

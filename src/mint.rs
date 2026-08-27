@@ -126,7 +126,6 @@ pub enum SubmissionKind {
     Update,
     Release,
     OtpRelay,
-    Replenish,
     AutoSweep,
 }
 
@@ -137,7 +136,6 @@ impl SubmissionKind {
             Self::Update => "update",
             Self::Release => "release",
             Self::OtpRelay => "otp_relay",
-            Self::Replenish => "replenish",
             Self::AutoSweep => "sweep",
         }
     }

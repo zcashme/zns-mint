@@ -19,8 +19,7 @@
 //! complete their OTP authorization, lifecycle releases enforce
 //! expiration and liveness, and the resulting reply transactions are
 //! built, signed, and broadcast through the Zebra node. Housekeeping
-//! then sweeps Treasury funds to the vault and replenishes the fee-note
-//! pool.
+//! then sweeps Treasury funds to the vault.
 //!
 //! State is held by `Wallet`, `Registry`, and `OtpQueue`; this entry
 //! point only sequences their calls.
@@ -436,7 +435,7 @@ async fn main() {
                 }
             }
 
-            // Housekeeping: vault sweep and fee replenishment.
+            // Housekeeping: vault sweep.
             let sweep_tip = tip;
             let produced: Vec<zcash_primitives::transaction::TxId> = [
                 zns_mint::mint::treasury::vault::sweep_to_vault(
@@ -445,11 +444,6 @@ async fn main() {
                     &treasury_keys,
                 ),
                 zns_mint::mint::treasury::vault::sweep_sapling_to_vault(
-                    &network,
-                    &mut wallet,
-                    &treasury_keys,
-                ),
-                zns_mint::mint::treasury::replenish::replenish_registry_fees(
                     &network,
                     &mut wallet,
                     &treasury_keys,

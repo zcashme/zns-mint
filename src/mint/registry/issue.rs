@@ -11,11 +11,14 @@ use crate::key::RegistryKeys;
 use crate::mint::registry::authorize::NameNoteRequest;
 use crate::mint::registry::Registry;
 use crate::mint::Action;
-use crate::wallet::NoteLocator;
 use std::collections::BTreeSet;
+use zcash_client_backend::data_api::WalletRead as _;
+use zcash_client_backend::wallet::NoteId;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::memo::Memo;
+use zcash_protocol::value::{ZatBalance, Zatoshis};
 
 // ---------------------------------------------------------------------------
 // Fee input planning
@@ -27,20 +30,20 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 /// different wallet note after planning.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RegistryFeeInputs {
-    locators: BTreeSet<NoteLocator>,
+    note_ids: BTreeSet<NoteId>,
 }
 
 impl std::fmt::Debug for RegistryFeeInputs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistryFeeInputs")
-            .field("count", &self.locators.len())
+            .field("count", &self.note_ids.len())
             .finish()
     }
 }
 
 impl RegistryFeeInputs {
-    pub fn locators(&self) -> &BTreeSet<NoteLocator> {
-        &self.locators
+    pub fn note_ids(&self) -> &BTreeSet<NoteId> {
+        &self.note_ids
     }
 }
 
@@ -51,7 +54,7 @@ fn registry_fee<P: Parameters>(
     funding_spends: usize,
     extra_outputs: usize,
     has_change: bool,
-) -> u64 {
+) -> Zatoshis {
     use orchard::builder::BundleType;
     use orchard::bundle::BundleVersion;
 
@@ -73,39 +76,40 @@ fn registry_fee<P: Parameters>(
             actions,
         )
         .expect("ZIP-317 fee for realistic action count is representable")
-        .into_u64()
 }
 
 /// Selects the exact ordinary Registry notes required to fund `request` at
-/// `target_height`, excluding every locator held by another Live operation.
+/// `target_height`, excluding every note held by another Live operation.
 pub fn select_registry_fee_inputs<P: Parameters>(
     network: &P,
     wallet: &crate::wallet::Wallet,
     request: &NameNoteRequest,
     target_height: BlockHeight,
-    excluded: &BTreeSet<NoteLocator>,
+    excluded: &BTreeSet<NoteId>,
     extra_outputs: usize,
 ) -> Result<RegistryFeeInputs, crate::mint::AssemblyError> {
     let lifecycle_spends = usize::from(request.action() != Action::Claim);
     let mut candidates: Vec<_> = wallet
-        .ironwood_notes_for(crate::mint::REGISTRY_ACCOUNT)
+        .unspent_ironwood_notes(crate::mint::REGISTRY_ACCOUNT)
+        .into_iter()
         .filter(|note| {
-            crate::mint::registry::liquidity::classify_registry_note_parts(
-                note.note.value().inner(),
-            ) == crate::mint::registry::liquidity::RegistryNoteClass::Fee
+            note.note_value()
+                .expect("Ironwood note values are within valid ZEC bounds by consensus")
+                > Zatoshis::ZERO
         })
         .map(|note| {
             (
-                NoteLocator::ironwood(crate::mint::REGISTRY_ACCOUNT, note.note.rho()),
-                note.note.value().inner(),
+                *note.internal_note_id(),
+                note.note_value()
+                    .expect("Ironwood note values are within valid ZEC bounds by consensus"),
             )
         })
-        .filter(|(locator, _)| !excluded.contains(locator))
+        .filter(|(note_id, _)| !excluded.contains(note_id))
         .collect();
     candidates.sort_by_key(|(_, value)| *value);
 
-    let mut locators = BTreeSet::new();
-    let mut total = 0u64;
+    let mut note_ids = BTreeSet::new();
+    let mut total = Zatoshis::ZERO;
     for funding_spends in 0..=candidates.len() {
         let fee_without_change = registry_fee(
             network,
@@ -116,7 +120,7 @@ pub fn select_registry_fee_inputs<P: Parameters>(
             false,
         );
         if total == fee_without_change {
-            return Ok(RegistryFeeInputs { locators });
+            return Ok(RegistryFeeInputs { note_ids });
         }
 
         let fee_with_change = registry_fee(
@@ -128,14 +132,15 @@ pub fn select_registry_fee_inputs<P: Parameters>(
             true,
         );
         if total > fee_without_change && total >= fee_with_change {
-            return Ok(RegistryFeeInputs { locators });
+            return Ok(RegistryFeeInputs { note_ids });
         }
 
-        let Some((locator, value)) = candidates.get(funding_spends) else {
+        let Some((note_id, value)) = candidates.get(funding_spends) else {
             break;
         };
-        total += *value;
-        locators.insert(*locator);
+        total = (total + *value)
+            .expect("Registry fee-note total is within the Zcash monetary range");
+        note_ids.insert(*note_id);
     }
 
     Err(crate::mint::AssemblyError::InsufficientFunds)
@@ -242,13 +247,22 @@ pub fn build_transaction<P: Parameters>(
 
         // Extract note data from the wallet (immutable borrow ends here).
         let (note, position, memo_bytes) = {
-            let w = wallet
-                .ironwood_note(crate::wallet::NoteLocator::ironwood(
-                    crate::mint::REGISTRY_ACCOUNT,
-                    record.rho,
-                ))
+            let received = wallet
+                .unspent_ironwood_note_by_rho(crate::mint::REGISTRY_ACCOUNT, record.rho)
                 .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
-            (w.note.clone(), w.position, w.memo)
+            let memo = match wallet
+                .get_memo(*received.internal_note_id())
+                .expect("wallet memo lookup succeeds")
+                .expect("previous Name Note memo is retained")
+            {
+                Memo::Future(bytes) => *bytes.as_array(),
+                _ => panic!("previous Name Note memo is retained as raw memo bytes"),
+            };
+            (
+                received.note().clone(),
+                received.note_commitment_tree_position(),
+                memo,
+            )
         };
 
         let merkle_path = wallet
@@ -279,7 +293,7 @@ pub fn build_transaction<P: Parameters>(
         .encode(network)
         .expect("typed NameNote encodes within 512-byte memo");
 
-    let value = orchard::value::NoteValue::from_raw(0);
+    let value = orchard::value::NoteValue::ZERO;
 
     builder
         .add_zns_output(
@@ -294,21 +308,23 @@ pub fn build_transaction<P: Parameters>(
 
     // 5. Resolve only the exact fee notes retained in the caller's plan.
     let committed_spends = builder.spends().len();
-    let mut funding_notes = Vec::with_capacity(fee_inputs.locators.len());
-    let mut total_funded = 0u64;
-    for locator in &fee_inputs.locators {
+    let mut funding_notes = Vec::with_capacity(fee_inputs.note_ids.len());
+    let mut total_funded = Zatoshis::ZERO;
+    for note_id in &fee_inputs.note_ids {
         let note = wallet
-            .ironwood_note(*locator)
+            .unspent_ironwood_note(crate::mint::REGISTRY_ACCOUNT, *note_id)
             .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
-        if note.account_id != crate::mint::REGISTRY_ACCOUNT
-            || crate::mint::registry::liquidity::classify_registry_note_parts(
-                note.note.value().inner(),
-            ) != crate::mint::registry::liquidity::RegistryNoteClass::Fee
+        if note.note_value()
+            .expect("Ironwood note values are within valid ZEC bounds by consensus")
+            == Zatoshis::ZERO
         {
             return Err(crate::mint::AssemblyError::WrongAccount);
         }
-        total_funded += note.note.value().inner();
-        funding_notes.push(note.clone());
+        total_funded = (total_funded
+            + note.note_value()
+                .expect("Ironwood note values are within valid ZEC bounds by consensus"))
+            .expect("Registry fee-note total is within the Zcash monetary range");
+        funding_notes.push(note);
     }
 
     let funding_spends = funding_notes.len();
@@ -322,7 +338,7 @@ pub fn build_transaction<P: Parameters>(
         false,
     );
     let (fee, change) = if total_funded == fee_without_change {
-        (fee_without_change, 0)
+        (fee_without_change, Zatoshis::ZERO)
     } else {
         let fee_with_change = registry_fee(
             network,
@@ -335,23 +351,27 @@ pub fn build_transaction<P: Parameters>(
         if total_funded < fee_with_change {
             return Err(crate::mint::AssemblyError::InsufficientValue);
         }
-        (fee_with_change, total_funded - fee_with_change)
+        (
+            fee_with_change,
+            (total_funded - fee_with_change)
+                .expect("total_funded was checked against fee_with_change"),
+        )
     };
 
     // Add the selected funding notes as standard Ironwood spends.
     for prev_note in &funding_notes {
         let merkle_path = wallet
-            .ironwood_witness(prev_note.position, anchor_height)
+            .ironwood_witness(prev_note.note_commitment_tree_position(), anchor_height)
             .ok()
             .flatten()
             .ok_or(crate::mint::AssemblyError::NoWitness)?;
 
         builder
-            .add_spend(fvk.clone(), prev_note.note, merkle_path.into())
+            .add_spend(fvk.clone(), prev_note.note().clone(), merkle_path.into())
             .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
     }
 
-    if change > 0 {
+    if change > Zatoshis::ZERO {
         let change_address = fvk.address_at(0u32, orchard::keys::Scope::Internal);
 
         // ZIP-302 empty memo: 0xF6 followed by 511 zeros.
@@ -362,7 +382,7 @@ pub fn build_transaction<P: Parameters>(
             .add_output(
                 Some(fvk.to_ovk(orchard::keys::Scope::Internal)),
                 change_address,
-                orchard::value::NoteValue::from_raw(change),
+                orchard::value::NoteValue::from_raw(change.into()),
                 change_memo,
             )
             .map_err(|_| crate::mint::AssemblyError::BuilderAdd)?;
@@ -376,11 +396,11 @@ pub fn build_transaction<P: Parameters>(
 
     // The net balance is exactly what the Registry fee notes contribute
     // beyond the Registry change — the aggregate fee.
-    let actual_fee: i64 = bundle.value_balance().into();
-    let intended_balance = i64::try_from(fee).expect("fee fits in i64");
+    let actual_fee = *bundle.value_balance();
+    let intended_balance = ZatBalance::from(fee);
     assert_eq!(
         actual_fee, intended_balance,
-        "bundle value balance {} != intended balance {} — transaction is misbalanced",
+        "bundle value balance {:?} != intended balance {:?} — transaction is misbalanced",
         actual_fee, intended_balance,
     );
 
@@ -405,14 +425,14 @@ pub fn execute_transition<P: Parameters>(
     registry: &Registry,
     registry_keys: &RegistryKeys,
     request: NameNoteRequest,
-    excluded: &BTreeSet<NoteLocator>,
+    excluded: &BTreeSet<NoteId>,
     anchor_height: BlockHeight,
     target_height: BlockHeight,
 ) -> Result<
     (
         zcash_primitives::transaction::TxId,
         String,
-        Vec<NoteLocator>,
+        Vec<NoteId>,
     ),
     crate::mint::AssemblyError,
 > {
@@ -439,6 +459,6 @@ pub fn execute_transition<P: Parameters>(
     Ok((
         tx.txid(),
         crate::mint::signer::serialize_tx(&tx)?,
-        fee_inputs.locators().iter().copied().collect(),
+        fee_inputs.note_ids().iter().copied().collect(),
     ))
 }

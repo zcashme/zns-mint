@@ -20,15 +20,14 @@
 //! 4. **Deposit to the vault** (`vault`) — when the spendable balance exceeds
 //!    the threshold, send the excess to the project vault's transparent
 //!    address, retaining a fixed reserve.
-//! 5. **Fund the Registry** (`replenish`) — refill the Registry's fee-note
-//!    pool from Treasury value when it drops below its floor.
+//! 5. **Pay Name Note fees** — the Treasury funds the ZIP-317 fee for every
+//!    Name Note transaction in a multi-authority bundle with the Registry.
 
 use zcash_keys::address::UnifiedAddress;
 use zcash_protocol::consensus::Parameters;
 
 use crate::mint::{Action, Name};
 
-pub mod replenish;
 pub mod vault;
 
 /// Parses a 512-byte memo sent to the Treasury as a ZNS transition request.

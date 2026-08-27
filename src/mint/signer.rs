@@ -17,7 +17,7 @@
 //! into one unauthorized transaction before computing the shared shielded
 //! signature hash, then each bundle is proven and signed over that exact
 //! commitment. This hand-rolled assembler handles Ironwood-only transactions
-//! (Name Notes, vault sweeps with reserve, replenish). Sapling sweeps to the
+//! (Name Notes, vault sweeps with reserve). Sapling sweeps to the
 //! transparent vault go through upstream `propose_send_max_transfer` +
 //! `create_proposed_transactions` instead, using the cached Sapling prover
 //! loaded by [`sapling_provers`]. Orchard bundles are not accepted: NU6.3

@@ -52,7 +52,7 @@ use hyper_util::rt::TokioIo;
 use rand::seq::IteratorRandom;
 use rand::rngs::OsRng;
 use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::value::COIN;
+use zcash_protocol::value::{COIN, Zatoshis};
 
 use crate::mint::Name;
 
@@ -426,12 +426,14 @@ impl RateOracle {
     /// `ceil(usd_micros × COIN / rate_micros)` in `u128`, rounded up — the
     /// Treasury never undercharges on a division remainder. `None` means no
     /// usable rate: the caller must skip, not guess.
-    pub fn price_zat(&self, name: &Name, tip: BlockHeight) -> Option<u64> {
+    pub fn price_zat(&self, name: &Name, tip: BlockHeight) -> Option<Zatoshis> {
         let usd = schedule_usd(name.as_str().len());
         let rate = self.rate(tip)?.as_u64().max(1);
         let numer = u128::from(usd.as_u64()) * u128::from(COIN);
         let price = numer.div_ceil(u128::from(rate));
-        u64::try_from(price).ok()
+        u64::try_from(price)
+            .ok()
+            .and_then(|price| Zatoshis::from_u64(price).ok())
     }
 }
 
@@ -517,15 +519,24 @@ mod tests {
 
         // $100 at $40 = exactly 2.5 ZEC — no rounding.
         let seven = Name::parse("abcdefg").unwrap();
-        assert_eq!(oracle.price_zat(&seven, tip), Some(250_000_000));
+        assert_eq!(
+            oracle.price_zat(&seven, tip),
+            Some(Zatoshis::const_from_u64(250_000_000))
+        );
 
         // $1000 at $40 = 25 ZEC exactly.
         let six = Name::parse("abcdef").unwrap();
-        assert_eq!(oracle.price_zat(&six, tip), Some(2_500_000_000));
+        assert_eq!(
+            oracle.price_zat(&six, tip),
+            Some(Zatoshis::const_from_u64(2_500_000_000))
+        );
 
         // Non-divisible: $100 at $30 = 333.333… ZEC rounds up.
         oracle.rate = Some(MicroUsd(30_000_000));
-        assert_eq!(oracle.price_zat(&seven, tip), Some(333_333_334));
+        assert_eq!(
+            oracle.price_zat(&seven, tip),
+            Some(Zatoshis::const_from_u64(333_333_334))
+        );
 
         // Stale rate prices nothing.
         oracle.fetched_at = Some(BlockHeight::from_u32(1));

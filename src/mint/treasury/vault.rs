@@ -284,7 +284,7 @@ pub fn sweep_to_vault<P: Parameters>(
 /// clears the Sapling pool entirely: every spendable Sapling note is spent and
 /// the remainder minus fee goes to [`VAULT_ADDRESS`] as a single transparent
 /// output. No reserve is kept because the Treasury does not use Sapling for
-/// its operational lanes (relays, replenish) — Sapling notes are legacy
+/// its operational lanes (relays) — Sapling notes are legacy
 /// inbound funds that should be moved out.
 ///
 /// Uses upstream [`propose_send_max_transfer`] + [`create_proposed_transactions`]:

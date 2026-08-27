@@ -186,7 +186,9 @@ mod tests {
     fn median_is_robust_against_outliers() {
         let mut tracker = MtpTracker::default();
         // 9 normal timestamps, 2 extreme outliers
-        let stamps = [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 99999, 0];
+        let stamps = [
+            1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 99999, 0,
+        ];
         for (i, &ts) in stamps.iter().enumerate() {
             tracker.update(h(i as u32), ts);
         }
@@ -256,9 +258,7 @@ mod tests {
 
         // Backfill refills from the chain
         tracker
-            .backfill(h(50), |height| {
-                async move { Ok(3000 + u32::from(height)) }
-            })
+            .backfill(h(50), |height| async move { Ok(3000 + u32::from(height)) })
             .await?;
 
         // Still not enough (backfill adds 10, need 11)
@@ -293,8 +293,8 @@ mod tests {
     async fn backfill_near_genesis_fetches_fewer() -> Result<(), BoxError> {
         let mut tracker = MtpTracker::default();
         tracker
-            .backfill(h(3), |height| {
-                async move { Ok(1_700_000_000 + u32::from(height)) }
+            .backfill(h(3), |height| async move {
+                Ok(1_700_000_000 + u32::from(height))
             })
             .await?;
 

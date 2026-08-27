@@ -421,7 +421,7 @@ pub fn process_claim<P: Parameters>(
         ua: ua.clone(),
         expires_at: Expiry::Never,
     });
-    let result = crate::mint::registry::transaction::execute_transition(
+    let result = crate::mint::registry::issue::execute_transition(
         network,
         wallet,
         registry,
@@ -473,7 +473,7 @@ pub fn process_transition<P: Parameters>(
     match req {
         None => None,
         Some(r) => {
-            let result = crate::mint::registry::transaction::execute_transition(
+            let result = crate::mint::registry::issue::execute_transition(
                 network,
                 wallet,
                 registry,
