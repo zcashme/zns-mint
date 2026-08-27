@@ -415,7 +415,7 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
         .ok()
         .flatten()
         .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
-    let hex = crate::mint::signer::serialize_tx(&tx)?;
+    let hex = crate::wallet::assembly::serialize_tx(&tx)?;;
     Ok((txid, hex))
 }
 

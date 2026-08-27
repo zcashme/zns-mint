@@ -39,7 +39,8 @@ use zns_mint::boot::Boot;
 use zns_mint::mint::otp::{decode_otp_relay_memo, OtpQueue};
 use zns_mint::mint::treasury::parse_request;
 use time::Timestamp;
-use zns_mint::mint::{decrypt_name_notes, signer, ChainTip};
+use zns_mint::mint::{decrypt_name_notes, ChainTip};
+use zns_mint::wallet::assembly::{assemble_v6_transaction, serialize_tx};
 use zns_mint::mint::{TREASURY_ACCOUNT, AssemblyError};
 use zns_mint::zcash::{self, CanonicalBlockSource, JsonRpc, SubmitOutcome};
 
@@ -210,7 +211,7 @@ async fn main() {
     // ChainTip = boot checkpoint (first-class position)
     // Must be cloned before into_parts consumes the boot evidence.
     let mut chain_tip: ChainTip = *boot.checkpoint_metadata();
-    let (network, mut chain, wallet, registry, treasury_keys, registry_keys) =
+    let (network, mut chain, wallet, registry, treasury_keys, registry_keys, sapling_spend, sapling_output) =
         boot.into_parts();
     let rpc = JsonRpc::new();
     let source = CanonicalBlockSource::new();
@@ -614,7 +615,7 @@ async fn main() {
             .collect();
             for txid in produced {
                 match wallet.get_transaction(txid) {
-                    Ok(Some(tx)) => match signer::serialize_tx(&tx) {
+                    Ok(Some(tx)) => match serialize_tx(&tx) {
                         Ok(hex) => {
                             match source
                                 .submit_transaction(

@@ -38,8 +38,9 @@ use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::mint::registry::Registry;
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
-use zcash_client_backend::data_api::{BlockMetadata};
+use zcash_client_backend::data_api::BlockMetadata;
 use zcash_client_backend::data_api::chain::ChainState;
+use sapling::circuit::{OutputParameters, SpendParameters};
 
 // ---------------------------------------------------------------------------
 // boot — the concrete entry point
@@ -66,6 +67,8 @@ pub struct Boot<P: Parameters> {
     checkpoint_metadata: BlockMetadata,
     treasury_keys: TreasuryKeys,
     registry_keys: RegistryKeys,
+    sapling_spend: SpendParameters,
+    sapling_output: OutputParameters,
 }
 
 /// Expected genesis hash — mainnet in production, regtest in dev builds.
@@ -189,6 +192,11 @@ impl<P: Parameters> Boot<P> {
             }
         }
 
+        // 8. Sapling proving parameters — load and verify against ceremony hashes.
+        let sapling_spend = load_sapling_spend_params();
+        let sapling_output = load_sapling_output_params();
+        tracing::info!("boot: Sapling proving parameters loaded and verified");
+
         tracing::info!(
             network = NETWORK_LABEL,
             "boot: complete at node tip {}",
@@ -203,6 +211,8 @@ impl<P: Parameters> Boot<P> {
             checkpoint_metadata,
             treasury_keys,
             registry_keys,
+            sapling_spend,
+            sapling_output,
         }
     }
 
@@ -230,6 +240,8 @@ impl<P: Parameters> Boot<P> {
         Registry,
         TreasuryKeys,
         RegistryKeys,
+        SpendParameters,
+        OutputParameters,
     ) {
         (
             self.network,
@@ -238,6 +250,8 @@ impl<P: Parameters> Boot<P> {
             self.registry,
             self.treasury_keys,
             self.registry_keys,
+            self.sapling_spend,
+            self.sapling_output,
         )
     }
 }
@@ -670,4 +684,74 @@ mod tests {
         assert!(!network.is_nu_active(NetworkUpgrade::Nu6_3, BlockHeight::from_u32(3)));
         assert!(network.is_nu_active(NetworkUpgrade::Nu6_3, four));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sapling proving parameters
+// ---------------------------------------------------------------------------
+
+/// The BLAKE2b-512 hash of the canonical `sapling-spend.params` file.
+const SAPLING_SPEND_HASH: &str = "8270785a1a0d0bc77196f000ee6d221c9c9894f55307bd9357c3f0105d31ca63991ab91324160d8f53e2bbd3c2633a6eb8bdf5205d822e7f3f73edac51b2b70c";
+
+/// The BLAKE2b-512 hash of the canonical `sapling-output.params` file.
+const SAPLING_OUTPUT_HASH: &str = "657e3d38dbb5cb5e7dd2970e8b03d69b4787dd907285b5a7f0790dcc8072f60bf593b32cc2d1c030e00ff5ae64bf84c5c3beb84ddc841d48264b4a171744d028";
+
+/// Expected file sizes for the Sapling parameter files.
+const SAPLING_SPEND_BYTES: u64 = 47_958_396;
+const SAPLING_OUTPUT_BYTES: u64 = 3_592_860;
+
+fn sapling_params_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("ZCASH_PARAMS_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    std::path::PathBuf::from(home).join(".zcash-params")
+}
+
+fn read_verified_sapling_params(
+    path: &std::path::Path,
+    expected_hash: &str,
+    expected_bytes: u64,
+) -> Vec<u8> {
+    use std::io::Read;
+
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(
+        size, expected_bytes,
+        "Sapling params size mismatch at {}: expected {expected_bytes}, got {size}",
+        path.display(),
+    );
+
+    let mut file = std::fs::File::open(path).unwrap_or_else(|e| {
+        panic!("FATAL: cannot open Sapling params at {}: {e}", path.display())
+    });
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.read_to_end(&mut bytes).unwrap_or_else(|e| {
+        panic!("FATAL: cannot read Sapling params at {}: {e}", path.display())
+    });
+
+    let hash = blake2b_simd::Params::new().hash_length(64).hash(&bytes);
+    let hash_hex = hex::encode(hash.as_bytes());
+    assert_eq!(
+        hash_hex, expected_hash,
+        "Sapling params hash mismatch at {}: expected {expected_hash}, got {hash_hex}",
+        path.display(),
+    );
+    bytes
+}
+
+fn load_sapling_spend_params() -> SpendParameters {
+    let dir = sapling_params_dir();
+    let path = dir.join("sapling-spend.params");
+    let bytes = read_verified_sapling_params(&path, SAPLING_SPEND_HASH, SAPLING_SPEND_BYTES);
+    SpendParameters::read(&bytes[..], false)
+        .expect("FATAL: failed to deserialize sapling-spend.params")
+}
+
+fn load_sapling_output_params() -> OutputParameters {
+    let dir = sapling_params_dir();
+    let path = dir.join("sapling-output.params");
+    let bytes = read_verified_sapling_params(&path, SAPLING_OUTPUT_HASH, SAPLING_OUTPUT_BYTES);
+    OutputParameters::read(&bytes[..], false)
+        .expect("FATAL: failed to deserialize sapling-output.params")
 }
