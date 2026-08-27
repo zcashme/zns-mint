@@ -3,6 +3,7 @@
 pub mod mtp;
 pub mod note;
 pub mod otp;
+pub mod pricing;
 pub mod registry;
 pub mod signer;
 pub mod treasury;
