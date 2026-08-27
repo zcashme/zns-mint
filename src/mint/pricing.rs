@@ -1,10 +1,15 @@
-//! Evaluation-time USD/ZEC claim pricing.
+//! Daily USD/ZEC claim pricing.
 //!
-//! The mint prices every claim against the USD/ZEC rate observed at the
-//! moment the claim is evaluated — never a past rate. This is a deliberate
-//! design constraint, not an implementation shortcut: no settlement decision
-//! consults history, so no historical rate is ever stored, fetched, or
-//! rebuilt. Crash recovery is rescan plus one fetch; nothing to reconcile.
+//! The mint publishes **one ZEC/USD rate per UTC day**. All claims filed
+//! during a given day are priced against that day's fixed rate — no
+//! intra-day fluctuation, no spot pricing, no surprises for users. The
+//! daily rate is a **time-weighted average price (TWAP)** of the per-block
+//! median-of-odd fetches accumulated throughout the *previous* day. So
+//! today's rate = yesterday's full-day average.
+//!
+//! On cold start the first successful fetch seeds a temporary spot rate so
+//! the mint can operate immediately; at the next UTC midnight the rate
+//! switches to a full-day TWAP and never looks back.
 //!
 //! # Rate aggregation
 //!
@@ -31,13 +36,14 @@
 //!
 //! # Trust model
 //!
-//! A corrupted median requires holding ≥5 of 9 venues (or Gemini plus four)
-//! during the fetch round. DNS or network interception cannot forge the
-//! webpki-validated certificates. There is no operator input channel into
-//! the rate: no env var, no config file, no RPC parameter. When a round
-//! fails or the last success is older than [`RATE_GRACE_BLOCKS`], pricing
-//! returns `None` and callers must pause claims — fail closed, never
-//! misprice.
+//! A corrupted daily TWAP requires sustained manipulation of the median
+//! across a large fraction of a full day's ~1152 fetch rounds — an attacker
+//! must control ≥5 of 9 venues (or Gemini plus four) for hours, not seconds.
+//! DNS or network interception cannot forge the webpki-validated
+//! certificates. There is no operator input channel into the rate: no env
+//! var, no config file, no RPC parameter. When no rate has ever been
+//! published, pricing returns `None` and callers must pause claims — fail
+//! closed, never misprice.
 //!
 //! Six sources quote ZEC/USDT rather than ZEC/USD; upstream pools them and
 //! so does this port. The USDT basis is bps-level noise under a median.
@@ -45,12 +51,13 @@
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use hyper::body::Incoming;
+use http_body_util::BodyExt;
 use hyper::client::conn::http1;
 use hyper::{Request, Uri};
 use hyper_util::rt::TokioIo;
 use rand::seq::IteratorRandom;
 use rand::rngs::OsRng;
+use time::Timestamp;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::{COIN, Zatoshis};
 
@@ -369,51 +376,147 @@ fn median_of_odd(trusted: Option<MicroUsd>, mut others: Vec<MicroUsd>) -> Option
 // Oracle
 // ===========================================================================
 
-/// How many blocks a successful rate may outlive its fetch. Roughly fifty
-/// minutes at Zcash's nominal 75-second cadence: a transient fetch failure
-/// (network blip, one bad round) does not pause claims, but a sustained
-/// outage fails pricing closed within the hour.
-pub const RATE_GRACE_BLOCKS: u32 = 40;
+/// Minimum samples required to publish a daily TWAP. With per-block sampling
+/// (~1152 blocks/day at Zcash's 75-second cadence), this threshold is met
+/// within minutes. It only matters if the mint was down for most of the day —
+/// in that case the previous day's rate is retained rather than publishing a
+/// rate from a handful of samples.
+const MIN_SAMPLES: u32 = 10;
 
-/// The mint's live USD/ZEC rate: one number, refreshed once per block, and
-/// the only pricing state in the system.
+/// Seconds per UTC day.
+const SECONDS_PER_DAY: i64 = 86_400;
+
+/// The mint's daily USD/ZEC rate oracle.
 ///
-/// There is no history here by design — `rate`/`fetched_at` are the whole
-/// state, `Default` is a cold oracle, and a reboot re-derives everything
-/// with one fetch. Claims must never be settled against a `None` rate.
+/// One price per UTC day, published at midnight, fixed for 24 hours. The
+/// rate is a **time-weighted average price (TWAP)** of the per-block
+/// median-of-odd fetches accumulated throughout the previous day. Today's
+/// claims are always priced against yesterday's full-day average — never a
+/// spot price, never an intra-day fluctuation.
+///
+/// On cold start the first successful fetch seeds a temporary spot rate so
+/// the mint can operate immediately. At the next UTC midnight the rate
+/// switches to a full-day TWAP and from then on every day is an average of
+/// the previous day.
+///
+/// If fewer than [`MIN_SAMPLES`] samples were collected during a day (a
+/// sustained outage), the previous day's rate is retained — fail safe, not
+/// fail random. If no rate has ever been published, `None` is returned and
+/// callers must pause claims — fail closed.
 #[derive(Default)]
 pub struct RateOracle {
-    /// The median-of-odd USD/ZEC rate from the last successful round.
-    rate: Option<MicroUsd>,
-    /// The chain tip the successful rate was fetched against.
-    fetched_at: Option<BlockHeight>,
+    /// The published daily rate — yesterday's TWAP. Valid for all of today.
+    daily_rate: Option<MicroUsd>,
+
+    /// TWAP accumulator: Σ(price × seconds) for the current day so far.
+    acc_sum: u128,
+    /// TWAP accumulator: Σ(seconds) for the current day so far.
+    acc_seconds: u64,
+    /// The price of the most recent sample, carried forward between samples
+    /// for time-weighting (the price is assumed constant between samples).
+    last_price: Option<MicroUsd>,
+    /// The Unix timestamp (seconds) of the most recent sample.
+    last_ts: i64,
+    /// The UTC day number (`floor(unix_seconds / 86400)`) of the current
+    /// accumulation.
+    current_day: i64,
+    /// Successful samples collected during the current day.
+    sample_count: u32,
 }
 
 impl RateOracle {
-    /// Runs one fetch round for `tip` and stores the result.
+    /// Runs one fetch round and accumulates the result into today's TWAP.
     ///
-    /// A failed round (fewer than three usable quotes) keeps the previous
-    /// rate; [`Self::rate`] enforces the grace window, so repeated failures
-    /// age the rate out and pricing fails closed.
-    pub async fn refresh(&mut self, tip: BlockHeight) {
+    /// Called once per block. A failed round (fewer than three usable quotes)
+    /// is skipped — the accumulator simply doesn't advance. If a UTC day
+    /// boundary has been crossed since the last sample, the previous day's
+    /// TWAP is finalized and published as the new daily rate.
+    pub async fn refresh(&mut self, _tip: BlockHeight) {
         let (trusted, others) = fetch_round().await;
-        match median_of_odd(trusted, others) {
-            Some(median) => {
-                self.rate = Some(median);
-                self.fetched_at = Some(tip);
-            }
+        let median = match median_of_odd(trusted, others) {
+            Some(m) => m,
             None => {
-                tracing::warn!("pricing round failed; retaining previous rate under grace");
+                tracing::warn!("pricing round failed; accumulator unchanged");
+                return;
             }
-        }
+        };
+        self.accumulate(median, Timestamp::now());
     }
 
-    /// The live rate, or `None` if no round has ever succeeded or the last
-    /// success is older than [`RATE_GRACE_BLOCKS`].
-    pub fn rate(&self, tip: BlockHeight) -> Option<MicroUsd> {
-        let fetched = self.fetched_at?;
-        let age = u32::from(tip).saturating_sub(u32::from(fetched));
-        (age <= RATE_GRACE_BLOCKS).then_some(self.rate)?
+    /// Incorporates one sample into the daily TWAP accumulator.
+    ///
+    /// Separated from [`refresh`](Self::refresh) so it can be tested without
+    /// network I/O. Handles UTC day-boundary rollover: when a new sample
+    /// arrives after midnight, the previous day's TWAP is finalized and
+    /// published as the daily rate (if enough samples were collected), and
+    /// the accumulator resets for the new day.
+    ///
+    /// # TWAP mechanics
+    ///
+    /// Between two consecutive samples the price is assumed constant at
+    /// the earlier sample's value (the standard Uniswap-style accumulator).
+    /// Each interval contributes `price_old × elapsed_seconds` to a running
+    /// sum; the day's TWAP is `sum / total_seconds`.
+    ///
+    /// At a day boundary the interval is split: the portion before midnight
+    /// closes the old day; the portion after midnight starts the new day
+    /// with the same carry-forward price.
+    fn accumulate(&mut self, price: MicroUsd, now: Timestamp) {
+        let now_secs = now.as_seconds();
+        let today = now_secs.div_euclid(SECONDS_PER_DAY);
+
+        // First ever sample: seed the accumulator and set a temporary spot
+        // rate so the mint can operate immediately on cold start.
+        if self.last_price.is_none() {
+            self.current_day = today;
+            self.last_price = Some(price);
+            self.last_ts = now_secs;
+            self.sample_count = 1;
+            if self.daily_rate.is_none() {
+                self.daily_rate = Some(price);
+            }
+            return;
+        }
+
+        let prev_price = self.last_price.unwrap();
+
+        if today > self.current_day {
+            // ── Day boundary: finalize yesterday, publish, reset ─────────
+            let midnight = today * SECONDS_PER_DAY;
+            let before_midnight = (midnight - self.last_ts) as u64;
+
+            // Close the old day with the carry-forward price active up to midnight.
+            self.acc_sum += u128::from(prev_price.as_u64()) * u128::from(before_midnight);
+            self.acc_seconds += before_midnight;
+
+            // Publish if we have enough data; otherwise keep the old rate.
+            if self.sample_count >= MIN_SAMPLES && self.acc_seconds > 0 {
+                let twap = self.acc_sum / u128::from(self.acc_seconds);
+                self.daily_rate = Some(MicroUsd(twap as u64));
+            }
+
+            // Start the new day: carry-forward price is active from midnight.
+            let after_midnight = (now_secs - midnight) as u64;
+            self.acc_sum = u128::from(prev_price.as_u64()) * u128::from(after_midnight);
+            self.acc_seconds = after_midnight;
+            self.current_day = today;
+            self.sample_count = 0;
+        } else {
+            // ── Same day: accumulate the interval ────────────────────────
+            let elapsed = (now_secs - self.last_ts) as u64;
+            self.acc_sum += u128::from(prev_price.as_u64()) * u128::from(elapsed);
+            self.acc_seconds += elapsed;
+        }
+
+        // The new sample takes over as the carry-forward price.
+        self.last_price = Some(price);
+        self.last_ts = now_secs;
+        self.sample_count += 1;
+    }
+
+    /// The published daily rate, or `None` if no rate has ever been published.
+    pub fn rate(&self) -> Option<MicroUsd> {
+        self.daily_rate
     }
 
     /// The claim price in zatoshis:
@@ -426,9 +529,9 @@ impl RateOracle {
     /// `ceil(usd_micros × COIN / rate_micros)` in `u128`, rounded up — the
     /// Treasury never undercharges on a division remainder. `None` means no
     /// usable rate: the caller must skip, not guess.
-    pub fn price_zat(&self, name: &Name, tip: BlockHeight) -> Option<Zatoshis> {
+    pub fn price_zat(&self, name: &Name) -> Option<Zatoshis> {
         let usd = schedule_usd(name.as_str().len());
-        let rate = self.rate(tip)?.as_u64().max(1);
+        let rate = self.rate()?.as_u64().max(1);
         let numer = u128::from(usd.as_u64()) * u128::from(COIN);
         let price = numer.div_ceil(u128::from(rate));
         u64::try_from(price)
@@ -496,51 +599,127 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rate_is_grace_bounded_and_fail_closed() {
-        let mut oracle = RateOracle::default;
-        oracle.rate = Some(MicroUsd(40_000_000));
-        oracle.fetched_at = Some(BlockHeight::from_u32(100));
+    /// Helper: create a `Timestamp` at the given Unix seconds.
+    fn ts(secs: i64) -> Timestamp {
+        Timestamp::from_seconds(secs).unwrap()
+    }
 
-        let at = |h: u32| BlockHeight::from_u32(h);
-        assert!(oracle.rate(at(100)).is_some());
-        assert!(oracle.rate(at(140)).is_some()); // exactly the grace bound
-        assert!(oracle.rate(at(141)).is_none()); // one block past: fail closed
-        // Cold oracle never prices.
-        assert!(RateOracle::default().rate(at(141)).is_none());
+    #[test]
+    fn cold_start_seeds_spot_rate() {
+        let mut oracle = RateOracle::default();
+        // No rate before first sample.
+        assert!(oracle.rate().is_none());
+
+        // First sample seeds a temporary spot rate.
+        oracle.accumulate(MicroUsd(40_000_000), ts(1_000_000));
+        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
+    }
+
+    #[test]
+    fn same_day_accumulation_does_not_publish() {
+        let mut oracle = RateOracle::default();
+        let day_start = 1_000_000; // arbitrary, well past epoch
+
+        // First sample.
+        oracle.accumulate(MicroUsd(40_000_000), ts(day_start));
+        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
+
+        // More samples same day: rate unchanged (still the cold-start spot).
+        oracle.accumulate(MicroUsd(50_000_000), ts(day_start + 60));
+        oracle.accumulate(MicroUsd(45_000_000), ts(day_start + 120));
+        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
+    }
+
+    #[test]
+    fn day_boundary_publishes_twap() {
+        let mut oracle = RateOracle::default();
+        // Pick a timestamp at 00:00:30 UTC on some day.
+        let day_0 = 1_725_148_830; // 2024-09-01 00:00:30 UTC
+        let day_0_midnight = 1_725_148_800;
+        let day_1_midnight = day_0_midnight + SECONDS_PER_DAY;
+
+        // Seed with first sample.
+        oracle.accumulate(MicroUsd(40_000_000), ts(day_0));
+        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
+
+        // Accumulate 14 more samples (total 15 ≥ MIN_SAMPLES) at $50.
+        for i in 1..=14 {
+            oracle.accumulate(
+                MicroUsd(50_000_000),
+                ts(day_0 + i * 60),
+            );
+        }
+        // Rate still the cold-start spot.
+        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
+
+        // Cross midnight: the TWAP of day 0 should be published.
+        // The accumulator covers day_0 to day_0+14*60 = day_0+840s.
+        // Intervals: 30s@40, 60s@40, 60s@50, 60s@50, ... 60s@50 (13 times)
+        // Before midnight: from day_0+840 to midnight = (86400-840-30) = 85530s @ $50
+        // Total sum = 30*40M + 60*40M + 13*60*50M + 85530*50M (all in micros)
+        // = 1.2B + 2.4B + 39B + 4276.5B = 4319.1B
+        // Total seconds = 30 + 60 + 13*60 + 85530 = 86400
+        // TWAP = 4319.1B / 86400 ≈ 49989.58 micros ≈ $49.99
+        // But with integer division: let's just check it's between 40 and 50,
+        // closer to 50 since most of the day was at $50.
+        oracle.accumulate(MicroUsd(45_000_000), ts(day_1_midnight + 30));
+        let published = oracle.rate().unwrap();
+        assert!(
+            published.as_u64() > MicroUsd(49_000_000).as_u64(),
+            "TWAP should be ~$50, got {}",
+            published.as_u64()
+        );
+        assert!(
+            published.as_u64() < MicroUsd(50_000_000).as_u64(),
+            "TWAP should be < $50, got {}",
+            published.as_u64()
+        );
+    }
+
+    #[test]
+    fn day_boundary_with_few_samples_keeps_old_rate() {
+        let mut oracle = RateOracle::default();
+        let day_0 = 1_725_148_830;
+        let day_1_midnight = 1_725_148_800 + SECONDS_PER_DAY;
+
+        // Seed and add just 2 samples (below MIN_SAMPLES).
+        oracle.accumulate(MicroUsd(40_000_000), ts(day_0));
+        oracle.accumulate(MicroUsd(60_000_000), ts(day_0 + 60));
+        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
+
+        // Cross midnight: not enough samples, keep old rate.
+        oracle.accumulate(MicroUsd(45_000_000), ts(day_1_midnight + 30));
+        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
     }
 
     #[test]
     fn price_converts_usd_to_zatoshis_with_ceil() {
         let mut oracle = RateOracle::default();
-        oracle.rate = Some(MicroUsd(40_000_000)); // $40/ZEC
-        oracle.fetched_at = Some(BlockHeight::from_u32(1));
-        let tip = BlockHeight::from_u32(2);
+        oracle.daily_rate = Some(MicroUsd(40_000_000)); // $40/ZEC
 
         // $100 at $40 = exactly 2.5 ZEC — no rounding.
         let seven = Name::parse("abcdefg").unwrap();
         assert_eq!(
-            oracle.price_zat(&seven, tip),
+            oracle.price_zat(&seven),
             Some(Zatoshis::const_from_u64(250_000_000))
         );
 
         // $1000 at $40 = 25 ZEC exactly.
         let six = Name::parse("abcdef").unwrap();
         assert_eq!(
-            oracle.price_zat(&six, tip),
+            oracle.price_zat(&six),
             Some(Zatoshis::const_from_u64(2_500_000_000))
         );
 
         // Non-divisible: $100 at $30 = 333.333… ZEC rounds up.
-        oracle.rate = Some(MicroUsd(30_000_000));
+        oracle.daily_rate = Some(MicroUsd(30_000_000));
         assert_eq!(
-            oracle.price_zat(&seven, tip),
+            oracle.price_zat(&seven),
             Some(Zatoshis::const_from_u64(333_333_334))
         );
 
-        // Stale rate prices nothing.
-        oracle.fetched_at = Some(BlockHeight::from_u32(1));
-        let far = BlockHeight::from_u32(1 + RATE_GRACE_BLOCKS + 1);
-        assert_eq!(oracle.price_zat(&seven, far), None);
+        // No rate: fail closed.
+        let cold = RateOracle::default();
+        assert_eq!(cold.price_zat(&seven), None);
     }
 }
