@@ -17,7 +17,7 @@
 //!    concern ([`crate::mint::otp`]): an ordinary upstream-built Treasury
 //!    payment to the current controller. Treasury never decides a name's
 //!    lifecycle — that is the Registry's.
-//! 4. **Deposit to the vault** (`vault`) — when the spendable balance exceeds
+//! 4. **Deposit to the vault** — when the spendable balance exceeds
 //!    the threshold, send the excess to the project vault's transparent
 //!    address, retaining a fixed reserve.
 //! 5. **Pay Name Note fees** — the Treasury funds the ZIP-317 fee for every
@@ -27,8 +27,6 @@ use zcash_keys::address::UnifiedAddress;
 use zcash_protocol::consensus::Parameters;
 
 use crate::mint::{Action, Name};
-
-pub mod vault;
 
 /// Parses a 512-byte memo sent to the Treasury as a ZNS transition request.
 ///

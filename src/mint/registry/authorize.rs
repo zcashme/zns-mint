@@ -1,7 +1,8 @@
 //! Transition authorization: validates requests against the name-chain state
-//! and produces typed [`NameNoteRequest`]s for the transaction-assembly path.
-//! The OTP challenges those requests authorize with live in
-//! [`crate::mint::otp`].
+//! and produces typed [`NameNoteRequest`]s. The transaction-assembly path
+//! (building the Ironwood bundle, funding the fee, signing) is the caller's
+//! job, not the Registry's. The OTP challenges those requests authorize
+//! with live in [`crate::mint::otp`].
 
 use crate::mint::otp::OtpQueue;
 use crate::mint::registry::{Record, Registry};
@@ -369,132 +370,5 @@ mod tests {
             result.is_none(),
             "relay memo must not parse as a request memo"
         );
-    }
-}
-
-/// Validates a claim request and assembles the transaction.
-/// Returns `None` if the request is invalid, the name is already locked,
-/// or the name is not available.
-///
-/// Name availability is checked against the registry — a failed claim on a live name must not block a future claim after
-/// that name is released.
-#[allow(clippy::too_many_arguments)]
-pub fn process_claim<P: Parameters>(
-    network: &P,
-    name: Name,
-    ua: UnifiedAddress,
-    value: Zatoshis,
-    confirmed_height: BlockHeight,
-    cursor_height: BlockHeight,
-    target_height: BlockHeight,
-    wallet: &mut crate::wallet::Wallet,
-    registry: &Registry,
-    registry_keys: &crate::key::RegistryKeys,
-) -> Option<crate::mint::RequestOutcome> {
-    use crate::mint::{RequestOutcome, SubmissionKind};
-
-    if ua.orchard().is_none() {
-        return None;
-    }
-
-    // Check availability — a claim on a live name is rejected here,
-    // but a future claim after release is still possible.
-    let available = match registry.record(&name) {
-        None => true,
-        Some(r) => r.action == Action::Release,
-    };
-    if !available {
-        return None;
-    }
-    if value < CLAIM_PRICE {
-        return None;
-    }
-    if registry
-        .record(&name)
-        .is_some_and(|record| confirmed_height <= record.confirmed_height)
-    {
-        return None;
-    }
-
-    let request = NameNoteRequest::Claim(ClaimRequest {
-        name: name.clone(),
-        ua: ua.clone(),
-        expires_at: Expiry::Never,
-    });
-    let result = crate::mint::registry::issue::execute_transition(
-        network,
-        wallet,
-        registry,
-        registry_keys,
-        request,
-        &std::collections::BTreeSet::new(),
-        cursor_height,
-        target_height,
-    )
-    .map(|(txid, hex, notes)| (SubmissionKind::Claim, txid, hex, notes));
-
-    Some(RequestOutcome {
-        result,
-        relay_otp: None,
-    })
-}
-
-/// Validates a transition request (update or release with OTP), reserves the name,
-/// authorizes the transition, and assembles the transaction.
-/// Returns `None` if the request is invalid, the name is locked, or authorization fails.
-///
-/// The predecessor commitment is not taken from the caller: the authorization
-/// binds to the Registry's live tip at execution time (`prev_commitment` is
-/// read from the current record), and the Name Note spend itself anchors the
-/// transition to that tip.
-#[allow(clippy::too_many_arguments)]
-pub fn process_transition<P: Parameters>(
-    network: &P,
-    name: Name,
-    action: Action,
-    ua: UnifiedAddress,
-    otp: &[u8; 6],
-    mtp: Timestamp,
-    anchor_height: zcash_protocol::consensus::BlockHeight,
-    target_height: zcash_protocol::consensus::BlockHeight,
-    otp_queue: &mut crate::mint::otp::OtpQueue,
-    wallet: &mut crate::wallet::Wallet,
-    registry: &Registry,
-    registry_keys: &crate::key::RegistryKeys,
-) -> Option<crate::mint::RequestOutcome> {
-    use crate::mint::{RequestOutcome, SubmissionKind};
-
-    let req = match action {
-        Action::Update => authorize_update(registry, otp_queue, mtp, name, ua, otp),
-        Action::Release => authorize_release(registry, otp_queue, mtp, name, ua, otp),
-        Action::Claim => unreachable!(),
-    };
-
-    match req {
-        None => None,
-        Some(r) => {
-            let result = crate::mint::registry::issue::execute_transition(
-                network,
-                wallet,
-                registry,
-                registry_keys,
-                r,
-                &std::collections::BTreeSet::new(),
-                anchor_height,
-                target_height,
-            )
-            .map(|(txid, hex, notes)| {
-                let kind = match action {
-                    Action::Update => SubmissionKind::Update,
-                    Action::Release => SubmissionKind::Release,
-                    _ => unreachable!(),
-                };
-                (kind, txid, hex, notes)
-            });
-            Some(RequestOutcome {
-                result,
-                relay_otp: None,
-            })
-        }
     }
 }

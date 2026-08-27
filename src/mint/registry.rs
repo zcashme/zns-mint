@@ -4,21 +4,17 @@
 //! Submodules:
 //! - [`authorize`] — `NameNoteRequest`, `authorize_claim`/`update`/`release`,
 //!   OTP challenge state (`ChallengeKey`, `PendingOtps`), relay memo encoding
-//! - [`issue`] — Name Note construction: builds the Ironwood bundle with
-//!   ZNS-specific commitment inputs
 //!
 //! V6 assembly/proving/signing lives in [`crate::mint::signer`]; transparent
 //! outputs ([`crate::mint::signer::TransparentOutput`]) moved with it.
 
 pub mod authorize;
-pub mod issue;
 
 // The module's primary public API — the authorization functions and the
 // request types they produce.
 pub use authorize::{
     authorize_claim, authorize_release, authorize_update, current_record, NameNoteRequest,
 };
-pub use issue::{build_transaction, select_registry_fee_inputs, RegistryFeeInputs};
 
 use crate::mint::{
     Action, Expiry, Name, NameCommitment, NameNote, UnifiedAddress, REGISTRY_ACCOUNT,
