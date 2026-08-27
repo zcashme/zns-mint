@@ -1,5 +1,26 @@
 # Treasury design record
 
+## OTP relay construction moves to upstream wallet assembly (mint-level)
+
+- The `relay` module is deleted. OTPs are a mint concern, not a Treasury
+  one: issuance lives in `mint::otp::issue_relay`, which builds the
+  challenge as an ordinary upstream Treasury payment (`propose_transfer` +
+  `create_proposed_transactions`) to the current controller's Unified
+  Address with the relay memo and one fee unit of compensation. After
+  NU6.3, upstream routes the controller UA's Orchard receiver to the
+  Ironwood pool; the spend policy, change strategy, and the
+  Sapling-disabled prover keep the transaction Ironwood-only.
+- The forced request-note spend and `required_relay_value` exact-value
+  rule are gone: they were implementation policy, not protocol. A user may
+  purchase as many challenges as they like; the queue burns the echoed one
+  and prunes the rest at expiry. Upstream's sent-transaction recording
+  marks the selected notes unavailable before broadcast, closing the
+  manual path's window where built-but-unstored transactions left inputs
+  re-selectable.
+- `key.rs` gains the sanctioned `usk_clone()` for upstream's owned
+  `SpendingKeys`; signing safety that the type boundary no longer provides
+  is carried by policy constraints plus the disabled Sapling prover.
+
 ## 2026-09-02 — Treasury is a keyless policy layer over the wallet
 
 - The `Treasury` view struct and its two methods (`unspent_notes`,

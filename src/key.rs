@@ -106,6 +106,23 @@ impl<A: MintAccount> AccountKeys<A> {
     pub(crate) fn orchard_ask(&self) -> orchard::keys::SpendAuthorizingKey {
         self.spending.orchard().into()
     }
+
+    /// The account's full unified spending key, owned.
+    ///
+    /// Upstream's generic payment path
+    /// ([`data_api::wallet::create_proposed_transactions`][upstream])
+    /// takes an owned [`UnifiedSpendingKey`] inside `SpendingKeys`. This is
+    /// the one sanctioned clone of a capability: the caller hands the clone
+    /// straight to upstream and drops it with the call. The mint's own
+    /// assembly paths continue to use the Orchard-family accessors above;
+    /// the upstream path is additionally constrained by a Sapling-disabled
+    /// prover and an Ironwood-only spend policy, so no other pool can be
+    /// signed for even though the key is whole.
+    ///
+    /// [upstream]: zcash_client_backend::data_api::wallet::create_proposed_transactions
+    pub(crate) fn usk_clone(&self) -> UnifiedSpendingKey {
+        self.spending.clone()
+    }
 }
 
 #[cfg(test)]

@@ -3,11 +3,20 @@
 //! The OTP queue is a single-use TTL cache: each entry binds a 6-digit
 //! passcode to a specific (name, action, target UA) and expires after
 //! 30 minutes of chain MTP. Entries are pushed when a relay transaction
-//! is accepted and burned on first successful verification — one-shot,
-//! never reusable.
+//! is accepted for broadcast and burned on first successful verification
+//! — one-shot, never reusable. Expired entries are pruned on each
+//! verification scan.
 //!
 //! Also home to the OTP relay memo codec
-//! (`ZNS:otp:<otp>:<name>:<verb>:<ua>`).
+//! (`ZNS:otp:<otp>:<name>:<verb>:<ua>`) and relay issuance
+//! ([`issue_relay`]): an ordinary Treasury payment to the current
+//! controller, built by upstream wallet assembly (input selection, fee
+//! computation, anchors and witnesses, proving, signing, and
+//! sent-transaction recording). After NU6.3, upstream routes the
+//! controller UA's Orchard receiver to the Ironwood pool, so the
+//! delivered note is an Ironwood note. The relay never spends the request
+//! note — intake dedup is not a protocol concern: a user may purchase as
+//! many challenges as they like; only the echoed one is burned.
 
 use std::fmt;
 
@@ -131,6 +140,7 @@ impl OtpQueue {
     /// timestamp and a code that equals `provided` under constant-time
     /// comparison. Removes and returns `true` on first match — the OTP
     /// is burned. Failed verification leaves the entry intact.
+    /// Expired entries are pruned on every scan.
     pub fn verify_and_burn(
         &mut self,
         name: &Name,
@@ -139,6 +149,8 @@ impl OtpQueue {
         provided: &[u8; 6],
         mtp: Timestamp,
     ) -> bool {
+        // Expire first: entries past their TTL never match and are dropped.
+        self.0.retain(|req| mtp < req.expires_at);
         let Some(provided_code) = OtpCode::from_digits(provided) else {
             return false;
         };
@@ -263,6 +275,201 @@ pub fn decode_otp_relay_memo(memo: &[u8; 512]) -> Option<(Name, Action, String, 
     Some((name, action, ua, otp))
 }
 
+// ---------------------------------------------------------------------------
+// OTP relay issuance
+// ---------------------------------------------------------------------------
+
+/// Builds, proves, signs, and records the OTP relay payment, returning its
+/// txid and serialized hex for broadcast.
+///
+/// The relay is an ordinary outgoing Treasury payment to the controller's
+/// Unified Address, carrying the OTP relay memo and one fee unit of
+/// compensation. Upstream proposal and transaction construction own input
+/// selection, fee computation, anchors and witnesses, proving, signing, and
+/// sent-transaction recording — the stored transaction is what makes the
+/// selected Treasury notes unavailable to later work before broadcast.
+///
+/// The spend policy and change strategy are Ironwood-only, so the constructed
+/// transaction cannot carry Sapling material even though it is built by generic
+/// upstream code and passed a real Sapling prover (which is never invoked).
+fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
+    network: &P,
+    wallet: &mut crate::wallet::Wallet,
+    treasury_keys: &crate::key::TreasuryKeys,
+    controller_ua: &UnifiedAddress,
+    target_height: zcash_protocol::consensus::BlockHeight,
+    memo: [u8; 512],
+) -> Result<(zcash_primitives::transaction::TxId, String), crate::mint::AssemblyError> {
+    use zcash_client_backend::data_api::wallet::input_selection::{
+        GreedyInputSelector, SpendPolicy,
+    };
+    use zcash_client_backend::data_api::wallet::{
+        create_proposed_transactions, propose_transfer, ConfirmationsPolicy, SpendingKeys,
+    };
+    use zcash_client_backend::data_api::WalletRead as _;
+    use zcash_client_backend::fees::{
+        standard::SingleOutputChangeStrategy, DustOutputPolicy, StandardFeeRule,
+    };
+    use zcash_client_backend::wallet::OvkPolicy;
+    use zcash_protocol::ShieldedPool;
+
+    // The controller's compensation funds the echo: the ZIP-317 fee of its
+    // bundle shape (one Ironwood spend plus one output, padded to two
+    // actions).
+    let amount = {
+        use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
+        FeeRule::standard()
+            .fee_required(
+                network,
+                target_height,
+                std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
+                std::iter::empty::<usize>(),
+                0,
+                0,
+                0,
+                2,
+            )
+            .map_err(|e| crate::mint::AssemblyError::UpstreamTransfer(format!("{e:?}")))?
+    };
+
+    let recipient =
+        zcash_keys::address::Address::Unified(controller_ua.clone()).to_zcash_address(network);
+    let payment = zip321::Payment::new(
+        recipient,
+        Some(amount),
+        Some(
+            zcash_protocol::memo::MemoBytes::from_bytes(&memo[..])
+                .expect("a zero-padded 512-byte memo is always a valid MemoBytes"),
+        ),
+        None,
+        None,
+        Vec::new(),
+    )
+    .map_err(|e| crate::mint::AssemblyError::UpstreamTransfer(format!("{e:?}")))?;
+    let request = zip321::TransactionRequest::new(vec![payment])
+        .map_err(|e| crate::mint::AssemblyError::UpstreamTransfer(format!("{e:?}")))?;
+
+    let input_selector = GreedyInputSelector::new();
+    let change_strategy = SingleOutputChangeStrategy::<crate::wallet::Wallet>::new(
+        StandardFeeRule::Zip317,
+        None,
+        ShieldedPool::Ironwood,
+        DustOutputPolicy::default(),
+    );
+    let proposal = propose_transfer(
+        wallet,
+        network,
+        crate::mint::TREASURY_ACCOUNT,
+        &input_selector,
+        &change_strategy,
+        request,
+        ConfirmationsPolicy::new_symmetrical(std::num::NonZeroU32::MIN, false),
+        &SpendPolicy::shielded_pools([ShieldedPool::Ironwood]),
+        None,
+        None, // transaction version implied by the target height: V6 / Ironwood
+    )
+    .map_err(
+        // The commitment-tree error type is free in `propose_transfer`'s
+        // signature; the wallet's tree error is `Infallible`.
+        |e: zcash_client_backend::data_api::wallet::ProposeTransferErrT<
+            crate::wallet::Wallet,
+            std::convert::Infallible,
+            GreedyInputSelector<crate::wallet::Wallet>,
+            SingleOutputChangeStrategy<crate::wallet::Wallet>,
+        >| crate::mint::AssemblyError::UpstreamTransfer(format!("{e:?}")),
+    )?;
+
+    // Only the Treasury signs; the relay carries no Registry authority.
+    // The Sapling prover is never invoked: the Ironwood-only spend policy
+    // means `sapling_builder` is `None` in the upstream `Builder::build`.
+    let (spend_prover, output_prover) = crate::mint::signer::sapling_provers();
+    let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
+    let txids = create_proposed_transactions(
+        wallet,
+        network,
+        spend_prover,
+        output_prover,
+        &spending_keys,
+        OvkPolicy::Sender,
+        &proposal,
+        None,
+    )
+    .map_err(
+        // `InputsErrT` and `ChangeErrT` are free in the signature; project
+        // them from the concrete selector and change strategy.
+        |e: zcash_client_backend::data_api::wallet::CreateErrT<
+            crate::wallet::Wallet,
+            <GreedyInputSelector<crate::wallet::Wallet> as zcash_client_backend::data_api::wallet::input_selection::InputSelector>::Error,
+            StandardFeeRule,
+            <SingleOutputChangeStrategy<crate::wallet::Wallet> as zcash_client_backend::fees::ChangeStrategy>::Error,
+            zcash_client_backend::wallet::NoteId,
+        >| crate::mint::AssemblyError::UpstreamTransfer(format!("{e:?}")),
+    )?;
+
+    let txid = *txids.first();
+    let tx = wallet
+        .get_transaction(txid)
+        .ok()
+        .flatten()
+        .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
+    let hex = crate::mint::signer::serialize_tx(&tx)?;
+    Ok((txid, hex))
+}
+
+/// Validates an OTP relay request (update or release without OTP) and issues
+/// the challenge. Returns `None` if the request is invalid — a claim (claims
+/// never relay), or a controller UA with no Orchard-family receiver to
+/// deliver Ironwood value to.
+///
+/// The relay spends whatever confirmed Treasury Ironwood notes upstream
+/// selects; the request note itself is not consumed. That is deliberate:
+/// each accepted relay is a fresh, independently valid challenge, and any
+/// re-delivery simply costs the Treasury float until housekeeping consumes
+/// the request note — only the echoed challenge is burned from the queue.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
+    network: &P,
+    name: &Name,
+    action: Action,
+    requested_ua: &UnifiedAddress,
+    controller_ua: &UnifiedAddress,
+    target_height: zcash_protocol::consensus::BlockHeight,
+    mtp: Timestamp,
+    wallet: &mut crate::wallet::Wallet,
+    treasury_keys: &crate::key::TreasuryKeys,
+) -> Option<crate::mint::RequestOutcome> {
+    use crate::mint::{RequestOutcome, SubmissionKind};
+    use time::Duration;
+
+    if action == Action::Claim || controller_ua.orchard().is_none() {
+        return None;
+    }
+
+    let otp = OtpCode::generate();
+    let memo = encode_otp_relay_memo(network, name, action, requested_ua, &otp)?;
+
+    let result = build_relay_payment(
+        network,
+        wallet,
+        treasury_keys,
+        controller_ua,
+        target_height,
+        memo,
+    )
+    .map(|(txid, hex)| (SubmissionKind::OtpRelay, txid, hex, Vec::new()));
+
+    Some(RequestOutcome {
+        result,
+        relay_otp: Some(OtpRequest {
+            name: name.clone(),
+            action,
+            ua: requested_ua.clone(),
+            code: otp,
+            expires_at: mtp + Duration::seconds(D_OTP),
+        }),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,11 +477,13 @@ mod tests {
     use zcash_protocol::consensus::MAIN_NETWORK;
 
     fn test_ua() -> UnifiedAddress {
-        crate::mint::NameNote::parse_ua(
+        match zcash_keys::address::Address::decode(
             &MAIN_NETWORK,
             "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf",
-        )
-        .expect("vector UA")
+        ) {
+            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            _ => panic!("vector is a mainnet Unified Address"),
+        }
     }
 
     fn test_name() -> Name {
@@ -332,7 +541,7 @@ mod tests {
 
         let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp)
             .expect("memo fits");
-        let result = crate::mint::treasury::memo::parse_request(&MAIN_NETWORK, &memo);
+        let result = crate::mint::treasury::parse_request(&MAIN_NETWORK, &memo);
         assert!(
             result.is_none(),
             "relay memo must not parse as a request memo"
@@ -430,7 +639,7 @@ mod tests {
             expires_at: expires,
         });
 
-        // Expired — entry stays (just not consumed)
+        // Expired — never matches, and the entry is pruned by the scan.
         assert!(!queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
     }
 

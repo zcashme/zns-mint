@@ -8,6 +8,7 @@ use crate::mint::registry::{Record, Registry};
 use crate::mint::{Action, Expiry, Name, NameCommitment, UnifiedAddress, CLAIM_PRICE};
 use time::Timestamp;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::value::Zatoshis;
 
 // ---------------------------------------------------------------------------
 // Transition requests
@@ -192,7 +193,10 @@ mod tests {
     }
 
     fn mock_ua() -> UnifiedAddress {
-        crate::mint::NameNote::parse_ua(&MAIN_NETWORK, TEST_UA).expect("vector UA")
+        match zcash_keys::address::Address::decode(&MAIN_NETWORK, TEST_UA) {
+            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            _ => panic!("vector is a mainnet Unified Address"),
+        }
     }
 
     const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
@@ -360,7 +364,7 @@ mod tests {
         let otp = OtpCode::for_test(*b"123456");
 
         let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp).unwrap();
-        let result = crate::mint::treasury::memo::parse_request(&MAIN_NETWORK, &memo);
+        let result = crate::mint::treasury::parse_request(&MAIN_NETWORK, &memo);
         assert!(
             result.is_none(),
             "relay memo must not parse as a request memo"
@@ -379,7 +383,7 @@ pub fn process_claim<P: Parameters>(
     network: &P,
     name: Name,
     ua: UnifiedAddress,
-    value: u64,
+    value: Zatoshis,
     confirmed_height: BlockHeight,
     cursor_height: BlockHeight,
     target_height: BlockHeight,
@@ -438,6 +442,11 @@ pub fn process_claim<P: Parameters>(
 /// Validates a transition request (update or release with OTP), reserves the name,
 /// authorizes the transition, and assembles the transaction.
 /// Returns `None` if the request is invalid, the name is locked, or authorization fails.
+///
+/// The predecessor commitment is not taken from the caller: the authorization
+/// binds to the Registry's live tip at execution time (`prev_commitment` is
+/// read from the current record), and the Name Note spend itself anchors the
+/// transition to that tip.
 #[allow(clippy::too_many_arguments)]
 pub fn process_transition<P: Parameters>(
     network: &P,
@@ -445,7 +454,6 @@ pub fn process_transition<P: Parameters>(
     action: Action,
     ua: UnifiedAddress,
     otp: &[u8; 6],
-    _record_commitment: NameCommitment,
     mtp: Timestamp,
     anchor_height: zcash_protocol::consensus::BlockHeight,
     target_height: zcash_protocol::consensus::BlockHeight,

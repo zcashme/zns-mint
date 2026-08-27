@@ -13,7 +13,7 @@ pub use zcash_client_backend::data_api::BlockMetadata as ChainTip;
 // The Name Note type and its codec.
 pub use note::{
     decode_name_note, decode_name_note_tuple, decrypt_name_notes, note_commitment_cmx,
-    parse_timestamp_canonical, zns_psi_rcm_raw, DecryptedNameNote, Expiry, NameNote, TermSeconds,
+    parse_timestamp_canonical, zns_psi_rcm_raw, DecryptedNameNote, Expiry, NameNote,
 };
 pub use time::Timestamp;
 
@@ -109,15 +109,15 @@ impl Name {
 // Protocol constants and settlement types
 // ===========================================================================
 
+use zcash_client_backend::wallet::NoteId;
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::value::COIN;
-use crate::wallet::NoteLocator;
+use zcash_protocol::value::{Zatoshis, COIN};
 
 /// Claim price and request minimum in zatoshis.
 ///
 /// One ZEC is 100,000,000 zatoshis. Claim payments may exceed this amount;
 /// atomic claim settlement returns any excess to the payer.
-pub const CLAIM_PRICE: u64 = COIN;
+pub const CLAIM_PRICE: Zatoshis = Zatoshis::const_from_u64(COIN);
 
 /// What kind of transaction was broadcast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,10 +145,9 @@ impl SubmissionKind {
 
 /// The result of processing a single Treasury note request.
 pub struct RequestOutcome {
-    pub result: Result<(SubmissionKind, TxId, String, Vec<NoteLocator>), AssemblyError>,
+    pub result: Result<(SubmissionKind, TxId, String, Vec<NoteId>), AssemblyError>,
     pub relay_otp: Option<crate::mint::otp::OtpRequest>,
 }
-
 
 // ===========================================================================
 // Assembly error type
@@ -173,8 +172,6 @@ pub enum AssemblyError {
     InsufficientFunds,
     #[error("note value insufficient for the required fee")]
     InsufficientValue,
-    #[error("OTP relay request value must equal exactly twice the ZIP-317 fee")]
-    IncorrectRelayValue,
     #[error("builder add operation failed")]
     BuilderAdd,
     #[error("bundle build produced no bundle")]
@@ -191,10 +188,10 @@ pub enum AssemblyError {
     NameUnavailable,
     #[error("request predecessor commitment does not match Registry tip")]
     PredecessorMismatch,
-    #[error("controller UA has no Orchard receiver")]
-    NoOrchardReceiver,
     #[error("UFVK not found in wallet")]
     UfvkNotFound,
     #[error("sighash mismatch: effecting data changed after authorization")]
     SighashMismatch,
+    #[error("upstream wallet transfer failed: {0}")]
+    UpstreamTransfer(String),
 }
