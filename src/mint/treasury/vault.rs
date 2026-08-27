@@ -40,17 +40,17 @@ use zcash_protocol::value::{ZatBalance, Zatoshis};
 use zcash_protocol::{PoolType, ShieldedPool};
 
 use crate::key::TreasuryKeys;
-use crate::mint::{AssemblyError, TREASURY_ACCOUNT};
 use crate::mint::signer::TransparentOutput;
+use crate::mint::{AssemblyError, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
 /// Minimum spendable Treasury balance (zatoshis) to trigger a deposit.
 /// 200,000,000 zatoshis = 2 ZEC.
-const SWEEP_THRESHOLD: u64 = 200_000_000;
+const SWEEP_THRESHOLD: Zatoshis = Zatoshis::const_from_u64(200_000_000);
 
 /// Amount retained as Treasury change after a sweep (zatoshis).
 /// 1,000,000 zatoshis = 0.01 ZEC.
-const SWEEP_RESERVE: u64 = 1_000_000;
+const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 
 /// The project vault's P2PKH address.
 ///
@@ -80,10 +80,7 @@ pub fn sweep_to_vault<P: Parameters>(
     //    (Wallet failures map to placeholder variants until `AssemblyError`
     //    grows a `Wallet` variant in the mint slice.)
     let Some(summary) = wallet
-        .get_wallet_summary(ConfirmationsPolicy::new_symmetrical(
-            NonZeroU32::MIN,
-            false,
-        ))
+        .get_wallet_summary(ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false))
         .ok()
         .flatten()
     else {
@@ -92,8 +89,8 @@ pub fn sweep_to_vault<P: Parameters>(
     let treasury_balance = summary
         .account_balances()
         .get(&TREASURY_ACCOUNT)
-        .map(|balance| balance.ironwood_balance().spendable_value().into_u64())
-        .unwrap_or(0);
+        .map(|balance| balance.ironwood_balance().spendable_value())
+        .unwrap_or(Zatoshis::ZERO);
     if treasury_balance <= SWEEP_THRESHOLD {
         return Ok(None);
     }
@@ -121,10 +118,17 @@ pub fn sweep_to_vault<P: Parameters>(
             LockFilter::Policy(&LockedInputPolicy::default()),
         )
         .map_err(|_| AssemblyError::NoteNotFound)?;
+    let total_selected = selected
+        .ironwood_value()
+        .expect("Treasury selection is within the Zcash monetary range");
     let funding_notes: Vec<(orchard::note::Note, incrementalmerkletree::Position)> = selected
         .ironwood()
         .iter()
-        .filter(|note| note.note().value().inner() > 0)
+        .filter(|note| {
+            note.note_value()
+                .map(|v| v > Zatoshis::ZERO)
+                .unwrap_or(false)
+        })
         .map(|note| (note.note().clone(), note.note_commitment_tree_position()))
         .collect();
     if funding_notes.is_empty() {
@@ -133,7 +137,6 @@ pub fn sweep_to_vault<P: Parameters>(
 
     // 4. The exact deposit is derived from the selected notes: reserve and
     //    fee are retained, the remainder goes to the vault.
-    let total_selected: u64 = funding_notes.iter().map(|(note, _)| note.value().inner()).sum();
     let ironwood_actions = BundleType::DEFAULT
         .num_actions(
             orchard::bundle::BundleVersion::ironwood_v3().default_flags(),
@@ -152,13 +155,11 @@ pub fn sweep_to_vault<P: Parameters>(
             0,
             ironwood_actions,
         )
-        .expect("ZIP-317 fee for realistic action count is representable")
-        .into_u64();
-    let sweep_amount = total_selected
-        .checked_sub(SWEEP_RESERVE)
-        .and_then(|value| value.checked_sub(fee))
+        .expect("ZIP-317 fee for realistic action count is representable");
+    let sweep_amount = (total_selected - SWEEP_RESERVE)
+        .and_then(|value| value - fee)
         .ok_or(AssemblyError::InsufficientFunds)?;
-    if sweep_amount == 0 {
+    if sweep_amount == Zatoshis::ZERO {
         return Err(AssemblyError::InsufficientFunds);
     }
 
@@ -211,7 +212,7 @@ pub fn sweep_to_vault<P: Parameters>(
             treasury_fvk.clone(),
             Some(treasury_fvk.to_ovk(orchard::keys::Scope::Internal)),
             change_address,
-            orchard::value::NoteValue::from_raw(SWEEP_RESERVE),
+            orchard::value::NoteValue::from_raw(SWEEP_RESERVE.into()),
             change_memo,
         )
         .map_err(|_| AssemblyError::BuilderAdd)?;
@@ -230,8 +231,7 @@ pub fn sweep_to_vault<P: Parameters>(
     //    the signing slice.
     let transparent_outputs = [TransparentOutput {
         address: VAULT_ADDRESS,
-        value: Zatoshis::from_u64(sweep_amount)
-            .expect("sweep_amount is at most the total Treasury balance"),
+        value: sweep_amount,
     }];
     let tx = crate::mint::signer::assemble_v6_transaction(
         network,
@@ -254,8 +254,7 @@ pub fn sweep_to_vault<P: Parameters>(
                 .to_zcash_address(network),
             output_pool: PoolType::TRANSPARENT,
         },
-        Zatoshis::from_u64(sweep_amount)
-            .expect("sweep_amount is at most the total Treasury balance"),
+        sweep_amount,
         None,
     )];
     let sent = SentTransaction::new(
@@ -264,12 +263,124 @@ pub fn sweep_to_vault<P: Parameters>(
         target,
         TREASURY_ACCOUNT,
         &sent_outputs,
-        Zatoshis::from_u64(fee).expect("ZIP-317 fee is representable"),
+        fee,
         &[],
     );
     wallet
         .store_transactions_to_be_sent(&[sent])
         .map_err(|_| AssemblyError::NoteNotFound)?;
 
+    Ok(Some(txid))
+}
+
+// ---------------------------------------------------------------------------
+// Sapling → transparent vault sweep
+// ---------------------------------------------------------------------------
+
+/// Sweeps all spendable Treasury **Sapling** notes to the project vault,
+/// returning the transaction's txid.
+///
+/// Unlike [`sweep_to_vault`] (Ironwood), which retains a reserve, this path
+/// clears the Sapling pool entirely: every spendable Sapling note is spent and
+/// the remainder minus fee goes to [`VAULT_ADDRESS`] as a single transparent
+/// output. No reserve is kept because the Treasury does not use Sapling for
+/// its operational lanes (relays, replenish) — Sapling notes are legacy
+/// inbound funds that should be moved out.
+///
+/// Uses upstream [`propose_send_max_transfer`] + [`create_proposed_transactions`]:
+/// input selection, Sapling witness fetching, proving (with the cached
+/// [`sapling_provers`]), signing, and sent-transaction recording are all
+/// handled by upstream. The Sapling prover IS invoked on this path — it
+/// proves each Sapling spend circuit with the canonical ceremony params.
+///
+/// Returns `Ok(None)` when there are no spendable Sapling notes.
+///
+/// [`propose_send_max_transfer`]: zcash_client_backend::data_api::wallet::propose_send_max_transfer
+/// [`create_proposed_transactions`]: zcash_client_backend::data_api::wallet::create_proposed_transactions
+/// [`sapling_provers`]: crate::mint::signer::sapling_provers
+pub fn sweep_sapling_to_vault<P: Parameters>(
+    network: &P,
+    wallet: &mut Wallet,
+    treasury_keys: &TreasuryKeys,
+) -> Result<Option<TxId>, AssemblyError> {
+    use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
+    use zcash_client_backend::data_api::wallet::input_selection::LockedInputPolicy;
+    use zcash_client_backend::data_api::wallet::{
+        create_proposed_transactions, propose_send_max_transfer, ConfirmationsPolicy, CreateErrT,
+        ProposeSendMaxErrT, SpendingKeys,
+    };
+    use zcash_client_backend::data_api::{MaxSpendMode, WalletRead as _};
+    use zcash_client_backend::fees::StandardFeeRule;
+    use zcash_client_backend::wallet::OvkPolicy;
+    use zcash_protocol::ShieldedPool;
+
+    // 1. Skip if no spendable Sapling notes exist.
+    let Some(summary) = wallet
+        .get_wallet_summary(ConfirmationsPolicy::new_symmetrical(
+            std::num::NonZeroU32::MIN,
+            false,
+        ))
+        .ok()
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    let sapling_balance = summary
+        .account_balances()
+        .get(&TREASURY_ACCOUNT)
+        .map(|b| b.sapling_balance().spendable_value())
+        .unwrap_or(Zatoshis::ZERO);
+    if sapling_balance == Zatoshis::ZERO {
+        return Ok(None);
+    }
+
+    // 2. Propose: select ALL spendable Sapling notes, send everything minus
+    //    fee to the transparent vault address.
+    let vault_recipient =
+        zcash_keys::address::Address::Transparent(VAULT_ADDRESS).to_zcash_address(network);
+
+    let proposal = propose_send_max_transfer(
+        wallet,
+        network,
+        TREASURY_ACCOUNT,
+        &[ShieldedPool::Sapling],
+        &StandardFeeRule::Zip317,
+        vault_recipient,
+        None, // no memo — transparent recipient
+        MaxSpendMode::MaxSpendable,
+        ConfirmationsPolicy::new_symmetrical(std::num::NonZeroU32::MIN, false),
+        &LockedInputPolicy::default(),
+        None,
+    )
+    .map_err(
+        |e: ProposeSendMaxErrT<Wallet, std::convert::Infallible, StandardFeeRule>| {
+            AssemblyError::UpstreamTransfer(format!("{e:?}"))
+        },
+    )?;
+
+    // 3. Build: upstream handles Sapling proving, signing, and recording.
+    let (spend_prover, output_prover) = crate::mint::signer::sapling_provers();
+    let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
+    let txids = create_proposed_transactions(
+        wallet,
+        network,
+        spend_prover,
+        output_prover,
+        &spending_keys,
+        OvkPolicy::Sender,
+        &proposal,
+        None,
+    )
+    .map_err(
+        |e: CreateErrT<
+            Wallet,
+            GreedyInputSelectorError,
+            StandardFeeRule,
+            <StandardFeeRule as zcash_primitives::transaction::fees::FeeRule>::Error,
+            zcash_client_backend::wallet::NoteId,
+        >| AssemblyError::UpstreamTransfer(format!("{e:?}")),
+    )?;
+
+    let txid = *txids.first();
     Ok(Some(txid))
 }

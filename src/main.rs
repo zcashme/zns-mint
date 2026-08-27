@@ -33,15 +33,15 @@ use zcash_client_backend::data_api::WalletWrite as _;
 use zcash_client_backend::scanning::Nullifiers;
 use zcash_client_backend::scanning::ScanningKeys;
 use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
+use zcash_protocol::memo::Memo;
 use zip32::AccountId;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::otp::{decode_otp_relay_memo, OtpQueue};
-use zns_mint::mint::treasury::memo::parse_request;
+use zns_mint::mint::treasury::parse_request;
 use time::Timestamp;
 use zns_mint::mint::{decrypt_name_notes, signer, ChainTip};
-use zns_mint::mint::{NameNote, TREASURY_ACCOUNT};
-use zns_mint::wallet::NoteLocator;
+use zns_mint::mint::TREASURY_ACCOUNT;
 use zns_mint::zcash::{self, CanonicalBlockSource, JsonRpc, SubmitOutcome};
 
 #[tokio::main]
@@ -293,17 +293,27 @@ async fn main() {
             // Intake: every confirmed Treasury note. Spent notes are naturally
             // excluded because the wallet marks them spent on broadcast.
             let intake: Vec<_> = wallet
-                .ironwood_notes_for(TREASURY_ACCOUNT)
-                .filter(|note| note.mined_height.is_some())
+                .unspent_ironwood_notes(TREASURY_ACCOUNT)
+                .into_iter()
+                .filter(|note| note.mined_height().is_some())
                 .collect();
 
             for note in intake {
-                let locator = NoteLocator::ironwood(TREASURY_ACCOUNT, note.note.rho());
                 let mtp = Timestamp::now();
-                let value = note.note.value().inner();
-                let confirmed_height = note.mined_height.expect("filtered on Some");
+                let value = note
+                    .note_value()
+                    .expect("Ironwood note values are within valid ZEC bounds by consensus");
+                let confirmed_height = note.mined_height().expect("filtered on Some");
+                let Some(Memo::Future(memo)) = wallet
+                    .get_memo(*note.internal_note_id())
+                    .ok()
+                    .flatten()
+                else {
+                    continue;
+                };
+                let memo = *memo.as_array();
 
-                let outcome = parse_request(&network, &note.memo)
+                let outcome = parse_request(&network, &memo)
                     .map(|(action, name, ua)| match action {
                         zns_mint::mint::Action::Claim => {
                             zns_mint::mint::registry::authorize::process_claim(
@@ -320,20 +330,21 @@ async fn main() {
                             )
                         }
                         // Relay: controller receives OTP, requester's UA rides memo.
+                        // An ordinary upstream-built Treasury payment; the
+                        // request note itself is not consumed.
                         zns_mint::mint::Action::Update | zns_mint::mint::Action::Release => {
                             let Some(record) = registry.record(&name) else {
                                 return None;
                             };
-                            zns_mint::mint::treasury::relay::process_otp_relay(
+                            zns_mint::mint::otp::issue_relay(
                                 &network,
                                 &name,
                                 action,
                                 &ua,
-                                record.ua.as_ref().expect("relay requires a live controller"),
-                                record.commitment,
-                                locator,
-                                value,
-                                tip,
+                                record
+                                    .ua
+                                    .as_ref()
+                                    .expect("relay requires a live controller"),
                                 target,
                                 mtp,
                                 &mut wallet,
@@ -343,18 +354,25 @@ async fn main() {
                     })
                     .or_else(|| Some({
                         // Controller forwarded a relay memo back.
-                        decode_otp_relay_memo(&note.memo).and_then(
+                        decode_otp_relay_memo(&memo).and_then(
                             |(otp_name, otp_action, otp_ua_str, otp_digits)| {
-                                let otp_ua =
-                                    NameNote::parse_ua(&network, &otp_ua_str)?;
-                                let record = registry.record(&otp_name)?;
+                                let otp_ua = match zcash_keys::address::Address::decode(
+                                    &network,
+                                    &otp_ua_str,
+                                )? {
+                                    zcash_keys::address::Address::Unified(ua) => ua,
+                                    _ => return None,
+                                };
+                                // The name must be registered; the
+                                // authorization binds to the live tip at
+                                // execution time.
+                                registry.record(&otp_name)?;
                                 zns_mint::mint::registry::authorize::process_transition(
                                     &network,
                                     otp_name,
                                     otp_action,
                                     otp_ua,
                                     &otp_digits,
-                                    record.commitment,
                                     mtp,
                                     tip,
                                     target,
@@ -422,6 +440,11 @@ async fn main() {
             let sweep_tip = tip;
             let produced: Vec<zcash_primitives::transaction::TxId> = [
                 zns_mint::mint::treasury::vault::sweep_to_vault(
+                    &network,
+                    &mut wallet,
+                    &treasury_keys,
+                ),
+                zns_mint::mint::treasury::vault::sweep_sapling_to_vault(
                     &network,
                     &mut wallet,
                     &treasury_keys,

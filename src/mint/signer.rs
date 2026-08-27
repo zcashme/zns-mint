@@ -16,11 +16,13 @@
 //! [`zcash_primitives::transaction::Builder`]: every effecting bundle is placed
 //! into one unauthorized transaction before computing the shared shielded
 //! signature hash, then each bundle is proven and signed over that exact
-//! commitment. Sapling is deliberately excluded because a Sapling bundle would
-//! require Groth16 prover parameters that are not available inside the attested
-//! mint boundary. Orchard bundles are not accepted: NU6.3 disables Orchard
-//! cross-address transfers, so users cannot send the Treasury Orchard notes
-//! and the mint has no Orchard spend lane.
+//! commitment. This hand-rolled assembler handles Ironwood-only transactions
+//! (Name Notes, vault sweeps with reserve, replenish). Sapling sweeps to the
+//! transparent vault go through upstream `propose_send_max_transfer` +
+//! `create_proposed_transactions` instead, using the cached Sapling prover
+//! loaded by [`sapling_provers`]. Orchard bundles are not accepted: NU6.3
+//! disables Orchard cross-address transfers, so users cannot send the Treasury
+//! Orchard notes and the mint has no Orchard spend lane.
 //!
 //! # Transparent bundle design
 //!
@@ -38,7 +40,11 @@
 //! pattern and avoids any manual `Bundle` construction or `zcash_script`
 //! dependency.
 
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
 use crate::key::{RegistryKeys, TreasuryKeys};
+use sapling::circuit::{OutputParameters, SpendParameters};
 use transparent::address::TransparentAddress;
 use transparent::builder::{TransparentBuilder, TransparentSigningSet};
 use zcash_primitives::transaction::Transaction;
@@ -181,11 +187,13 @@ pub fn assemble_v6_transaction<P: Parameters>(
     let pk = PK.get_or_init(|| ProvingKey::build(circuit_version));
     let vk = VK.get_or_init(|| VerifyingKey::build(circuit_version));
     assert_eq!(
-        pk.circuit_version(), circuit_version,
+        pk.circuit_version(),
+        circuit_version,
         "proving key built from circuit version"
     );
     assert_eq!(
-        vk.circuit_version(), circuit_version,
+        vk.circuit_version(),
+        circuit_version,
         "verifying key built from circuit version"
     );
 
@@ -288,4 +296,121 @@ pub fn serialize_tx(tx: &Transaction) -> Result<String, crate::mint::AssemblyErr
     tx.write(&mut tx_bytes)
         .map_err(|_| crate::mint::AssemblyError::Serialize)?;
     Ok(hex::encode(tx_bytes))
+}
+
+// ---------------------------------------------------------------------------
+// Sapling Groth16 proving parameters
+// ---------------------------------------------------------------------------
+
+/// The BLAKE2b-512 hash of the canonical `sapling-spend.params` file from the
+/// Sapling Powers of Tau ceremony. Same constant as `zcash_proofs`.
+const SAPLING_SPEND_HASH: &str = "8270785a1a0d0bc77196f000ee6d221c9c9894f55307bd9357c3f0105d31ca63991ab91324160d8f53e2bbd3c2633a6eb8bdf5205d822e7f3f73edac51b2b70c";
+
+/// The BLAKE2b-512 hash of the canonical `sapling-output.params` file.
+const SAPLING_OUTPUT_HASH: &str = "657e3d38dbb5cb5e7dd2970e8b03d69b4787dd907285b5a7f0790dcc8072f60bf593b32cc2d1c030e00ff5ae64bf84c5c3beb84ddc841d48264b4a171744d028";
+
+/// Expected file sizes for the Sapling parameter files.
+const SAPLING_SPEND_BYTES: u64 = 47_958_396;
+const SAPLING_OUTPUT_BYTES: u64 = 3_592_860;
+
+use std::io::Read as _;
+
+/// Reads a Sapling parameter file, verifying its size and BLAKE2b hash
+/// against the known ceremony constants before returning the raw bytes.
+/// Panics on mismatch (tampered or missing params are a halt condition,
+/// not a recoverable error).
+fn read_verified_sapling_params(
+    path: &std::path::Path,
+    expected_hash: &str,
+    expected_bytes: u64,
+) -> Vec<u8> {
+    let mut file = std::fs::File::open(path).unwrap_or_else(|e| {
+        panic!(
+            "FATAL: cannot open Sapling params at {}: {e}",
+            path.display()
+        )
+    });
+
+    // Check file size before reading.
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(
+        size,
+        expected_bytes,
+        "Sapling params size mismatch at {}: expected {expected_bytes}, got {size}",
+        path.display(),
+    );
+
+    // Read + hash.
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.read_to_end(&mut bytes).unwrap_or_else(|e| {
+        panic!(
+            "FATAL: cannot read Sapling params at {}: {e}",
+            path.display()
+        )
+    });
+    let hash = blake2b_simd::Params::new().hash_length(64).hash(&bytes);
+    let hash_hex = hex::encode(hash.as_bytes());
+    assert_eq!(
+        hash_hex,
+        expected_hash,
+        "Sapling params hash mismatch at {}: expected {expected_hash}, got {hash_hex}",
+        path.display(),
+    );
+
+    // Deserialize with verify_point_encodings=false: the hash already
+    // authenticates the file, so redundant point-encoding checks are skipped.
+    bytes
+}
+
+/// The directory where Sapling parameter files are located.
+///
+/// Defaults to `$ZCASH_PARAMS_DIR` or `~/.zcash-params`, matching the
+/// standard `fetch-params` location. In a TEE deployment the host mounts
+/// the params at a known path and sets the env var.
+fn sapling_params_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("ZCASH_PARAMS_DIR") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    PathBuf::from(home).join(".zcash-params")
+}
+
+/// Lazily loaded, cached Sapling proving parameters.
+///
+/// `SpendParameters` and `OutputParameters` implement `SpendProver` and
+/// `OutputProver` respectively (blanket impls in `sapling-crypto`), so they
+/// are passed directly to upstream `create_proposed_transactions`. The
+/// relay path (Ironwood-only spend policy) never invokes them; the Sapling
+/// vault sweep does.
+static SAPLING_PROVERS: OnceLock<(SpendParameters, OutputParameters)> = OnceLock::new();
+
+/// Returns cached references to the Sapling spend and output proving
+/// parameters, loading them from disk on first access.
+///
+/// The parameter files are verified against the canonical ceremony hashes
+/// (BLAKE2b-512) before deserialization. A tampered or missing file panics —
+/// the mint cannot operate with wrong params, and the hash check is the
+/// attestation that binds the loaded params to the ceremony.
+///
+/// [`SpendParameters`]: sapling::circuit::SpendParameters
+/// [`OutputParameters`]: sapling::circuit::OutputParameters
+pub(crate) fn sapling_provers() -> (&'static SpendParameters, &'static OutputParameters) {
+    let (spend, output) = SAPLING_PROVERS.get_or_init(|| {
+        let dir = sapling_params_dir();
+        let spend_path = dir.join("sapling-spend.params");
+        let output_path = dir.join("sapling-output.params");
+
+        let spend_bytes =
+            read_verified_sapling_params(&spend_path, SAPLING_SPEND_HASH, SAPLING_SPEND_BYTES);
+        let output_bytes =
+            read_verified_sapling_params(&output_path, SAPLING_OUTPUT_HASH, SAPLING_OUTPUT_BYTES);
+
+        let spend_params = SpendParameters::read(&spend_bytes[..], false)
+            .expect("FATAL: failed to deserialize sapling-spend.params");
+        let output_params = OutputParameters::read(&output_bytes[..], false)
+            .expect("FATAL: failed to deserialize sapling-output.params");
+
+        (spend_params, output_params)
+    });
+    (spend, output)
 }
