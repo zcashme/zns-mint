@@ -1,104 +1,87 @@
-//! Assembly-slice wallet projections.
+//! Ironwood wallet queries used by transaction assembly.
 //!
-//! The transaction-assembly paths (Registry lifecycle, Treasury relay, claim
-//! settlement) address wallet notes by capability, not by storage key:
-//! [`NoteLocator`] names exactly one wallet Ironwood note as
-//! `(account, rho)`, and [`IronwoodNote`] is the assembled projection the
-//! builders consume — note, position, memo, nullifier — drawn from the
-//! wallet's ordinary received-note state. Nullifiers are derived here (not
-//! stored) via the account's Orchard-family viewing key, mirroring the
-//! scanner's own derivation.
+//! Assembly consumes LRZ [`ReceivedNote`] and [`NoteId`] values directly.
+//! This module provides only the wallet-specific lookups that LRZ's generic
+//! traits cannot express: finding an owned note by a ZNS record's `rho`, and
+//! retrieving the unspent Registry fee-note nullifiers.
 
 use incrementalmerkletree::{MerklePath, Position};
 use zcash_client_backend::data_api::{ScannedBlock, WalletCommitmentTrees};
-use zcash_client_backend::wallet::NoteId;
+use zcash_client_backend::wallet::{NoteId, ReceivedNote};
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::ShieldedPool;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::memo::Memo;
+use zcash_protocol::value::Zatoshis;
 use zip32::AccountId;
 
 use crate::mint::REGISTRY_ACCOUNT;
 
 use super::{TreeError, Wallet};
 
-/// The witness path type produced by the Ironwood shard tree.
-pub type IronwoodWitness =
-    MerklePath<orchard::tree::MerkleHashOrchard, 32>;
-
-/// A capability handle to one wallet Ironwood note: `(account, rho)`.
-///
-/// `rho` is the note's unique identity across all pools; pairing it with the
-/// owning account makes the locator total over the wallet's fixed accounts.
-/// `Copy + Ord + Hash` so it can serve as a reservation-set key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct NoteLocator {
-    account_id: AccountId,
-    rho: orchard::note::Rho,
-}
-
-impl NoteLocator {
-    /// Locates the Ironwood note `rho` received by `account_id`.
-    pub fn ironwood(account_id: AccountId, rho: orchard::note::Rho) -> Self {
-        Self { account_id, rho }
-    }
-
-    pub fn account(&self) -> AccountId {
-        self.account_id
-    }
-
-    pub fn rho(&self) -> orchard::note::Rho {
-        self.rho
-    }
-}
-
-/// The assembled projection of one unspent wallet Ironwood note.
-///
-/// Built by [`Wallet::ironwood_note`] / [`Wallet::ironwood_notes_for`] from
-/// the received-note table; `nullifier` is derived through the account's
-/// Orchard FVK at projection time.
-#[derive(Clone, Debug)]
-pub struct IronwoodNote {
-    /// The owning wallet account (Treasury or Registry).
-    pub account_id: AccountId,
-    /// The creating transaction's ID.
-    pub txid: TxId,
-    /// The height at which the creating transaction mined, once applied.
-    pub mined_height: Option<BlockHeight>,
-    /// The decrypted note — recipient, value, rho, rseed.
-    pub note: orchard::note::Note,
-    /// The note's position in the Ironwood commitment tree.
-    pub position: Position,
-    /// The stored memo as canonical 512 bytes (ZIP-302 padding when the
-    /// memo slot holds a non-bytes memo).
-    pub memo: [u8; 512],
-    /// The spend nullifier, derived from the account FVK.
-    pub nullifier: orchard::note::Nullifier,
-}
-
 impl Wallet {
-    /// Projects one unspent Ironwood note by locator, or `None` when the
-    /// wallet has no such unspent note.
-    pub(crate) fn ironwood_note(&self, locator: NoteLocator) -> Option<IronwoodNote> {
-        self.locate_ironwood(locator)
-    }
-
-    /// Projects every unspent Ironwood note of `account`, oldest-first by
-    /// commitment tree position.
-    pub fn ironwood_notes_for(
+    /// Returns every unspent Ironwood note owned by `account`.
+    pub fn unspent_ironwood_notes(
         &self,
         account: AccountId,
-    ) -> impl Iterator<Item = IronwoodNote> + '_ {
+    ) -> Vec<ReceivedNote<NoteId, orchard::note::Note>> {
         self.ironwood_notes
             .iter()
             .filter(move |(_, output)| *output.account_id() == account)
             .filter(|(note_id, _)| !self.ironwood_note_spends.contains_key(note_id))
-            .filter_map(|(note_id, output)| self.project_ironwood(*note_id, output))
+            .filter_map(|(note_id, _)| self.ironwood_received_note(*note_id))
+            .collect()
     }
 
-    /// Whether the wallet holds the located note and it is unspent.
-    pub(crate) fn contains_unspent_locator(&self, locator: NoteLocator) -> bool {
-        self.locate_ironwood(locator).is_some()
+    /// Returns one unspent Ironwood note by its LRZ wallet identity.
+    pub(crate) fn unspent_ironwood_note(
+        &self,
+        account: AccountId,
+        note_id: NoteId,
+    ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
+        let output = self.ironwood_notes.get(&note_id)?;
+        (*output.account_id() == account && !self.ironwood_note_spends.contains_key(&note_id))
+            .then(|| self.ironwood_received_note(note_id))
+            .flatten()
+    }
+
+    /// Finds an unspent owned Ironwood note by the `rho` persisted in a ZNS
+    /// record, returning its native LRZ wallet representation.
+    pub(crate) fn unspent_ironwood_note_by_rho(
+        &self,
+        account: AccountId,
+        rho: orchard::note::Rho,
+    ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
+        let note_id = self
+            .ironwood_notes
+            .iter()
+            .find(|(_, output)| {
+                *output.account_id() == account && output.note().0.rho() == rho
+            })
+            .map(|(note_id, _)| *note_id)?;
+        self.unspent_ironwood_note(account, note_id)
+    }
+
+    /// Returns the nullifiers of all unspent Ironwood notes owned by `account`.
+    pub(crate) fn unspent_ironwood_nullifiers(
+        &self,
+        account: AccountId,
+    ) -> Vec<orchard::note::Nullifier> {
+        self.ironwood_notes
+            .iter()
+            .filter(|(note_id, output)| {
+                *output.account_id() == account
+                    && !self.ironwood_note_spends.contains_key(note_id)
+            })
+            .filter_map(|(note_id, output)| {
+                (self
+                    .ironwood_received_note(*note_id)?
+                    .note_value()
+                    .ok()? > Zatoshis::ZERO)
+                    .then(|| output.nf().copied())
+                    .flatten()
+            })
+            .collect()
     }
 
     /// The Ironwood witness at `anchor_height` for the note at `position`.
@@ -109,7 +92,7 @@ impl Wallet {
         &mut self,
         position: Position,
         anchor_height: BlockHeight,
-    ) -> Result<Option<IronwoodWitness>, TreeError> {
+    ) -> Result<Option<MerklePath<orchard::tree::MerkleHashOrchard, 32>>, TreeError> {
         // with_ironwood_tree_mut wraps the callback's Ok payload in an
         // outer Option; `?` then flatten collapses both layers.
         let witnessed = self
@@ -182,56 +165,5 @@ impl Wallet {
         self.transaction_statuses
             .insert(txid, zcash_client_backend::data_api::TransactionStatus::Mined(scanned.height()));
         Some(())
-    }
-
-    // -- internals ----------------------------------------------------------
-
-    fn locate_ironwood(&self, locator: NoteLocator) -> Option<IronwoodNote> {
-        self.ironwood_notes
-            .iter()
-            .find(|(_, output)| {
-                *output.account_id() == locator.account_id
-                    && output.note().0.rho() == locator.rho
-            })
-            .filter(|(note_id, _)| !self.ironwood_note_spends.contains_key(note_id))
-            .and_then(|(note_id, output)| self.project_ironwood(*note_id, output))
-    }
-
-    fn project_ironwood(
-        &self,
-        note_id: NoteId,
-        output: &zcash_client_backend::wallet::WalletIronwoodOutput<AccountId>,
-    ) -> Option<IronwoodNote> {
-        let fvk = self
-            .ufvks
-            .get(output.account_id())?
-            .orchard()?
-            .clone();
-        let note = output.note().0.clone();
-        let memo = match self.memos.get(&note_id) {
-            Some(Memo::Future(bytes)) => *bytes.as_array(),
-            Some(Memo::Arbitrary(bytes)) => {
-                let mut raw = [0u8; 512];
-                raw[0] = 0xFF;
-                raw[1..512].copy_from_slice(&bytes[..]);
-                raw
-            }
-            _ => {
-                // Empty and Text memos are not part of any mint protocol
-                // lane; project them as the ZIP-302 empty memo.
-                let mut empty = [0u8; 512];
-                empty[0] = 0xF6;
-                empty
-            }
-        };
-        Some(IronwoodNote {
-            account_id: *output.account_id(),
-            txid: *note_id.txid(),
-            mined_height: self.mined_height(note_id.txid()),
-            nullifier: note.nullifier(&fvk),
-            note,
-            position: output.note_commitment_tree_position(),
-            memo,
-        })
     }
 }

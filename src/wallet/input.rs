@@ -172,7 +172,7 @@ impl Wallet {
 
     /// Builds the [`ReceivedNote`] for a retained Ironwood output, or `None`
     /// when the spending key scope was not retained.
-    fn ironwood_received_note(
+    pub(crate) fn ironwood_received_note(
         &self,
         note_id: NoteId,
     ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
@@ -304,7 +304,7 @@ impl Wallet {
                 .eligible_sapling(account, target_height, Some(policy), exclude, lock_filter)
                 .into_iter()
                 .map(|note| {
-                    Zatoshis::try_from(note.note().value().inner())
+                    note.note_value()
                         .expect("Sapling note values are within valid ZEC bounds by consensus")
                 })
                 .collect(),
@@ -312,7 +312,7 @@ impl Wallet {
                 .eligible_ironwood(account, target_height, Some(policy), exclude, lock_filter)
                 .into_iter()
                 .map(|note| {
-                    Zatoshis::from_u64(note.note().value().inner())
+                    note.note_value()
                         .expect("Ironwood note values are within valid ZEC bounds by consensus")
                 })
                 .collect(),
@@ -433,7 +433,8 @@ impl InputSource for Wallet {
                             // AllFunds selects every eligible note.
                             TargetValue::AllFunds(_) => true,
                         };
-                        let value = Zatoshis::try_from(note.note().value().inner())
+                        let value = note
+                            .note_value()
                             .expect("Sapling note values are within valid ZEC bounds by consensus");
                         accumulated = (accumulated + value).expect(
                             "selection cannot overflow MAX_MONEY; mirrors upstream Balance::total",
@@ -456,7 +457,7 @@ impl InputSource for Wallet {
                             TargetValue::AtLeast(target) => accumulated <= target,
                             TargetValue::AllFunds(_) => true,
                         };
-                        let value = Zatoshis::from_u64(note.note().value().inner()).expect(
+                        let value = note.note_value().expect(
                             "Ironwood note values are within valid ZEC bounds by consensus",
                         );
                         accumulated = (accumulated + value).expect(

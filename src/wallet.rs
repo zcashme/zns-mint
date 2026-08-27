@@ -6,7 +6,6 @@ mod read;
 mod trees;
 mod write;
 
-pub use assembly::{IronwoodNote, NoteLocator};
 pub use read::WalletError;
 
 use std::collections::{BTreeMap, BTreeSet};
