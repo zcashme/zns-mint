@@ -17,11 +17,11 @@ use incrementalmerkletree::{MerklePath, Position};
 use zcash_client_backend::data_api::{ScannedBlock, WalletCommitmentTrees};
 use zcash_client_backend::wallet::{NoteId, ReceivedNote};
 use zcash_primitives::transaction::{Transaction, TxId};
-use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::ShieldedPool;
-use zcash_protocol::consensus::BlockHeight as _;
+use zcash_protocol::consensus::Parameters;
 use zcash_protocol::memo::Memo;
-use zcash_protocol::value::{ZatBalance, Zatoshis};
+use zcash_protocol::value::ZatBalance;
 use zip32::AccountId;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
@@ -236,7 +236,11 @@ impl Wallet {
         self.unspent_ironwood_note(account, note_id)
     }
 
-    /// Returns the nullifiers of all unspent Ironwood notes owned by `account`.
+    /// Returns the nullifiers of all unspent Ironwood notes owned by `account`,
+    /// including value-0 notes: the Registry's Name Notes are value-0, and
+    /// their nullifiers are what identifies a Registry spend in
+    /// [`Registry::apply_block`](crate::mint::registry::Registry::apply_block)'s
+    /// mint-authority check.
     pub(crate) fn unspent_ironwood_nullifiers(
         &self,
         account: AccountId,
@@ -247,14 +251,7 @@ impl Wallet {
                 *output.account_id() == account
                     && !self.ironwood_note_spends.contains_key(note_id)
             })
-            .filter_map(|(note_id, output)| {
-                (self
-                    .ironwood_received_note(*note_id)?
-                    .note_value()
-                    .ok()? > Zatoshis::ZERO)
-                    .then(|| output.nf().copied())
-                    .flatten()
-            })
+            .filter_map(|(_, output)| output.nf().copied())
             .collect()
     }
 

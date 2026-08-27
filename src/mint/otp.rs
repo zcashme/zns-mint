@@ -299,6 +299,8 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
     network: &P,
     wallet: &mut crate::wallet::Wallet,
     treasury_keys: &crate::key::TreasuryKeys,
+    spend_prover: &sapling::circuit::SpendParameters,
+    output_prover: &sapling::circuit::OutputParameters,
     controller_ua: &UnifiedAddress,
     target_height: zcash_protocol::consensus::BlockHeight,
     memo: [u8; 512],
@@ -383,9 +385,8 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
     )?;
 
     // Only the Treasury signs; the relay carries no Registry authority.
-    // The Sapling prover is never invoked: the Ironwood-only spend policy
+    // The Sapling provers are never invoked: the Ironwood-only spend policy
     // means `sapling_builder` is `None` in the upstream `Builder::build`.
-    let (spend_prover, output_prover) = crate::mint::signer::sapling_provers();
     let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
     let txids = create_proposed_transactions(
         wallet,
@@ -415,7 +416,7 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
         .ok()
         .flatten()
         .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
-    let hex = crate::wallet::assembly::serialize_tx(&tx)?;;
+    let hex = crate::wallet::assembly::serialize_tx(&tx)?;
     Ok((txid, hex))
 }
 
@@ -440,6 +441,8 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
     mtp: Timestamp,
     wallet: &mut crate::wallet::Wallet,
     treasury_keys: &crate::key::TreasuryKeys,
+    spend_prover: &sapling::circuit::SpendParameters,
+    output_prover: &sapling::circuit::OutputParameters,
 ) -> Option<crate::mint::RequestOutcome> {
     use crate::mint::{RequestOutcome, SubmissionKind};
     use time::Duration;
@@ -455,6 +458,8 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
         network,
         wallet,
         treasury_keys,
+        spend_prover,
+        output_prover,
         controller_ua,
         target_height,
         memo,

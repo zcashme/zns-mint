@@ -2,7 +2,9 @@
 //!
 //! The Registry tracks the current state of every name (the [`Record`] for
 //! each name chain) and authorizes transitions against that state
-//! ([`authorize_claim`], [`authorize_update`], [`authorize_release`]).
+//! ([`authorize_claim`], [`authorize_update`], [`authorize_release`]), each
+//! producing the typed [`NameNote`] transition for the settle path to
+//! commit — memo, opening, and predecessor all derive from the one value.
 //! The transaction-assembly path — building the Ironwood bundle, funding
 //! the fee, signing — is the caller's job, not the Registry's. The OTP
 //! challenges that update/release requests authorize with live in
@@ -21,92 +23,42 @@ use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
 use zip32::AccountId;
 
-impl NameNoteRequest {
-    pub fn action(&self) -> Action {
-        match self {
-            Self::Claim(_) => Action::Claim,
-            Self::Update(_) => Action::Update,
-            Self::Release(_) => Action::Release,
-        }
-    }
-
-    pub fn name(&self) -> &Name {
-        match self {
-            Self::Claim(b) => &b.name,
-            Self::Update(b) => &b.name,
-            Self::Release(b) => &b.name,
-        }
-    }
-}
-
-/// Request for a new name claim (no previous commitment exists).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaimRequest {
-    pub name: Name,
-    pub ua: UnifiedAddress,
-    /// The committed expiration (§4.5.1). Until term-request plumbing
-    /// exists in the intake path, claims register without fixed expiration.
-    pub expires_at: Expiry,
-}
-
-/// Request to update an existing name (requires previous commitment).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UpdateRequest {
-    pub name: Name,
-    pub new_ua: UnifiedAddress,
-    /// The carried-forward expiration (§4.5.3: an ordinary update MUST NOT
-    /// change the registration period). Extension requests arrive as terms
-    /// elsewhere; this field holds the resulting value.
-    pub expires_at: Expiry,
-    pub prev_commitment: NameCommitment,
-}
-
-/// Request to release an existing name (requires previous commitment).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReleaseRequest {
-    pub name: Name,
-    /// The current binding preserved in the release Name Note.
-    pub ua: UnifiedAddress,
-    pub prev_commitment: NameCommitment,
-}
-
 /// Reads the current record of the name chain for `name`.
 pub fn current_record(registry: &Registry, name: &Name) -> Option<Record> {
     registry.record(name).cloned()
 }
 
-/// Authorizes a claim request, producing a [`NameNoteRequest`].
+/// Authorizes a claim, producing the typed [`NameNote`] transition to commit.
 ///
 /// The Treasury layer must have already verified that the claim payment was
 /// made. This function verifies that the name is available (either no record,
-/// or record is `Release`).
+/// or record is `Release`). Until term-request plumbing exists in the intake
+/// path, claims register without fixed expiration.
 pub fn authorize_claim(
     registry: &Registry,
     name: Name,
     ua: UnifiedAddress,
-) -> Option<NameNoteRequest> {
+) -> Option<NameNote> {
     match current_record(registry, &name) {
-        None => Some(NameNoteRequest::Claim(ClaimRequest {
-            name,
-            ua,
-            expires_at: Expiry::Never,
-        })),
-        Some(Record {
+        None | Some(Record {
             action: Action::Release,
             ..
-        }) => Some(NameNoteRequest::Claim(ClaimRequest {
+        }) => Some(NameNote::Claim {
             name,
             ua,
             expires_at: Expiry::Never,
-        })),
+        }),
         Some(_) => None, // Name is already live
     }
 }
 
-/// Authorizes an update request, producing a [`NameNoteRequest`].
+/// Authorizes an update, producing the typed [`NameNote`] transition to
+/// commit.
 ///
 /// Verifies the name is live and consumes an OTP bound to its exact current
-/// predecessor commitment.
+/// predecessor commitment, which becomes the transition's `prev` — the
+/// settle path therefore cannot bind a predecessor other than the live
+/// tip's.
 pub fn authorize_update(
     registry: &Registry,
     otp_queue: &mut OtpQueue,
@@ -114,7 +66,7 @@ pub fn authorize_update(
     name: Name,
     new_ua: UnifiedAddress,
     otp: &[u8; 6],
-) -> Option<NameNoteRequest> {
+) -> Option<NameNote> {
     let record = current_record(registry, &name)?;
     if record.action == Action::Release {
         return None;
@@ -124,18 +76,21 @@ pub fn authorize_update(
         return None;
     }
 
-    Some(NameNoteRequest::Update(UpdateRequest {
+    Some(NameNote::Update {
         name,
-        new_ua,
+        ua: new_ua,
+        // §4.5.3: an ordinary update MUST NOT change the registration
+        // period; the expiry is carried forward from the live record.
         expires_at: record.expires_at,
-        prev_commitment: record.commitment,
-    }))
+        prev: record.commitment,
+    })
 }
 
-/// Authorizes a release request, producing a [`NameNoteRequest`].
+/// Authorizes a release, producing the typed [`NameNote`] transition to
+/// commit.
 ///
-/// Verifies the name is live and consumes an OTP bound to its exact current
-/// predecessor commitment.
+/// Verifies the name is live, that the requester holds the live binding, and
+/// consumes an OTP bound to its exact current predecessor commitment.
 pub fn authorize_release(
     registry: &Registry,
     otp_queue: &mut OtpQueue,
@@ -143,7 +98,7 @@ pub fn authorize_release(
     name: Name,
     current_ua: UnifiedAddress,
     otp: &[u8; 6],
-) -> Option<NameNoteRequest> {
+) -> Option<NameNote> {
     let record = current_record(registry, &name)?;
     if record.action == Action::Release {
         return None;
@@ -159,11 +114,11 @@ pub fn authorize_release(
         return None;
     }
 
-    Some(NameNoteRequest::Release(ReleaseRequest {
+    Some(NameNote::Release {
         name,
         ua: current_ua,
-        prev_commitment: record.commitment,
-    }))
+        prev: record.commitment,
+    })
 }
 
 
@@ -730,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn release_preserves_the_current_binding_in_the_name_note_request() {
+    fn release_preserves_the_current_binding_in_the_name_note() {
         let mut reg = mock_registry();
         let mut otps = mock_otp_queue();
         let name = Name::parse("dave").unwrap();
@@ -754,11 +709,11 @@ mod tests {
             expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
         });
 
-        let request = authorize_release(&reg, &mut otps, now, name, ua.clone(), b"004206")
+        let transition = authorize_release(&reg, &mut otps, now, name, ua.clone(), b"004206")
             .expect("valid OTP authorizes release");
-        match request {
-            NameNoteRequest::Release(release) => assert_eq!(release.ua, ua),
-            _ => panic!("expected release request"),
+        match transition {
+            NameNote::Release { ua: bound, .. } => assert_eq!(bound, ua),
+            other => panic!("expected release transition, got {}", other.action().as_str()),
         }
     }
 
