@@ -20,7 +20,7 @@ pub use authorize::{
     authorize_claim, authorize_release, authorize_update, current_record, NameNoteRequest,
 };
 pub use liquidity::{
-    classify_registry_ironwood_note, classify_registry_note_parts, RegistryFeeLiquidity,
+    classify_registry_ironwood_note, classify_registry_note_value, RegistryFeeLiquidity,
     RegistryFundingPlan, RegistryNoteClass,
 };
 pub use transaction::{build_transaction, select_registry_fee_inputs, RegistryFeeInputs};
@@ -132,7 +132,7 @@ impl Record {
         confirmed_height: BlockHeight,
     ) -> Self {
         let note = received.payload();
-        let (rcm, _) = note.opening(params);
+        let rcm = note.rcm(params);
         Self {
             action: note.action(),
             ua: note.ua().cloned(),
@@ -234,11 +234,7 @@ impl Registry {
     ) -> Self {
         let mut next = self.clone();
         let height = scanned.height();
-        let mut available_registry_fees: Vec<_> = wallet
-            .ironwood_notes_for(REGISTRY_ACCOUNT)
-            .filter(|note| note.note.value().inner() > 0)
-            .map(|note| note.nullifier)
-            .collect();
+        let mut available_registry_fees = wallet.unspent_ironwood_nullifiers(REGISTRY_ACCOUNT);
 
         // Group the supplemental Name Note lane and the scanner's spent
         // nullifiers by txid, in one pass each.

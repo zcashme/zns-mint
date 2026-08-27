@@ -13,7 +13,7 @@ pub use zcash_client_backend::data_api::BlockMetadata as ChainTip;
 // The Name Note type and its codec.
 pub use note::{
     decode_name_note, decode_name_note_tuple, decrypt_name_notes, note_commitment_cmx,
-    parse_timestamp_canonical, zns_psi_rcm_raw, DecryptedNameNote, Expiry, NameNote,
+    parse_timestamp_canonical, zns_rcm, zns_psi, DecryptedNameNote, Expiry, NameNote,
 };
 pub use time::Timestamp;
 

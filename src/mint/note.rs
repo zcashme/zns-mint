@@ -29,11 +29,6 @@ pub fn parse_timestamp_canonical(s: &str) -> Option<Timestamp> {
     Timestamp::from_seconds(seconds).ok()
 }
 
-/// A duration in whole seconds — what a user requests as a registration
-/// term or extension (§4.5.3). Never an instant; never compared to MTP.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct TermSeconds(pub u64);
-
 /// The `expires_at` field of a transition: a fixed Unix instant, or the
 /// exact ASCII value `none` for a registration without fixed expiration.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -130,18 +125,6 @@ impl NameNote {
         }
     }
 
-    /// Parses a UA string into the typed upstream form for this network.
-    /// The single validation boundary: ZIP 316 grammar, receiver order, and
-    /// network prefix are all enforced here (§3.5 — invalid UAs must fail
-    /// validation before a transition affects registry state).
-    pub fn parse_ua<P: Parameters>(params: &P, s: &str) -> Option<UnifiedAddress> {
-        let zaddr: zcash_address::ZcashAddress = s.parse().ok()?;
-        match zaddr.convert_if_network(params.network_type()).ok()? {
-            zcash_keys::address::Address::Unified(ua) => Some(ua),
-            _ => None,
-        }
-    }
-
     /// The committed expiration; absent only for a release.
     pub fn expires_at(&self) -> Option<Expiry> {
         match self {
@@ -160,13 +143,12 @@ impl NameNote {
         }
     }
 
-    /// The ZNS commitment opening bound to this exact transition. The UA
-    /// field's canonical encoding (network prefix included) is hashed into
-    /// σ, so the opening is parameter-dependent.
-    pub fn opening<P: Parameters>(
+    /// The rcm component of the ZNS commitment opening, derived independently
+    /// from the same transition tuple with derivation tag `rcm`.
+    pub fn rcm<P: Parameters>(
         &self,
         params: &P,
-    ) -> (pasta_curves::pallas::Scalar, pasta_curves::pallas::Base) {
+    ) -> pasta_curves::pallas::Scalar {
         let verb: &[u8] = match self {
             NameNote::Claim { .. } => b"claim",
             NameNote::Update { .. } => b"update",
@@ -177,7 +159,34 @@ impl NameNote {
         let ua = ua_owned.as_deref().unwrap_or("").as_bytes();
         let expiry = self.expires_field_bytes();
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
-        zns_psi_rcm_raw(verb, name, ua, &expiry, &prev)
+        zns_rcm(verb, name, ua, &expiry, &prev)
+    }
+
+    /// The ψ component of the ZNS commitment opening, derived independently
+    /// from the same transition tuple with derivation tag `psi`.
+    pub fn psi<P: Parameters>(
+        &self,
+        params: &P,
+    ) -> pasta_curves::pallas::Base {
+        let verb: &[u8] = match self {
+            NameNote::Claim { .. } => b"claim",
+            NameNote::Update { .. } => b"update",
+            NameNote::Release { .. } => b"release",
+        };
+        let name = self.name().as_str().as_bytes();
+        let ua_owned = self.ua().map(|ua| ua.encode(params));
+        let ua = ua_owned.as_deref().unwrap_or("").as_bytes();
+        let expiry = self.expires_field_bytes();
+        let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
+        zns_psi(verb, name, ua, &expiry, &prev)
+    }
+
+    /// Both commitment inputs `(rcm, ψ)` in one call for convenience.
+    pub fn opening<P: Parameters>(
+        &self,
+        params: &P,
+    ) -> (pasta_curves::pallas::Scalar, pasta_curves::pallas::Base) {
+        (self.rcm(params), self.psi(params))
     }
 
     /// The `expires_at` field bytes as the memo and σ encode them: `none`
@@ -222,36 +231,46 @@ impl NameNote {
     }
 }
 
-/// Derives the ZNS commitment inputs `(rcm, ψ)` for a transition (§3.3):
-/// BLAKE2b-512 over the length-prefixed fields with tag `rcm` / `psi`,
-/// wide-reduced into the Pallas scalar and base fields respectively.
-pub fn zns_psi_rcm_raw(
+/// Derives the ZNS note-commitment randomness `rcm` for a transition (§3.3):
+/// BLAKE2b-512 over the length-prefixed fields with derivation tag `rcm`,
+/// wide-reduced into the Pallas scalar field.
+pub fn zns_rcm(
     verb: &[u8],
     name: &[u8],
     ua: &[u8],
     expires_at: &[u8],
     prev_rcm_bytes: &[u8; 32],
-) -> (pasta_curves::pallas::Scalar, pasta_curves::pallas::Base) {
+) -> pasta_curves::pallas::Scalar {
     use pasta_curves::group::ff::FromUniformBytes;
-
-    let psi = pasta_curves::pallas::Base::from_uniform_bytes(&tagged_zns_hash(
-        b"psi",
-        verb,
-        name,
-        ua,
-        expires_at,
-        prev_rcm_bytes,
-    ));
-    let rcm = pasta_curves::pallas::Scalar::from_uniform_bytes(&tagged_zns_hash(
+    pasta_curves::pallas::Scalar::from_uniform_bytes(&tagged_zns_hash(
         b"rcm",
         verb,
         name,
         ua,
         expires_at,
         prev_rcm_bytes,
-    ));
+    ))
+}
 
-    (rcm, psi)
+/// Derives the ZNS note-commitment psi `ψ` for a transition (§3.3):
+/// BLAKE2b-512 over the length-prefixed fields with derivation tag `psi`,
+/// wide-reduced into the Pallas base field.
+pub fn zns_psi(
+    verb: &[u8],
+    name: &[u8],
+    ua: &[u8],
+    expires_at: &[u8],
+    prev_rcm_bytes: &[u8; 32],
+) -> pasta_curves::pallas::Base {
+    use pasta_curves::group::ff::FromUniformBytes;
+    pasta_curves::pallas::Base::from_uniform_bytes(&tagged_zns_hash(
+        b"psi",
+        verb,
+        name,
+        ua,
+        expires_at,
+        prev_rcm_bytes,
+    ))
 }
 
 /// The domain-tagged, length-prefixed BLAKE2b-512 of σ (§3.3).
@@ -302,6 +321,10 @@ pub fn decode_name_note<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<N
     // The single UA validation boundary: a memo whose ua field is not a
     // valid ZIP 316 Unified Address for this network decodes to no note.
     let ua_str = parts[3];
+    let ua = match zcash_keys::address::Address::decode(params, ua_str)? {
+        zcash_keys::address::Address::Unified(ua) => ua,
+        _ => return None,
+    };
     let expires_at = Expiry::parse(parts[4])?;
 
     let mut prev_rcm_bytes = [0u8; 32];
@@ -321,7 +344,7 @@ pub fn decode_name_note<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<N
             }
             NameNote::Claim {
                 name,
-                ua: NameNote::parse_ua(params, ua_str)?,
+                ua,
                 expires_at,
             }
         }
@@ -331,7 +354,7 @@ pub fn decode_name_note<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<N
             }
             NameNote::Update {
                 name,
-                ua: NameNote::parse_ua(params, ua_str)?,
+                ua,
                 expires_at,
                 prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
             }
@@ -344,7 +367,7 @@ pub fn decode_name_note<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<N
             }
             NameNote::Release {
                 name,
-                ua: NameNote::parse_ua(params, ua_str)?,
+                ua,
                 prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
             }
         }
@@ -520,7 +543,10 @@ mod tests {
     const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
 
     fn test_ua() -> UnifiedAddress {
-        NameNote::parse_ua(&MAIN_NETWORK, TEST_UA).expect("vector UA parses")
+        match zcash_keys::address::Address::decode(&MAIN_NETWORK, TEST_UA) {
+            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            _ => panic!("vector is a mainnet Unified Address"),
+        }
     }
 
     fn test_name() -> Name {
@@ -587,7 +613,7 @@ mod tests {
         let mut m = [0u8; 512];
         m[..forged.len()].copy_from_slice(forged.as_bytes());
         assert!(decode_name_note(&MAIN_NETWORK, &m).is_none());
-        assert!(NameNote::parse_ua(&MAIN_NETWORK, "u1xxx").is_none());
+        assert!(zcash_keys::address::Address::decode(&MAIN_NETWORK, "u1xxx").is_none());
     }
 
     /// The chain rule: claim/update/release openings all differ, and the
