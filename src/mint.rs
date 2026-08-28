@@ -110,7 +110,6 @@ impl Name {
 // Protocol constants and settlement types
 // ===========================================================================
 
-use zcash_client_backend::wallet::NoteId;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::value::{Zatoshis, COIN};
 
@@ -120,32 +119,11 @@ use zcash_protocol::value::{Zatoshis, COIN};
 /// atomic claim settlement returns any excess to the payer.
 pub const CLAIM_PRICE: Zatoshis = Zatoshis::const_from_u64(COIN);
 
-/// What kind of transaction was broadcast.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SubmissionKind {
-    Claim,
-    Update,
-    Release,
-    OtpRelay,
-    AutoSweep,
-}
-
-impl SubmissionKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Claim => "claim",
-            Self::Update => "update",
-            Self::Release => "release",
-            Self::OtpRelay => "otp_relay",
-            Self::AutoSweep => "sweep",
-        }
-    }
-}
-
-/// The result of processing a single Treasury note request.
+/// The result of processing a single Treasury note request: the txid of the
+/// issued OTP relay payment, or the relay pipeline's error.
 pub struct RequestOutcome {
     pub result: Result<
-        (SubmissionKind, TxId, Vec<NoteId>),
+        TxId,
         zcash_client_backend::data_api::wallet::ProposeTransferErrT<
             crate::wallet::Wallet,
             std::convert::Infallible,

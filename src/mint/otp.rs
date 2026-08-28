@@ -437,7 +437,7 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
 ) -> Option<crate::mint::RequestOutcome> {
-    use crate::mint::{RequestOutcome, SubmissionKind};
+    use crate::mint::RequestOutcome;
     use time::Duration;
 
     if action == Action::Claim || controller_ua.orchard().is_none() {
@@ -456,8 +456,7 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
         controller_ua,
         target_height,
         memo,
-    )
-    .map(|txid| (SubmissionKind::OtpRelay, txid, Vec::new()));
+    );
 
     Some(RequestOutcome {
         result,
