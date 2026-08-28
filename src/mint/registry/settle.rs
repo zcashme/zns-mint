@@ -3,9 +3,8 @@
 //!
 //! The loop sequences (scan → settle → submit → sweep); this module owns
 //! the mint's policy arc per request: payment freshness, price, the
-//! `authorize_*` gates, fee selection and funding, and finalization. The
-//! orchestration never touches a builder; [`super::bundle`] never touches
-//! the wallet.
+//! `authorize_*` gates, fee selection and funding, and transaction
+//! assembly. The orchestration never touches a builder.
 //!
 //! The contract is closed: a claim payment note leaves the intake exactly
 //! one way or the other — it becomes a claim, or it becomes a refund of
@@ -17,30 +16,34 @@ use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::data_api::{SentTransaction, WalletWrite as _};
 use zcash_client_backend::wallet::{NoteId, ReceivedNote};
+use zcash_primitives::transaction::fees::zip317::FeeError;
+use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_primitives::transaction::Transaction;
+use zcash_primitives::transaction::builder::{BuildConfig, Builder};
+use zcash_primitives::transaction::builder::BundlePadding;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 use time::Timestamp;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
-use crate::mint::NameNote;
 use crate::mint::otp::OtpQueue;
+use crate::mint::NameNote;
 use crate::mint::registry::Registry;
 use crate::mint::{Action, CLAIM_PRICE, PROCESSING_FEE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
-
-use super::bundle::{self, PreparedSpend};
 
 /// A change output below this value is not emitted; the fee absorbs it.
 /// The ZIP-317 marginal fee is the conventional dust bound.
 const DUST: Zatoshis = Zatoshis::const_from_u64(5_000);
 
-/// The error surface of the settle step: upstream error payloads plus the
-/// wallet-state conditions that are not upstream errors.
+/// The expiry height buffer: 20 blocks (~25 minutes at 75s/block).
+const TX_EXPIRY_BUFFER: u32 = 20;
+
+/// The error surface of the settle step.
 #[derive(Debug)]
 pub enum SettleError {
-    /// The finalizer rejected the bundle (prove, sign, verify, freeze).
-    Finalize(orchard::builder::BuildError),
+    /// The transaction Builder rejected composition or failed to build.
+    Build(zcash_primitives::transaction::builder::Error<FeeError>),
     /// The wallet rejected the sent-transaction record.
     Store(crate::wallet::WalletError),
     /// A commitment-tree structural error while fetching a witness or anchor.
@@ -49,7 +52,7 @@ pub enum SettleError {
     /// state is behind the chain tip the wallet itself reported.
     Witness,
     /// The ZIP-317 fee computation failed.
-    Fee(zcash_primitives::transaction::fees::zip317::FeeError),
+    Fee(FeeError),
     /// The Treasury float cannot fund the fee for this shape.
     Float,
     /// The predecessor's stored memo does not decode into the transition
@@ -62,7 +65,7 @@ pub enum SettleError {
 impl std::fmt::Display for SettleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SettleError::Finalize(e) => write!(f, "bundle composition or finalization failed: {e}"),
+            SettleError::Build(e) => write!(f, "transaction build failed: {e}"),
             SettleError::Store(e) => write!(f, "wallet rejected the sent transaction: {e}"),
             SettleError::Tree(e) => write!(f, "commitment tree error: {e}"),
             SettleError::Witness => write!(f, "note has no witness at the anchor height"),
@@ -87,6 +90,8 @@ pub struct Settle<'a, P: Parameters> {
     otp_queue: &'a mut OtpQueue,
     treasury_keys: &'a TreasuryKeys,
     registry_keys: &'a RegistryKeys,
+    spend_prover: &'a sapling::circuit::SpendParameters,
+    output_prover: &'a sapling::circuit::OutputParameters,
     tip: BlockHeight,
     target_height: BlockHeight,
 }
@@ -100,6 +105,8 @@ impl<'a, P: Parameters> Settle<'a, P> {
         otp_queue: &'a mut OtpQueue,
         treasury_keys: &'a TreasuryKeys,
         registry_keys: &'a RegistryKeys,
+        spend_prover: &'a sapling::circuit::SpendParameters,
+        output_prover: &'a sapling::circuit::OutputParameters,
         tip: BlockHeight,
         target_height: BlockHeight,
     ) -> Self {
@@ -110,6 +117,8 @@ impl<'a, P: Parameters> Settle<'a, P> {
             otp_queue,
             treasury_keys,
             registry_keys,
+            spend_prover,
+            output_prover,
             tip,
             target_height,
         }
@@ -157,62 +166,68 @@ impl<'a, P: Parameters> Settle<'a, P> {
         Ok(tx)
     }
 
-    /// Settles an OTP-authorized update or release from the controller's
-    /// echo. There is no money at stake — the request note is not consumed
-    /// — so a policy rejection is a silent skip (`Ok(None)`), never a
-    /// transaction. The OTP is consumed only by a successful verification
-    /// inside the authorize step.
-    pub fn transition(
+    /// Settles an OTP-authorized update from the controller's echo.
+    /// Returns `Ok(None)` on policy rejection — no money at stake.
+    pub fn update(
         &mut self,
         name: crate::mint::Name,
-        action: Action,
         ua: zcash_keys::address::UnifiedAddress,
         otp: &[u8; 6],
         mtp: Timestamp,
     ) -> Result<Option<Transaction>, SettleError> {
-        // The predecessor is looked up *before* the OTP is consumed: an
-        // in-flight transition for the same name (its predecessor note
-        // spent-pending) must not burn the controller's pass.
         let Some(record) = self.registry.record(&name).cloned() else {
             return Ok(None);
         };
         if record.action == Action::Release {
             return Ok(None);
         }
-        let Some(predecessor) = self.wallet.unspent_ironwood_note_by_rho(
-            REGISTRY_ACCOUNT,
-            record.rho,
-            TargetHeight::from(self.tip),
-        ) else {
+        let Some(predecessor) = self.predecessor_for(&record)? else {
             return Ok(None);
         };
 
-        let transition = match action {
-            Action::Claim => return Ok(None),
-            Action::Update => {
-                super::authorize_update(self.registry, self.otp_queue, mtp, name, ua, otp)
-            }
-            Action::Release => {
-                super::authorize_release(self.registry, self.otp_queue, mtp, name, ua, otp)
-            }
-        };
-
-        let Some(transition) = transition else {
+        let Some(transition) =
+            super::authorize_update(self.registry, self.otp_queue, mtp, name, ua, otp)
+        else {
             return Ok(None);
         };
 
-        let tx = self.transition_transaction(transition, &predecessor)?;
+        let tx = self.update_transaction(transition, &predecessor)?;
         self.record(&tx)?;
         Ok(Some(tx))
     }
 
-    // -- Transaction assembly (economics + prepared pieces) ------------------
+    /// Settles an OTP-authorized release from the controller's echo.
+    /// Same shape as an update, different authorized note.
+    pub fn release(
+        &mut self,
+        name: crate::mint::Name,
+        ua: zcash_keys::address::UnifiedAddress,
+        otp: &[u8; 6],
+        mtp: Timestamp,
+    ) -> Result<Option<Transaction>, SettleError> {
+        let Some(record) = self.registry.record(&name).cloned() else {
+            return Ok(None);
+        };
+        if record.action == Action::Release {
+            return Ok(None);
+        }
+        let Some(predecessor) = self.predecessor_for(&record)? else {
+            return Ok(None);
+        };
 
-    /// The claim transaction: the payment note is spent, the name note is
-    /// minted, the excess minus the processing fee is refunded to the
-    /// payer, and the retained value less the fee returns to the Treasury's
-    /// internal address. The payment note is the only input — the price
-    /// dwarfs any ZIP-317 fee, so no float top-up is ever needed.
+        let Some(transition) =
+            super::authorize_release(self.registry, self.otp_queue, mtp, name, ua, otp)
+        else {
+            return Ok(None);
+        };
+
+        let tx = self.release_transaction(transition, &predecessor)?;
+        self.record(&tx)?;
+        Ok(Some(tx))
+    }
+
+    // ── Claim ────────────────────────────────────────────────────────────
+
     fn claim_transaction(
         &mut self,
         claim: NameNote,
@@ -222,7 +237,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
             .expect("note values fit in u64 zatoshis by consensus");
         let excess = (payment_value - CLAIM_PRICE).unwrap_or(Zatoshis::ZERO);
         let kept = PROCESSING_FEE.min(excess);
-        let payer = payer_of(&claim);
+        let payer = claim.ua().and_then(|ua| ua.orchard().copied());
         let refund = match (payer, excess > PROCESSING_FEE) {
             (Some(payer), true) => {
                 Some((payer, (excess - PROCESSING_FEE).expect("excess > processing fee")))
@@ -230,121 +245,284 @@ impl<'a, P: Parameters> Settle<'a, P> {
             _ => None,
         };
 
-        // Actions: payment spend + name-note output + refund? + change.
         let fee = self.fee(3 + usize::from(refund.is_some()))?;
         let change = ((CLAIM_PRICE + kept).expect("price plus processing fee fits in u64 zatoshis")
             - fee)
             .expect("CLAIM_PRICE dwarfs any ZIP-317 fee");
 
         let anchor = self.anchor()?;
-        let payment_spend = self.prepare(payment)?;
+        let (payment_note, payment_path) = self.prepare(payment)?;
         let memo = claim.encode(self.network).ok_or(SettleError::Memo)?;
         let (rcm, psi) = claim.opening(self.network);
-        let opening = (orchard::note::NoteCommitTrapdoor::from_inner(rcm), psi);
+        let opening = orchard::note::NoteCommitTrapdoor::from_inner(rcm);
 
-        let bundle = bundle::build_claim_bundle(
-            self.network,
-            anchor,
-            memo,
-            opening,
-            payment_spend,
-            refund,
-            Some(change),
-            self.treasury_keys,
-            self.registry_keys,
+        let registry_fvk = self.registry_keys.orchard_fvk();
+        let treasury_fvk = self.treasury_keys.orchard_fvk();
+
+        let mut builder = Builder::new(
+            self.network.clone(),
             self.target_height,
-        )
-        .map_err(SettleError::Finalize)?;
-        crate::wallet::assembly::build_name_note_transaction(
-            self.network,
-            bundle,
-            self.treasury_keys,
-            self.registry_keys,
-            self.target_height,
-        )
-        .map_err(SettleError::Finalize)
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: Some(anchor),
+                orchard_padding: BundlePadding::DEFAULT,
+                ironwood_padding: BundlePadding::DEFAULT,
+            },
+        );
+        builder = builder.with_expiry_height(self.expiry());
+
+        builder
+            .add_ironwood_spend(treasury_fvk.clone(), payment_note, payment_path)
+            .map_err(SettleError::Build)?;
+
+        builder
+            .add_zns_output(
+                Some(registry_fvk.to_ovk(orchard::keys::Scope::External)),
+                registry_fvk.address_at(0u32, orchard::keys::Scope::External),
+                Zatoshis::ZERO,
+                memo,
+                opening,
+                psi,
+            )
+            .map_err(SettleError::Build)?;
+
+        if let Some((payer, value)) = refund {
+            builder
+                .add_ironwood_output(
+                    Some(treasury_fvk.to_ovk(orchard::keys::Scope::External)),
+                    payer,
+                    value,
+                    zcash_protocol::memo::MemoBytes::empty(),
+                )
+                .map_err(SettleError::Build)?;
+        }
+
+        if change >= DUST {
+            builder
+                .add_ironwood_output(
+                    Some(treasury_fvk.to_ovk(orchard::keys::Scope::Internal)),
+                    treasury_fvk.address_at(0u32, orchard::keys::Scope::Internal),
+                    change,
+                    zcash_protocol::memo::MemoBytes::empty(),
+                )
+                .map_err(SettleError::Build)?;
+        }
+
+        let result = builder
+            .build(
+                &Default::default(),
+                &[],
+                &[
+                    orchard::keys::SpendAuthorizingKey::from(
+                        self.treasury_keys.orchard_spending_key(),
+                    ),
+                    orchard::keys::SpendAuthorizingKey::from(
+                        self.registry_keys.orchard_spending_key(),
+                    ),
+                ],
+                &mut rand::rngs::OsRng,
+                self.spend_prover,
+                self.output_prover,
+                &zcash_primitives::transaction::fees::zip317::FeeRule::standard(),
+            )
+            .map_err(SettleError::Build)?;
+        Ok(result.transaction().clone())
     }
 
-    /// The update or release transaction: the predecessor name note is
-    /// spent under its own transition opening, the successor note is
-    /// minted, and the Treasury float funds the fee.
-    fn transition_transaction(
+    // ── Update ───────────────────────────────────────────────────────────
+
+    fn update_transaction(
         &mut self,
         transition: NameNote,
         predecessor: &ReceivedNote<NoteId, orchard::note::Note>,
     ) -> Result<Transaction, SettleError> {
-        // One name-note spend, one name-note output, one change output —
-        // plus one spend per fee note; notes are added until the float
-        // covers the recomputed fee.
         let (fee_notes, funding, fee) =
             self.select_fee_notes(3, |funding, fee| funding >= fee)?;
         let change = (funding - fee).expect("selection guarantees coverage");
 
         let anchor = self.anchor()?;
-        let predecessor_spend = self.prepare(predecessor)?;
-        let predecessor_opening = self.predecessor_opening(predecessor)?;
+        let (pred_note, pred_path) = self.prepare(predecessor)?;
+        let pred_opening = self.predecessor_opening(predecessor)?;
         let memo = transition.encode(self.network).ok_or(SettleError::Memo)?;
         let (rcm, psi) = transition.opening(self.network);
-        let opening = (orchard::note::NoteCommitTrapdoor::from_inner(rcm), psi);
+        let opening = orchard::note::NoteCommitTrapdoor::from_inner(rcm);
 
-        let change_out = (change >= DUST).then_some(change);
-        let bundle = match transition.action() {
-            Action::Update => bundle::build_update_bundle(
-                self.network,
-                anchor,
-                memo,
-                opening,
-                predecessor_spend,
-                predecessor_opening,
-                &fee_notes,
-                change_out,
-                self.treasury_keys,
-                self.registry_keys,
-                self.target_height,
-            ),
-            // Releases are unreachable here — `transition` gates them out —
-            // but the composition is the release path's, kept for
-            // completeness of the fork surface.
-            Action::Release => bundle::build_release_bundle(
-                self.network,
-                anchor,
-                memo,
-                opening,
-                predecessor_spend,
-                predecessor_opening,
-                &fee_notes,
-                (change >= DUST).then_some(change),
-                self.treasury_keys,
-                self.registry_keys,
-                self.target_height,
-            ),
-            Action::Claim => unreachable!("settle::transition gates claims out"),
-        }
-        .map_err(SettleError::Finalize)?;
-        crate::wallet::assembly::build_name_note_transaction(
-            self.network,
-            bundle,
-            self.treasury_keys,
-            self.registry_keys,
+        let registry_fvk = self.registry_keys.orchard_fvk();
+        let treasury_fvk = self.treasury_keys.orchard_fvk();
+
+        let mut builder = Builder::new(
+            self.network.clone(),
             self.target_height,
-        )
-        .map_err(SettleError::Finalize)
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: Some(anchor),
+                orchard_padding: BundlePadding::DEFAULT,
+                ironwood_padding: BundlePadding::DEFAULT,
+            },
+        );
+        builder = builder.with_expiry_height(self.expiry());
+
+        builder
+            .add_zns_spend(
+                registry_fvk.clone(),
+                pred_note,
+                pred_path,
+                pred_opening.0,
+                pred_opening.1,
+            )
+            .map_err(SettleError::Build)?;
+
+        builder
+            .add_zns_output(
+                Some(registry_fvk.to_ovk(orchard::keys::Scope::External)),
+                registry_fvk.address_at(0u32, orchard::keys::Scope::External),
+                Zatoshis::ZERO,
+                memo,
+                opening,
+                psi,
+            )
+            .map_err(SettleError::Build)?;
+
+        for spend in &fee_notes {
+            builder
+                .add_ironwood_spend(treasury_fvk.clone(), spend.0.clone(), spend.1.clone())
+                .map_err(SettleError::Build)?;
+        }
+
+        if change >= DUST {
+            builder
+                .add_ironwood_output(
+                    Some(treasury_fvk.to_ovk(orchard::keys::Scope::Internal)),
+                    treasury_fvk.address_at(0u32, orchard::keys::Scope::Internal),
+                    change,
+                    zcash_protocol::memo::MemoBytes::empty(),
+                )
+                .map_err(SettleError::Build)?;
+        }
+
+        let result = builder
+            .build(
+                &Default::default(),
+                &[],
+                &[
+                    orchard::keys::SpendAuthorizingKey::from(
+                        self.treasury_keys.orchard_spending_key(),
+                    ),
+                    orchard::keys::SpendAuthorizingKey::from(
+                        self.registry_keys.orchard_spending_key(),
+                    ),
+                ],
+                &mut rand::rngs::OsRng,
+                self.spend_prover,
+                self.output_prover,
+                &zcash_primitives::transaction::fees::zip317::FeeRule::standard(),
+            )
+            .map_err(SettleError::Build)?;
+        Ok(result.transaction().clone())
     }
 
-    /// The rejection refund: the payment is consumed, its value minus the
-    /// fee and the processing charge returns to the payer, and the
-    /// Treasury nets the processing charge. When the payment is too small
-    /// to fund a refund even with float top-up, everything is retained
-    /// (saturating) — every rejected claim is self-funding.
+    // ── Release ──────────────────────────────────────────────────────────
+
+    fn release_transaction(
+        &mut self,
+        transition: NameNote,
+        predecessor: &ReceivedNote<NoteId, orchard::note::Note>,
+    ) -> Result<Transaction, SettleError> {
+        let (fee_notes, funding, fee) =
+            self.select_fee_notes(3, |funding, fee| funding >= fee)?;
+        let change = (funding - fee).expect("selection guarantees coverage");
+
+        let anchor = self.anchor()?;
+        let (pred_note, pred_path) = self.prepare(predecessor)?;
+        let pred_opening = self.predecessor_opening(predecessor)?;
+        let memo = transition.encode(self.network).ok_or(SettleError::Memo)?;
+        let (rcm, psi) = transition.opening(self.network);
+        let opening = orchard::note::NoteCommitTrapdoor::from_inner(rcm);
+
+        let registry_fvk = self.registry_keys.orchard_fvk();
+        let treasury_fvk = self.treasury_keys.orchard_fvk();
+
+        let mut builder = Builder::new(
+            self.network.clone(),
+            self.target_height,
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: Some(anchor),
+                orchard_padding: BundlePadding::DEFAULT,
+                ironwood_padding: BundlePadding::DEFAULT,
+            },
+        );
+        builder = builder.with_expiry_height(self.expiry());
+
+        builder
+            .add_zns_spend(
+                registry_fvk.clone(),
+                pred_note,
+                pred_path,
+                pred_opening.0,
+                pred_opening.1,
+            )
+            .map_err(SettleError::Build)?;
+
+        builder
+            .add_zns_output(
+                Some(registry_fvk.to_ovk(orchard::keys::Scope::External)),
+                registry_fvk.address_at(0u32, orchard::keys::Scope::External),
+                Zatoshis::ZERO,
+                memo,
+                opening,
+                psi,
+            )
+            .map_err(SettleError::Build)?;
+
+        for spend in &fee_notes {
+            builder
+                .add_ironwood_spend(treasury_fvk.clone(), spend.0.clone(), spend.1.clone())
+                .map_err(SettleError::Build)?;
+        }
+
+        if change >= DUST {
+            builder
+                .add_ironwood_output(
+                    Some(treasury_fvk.to_ovk(orchard::keys::Scope::Internal)),
+                    treasury_fvk.address_at(0u32, orchard::keys::Scope::Internal),
+                    change,
+                    zcash_protocol::memo::MemoBytes::empty(),
+                )
+                .map_err(SettleError::Build)?;
+        }
+
+        let result = builder
+            .build(
+                &Default::default(),
+                &[],
+                &[
+                    orchard::keys::SpendAuthorizingKey::from(
+                        self.treasury_keys.orchard_spending_key(),
+                    ),
+                    orchard::keys::SpendAuthorizingKey::from(
+                        self.registry_keys.orchard_spending_key(),
+                    ),
+                ],
+                &mut rand::rngs::OsRng,
+                self.spend_prover,
+                self.output_prover,
+                &zcash_primitives::transaction::fees::zip317::FeeRule::standard(),
+            )
+            .map_err(SettleError::Build)?;
+        Ok(result.transaction().clone())
+    }
+
+    // ── Refund ───────────────────────────────────────────────────────────
+
     fn refund_transaction(
         &mut self,
         payment: &ReceivedNote<NoteId, orchard::note::Note>,
         payer: Option<orchard::Address>,
     ) -> Result<Transaction, SettleError> {
-        // Float notes are added until a refund output becomes possible
-        // (pool ≥ fee + processing fee) — or, when the payer has no
-        // Ironwood receiver, until the fee alone is covered and the whole
-        // payment is retained.
         let covered = |funding: Zatoshis, fee: Zatoshis| match payer {
             Some(_) => funding
                 >= (fee + PROCESSING_FEE).expect("fee and processing fee fit in u64 zatoshis"),
@@ -364,33 +542,78 @@ impl<'a, P: Parameters> Settle<'a, P> {
         };
 
         let anchor = self.anchor()?;
-        let payment_spend = self.prepare(payment)?;
-        let bundle = bundle::build_refund_bundle(
-            self.network,
-            anchor,
-            payment_spend,
-            refund,
-            (change >= DUST).then_some(change),
-            &fee_notes,
-            self.treasury_keys,
+        let (payment_note, payment_path) = self.prepare(payment)?;
+
+        let treasury_fvk = self.treasury_keys.orchard_fvk();
+
+        let mut builder = Builder::new(
+            self.network.clone(),
             self.target_height,
-        )
-        .map_err(SettleError::Finalize)?;
-        crate::wallet::assembly::build_name_note_transaction(
-            self.network,
-            bundle,
-            self.treasury_keys,
-            self.registry_keys,
-            self.target_height,
-        )
-        .map_err(SettleError::Finalize)
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: Some(anchor),
+                orchard_padding: BundlePadding::DEFAULT,
+                ironwood_padding: BundlePadding::DEFAULT,
+            },
+        );
+        builder = builder.with_expiry_height(self.expiry());
+
+        builder
+            .add_ironwood_spend(treasury_fvk.clone(), payment_note, payment_path)
+            .map_err(SettleError::Build)?;
+
+        for (note, path) in &fee_notes {
+            builder
+                .add_ironwood_spend(treasury_fvk.clone(), note.clone(), path.clone())
+                .map_err(SettleError::Build)?;
+        }
+
+        if let Some((payer, value)) = refund {
+            builder
+                .add_ironwood_output(
+                    Some(treasury_fvk.to_ovk(orchard::keys::Scope::External)),
+                    payer,
+                    value,
+                    zcash_protocol::memo::MemoBytes::empty(),
+                )
+                .map_err(SettleError::Build)?;
+        }
+
+        if change >= DUST {
+            builder
+                .add_ironwood_output(
+                    Some(treasury_fvk.to_ovk(orchard::keys::Scope::Internal)),
+                    treasury_fvk.address_at(0u32, orchard::keys::Scope::Internal),
+                    change,
+                    zcash_protocol::memo::MemoBytes::empty(),
+                )
+                .map_err(SettleError::Build)?;
+        }
+
+        let result = builder
+            .build(
+                &Default::default(),
+                &[],
+                &[
+                    orchard::keys::SpendAuthorizingKey::from(
+                        self.treasury_keys.orchard_spending_key(),
+                    ),
+                    orchard::keys::SpendAuthorizingKey::from(
+                        self.registry_keys.orchard_spending_key(),
+                    ),
+                ],
+                &mut rand::rngs::OsRng,
+                self.spend_prover,
+                self.output_prover,
+                &zcash_primitives::transaction::fees::zip317::FeeRule::standard(),
+            )
+            .map_err(SettleError::Build)?;
+        Ok(result.transaction().clone())
     }
 
-    // -- Wallet projections --------------------------------------------------
+    // ── Wallet projections ───────────────────────────────────────────────
 
-    /// The Ironwood anchor at the tip — the root every spend of this pass
-    /// is witnessed under. A missing root at the tip the wallet itself
-    /// reported is a structural inconsistency, not a transient.
     fn anchor(&mut self) -> Result<orchard::tree::Anchor, SettleError> {
         self.wallet
             .ironwood_anchor(self.tip)
@@ -398,23 +621,28 @@ impl<'a, P: Parameters> Settle<'a, P> {
             .ok_or(SettleError::Witness)
     }
 
-    /// A spend prepared with its witness under the anchor.
     fn prepare(
         &mut self,
         note: &ReceivedNote<NoteId, orchard::note::Note>,
-    ) -> Result<PreparedSpend, SettleError> {
+    ) -> Result<(orchard::note::Note, orchard::tree::MerklePath), SettleError> {
         let path = self
             .wallet
             .ironwood_witness(note.note_commitment_tree_position(), self.tip)
             .map_err(SettleError::Tree)?
             .ok_or(SettleError::Witness)
             .map(orchard::tree::MerklePath::from)?;
-        Ok(PreparedSpend { note: note.note().clone(), path })
+        Ok((note.note().clone(), path))
     }
 
-    /// The ZIP-317 fee for `ironwood_actions` actions.
+    fn expiry(&self) -> BlockHeight {
+        BlockHeight::from_u32(
+            u32::from(self.target_height)
+                .checked_add(TX_EXPIRY_BUFFER)
+                .expect("target height + expiry buffer fits in u32"),
+        )
+    }
+
     fn fee(&self, ironwood_actions: usize) -> Result<Zatoshis, SettleError> {
-        use zcash_primitives::transaction::fees::FeeRule as _;
         zcash_primitives::transaction::fees::zip317::FeeRule::standard()
             .fee_required(
                 self.network,
@@ -429,15 +657,23 @@ impl<'a, P: Parameters> Settle<'a, P> {
             .map_err(SettleError::Fee)
     }
 
-    /// Greedily witnesses Treasury fee notes (largest first) until
-    /// `covered(funding, fee)` holds. Each added note is one more spend —
-    /// one more action — so the fee is recomputed after every addition.
-    /// `Float` if the float is exhausted without coverage.
+    fn predecessor_for(
+        &self,
+        record: &crate::mint::registry::NameRecord,
+    ) -> Result<Option<ReceivedNote<NoteId, orchard::note::Note>>, SettleError> {
+        Ok(self.wallet.unspent_ironwood_note_by_rho(
+            REGISTRY_ACCOUNT,
+            record.rho,
+            TargetHeight::from(self.tip),
+        ))
+    }
+
     fn select_fee_notes(
         &mut self,
         base_actions: usize,
         covered: impl Fn(Zatoshis, Zatoshis) -> bool,
-    ) -> Result<(Vec<PreparedSpend>, Zatoshis, Zatoshis), SettleError> {
+    ) -> Result<(Vec<(orchard::note::Note, orchard::tree::MerklePath)>, Zatoshis, Zatoshis), SettleError>
+    {
         let candidates = crate::mint::treasury::fee_note_candidates(self.wallet, self.tip);
         let mut prepared = Vec::new();
         let mut funding = Zatoshis::ZERO;
@@ -446,7 +682,8 @@ impl<'a, P: Parameters> Settle<'a, P> {
             if covered(funding, fee) {
                 break;
             }
-            prepared.push(self.prepare(&note)?);
+            let (n, p) = self.prepare(&note)?;
+            prepared.push((n, p));
             funding = (funding
                 + Zatoshis::from_u64(note.note().value().inner())
                     .expect("note values fit in u64 zatoshis by consensus"))
@@ -459,10 +696,6 @@ impl<'a, P: Parameters> Settle<'a, P> {
         Ok((prepared, funding, fee))
     }
 
-    /// The (rcm, ψ) opening of a name note already on chain: decoded from
-    /// its stored memo, which is the same payload the minted note's
-    /// commitment was derived from — so the spend's opening is
-    /// self-verifying against the predecessor's cmx.
     fn predecessor_opening(
         &self,
         note: &ReceivedNote<NoteId, orchard::note::Note>,
@@ -482,14 +715,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
         Ok((orchard::note::NoteCommitTrapdoor::from_inner(rcm), psi))
     }
 
-    /// Records the built transaction's spends into the wallet so the next
-    /// intake pass cannot re-select the consumed notes — the wallet's
-    /// pending-spend map is the whole of submission tracking. If the
-    /// transaction expires unmined, the spend records release the notes
-    /// automatically.
     fn record(&mut self, tx: &Transaction) -> Result<(), SettleError> {
-        // Output bookkeeping is not consumed by any wallet read today;
-        // the spend records are what protect against double selection.
         let sent = SentTransaction::new(
             tx,
             time::OffsetDateTime::now_utc(),
@@ -503,9 +729,4 @@ impl<'a, P: Parameters> Settle<'a, P> {
             .store_transactions_to_be_sent(&[sent])
             .map_err(SettleError::Store)
     }
-}
-/// The claim refund target: the bound UA's Ironwood-capable receiver, when
-/// its address carries one.
-fn payer_of(claim: &NameNote) -> Option<orchard::Address> {
-    claim.ua().and_then(|ua| ua.orchard().copied())
 }

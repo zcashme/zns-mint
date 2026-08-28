@@ -1,6 +1,5 @@
 //! In-memory wallet database for the ZNS mint.
 
-pub mod assembly;
 mod input;
 mod read;
 mod trees;
