@@ -1,13 +1,6 @@
 //! The V6 Ironwood transaction finalizer.
-//!
-//! [`assemble_v6_transaction`] proves, signs, and freezes an Ironwood bundle
-//! into a V6 [`Transaction`]. This is the equivalent of
-//! `zcash_primitives::transaction::builder::Builder::build` for the Ironwood
-//! path, extracted because the upstream `Builder` keeps its inner
-//! `ironwood_builder` private, preventing callers from reaching
-//! `add_zns_spend` / `add_zns_output` (behind `unsafe-zns` on the orchard
-//! crate).
 
+use orchard::builder::UnauthorizedBundle;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
@@ -22,33 +15,12 @@ use crate::key::{RegistryKeys, TreasuryKeys};
 /// The expiry height buffer: 20 blocks (~25 minutes at 75s/block).
 const TX_EXPIRY_BUFFER: u32 = 20;
 
-/// The common unsigned bundle type used by this module.
-type UnsignedBundle = orchard::Bundle<
-    orchard::builder::InProgress<orchard::builder::Unproven, orchard::builder::Unauthorized>,
-    ZatBalance,
->;
 
-/// Proves, signs, and freezes a V6 transaction containing one Ironwood
-/// bundle.
-///
-/// This is the transaction finalizer for ZNS Name Note issuance: it takes a
-/// pre-built unproven Ironwood bundle (constructed with `add_zns_spend` /
-/// `add_zns_output` + standard `add_spend` / `add_output` for Treasury fee
-/// notes) and produces an authorized, broadcastable V6 transaction.
-///
-/// Authority is per-spend: the caller passes exactly the signing keys its
-/// spends require. For a Name Note claim (dual authority), both
-/// [`TreasuryKeys`] and [`RegistryKeys`] are supplied; the builder's
-/// `apply_signatures` matches each action to its key by `ak`.
-///
-/// This mirrors the Ironwood path of
-/// `zcash_primitives::transaction::builder::Builder::build_internal`:
-/// construct the unauthed transaction → compute the shared shielded sighash
-/// → prove with the in-memory orchard proving key → sign with the supplied
-/// keys → verify → freeze.
+/// The transaction finalizer for ZNS Name Note issuance: proves, signs, and
+/// freezes a V6 transaction containing one Ironwood bundle.
 pub fn assemble_v6_transaction<P: Parameters>(
     network: &P,
-    ironwood_bundle: UnsignedBundle,
+    ironwood_bundle: UnauthorizedBundle<ZatBalance>,
     treasury_signer: Option<&TreasuryKeys>,
     registry_signer: Option<&RegistryKeys>,
     target_height: BlockHeight,
@@ -139,23 +111,23 @@ pub fn assemble_v6_transaction<P: Parameters>(
 
     // Verify the effecting data committed by the sighash has not changed.
     let final_txid_parts = final_tx.digest(TxIdDigester);
-    let tx_digests_match =
-        final_txid_parts.header_digest.as_bytes() == txid_parts.header_digest.as_bytes()
-            && final_txid_parts
-                .sapling_digest
-                .as_ref()
-                .map(|h| h.as_bytes())
-                == txid_parts.sapling_digest.as_ref().map(|h| h.as_bytes())
-            && final_txid_parts
-                .orchard_digest
-                .as_ref()
-                .map(|h| h.as_bytes())
-                == txid_parts.orchard_digest.as_ref().map(|h| h.as_bytes())
-            && final_txid_parts
-                .ironwood_digest
-                .as_ref()
-                .map(|h| h.as_bytes())
-                == txid_parts.ironwood_digest.as_ref().map(|h| h.as_bytes());
+    let tx_digests_match = final_txid_parts.header_digest.as_bytes()
+        == txid_parts.header_digest.as_bytes()
+        && final_txid_parts
+            .sapling_digest
+            .as_ref()
+            .map(|h| h.as_bytes())
+            == txid_parts.sapling_digest.as_ref().map(|h| h.as_bytes())
+        && final_txid_parts
+            .orchard_digest
+            .as_ref()
+            .map(|h| h.as_bytes())
+            == txid_parts.orchard_digest.as_ref().map(|h| h.as_bytes())
+        && final_txid_parts
+            .ironwood_digest
+            .as_ref()
+            .map(|h| h.as_bytes())
+            == txid_parts.ironwood_digest.as_ref().map(|h| h.as_bytes());
 
     if !tx_digests_match {
         return Err(crate::mint::AssemblyError::SighashMismatch);
