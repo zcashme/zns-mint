@@ -18,6 +18,7 @@ use crate::wallet::Wallet;
 use std::collections::BTreeMap;
 use time::Timestamp;
 use zcash_client_backend::data_api::ScannedBlock;
+use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
@@ -321,7 +322,8 @@ impl Registry {
     ) -> Self {
         let mut next = self.clone();
         let height = scanned.height();
-        let mut available_registry_fees = wallet.unspent_ironwood_nullifiers(REGISTRY_ACCOUNT);
+        let mut available_registry_fees =
+            wallet.unspent_ironwood_nullifiers(REGISTRY_ACCOUNT, TargetHeight::from(height));
 
         // Group the supplemental Name Note lane and the scanner's spent
         // nullifiers by txid, in one pass each.

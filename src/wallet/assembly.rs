@@ -14,7 +14,7 @@
 //!    crate).
 
 use incrementalmerkletree::{MerklePath, Position};
-use zcash_client_backend::data_api::{ScannedBlock, WalletCommitmentTrees};
+use zcash_client_backend::data_api::{ScannedBlock, WalletCommitmentTrees, wallet::TargetHeight};
 use zcash_client_backend::wallet::{NoteId, ReceivedNote};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::BlockHeight;
@@ -186,27 +186,31 @@ pub fn assemble_v6_transaction<P: Parameters>(
 // ---------------------------------------------------------------------------
 
 impl Wallet {
-    /// Returns every unspent Ironwood note owned by `account`.
+    /// Returns every Ironwood note owned by `account` with no spend that is
+    /// pending or mined as of `tip`: a spend recorded by a transaction whose
+    /// expiry height has passed releases its note.
     pub fn unspent_ironwood_notes(
         &self,
         account: AccountId,
+        tip: TargetHeight,
     ) -> Vec<ReceivedNote<NoteId, orchard::note::Note>> {
         self.ironwood_notes
             .iter()
             .filter(move |(_, output)| *output.account_id() == account)
-            .filter(|(note_id, _)| !self.ironwood_note_spends.contains_key(note_id))
+            .filter(|(note_id, _)| !self.ironwood_note_is_spent(note_id, tip))
             .filter_map(|(note_id, _)| self.ironwood_received_note(*note_id))
             .collect()
     }
 
-    /// Returns one unspent Ironwood note by its LRZ wallet identity.
+    /// Returns one Ironwood note with no pending-or-mined spend as of `tip`.
     pub(crate) fn unspent_ironwood_note(
         &self,
         account: AccountId,
         note_id: NoteId,
+        tip: TargetHeight,
     ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
         let output = self.ironwood_notes.get(&note_id)?;
-        (*output.account_id() == account && !self.ironwood_note_spends.contains_key(&note_id))
+        (*output.account_id() == account && !self.ironwood_note_is_spent(&note_id, tip))
             .then(|| self.ironwood_received_note(note_id))
             .flatten()
     }
@@ -217,6 +221,7 @@ impl Wallet {
         &self,
         account: AccountId,
         rho: orchard::note::Rho,
+        tip: TargetHeight,
     ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
         let note_id = self
             .ironwood_notes
@@ -225,23 +230,25 @@ impl Wallet {
                 *output.account_id() == account && output.note().0.rho() == rho
             })
             .map(|(note_id, _)| *note_id)?;
-        self.unspent_ironwood_note(account, note_id)
+        self.unspent_ironwood_note(account, note_id, tip)
     }
 
-    /// Returns the nullifiers of all unspent Ironwood notes owned by `account`,
-    /// including value-0 notes: the Registry's Name Notes are value-0, and
-    /// their nullifiers are what identifies a Registry spend in
+    /// Returns the nullifiers of all Ironwood notes owned by `account` with
+    /// no pending-or-mined spend as of `tip`, including value-0 notes: the
+    /// Registry's Name Notes are value-0, and their nullifiers are what
+    /// identifies a Registry spend in
     /// [`Registry::apply_block`](crate::mint::registry::Registry::apply_block)'s
     /// mint-authority check.
     pub(crate) fn unspent_ironwood_nullifiers(
         &self,
         account: AccountId,
+        tip: TargetHeight,
     ) -> Vec<orchard::note::Nullifier> {
         self.ironwood_notes
             .iter()
             .filter(|(note_id, output)| {
                 *output.account_id() == account
-                    && !self.ironwood_note_spends.contains_key(note_id)
+                    && !self.ironwood_note_is_spent(note_id, tip)
             })
             .filter_map(|(_, output)| output.nf().copied())
             .collect()

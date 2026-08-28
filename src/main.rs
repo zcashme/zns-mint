@@ -29,6 +29,7 @@ use std::time::Duration as StdDuration;
 
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::data_api::WalletWrite as _;
+use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::scanning::Nullifiers;
 use zcash_client_backend::scanning::ScanningKeys;
 use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
@@ -447,7 +448,7 @@ async fn main() {
             // Intake: every confirmed Treasury note. Spent notes are naturally
             // excluded because the wallet marks them spent on broadcast.
             let intake: Vec<_> = wallet
-                .unspent_ironwood_notes(TREASURY_ACCOUNT)
+                .unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip))
                 .into_iter()
                 .filter(|note| note.mined_height().is_some())
                 .collect();
