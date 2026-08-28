@@ -1,6 +1,7 @@
 //! The V6 Ironwood transaction finalizer.
 
 use orchard::builder::{BuildError, UnauthorizedBundle};
+use zcash_primitives::transaction::components::orchard::bundle_version_for_branch;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
@@ -35,17 +36,22 @@ pub fn build_name_note_transaction<P: Parameters>(
     };
     use zcash_protocol::consensus::BranchId;
 
+    // The circuit version is fixed by the consensus branch at the target
+    // height — a property of the chain, not of the bundle we were handed.
+    let branch_id = BranchId::for_height(network, target_height);
+    let bundle_version = bundle_version_for_branch(branch_id, orchard::ValuePool::Ironwood)
+        .expect("Ironwood exists only from NU6.3; the mint targets NU6.3+");
+
+    // Cross-check: the bundle's self-declared version must agree with the
+    // chain's derivation. For NU6.3+ Ironwood this is always ironwood_v3.
     assert_eq!(
         ironwood_bundle.bundle_version(),
-        orchard::bundle::BundleVersion::ironwood_v3(),
-        "only ironwood_v3 bundles are constructed by the mint"
+        bundle_version,
+        "bundle version does not match the consensus branch at target height"
     );
 
-    // Cache the proving and verifying keys across calls.
-    static PK: OnceLock<ProvingKey> = OnceLock::new();
-    static VK: OnceLock<VerifyingKey> = OnceLock::new();
+    let circuit_version = bundle_version.circuit_version();
 
-    let branch_id = BranchId::for_height(network, target_height);
     let expiry_height = BlockHeight::from_u32(
         u32::from(target_height)
             .checked_add(TX_EXPIRY_BUFFER)
@@ -74,12 +80,20 @@ pub fn build_name_note_transaction<P: Parameters>(
     ];
     let mut rng = OsRng;
 
-    let circuit_version = ironwood_bundle.circuit_version();
+    // Cache the proving and verifying keys across calls. Every revision in
+    // the NU6.3+ era shares one circuit, so a single cell per key is valid
+    // for as long as this derivation holds; the assert below is the tripwire
+    // that fires if a future revision changes the circuit.
+    static PK: OnceLock<ProvingKey> = OnceLock::new();
+    static VK: OnceLock<VerifyingKey> = OnceLock::new();
 
     let pk = PK.get_or_init(|| ProvingKey::build(circuit_version));
     let vk = VK.get_or_init(|| VerifyingKey::build(circuit_version));
-    assert_eq!(pk.circuit_version(), circuit_version);
-    assert_eq!(vk.circuit_version(), circuit_version);
+    assert_eq!(
+        pk.circuit_version(),
+        circuit_version,
+        "cached proving key is from a different circuit era — a new network upgrade needs this code revisited"
+    );
 
     let proven = ironwood_bundle
         .create_proof(pk, &mut rng)?;
