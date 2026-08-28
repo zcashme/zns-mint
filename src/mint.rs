@@ -144,7 +144,7 @@ impl SubmissionKind {
 
 /// The result of processing a single Treasury note request.
 pub struct RequestOutcome {
-    pub result: Result<(SubmissionKind, TxId, String, Vec<NoteId>), AssemblyError>,
+    pub result: Result<(SubmissionKind, TxId, Vec<NoteId>), AssemblyError>,
     pub relay_otp: Option<crate::mint::otp::OtpRequest>,
 }
 

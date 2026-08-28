@@ -304,14 +304,13 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
     controller_ua: &UnifiedAddress,
     target_height: zcash_protocol::consensus::BlockHeight,
     memo: [u8; 512],
-) -> Result<(zcash_primitives::transaction::TxId, String), crate::mint::AssemblyError> {
+) -> Result<zcash_primitives::transaction::TxId, crate::mint::AssemblyError> {
     use zcash_client_backend::data_api::wallet::input_selection::{
         GreedyInputSelector, SpendPolicy,
     };
     use zcash_client_backend::data_api::wallet::{
         create_proposed_transactions, propose_transfer, ConfirmationsPolicy, SpendingKeys,
     };
-    use zcash_client_backend::data_api::WalletRead as _;
     use zcash_client_backend::fees::{
         standard::SingleOutputChangeStrategy, DustOutputPolicy, StandardFeeRule,
     };
@@ -411,13 +410,10 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
     )?;
 
     let txid = *txids.first();
-    let tx = wallet
-        .get_transaction(txid)
-        .ok()
-        .flatten()
-        .ok_or(crate::mint::AssemblyError::NoteNotFound)?;
-    let hex = crate::wallet::assembly::serialize_tx(&tx)?;
-    Ok((txid, hex))
+    // Serialization and broadcast happen at the submission boundary
+    // (`zcash::submit_transaction`); upstream returns txids only and stores
+    // the built transaction in the wallet for later retrieval.
+    Ok(txid)
 }
 
 /// Validates an OTP relay request (update or release without OTP) and issues
@@ -464,7 +460,7 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
         target_height,
         memo,
     )
-    .map(|(txid, hex)| (SubmissionKind::OtpRelay, txid, hex, Vec::new()));
+    .map(|txid| (SubmissionKind::OtpRelay, txid, Vec::new()));
 
     Some(RequestOutcome {
         result,

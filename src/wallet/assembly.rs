@@ -181,14 +181,6 @@ pub fn assemble_v6_transaction<P: Parameters>(
     Ok(tx)
 }
 
-/// Serializes an authorized transaction to broadcastable hex.
-pub fn serialize_tx(tx: &Transaction) -> Result<String, crate::mint::AssemblyError> {
-    let mut tx_bytes = Vec::new();
-    tx.write(&mut tx_bytes)
-        .map_err(|_| crate::mint::AssemblyError::Serialize)?;
-    Ok(hex::encode(tx_bytes))
-}
-
 // ---------------------------------------------------------------------------
 // Wallet queries
 // ---------------------------------------------------------------------------

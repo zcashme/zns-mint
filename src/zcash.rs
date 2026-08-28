@@ -413,22 +413,37 @@ impl CanonicalBlockSource {
         self.0.get_block(network, height).await
     }
 
-    /// Verifies the canonical tip hasn't moved, then broadcasts a signed transaction.
+    /// Broadcasts a signed transaction to the network.
+    ///
+    /// Serialization to raw hex happens here, at the submission boundary, at
+    /// the last possible moment — upstream's transaction-creation APIs return
+    /// [`TxId`]s only and leave retrieval and serialization to the caller, so
+    /// this is that caller. The expected transaction ID is derived from the
+    /// transaction itself; callers cannot submit a mismatched identifier.
     ///
     /// Returns [`SubmitOutcome`] for application-level results (accepted, rejected,
     /// tip changed) or `Err(TransportError)` for retryable transport failures.
     pub async fn submit_transaction(
         &self,
-        hex: &str,
-        expected_txid: &str,
+        tx: &Transaction,
         expected_height: BlockHeight,
         expected_hash: BlockHash,
     ) -> Result<SubmitOutcome, TransportError> {
+        let expected_txid = tx.txid().to_string();
+        let mut tx_bytes = Vec::new();
+        // Serializing a completed Transaction into a Vec cannot fail; the
+        // io::Result exists for streaming writers. Mapped to BadNodeData —
+        // the only error class for "bytes we were handed are malformed" —
+        // and unreachable in practice.
+        tx.write(&mut tx_bytes)
+            .map_err(|_| TransportError::BadNodeData("transaction serialization failed"))?;
+        let raw_tx_hex = hex::encode(tx_bytes);
+
         let (tip_height, tip_hash) = self.exact_tip().await?;
         if tip_height != expected_height || tip_hash != expected_hash {
             return Ok(SubmitOutcome::TipChanged);
         }
-        match self.0.send(hex).await {
+        match self.0.send(&raw_tx_hex).await {
             Ok(returned_txid) if returned_txid == expected_txid => Ok(SubmitOutcome::Accepted),
             Ok(returned_txid) => Ok(SubmitOutcome::TxIdMismatch { returned_txid }),
             Err(TransportError::Rpc(ref rpc_err)) if rpc_err.is_tx_already_in_chain() => {
