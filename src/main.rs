@@ -42,162 +42,8 @@ use zns_mint::mint::otp::{decode_otp_relay_memo, OtpQueue};
 use zns_mint::mint::treasury::parse_request;
 use time::Timestamp;
 use zns_mint::mint::{decrypt_name_notes, ChainTip};
-use zns_mint::wallet::assembly::{assemble_v6_transaction, serialize_tx};
-use zns_mint::mint::{TREASURY_ACCOUNT, AssemblyError};
+use zns_mint::mint::TREASURY_ACCOUNT;
 use zns_mint::zcash::{self, CanonicalBlockSource, JsonRpc, SubmitOutcome};
-
-/// Minimum spendable Treasury balance to trigger a vault sweep (2 ZEC).
-const SWEEP_THRESHOLD: zcash_protocol::value::Zatoshis = zcash_protocol::value::Zatoshis::const_from_u64(200_000_000);
-
-/// Amount retained as Treasury change after a sweep (0.01 ZEC).
-const SWEEP_RESERVE: zcash_protocol::value::Zatoshis = zcash_protocol::value::Zatoshis::const_from_u64(1_000_000);
-
-/// The project vault's P2PKH address (placeholder pending final approved address).
-const VAULT_ADDRESS: zcash_primitives::transparent::address::TransparentAddress =
-    zcash_primitives::transparent::address::TransparentAddress::PublicKeyHash([0x42; 20]);
-
-/// Sweeps excess Treasury Ironwood balance to the project vault.
-fn sweep_ironwood_to_vault<P: Parameters>(
-    network: &P,
-    wallet: &mut zns_mint::wallet::Wallet,
-    treasury_keys: &zns_mint::key::TreasuryKeys,
-) -> Result<Option<zcash_primitives::transaction::TxId>, AssemblyError> {
-    use zcash_client_backend::data_api::wallet::{
-        create_proposed_transactions, propose_transfer, ConfirmationsPolicy, SpendingKeys,
-    };
-    use zcash_client_backend::data_api::wallet::input_selection::{
-        GreedyInputSelector, LockFilter, LockedInputPolicy, SpendPolicy,
-    };
-    use zcash_client_backend::fees::{standard::SingleOutputChangeStrategy, DustOutputPolicy, StandardFeeRule};
-    use zcash_client_backend::wallet::OvkPolicy;
-    use zcash_protocol::ShieldedPool;
-    use zcash_protocol::value::Zatoshis;
-
-    let spendable = wallet
-        .account_balances()
-        .get(&TREASURY_ACCOUNT)
-        .map(|b| b.ironwood_balance().spendable_value())
-        .unwrap_or(Zatoshis::ZERO);
-    if spendable <= SWEEP_THRESHOLD {
-        return Ok(None);
-    }
-
-    let sweep_amount = (spendable - SWEEP_RESERVE).ok_or(AssemblyError::InsufficientFunds)?;
-    let recipient = zcash_keys::address::Address::Transparent(VAULT_ADDRESS).to_zcash_address(network);
-    let payment = zip321::Payment::new(recipient, Some(sweep_amount), None, None, None, Vec::new())
-        .map_err(|e| AssemblyError::UpstreamTransfer(format!("{e:?}")))?;
-    let request = zip321::TransactionRequest::new(vec![payment])
-        .map_err(|e| AssemblyError::UpstreamTransfer(format!("{e:?}")))?;
-
-    let input_selector = GreedyInputSelector::new();
-    let change_strategy = SingleOutputChangeStrategy::<zns_mint::wallet::Wallet>::new(
-        StandardFeeRule::Zip317,
-        None,
-        ShieldedPool::Ironwood,
-        DustOutputPolicy::default(),
-    );
-    let proposal = propose_transfer(
-        wallet,
-        network,
-        TREASURY_ACCOUNT,
-        &input_selector,
-        &change_strategy,
-        request,
-        ConfirmationsPolicy::new_symmetrical(std::num::NonZeroU32::MIN, false),
-        &SpendPolicy::shielded_pools([ShieldedPool::Ironwood]),
-        None,
-        None,
-    ).map_err(|e| AssemblyError::UpstreamTransfer(format!("{e:?}")))?;
-
-    let (spend_prover, output_prover) = signer::sapling_provers();
-    let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
-    let txids = create_proposed_transactions(
-        wallet,
-        network,
-        spend_prover,
-        output_prover,
-        &spending_keys,
-        OvkPolicy::Sender,
-        &proposal,
-        None,
-    ).map_err(|e| AssemblyError::UpstreamTransfer(format!("{e:?}")))?;
-
-    Ok(Some(*txids.first()))
-}
-
-/// Sweeps all spendable Treasury Sapling notes to the project vault.
-fn sweep_sapling_to_vault<P: Parameters>(
-    network: &P,
-    wallet: &mut zns_mint::wallet::Wallet,
-    treasury_keys: &zns_mint::key::TreasuryKeys,
-) -> Result<Option<zcash_primitives::transaction::TxId>, AssemblyError> {
-    use zcash_client_backend::data_api::wallet::input_selection::{
-        GreedyInputSelectorError, LockedInputPolicy,
-    };
-    use zcash_client_backend::data_api::wallet::{
-        create_proposed_transactions, propose_send_max_transfer, ConfirmationsPolicy, CreateErrT,
-        ProposeSendMaxErrT, SpendingKeys,
-    };
-    use zcash_client_backend::data_api::{MaxSpendMode, WalletRead as _};
-    use zcash_client_backend::fees::StandardFeeRule;
-    use zcash_client_backend::wallet::OvkPolicy;
-    use zcash_protocol::ShieldedPool;
-    use zcash_protocol::value::Zatoshis;
-
-    let summary = wallet
-        .get_wallet_summary(ConfirmationsPolicy::new_symmetrical(std::num::NonZeroU32::MIN, false))
-        .ok()
-        .flatten();
-    let sapling_balance = summary
-        .as_ref()
-        .and_then(|s| s.account_balances().get(&TREASURY_ACCOUNT))
-        .map(|b| b.sapling_balance().spendable_value())
-        .unwrap_or(Zatoshis::ZERO);
-    if sapling_balance == Zatoshis::ZERO {
-        return Ok(None);
-    }
-
-    let vault_recipient =
-        zcash_keys::address::Address::Transparent(VAULT_ADDRESS).to_zcash_address(network);
-    let proposal = propose_send_max_transfer(
-        wallet,
-        network,
-        TREASURY_ACCOUNT,
-        &[ShieldedPool::Sapling],
-        &StandardFeeRule::Zip317,
-        vault_recipient,
-        None,
-        MaxSpendMode::MaxSpendable,
-        ConfirmationsPolicy::new_symmetrical(std::num::NonZeroU32::MIN, false),
-        &LockedInputPolicy::default(),
-        None,
-    )
-    .map_err(|e: ProposeSendMaxErrT<zns_mint::wallet::Wallet, std::convert::Infallible, StandardFeeRule>| {
-        AssemblyError::UpstreamTransfer(format!("{e:?}"))
-    })?;
-
-    let (spend_prover, output_prover) = signer::sapling_provers();
-    let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
-    let txids = create_proposed_transactions(
-        wallet,
-        network,
-        spend_prover,
-        output_prover,
-        &spending_keys,
-        OvkPolicy::Sender,
-        &proposal,
-        None,
-    )
-    .map_err(|e: CreateErrT<
-        zns_mint::wallet::Wallet,
-        GreedyInputSelectorError,
-        StandardFeeRule,
-        <StandardFeeRule as zcash_primitives::transaction::fees::FeeRule>::Error,
-        zcash_client_backend::wallet::NoteId,
-    >| AssemblyError::UpstreamTransfer(format!("{e:?}")))?;
-
-    Ok(Some(*txids.first()))
-}
 
 #[tokio::main]
 async fn main() {
@@ -594,15 +440,19 @@ async fn main() {
             // Housekeeping: vault sweep.
             let sweep_tip = tip;
             let produced: Vec<zcash_primitives::transaction::TxId> = [
-                sweep_ironwood_to_vault(
+                zns_mint::mint::treasury::sweep_ironwood_to_vault(
                     &network,
                     &mut wallet,
                     &treasury_keys,
+                    &sapling_spend,
+                    &sapling_output,
                 ),
-                sweep_sapling_to_vault(
+                zns_mint::mint::treasury::sweep_sapling_to_vault(
                     &network,
                     &mut wallet,
                     &treasury_keys,
+                    &sapling_spend,
+                    &sapling_output,
                 ),
             ]
             .into_iter()
@@ -617,28 +467,14 @@ async fn main() {
             .collect();
             for txid in produced {
                 match wallet.get_transaction(txid) {
-                    Ok(Some(tx)) => match serialize_tx(&tx) {
-                        Ok(hex) => {
-                            match source
-                                .submit_transaction(
-                                    &hex,
-                                    &txid.to_string(),
-                                    sweep_tip,
-                                    tip_hash,
-                                )
-                                .await
-                            {
-                                Ok(SubmitOutcome::Accepted)
-                                | Ok(SubmitOutcome::AlreadyInChain) => {
-                                    tracing::info!(%txid, "submitted")
-                                }
-                                other => tracing::warn!(?other, %txid, "submit not accepted"),
+                    Ok(Some(tx)) => {
+                        match source.submit_transaction(&tx, sweep_tip, tip_hash).await {
+                            Ok(SubmitOutcome::Accepted) | Ok(SubmitOutcome::AlreadyInChain) => {
+                                tracing::info!(%txid, "submitted")
                             }
+                            other => tracing::warn!(?other, %txid, "submit not accepted"),
                         }
-                        Err(e) => {
-                            tracing::error!(?e, %txid, "serialization failed")
-                        }
-                    },
+                    }
                     other => {
                         tracing::error!(?other, %txid, "stored transaction missing")
                     }
