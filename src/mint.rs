@@ -14,7 +14,7 @@ pub use zcash_client_backend::data_api::BlockMetadata as ChainTip;
 // The Name Note type and its codec.
 pub use note::{
     decode_name_note, decode_name_note_tuple, decrypt_name_notes, note_commitment_cmx,
-    parse_timestamp_canonical, zns_rcm, zns_psi, DecryptedNameNote, Expiry, NameNote,
+    parse_timestamp_canonical, zns_psi, zns_rcm, DecryptedNameNote, Expiry, NameNote,
 };
 pub use time::Timestamp;
 
@@ -144,53 +144,18 @@ impl SubmissionKind {
 
 /// The result of processing a single Treasury note request.
 pub struct RequestOutcome {
-    pub result: Result<(SubmissionKind, TxId, Vec<NoteId>), AssemblyError>,
+    pub result: Result<
+        (SubmissionKind, TxId, Vec<NoteId>),
+        zcash_client_backend::data_api::wallet::ProposeTransferErrT<
+            crate::wallet::Wallet,
+            std::convert::Infallible,
+            zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector<
+                crate::wallet::Wallet,
+            >,
+            zcash_client_backend::fees::standard::SingleOutputChangeStrategy<
+                crate::wallet::Wallet,
+            >,
+        >,
+    >,
     pub relay_otp: Option<crate::mint::otp::OtpRequest>,
-}
-
-// ===========================================================================
-// Assembly error type
-// ===========================================================================
-
-/// Typed error for transaction assembly, signing, and submission.
-///
-/// Replaces `&'static str` returns throughout the assembly path. Follows the
-/// upstream convention of typed error enums (cf. `orchard::builder::SpendError`,
-/// `zcash_keys::keys::DerivationError`).
-#[derive(Debug, thiserror::Error)]
-pub enum AssemblyError {
-    #[error("no commitment tree anchor available")]
-    NoAnchor,
-    #[error("witness not found for note")]
-    NoWitness,
-    #[error("note not found in wallet")]
-    NoteNotFound,
-    #[error("note is from the wrong account")]
-    WrongAccount,
-    #[error("insufficient available notes for funding")]
-    InsufficientFunds,
-    #[error("note value insufficient for the required fee")]
-    InsufficientValue,
-    #[error("builder add operation failed")]
-    BuilderAdd,
-    #[error("bundle build produced no bundle")]
-    BuildFailed,
-    #[error("proof creation failed")]
-    ProofCreation,
-    #[error("proof verification failed before broadcast")]
-    ProofVerification,
-    #[error("signing authorization failed")]
-    SigningAuth,
-    #[error("transaction serialization failed")]
-    Serialize,
-    #[error("name became unavailable before assembly")]
-    NameUnavailable,
-    #[error("request predecessor commitment does not match Registry tip")]
-    PredecessorMismatch,
-    #[error("UFVK not found in wallet")]
-    UfvkNotFound,
-    #[error("sighash mismatch: effecting data changed after authorization")]
-    SighashMismatch,
-    #[error("upstream wallet transfer failed: {0}")]
-    UpstreamTransfer(String),
 }

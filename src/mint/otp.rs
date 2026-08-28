@@ -26,6 +26,10 @@ use time::Timestamp;
 use zeroize::Zeroize;
 
 use crate::mint::{Action, Name, UnifiedAddress};
+use zcash_client_backend::data_api::wallet::{
+    ProposeTransferErrT, input_selection::GreedyInputSelector,
+};
+use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 
 /// OTP validity window (whitepaper §5.3: D_OTP). 30 minutes in seconds.
 pub const D_OTP: i64 = 1800;
@@ -304,7 +308,15 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
     controller_ua: &UnifiedAddress,
     target_height: zcash_protocol::consensus::BlockHeight,
     memo: [u8; 512],
-) -> Result<zcash_primitives::transaction::TxId, crate::mint::AssemblyError> {
+) -> Result<
+    zcash_primitives::transaction::TxId,
+    ProposeTransferErrT<
+        crate::wallet::Wallet,
+        std::convert::Infallible,
+        GreedyInputSelector<crate::wallet::Wallet>,
+        SingleOutputChangeStrategy<crate::wallet::Wallet>,
+    >,
+> {
     use zcash_client_backend::data_api::wallet::input_selection::{
         GreedyInputSelector, SpendPolicy,
     };
@@ -333,7 +345,13 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
                 0,
                 2,
             )
-            .map_err(|e| crate::mint::AssemblyError::UpstreamTransfer(format!("{e:?}")))?
+            .map_err(|e| {
+                // zip317::FeeError → builder::Error::Fee → data_api::Error::Builder,
+                // via upstream's own From impls.
+                zcash_primitives::transaction::builder::Error::Fee(
+                    zcash_primitives::transaction::builder::FeeError::FeeRule(e),
+                )
+            })?
     };
 
     let recipient =
@@ -349,9 +367,9 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
         None,
         Vec::new(),
     )
-    .map_err(|e| crate::mint::AssemblyError::UpstreamTransfer(format!("{e:?}")))?;
+    .expect("memo to a guarded Orchard UA with a nonzero fee cannot fail");
     let request = zip321::TransactionRequest::new(vec![payment])
-        .map_err(|e| crate::mint::AssemblyError::UpstreamTransfer(format!("{e:?}")))?;
+        .expect("single-payment request cannot fail");
 
     let input_selector = GreedyInputSelector::new();
     let change_strategy = SingleOutputChangeStrategy::<crate::wallet::Wallet>::new(
@@ -371,16 +389,6 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
         &SpendPolicy::shielded_pools([ShieldedPool::Ironwood]),
         None,
         None, // transaction version implied by the target height: V6 / Ironwood
-    )
-    .map_err(
-        // The commitment-tree error type is free in `propose_transfer`'s
-        // signature; the wallet's tree error is `Infallible`.
-        |e: zcash_client_backend::data_api::wallet::ProposeTransferErrT<
-            crate::wallet::Wallet,
-            std::convert::Infallible,
-            GreedyInputSelector<crate::wallet::Wallet>,
-            SingleOutputChangeStrategy<crate::wallet::Wallet>,
-        >| crate::mint::AssemblyError::UpstreamTransfer(format!("{e:?}")),
     )?;
 
     // Only the Treasury signs; the relay carries no Registry authority.
@@ -396,17 +404,6 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
         OvkPolicy::Sender,
         &proposal,
         None,
-    )
-    .map_err(
-        // `InputsErrT` and `ChangeErrT` are free in the signature; project
-        // them from the concrete selector and change strategy.
-        |e: zcash_client_backend::data_api::wallet::CreateErrT<
-            crate::wallet::Wallet,
-            <GreedyInputSelector<crate::wallet::Wallet> as zcash_client_backend::data_api::wallet::input_selection::InputSelector>::Error,
-            StandardFeeRule,
-            <SingleOutputChangeStrategy<crate::wallet::Wallet> as zcash_client_backend::fees::ChangeStrategy>::Error,
-            zcash_client_backend::wallet::NoteId,
-        >| crate::mint::AssemblyError::UpstreamTransfer(format!("{e:?}")),
     )?;
 
     let txid = *txids.first();
