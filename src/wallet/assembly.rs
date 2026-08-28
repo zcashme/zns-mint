@@ -1,6 +1,6 @@
 //! The V6 Ironwood transaction finalizer.
 
-use orchard::builder::UnauthorizedBundle;
+use orchard::builder::{BuildError, UnauthorizedBundle};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
@@ -18,13 +18,13 @@ const TX_EXPIRY_BUFFER: u32 = 20;
 
 /// The transaction finalizer for ZNS Name Note issuance: proves, signs, and
 /// freezes a V6 transaction containing one Ironwood bundle.
-pub fn assemble_v6_transaction<P: Parameters>(
+pub fn build_name_note_transaction<P: Parameters>(
     network: &P,
     ironwood_bundle: UnauthorizedBundle<ZatBalance>,
-    treasury_signer: Option<&TreasuryKeys>,
-    registry_signer: Option<&RegistryKeys>,
+    treasury_keys: &TreasuryKeys,
+    registry_keys: &RegistryKeys,
     target_height: BlockHeight,
-) -> Result<Transaction, crate::mint::AssemblyError> {
+) -> Result<Transaction, BuildError> {
     use orchard::circuit::{ProvingKey, VerifyingKey};
     use rand::rngs::OsRng;
     use std::sync::OnceLock;
@@ -68,17 +68,10 @@ pub fn assemble_v6_transaction<P: Parameters>(
         signature_hash(&unauthed_tx, &SignableInput::Shielded, &txid_parts);
 
     // --- Prove and sign the shielded bundle ---
-    let mut signing_keys: Vec<orchard::keys::SpendAuthorizingKey> = Vec::new();
-    if let Some(keys) = treasury_signer {
-        signing_keys.push(orchard::keys::SpendAuthorizingKey::from(
-            keys.orchard_spending_key(),
-        ));
-    }
-    if let Some(keys) = registry_signer {
-        signing_keys.push(orchard::keys::SpendAuthorizingKey::from(
-            keys.orchard_spending_key(),
-        ));
-    }
+    let signing_keys = vec![
+        orchard::keys::SpendAuthorizingKey::from(treasury_keys.orchard_spending_key()),
+        orchard::keys::SpendAuthorizingKey::from(registry_keys.orchard_spending_key()),
+    ];
     let mut rng = OsRng;
 
     let circuit_version = ironwood_bundle.circuit_version();
@@ -89,14 +82,10 @@ pub fn assemble_v6_transaction<P: Parameters>(
     assert_eq!(vk.circuit_version(), circuit_version);
 
     let proven = ironwood_bundle
-        .create_proof(pk, &mut rng)
-        .map_err(|_| crate::mint::AssemblyError::ProofCreation)?;
+        .create_proof(pk, &mut rng)?;
     let authorized_ironwood = proven
-        .apply_signatures(rng, *shielded_sig_commitment.as_ref(), &signing_keys)
-        .map_err(|_| crate::mint::AssemblyError::SigningAuth)?;
-    authorized_ironwood
-        .verify_proof(vk)
-        .map_err(|_| crate::mint::AssemblyError::ProofVerification)?;
+        .apply_signatures(rng, *shielded_sig_commitment.as_ref(), &signing_keys)?;
+    authorized_ironwood.verify_proof(vk)?;
 
     // --- Final authorized transaction ---
     let final_tx: TransactionData<Authorized> = TransactionData::from_parts_v6(
@@ -129,12 +118,18 @@ pub fn assemble_v6_transaction<P: Parameters>(
             .map(|h| h.as_bytes())
             == txid_parts.ironwood_digest.as_ref().map(|h| h.as_bytes());
 
-    if !tx_digests_match {
-        return Err(crate::mint::AssemblyError::SighashMismatch);
-    }
+    // The digest commits to effecting data only, and the authorization
+    // pipeline copies effecting data verbatim (Action::try_map,
+    // Bundle::try_map_authorization) — the digests cannot legitimately
+    // differ. Reaching this line with a mismatch means the assembly
+    // pipeline itself is broken.
+    assert!(
+        tx_digests_match,
+        "assembly bug: effecting data changed during authorization"
+    );
 
     let tx = final_tx
         .freeze()
-        .map_err(|_| crate::mint::AssemblyError::Serialize)?;
+        .expect("V6 transaction freeze is infallible");
     Ok(tx)
 }
