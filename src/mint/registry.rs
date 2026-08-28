@@ -1,6 +1,6 @@
 //! Registry: the ZNS name-chain state machine and transition authorization.
 //!
-//! The Registry tracks the current state of every name (the [`Record`] for
+//! The Registry tracks the current state of every name (the [`NameRecord`] for
 //! each name chain) and authorizes transitions against that state
 //! ([`authorize_claim`], [`authorize_update`], [`authorize_release`]), each
 //! producing the typed [`NameNote`] transition for the settle path to
@@ -24,7 +24,7 @@ use zcash_protocol::consensus::Parameters;
 use zip32::AccountId;
 
 /// Reads the current record of the name chain for `name`.
-pub fn current_record(registry: &Registry, name: &Name) -> Option<Record> {
+pub fn current_record(registry: &Registry, name: &Name) -> Option<NameRecord> {
     registry.record(name).cloned()
 }
 
@@ -40,7 +40,7 @@ pub fn authorize_claim(
     ua: UnifiedAddress,
 ) -> Option<NameNote> {
     match current_record(registry, &name) {
-        None | Some(Record {
+        None | Some(NameRecord {
             action: Action::Release,
             ..
         }) => Some(NameNote::Claim {
@@ -185,7 +185,7 @@ impl std::fmt::Debug for ReceivedNameNote {
 }
 
 // ---------------------------------------------------------------------------
-// Record — the current state of a name chain
+// NameRecord — the current state of a name chain
 // ---------------------------------------------------------------------------
 
 /// The current state of a name in the registry.
@@ -198,7 +198,7 @@ impl std::fmt::Debug for ReceivedNameNote {
 /// everything needed to spend it (the note, its Merkle position, and its
 /// memo for psi recomputation).
 #[derive(Clone, PartialEq, Eq)]
-pub struct Record {
+pub struct NameRecord {
     pub action: Action,
     /// The binding UA. A release retains the address it terminated so the
     /// on-chain transition remains historically complete.
@@ -212,7 +212,7 @@ pub struct Record {
     pub rho: orchard::note::Rho,
 }
 
-impl Record {
+impl NameRecord {
     fn from_received<P: Parameters>(
         params: &P,
         received: ReceivedNameNote,
@@ -252,9 +252,9 @@ impl Record {
     }
 }
 
-impl std::fmt::Debug for Record {
+impl std::fmt::Debug for NameRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Record")
+        f.debug_struct("NameRecord")
             .field("action", &self.action)
             .field("ua", &self.ua)
             .field("commitment", &self.commitment)
@@ -274,14 +274,14 @@ impl std::fmt::Debug for Record {
 pub struct RegistryHistoryRecord {
     pub height: BlockHeight,
     pub name: Name,
-    pub prev_record: Option<Record>,
+    pub prev_record: Option<NameRecord>,
 }
 
 /// The name-chain state: a map from each canonical ZNS name to the most
 /// recent confirmed record for that name, plus an undo log for reorgs.
 #[derive(Clone)]
 pub struct Registry {
-    records: BTreeMap<Name, Record>,
+    records: BTreeMap<Name, NameRecord>,
     history: Vec<RegistryHistoryRecord>,
 }
 
@@ -295,7 +295,7 @@ impl Registry {
     }
 
     /// Read the current record of a ZNS name chain.
-    pub fn record(&self, name: &Name) -> Option<&Record> {
+    pub fn record(&self, name: &Name) -> Option<&NameRecord> {
         self.records.get(name)
     }
 
@@ -443,7 +443,7 @@ impl Registry {
 
                     next.set_record(
                         name.clone(),
-                        Record::from_received(params, (*note).clone(), height),
+                        NameRecord::from_received(params, (*note).clone(), height),
                         height,
                     );
                 }
@@ -476,7 +476,7 @@ impl Registry {
         );
     }
 
-    fn set_record(&mut self, name: Name, record: Record, height: BlockHeight) {
+    fn set_record(&mut self, name: Name, record: NameRecord, height: BlockHeight) {
         let prev_record = self.records.insert(name.clone(), record);
         self.history.push(RegistryHistoryRecord {
             height,
@@ -486,7 +486,7 @@ impl Registry {
     }
 
     /// Read-only iterator over all known name records. Used for diagnostics.
-    pub fn name_chain(&self) -> impl Iterator<Item = (&Name, &Record)> {
+    pub fn name_chain(&self) -> impl Iterator<Item = (&Name, &NameRecord)> {
         self.records.iter()
     }
 
@@ -521,7 +521,7 @@ impl Registry {
     ) {
         self.set_record(
             name,
-            Record::for_test(action, ua, expires_at, commitment, height, rho),
+            NameRecord::for_test(action, ua, expires_at, commitment, height, rho),
             height,
         );
     }
