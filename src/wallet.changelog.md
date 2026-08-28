@@ -261,3 +261,16 @@ Tracks design-relevant changes to `src/wallet.rs` and `src/wallet/trees.rs`.
 - Added a unit case showing that a latest root is available even when an exact
   later checkpoint ID is absent. The test is written but was not executed in
   this pass.
+## 2026-08-28 — Wallet file boundaries match their identities
+
+- `assembly.rs` no longer hosts wallet queries. It holds only the V6 Ironwood
+  transaction finalizer (`assemble_v6_transaction`) — the one lane upstream's
+  `Builder` cannot serve — and its module doc now claims exactly that.
+- Note reads (`unspent_ironwood_notes`, `unspent_ironwood_note`,
+  `unspent_ironwood_note_by_rho`, `unspent_ironwood_nullifiers`) moved to
+  `wallet/read.rs` as "reads beyond the upstream trait surface."
+- Tree reads (`ironwood_witness`, `ironwood_anchor`) moved to
+  `wallet/trees.rs`, beside the `WalletCommitmentTrees` impl they wrap.
+- `store_name_note` moved to `wallet/write.rs` as the ZNS ingestion lane —
+  a write, sibling of `put_blocks`.
+- No signature, visibility, or behavior changes.

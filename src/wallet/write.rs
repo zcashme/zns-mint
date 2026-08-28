@@ -1,5 +1,6 @@
 //! Upstream write-side wallet operations: [`OutputLockStore`] and
-//! [`WalletWrite`].
+//! [`WalletWrite`] — plus the ZNS Name Note ingestion lane, which the
+//! upstream write surface cannot express (see [`Wallet::store_name_note`]).
 
 use std::collections::{BTreeSet, HashSet};
 use std::convert::Infallible;
@@ -17,7 +18,9 @@ use zcash_client_backend::data_api::{
     error::RewindError, locking::{LockError, LockOwner, OutputLockStore},
     scanning::ScanPriority,
 };
-use zcash_client_backend::wallet::{NoteId, OutputRef, WalletTransparentOutput};
+use zcash_client_backend::wallet::{
+    NoteId, OutputRef, WalletIronwoodOutput, WalletTransparentOutput,
+};
 use zcash_keys::address::UnifiedAddress;
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_primitives::transaction::{Transaction, TxId};
@@ -30,6 +33,7 @@ use super::{
     Wallet,
     read::{WalletError, account_birthday, next_height},
 };
+use crate::mint::REGISTRY_ACCOUNT;
 
 impl Wallet {
     /// Returns the account that owns a wallet output, if the reference names
@@ -667,5 +671,61 @@ impl WalletWrite for Wallet {
     ) -> Result<(), WalletError> {
         // No address-check state is maintained.
         Ok(())
+    }
+}
+
+impl Wallet {
+    /// Stores one decrypted ZNS Name Note as the Registry account's ordinary
+    /// received Ironwood note, at its consensus-derived tree position.
+    ///
+    /// The standard scanning lane cannot see Name Notes (its domain re-derives
+    /// the commitment from rseed and rejects the ZNS-derived cmx), so the
+    /// orchestrator's ZNS pass supplies them here. Storage mirrors
+    /// `put_blocks`: note table + memo + mined status. `ordinal` is the
+    /// action's index in the block's full Ironwood commitment stream.
+    pub fn store_name_note(
+        &mut self,
+        scanned: &ScannedBlock<AccountId>,
+        ordinal: usize,
+        txid: TxId,
+        action_index: usize,
+        note: orchard::note::Note,
+        ephemeral_key: zcash_note_encryption::EphemeralKeyBytes,
+        memo: [u8; 512],
+    ) -> Option<()> {
+        let fvk = self.ufvks.get(&REGISTRY_ACCOUNT)?.orchard()?.clone();
+        let bundles = scanned.ironwood();
+        let start_size = bundles
+            .final_tree_size()
+            .checked_sub(u32::try_from(bundles.commitments().len()).ok()?)?;
+        let position = Position::from(u64::from(start_size) + ordinal as u64);
+        let note_id = NoteId::new(txid, ShieldedPool::Ironwood, u16::try_from(action_index).ok()?);
+        self.ironwood_notes.insert(
+            note_id,
+            WalletIronwoodOutput::from_parts(
+                action_index,
+                ephemeral_key,
+                (note.clone(), orchard::ValuePool::Ironwood),
+                false,
+                position,
+                Some(note.nullifier(&fvk)),
+                REGISTRY_ACCOUNT,
+                Some(zip32::Scope::External),
+            ),
+        );
+        self.ironwood_nullifiers
+            .insert(note.nullifier(&fvk), note_id);
+        self.memos.insert(
+            note_id,
+            Memo::Future(
+                zcash_protocol::memo::MemoBytes::from_bytes(&memo)
+                    .expect("512-byte memo always parses"),
+            ),
+        );
+        self.transaction_statuses.insert(
+            txid,
+            zcash_client_backend::data_api::TransactionStatus::Mined(scanned.height()),
+        );
+        Some(())
     }
 }

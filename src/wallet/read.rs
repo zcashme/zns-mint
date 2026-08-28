@@ -1,4 +1,6 @@
-//! Upstream `WalletRead` implementation and its private fixed-account value.
+//! Upstream `WalletRead` implementation, its private fixed-account value,
+//! and the Ironwood note reads that upstream's generic traits cannot express
+//! — notably the ZNS lookup by a record's `rho`.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -14,7 +16,7 @@ use zcash_client_backend::data_api::{
     scanning::{ScanPriority, ScanRange},
     wallet::{ConfirmationsPolicy, TargetHeight},
 };
-use zcash_client_backend::wallet::TransparentAddressMetadata;
+use zcash_client_backend::wallet::{NoteId, ReceivedNote, TransparentAddressMetadata};
 use zcash_keys::address::{Address, UnifiedAddress};
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_primitives::block::BlockHash;
@@ -711,5 +713,83 @@ impl WalletRead for Wallet {
             ));
         }
         Ok(outputs)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ironwood note reads beyond the upstream trait surface
+// ---------------------------------------------------------------------------
+
+impl Wallet {
+    /// Returns every Ironwood note owned by `account` with no spend that is
+    /// pending or mined as of `tip`: a spend recorded by a transaction whose
+    /// expiry height has passed releases its note.
+    pub fn unspent_ironwood_notes(
+        &self,
+        account: AccountId,
+        tip: TargetHeight,
+    ) -> Vec<ReceivedNote<NoteId, orchard::note::Note>> {
+        self.ironwood_notes
+            .iter()
+            .filter(move |(_, output)| *output.account_id() == account)
+            .filter(|(note_id, _)| !self.ironwood_note_is_spent(note_id, tip))
+            .filter_map(|(note_id, _)| self.ironwood_received_note(*note_id))
+            .collect()
+    }
+
+    /// Returns one Ironwood note with no pending-or-mined spend as of `tip`.
+    pub(crate) fn unspent_ironwood_note(
+        &self,
+        account: AccountId,
+        note_id: NoteId,
+        tip: TargetHeight,
+    ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
+        let output = self.ironwood_notes.get(&note_id)?;
+        (*output.account_id() == account && !self.ironwood_note_is_spent(&note_id, tip))
+            .then(|| self.ironwood_received_note(note_id))
+            .flatten()
+    }
+
+    /// Finds an unspent owned Ironwood note by the `rho` persisted in a ZNS
+    /// record, returning its native LRZ wallet representation.
+    pub(crate) fn unspent_ironwood_note_by_rho(
+        &self,
+        account: AccountId,
+        rho: orchard::note::Rho,
+        tip: TargetHeight,
+    ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
+        let note_id = self
+            .ironwood_notes
+            .iter()
+            .find(|(_, output)| {
+                *output.account_id() == account && output.note().0.rho() == rho
+            })
+            .map(|(note_id, _)| *note_id)?;
+        self.unspent_ironwood_note(account, note_id, tip)
+    }
+
+    /// Returns the nullifiers of all Ironwood notes owned by `account` with
+    /// no pending-or-mined spend as of `tip`, including value-0 notes: the
+    /// Registry's Name Notes are value-0, and their nullifiers are what
+    /// identifies a Registry spend in
+    /// [`Registry::apply_block`](crate::mint::registry::Registry::apply_block)'s
+    /// mint-authority check.
+    ///
+    /// Distinct from the [`WalletRead::get_ironwood_nullifiers`] impl above:
+    /// that one classifies a spend as spent once its transaction is mined,
+    /// while this read also blocks on locally recorded but unmined spends.
+    pub(crate) fn unspent_ironwood_nullifiers(
+        &self,
+        account: AccountId,
+        tip: TargetHeight,
+    ) -> Vec<orchard::note::Nullifier> {
+        self.ironwood_notes
+            .iter()
+            .filter(|(note_id, output)| {
+                *output.account_id() == account
+                    && !self.ironwood_note_is_spent(note_id, tip)
+            })
+            .filter_map(|(_, output)| output.nf().copied())
+            .collect()
     }
 }

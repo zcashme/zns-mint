@@ -1,8 +1,9 @@
-//! `WalletCommitmentTrees` over Wallet's direct upstream shard trees.
+//! `WalletCommitmentTrees` over Wallet's direct upstream shard trees, plus
+//! the Ironwood witness/anchor reads that bundle construction consumes.
 
 use std::convert::Infallible;
 
-use incrementalmerkletree::Address;
+use incrementalmerkletree::{Address, MerklePath, Position};
 use shardtree::{
     ShardTree,
     error::ShardTreeError,
@@ -13,7 +14,7 @@ use zcash_protocol::consensus::BlockHeight;
 
 use super::{
     ORCHARD_NOTE_COMMITMENT_TREE_DEPTH, ORCHARD_SHARD_HEIGHT, SAPLING_NOTE_COMMITMENT_TREE_DEPTH,
-    SAPLING_SHARD_HEIGHT, Wallet,
+    SAPLING_SHARD_HEIGHT, TreeError, Wallet,
 };
 
 impl WalletCommitmentTrees for Wallet {
@@ -192,5 +193,38 @@ impl WalletCommitmentTrees for Wallet {
                 }))
         })
         .map(|result| result.flatten())
+    }
+}
+
+impl Wallet {
+    /// The Ironwood witness at `anchor_height` for the note at `position`.
+    ///
+    /// `Ok(None)` means no witness exists yet at that checkpoint (note not
+    /// yet observed under that anchor); errors are tree-structural.
+    pub(crate) fn ironwood_witness(
+        &mut self,
+        position: Position,
+        anchor_height: BlockHeight,
+    ) -> Result<Option<MerklePath<orchard::tree::MerkleHashOrchard, 32>>, TreeError> {
+        // with_ironwood_tree_mut wraps the callback's Ok payload in an
+        // outer Option; `?` then flatten collapses both layers.
+        let witnessed = self
+            .with_ironwood_tree_mut(|tree| {
+                tree.witness_at_checkpoint_id_caching(position, &anchor_height)
+            })
+            .map_err(|e| e)?;
+        Ok(witnessed.flatten())
+    }
+
+    /// The Ironwood tree root at `anchor_height` as an Orchard-family
+    /// anchor for the builder.
+    pub(crate) fn ironwood_anchor(
+        &mut self,
+        anchor_height: BlockHeight,
+    ) -> Result<Option<orchard::tree::Anchor>, TreeError> {
+        let root = self
+            .with_ironwood_tree_mut(|tree| tree.root_at_checkpoint_id(&anchor_height))
+            .map_err(|e| e)?;
+        Ok(root.flatten().map(Into::into))
     }
 }

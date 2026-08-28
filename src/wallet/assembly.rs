@@ -1,33 +1,19 @@
-//! Ironwood wallet queries and transaction assembly.
+//! The V6 Ironwood transaction finalizer.
 //!
-//! Two concerns live here:
-//!
-//! 1. **Wallet queries** — Ironwood-specific lookups that upstream's generic
-//!    traits cannot express: finding an owned note by a ZNS record's `rho`,
-//!    and retrieving unspent Ironwood nullifiers.
-//! 2. **Transaction assembly** — [`assemble_v6_transaction`] proves, signs,
-//!    and freezes an Ironwood bundle into a V6 [`Transaction`]. This is the
-//!    equivalent of `zcash_primitives::transaction::builder::Builder::build`
-//!    for the Ironwood path, extracted because the upstream `Builder` keeps
-//!    its inner `ironwood_builder` private, preventing callers from reaching
-//!    `add_zns_spend` / `add_zns_output` (behind `unsafe-zns` on the orchard
-//!    crate).
+//! [`assemble_v6_transaction`] proves, signs, and freezes an Ironwood bundle
+//! into a V6 [`Transaction`]. This is the equivalent of
+//! `zcash_primitives::transaction::builder::Builder::build` for the Ironwood
+//! path, extracted because the upstream `Builder` keeps its inner
+//! `ironwood_builder` private, preventing callers from reaching
+//! `add_zns_spend` / `add_zns_output` (behind `unsafe-zns` on the orchard
+//! crate).
 
-use incrementalmerkletree::{MerklePath, Position};
-use zcash_client_backend::data_api::{ScannedBlock, WalletCommitmentTrees, wallet::TargetHeight};
-use zcash_client_backend::wallet::{NoteId, ReceivedNote};
-use zcash_primitives::transaction::{Transaction, TxId};
+use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::ShieldedPool;
 use zcash_protocol::consensus::Parameters;
-use zcash_protocol::memo::Memo;
 use zcash_protocol::value::ZatBalance;
-use zip32::AccountId;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
-use crate::mint::REGISTRY_ACCOUNT;
-
-use super::{TreeError, Wallet};
 
 // ---------------------------------------------------------------------------
 // Transaction assembly
@@ -179,161 +165,4 @@ pub fn assemble_v6_transaction<P: Parameters>(
         .freeze()
         .map_err(|_| crate::mint::AssemblyError::Serialize)?;
     Ok(tx)
-}
-
-// ---------------------------------------------------------------------------
-// Wallet queries
-// ---------------------------------------------------------------------------
-
-impl Wallet {
-    /// Returns every Ironwood note owned by `account` with no spend that is
-    /// pending or mined as of `tip`: a spend recorded by a transaction whose
-    /// expiry height has passed releases its note.
-    pub fn unspent_ironwood_notes(
-        &self,
-        account: AccountId,
-        tip: TargetHeight,
-    ) -> Vec<ReceivedNote<NoteId, orchard::note::Note>> {
-        self.ironwood_notes
-            .iter()
-            .filter(move |(_, output)| *output.account_id() == account)
-            .filter(|(note_id, _)| !self.ironwood_note_is_spent(note_id, tip))
-            .filter_map(|(note_id, _)| self.ironwood_received_note(*note_id))
-            .collect()
-    }
-
-    /// Returns one Ironwood note with no pending-or-mined spend as of `tip`.
-    pub(crate) fn unspent_ironwood_note(
-        &self,
-        account: AccountId,
-        note_id: NoteId,
-        tip: TargetHeight,
-    ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
-        let output = self.ironwood_notes.get(&note_id)?;
-        (*output.account_id() == account && !self.ironwood_note_is_spent(&note_id, tip))
-            .then(|| self.ironwood_received_note(note_id))
-            .flatten()
-    }
-
-    /// Finds an unspent owned Ironwood note by the `rho` persisted in a ZNS
-    /// record, returning its native LRZ wallet representation.
-    pub(crate) fn unspent_ironwood_note_by_rho(
-        &self,
-        account: AccountId,
-        rho: orchard::note::Rho,
-        tip: TargetHeight,
-    ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
-        let note_id = self
-            .ironwood_notes
-            .iter()
-            .find(|(_, output)| {
-                *output.account_id() == account && output.note().0.rho() == rho
-            })
-            .map(|(note_id, _)| *note_id)?;
-        self.unspent_ironwood_note(account, note_id, tip)
-    }
-
-    /// Returns the nullifiers of all Ironwood notes owned by `account` with
-    /// no pending-or-mined spend as of `tip`, including value-0 notes: the
-    /// Registry's Name Notes are value-0, and their nullifiers are what
-    /// identifies a Registry spend in
-    /// [`Registry::apply_block`](crate::mint::registry::Registry::apply_block)'s
-    /// mint-authority check.
-    pub(crate) fn unspent_ironwood_nullifiers(
-        &self,
-        account: AccountId,
-        tip: TargetHeight,
-    ) -> Vec<orchard::note::Nullifier> {
-        self.ironwood_notes
-            .iter()
-            .filter(|(note_id, output)| {
-                *output.account_id() == account
-                    && !self.ironwood_note_is_spent(note_id, tip)
-            })
-            .filter_map(|(_, output)| output.nf().copied())
-            .collect()
-    }
-
-    /// The Ironwood witness at `anchor_height` for the note at `position`.
-    ///
-    /// `Ok(None)` means no witness exists yet at that checkpoint (note not
-    /// yet observed under that anchor); errors are tree-structural.
-    pub(crate) fn ironwood_witness(
-        &mut self,
-        position: Position,
-        anchor_height: BlockHeight,
-    ) -> Result<Option<MerklePath<orchard::tree::MerkleHashOrchard, 32>>, TreeError> {
-        // with_ironwood_tree_mut wraps the callback's Ok payload in an
-        // outer Option; `?` then flatten collapses both layers.
-        let witnessed = self
-            .with_ironwood_tree_mut(|tree| {
-                tree.witness_at_checkpoint_id_caching(position, &anchor_height)
-            })
-            .map_err(|e| e)?;
-        Ok(witnessed.flatten())
-    }
-
-    /// The Ironwood tree root at `anchor_height` as an Orchard-family
-    /// anchor for the builder.
-    pub(crate) fn ironwood_anchor(
-        &mut self,
-        anchor_height: BlockHeight,
-    ) -> Result<Option<orchard::tree::Anchor>, TreeError> {
-        let root = self
-            .with_ironwood_tree_mut(|tree| tree.root_at_checkpoint_id(&anchor_height))
-            .map_err(|e| e)?;
-        Ok(root.flatten().map(Into::into))
-    }
-
-    /// Stores one decrypted ZNS Name Note as the Registry account's ordinary
-    /// received Ironwood note, at its consensus-derived tree position.
-    ///
-    /// The standard scanning lane cannot see Name Notes (its domain re-derives
-    /// the commitment from rseed and rejects the ZNS-derived cmx), so the
-    /// orchestrator's ZNS pass supplies them here. Storage mirrors
-    /// `put_blocks`: note table + memo + mined status. `ordinal` is the
-    /// action's index in the block's full Ironwood commitment stream.
-    pub fn store_name_note(
-        &mut self,
-        scanned: &ScannedBlock<AccountId>,
-        ordinal: usize,
-        txid: TxId,
-        action_index: usize,
-        note: orchard::note::Note,
-        ephemeral_key: zcash_note_encryption::EphemeralKeyBytes,
-        memo: [u8; 512],
-    ) -> Option<()> {
-        let fvk = self.ufvks.get(&REGISTRY_ACCOUNT)?.orchard()?.clone();
-        let bundles = scanned.ironwood();
-        let start_size = bundles
-            .final_tree_size()
-            .checked_sub(u32::try_from(bundles.commitments().len()).ok()?)?;
-        let position = Position::from(u64::from(start_size) + ordinal as u64);
-        let note_id = NoteId::new(txid, ShieldedPool::Ironwood, u16::try_from(action_index).ok()?);
-        self.ironwood_notes.insert(
-            note_id,
-            zcash_client_backend::wallet::WalletIronwoodOutput::from_parts(
-                action_index,
-                ephemeral_key,
-                (note.clone(), orchard::ValuePool::Ironwood),
-                false,
-                position,
-                Some(note.nullifier(&fvk)),
-                REGISTRY_ACCOUNT,
-                Some(zip32::Scope::External),
-            ),
-        );
-        self.ironwood_nullifiers
-            .insert(note.nullifier(&fvk), note_id);
-        self.memos.insert(
-            note_id,
-            Memo::Future(
-                zcash_protocol::memo::MemoBytes::from_bytes(&memo)
-                    .expect("512-byte memo always parses"),
-            ),
-        );
-        self.transaction_statuses
-            .insert(txid, zcash_client_backend::data_api::TransactionStatus::Mined(scanned.height()));
-        Some(())
-    }
 }
