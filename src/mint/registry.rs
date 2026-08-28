@@ -10,6 +10,9 @@
 //! challenges that update/release requests authorize with live in
 //! [`crate::mint::otp`].
 
+pub mod bundle;
+pub mod settle;
+
 use crate::mint::otp::OtpQueue;
 use crate::mint::{
     Action, Expiry, Name, NameCommitment, NameNote, UnifiedAddress, REGISTRY_ACCOUNT,

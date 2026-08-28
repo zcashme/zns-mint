@@ -48,7 +48,7 @@ const MAX_CHECKPOINTS: usize = 100;
 
 /// Shard-tree error over the infallible in-memory store: only tree-structural
 /// failures (`Query`, `Insert`) are reachable, never storage failures.
-type TreeError = ShardTreeError<Infallible>;
+pub(crate) type TreeError = ShardTreeError<Infallible>;
 
 /// The in-memory wallet for the two fixed mint accounts.
 pub struct Wallet {

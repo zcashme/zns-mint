@@ -109,9 +109,12 @@ webpki-roots = "1.0.9"
 
 # Redirect the crates.io `orchard` consumed transitively by librustzcash to
 # the ZNS fork so the whole graph builds against the same source.
+# Also redirect `zcash_primitives` to the standalone fork so the transaction
+# Builder can compose ZNS Name Notes (add_zns_spend / add_zns_output).
 [patch.crates-io]
 # Tag of the last commit whose package name is still `orchard` (pre-rename).
 orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.15.5" }
+zcash_primitives = { git = "https://github.com/zcashme/zns-zcash_primitives.git" }
 
 # Upstream ZIP-316 unified test vectors for the key-derivation regression
 # tests (`zcash_address::test_vectors::UNIFIED` is gated behind the crate's

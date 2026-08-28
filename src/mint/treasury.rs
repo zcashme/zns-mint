@@ -23,10 +23,12 @@
 //! 5. **Pay Name Note fees** — the Treasury funds the ZIP-317 fee for every
 //!    Name Note transaction in a multi-authority bundle with the Registry.
 
+use zcash_client_backend::wallet::{NoteId, ReceivedNote};
 use zcash_keys::address::UnifiedAddress;
-use zcash_protocol::consensus::Parameters;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
-use crate::mint::{Action, Name};
+use crate::mint::{Action, Name, TREASURY_ACCOUNT};
+use crate::wallet::Wallet;
 
 /// Parses a 512-byte memo sent to the Treasury as a ZNS transition request.
 ///
@@ -77,6 +79,23 @@ pub fn parse_request<P: Parameters>(
     };
 
     Some((action, name, ua))
+}
+
+/// The Treasury's Ironwood fee-note candidates, largest value first.
+///
+/// The builder consumes these greedily (fewest notes → fewest actions →
+/// lowest fee); the ordering here implements the Treasury's selection
+/// policy so the builder stays a mechanical composer.
+pub(crate) fn fee_note_candidates(
+    wallet: &Wallet,
+    tip: BlockHeight,
+) -> Vec<ReceivedNote<NoteId, orchard::note::Note>> {
+    let mut notes = wallet.unspent_ironwood_notes(
+        TREASURY_ACCOUNT,
+        zcash_client_backend::data_api::wallet::TargetHeight::from(tip),
+    );
+    notes.sort_by_key(|note| std::cmp::Reverse(note.note().value().inner()));
+    notes
 }
 
 #[cfg(test)]

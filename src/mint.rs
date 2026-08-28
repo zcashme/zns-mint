@@ -119,6 +119,14 @@ use zcash_protocol::value::{Zatoshis, COIN};
 /// atomic claim settlement returns any excess to the payer.
 pub const CLAIM_PRICE: Zatoshis = Zatoshis::const_from_u64(COIN);
 
+/// Flat charge taken from a claim payment whenever the mint processes the
+/// request without completing it — either the excess over [`CLAIM_PRICE`]
+/// (refunded minus this fee) or the entire payment when the claim is
+/// rejected (stale, underpaid, or the name is live). Saturates to "the
+/// Treasury retains the payment in full" when the payment is too small to
+/// cover it, so every rejected claim is self-funding.
+pub const PROCESSING_FEE: Zatoshis = Zatoshis::const_from_u64(10_000);
+
 /// The result of processing a single Treasury note request: the txid of the
 /// issued OTP relay payment, or the relay pipeline's error.
 pub struct RequestOutcome {
