@@ -32,6 +32,7 @@ use zcash_client_backend::data_api::WalletWrite as _;
 use zcash_client_backend::scanning::Nullifiers;
 use zcash_client_backend::scanning::ScanningKeys;
 use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
+use zcash_protocol::consensus::Parameters;
 use zcash_protocol::memo::Memo;
 use zip32::AccountId;
 
@@ -55,8 +56,8 @@ const VAULT_ADDRESS: zcash_primitives::transparent::address::TransparentAddress 
     zcash_primitives::transparent::address::TransparentAddress::PublicKeyHash([0x42; 20]);
 
 /// Sweeps excess Treasury Ironwood balance to the project vault.
-fn sweep_ironwood_to_vault(
-    network: &impl zcash_protocol::consensus::Parameters,
+fn sweep_ironwood_to_vault<P: Parameters>(
+    network: &P,
     wallet: &mut zns_mint::wallet::Wallet,
     treasury_keys: &zns_mint::key::TreasuryKeys,
 ) -> Result<Option<zcash_primitives::transaction::TxId>, AssemblyError> {
@@ -124,8 +125,8 @@ fn sweep_ironwood_to_vault(
 }
 
 /// Sweeps all spendable Treasury Sapling notes to the project vault.
-fn sweep_sapling_to_vault(
-    network: &impl zcash_protocol::consensus::Parameters,
+fn sweep_sapling_to_vault<P: Parameters>(
+    network: &P,
     wallet: &mut zns_mint::wallet::Wallet,
     treasury_keys: &zns_mint::key::TreasuryKeys,
 ) -> Result<Option<zcash_primitives::transaction::TxId>, AssemblyError> {
