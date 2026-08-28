@@ -35,6 +35,7 @@ use zeroize::Zeroize;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::mtp::MtpTracker;
 use crate::mint::registry::Registry;
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
@@ -69,6 +70,10 @@ pub struct Boot<P: Parameters> {
     registry_keys: RegistryKeys,
     sapling_spend: SpendParameters,
     sapling_output: OutputParameters,
+    /// Canonical MTP tracker, backfilled from the 10 header timestamps
+    /// below the origin checkpoint so the MTP window completes with the
+    /// first scanned block.
+    mtp: MtpTracker,
 }
 
 /// Expected genesis hash — mainnet in production, regtest in dev builds.
@@ -165,6 +170,29 @@ impl<P: Parameters> Boot<P> {
             Some(ironwood_size),
         );
 
+        // 5b. MTP backfill: the 10 predecessor header timestamps, so the
+        // MTP window completes with the first scanned block. Boot fails
+        // closed here — chain time is protocol-critical.
+        let mut mtp = MtpTracker::default();
+        mtp.backfill(checkpoint_height, |height| {
+            let rpc = rpc.clone();
+            async move {
+                let (_, _, timestamp) = rpc.get_block_header(height).await.map_err(
+                    |error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) },
+                )?;
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
+                    u32::try_from(timestamp.as_seconds())
+                        .expect("Zcash block-header timestamps are u32 seconds"),
+                )
+            }
+        })
+        .await
+        .expect("FATAL: MTP backfill from Zebra failed");
+        tracing::info!(
+            "boot: MTP backfilled from headers below checkpoint {}",
+            u32::from(checkpoint_height)
+        );
+
         // 6. Wallet initialization
         let wallet = Wallet::new(
             [
@@ -213,6 +241,7 @@ impl<P: Parameters> Boot<P> {
             registry_keys,
             sapling_spend,
             sapling_output,
+            mtp,
         }
     }
 
@@ -242,6 +271,7 @@ impl<P: Parameters> Boot<P> {
         RegistryKeys,
         SpendParameters,
         OutputParameters,
+        MtpTracker,
     ) {
         (
             self.network,
@@ -252,6 +282,7 @@ impl<P: Parameters> Boot<P> {
             self.registry_keys,
             self.sapling_spend,
             self.sapling_output,
+            self.mtp,
         )
     }
 }

@@ -7,15 +7,16 @@
 //! of 11 blocks to shift it, and deterministic because every node reading
 //! the same chain derives the same value.
 //!
-//! The tracker is populated during the scan loop: after each block is
-//! processed, [`push`](MtpTracker::push) records its header time. Once 11
-//! entries are present, [`current`](MtpTracker::current) returns
-//! the median. For cold start, [`backfill`](MtpTracker::backfill) fetches
-//! the 10 headers below the scan floor via `get_block_header` so MTP is
-//! available from the first scanned block.
+//! The tracker is constructed and backfilled during boot:
+//! [`backfill`](MtpTracker::backfill) fetches the 10 headers below the
+//! origin checkpoint via `get_block_header` so MTP is available from the
+//! first scanned block. The run loop then owns the tracker alongside
+//! `wallet` and `registry`: after each block is processed,
+//! [`update`](MtpTracker::update) records its header time; once 11
+//! entries are present, [`current`](MtpTracker::current) returns the
+//! median.
 //!
-//! MTP is chain state, not mint state. The tracker lives as a local in
-//! the run loop alongside `wallet` and `registry`.
+//! MTP is chain state, not mint state.
 
 use std::collections::VecDeque;
 
@@ -48,10 +49,11 @@ impl MtpTracker {
     /// Fills the tracker with block timestamps below `scan_floor` so MTP
     /// is available after the first scanned block.
     ///
-    /// Called during cold start (`MtpTracker::default()` then `backfill`)
-    /// and after a deep reorg (`truncate_to` then `backfill`). The first
-    /// scanned block provides the 11th timestamp; `get_block_header` is
-    /// used because the blocks themselves have not been fetched yet.
+    /// Called during boot (cold start) to fill the window below the
+    /// origin checkpoint. After a deep reorg the tracker refills
+    /// naturally as blocks are re-scanned. The first scanned block
+    /// provides the 11th timestamp; `get_block_header` is used because
+    /// the blocks themselves have not been fetched yet.
     ///
     /// If `scan_floor` is near genesis and fewer than 10 predecessors
     /// exist, as many as available are fetched. The tracker will return
