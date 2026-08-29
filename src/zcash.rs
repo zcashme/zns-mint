@@ -24,12 +24,6 @@ use orchard::tree::MerkleHashOrchard;
 const ZEBRA_INDEXER_URL: &str = "http://127.0.0.1:8230";
 const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:8232";
 
-/// The mainnet genesis block hash, in `BlockHash` internal byte order.
-pub const MAINNET_GENESIS_HASH: BlockHash = BlockHash([
-    0x08, 0xce, 0x3d, 0x97, 0x31, 0xb0, 0x00, 0xc0, 0x83, 0x38, 0x45, 0x5c, 0x8a, 0x4a, 0x6b, 0xd0,
-    0x5d, 0xa1, 0x6e, 0x26, 0xb1, 0x1d, 0xaa, 0x1b, 0x91, 0x71, 0x84, 0xec, 0xe8, 0x0f, 0x04, 0x00,
-]);
-
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -160,9 +154,8 @@ impl JsonRpc {
 
     /// Fetches a best-chain block hash by height without parsing its block bytes.
     ///
-    /// This is required for genesis identity checks: upstream [`Block::read`]
-    /// intentionally rejects the genesis block because its coinbase input
-    /// predates the BIP 34 height commitment.
+    /// Used for reorg handling in the run loop. The genesis block is fetched
+    /// this way because upstream [`Block::read`] intentionally rejects it.
     pub async fn get_block_hash(&self, height: BlockHeight) -> Result<BlockHash, TransportError> {
         let index = i32::try_from(u32::from(height))
             .map_err(|_| TransportError::BadNodeData("getblockhash height"))?;
@@ -219,8 +212,8 @@ impl JsonRpc {
 
     /// Fetches a full block by height through Zebra JSON-RPC and parses it.
     ///
-    /// This proves the node returned bytes that are structurally parseable under
-    /// the boot-proven consensus parameters. Best-chain membership and full
+    /// This validates that the returned bytes are structurally parseable under
+    /// the boot-selected consensus parameters. Best-chain membership and full
     /// consensus validity remain Zebra's responsibility.
     pub async fn get_block<P: Parameters>(
         &self,
@@ -245,7 +238,7 @@ impl JsonRpc {
     }
 
     /// Fetches a transaction by ID — Zebra's `getrawtransaction` checks the
-    /// mempool first, then the chain — parses it under the boot-proven
+    /// mempool first, then the chain — parses it under the boot-selected
     /// consensus parameters, and returns it.
     ///
     /// `branch_id` is the consensus branch ID to parse under; callers should

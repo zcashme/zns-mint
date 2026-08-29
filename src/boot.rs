@@ -4,10 +4,10 @@
 //! development-only regtest counterpart supplies its own fixed parameters; the
 //! shared boot core carries the selected concrete parameters into the loop.
 //!
-//! 1. **Liveness** — JSON-RPC `getblockchaininfo` proves Zebra is reachable.
-//! 2. **Chain integrity** — gRPC `chain_tip_change` + `get_block` cross-validates
-//!    the tip against JSON-RPC, verifies the selected network's genesis hash,
-//!    checks NU5 activation.
+//! 1. **Liveness** — JSON-RPC `getblockchaininfo` confirms Zebra is reachable.
+//! 2. **Canonical tip** — gRPC `chain_tip_change` is cross-validated against
+//!    JSON-RPC to detect split-brain or misconfiguration. Zebra's identity is
+//!    guaranteed by the SEV-SNP TEE measurement, not by runtime RPC checks.
 //! 3. **Seed intake** — SEV-SNP sealed-blob decryption (production) or dev zero
 //!    seed (`dev-seed` feature). Fingerprint verification guards against wrong-seed
 //!    injection.
@@ -34,29 +34,19 @@ use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
 use zeroize::Zeroize;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
-use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::mint::mtp::MtpTracker;
 use crate::mint::registry::Registry;
+use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
-use zcash_client_backend::data_api::BlockMetadata;
-use zcash_client_backend::data_api::chain::ChainState;
 use sapling::circuit::{OutputParameters, SpendParameters};
+use zcash_client_backend::data_api::chain::ChainState;
+use zcash_client_backend::data_api::BlockMetadata;
 
 // ---------------------------------------------------------------------------
-// boot — the concrete entry point
+// Boot life-cycle
 // ---------------------------------------------------------------------------
 
-/// Proof that the full boot sequence completed successfully.
-///
-/// Can only be constructed by [`Boot::run`] or the development-only
-/// [`Boot::run_regtest`]. Every field is private — the
-/// run loop accepts `Boot` as evidence that all checks passed: Zebra is on
-/// the right chain, the seed is decrypted, Ironwood is active, and the
-/// commitment trees are seeded from the correct checkpoint.
-///
-/// Production has no public constructor other than [`Boot::run`], which
-/// panics on any failure.
 pub struct Boot<P: Parameters> {
     network: P,
     chain: ChainClient,
@@ -75,19 +65,6 @@ pub struct Boot<P: Parameters> {
     /// first scanned block.
     mtp: MtpTracker,
 }
-
-/// Expected genesis hash — mainnet in production, regtest in dev builds.
-#[cfg(not(feature = "regtest"))]
-const EXPECTED_GENESIS: zcash_primitives::block::BlockHash = zcash::MAINNET_GENESIS_HASH;
-
-#[cfg(feature = "regtest")]
-const EXPECTED_GENESIS: zcash_primitives::block::BlockHash = zcash_primitives::block::BlockHash([
-    // Zebra's immutable regtest genesis (`zebra-chain` 11.3.0,
-    // `parameters/network/testnet.rs:47-49`), stored in BlockHash's
-    // internal byte order.
-    0x27, 0xe3, 0x01, 0x34, 0xd6, 0x20, 0xe9, 0xfe, 0x61, 0xf7, 0x19, 0x93, 0x83, 0x20, 0xba, 0xb6,
-    0x3e, 0x7e, 0x72, 0xc9, 0x1b, 0x5e, 0x23, 0x02, 0x56, 0x76, 0xf9, 0x0e, 0xd8, 0x11, 0x9f, 0x02,
-]);
 
 /// Network label for logging.
 #[cfg(not(feature = "regtest"))]
@@ -122,14 +99,11 @@ impl<P: Parameters> Boot<P> {
         // 1. Liveness: JSON-RPC getblockchaininfo
         let info = check_liveness().await;
 
-        // 2. Chain integrity: gRPC cross-validation + tip block verification
-        let (chain_client, tip_height) = verify_chain_integrity::<P>(&info, &network).await;
+        // 2. Canonical tip: gRPC cross-validated against JSON-RPC.
+        let (chain_client, tip_height) = connect_and_baseline(&info).await;
 
-        // 3. Seed intake + fingerprint verification, then derivation.
-        //
-        // The seed lives only inside this block: the moment both capabilities
-        // exist, `Secret`'s `Drop` wipes it. No copy of the seed outlives
-        // derivation.
+        // 3. Seed intake: decrypt sealed blob (or dev seed), then verify
+        //    fingerprint before any key derivation.
         let (treasury_keys, registry_keys) = {
             let source = obtain_key_source();
             let seed = match &source {
@@ -145,7 +119,7 @@ impl<P: Parameters> Boot<P> {
         };
         tracing::info!("boot: keys derived (treasury=acct0, registry=acct1); seed wiped");
 
-        // 5. ZNS Origin Checkpoint: fetch tree state from Zebra; the wallet is
+        // 5. Origin checkpoint: fetch tree state from Zebra; the wallet is
         // born from it (trees seeded) and the cursor derives from it.
         //
         // `ChainState` (frontiers) seeds the trees; the cursor carries
@@ -156,8 +130,8 @@ impl<P: Parameters> Boot<P> {
         let rpc = zcash::JsonRpc::new();
         let chain_state = origin_checkpoint(&rpc, &network).await;
         let checkpoint_height = chain_state.block_height();
-        let sapling_size =
-            u32::try_from(chain_state.final_sapling_tree().tree_size()).expect("tree size fits u32");
+        let sapling_size = u32::try_from(chain_state.final_sapling_tree().tree_size())
+            .expect("tree size fits u32");
         let orchard_size = u32::try_from(chain_state.final_orchard_tree().tree_size())
             .expect("tree size fits u32");
         let ironwood_size = u32::try_from(chain_state.final_ironwood_tree().tree_size())
@@ -171,8 +145,7 @@ impl<P: Parameters> Boot<P> {
         );
 
         // 5b. MTP backfill: the 10 predecessor header timestamps, so the
-        // MTP window completes with the first scanned block. Boot fails
-        // closed here — chain time is protocol-critical.
+        // MTP window completes with the first scanned block.
         let mut mtp = MtpTracker::default();
         mtp.backfill(checkpoint_height, |height| {
             let rpc = rpc.clone();
@@ -193,7 +166,7 @@ impl<P: Parameters> Boot<P> {
             u32::from(checkpoint_height)
         );
 
-        // 6. Wallet initialization
+        // 5c. Wallet initialization from the verified checkpoint
         let wallet = Wallet::new(
             [
                 (TREASURY_ACCOUNT, treasury_keys.fvk()),
@@ -207,7 +180,7 @@ impl<P: Parameters> Boot<P> {
             u32::from(checkpoint_height)
         );
 
-        // 7. Attestation (production only)
+        // 6. Attestation (production only)
         #[cfg(not(feature = "regtest"))]
         {
             let report_data =
@@ -220,7 +193,7 @@ impl<P: Parameters> Boot<P> {
             }
         }
 
-        // 8. Sapling proving parameters — load and verify against ceremony hashes.
+        // 7. Sapling proving parameters — load and verify against ceremony hashes.
         let sapling_spend = load_sapling_spend_params();
         let sapling_output = load_sapling_output_params();
         tracing::info!("boot: Sapling proving parameters loaded and verified");
@@ -329,18 +302,17 @@ async fn check_liveness() -> zcash::BlockchainInfo {
 }
 
 // ---------------------------------------------------------------------------
-// Step 2: Chain integrity
+// Step 2: Canonical tip
 // ---------------------------------------------------------------------------
 
-/// gRPC tip stream + block fetch, cross-validated against JSON-RPC.
+/// Connects to Zebra's gRPC indexer and cross-validates the first tip message
+/// against the JSON-RPC `getblockchaininfo` response.
 ///
-/// Verifies:
-/// - gRPC and JSON-RPC agree on tip height and hash (split-brain detection).
-/// - The genesis block hash matches the selected boot-network constant.
-/// - Tip is at or after NU5 activation (consensus baseline).
-async fn verify_chain_integrity<P: Parameters>(
+/// This only detects split-brain or misconfiguration between the two local
+/// transports. Zebra's identity is guaranteed by the SEV-SNP TEE measurement,
+/// not by any data returned over these plaintext localhost RPCs.
+async fn connect_and_baseline(
     info: &zcash::BlockchainInfo,
-    network: &P,
 ) -> (ChainClient, BlockHeight) {
     let mut chain = ChainClient::connect()
         .await
@@ -373,176 +345,16 @@ async fn verify_chain_integrity<P: Parameters>(
         "FATAL: split-brain — JSON-RPC tip hash != gRPC tip hash"
     );
 
-    let rpc = zcash::JsonRpc::new();
-
-    // Network identity check. This is hash-only because upstream Block::read
-    // intentionally rejects the genesis block.
-    {
-        let genesis_hash = rpc
-            .get_block_hash(BlockHeight::from_u32(0))
-            .await
-            .expect("FATAL: failed to fetch genesis hash via JSON-RPC");
-        assert_eq!(
-            genesis_hash, EXPECTED_GENESIS,
-            "FATAL: genesis block hash mismatch — Zebra is not on the boot-selected network"
-        );
-    }
-
-    // Fetch the tip block via JSON-RPC since Zebra gRPC doesn't implement get_block.
-    let block = rpc
-        .get_block(network, tip_height)
-        .await
-        .expect("FATAL: failed to fetch tip block via JSON-RPC");
-
-    // Consensus baseline: NU5 must be active.
-    {
-        assert!(
-            network.is_nu_active(NetworkUpgrade::Nu5, tip_height),
-            "FATAL: node is on a pre-NU5 branch (tip {})",
-            u32::from(tip_height),
-        );
-    }
-
     tracing::info!(
         height = u32::from(tip_height),
-        tx_count = block.vtx().len(),
-        "boot: tip block verified, chain integrity ok"
+        "boot: canonical tip baseline established"
     );
 
     (chain, tip_height)
 }
 
 // ---------------------------------------------------------------------------
-// Step 6: ZNS Origin Checkpoint
-// ---------------------------------------------------------------------------
-
-/// The Ironwood (NU6.3) activation height in boot-proven parameters.
-pub fn ironwood_activation_height<P: Parameters>(network: &P) -> BlockHeight {
-    network
-        .activation_height(NetworkUpgrade::Nu6_3)
-        .expect("NU6.3 activation height must be set in zcash_protocol")
-}
-
-/// Fetches the origin checkpoint from Zebra via `z_gettreestate`.
-///
-/// The mint orchestrator begins scanning blocks from the boot-proven
-/// `ironwood_activation_height`.
-/// The checkpoint provides the commitment tree state for the block immediately
-/// preceding it, establishing the tree root for the wallet.
-///
-/// Sapling and Orchard trees are fetched from Zebra (they contain years of
-/// commitments at this height). The Ironwood tree is empty — it does not
-/// exist until Ironwood activates.
-///
-/// Zebra is the trust root (same TEE). `verify_chain_integrity` already
-/// cross-validates gRPC vs JSON-RPC, verifies the selected network's genesis
-/// block hash, and checks the required upgrade baseline. No hardcoded
-/// origin-hash pinning is needed — the checkpoint hash from `z_gettreestate`
-/// is stored in metadata for reference.
-async fn origin_checkpoint<P: Parameters>(rpc: &zcash::JsonRpc, network: &P) -> ChainState {
-    let checkpoint_height = ironwood_activation_height(network).saturating_sub(1);
-
-    let chain_state = rpc
-        .chain_state_at(checkpoint_height)
-        .await
-        .expect("FATAL: failed to fetch origin checkpoint from Zebra");
-
-    tracing::info!(
-        "boot: origin checkpoint at height {}, hash {}",
-        u32::from(checkpoint_height),
-        chain_state.block_hash()
-    );
-
-    chain_state
-}
-
-// ---------------------------------------------------------------------------
-// Seed fingerprint verification
-// ---------------------------------------------------------------------------
-
-/// The expected ZIP-32 seed fingerprint, compiled into the binary.
-///
-/// This is read at compile time from `deployment/seed_fingerprint.txt`. That
-/// file is a deployment artifact, not a runtime config: it must be replaced
-/// with the real seed fingerprint before a production artifact is built. The
-/// placeholder value causes boot to fail closed if it is not replaced.
-static EXPECTED_SEED_FINGERPRINT_RAW: &str = include_str!("../deployment/seed_fingerprint.txt");
-
-fn expected_seed_fingerprint() -> &'static str {
-    EXPECTED_SEED_FINGERPRINT_RAW.trim()
-}
-
-fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
-    let actual = SeedFingerprint::from_seed(seed.expose_secret())
-        .expect("seed is 32 bytes, within ZIP-32's 32..=252 range");
-
-    #[cfg(feature = "dev-seed")]
-    {
-        let _ = expected; // Suppress unused warning in dev mode only.
-        tracing::warn!(
-            "boot: dev-seed fingerprint = {} (verification skipped)",
-            actual
-        );
-    }
-
-    #[cfg(not(feature = "dev-seed"))]
-    {
-        if expected.eq("PLACEHOLDER") {
-            panic!(
-                "FATAL: production build contains the placeholder seed fingerprint. \
-                 Replace deployment/seed_fingerprint.txt with the real fingerprint before building."
-            );
-        }
-
-        let expected_fp = SeedFingerprint::from_str(expected)
-            .expect("FATAL: compiled binary contains an invalid seed fingerprint");
-
-        if actual != expected_fp {
-            // Redacted panic: do not print either fingerprint.
-            panic!(
-                "FATAL: SEED FINGERPRINT MISMATCH — decrypted seed does not match the fingerprint compiled into this binary"
-            );
-        }
-        tracing::info!("boot: seed fingerprint verified");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Attestation report data
-// ---------------------------------------------------------------------------
-
-/// Constructs the 64-byte attestation report data: BLAKE2b-512 of
-/// `treasury_default_address || "||" || registry_fvk`.
-///
-/// An external verifier checks this against the expected Treasury address
-/// and Registry UFVK, binding the attestation to the mint's identity.
-fn generate_attestation_report_data<P: Parameters>(
-    network: &P,
-    treasury_keys: &TreasuryKeys,
-    registry_keys: &RegistryKeys,
-) -> [u8; 64] {
-    use zcash_keys::keys::UnifiedAddressRequest;
-
-    let (treasury_addr, _) = treasury_keys
-        .fvk()
-        .default_address(UnifiedAddressRequest::SHIELDED)
-        .expect("FATAL: Treasury FVK missing default address");
-    let treasury_addr_str = treasury_addr.encode(network);
-    let registry_fvk_str = registry_keys.fvk().encode(network);
-
-    let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
-    hasher.update(treasury_addr_str.as_bytes());
-    hasher.update(b"||");
-    hasher.update(registry_fvk_str.as_bytes());
-    let hash = hasher.finalize();
-
-    let mut report_data = [0u8; 64];
-    report_data.copy_from_slice(hash.as_bytes());
-    report_data
-}
-
-// ---------------------------------------------------------------------------
-// Seed intake (sealed blob)
+// Step 3: Seed intake (sealed blob)
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -643,8 +455,132 @@ fn derive_sealing_key() -> [u8; 32] {
 }
 
 // ---------------------------------------------------------------------------
-// SEV-SNP attestation
+// Step 4: Seed fingerprint verification
 // ---------------------------------------------------------------------------
+
+/// The expected ZIP-32 seed fingerprint, compiled into the binary.
+///
+/// This is read at compile time from `deployment/seed_fingerprint.txt`. That
+/// file is a deployment artifact, not a runtime config: it must be replaced
+/// with the real seed fingerprint before a production artifact is built. The
+/// placeholder value causes boot to fail closed if it is not replaced.
+static EXPECTED_SEED_FINGERPRINT_RAW: &str = include_str!("../deployment/seed_fingerprint.txt");
+
+fn expected_seed_fingerprint() -> &'static str {
+    EXPECTED_SEED_FINGERPRINT_RAW.trim()
+}
+
+fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
+    let actual = SeedFingerprint::from_seed(seed.expose_secret())
+        .expect("seed is 32 bytes, within ZIP-32's 32..=252 range");
+
+    #[cfg(feature = "dev-seed")]
+    {
+        let _ = expected; // Suppress unused warning in dev mode only.
+        tracing::warn!(
+            "boot: dev-seed fingerprint = {} (verification skipped)",
+            actual
+        );
+    }
+
+    #[cfg(not(feature = "dev-seed"))]
+    {
+        if expected.eq("PLACEHOLDER") {
+            panic!(
+                "FATAL: production build contains the placeholder seed fingerprint. \
+                 Replace deployment/seed_fingerprint.txt with the real fingerprint before building."
+            );
+        }
+
+        let expected_fp = SeedFingerprint::from_str(expected)
+            .expect("FATAL: compiled binary contains an invalid seed fingerprint");
+
+        if actual != expected_fp {
+            // Redacted panic: do not print either fingerprint.
+            panic!(
+                "FATAL: SEED FINGERPRINT MISMATCH — decrypted seed does not match the fingerprint compiled into this binary"
+            );
+        }
+        tracing::info!("boot: seed fingerprint verified");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Step 5: Origin checkpoint
+// ---------------------------------------------------------------------------
+
+/// The Ironwood (NU6.3) activation height in the selected network parameters.
+pub fn ironwood_activation_height<P: Parameters>(network: &P) -> BlockHeight {
+    network
+        .activation_height(NetworkUpgrade::Nu6_3)
+        .expect("NU6.3 activation height must be set in zcash_protocol")
+}
+
+/// Fetches the origin checkpoint from Zebra via `z_gettreestate`.
+///
+/// The mint orchestrator begins scanning blocks from the
+/// `ironwood_activation_height`.
+/// The checkpoint provides the commitment tree state for the block immediately
+/// preceding it, establishing the tree root for the wallet.
+///
+/// Sapling and Orchard trees are fetched from Zebra (they contain years of
+/// commitments at this height). The Ironwood tree is empty — it does not
+/// exist until Ironwood activates.
+///
+/// Zebra is part of the same measured TEE image; its identity is guaranteed
+/// by the SEV-SNP attestation, not by runtime RPC checks. No hardcoded
+/// origin-hash pinning is needed — the checkpoint hash from `z_gettreestate`
+/// is stored in metadata for reference.
+async fn origin_checkpoint<P: Parameters>(rpc: &zcash::JsonRpc, network: &P) -> ChainState {
+    let checkpoint_height = ironwood_activation_height(network).saturating_sub(1);
+
+    let chain_state = rpc
+        .chain_state_at(checkpoint_height)
+        .await
+        .expect("FATAL: failed to fetch origin checkpoint from Zebra");
+
+    tracing::info!(
+        "boot: origin checkpoint at height {}, hash {}",
+        u32::from(checkpoint_height),
+        chain_state.block_hash()
+    );
+
+    chain_state
+}
+
+// ---------------------------------------------------------------------------
+// Step 6: Attestation
+// ---------------------------------------------------------------------------
+
+/// Constructs the 64-byte attestation report data: BLAKE2b-512 of
+/// `treasury_default_address || "||" || registry_fvk`.
+///
+/// An external verifier checks this against the expected Treasury address
+/// and Registry UFVK, binding the attestation to the mint's identity.
+fn generate_attestation_report_data<P: Parameters>(
+    network: &P,
+    treasury_keys: &TreasuryKeys,
+    registry_keys: &RegistryKeys,
+) -> [u8; 64] {
+    use zcash_keys::keys::UnifiedAddressRequest;
+
+    let (treasury_addr, _) = treasury_keys
+        .fvk()
+        .default_address(UnifiedAddressRequest::SHIELDED)
+        .expect("FATAL: Treasury FVK missing default address");
+    let treasury_addr_str = treasury_addr.encode(network);
+    let registry_fvk_str = registry_keys.fvk().encode(network);
+
+    let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
+    hasher.update(treasury_addr_str.as_bytes());
+    hasher.update(b"||");
+    hasher.update(registry_fvk_str.as_bytes());
+    let hash = hasher.finalize();
+
+    let mut report_data = [0u8; 64];
+    report_data.copy_from_slice(hash.as_bytes());
+    report_data
+}
 
 #[cfg(target_os = "linux")]
 fn generate_mint_attestation(report_data: [u8; 64]) -> Vec<u8> {
@@ -663,6 +599,84 @@ fn generate_mint_attestation(report_data: [u8; 64]) -> Vec<u8> {
 fn generate_mint_attestation(_report_data: [u8; 64]) -> Vec<u8> {
     tracing::warn!("boot: skipped attestation generation (not on linux)");
     Vec::new()
+}
+
+// ---------------------------------------------------------------------------
+// Step 7: Sapling proving parameters
+// ---------------------------------------------------------------------------
+
+/// The BLAKE2b-512 hash of the canonical `sapling-spend.params` file.
+const SAPLING_SPEND_HASH: &str = "8270785a1a0d0bc77196f000ee6d221c9c9894f55307bd9357c3f0105d31ca63991ab91324160d8f53e2bbd3c2633a6eb8bdf5205d822e7f3f73edac51b2b70c";
+
+/// The BLAKE2b-512 hash of the canonical `sapling-output.params` file.
+const SAPLING_OUTPUT_HASH: &str = "657e3d38dbb5cb5e7dd2970e8b03d69b4787dd907285b5a7f0790dcc8072f60bf593b32cc2d1c030e00ff5ae64bf84c5c3beb84ddc841d48264b4a171744d028";
+
+/// Expected file sizes for the Sapling parameter files.
+const SAPLING_SPEND_BYTES: u64 = 47_958_396;
+const SAPLING_OUTPUT_BYTES: u64 = 3_592_860;
+
+fn sapling_params_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("ZCASH_PARAMS_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    std::path::PathBuf::from(home).join(".zcash-params")
+}
+
+fn read_verified_sapling_params(
+    path: &std::path::Path,
+    expected_hash: &str,
+    expected_bytes: u64,
+) -> Vec<u8> {
+    use std::io::Read;
+
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(
+        size,
+        expected_bytes,
+        "Sapling params size mismatch at {}: expected {expected_bytes}, got {size}",
+        path.display(),
+    );
+
+    let mut file = std::fs::File::open(path).unwrap_or_else(|e| {
+        panic!(
+            "FATAL: cannot open Sapling params at {}: {e}",
+            path.display()
+        )
+    });
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.read_to_end(&mut bytes).unwrap_or_else(|e| {
+        panic!(
+            "FATAL: cannot read Sapling params at {}: {e}",
+            path.display()
+        )
+    });
+
+    let hash = blake2b_simd::Params::new().hash_length(64).hash(&bytes);
+    let hash_hex = hex::encode(hash.as_bytes());
+    assert_eq!(
+        hash_hex,
+        expected_hash,
+        "Sapling params hash mismatch at {}: expected {expected_hash}, got {hash_hex}",
+        path.display(),
+    );
+    bytes
+}
+
+fn load_sapling_spend_params() -> SpendParameters {
+    let dir = sapling_params_dir();
+    let path = dir.join("sapling-spend.params");
+    let bytes = read_verified_sapling_params(&path, SAPLING_SPEND_HASH, SAPLING_SPEND_BYTES);
+    SpendParameters::read(&bytes[..], false)
+        .expect("FATAL: failed to deserialize sapling-spend.params")
+}
+
+fn load_sapling_output_params() -> OutputParameters {
+    let dir = sapling_params_dir();
+    let path = dir.join("sapling-output.params");
+    let bytes = read_verified_sapling_params(&path, SAPLING_OUTPUT_HASH, SAPLING_OUTPUT_BYTES);
+    OutputParameters::read(&bytes[..], false)
+        .expect("FATAL: failed to deserialize sapling-output.params")
 }
 
 // ---------------------------------------------------------------------------
@@ -715,74 +729,4 @@ mod tests {
         assert!(!network.is_nu_active(NetworkUpgrade::Nu6_3, BlockHeight::from_u32(3)));
         assert!(network.is_nu_active(NetworkUpgrade::Nu6_3, four));
     }
-}
-
-// ---------------------------------------------------------------------------
-// Sapling proving parameters
-// ---------------------------------------------------------------------------
-
-/// The BLAKE2b-512 hash of the canonical `sapling-spend.params` file.
-const SAPLING_SPEND_HASH: &str = "8270785a1a0d0bc77196f000ee6d221c9c9894f55307bd9357c3f0105d31ca63991ab91324160d8f53e2bbd3c2633a6eb8bdf5205d822e7f3f73edac51b2b70c";
-
-/// The BLAKE2b-512 hash of the canonical `sapling-output.params` file.
-const SAPLING_OUTPUT_HASH: &str = "657e3d38dbb5cb5e7dd2970e8b03d69b4787dd907285b5a7f0790dcc8072f60bf593b32cc2d1c030e00ff5ae64bf84c5c3beb84ddc841d48264b4a171744d028";
-
-/// Expected file sizes for the Sapling parameter files.
-const SAPLING_SPEND_BYTES: u64 = 47_958_396;
-const SAPLING_OUTPUT_BYTES: u64 = 3_592_860;
-
-fn sapling_params_dir() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("ZCASH_PARAMS_DIR") {
-        return std::path::PathBuf::from(dir);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    std::path::PathBuf::from(home).join(".zcash-params")
-}
-
-fn read_verified_sapling_params(
-    path: &std::path::Path,
-    expected_hash: &str,
-    expected_bytes: u64,
-) -> Vec<u8> {
-    use std::io::Read;
-
-    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    assert_eq!(
-        size, expected_bytes,
-        "Sapling params size mismatch at {}: expected {expected_bytes}, got {size}",
-        path.display(),
-    );
-
-    let mut file = std::fs::File::open(path).unwrap_or_else(|e| {
-        panic!("FATAL: cannot open Sapling params at {}: {e}", path.display())
-    });
-    let mut bytes = Vec::with_capacity(size as usize);
-    file.read_to_end(&mut bytes).unwrap_or_else(|e| {
-        panic!("FATAL: cannot read Sapling params at {}: {e}", path.display())
-    });
-
-    let hash = blake2b_simd::Params::new().hash_length(64).hash(&bytes);
-    let hash_hex = hex::encode(hash.as_bytes());
-    assert_eq!(
-        hash_hex, expected_hash,
-        "Sapling params hash mismatch at {}: expected {expected_hash}, got {hash_hex}",
-        path.display(),
-    );
-    bytes
-}
-
-fn load_sapling_spend_params() -> SpendParameters {
-    let dir = sapling_params_dir();
-    let path = dir.join("sapling-spend.params");
-    let bytes = read_verified_sapling_params(&path, SAPLING_SPEND_HASH, SAPLING_SPEND_BYTES);
-    SpendParameters::read(&bytes[..], false)
-        .expect("FATAL: failed to deserialize sapling-spend.params")
-}
-
-fn load_sapling_output_params() -> OutputParameters {
-    let dir = sapling_params_dir();
-    let path = dir.join("sapling-output.params");
-    let bytes = read_verified_sapling_params(&path, SAPLING_OUTPUT_HASH, SAPLING_OUTPUT_BYTES);
-    OutputParameters::read(&bytes[..], false)
-        .expect("FATAL: failed to deserialize sapling-output.params")
 }
