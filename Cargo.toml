@@ -7,8 +7,7 @@ publish = false
 
 [features]
 default = []
-dev-seed = []
-regtest = ["dev-seed", "zcash_protocol/local-consensus"]
+regtest = ["zcash_protocol/local-consensus"]
 
 [[bin]]
 name = "zns-mint"
