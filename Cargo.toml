@@ -22,7 +22,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
 subtle = "2.5"
 secrecy = "0.8"
-chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
 hkdf = "0.12"
 sha2 = "0.10"
 thiserror = "1"
