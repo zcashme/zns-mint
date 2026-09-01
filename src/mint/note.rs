@@ -384,20 +384,6 @@ pub fn decode_name_note<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<N
     (note.encode(params)?.as_slice() == memo).then_some(note)
 }
 
-/// Compatibility wrapper preserving the tuple-returning call sites.
-pub fn decode_name_note_tuple<P: Parameters>(
-    params: &P,
-    memo: &[u8; 512],
-) -> Option<(Name, Action, String, Expiry, Option<NameCommitment>)> {
-    let note = decode_name_note(params, memo)?;
-    Some((
-        note.name().clone(),
-        note.action(),
-        note.ua().encode(params),
-        note.expires_at().unwrap_or(Expiry::Never),
-        note.prev_rcm(),
-    ))
-}
 
 // ---------------------------------------------------------------------------
 // Block scan: ZNS trial-decryption pass
