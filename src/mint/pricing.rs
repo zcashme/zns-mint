@@ -1,123 +1,326 @@
-//! Daily USD/ZEC claim pricing.
+//! Daily USD/ZEC pricing.
 //!
-//! The mint publishes **one ZEC/USD rate per UTC day**. All claims filed
-//! during a given day are priced against that day's fixed rate — no
-//! intra-day fluctuation, no spot pricing, no surprises for users. The
-//! daily rate is a **time-weighted average price (TWAP)** of the per-block
-//! median-of-odd fetches accumulated throughout the *previous* day. So
-//! today's rate = yesterday's full-day average.
-//!
-//! On cold start the first successful fetch seeds a temporary spot rate so
-//! the mint can operate immediately; at the next UTC midnight the rate
-//! switches to a full-day TWAP and never looks back.
-//!
-//! # Rate aggregation
-//!
-//! The aggregation is ported from `zcash_client_backend` 0.24.0-rc.7
-//! `tor::http::cryptex` (MIT OR Apache-2.0):
-//!
-//! - nine public exchange ticker endpoints, quoted per source;
-//! - each source contributes the midpoint of its best bid/ask (cryptex.rs
-//!   `ExchangeData::exchange_rate`);
-//! - Gemini (a NYDFS-regulated exchange) is trusted: its quote always counts
-//!   when obtained;
-//! - with two or more other sources configured — always true here — at least
-//!   three usable quotes are required, else the round fails (cryptex.rs
-//!   "never go to sea with two chronometers" rule);
-//! - one quote is evicted at random if needed to leave an odd count, and the
-//!   median is taken.
-//!
-//! Upstream routes every request through Tor (`tor::Client` is welded into
-//! the adapter trait and the aggregator method); this port swaps the
-//! transport for a one-shot rustls HTTPS connection (upstream
-//! `tor/http.rs::make_http_request` shape) against the repo's existing hyper
-//! stack. No arti, no `rust_decimal` (fixed-point `MicroUsd`), no
-//! `futures-util` (tokio fan-out).
-//!
-//! # Trust model
-//!
-//! A corrupted daily TWAP requires sustained manipulation of the median
-//! across a large fraction of a full day's ~1152 fetch rounds — an attacker
-//! must control ≥5 of 9 venues (or Gemini plus four) for hours, not seconds.
-//! DNS or network interception cannot forge the webpki-validated
-//! certificates. There is no operator input channel into the rate: no env
-//! var, no config file, no RPC parameter. When no rate has ever been
-//! published, pricing returns `None` and callers must pause claims — fail
-//! closed, never misprice.
-//!
-//! Six sources quote ZEC/USDT rather than ZEC/USD; upstream pools them and
-//! so does this port. The USDT basis is bps-level noise under a median.
 
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Duration;
 
-use http_body_util::BodyExt;
-use hyper::client::conn::http1;
-use hyper::{Request, Uri};
-use hyper_util::rt::TokioIo;
-use rand::seq::IteratorRandom;
-use rand::rngs::OsRng;
+use http::Uri;
+use http_body_util::{BodyExt, Empty};
+use hyper::body::Bytes;
+use hyper::Request;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use rust_decimal::Decimal;
 use time::Timestamp;
+use tokio_rustls::rustls::pki_types::ServerName;
+use tokio_rustls::{client::TlsStream, TlsConnector};
+use tower_service::Service as TowerService;
 use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::value::{COIN, Zatoshis};
+use zcash_protocol::value::{Zatoshis, COIN};
 
 use crate::mint::Name;
 
 // ===========================================================================
-// Fixed-point USD
+// Venues — the entire per-exchange configuration is data, one line each
 // ===========================================================================
 
-/// A USD amount in millionths (USD × 10⁻⁶) as an exact integer.
-///
-/// Every exchange in the source set emits at most six fraction digits, so
-/// ingest is lossless and every later operation (midpoint, median, price
-/// conversion) is exact integer arithmetic. Replaces cryptex's
-/// `rust_decimal` with no new dependency and no allocator.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct MicroUsd(u64);
+/// One ZEC spot venue: where to fetch and how to read the last price.
+struct Exchange {
+    /// Identity for logs and errors.
+    name: &'static str,
+    /// This venue's quote is always counted in the median (trusted anchor).
+    trusted: bool,
+    /// Ticker endpoint returning JSON.
+    url: &'static str,
+    /// RFC 6901 JSON pointer to the last-price value.
+    pointer: &'static str,
+}
 
-impl MicroUsd {
-    /// Parses a decimal string such as `"41"`, `"41.5"`, `"41.234567"`.
-    ///
-    /// Accepts at most six fraction digits (everything the source set can
-    /// emit); rejects signs, empty parts, and any non-digit. Returns `None`
-    /// on anything else — a malformed quote drops its source from the
-    /// median rather than erroring the round.
-    pub fn parse(s: &str) -> Option<Self> {
-        let (int_part, frac_part) = match s.split_once('.') {
-            Some((i, f)) => (i, Some(f)),
-            None => (s, None),
-        };
-        if int_part.is_empty() {
+const EXCHANGES: [Exchange; 9] = [
+    Exchange {
+        name: "gemini",
+        trusted: true,
+        url: "https://api.gemini.com/v2/ticker/zecusd",
+        pointer: "/close",
+    },
+    Exchange {
+        name: "kraken",
+        trusted: false,
+        url: "https://api.kraken.com/0/public/Ticker?pair=XZECZUSD",
+        pointer: "/result/XZECZUSD/c/0",
+    },
+    Exchange {
+        name: "coinbase",
+        trusted: false,
+        url: "https://api.exchange.coinbase.com/products/ZEC-USD/ticker",
+        pointer: "/price",
+    },
+    Exchange {
+        name: "bitstamp",
+        trusted: false,
+        url: "https://www.bitstamp.net/api/v2/ticker/zecusd/",
+        pointer: "/last",
+    },
+    Exchange {
+        name: "bitfinex",
+        trusted: false,
+        url: "https://api-pub.bitfinex.com/v2/ticker/tZECUSD",
+        pointer: "/6",
+    },
+    Exchange {
+        name: "okx",
+        trusted: false,
+        url: "https://www.okx.com/api/v5/market/ticker?instId=ZEC-USDT",
+        pointer: "/data/0/last",
+    },
+    Exchange {
+        name: "binance",
+        trusted: false,
+        url: "https://api.binance.com/api/v3/ticker/24hr?symbol=ZECUSDT",
+        pointer: "/lastPrice",
+    },
+    Exchange {
+        name: "kucoin",
+        trusted: false,
+        url: "https://api.kucoin.com/api/v1/market/stats?symbol=ZEC-USDT",
+        pointer: "/data/last",
+    },
+    Exchange {
+        name: "mexc",
+        trusted: false,
+        url: "https://api.mexc.com/api/v3/ticker/24hr?symbol=ZECUSDT",
+        pointer: "/lastPrice",
+    },
+];
+
+/// The trusted anchor venue: NYDFS-regulated Gemini.
+const TRUSTED: usize = 0;
+
+// ===========================================================================
+// Fetch
+// ===========================================================================
+
+/// Deadline for one source end-to-end (connect + request + body). A slow
+/// source is a dropped source; the round does not wait for stragglers.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The webpki root store, no client auth. This is the entire trust anchor
+/// for egress — a network interceptor can drop or stall a quote (the median
+/// and timeouts absorb that) but cannot forge it.
+fn tls_connector() -> TlsConnector {
+    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    TlsConnector::from(Arc::new(
+        tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    ))
+}
+
+/// A TLS-wrapped TCP stream, presented to the pooled HTTP client.
+#[derive(Debug)]
+struct TlsConnection(TokioIo<TlsStream<tokio::net::TcpStream>>);
+
+impl hyper_util::client::legacy::connect::Connection for TlsConnection {
+    fn connected(&self) -> hyper_util::client::legacy::connect::Connected {
+        hyper_util::client::legacy::connect::Connected::new()
+    }
+}
+
+impl hyper::rt::Read for TlsConnection {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        hyper::rt::Read::poll_read(std::pin::Pin::new(&mut self.0), cx, buf)
+    }
+}
+
+impl hyper::rt::Write for TlsConnection {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        hyper::rt::Write::poll_write(std::pin::Pin::new(&mut self.0), cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        hyper::rt::Write::poll_flush(std::pin::Pin::new(&mut self.0), cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        hyper::rt::Write::poll_shutdown(std::pin::Pin::new(&mut self.0), cx)
+    }
+}
+
+/// DNS + TCP + TLS: the connector the pooled HTTP client uses to open
+/// HTTPS connections. `Uri` in, TLS connection out.
+#[derive(Clone)]
+struct HttpsConnector {
+    tls: TlsConnector,
+}
+
+impl TowerService<Uri> for HttpsConnector {
+    type Response = TlsConnection;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, uri: Uri) -> Self::Future {
+        let tls = self.tls.clone();
+        Box::pin(async move {
+            let host = uri.host().ok_or("uri has no host")?.to_string();
+            let port = uri.port_u16().unwrap_or(443);
+            let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+            let server_name = ServerName::try_from(host)?;
+            let stream = tls.connect(server_name, tcp).await?;
+            Ok(TlsConnection(TokioIo::new(stream)))
+        })
+    }
+}
+
+type HttpsClient = Client<HttpsConnector, Empty<Bytes>>;
+
+fn https_client(tls: TlsConnector) -> HttpsClient {
+    Client::builder(TokioExecutor::new()).build(HttpsConnector { tls })
+}
+
+/// Fetches one venue's last price. Every failure mode — DNS, TCP, TLS, HTTP
+/// status, JSON shape, pointer miss, malformed decimal — collapses to `None`
+/// and the venue is dropped from the round.
+async fn fetch_last(client: &HttpsClient, exchange: &Exchange) -> Option<Decimal> {
+    let uri: Uri = exchange.url.parse().ok()?;
+    let request = Request::builder()
+        .uri(uri)
+        .header("accept", "application/json")
+        .body(Empty::<Bytes>::default())
+        .ok()?;
+    let response = tokio::time::timeout(FETCH_TIMEOUT, client.request(request))
+        .await
+        .ok()?
+        .ok()?;
+    if !response.status().is_success() {
+        tracing::warn!(
+            exchange = exchange.name,
+            status = %response.status(),
+            "pricing fetch rejected"
+        );
+        return None;
+    }
+    let bytes = response.into_body().collect().await.ok()?.to_bytes();
+    let body: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(exchange = exchange.name, error = %e, "pricing JSON parse failed");
             return None;
         }
-        let frac = match frac_part {
-            Some(f) if f.is_empty() || f.len() > 6 => return None,
-            Some(f) => f,
-            None => "",
+    };
+    match body.pointer(exchange.pointer) {
+        Some(v) => match serde_json::from_value::<Decimal>(v.clone()) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!(exchange = exchange.name, error = %e, "price value invalid");
+                None
+            }
+        },
+        None => {
+            tracing::warn!(
+                exchange = exchange.name,
+                pointer = exchange.pointer,
+                "pricing pointer missed"
+            );
+            None
+        }
+    }
+}
+
+// ===========================================================================
+// Aggregation
+// ===========================================================================
+
+/// Median over the round's quotes.
+///
+/// - the trusted quote (Gemini) is always counted when obtained;
+/// - at least three usable quotes are required;
+/// - odd count: the middle element; even count: the mean of the middle
+///   two. No eviction, no randomness — the same quote set always produces
+///   the same rate, so a published day-price is reproducible from its
+///   inputs.
+///
+/// An attacker must control half the venues to move the published rate.
+fn median(trusted: Option<Decimal>, mut quotes: Vec<Decimal>) -> Option<Decimal> {
+    if let Some(t) = trusted {
+        quotes.push(t);
+    }
+    if quotes.len() < 3 {
+        return None;
+    }
+    quotes.sort_unstable();
+    let mid = quotes.len() / 2;
+    Some(if quotes.len() % 2 == 1 {
+        quotes[mid]
+    } else {
+        (quotes[mid - 1] + quotes[mid]) / Decimal::TWO
+    })
+}
+
+/// Queries all nine venues concurrently and returns the median last price.
+///
+/// The trusted venue is aggregated separately per the upstream rule. All
+/// failures collapse to dropped venues; `None` means fewer than three
+/// venues responded and the round failed.
+async fn fetch_round() -> Option<Decimal> {
+    let client = https_client(tls_connector());
+    let mut set = tokio::task::JoinSet::new();
+    for (index, exchange) in EXCHANGES.iter().enumerate() {
+        let client = client.clone();
+        set.spawn(async move {
+            (index, tokio::time::timeout(FETCH_TIMEOUT, fetch_last(&client, exchange)).await.ok().flatten())
+        });
+    }
+
+    let mut trusted = None;
+    let mut others = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        let (index, quote) = match joined {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!(error = %e, "pricing task panicked");
+                continue;
+            }
         };
-
-        let mut micros: u64 = 0;
-        for b in int_part.bytes().chain(frac.bytes()) {
-            let d = (b as char).to_digit(10)? as u64;
-            micros = micros.checked_mul(10)?.checked_add(d)?;
+        if index == TRUSTED {
+            trusted = quote;
+            if quote.is_none() {
+                tracing::warn!("trusted pricing source (gemini) failed");
+            }
+        } else if let Some(q) = quote {
+            others.push(q);
         }
-        // Scale the fraction digits up to micros.
-        for _ in 0..(6 - frac.len()) {
-            micros = micros.checked_mul(10)?;
-        }
-        Some(Self(micros))
     }
 
-    /// The exact midpoint of a bid/ask pair, floored on a half-micro.
-    /// Port of cryptex `ExchangeData::exchange_rate`.
-    pub fn midpoint(self, other: Self) -> Option<Self> {
-        Some(Self(self.0.checked_add(other.0)? / 2))
-    }
-
-    /// The raw micro-USD value.
-    pub fn as_u64(self) -> u64 {
-        self.0
+    match median(trusted, others) {
+        Some(m) => Some(m),
+        None => {
+            tracing::warn!("pricing round failed: fewer than three venues responded");
+            None
+        }
     }
 }
 
@@ -131,257 +334,21 @@ impl MicroUsd {
 /// `Name::parse` admits only `a-z`, `0-9`, `-` (1–63 chars), so `len` is a
 /// byte length equal to the character count. Compiled into the binary —
 /// pricing policy follows the no-env, no-config doctrine.
-pub fn schedule_usd(len: usize) -> MicroUsd {
-    MicroUsd(match len {
-        1 => 100_000_000_000_000, // $100,000,000
-        2 => 10_000_000_000_000,  // $10,000,000
-        3 => 1_000_000_000_000,   // $1,000,000
-        4 => 100_000_000_000,     // $100,000
-        5 => 10_000_000_000,      // $10,000
-        6 => 1_000_000_000,       // $1,000
-        _ => 100_000_000,         // 7+ = $100
+pub fn schedule_usd(len: usize) -> Decimal {
+    Decimal::from(match len {
+        1 => 100_000_000, // $100,000,000
+        2 => 10_000_000,  // $10,000,000
+        3 => 1_000_000,   // $1,000,000
+        4 => 100_000,     // $100,000
+        5 => 10_000,      // $10,000
+        6 => 1_000,       // $1,000
+        _ => 100,         // 7+ = $100
     })
-}
-
-// ===========================================================================
-// Sources
-// ===========================================================================
-
-/// The fixed source set. Entry 0 (Gemini) is the trusted source; the
-/// aggregator requires at least three usable quotes total.
-///
-/// Each entry cites its ported upstream adapter under
-/// `zcash_client_backend/src/tor/http/cryptex/`.
-const TICKERS: [(&str, &str); 9] = [
-    // gemini.rs — ZEC/USD, NYDFS-regulated; trusted.
-    ("gemini", "https://api.gemini.com/v2/ticker/zecusd"),
-    // kraken.rs — ZEC/USD. Upstream's typed struct does not match Kraken's
-    // documented `{"error":[],"result":{...}}` envelope; this arm follows
-    // the documented nesting and drops the source on mismatch.
-    ("kraken", "https://api.kraken.com/0/public/Ticker?pair=XZECZUSD"),
-    // coinbase.rs — ZEC/USD.
-    ("coinbase", "https://api.exchange.coinbase.com/products/ZEC-USD/ticker"),
-    // binance.rs — ZEC/USDT.
-    ("binance", "https://api.binance.com/api/v3/ticker/24hr?symbol=ZECUSDT"),
-    // mexc.rs — ZEC/USDT.
-    ("mexc", "https://api.mexc.com/api/v3/ticker/24hr?symbol=ZECUSDT"),
-    // ku_coin.rs — ZEC/USDT.
-    ("kucoin", "https://api.kucoin.com/api/v1/market/stats?symbol=ZEC-USDT"),
-    // coin_ex.rs — ZEC/USDT (best book level).
-    ("coinex", "https://api.coinex.com/v2/spot/depth?market=ZECUSDT&limit=5&interval=0"),
-    // digi_finex.rs — ZEC/USDT.
-    ("digifinex", "https://openapi.digifinex.com/v3/ticker?symbol=zec_usdt"),
-    // xt.rs — ZEC/USDT (best book level).
-    ("xt", "https://sapi.xt.com/v4/public/ticker/book?symbol=zec_usdt"),
-];
-
-/// Extracts `(bid, ask)` from a source's ticker JSON.
-///
-/// Each arm mirrors the field selection of its upstream adapter. All nine
-/// sources emit prices as JSON strings; anything absent, null, or
-/// non-numeric yields `None` and the source is dropped from the round.
-fn parse_quote(source: &str, v: &serde_json::Value) -> Option<(MicroUsd, MicroUsd)> {
-    let field = |v: &serde_json::Value, key: &str| -> Option<MicroUsd> {
-        MicroUsd::parse(v.get(key)?.as_str()?)
-    };
-    let (bid, ask) = match source {
-        // gemini.rs: `ExchangeData { bid: data.bid, ask: data.ask }`
-        "gemini" => (field(v, "bid")?, field(v, "ask")?),
-        // kraken.rs: `bid: data.b.0, ask: data.a.0` under result.XZECZUSD.
-        "kraken" => {
-            let r = v.get("result")?.get("XZECZUSD")?;
-            (
-                MicroUsd::parse(r.get("b")?.get(0)?.as_str()?)?,
-                MicroUsd::parse(r.get("a")?.get(0)?.as_str()?)?,
-            )
-        }
-        // coinbase.rs: `bid: data.bid, ask: data.ask`.
-        "coinbase" => (field(v, "bid")?, field(v, "ask")?),
-        // binance.rs: `bid: data.bidPrice, ask: data.askPrice`.
-        "binance" => (field(v, "bidPrice")?, field(v, "askPrice")?),
-        // mexc.rs: `bid: data.bidPrice, ask: data.askPrice`.
-        "mexc" => (field(v, "bidPrice")?, field(v, "askPrice")?),
-        // ku_coin.rs: `bid: data.buy, ask: data.sell` under `data`.
-        "kucoin" => {
-            let d = v.get("data")?;
-            (field(d, "buy")?, field(d, "sell")?)
-        }
-        // coin_ex.rs: first bid / first ask price under `data.depth`.
-        "coinex" => {
-            let d = v.get("data")?.get("depth")?;
-            (
-                MicroUsd::parse(d.get("bids")?.get(0)?.get(0)?.as_str()?)?,
-                MicroUsd::parse(d.get("asks")?.get(0)?.get(0)?.as_str()?)?,
-            )
-        }
-        // digi_finex.rs: `bid: ticker[0].buy, ask: ticker[0].sell`.
-        "digifinex" => {
-            let t = v.get("ticker")?.get(0)?;
-            (field(t, "buy")?, field(t, "sell")?)
-        }
-        // xt.rs: `bid: result[0].bp, ask: result[0].ap`.
-        "xt" => {
-            let r = v.get("result")?.get(0)?;
-            (field(r, "bp")?, field(r, "ap")?)
-        }
-        _ => return None,
-    };
-    Some((bid, ask))
-}
-
-// ===========================================================================
-// Transport
-// ===========================================================================
-
-/// One-shot rustls HTTPS: webpki root store, no client auth. This is the
-/// entire trust anchor for egress — a network interceptor can drop or stall
-/// a quote (the median and timeouts absorb that) but cannot forge it.
-static TLS: LazyLock<tokio_rustls::TlsConnector> = LazyLock::new(|| {
-    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    tokio_rustls::TlsConnector::from(Arc::new(
-        tokio_rustls::rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-    ))
-});
-
-/// Deadline for one source end-to-end (connect + request + body). A slow
-/// source is a dropped source; the round does not wait for stragglers.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Fetches one source's midpoint quote. Every failure mode — DNS, TCP, TLS,
-/// HTTP status, JSON shape, malformed decimal — collapses to `None`.
-///
-/// One-shot connection per fetch, mirroring upstream
-/// `tor/http.rs::make_http_request`: handshake, spawn the connection driver,
-/// one request, drop everything. At one round per block there is nothing to
-/// pool.
-async fn fetch_one(name: &'static str, url: &'static str) -> Option<MicroUsd> {
-    let uri: Uri = url.parse().ok()?;
-    let host = uri.host()?.to_string();
-    let port = uri.port_u16().unwrap_or(443);
-
-    let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await.ok()?;
-    let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host).ok()?;
-    let stream = TLS.connect(server_name, tcp).await.ok()?;
-
-    let (mut sender, connection) = http1::handshake::<_, http_body_util::Empty<hyper::body::Bytes>>(TokioIo::new(stream))
-        .await
-        .ok()?;
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    let request = Request::builder()
-        .method("GET")
-        .uri(uri)
-        .header("accept", "application/json")
-        .body(http_body_util::Empty::default())
-        .ok()?;
-    let response = sender.send_request(request).await.ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .ok()?
-        .to_bytes();
-    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let (bid, ask) = parse_quote(name, &v)?;
-    bid.midpoint(ask)
-}
-
-/// Runs one fetch round over the whole source set.
-///
-/// Returns the trusted (Gemini) quote separately from the others — the
-/// aggregation weights them differently. Sources resolve concurrently; the
-/// round takes as long as its fastest stragglers, bounded by
-/// [`FETCH_TIMEOUT`] per source.
-async fn fetch_round() -> (Option<MicroUsd>, Vec<MicroUsd>) {
-    let mut set = tokio::task::JoinSet::new();
-    for (name, url) in TICKERS {
-        set.spawn(async move {
-            let mid = tokio::time::timeout(FETCH_TIMEOUT, fetch_one(name, url))
-                .await
-                .ok()
-                .flatten();
-            (name, mid)
-        });
-    }
-
-    let mut trusted = None;
-    let mut others = Vec::new();
-    while let Some(joined) = set.join_next().await {
-        if let Ok((name, mid)) = joined {
-            if name == TICKERS[0].0 {
-                trusted = mid;
-            } else if let Some(m) = mid {
-                others.push(m);
-            }
-        }
-    }
-    (trusted, others)
-}
-
-// ===========================================================================
-// Aggregation
-// ===========================================================================
-
-/// Median-of-odd over the round's quotes. Port of the aggregation in
-/// cryptex `Client::get_latest_zec_to_usd_rate` (cryptex.rs 0.24.0-rc.7):
-///
-/// - at least three usable quotes are required whenever two or more
-///   non-trusted sources are configured (always true for this source set);
-/// - the trusted quote is always counted when obtained;
-/// - one other quote is evicted at random when needed to leave an odd
-///   count; the median of the odd set is the round's rate.
-fn median_of_odd(trusted: Option<MicroUsd>, mut others: Vec<MicroUsd>) -> Option<MicroUsd> {
-    // cryptex guards on the configured source count; the set is fixed here,
-    // so the "≥3 usable" rule is unconditional.
-    if others.len() + usize::from(trusted.is_some()) < 3 {
-        return None;
-    }
-
-    let mut evict_random = |s: &mut Vec<MicroUsd>| {
-        if let Some(index) = (0..s.len()).choose(&mut OsRng) {
-            s.remove(index);
-        }
-    };
-    match trusted {
-        Some(t) => {
-            if !others.len().is_multiple_of(2) {
-                evict_random(&mut others);
-            }
-            others.push(t);
-        }
-        None => {
-            if others.len().is_multiple_of(2) {
-                evict_random(&mut others);
-            }
-        }
-    }
-
-    if others.is_empty() {
-        return None;
-    }
-    assert!(!others.len().is_multiple_of(2));
-    others.sort_unstable();
-    Some(others[others.len() / 2])
 }
 
 // ===========================================================================
 // Oracle
 // ===========================================================================
-
-/// Minimum samples required to publish a daily TWAP. With per-block sampling
-/// (~1152 blocks/day at Zcash's 75-second cadence), this threshold is met
-/// within minutes. It only matters if the mint was down for most of the day —
-/// in that case the previous day's rate is retained rather than publishing a
-/// rate from a handful of samples.
-const MIN_SAMPLES: u32 = 10;
 
 /// Seconds per UTC day.
 const SECONDS_PER_DAY: i64 = 86_400;
@@ -399,29 +366,28 @@ const SECONDS_PER_DAY: i64 = 86_400;
 /// switches to a full-day TWAP and from then on every day is an average of
 /// the previous day.
 ///
-/// If fewer than [`MIN_SAMPLES`] samples were collected during a day (a
-/// sustained outage), the previous day's rate is retained — fail safe, not
-/// fail random. If no rate has ever been published, `None` is returned and
-/// callers must pause claims — fail closed.
+/// If the mint is down for an entire day, every round fails, the accumulator
+/// never advances, and the previous day's rate is retained. If no rate has
+/// ever been published, [`RateOracle::rate`] returns `None` and callers must
+/// pause claims — fail closed.
 #[derive(Default)]
 pub struct RateOracle {
     /// The published daily rate — yesterday's TWAP. Valid for all of today.
-    daily_rate: Option<MicroUsd>,
+    daily_rate: Option<Decimal>,
 
     /// TWAP accumulator: Σ(price × seconds) for the current day so far.
-    acc_sum: u128,
+    /// `Decimal` has ample range for a day's accumulation.
+    acc_sum: Decimal,
     /// TWAP accumulator: Σ(seconds) for the current day so far.
     acc_seconds: u64,
     /// The price of the most recent sample, carried forward between samples
     /// for time-weighting (the price is assumed constant between samples).
-    last_price: Option<MicroUsd>,
+    last_price: Option<Decimal>,
     /// The Unix timestamp (seconds) of the most recent sample.
     last_ts: i64,
     /// The UTC day number (`floor(unix_seconds / 86400)`) of the current
     /// accumulation.
     current_day: i64,
-    /// Successful samples collected during the current day.
-    sample_count: u32,
 }
 
 impl RateOracle {
@@ -432,8 +398,7 @@ impl RateOracle {
     /// boundary has been crossed since the last sample, the previous day's
     /// TWAP is finalized and published as the new daily rate.
     pub async fn refresh(&mut self, _tip: BlockHeight) {
-        let (trusted, others) = fetch_round().await;
-        let median = match median_of_odd(trusted, others) {
+        let median = match fetch_round().await {
             Some(m) => m,
             None => {
                 tracing::warn!("pricing round failed; accumulator unchanged");
@@ -448,8 +413,8 @@ impl RateOracle {
     /// Separated from [`refresh`](Self::refresh) so it can be tested without
     /// network I/O. Handles UTC day-boundary rollover: when a new sample
     /// arrives after midnight, the previous day's TWAP is finalized and
-    /// published as the daily rate (if enough samples were collected), and
-    /// the accumulator resets for the new day.
+    /// published as the daily rate, and the accumulator resets for the new
+    /// day.
     ///
     /// # TWAP mechanics
     ///
@@ -461,7 +426,7 @@ impl RateOracle {
     /// At a day boundary the interval is split: the portion before midnight
     /// closes the old day; the portion after midnight starts the new day
     /// with the same carry-forward price.
-    fn accumulate(&mut self, price: MicroUsd, now: Timestamp) {
+    fn accumulate(&mut self, price: Decimal, now: Timestamp) {
         let now_secs = now.as_seconds();
         let today = now_secs.div_euclid(SECONDS_PER_DAY);
 
@@ -471,7 +436,6 @@ impl RateOracle {
             self.current_day = today;
             self.last_price = Some(price);
             self.last_ts = now_secs;
-            self.sample_count = 1;
             if self.daily_rate.is_none() {
                 self.daily_rate = Some(price);
             }
@@ -483,60 +447,53 @@ impl RateOracle {
         if today > self.current_day {
             // ── Day boundary: finalize yesterday, publish, reset ─────────
             let midnight = today * SECONDS_PER_DAY;
-            let before_midnight = (midnight - self.last_ts) as u64;
+            let before_midnight = u64::try_from(midnight - self.last_ts).unwrap_or_default();
 
             // Close the old day with the carry-forward price active up to midnight.
-            self.acc_sum += u128::from(prev_price.as_u64()) * u128::from(before_midnight);
+            self.acc_sum += prev_price * Decimal::from(before_midnight);
             self.acc_seconds += before_midnight;
 
-            // Publish if we have enough data; otherwise keep the old rate.
-            if self.sample_count >= MIN_SAMPLES && self.acc_seconds > 0 {
-                let twap = self.acc_sum / u128::from(self.acc_seconds);
-                self.daily_rate = Some(MicroUsd(twap as u64));
-            }
+            // Publish yesterday's TWAP. The previous sample strictly predates
+            // midnight, so `acc_seconds` is at least one — no zero division.
+            self.daily_rate = Some(self.acc_sum / Decimal::from(self.acc_seconds));
 
             // Start the new day: carry-forward price is active from midnight.
-            let after_midnight = (now_secs - midnight) as u64;
-            self.acc_sum = u128::from(prev_price.as_u64()) * u128::from(after_midnight);
+            let after_midnight = u64::try_from(now_secs - midnight).unwrap_or_default();
+            self.acc_sum = prev_price * Decimal::from(after_midnight);
             self.acc_seconds = after_midnight;
             self.current_day = today;
-            self.sample_count = 0;
         } else {
             // ── Same day: accumulate the interval ────────────────────────
-            let elapsed = (now_secs - self.last_ts) as u64;
-            self.acc_sum += u128::from(prev_price.as_u64()) * u128::from(elapsed);
+            let elapsed = u64::try_from(now_secs - self.last_ts).unwrap_or_default();
+            self.acc_sum += prev_price * Decimal::from(elapsed);
             self.acc_seconds += elapsed;
         }
 
         // The new sample takes over as the carry-forward price.
         self.last_price = Some(price);
         self.last_ts = now_secs;
-        self.sample_count += 1;
     }
 
     /// The published daily rate, or `None` if no rate has ever been published.
-    pub fn rate(&self) -> Option<MicroUsd> {
+    pub fn rate(&self) -> Option<Decimal> {
         self.daily_rate
     }
 
     /// The claim price in zatoshis:
     ///
     /// ```text
-    /// price = ceil( schedule_usd(len) / rate )
+    /// price = ceil( schedule_usd(len) × COIN / rate )
     /// ```
     ///
-    /// The micro-USD scales cancel exactly, so this is
-    /// `ceil(usd_micros × COIN / rate_micros)` in `u128`, rounded up — the
-    /// Treasury never undercharges on a division remainder. `None` means no
-    /// usable rate: the caller must skip, not guess.
+    /// Rounded up — the Treasury never undercharges on a division remainder.
+    /// `None` means no usable rate: the caller must skip, not guess.
     pub fn price_zat(&self, name: &Name) -> Option<Zatoshis> {
         let usd = schedule_usd(name.as_str().len());
-        let rate = self.rate()?.as_u64().max(1);
-        let numer = u128::from(usd.as_u64()) * u128::from(COIN);
-        let price = numer.div_ceil(u128::from(rate));
+        let rate = self.rate()?.max(Decimal::ONE);
+        let price = ((usd * Decimal::from(COIN)) / rate).ceil();
         u64::try_from(price)
             .ok()
-            .and_then(|price| Zatoshis::from_u64(price).ok())
+            .and_then(|p| Zatoshis::from_u64(p).ok())
     }
 }
 
@@ -544,59 +501,24 @@ impl RateOracle {
 mod tests {
     use super::*;
 
-    #[test]
-    fn micro_usd_parse_exact_and_rejected() {
-        assert_eq!(MicroUsd::parse("41"), Some(MicroUsd(41_000_000)));
-        assert_eq!(MicroUsd::parse("41.5"), Some(MicroUsd(41_500_000)));
-        assert_eq!(
-            MicroUsd::parse("41.234567"),
-            Some(MicroUsd(41_234_567))
-        );
-        // Seven fraction digits exceed source precision: reject, don't round.
-        assert_eq!(MicroUsd::parse("41.1234567"), None);
-        for bad in ["", ".5", "41.", "-1", "+1", "4x", "1e2", "41.2.3"] {
-            assert_eq!(MicroUsd::parse(bad), None, "{bad:?}");
-        }
-    }
-
-    #[test]
-    fn midpoint_floors_half_micro() {
-        assert_eq!(
-            MicroUsd(100).midpoint(MicroUsd(101)),
-            Some(MicroUsd(100))
-        );
-        assert_eq!(
-            MicroUsd(100).midpoint(MicroUsd(102)),
-            Some(MicroUsd(101))
-        );
-    }
-
-    #[test]
-    fn schedule_is_decadal_with_100_floor() {
-        assert_eq!(schedule_usd(1).as_u64(), 100_000_000_000_000);
-        assert_eq!(schedule_usd(6).as_u64(), 1_000_000_000);
-        assert_eq!(schedule_usd(7).as_u64(), 100_000_000);
-        // Name::parse caps at 63; every 7+ length is the $100 floor.
-        assert_eq!(schedule_usd(63).as_u64(), 100_000_000);
+    fn d(v: i64) -> Decimal {
+        Decimal::from(v)
     }
 
     #[test]
     fn median_requires_three_usable_quotes() {
-        let q = |v: u64| MicroUsd(v);
         // Trusted + one other: below the floor.
-        assert_eq!(median_of_odd(Some(q(40)), vec![q(41)]), None);
+        assert_eq!(median(Some(d(40)), vec![d(41)]), None);
         // One usable other, no trusted: below the floor.
-        assert_eq!(median_of_odd(None, vec![q(40)]), None);
+        assert_eq!(median(None, vec![d(40)]), None);
         // Trusted + two others: true median of three.
-        assert_eq!(
-            median_of_odd(Some(q(40)), vec![q(30), q(50)]),
-            Some(q(40))
-        );
-        // No trusted, three others: median survives the eviction rule.
-        assert_eq!(
-            median_of_odd(None, vec![q(30), q(40), q(50)]),
-            Some(q(40))
-        );
+        assert_eq!(median(Some(d(40)), vec![d(30), d(50)]), Some(d(40)));
+    }
+
+    #[test]
+    fn median_is_deterministic_for_even_counts() {
+        // Four quotes: mean of the two middle values.
+        assert_eq!(median(None, vec![d(30), d(40), d(50), d(60)]), Some(d(45)));
     }
 
     /// Helper: create a `Timestamp` at the given Unix seconds.
@@ -605,97 +527,38 @@ mod tests {
     }
 
     #[test]
-    fn cold_start_seeds_spot_rate() {
-        let mut oracle = RateOracle::default();
-        // No rate before first sample.
-        assert!(oracle.rate().is_none());
-
-        // First sample seeds a temporary spot rate.
-        oracle.accumulate(MicroUsd(40_000_000), ts(1_000_000));
-        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
-    }
-
-    #[test]
-    fn same_day_accumulation_does_not_publish() {
-        let mut oracle = RateOracle::default();
-        let day_start = 1_000_000; // arbitrary, well past epoch
-
-        // First sample.
-        oracle.accumulate(MicroUsd(40_000_000), ts(day_start));
-        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
-
-        // More samples same day: rate unchanged (still the cold-start spot).
-        oracle.accumulate(MicroUsd(50_000_000), ts(day_start + 60));
-        oracle.accumulate(MicroUsd(45_000_000), ts(day_start + 120));
-        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
-    }
-
-    #[test]
     fn day_boundary_publishes_twap() {
         let mut oracle = RateOracle::default();
-        // Pick a timestamp at 00:00:30 UTC on some day.
-        let day_0 = 1_725_148_830; // 2024-09-01 00:00:30 UTC
-        let day_0_midnight = 1_725_148_800;
-        let day_1_midnight = day_0_midnight + SECONDS_PER_DAY;
+        let midnight = 1_725_148_800; // 2024-09-01 00:00:00 UTC
 
-        // Seed with first sample.
-        oracle.accumulate(MicroUsd(40_000_000), ts(day_0));
-        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
+        // 12h @ $40, then 12h @ $50 → TWAP of the day is exactly $45.
+        oracle.accumulate(d(40), ts(midnight));
+        oracle.accumulate(d(50), ts(midnight + 43_200));
+        assert_eq!(oracle.rate(), Some(d(40)));
 
-        // Accumulate 14 more samples (total 15 ≥ MIN_SAMPLES) at $50.
-        for i in 1..=14 {
-            oracle.accumulate(
-                MicroUsd(50_000_000),
-                ts(day_0 + i * 60),
-            );
-        }
-        // Rate still the cold-start spot.
-        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
-
-        // Cross midnight: the TWAP of day 0 should be published.
-        // The accumulator covers day_0 to day_0+14*60 = day_0+840s.
-        // Intervals: 30s@40, 60s@40, 60s@50, 60s@50, ... 60s@50 (13 times)
-        // Before midnight: from day_0+840 to midnight = (86400-840-30) = 85530s @ $50
-        // Total sum = 30*40M + 60*40M + 13*60*50M + 85530*50M (all in micros)
-        // = 1.2B + 2.4B + 39B + 4276.5B = 4319.1B
-        // Total seconds = 30 + 60 + 13*60 + 85530 = 86400
-        // TWAP = 4319.1B / 86400 ≈ 49989.58 micros ≈ $49.99
-        // But with integer division: let's just check it's between 40 and 50,
-        // closer to 50 since most of the day was at $50.
-        oracle.accumulate(MicroUsd(45_000_000), ts(day_1_midnight + 30));
-        let published = oracle.rate().unwrap();
-        assert!(
-            published.as_u64() > MicroUsd(49_000_000).as_u64(),
-            "TWAP should be ~$50, got {}",
-            published.as_u64()
-        );
-        assert!(
-            published.as_u64() < MicroUsd(50_000_000).as_u64(),
-            "TWAP should be < $50, got {}",
-            published.as_u64()
-        );
+        oracle.accumulate(d(45), ts(midnight + SECONDS_PER_DAY as i64 + 30));
+        assert_eq!(oracle.rate(), Some(d(45)));
     }
 
     #[test]
-    fn day_boundary_with_few_samples_keeps_old_rate() {
+    fn day_boundary_with_few_samples_still_publishes() {
         let mut oracle = RateOracle::default();
-        let day_0 = 1_725_148_830;
-        let day_1_midnight = 1_725_148_800 + SECONDS_PER_DAY;
+        let midnight = 1_725_148_800;
 
-        // Seed and add just 2 samples (below MIN_SAMPLES).
-        oracle.accumulate(MicroUsd(40_000_000), ts(day_0));
-        oracle.accumulate(MicroUsd(60_000_000), ts(day_0 + 60));
-        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
+        // 12h @ $40, then 12h @ $60 (mint down in between is indistinguishable
+        // — carry-forward fills the gap). Thin day still publishes: $50.
+        oracle.accumulate(d(40), ts(midnight));
+        oracle.accumulate(d(60), ts(midnight + 43_200));
+        assert_eq!(oracle.rate(), Some(d(40)));
 
-        // Cross midnight: not enough samples, keep old rate.
-        oracle.accumulate(MicroUsd(45_000_000), ts(day_1_midnight + 30));
-        assert_eq!(oracle.rate(), Some(MicroUsd(40_000_000)));
+        oracle.accumulate(d(50), ts(midnight + SECONDS_PER_DAY as i64));
+        assert_eq!(oracle.rate(), Some(d(50)));
     }
 
     #[test]
     fn price_converts_usd_to_zatoshis_with_ceil() {
         let mut oracle = RateOracle::default();
-        oracle.daily_rate = Some(MicroUsd(40_000_000)); // $40/ZEC
+        oracle.daily_rate = Some(d(40)); // $40/ZEC
 
         // $100 at $40 = exactly 2.5 ZEC — no rounding.
         let seven = Name::parse("abcdefg").unwrap();
@@ -712,7 +575,7 @@ mod tests {
         );
 
         // Non-divisible: $100 at $30 = 333.333… ZEC rounds up.
-        oracle.daily_rate = Some(MicroUsd(30_000_000));
+        oracle.daily_rate = Some(d(30));
         assert_eq!(
             oracle.price_zat(&seven),
             Some(Zatoshis::const_from_u64(333_333_334))
@@ -721,5 +584,49 @@ mod tests {
         // No rate: fail closed.
         let cold = RateOracle::default();
         assert_eq!(cold.price_zat(&seven), None);
+    }
+
+    // ── Venue fixtures: every pointer asserted against a recorded body ──
+    //
+    // A typo'd pointer silently drops a venue at runtime; these fixtures
+    // make pointer mistakes a test failure instead.
+    #[test]
+    fn venue_pointers_resolve_in_recorded_bodies() {
+        let gemini = r#"{"symbol":"ZECUSD","open":"809.23","high":"849.22","low":"790.19","close":"831.43","changes":["798.91"],"bid":"832.15","ask":"832.16"}"#;
+        let kraken = r#"{"error":[],"result":{"XZECZUSD":{"a":["831.60","1","1.000"],"b":["831.36","3","3.000"],"c":["833.37","0.05999736"],"v":["1792.18","17113.67"],"p":["836.08","828.17"],"t":[1411,13438],"l":["830.05","789.86"],"h":["843.67","847.96"],"o":"841.80"}}}"#;
+        let coinbase = r#"{"ask":"833.5","bid":"833.49","volume":"95.7","trade_id":123,"price":"833.07","size":"0.05","time":"2026-08-30T03:00:00Z"}"#;
+        let bitstamp = r#"{"timestamp":"1788058797","open":"839.00","high":"846.00","low":"789.95","last":"832.45","volume":"180.15","vwap":"815.35","bid":"831.23","ask":"845.00","side":"0","open_24":"807.71","percent_change_24":"3.06","market_type":"SPOT"}"#;
+        let bitfinex =
+            r#"[825.51,150.59,826.43,59.06,23.52,0.0292,826.51,535.94,839.8,783.12,1477726786000]"#;
+        let okx = r#"{"code":"0","data":[{"instType":"SPOT","instId":"ZEC-USDT","last":"832.94","askPx":"832.97","bidPx":"832.96"}],"msg":""}"#;
+        let binance = r#"{"symbol":"ZECUSDT","priceChange":"23.75","lastPrice":"832.98","bidPrice":"832.97","askPrice":"832.98"}"#;
+        let kucoin = r#"{"code":"200000","data":{"time":1788058819905,"symbol":"ZEC-USDT","buy":"831.455","sell":"831.508","last":"831.49"}}"#;
+        let mexc = r#"{"symbol":"ZECUSDT","high":"852","low":"789","lastPrice":"833","bidPrice":"832.9","askPrice":"833"}"#;
+
+        let bodies: [(&str, &str); 9] = [
+            ("gemini", gemini),
+            ("kraken", kraken),
+            ("coinbase", coinbase),
+            ("bitstamp", bitstamp),
+            ("bitfinex", bitfinex),
+            ("okx", okx),
+            ("binance", binance),
+            ("kucoin", kucoin),
+            ("mexc", mexc),
+        ];
+
+        for exchange in &EXCHANGES {
+            let (name, body) = bodies
+                .iter()
+                .find(|(n, _)| *n == exchange.name)
+                .unwrap_or_else(|| panic!("no fixture for venue {}", exchange.name));
+            let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+            let price: Decimal = serde_json::from_value(parsed.pointer(exchange.pointer).unwrap())
+                .unwrap_or_else(|e| panic!("{}.pointer({}) failed: {e}", name, exchange.pointer));
+            assert!(
+                price > Decimal::ONE && price < Decimal::from(1_000_000),
+                "{name} price {price} outside plausible range"
+            );
+        }
     }
 }

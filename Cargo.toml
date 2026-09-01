@@ -27,6 +27,9 @@ sha2 = "0.10"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Exchange price parsing: `Decimal` deserializes JSON price strings
+# ("41.53") directly, so no hand-rolled decimal parser is needed.
+rust_decimal = { version = "1.42", features = ["serde-with-str"] }
 # `OffsetDateTime` for `SentTransaction::new` (zcash_client_backend data-api);
 # same crate upstream depends on, lockfile-shared at 0.3.x.
 time = "0.3"
@@ -36,6 +39,11 @@ time = "0.3"
 tonic = "0.14"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
+# The `Service` trait for pricing's HTTPS connector. Already compiled via
+# hyper/tonic — direct listing adds no code.
+tower-service = "0.3"
+tokio-rustls = "0.26.4"
+webpki-roots = "1.0.9"
 http-body-util = "0.1"
 http = "1"
 bytes = "1"
@@ -103,8 +111,7 @@ zcash_client_backend = { version = "0.24.0-rc.7", default-features = false, feat
 # this is a first-class dep, not just a transitive one.
 orchard = { version = "0.15.5", default-features = false, features = ["unsafe-zns", "circuit"] }
 shardtree = "0.7.1"
-tokio-rustls = "0.26.4"
-webpki-roots = "1.0.9"
+
 
 # Redirect the crates.io `orchard` consumed transitively by librustzcash to
 # the ZNS fork so the whole graph builds against the same source.

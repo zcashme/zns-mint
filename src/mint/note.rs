@@ -1,19 +1,24 @@
-//! Name Notes: the typed transition, its memo codec, and the ZNS commitment
+//! Name Notes: the transition types, its memo codec, and the ZNS commitment
 //! derivation.
 //!
-//! A [`NameNote`] is one name transition as the whitepaper defines it — a
-//! variant enum in which illegal field combinations are unrepresentable
-//! (a claim has no predecessor; a release retains the released address and
-//! always has the `none` expiry).
-//! The 512-byte memo grammar and the σ-hash are functions *over* the type,
-//! not constructors of it.
 
 use time::Timestamp;
 use zcash_keys::address::UnifiedAddress;
+use zcash_primitives::transaction::builder::Builder;
+use zcash_primitives::transaction::builder::Error as BuildError;
+use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_protocol::consensus::Parameters;
+use zcash_protocol::value::Zatoshis;
 
+pub mod assemble;
+pub mod claim;
+pub mod release;
+pub mod update;
+
+use crate::key::RegistryKeys;
 use crate::mint::{Action, Name, NameCommitment};
 
+//why do we need this helper? why can't we inline this it's easy to get parsing logic wrong - handrolled code sucks
 /// Parses canonical ASCII decimal into a [`Timestamp`]: digits only, no
 /// sign, no leading zeroes (except `0` itself). Non-canonical spellings
 /// are rejected because the raw field bytes are hashed into σ — `1` and
@@ -117,11 +122,11 @@ impl NameNote {
     }
 
     /// The bound Unified Address, including the address retained by a release.
-    pub fn ua(&self) -> Option<&UnifiedAddress> {
+    pub fn ua(&self) -> &UnifiedAddress {
         match self {
             NameNote::Claim { ua, .. }
             | NameNote::Update { ua, .. }
-            | NameNote::Release { ua, .. } => Some(ua),
+            | NameNote::Release { ua, .. } => ua,
         }
     }
 
@@ -143,64 +148,34 @@ impl NameNote {
         }
     }
 
-    /// The rcm component of the ZNS commitment opening, derived independently
-    /// from the same transition tuple with derivation tag `rcm`.
-    pub fn rcm<P: Parameters>(
-        &self,
-        params: &P,
-    ) -> pasta_curves::pallas::Scalar {
+    /// The rcm component of the ZNS note commitment, derived from the
+    /// transition tuple with derivation tag `rcm`.
+    pub fn rcm<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Scalar {
         let verb: &[u8] = match self {
             NameNote::Claim { .. } => b"claim",
             NameNote::Update { .. } => b"update",
             NameNote::Release { .. } => b"release",
         };
         let name = self.name().as_str().as_bytes();
-        let ua_owned = self.ua().map(|ua| ua.encode(params));
-        let ua = ua_owned.as_deref().unwrap_or("").as_bytes();
-        let expiry = self.expires_field_bytes();
+        let ua = self.ua().encode(params);
+        let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
-        zns_rcm(verb, name, ua, &expiry, &prev)
+        zns_rcm(verb, name, ua.as_bytes(), &expiry, &prev)
     }
 
-    /// The ψ component of the ZNS commitment opening, derived independently
-    /// from the same transition tuple with derivation tag `psi`.
-    pub fn psi<P: Parameters>(
-        &self,
-        params: &P,
-    ) -> pasta_curves::pallas::Base {
+    /// The ψ component of the ZNS note commitment, derived from the
+    /// transition tuple with derivation tag `psi`.
+    pub fn psi<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Base {
         let verb: &[u8] = match self {
             NameNote::Claim { .. } => b"claim",
             NameNote::Update { .. } => b"update",
             NameNote::Release { .. } => b"release",
         };
         let name = self.name().as_str().as_bytes();
-        let ua_owned = self.ua().map(|ua| ua.encode(params));
-        let ua = ua_owned.as_deref().unwrap_or("").as_bytes();
-        let expiry = self.expires_field_bytes();
+        let ua = self.ua().encode(params);
+        let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
-        zns_psi(verb, name, ua, &expiry, &prev)
-    }
-
-    /// Both commitment inputs `(rcm, ψ)` in one call for convenience.
-    pub fn opening<P: Parameters>(
-        &self,
-        params: &P,
-    ) -> (pasta_curves::pallas::Scalar, pasta_curves::pallas::Base) {
-        (self.rcm(params), self.psi(params))
-    }
-
-    /// The `expires_at` field bytes as the memo and σ encode them: `none`
-    /// for a release (§3.1: a release MUST encode `none`).
-    fn expires_field_bytes(&self) -> Vec<u8> {
-        self.expires_at().unwrap_or(Expiry::Never).field_bytes()
-    }
-
-    /// The `ua` field string: the canonical encoding for every action.
-    fn ua_field_string<P: Parameters>(&self, params: &P) -> Option<String> {
-        match self.ua() {
-            Some(ua) => Some(ua.encode(params)),
-            None => None,
-        }
+        zns_psi(verb, name, ua.as_bytes(), &expiry, &prev)
     }
 
     /// Encodes into the canonical zero-padded 512-byte memo under `params`.
@@ -209,10 +184,10 @@ impl NameNote {
     /// canonical ZIP 316 encoding (bech32m: ASCII, no colon, no NUL), empty
     /// for a release.
     pub fn encode<P: Parameters>(&self, params: &P) -> Option<[u8; 512]> {
-        let ua_field = self.ua_field_string(params)?;
+        let ua_field = self.ua().encode(params);
         let verb = self.action().as_str();
         let hex_rcm = hex::encode(self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]));
-        let expires_field = self.expires_field_bytes();
+        let expires_field = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
         let memo_string = format!(
             "ZNS:{}:{}:{}:{}:{}",
             verb,
@@ -229,6 +204,35 @@ impl NameNote {
         memo[..bytes.len()].copy_from_slice(bytes);
         Some(memo)
     }
+}
+
+/// Constructs this Name Note's zero-value Registry output in `builder`.
+///
+/// The action modules own their action-specific public verbs; this is the
+/// shared raw-note construction that every Name Note uses.
+fn construct<P: Parameters>(
+    builder: &mut Builder<P, ()>,
+    registry_keys: &RegistryKeys,
+    note: &NameNote,
+) -> Result<(), BuildError<FeeError>> {
+    let memo = note
+        .encode(builder.params())
+        .expect("a valid name note encodes into 512 bytes");
+    let rcm = note.rcm(builder.params());
+    let psi = note.psi(builder.params());
+    let opening = orchard::note::NoteCommitTrapdoor::from_inner(rcm);
+
+    let registry_fvk = registry_keys.orchard_fvk();
+    builder.add_zns_output(
+        Some(registry_fvk.to_ovk(orchard::keys::Scope::External)),
+        registry_fvk.address_at(0u32, orchard::keys::Scope::External),
+        Zatoshis::ZERO,
+        memo,
+        opening,
+        psi,
+    )?;
+
+    Ok(())
 }
 
 /// Derives the ZNS note-commitment randomness `rcm` for a transition (§3.3):
@@ -389,7 +393,7 @@ pub fn decode_name_note_tuple<P: Parameters>(
     Some((
         note.name().clone(),
         note.action(),
-        note.ua().map(|ua| ua.encode(params)).unwrap_or_default(),
+        note.ua().encode(params),
         note.expires_at().unwrap_or(Expiry::Never),
         note.prev_rcm(),
     ))
@@ -452,7 +456,8 @@ pub fn decrypt_name_notes<P: Parameters>(
                                 Some(p) => p,
                                 None => return subtle::Choice::from(0),
                             };
-                            let (rcm, psi) = payload.opening(network);
+                            let rcm = payload.rcm(network);
+                            let psi = payload.psi(network);
                             let (g_d, pk_d) = note.recipient().zns_commitment_keys();
                             let rho = Option::from(pasta_curves::pallas::Base::from_repr(
                                 note.rho().to_bytes(),
@@ -629,28 +634,30 @@ mod tests {
         let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
         let t = Timestamp::from_seconds(1_000).unwrap();
 
-        let (rcm_never, psi_never) = NameNote::Claim {
+        let claim_never = NameNote::Claim {
             name: name.clone(),
             ua: ua.clone(),
             expires_at: Expiry::Never,
-        }
-        .opening(&MAIN_NETWORK);
-        let (rcm_at, psi_at) = NameNote::Claim {
+        };
+        let rcm_never = claim_never.rcm(&MAIN_NETWORK);
+        let psi_never = claim_never.psi(&MAIN_NETWORK);
+        let claim_at = NameNote::Claim {
             name: name.clone(),
             ua: ua.clone(),
             expires_at: Expiry::At(t),
-        }
-        .opening(&MAIN_NETWORK);
+        };
+        let rcm_at = claim_at.rcm(&MAIN_NETWORK);
+        let psi_at = claim_at.psi(&MAIN_NETWORK);
         assert_ne!(rcm_never.to_repr(), rcm_at.to_repr());
         assert_ne!(psi_never, psi_at);
 
-        let (rcm_upd, _) = NameNote::Update {
+        let rcm_upd = NameNote::Update {
             name,
             ua,
             expires_at: Expiry::At(t),
             prev,
         }
-        .opening(&MAIN_NETWORK);
+        .rcm(&MAIN_NETWORK);
         assert_ne!(rcm_at.to_repr(), rcm_upd.to_repr());
     }
 
