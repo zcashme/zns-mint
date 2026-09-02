@@ -1,11 +1,11 @@
 //! OTP challenge machinery for ZNS name transitions.
 //!
 //! The OTP queue is a single-use TTL cache: each entry binds a 6-digit
-//! passcode to a specific (name, action, target UA) and expires after
-//! 30 minutes of chain MTP. Entries are pushed when a relay transaction
-//! is accepted for broadcast and burned on first successful verification
-//! — one-shot, never reusable. Expired entries are pruned on each
-//! verification scan.
+//! passcode to a specific (name, action, target UA, live tip `rcm`) and
+//! expires after 30 minutes of chain MTP. Entries are pushed when a relay
+//! transaction is accepted for broadcast and burned on first successful
+//! verification — one-shot, never reusable. Expired entries are pruned on
+//! each verification scan.
 //!
 //! Also home to the OTP relay memo codec
 //! (`ZNS:otp:<otp>:<name>:<verb>:<ua>`) and relay issuance
@@ -25,11 +25,13 @@ use subtle::ConstantTimeEq;
 use time::Timestamp;
 use zeroize::Zeroize;
 
-use crate::mint::{Action, Name, UnifiedAddress};
+use crate::mint::{Action, Name, NameCommitment, UnifiedAddress};
 use zcash_client_backend::data_api::wallet::{
-    ProposeTransferErrT, input_selection::GreedyInputSelector,
+    input_selection::GreedyInputSelector, ProposeTransferErrT,
 };
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::value::Zatoshis;
 
 /// OTP validity window (whitepaper §5.3: D_OTP). 30 minutes in seconds.
 pub const D_OTP: i64 = 1800;
@@ -100,15 +102,27 @@ impl OtpCode {
 // OtpRequest — one pending OTP bound to a specific transition
 // ---------------------------------------------------------------------------
 
-/// A pending OTP bound to a specific (name, action, target UA).
+/// A pending OTP bound to a specific (name, action, target UA, live tip).
 ///
 /// Pushed onto the [`OtpQueue`] after the relay transaction is accepted.
 /// Burned on first successful verification — one-shot, never reusable.
 /// Expires after `D_OTP` seconds of chain MTP.
+///
+/// Registration `expires_at` is not part of this binding until renewal
+/// intake can request a term (`new_expires_at = current + term`). Until
+/// then every ordinary update from a tip carries the same period forward,
+/// so [`OtpRequest::tip_rcm`] already pins it.
+///
+/// TODO: when renewal intake can request a term, bind that resulting
+/// successor `expires_at` here so the OTP consents to one period, not
+/// whatever assembly writes.
 pub struct OtpRequest {
     pub name: Name,
     pub action: Action,
     pub ua: UnifiedAddress,
+    /// The live Name Note commitment at issuance. An echo for a superseded
+    /// tip must not authorize a successor of a different note.
+    pub tip_rcm: NameCommitment,
     pub code: OtpCode,
     pub expires_at: Timestamp,
 }
@@ -119,8 +133,8 @@ pub struct OtpRequest {
 
 /// A bag of pending OTP requests. Push appends with no checks; every
 /// accepted relay gets an entry. Verification scans for a match on
-/// (name, action, ua, code) plus the expiry check, and removes the
-/// first match — burning it permanently.
+/// (name, action, ua, tip_rcm, code) plus the expiry check, and removes
+/// the first match — burning it permanently.
 pub struct OtpQueue(Vec<OtpRequest>);
 
 impl Default for OtpQueue {
@@ -140,16 +154,17 @@ impl OtpQueue {
         self.0.push(req);
     }
 
-    /// Scans for an entry matching (name, action, ua) with an unexpired
-    /// timestamp and a code that equals `provided` under constant-time
-    /// comparison. Removes and returns `true` on first match — the OTP
-    /// is burned. Failed verification leaves the entry intact.
-    /// Expired entries are pruned on every scan.
+    /// Scans for an entry matching (name, action, ua, tip_rcm) with an
+    /// unexpired timestamp and a code that equals `provided` under
+    /// constant-time comparison. Removes and returns `true` on first
+    /// match — the OTP is burned. Failed verification leaves the entry
+    /// intact. Expired entries are pruned on every scan.
     pub fn verify_and_burn(
         &mut self,
         name: &Name,
         action: Action,
         ua: &UnifiedAddress,
+        tip_rcm: NameCommitment,
         provided: &[u8; 6],
         mtp: Timestamp,
     ) -> bool {
@@ -163,6 +178,7 @@ impl OtpQueue {
             if req.name == *name
                 && req.action == action
                 && &req.ua == ua
+                && req.tip_rcm == tip_rcm
                 && mtp < req.expires_at
                 && bool::from(req.code.0.ct_eq(&provided_code.0))
             {
@@ -286,6 +302,57 @@ pub fn decode_otp_relay_memo(memo: &[u8; 512]) -> Option<(Name, Action, String, 
 // OTP relay issuance
 // ---------------------------------------------------------------------------
 
+/// ZIP-317 fee for the OTP relay's bundle shape: one Ironwood spend plus
+/// one output, padded to two actions. This is the amount delivered to the
+/// controller as compensation, and the amount the echo must return.
+pub fn required_relay_value<P: Parameters>(network: &P, target_height: BlockHeight) -> Zatoshis {
+    use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
+
+    FeeRule::standard()
+        .fee_required(
+            network,
+            target_height,
+            std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
+            std::iter::empty::<usize>(),
+            0,
+            0,
+            0,
+            2,
+        )
+        .expect("ZIP-317 fee for 2 actions is representable")
+}
+
+/// Exact value of the OTP-bearing echo note.
+///
+/// Same as [`required_relay_value`]: this is the relay compensation, so a
+/// dust echo cannot authorize a transition. It is **not** the whitepaper
+/// name price (`price_zat` / claim schedule). WP puts that payment on the
+/// OTP-bearing note; that check is still open.
+pub fn required_echo_value<P: Parameters>(network: &P, target_height: BlockHeight) -> Zatoshis {
+    // TODO: WP name price on the OTP-bearing note (`price_zat` / schedule),
+    // not the relay's ZIP-317 compensation.
+    required_relay_value(network, target_height)
+}
+
+/// Whether this request may receive an OTP relay — before Treasury float
+/// is spent on a challenge that authorization can never consume.
+fn may_issue_relay(
+    action: Action,
+    requested_ua: &UnifiedAddress,
+    controller_ua: &UnifiedAddress,
+) -> bool {
+    if action == Action::Claim || controller_ua.orchard().is_none() {
+        return false;
+    }
+    // A release OTP is bound to the live controller. A request that names
+    // anyone else would mint a challenge `authorize_release` can never
+    // consume — still a Treasury payment.
+    if action == Action::Release && requested_ua != controller_ua {
+        return false;
+    }
+    true
+}
+
 /// Builds, proves, signs, and records the OTP relay payment, returning its
 /// txid and serialized hex for broadcast.
 ///
@@ -332,27 +399,7 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
     // The controller's compensation funds the echo: the ZIP-317 fee of its
     // bundle shape (one Ironwood spend plus one output, padded to two
     // actions).
-    let amount = {
-        use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
-        FeeRule::standard()
-            .fee_required(
-                network,
-                target_height,
-                std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
-                std::iter::empty::<usize>(),
-                0,
-                0,
-                0,
-                2,
-            )
-            .map_err(|e| {
-                // zip317::FeeError → builder::Error::Fee → data_api::Error::Builder,
-                // via upstream's own From impls.
-                zcash_primitives::transaction::builder::Error::Fee(
-                    zcash_primitives::transaction::builder::FeeError::FeeRule(e),
-                )
-            })?
-    };
+    let amount = required_relay_value(network, target_height);
 
     let recipient =
         zcash_keys::address::Address::Unified(controller_ua.clone()).to_zcash_address(network);
@@ -368,8 +415,8 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
         Vec::new(),
     )
     .expect("memo to a guarded Orchard UA with a nonzero fee cannot fail");
-    let request = zip321::TransactionRequest::new(vec![payment])
-        .expect("single-payment request cannot fail");
+    let request =
+        zip321::TransactionRequest::new(vec![payment]).expect("single-payment request cannot fail");
 
     let input_selector = GreedyInputSelector::new();
     let change_strategy = SingleOutputChangeStrategy::<crate::wallet::Wallet>::new(
@@ -415,8 +462,12 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
 
 /// Validates an OTP relay request (update or release without OTP) and issues
 /// the challenge. Returns `None` if the request is invalid — a claim (claims
-/// never relay), or a controller UA with no Orchard-family receiver to
-/// deliver Ironwood value to.
+/// never relay), a controller UA with no Orchard-family receiver to deliver
+/// Ironwood value to, or a release whose memo UA is not the live controller.
+///
+/// The issued OTP is bound to `tip_rcm`, the live Name Note at issuance.
+/// An echo after that tip is spent cannot authorize a successor of a
+/// different note.
 ///
 /// The relay spends whatever confirmed Treasury Ironwood notes upstream
 /// selects; the request note itself is not consumed. That is deliberate:
@@ -424,13 +475,14 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
 /// re-delivery simply costs the Treasury float until housekeeping consumes
 /// the request note — only the echoed challenge is burned from the queue.
 #[allow(clippy::too_many_arguments)]
-pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
+pub fn issue_relay<P: Parameters>(
     network: &P,
     name: &Name,
     action: Action,
     requested_ua: &UnifiedAddress,
     controller_ua: &UnifiedAddress,
-    target_height: zcash_protocol::consensus::BlockHeight,
+    tip_rcm: NameCommitment,
+    target_height: BlockHeight,
     mtp: Timestamp,
     wallet: &mut crate::wallet::Wallet,
     treasury_keys: &crate::key::TreasuryKeys,
@@ -440,7 +492,7 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
     use crate::mint::RequestOutcome;
     use time::Duration;
 
-    if action == Action::Claim || controller_ua.orchard().is_none() {
+    if !may_issue_relay(action, requested_ua, controller_ua) {
         return None;
     }
 
@@ -464,6 +516,7 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
             name: name.clone(),
             action,
             ua: requested_ua.clone(),
+            tip_rcm,
             code: otp,
             expires_at: mtp + Duration::seconds(D_OTP),
         }),
@@ -474,7 +527,7 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
 mod tests {
     use super::*;
     use time::Duration;
-    use zcash_protocol::consensus::MAIN_NETWORK;
+    use zcash_protocol::consensus::{BlockHeight, MAIN_NETWORK};
 
     fn test_ua() -> UnifiedAddress {
         match zcash_keys::address::Address::decode(
@@ -488,6 +541,28 @@ mod tests {
 
     fn test_name() -> Name {
         Name::parse("alice").unwrap()
+    }
+
+    fn dummy_tip() -> NameCommitment {
+        let mut b = [0u8; 32];
+        b[0] = 1;
+        NameCommitment::from_bytes(&b).unwrap()
+    }
+
+    fn other_tip() -> NameCommitment {
+        let mut b = [0u8; 32];
+        b[0] = 2;
+        NameCommitment::from_bytes(&b).unwrap()
+    }
+
+    fn other_ua() -> UnifiedAddress {
+        use secrecy::Secret;
+        use zcash_keys::keys::UnifiedAddressRequest;
+        crate::key::TreasuryKeys::derive(&MAIN_NETWORK, &Secret::new([7u8; 32]))
+            .fvk()
+            .default_address(UnifiedAddressRequest::SHIELDED)
+            .expect("test FVK has a shielded address")
+            .0
     }
 
     #[test]
@@ -588,14 +663,15 @@ mod tests {
             name: name.clone(),
             action: Action::Update,
             ua: ua.clone(),
+            tip_rcm: dummy_tip(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: expires,
         });
 
         // Correct code burns the entry
-        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
+        assert!(queue.verify_and_burn(&name, Action::Update, &ua, dummy_tip(), b"004206", now));
         // Second attempt fails — entry is gone
-        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
+        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, dummy_tip(), b"004206", now));
     }
 
     #[test]
@@ -610,14 +686,15 @@ mod tests {
             name: name.clone(),
             action: Action::Update,
             ua: ua.clone(),
+            tip_rcm: dummy_tip(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: expires,
         });
 
         // Wrong code — entry stays
-        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, b"999999", now));
+        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, dummy_tip(), b"999999", now));
         // Correct code still works
-        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
+        assert!(queue.verify_and_burn(&name, Action::Update, &ua, dummy_tip(), b"004206", now));
     }
 
     #[test]
@@ -632,14 +709,15 @@ mod tests {
             name: name.clone(),
             action: Action::Update,
             ua: ua.clone(),
+            tip_rcm: dummy_tip(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: expires,
         });
 
         // Wrong action — entry stays
-        assert!(!queue.verify_and_burn(&name, Action::Release, &ua, b"004206", now));
+        assert!(!queue.verify_and_burn(&name, Action::Release, &ua, dummy_tip(), b"004206", now));
         // Correct action still works
-        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
+        assert!(queue.verify_and_burn(&name, Action::Update, &ua, dummy_tip(), b"004206", now));
     }
 
     #[test]
@@ -654,12 +732,13 @@ mod tests {
             name: name.clone(),
             action: Action::Update,
             ua: ua.clone(),
+            tip_rcm: dummy_tip(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: expires,
         });
 
         // Expired — never matches, and the entry is pruned by the scan.
-        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
+        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, dummy_tip(), b"004206", now));
     }
 
     #[test]
@@ -674,6 +753,7 @@ mod tests {
             name: name.clone(),
             action: Action::Update,
             ua: ua.clone(),
+            tip_rcm: dummy_tip(),
             code: OtpCode::for_test(*b"111111"),
             expires_at: expires,
         });
@@ -681,13 +761,57 @@ mod tests {
             name: name.clone(),
             action: Action::Update,
             ua: ua.clone(),
+            tip_rcm: dummy_tip(),
             code: OtpCode::for_test(*b"222222"),
             expires_at: expires,
         });
 
         // First code burns one entry, the other stays
-        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"111111", now));
-        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"222222", now));
-        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, b"111111", now));
+        assert!(queue.verify_and_burn(&name, Action::Update, &ua, dummy_tip(), b"111111", now));
+        assert!(queue.verify_and_burn(&name, Action::Update, &ua, dummy_tip(), b"222222", now));
+        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, dummy_tip(), b"111111", now));
+    }
+
+    #[test]
+    fn otp_queue_wrong_tip_rcm_does_not_burn() {
+        let name = test_name();
+        let ua = test_ua();
+        let now = Timestamp::now();
+        let expires = now + Duration::seconds(D_OTP);
+
+        let mut queue = OtpQueue::new();
+        queue.push(OtpRequest {
+            name: name.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            tip_rcm: dummy_tip(),
+            code: OtpCode::for_test(*b"004206"),
+            expires_at: expires,
+        });
+
+        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, other_tip(), b"004206", now));
+        assert!(queue.verify_and_burn(&name, Action::Update, &ua, dummy_tip(), b"004206", now));
+    }
+
+    #[test]
+    fn release_relay_rejects_non_controller_ua() {
+        let controller = test_ua();
+        let other = other_ua();
+        assert_ne!(controller, other);
+
+        assert!(may_issue_relay(Action::Update, &other, &controller));
+        assert!(may_issue_relay(Action::Release, &controller, &controller));
+        assert!(!may_issue_relay(Action::Release, &other, &controller));
+        assert!(!may_issue_relay(Action::Claim, &controller, &controller));
+    }
+
+    #[test]
+    fn echo_value_is_relay_compensation() {
+        let height = BlockHeight::from_u32(1);
+        assert_eq!(
+            required_echo_value(&MAIN_NETWORK, height),
+            required_relay_value(&MAIN_NETWORK, height)
+        );
+        assert!(required_echo_value(&MAIN_NETWORK, height) > Zatoshis::ZERO);
     }
 }

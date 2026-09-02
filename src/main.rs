@@ -334,6 +334,7 @@ async fn main() {
                                 action,
                                 &ua,
                                 controller_ua,
+                                record.commitment,
                                 target_height,
                                 mtp_now,
                                 &mut wallet,
@@ -397,8 +398,8 @@ async fn main() {
                         target_height,
                     );
                     match action {
-                        Action::Update => settle.update(name, ua, &otp, mtp_now),
-                        Action::Release => settle.release(name, ua, &otp, mtp_now),
+                        Action::Update => settle.update(name, ua, &note, &otp, mtp_now),
+                        Action::Release => settle.release(name, ua, &note, &otp, mtp_now),
                         Action::Claim => unreachable!("OTP memo decoder rejects claims"),
                     }
                 };
