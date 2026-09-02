@@ -12,10 +12,7 @@ pub mod treasury;
 pub use zcash_client_backend::data_api::BlockMetadata as ChainTip;
 
 // The Name Note type and its codec.
-pub use note::{
-    decode_name_note, decrypt_name_notes, note_commitment_cmx,
-    parse_timestamp_canonical, zns_psi, zns_rcm, DecryptedNameNote, Expiry, NameNote,
-};
+pub use note::{decode_name_note, decrypt_name_notes, DecryptedNameNote, Expiry, NameNote};
 pub use time::Timestamp;
 
 pub use zcash_keys::address::UnifiedAddress;
@@ -83,17 +80,17 @@ pub struct Name(String);
 
 impl Name {
     /// Attempts to parse a string into a valid ZNS name.
+    ///
+    /// Per §3 the name field is 1–63 bytes of ASCII `a`–`z` and `0`–`9` —
+    /// no hyphens, no separators.
     pub fn parse(s: &str) -> Option<Self> {
         let bytes = s.as_bytes();
         if bytes.is_empty() || bytes.len() > 63 {
             return None;
         }
-        if bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
-            return None;
-        }
         if bytes
             .iter()
-            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9'))
         {
             Some(Self(s.to_string()))
         } else {

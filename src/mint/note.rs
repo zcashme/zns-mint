@@ -4,76 +4,15 @@
 
 use time::Timestamp;
 use zcash_keys::address::UnifiedAddress;
-use zcash_primitives::transaction::builder::Builder;
-use zcash_primitives::transaction::builder::Error as BuildError;
-use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_protocol::consensus::Parameters;
-use zcash_protocol::value::Zatoshis;
 
 pub mod assemble;
-pub mod claim;
-pub mod release;
-pub mod update;
 
-use crate::key::RegistryKeys;
 use crate::mint::{Action, Name, NameCommitment};
 
-//why do we need this helper? why can't we inline this it's easy to get parsing logic wrong - handrolled code sucks
-/// Parses canonical ASCII decimal into a [`Timestamp`]: digits only, no
-/// sign, no leading zeroes (except `0` itself). Non-canonical spellings
-/// are rejected because the raw field bytes are hashed into σ — `1` and
-/// `01` are different transitions with different commitments.
-pub fn parse_timestamp_canonical(s: &str) -> Option<Timestamp> {
-    if s.is_empty() || s.len() > 20 || !s.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    if s.len() > 1 && s.starts_with('0') {
-        return None;
-    }
-    let seconds: i64 = s.parse().ok()?;
-    Timestamp::from_seconds(seconds).ok()
-}
-
-/// The `expires_at` field of a transition: a fixed Unix instant, or the
-/// exact ASCII value `none` for a registration without fixed expiration.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Expiry {
-    /// The exact ASCII bytes `none`.
-    Never,
-    /// A Unix timestamp in whole seconds.
-    At(Timestamp),
-}
-
-impl Expiry {
-    /// The canonical memo-field bytes.
-    pub fn field_bytes(&self) -> Vec<u8> {
-        match self {
-            Expiry::Never => b"none".to_vec(),
-            Expiry::At(t) => t.as_seconds().to_string().into_bytes(),
-        }
-    }
-
-    /// Parses the memo field: canonical decimal, or exactly `none`.
-    pub fn parse(field: &str) -> Option<Self> {
-        match field {
-            "none" => Some(Expiry::Never),
-            digits => parse_timestamp_canonical(digits).map(Expiry::At),
-        }
-    }
-
-    /// The §4.5.2 expiration test against canonical-chain MTP.
-    /// `Never` never expires (liveness still applies; §4.5.4).
-    pub fn expired(self, mtp: Timestamp) -> bool {
-        match self {
-            Expiry::Never => false,
-            Expiry::At(t) => mtp >= t,
-        }
-    }
-}
-
-/// One name transition (§3.2), typed so every action carries exactly its
+/// A Name transition (§3.2), typed so every action carries exactly its
 /// legal fields.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NameNote {
     /// Bind `name` to `ua` for `expires_at`; no predecessor exists.
     Claim {
@@ -96,12 +35,6 @@ pub enum NameNote {
         ua: UnifiedAddress,
         prev: NameCommitment,
     },
-}
-
-impl std::fmt::Debug for NameNote {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("NameNote(<redacted>)")
-    }
 }
 
 impl NameNote {
@@ -180,10 +113,11 @@ impl NameNote {
 
     /// Encodes into the canonical zero-padded 512-byte memo under `params`.
     ///
-    /// `None` when the fields overflow 512 bytes. The UA field is the
-    /// canonical ZIP 316 encoding (bech32m: ASCII, no colon, no NUL), empty
-    /// for a release.
-    pub fn encode<P: Parameters>(&self, params: &P) -> Option<[u8; 512]> {
+    /// Total over valid `NameNote`s — the memo always fits, because every
+    /// field is validated at construction: `Name::parse` bounds the name,
+    /// `UnifiedAddress` bounds its ZIP 316 encoding (bech32m: ASCII, no
+    /// colon, no NUL), and the time crate bounds the expiry.
+    pub fn encode<P: Parameters>(&self, params: &P) -> [u8; 512] {
         let ua_field = self.ua().encode(params);
         let verb = self.action().as_str();
         let hex_rcm = hex::encode(self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]));
@@ -193,52 +127,75 @@ impl NameNote {
             verb,
             self.name().as_str(),
             ua_field,
-            String::from_utf8(expires_field).ok()?,
+            // `b"none"` or canonical ASCII digits — always UTF-8.
+            String::from_utf8(expires_field).unwrap(),
             hex_rcm,
         );
-        let bytes = memo_string.as_bytes();
-        if bytes.len() > 512 {
-            return None;
-        }
         let mut memo = [0u8; 512];
+        let bytes = memo_string.as_bytes();
         memo[..bytes.len()].copy_from_slice(bytes);
-        Some(memo)
+        memo
     }
 }
 
-/// Constructs this Name Note's zero-value Registry output in `builder`.
-///
-/// The action modules own their action-specific public verbs; this is the
-/// shared raw-note construction that every Name Note uses.
-fn construct<P: Parameters>(
-    builder: &mut Builder<P, ()>,
-    registry_keys: &RegistryKeys,
-    note: &NameNote,
-) -> Result<(), BuildError<FeeError>> {
-    let memo = note
-        .encode(builder.params())
-        .expect("a valid name note encodes into 512 bytes");
-    let rcm = note.rcm(builder.params());
-    let psi = note.psi(builder.params());
-    let opening = orchard::note::NoteCommitTrapdoor::from_inner(rcm);
+/// The `expires_at` field of a transition: a fixed Unix instant, or the
+/// exact ASCII value `none` for a registration without fixed expiration.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Expiry {
+    /// The exact ASCII bytes `none`.
+    Never,
+    /// A Unix timestamp in whole seconds.
+    At(Timestamp),
+}
 
-    let registry_fvk = registry_keys.orchard_fvk();
-    builder.add_zns_output(
-        Some(registry_fvk.to_ovk(orchard::keys::Scope::External)),
-        registry_fvk.address_at(0u32, orchard::keys::Scope::External),
-        Zatoshis::ZERO,
-        memo,
-        opening,
-        psi,
-    )?;
+impl Expiry {
+    /// The canonical memo-field bytes.
+    pub fn field_bytes(&self) -> Vec<u8> {
+        match self {
+            Expiry::Never => b"none".to_vec(),
+            Expiry::At(t) => t.as_seconds().to_string().into_bytes(),
+        }
+    }
 
-    Ok(())
+    /// Parses the memo field: canonical decimal, or exactly `none`.
+    ///
+    /// Canonical means digits only — no sign, no leading zeroes (except `0`
+    /// itself). Non-canonical spellings are rejected because the raw field
+    /// bytes are hashed into σ: `1` and `01` are different transitions with
+    /// different commitments.
+    pub fn parse(field: &str) -> Option<Self> {
+        match field {
+            "none" => Some(Expiry::Never),
+            digits => {
+                if digits.is_empty()
+                    || digits.len() > 20
+                    || !digits.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return None;
+                }
+                if digits.len() > 1 && digits.starts_with('0') {
+                    return None;
+                }
+                let seconds: i64 = digits.parse().ok()?;
+                Timestamp::from_seconds(seconds).ok().map(Expiry::At)
+            }
+        }
+    }
+
+    /// The §4.5.2 expiration test against canonical-chain MTP.
+    /// `Never` never expires (liveness still applies; §4.5.4).
+    pub fn expired(self, mtp: Timestamp) -> bool {
+        match self {
+            Expiry::Never => false,
+            Expiry::At(t) => mtp >= t,
+        }
+    }
 }
 
 /// Derives the ZNS note-commitment randomness `rcm` for a transition (§3.3):
 /// BLAKE2b-512 over the length-prefixed fields with derivation tag `rcm`,
 /// wide-reduced into the Pallas scalar field.
-pub fn zns_rcm(
+fn zns_rcm(
     verb: &[u8],
     name: &[u8],
     ua: &[u8],
@@ -259,7 +216,7 @@ pub fn zns_rcm(
 /// Derives the ZNS note-commitment psi `ψ` for a transition (§3.3):
 /// BLAKE2b-512 over the length-prefixed fields with derivation tag `psi`,
 /// wide-reduced into the Pallas base field.
-pub fn zns_psi(
+fn zns_psi(
     verb: &[u8],
     name: &[u8],
     ua: &[u8],
@@ -381,9 +338,8 @@ pub fn decode_name_note<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<N
         _ => return None,
     };
 
-    (note.encode(params)?.as_slice() == memo).then_some(note)
+    (note.encode(params).as_slice() == memo).then_some(note)
 }
-
 
 // ---------------------------------------------------------------------------
 // Block scan: ZNS trial-decryption pass
@@ -421,8 +377,6 @@ pub fn decrypt_name_notes<P: Parameters>(
     registry_ivk: &orchard::keys::PreparedIncomingViewingKey,
     registry_recipient: orchard::Address,
 ) -> Vec<DecryptedNameNote> {
-    use pasta_curves::group::ff::PrimeField as _;
-
     let mut candidates = Vec::new();
     let mut ordinal = 0usize;
     for tx in block.vtx() {
@@ -442,18 +396,13 @@ pub fn decrypt_name_notes<P: Parameters>(
                                 Some(p) => p,
                                 None => return subtle::Choice::from(0),
                             };
-                            let rcm = payload.rcm(network);
+                            let rcm =
+                                orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network));
                             let psi = payload.psi(network);
-                            let (g_d, pk_d) = note.recipient().zns_commitment_keys();
-                            let rho = Option::from(pasta_curves::pallas::Base::from_repr(
-                                note.rho().to_bytes(),
-                            ))
-                            .expect("valid rho");
-                            let computed = match note_commitment_cmx(g_d, pk_d, 0, rho, psi, rcm) {
-                                Some(c) => c,
-                                None => return subtle::Choice::from(0),
-                            };
-                            computed.to_repr().ct_eq(&cmx.to_bytes())
+                            match note.zns_cmx(rcm, psi) {
+                                Some(computed) => computed.ct_eq(cmx),
+                                None => subtle::Choice::from(0),
+                            }
                         },
                     )
                 {
@@ -480,51 +429,6 @@ pub fn decrypt_name_notes<P: Parameters>(
         }
     }
     candidates
-}
-
-// ---------------------------------------------------------------------------
-// cmx helper — copied from zns-verify (standalone Sinsemilla, no orchard dep)
-// ---------------------------------------------------------------------------
-
-use pasta_curves::group::ff::PrimeField;
-use sinsemilla::CommitDomain;
-
-/// Sinsemilla personalization tag for Orchard note commitments.
-const NOTE_COMMITMENT_PERSONALIZATION: &str = "z.cash:Orchard-NoteCommit";
-
-/// Number of bits taken from each Pallas base-field input (rho, psi).
-const L_ORCHARD_BASE: usize = 255;
-
-fn le_bytes_lsb0(bytes: &[u8]) -> impl Iterator<Item = bool> + '_ {
-    bytes
-        .iter()
-        .copied()
-        .flat_map(|b| (0..8).map(move |i| (b >> i) & 1 != 0))
-}
-
-/// Computes cmx from raw note components plus caller-supplied (ψ, rcm).
-/// Used by the scanner to validate a decrypted Name Note's ZNS-derived
-/// commitment against the on-chain cmx.
-pub fn note_commitment_cmx(
-    g_d: [u8; 32],
-    pk_d: [u8; 32],
-    value: u64,
-    rho: pasta_curves::pallas::Base,
-    psi: pasta_curves::pallas::Base,
-    rcm: pasta_curves::pallas::Scalar,
-) -> Option<pasta_curves::pallas::Base> {
-    let domain = CommitDomain::new(NOTE_COMMITMENT_PERSONALIZATION);
-    let value_bytes = value.to_le_bytes();
-    let rho_bytes = rho.to_repr();
-    let psi_bytes = psi.to_repr();
-
-    let bits = le_bytes_lsb0(&g_d)
-        .chain(le_bytes_lsb0(&pk_d))
-        .chain(le_bytes_lsb0(&value_bytes))
-        .chain(le_bytes_lsb0(rho_bytes.as_ref()).take(L_ORCHARD_BASE))
-        .chain(le_bytes_lsb0(psi_bytes.as_ref()).take(L_ORCHARD_BASE));
-
-    Option::<pasta_curves::pallas::Base>::from(domain.short_commit(bits, &rcm))
 }
 
 #[cfg(test)]
@@ -561,7 +465,7 @@ mod tests {
             expires_at: Expiry::Never,
         };
         assert_eq!(
-            decode_name_note(&MAIN_NETWORK, &claim.encode(&MAIN_NETWORK).unwrap()).as_ref(),
+            decode_name_note(&MAIN_NETWORK, &claim.encode(&MAIN_NETWORK)).as_ref(),
             Some(&claim)
         );
 
@@ -572,7 +476,7 @@ mod tests {
             expires_at: Expiry::At(t),
         };
         assert_eq!(
-            decode_name_note(&MAIN_NETWORK, &claim_t.encode(&MAIN_NETWORK).unwrap()).as_ref(),
+            decode_name_note(&MAIN_NETWORK, &claim_t.encode(&MAIN_NETWORK)).as_ref(),
             Some(&claim_t)
         );
 
@@ -583,13 +487,13 @@ mod tests {
             prev,
         };
         assert_eq!(
-            decode_name_note(&MAIN_NETWORK, &update.encode(&MAIN_NETWORK).unwrap()).as_ref(),
+            decode_name_note(&MAIN_NETWORK, &update.encode(&MAIN_NETWORK)).as_ref(),
             Some(&update)
         );
 
         let release = NameNote::Release { name, ua, prev };
         assert_eq!(
-            decode_name_note(&MAIN_NETWORK, &release.encode(&MAIN_NETWORK).unwrap()).as_ref(),
+            decode_name_note(&MAIN_NETWORK, &release.encode(&MAIN_NETWORK)).as_ref(),
             Some(&release)
         );
     }
@@ -634,7 +538,7 @@ mod tests {
         };
         let rcm_at = claim_at.rcm(&MAIN_NETWORK);
         let psi_at = claim_at.psi(&MAIN_NETWORK);
-        assert_ne!(rcm_never.to_repr(), rcm_at.to_repr());
+        assert_ne!(rcm_never, rcm_at);
         assert_ne!(psi_never, psi_at);
 
         let rcm_upd = NameNote::Update {
@@ -644,7 +548,7 @@ mod tests {
             prev,
         }
         .rcm(&MAIN_NETWORK);
-        assert_ne!(rcm_at.to_repr(), rcm_upd.to_repr());
+        assert_ne!(rcm_at, rcm_upd);
     }
 
     /// Canonical-decimal strictness: `e` bytes are hashed into σ, so
@@ -653,17 +557,17 @@ mod tests {
     #[test]
     fn expiry_parsing_is_canonical() {
         assert_eq!(
-            parse_timestamp_canonical("0"),
-            Some(Timestamp::from_seconds(0).unwrap())
+            Expiry::parse("0"),
+            Some(Expiry::At(Timestamp::from_seconds(0).unwrap()))
         );
         assert_eq!(
-            parse_timestamp_canonical("1"),
-            Some(Timestamp::from_seconds(1).unwrap())
+            Expiry::parse("1"),
+            Some(Expiry::At(Timestamp::from_seconds(1).unwrap()))
         );
-        assert_eq!(parse_timestamp_canonical("01"), None);
-        assert_eq!(parse_timestamp_canonical("+1"), None);
-        assert_eq!(parse_timestamp_canonical(""), None);
-        assert_eq!(parse_timestamp_canonical("1a"), None);
+        assert_eq!(Expiry::parse("01"), None);
+        assert_eq!(Expiry::parse("+1"), None);
+        assert_eq!(Expiry::parse(""), None);
+        assert_eq!(Expiry::parse("1a"), None);
 
         assert_eq!(Expiry::parse("none"), Some(Expiry::Never));
         assert_eq!(Expiry::parse("None"), None);
@@ -687,8 +591,7 @@ mod tests {
             ua: ua.clone(),
             prev,
         }
-        .encode(&MAIN_NETWORK)
-        .unwrap();
+        .encode(&MAIN_NETWORK);
         assert!(decode_name_note(&MAIN_NETWORK, &m).is_some());
         // Releases must use the literal expiry `none`.
         let forged = format!(
@@ -716,8 +619,7 @@ mod tests {
             ua,
             expires_at: t,
         }
-        .encode(&MAIN_NETWORK)
-        .unwrap();
+        .encode(&MAIN_NETWORK);
         let forged = format!("ZNS:claim:bob:{}:none:{}", TEST_UA, hex::encode([1u8; 32]));
         m2[..forged.len()].copy_from_slice(forged.as_bytes());
         assert!(decode_name_note(&MAIN_NETWORK, &m2).is_none());
