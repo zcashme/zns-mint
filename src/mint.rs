@@ -108,21 +108,20 @@ impl Name {
 // ===========================================================================
 
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::value::{Zatoshis, COIN};
+use zcash_protocol::value::Zatoshis;
 
-/// Claim price and request minimum in zatoshis.
-///
-/// One ZEC is 100,000,000 zatoshis. Claim payments may exceed this amount;
-/// atomic claim settlement returns any excess to the payer.
-pub const CLAIM_PRICE: Zatoshis = Zatoshis::const_from_u64(COIN);
+// The claim price is not a constant: it is the pricing oracle's daily rate
+// applied to the claimant's name (`Oracle::price_zat`), fail-closed — no
+// usable rate, no claims.
 
-/// Flat charge taken from a claim payment whenever the mint processes the
-/// request without completing it — either the excess over [`CLAIM_PRICE`]
-/// (refunded minus this fee) or the entire payment when the claim is
-/// rejected (stale, underpaid, or the name is live). Saturates to "the
-/// Treasury retains the payment in full" when the payment is too small to
-/// cover it, so every rejected claim is self-funding.
-pub const PROCESSING_FEE: Zatoshis = Zatoshis::const_from_u64(10_000);
+/// Flat charge deducted from a claim payment's excess over the claim price:
+/// the payer receives `payment − price − REFUND_FEE` when that is positive,
+/// and nothing otherwise — the Treasury retains the payment in full and no
+/// refund output is emitted. Only a completed claim emits a refund; rejected
+/// claims (stale, underpaid, or the name is live) are likewise retained in
+/// full, so every claim is self-funding and refund delivery is always paid
+/// for by the payment that caused it.
+pub const REFUND_FEE: Zatoshis = Zatoshis::const_from_u64(50_000);
 
 /// The result of processing a single Treasury note request: the txid of the
 /// issued OTP relay payment, or the relay pipeline's error.
