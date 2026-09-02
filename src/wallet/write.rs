@@ -683,6 +683,13 @@ impl Wallet {
     /// orchestrator's ZNS pass supplies them here. Storage mirrors
     /// `put_blocks`: note table + memo + mined status. `ordinal` is the
     /// action's index in the block's full Ironwood commitment stream.
+    ///
+    /// `rcm` and `psi` are the note's ZNS commitment parameters, already
+    /// authenticated by the caller's cmx check. The nullifier filed for the
+    /// note is derived from them — [`orchard::note::Note::zns_nullifier`] —
+    /// because that is the value a spend of this note publishes; the
+    /// rseed-derived [`orchard::note::Note::nullifier`] never matches and
+    /// would blind the wallet to its own Name Notes being spent.
     pub fn store_name_note(
         &mut self,
         scanned: &ScannedBlock<AccountId>,
@@ -692,8 +699,16 @@ impl Wallet {
         note: orchard::note::Note,
         ephemeral_key: zcash_note_encryption::EphemeralKeyBytes,
         memo: [u8; 512],
+        rcm: orchard::note::NoteCommitTrapdoor,
+        psi: pasta_curves::pallas::Base,
     ) -> Option<()> {
         let fvk = self.ufvks.get(&REGISTRY_ACCOUNT)?.orchard()?.clone();
+        // Filed once, used for both the stored output's nullifier field and
+        // the spend-detection map: every detection pass is a lookup against
+        // this key, so it must be the value a spend reveals.
+        let Some(nf) = note.zns_nullifier(&fvk, rcm, psi) else {
+            return None;
+        };
         let bundles = scanned.ironwood();
         let start_size = bundles
             .final_tree_size()
@@ -708,13 +723,12 @@ impl Wallet {
                 (note.clone(), orchard::ValuePool::Ironwood),
                 false,
                 position,
-                Some(note.nullifier(&fvk)),
+                Some(nf),
                 REGISTRY_ACCOUNT,
                 Some(zip32::Scope::External),
             ),
         );
-        self.ironwood_nullifiers
-            .insert(note.nullifier(&fvk), note_id);
+        self.ironwood_nullifiers.insert(nf, note_id);
         self.memos.insert(
             note_id,
             Memo::Future(
