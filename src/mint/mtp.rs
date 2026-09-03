@@ -1,6 +1,6 @@
-//! Canonical-chain Median Time Past (MTP).
+//! Zcash on-chain Median Time Past (MTP).
 //!
-//! The whitepaper (§4.5) designates MTP as the sole authoritative time
+//! ZNS (§4.5) designates MTP as the sole authoritative time
 //! source for protocol-defined lifecycle periods: name expiration, OTP
 //! validity, and liveness enforcement. MTP is the median of the last 11
 //! block timestamps — manipulation-resistant because an attacker needs 6
@@ -75,7 +75,7 @@ impl MtpTracker {
         let floor_u32 = u32::from(scan_floor);
         let start = floor_u32.saturating_sub(MTP_WINDOW as u32 - 1);
 
-        for h in start..floor_u32 {
+        for h in start..=floor_u32 {
             let height = BlockHeight::from_u32(h);
             let timestamp = fetch(height).await?;
             self.update(height, timestamp);

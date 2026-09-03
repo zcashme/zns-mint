@@ -161,7 +161,7 @@ fn aggregate(quotes: Vec<(&'static str, Decimal)>) -> Option<Decimal> {
     }
 }
 
-async fn fetch_round() -> Option<Decimal> {
+pub async fn fetch_round() -> Option<Decimal> {
     let client = https_client();
     let mut set = tokio::task::JoinSet::new();
     for exchange in EXCHANGES.iter() {

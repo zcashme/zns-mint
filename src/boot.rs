@@ -18,6 +18,7 @@ use zeroize::Zeroize;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::mtp::MtpTracker;
+use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
@@ -41,6 +42,7 @@ pub struct Boot<P: Parameters> {
     sapling_spend: SpendParameters,
     sapling_output: OutputParameters,
     mtp: MtpTracker,
+    oracle: Oracle,
 }
 
 /// Network label for logging.
@@ -154,6 +156,13 @@ impl<P: Parameters> Boot<P> {
             u32::from(checkpoint_height)
         );
 
+        let mut oracle = Oracle::default();
+        let mtp_now = mtp.current().expect("MTP complete after backfill");
+        let price = crate::mint::pricing::fetch_round().await
+            .expect("FATAL: initial price fetch failed; restart when exchanges are reachable");
+        oracle.ingest(Some(price), mtp_now);
+        tracing::info!("boot: initial price ingested");
+
         // 4. Attestation (production only)
         #[cfg(not(feature = "regtest"))]
         {
@@ -189,6 +198,7 @@ impl<P: Parameters> Boot<P> {
             sapling_spend,
             sapling_output,
             mtp,
+            oracle,
         }
     }
 
@@ -219,6 +229,7 @@ impl<P: Parameters> Boot<P> {
         SpendParameters,
         OutputParameters,
         MtpTracker,
+        Oracle,
     ) {
         (
             self.network,
@@ -230,6 +241,7 @@ impl<P: Parameters> Boot<P> {
             self.sapling_spend,
             self.sapling_output,
             self.mtp,
+            self.oracle,
         )
     }
 }
