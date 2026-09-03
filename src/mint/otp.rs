@@ -27,7 +27,7 @@ use zeroize::Zeroize;
 
 use crate::mint::{Action, Name, UnifiedAddress};
 use zcash_client_backend::data_api::wallet::{
-    ProposeTransferErrT, input_selection::GreedyInputSelector,
+    input_selection::GreedyInputSelector, ProposeTransferErrT,
 };
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 
@@ -368,8 +368,8 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
         Vec::new(),
     )
     .expect("memo to a guarded Orchard UA with a nonzero fee cannot fail");
-    let request = zip321::TransactionRequest::new(vec![payment])
-        .expect("single-payment request cannot fail");
+    let request =
+        zip321::TransactionRequest::new(vec![payment]).expect("single-payment request cannot fail");
 
     let input_selector = GreedyInputSelector::new();
     let change_strategy = SingleOutputChangeStrategy::<crate::wallet::Wallet>::new(

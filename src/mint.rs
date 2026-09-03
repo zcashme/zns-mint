@@ -88,10 +88,7 @@ impl Name {
         if bytes.is_empty() || bytes.len() > 63 {
             return None;
         }
-        if bytes
-            .iter()
-            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9'))
-        {
+        if bytes.iter().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9')) {
             Some(Self(s.to_string()))
         } else {
             None
@@ -135,9 +132,7 @@ pub struct RequestOutcome {
             zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector<
                 crate::wallet::Wallet,
             >,
-            zcash_client_backend::fees::standard::SingleOutputChangeStrategy<
-                crate::wallet::Wallet,
-            >,
+            zcash_client_backend::fees::standard::SingleOutputChangeStrategy<crate::wallet::Wallet>,
         >,
     >,
     pub relay_otp: Option<crate::mint::otp::OtpRequest>,

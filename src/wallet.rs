@@ -172,10 +172,7 @@ impl Wallet {
 
     /// Truncates the wallet to `max_height` and returns the
     /// [`BlockMetadata`] at that height — the new chain tip after reorg.
-    pub fn truncate_to(
-        &mut self,
-        max_height: BlockHeight,
-    ) -> Result<BlockMetadata, WalletError> {
+    pub fn truncate_to(&mut self, max_height: BlockHeight) -> Result<BlockMetadata, WalletError> {
         WalletWrite::truncate_to_height(self, max_height)?;
         self.blocks
             .get(&max_height)

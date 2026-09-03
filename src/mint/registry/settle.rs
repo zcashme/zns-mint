@@ -12,23 +12,23 @@
 //! re-observed by every subsequent intake pass, so there is no policy
 //! rejection that leaves money sitting.
 
+use time::Timestamp;
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::data_api::{SentTransaction, WalletWrite as _};
 use zcash_client_backend::wallet::{NoteId, ReceivedNote};
+use zcash_primitives::transaction::builder::BundlePadding;
+use zcash_primitives::transaction::builder::{BuildConfig, Builder};
 use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_primitives::transaction::Transaction;
-use zcash_primitives::transaction::builder::{BuildConfig, Builder};
-use zcash_primitives::transaction::builder::BundlePadding;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
-use time::Timestamp;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::otp::OtpQueue;
-use crate::mint::NameNote;
 use crate::mint::registry::Registry;
+use crate::mint::NameNote;
 use crate::mint::{Action, CLAIM_PRICE, PROCESSING_FEE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
@@ -239,16 +239,17 @@ impl<'a, P: Parameters> Settle<'a, P> {
         let kept = PROCESSING_FEE.min(excess);
         let payer = claim.ua().and_then(|ua| ua.orchard().copied());
         let refund = match (payer, excess > PROCESSING_FEE) {
-            (Some(payer), true) => {
-                Some((payer, (excess - PROCESSING_FEE).expect("excess > processing fee")))
-            }
+            (Some(payer), true) => Some((
+                payer,
+                (excess - PROCESSING_FEE).expect("excess > processing fee"),
+            )),
             _ => None,
         };
 
         let fee = self.fee(3 + usize::from(refund.is_some()))?;
-        let change = ((CLAIM_PRICE + kept).expect("price plus processing fee fits in u64 zatoshis")
-            - fee)
-            .expect("CLAIM_PRICE dwarfs any ZIP-317 fee");
+        let change =
+            ((CLAIM_PRICE + kept).expect("price plus processing fee fits in u64 zatoshis") - fee)
+                .expect("CLAIM_PRICE dwarfs any ZIP-317 fee");
 
         let anchor = self.anchor()?;
         let (payment_note, payment_path) = self.prepare(payment)?;
@@ -337,8 +338,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
         transition: NameNote,
         predecessor: &ReceivedNote<NoteId, orchard::note::Note>,
     ) -> Result<Transaction, SettleError> {
-        let (fee_notes, funding, fee) =
-            self.select_fee_notes(3, |funding, fee| funding >= fee)?;
+        let (fee_notes, funding, fee) = self.select_fee_notes(3, |funding, fee| funding >= fee)?;
         let change = (funding - fee).expect("selection guarantees coverage");
 
         let anchor = self.anchor()?;
@@ -430,8 +430,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
         transition: NameNote,
         predecessor: &ReceivedNote<NoteId, orchard::note::Note>,
     ) -> Result<Transaction, SettleError> {
-        let (fee_notes, funding, fee) =
-            self.select_fee_notes(3, |funding, fee| funding >= fee)?;
+        let (fee_notes, funding, fee) = self.select_fee_notes(3, |funding, fee| funding >= fee)?;
         let change = (funding - fee).expect("selection guarantees coverage");
 
         let anchor = self.anchor()?;
@@ -524,16 +523,17 @@ impl<'a, P: Parameters> Settle<'a, P> {
         payer: Option<orchard::Address>,
     ) -> Result<Transaction, SettleError> {
         let covered = |funding: Zatoshis, fee: Zatoshis| match payer {
-            Some(_) => funding
-                >= (fee + PROCESSING_FEE).expect("fee and processing fee fit in u64 zatoshis"),
+            Some(_) => {
+                funding
+                    >= (fee + PROCESSING_FEE).expect("fee and processing fee fit in u64 zatoshis")
+            }
             None => funding >= fee,
         };
         let (fee_notes, funding, _) = self.select_fee_notes(3, covered)?;
         let fee = self.fee(1 + fee_notes.len() + usize::from(payer.is_some()))?;
 
-        let refund = payer.and_then(|payer| {
-            (funding - fee - PROCESSING_FEE).map(|value| (payer, value))
-        });
+        let refund =
+            payer.and_then(|payer| (funding - fee - PROCESSING_FEE).map(|value| (payer, value)));
         let change = match &refund {
             Some((_, value)) => {
                 (funding - *value - fee).expect("refund plus fee is at most the pool")
@@ -672,8 +672,14 @@ impl<'a, P: Parameters> Settle<'a, P> {
         &mut self,
         base_actions: usize,
         covered: impl Fn(Zatoshis, Zatoshis) -> bool,
-    ) -> Result<(Vec<(orchard::note::Note, orchard::tree::MerklePath)>, Zatoshis, Zatoshis), SettleError>
-    {
+    ) -> Result<
+        (
+            Vec<(orchard::note::Note, orchard::tree::MerklePath)>,
+            Zatoshis,
+            Zatoshis,
+        ),
+        SettleError,
+    > {
         let candidates = crate::mint::treasury::fee_note_candidates(self.wallet, self.tip);
         let mut prepared = Vec::new();
         let mut funding = Zatoshis::ZERO;
@@ -699,7 +705,13 @@ impl<'a, P: Parameters> Settle<'a, P> {
     fn predecessor_opening(
         &self,
         note: &ReceivedNote<NoteId, orchard::note::Note>,
-    ) -> Result<(orchard::note::NoteCommitTrapdoor, pasta_curves::pallas::Base), SettleError> {
+    ) -> Result<
+        (
+            orchard::note::NoteCommitTrapdoor,
+            pasta_curves::pallas::Base,
+        ),
+        SettleError,
+    > {
         let memo = self
             .wallet
             .get_memo(*note.internal_note_id())

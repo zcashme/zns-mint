@@ -12,11 +12,13 @@ use shardtree::store::{Checkpoint, ShardStore, TreeState};
 use shardtree::ShardTree;
 use transparent::bundle::OutPoint;
 use zcash_client_backend::data_api::{
-    AccountBirthday, AccountPurpose, DecryptedTransaction,
-    ScannedBlock, ScannedBundles, SentTransaction, SentTransactionOutput, TransactionStatus,
-    TransactionsInvolvingAddress, WalletWrite, chain::ChainState,
-    error::RewindError, locking::{LockError, LockOwner, OutputLockStore},
+    chain::ChainState,
+    error::RewindError,
+    locking::{LockError, LockOwner, OutputLockStore},
     scanning::ScanPriority,
+    AccountBirthday, AccountPurpose, DecryptedTransaction, ScannedBlock, ScannedBundles,
+    SentTransaction, SentTransactionOutput, TransactionStatus, TransactionsInvolvingAddress,
+    WalletWrite,
 };
 use zcash_client_backend::wallet::{
     NoteId, OutputRef, WalletIronwoodOutput, WalletTransparentOutput,
@@ -30,8 +32,8 @@ use zcash_protocol::{PoolType, ShieldedPool};
 use zip32::{AccountId, DiversifierIndex};
 
 use super::{
+    read::{account_birthday, next_height, WalletError},
     Wallet,
-    read::{WalletError, account_birthday, next_height},
 };
 use crate::mint::REGISTRY_ACCOUNT;
 
@@ -69,12 +71,10 @@ impl Wallet {
     /// conservatively.
     fn is_foreign_lock_active(&self, output: &OutputRef, owner: LockOwner) -> bool {
         match self.locks.get(output) {
-            Some((existing_owner, expiry)) if *existing_owner != owner => {
-                match self.zebra_tip {
-                    Some(tip) => *expiry > tip,
-                    None => true,
-                }
-            }
+            Some((existing_owner, expiry)) if *existing_owner != owner => match self.zebra_tip {
+                Some(tip) => *expiry > tip,
+                None => true,
+            },
             _ => false,
         }
     }
@@ -97,7 +97,11 @@ impl Wallet {
         let floors = [
             self.sapling_tree.store().min_checkpoint_id().ok().flatten(),
             self.orchard_tree.store().min_checkpoint_id().ok().flatten(),
-            self.ironwood_tree.store().min_checkpoint_id().ok().flatten(),
+            self.ironwood_tree
+                .store()
+                .min_checkpoint_id()
+                .ok()
+                .flatten(),
         ];
         match floors {
             [Some(a), Some(b), Some(c)] if a == b && b == c && a <= max_height => Some(a),
@@ -170,7 +174,11 @@ impl OutputLockStore for Wallet {
 /// with no commitments in that block — so anchors remain computable at each
 /// block boundary and reorg truncation is exact.
 fn ensure_block_checkpoint<H, const DEPTH: u8, const SHARD_HEIGHT: u8>(
-    tree: &mut ShardTree<shardtree::store::memory::MemoryShardStore<H, BlockHeight>, DEPTH, SHARD_HEIGHT>,
+    tree: &mut ShardTree<
+        shardtree::store::memory::MemoryShardStore<H, BlockHeight>,
+        DEPTH,
+        SHARD_HEIGHT,
+    >,
     height: BlockHeight,
     final_tree_size: u32,
 ) -> Result<(), WalletError>
@@ -353,8 +361,7 @@ impl WalletWrite for Wallet {
                         // Sapling bundle output counts are bounded far below
                         // 2^16 by consensus; upstream in-memory wallets make
                         // the same assumption.
-                        u16::try_from(output.index())
-                            .expect("Sapling output index fits in u16"),
+                        u16::try_from(output.index()).expect("Sapling output index fits in u16"),
                     );
                     self.sapling_notes.insert(note_id, output.clone());
                     if let Some(nf) = output.nf() {
@@ -365,8 +372,7 @@ impl WalletWrite for Wallet {
                     let note_id = NoteId::new(
                         txid,
                         ShieldedPool::Ironwood,
-                        u16::try_from(output.index())
-                            .expect("Ironwood action index fits in u16"),
+                        u16::try_from(output.index()).expect("Ironwood action index fits in u16"),
                     );
                     self.ironwood_notes.insert(note_id, output.clone());
                     if let Some(nf) = output.nf() {
@@ -411,7 +417,8 @@ impl WalletWrite for Wallet {
         // Stored as a chain observation only: under the outbound-only
         // transparent policy it is never surfaced as a spendable input.
         let outpoint = output.outpoint().clone();
-        self.transparent_outputs.insert(outpoint.clone(), output.clone());
+        self.transparent_outputs
+            .insert(outpoint.clone(), output.clone());
         Ok(outpoint)
     }
 
@@ -446,8 +453,7 @@ impl WalletWrite for Wallet {
                     NoteId::new(
                         txid,
                         ShieldedPool::Sapling,
-                        u16::try_from(output.index())
-                            .expect("Sapling output index fits in u16"),
+                        u16::try_from(output.index()).expect("Sapling output index fits in u16"),
                     ),
                     memo,
                 );
@@ -459,8 +465,7 @@ impl WalletWrite for Wallet {
                     NoteId::new(
                         txid,
                         ShieldedPool::Ironwood,
-                        u16::try_from(output.index())
-                            .expect("Ironwood action index fits in u16"),
+                        u16::try_from(output.index()).expect("Ironwood action index fits in u16"),
                     ),
                     memo,
                 );
@@ -491,15 +496,20 @@ impl WalletWrite for Wallet {
             self.transaction_statuses
                 .entry(txid)
                 .or_insert(TransactionStatus::NotInMainChain);
-            self.sent_outputs
-                .insert(txid, sent.outputs().iter().map(|o| {
-                    SentTransactionOutput::from_parts(
-                        o.output_index(),
-                        o.recipient().clone(),
-                        o.value(),
-                        o.memo().cloned(),
-                    )
-                }).collect());
+            self.sent_outputs.insert(
+                txid,
+                sent.outputs()
+                    .iter()
+                    .map(|o| {
+                        SentTransactionOutput::from_parts(
+                            o.output_index(),
+                            o.recipient().clone(),
+                            o.value(),
+                            o.memo().cloned(),
+                        )
+                    })
+                    .collect(),
+            );
 
             // Record spends of wallet outputs from the raw bundles, then
             // release the locks on every output now recorded as spent: the
@@ -617,8 +627,13 @@ impl WalletWrite for Wallet {
         &mut self,
         _account_id: AccountId,
         _n: usize,
-    ) -> Result<Vec<(transparent::address::TransparentAddress, zcash_client_backend::wallet::TransparentAddressMetadata)>, WalletError>
-    {
+    ) -> Result<
+        Vec<(
+            transparent::address::TransparentAddress,
+            zcash_client_backend::wallet::TransparentAddressMetadata,
+        )>,
+        WalletError,
+    > {
         // Neither fixed account owns, derives, or reserves a transparent
         // receiver.
         Err(WalletError::FixedAccountsOnly)
@@ -628,8 +643,13 @@ impl WalletWrite for Wallet {
         &mut self,
         _account_id: AccountId,
         _n: usize,
-    ) -> Result<Vec<(transparent::address::TransparentAddress, zcash_client_backend::wallet::TransparentAddressMetadata)>, WalletError>
-    {
+    ) -> Result<
+        Vec<(
+            transparent::address::TransparentAddress,
+            zcash_client_backend::wallet::TransparentAddressMetadata,
+        )>,
+        WalletError,
+    > {
         Err(WalletError::FixedAccountsOnly)
     }
 
@@ -714,7 +734,11 @@ impl Wallet {
             .final_tree_size()
             .checked_sub(u32::try_from(bundles.commitments().len()).ok()?)?;
         let position = Position::from(u64::from(start_size) + ordinal as u64);
-        let note_id = NoteId::new(txid, ShieldedPool::Ironwood, u16::try_from(action_index).ok()?);
+        let note_id = NoteId::new(
+            txid,
+            ShieldedPool::Ironwood,
+            u16::try_from(action_index).ok()?,
+        );
         self.ironwood_notes.insert(
             note_id,
             WalletIronwoodOutput::from_parts(

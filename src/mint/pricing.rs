@@ -250,7 +250,9 @@ fn to_factor(avg: Decimal) -> Option<Zatoshis> {
 
 impl Oracle {
     pub fn ingest(&mut self, sample: Option<Decimal>, now: Timestamp) {
-        let Some(sample) = sample else { return; };
+        let Some(sample) = sample else {
+            return;
+        };
 
         if sample <= Decimal::ZERO {
             tracing::warn!(sample = %sample, "pricing observation dropped: non-positive");
