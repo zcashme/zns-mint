@@ -1,16 +1,5 @@
 //! Registry: the ZNS name-chain state machine and transition authorization.
 //!
-//! The Registry tracks the current state of every name (the [`NameRecord`] for
-//! each name chain) and authorizes transitions against that state
-//! ([`authorize_claim`], [`authorize_update`], [`authorize_release`]), each
-//! producing the typed [`NameNote`] transition for the settle path to
-//! commit — memo, opening, and predecessor all derive from the one value.
-//! The transaction-assembly path — building the Ironwood bundle, funding
-//! the fee, signing — is the caller's job, not the Registry's. The OTP
-//! challenges that update/release requests authorize with live in
-//! [`crate::mint::otp`].
-
-pub mod settle;
 
 use crate::mint::otp::OtpQueue;
 use crate::mint::{
