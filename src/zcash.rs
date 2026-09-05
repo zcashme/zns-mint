@@ -16,7 +16,7 @@ use zcash_client_backend::data_api::chain::ChainState;
 use zcash_primitives::block::{Block, BlockHash};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
 use zcash_primitives::transaction::{Transaction, TxId};
-use zcash_protocol::consensus::{BranchId, BlockHeight, Parameters};
+use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
 use zebra_indexer_proto::{BlockHashAndHeight, Empty, MempoolChangeKind, ZebraClient};
 
 use orchard::tree::MerkleHashOrchard;
@@ -173,10 +173,7 @@ impl JsonRpc {
     /// Fetches the shielded tree state for a block through Zebra JSON-RPC and
     /// returns it as the upstream [`ChainState`] value — the same type the
     /// run loop hands to `WalletWrite::put_blocks` as its connection point.
-    pub async fn chain_state_at(
-        &self,
-        height: BlockHeight,
-    ) -> Result<ChainState, TransportError> {
+    pub async fn chain_state_at(&self, height: BlockHeight) -> Result<ChainState, TransportError> {
         let response: TreeStateResponse = self
             .send_request("z_gettreestate", [u32::from(height).to_string()])
             .await?
@@ -288,9 +285,7 @@ impl JsonRpc {
 
         txids
             .iter()
-            .map(|hex| {
-                TxId::from_hex(hex).ok_or(TransportError::BadNodeData("getrawmempool txid"))
-            })
+            .map(|hex| TxId::from_hex(hex).ok_or(TransportError::BadNodeData("getrawmempool txid")))
             .collect()
     }
 
@@ -360,7 +355,6 @@ impl JsonRpc {
         Ok((status, body))
     }
 }
-
 
 /// The outcome of submitting a signed transaction to the node.
 #[derive(Debug)]

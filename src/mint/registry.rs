@@ -19,8 +19,8 @@ use crate::mint::{
 use crate::wallet::Wallet;
 use std::collections::BTreeMap;
 use time::Timestamp;
-use zcash_client_backend::data_api::ScannedBlock;
 use zcash_client_backend::data_api::wallet::TargetHeight;
+use zcash_client_backend::data_api::ScannedBlock;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
@@ -37,13 +37,10 @@ pub fn current_record(registry: &Registry, name: &Name) -> Option<NameRecord> {
 /// made. This function verifies that the name is available (either no record,
 /// or record is `Release`). Until term-request plumbing exists in the intake
 /// path, claims register without fixed expiration.
-pub fn authorize_claim(
-    registry: &Registry,
-    name: Name,
-    ua: UnifiedAddress,
-) -> Option<NameNote> {
+pub fn authorize_claim(registry: &Registry, name: Name, ua: UnifiedAddress) -> Option<NameNote> {
     match current_record(registry, &name) {
-        None | Some(NameRecord {
+        None
+        | Some(NameRecord {
             action: Action::Release,
             ..
         }) => Some(NameNote::Claim {
@@ -123,8 +120,6 @@ pub fn authorize_release(
         prev: record.commitment,
     })
 }
-
-
 
 // ---------------------------------------------------------------------------
 // ReceivedNameNote — scanner evidence for one Name Note
@@ -717,7 +712,10 @@ mod tests {
             .expect("valid OTP authorizes release");
         match transition {
             NameNote::Release { ua: bound, .. } => assert_eq!(bound, ua),
-            other => panic!("expected release transition, got {}", other.action().as_str()),
+            other => panic!(
+                "expected release transition, got {}",
+                other.action().as_str()
+            ),
         }
     }
 

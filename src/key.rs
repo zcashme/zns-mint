@@ -9,8 +9,8 @@ use std::marker::PhantomData;
 
 use secrecy::{ExposeSecret, Secret};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
-use zip32::AccountId;
 use zcash_protocol::consensus::Parameters;
+use zip32::AccountId;
 
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 
@@ -144,8 +144,12 @@ mod tests {
         for tv in test_vectors::UNIFIED {
             let derive = |account: u32| -> Option<UnifiedFullViewingKey> {
                 match account {
-                    0 => Some(TreasuryKeys::derive(&MAIN_NETWORK, &Secret::new(tv.root_seed)).fvk()),
-                    1 => Some(RegistryKeys::derive(&MAIN_NETWORK, &Secret::new(tv.root_seed)).fvk()),
+                    0 => {
+                        Some(TreasuryKeys::derive(&MAIN_NETWORK, &Secret::new(tv.root_seed)).fvk())
+                    }
+                    1 => {
+                        Some(RegistryKeys::derive(&MAIN_NETWORK, &Secret::new(tv.root_seed)).fvk())
+                    }
                     // The mint has exactly two accounts; vectors for other
                     // ZIP-32 accounts exercise nothing we can express.
                     _ => None,
@@ -204,28 +208,24 @@ mod tests {
     fn type_bound_derivation_matches_value_keyed() {
         let seed = Secret::new(test_vectors::UNIFIED[0].root_seed);
 
-        let treasury =
-            TreasuryKeys::derive(&MAIN_NETWORK, &seed).fvk().to_unified_incoming_viewing_key();
-        let value_keyed = UnifiedSpendingKey::from_seed(
-            &MAIN_NETWORK,
-            seed.expose_secret(),
-            TREASURY_ACCOUNT,
-        )
-        .expect("vector seed derives a valid USK")
-        .to_unified_full_viewing_key()
-        .to_unified_incoming_viewing_key();
+        let treasury = TreasuryKeys::derive(&MAIN_NETWORK, &seed)
+            .fvk()
+            .to_unified_incoming_viewing_key();
+        let value_keyed =
+            UnifiedSpendingKey::from_seed(&MAIN_NETWORK, seed.expose_secret(), TREASURY_ACCOUNT)
+                .expect("vector seed derives a valid USK")
+                .to_unified_full_viewing_key()
+                .to_unified_incoming_viewing_key();
         assert_eq!(treasury, value_keyed);
 
-        let registry =
-            RegistryKeys::derive(&MAIN_NETWORK, &seed).fvk().to_unified_incoming_viewing_key();
-        let value_keyed = UnifiedSpendingKey::from_seed(
-            &MAIN_NETWORK,
-            seed.expose_secret(),
-            REGISTRY_ACCOUNT,
-        )
-        .expect("vector seed derives a valid USK")
-        .to_unified_full_viewing_key()
-        .to_unified_incoming_viewing_key();
+        let registry = RegistryKeys::derive(&MAIN_NETWORK, &seed)
+            .fvk()
+            .to_unified_incoming_viewing_key();
+        let value_keyed =
+            UnifiedSpendingKey::from_seed(&MAIN_NETWORK, seed.expose_secret(), REGISTRY_ACCOUNT)
+                .expect("vector seed derives a valid USK")
+                .to_unified_full_viewing_key()
+                .to_unified_incoming_viewing_key();
         assert_eq!(registry, value_keyed);
     }
 }
