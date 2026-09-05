@@ -1,25 +1,5 @@
-//! OTP challenge machinery for ZNS name transitions.
+//! OTP authentication for ZNS locked-name transitions.
 //!
-//! The OTP queue is a single-use TTL cache: each entry binds a 6-digit
-//! passcode to a specific (name, action, target UA) and expires after
-//! 30 minutes of chain MTP. Entries are pushed when a relay transaction
-//! is accepted for broadcast and burned on first successful verification
-//! — one-shot, never reusable. Expired entries are pruned on each
-//! verification scan.
-//!
-//! Also home to the OTP relay memo codec
-//! (`ZNS:otp:<otp>:<name>:<verb>:<ua>`) and relay issuance
-//! ([`issue_relay`]): an ordinary Treasury payment to the current
-//! controller, built by upstream wallet assembly (input selection, fee
-//! computation, anchors and witnesses, proving, signing, and
-//! sent-transaction recording). After NU6.3, upstream routes the
-//! controller UA's Orchard receiver to the Ironwood pool, so the
-//! delivered note is an Ironwood note. The relay never spends the request
-//! note — intake dedup is not a protocol concern: a user may purchase as
-//! many challenges as they like; only the echoed one is burned.
-
-use std::fmt;
-
 use rand::Rng;
 use subtle::ConstantTimeEq;
 use time::Timestamp;
@@ -27,30 +7,17 @@ use zeroize::Zeroize;
 
 use crate::mint::{Action, Name, UnifiedAddress};
 use zcash_client_backend::data_api::wallet::{
-    ProposeTransferErrT, input_selection::GreedyInputSelector,
+    input_selection::GreedyInputSelector, ProposeTransferErrT,
 };
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 
-/// OTP validity window (whitepaper §5.3: D_OTP). 30 minutes in seconds.
+/// OTP validity window (30 minutes in seconds; §5.3: D_OTP)
 pub const D_OTP: i64 = 1800;
 
-// ---------------------------------------------------------------------------
-// OtpCode
-// ---------------------------------------------------------------------------
-
-/// A six-digit decimal one-time passcode for update/release authorization.
-///
-/// Stored as a `u32` in the range `0..=999_999`. The canonical relay form is
-/// six ASCII decimal digits, including leading zeroes.
+/// A six-digit one-time passcode for update/release authorization.
 #[derive(Zeroize)]
 #[zeroize(drop)]
 pub struct OtpCode(u32);
-
-impl fmt::Debug for OtpCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("OtpCode(<redacted>)")
-    }
-}
 
 impl OtpCode {
     /// Generates a new uniformly random six-digit decimal OTP.
@@ -70,41 +37,16 @@ impl OtpCode {
     }
 
     /// Parses six ASCII decimal digits into an OTP.
-    ///
-    /// Returns `None` if the input is not exactly six ASCII digits.
     pub fn from_digits(digits: &[u8; 6]) -> Option<Self> {
-        let mut value = 0u32;
-        for &b in digits {
-            if !b.is_ascii_digit() {
-                return None;
-            }
-            value = value.checked_mul(10)? + (b - b'0') as u32;
+        let s = std::str::from_utf8(digits).ok()?;
+        if !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
         }
-        Some(Self(value))
-    }
-
-    #[cfg(test)]
-    pub fn expose_for_test(&self) -> [u8; 6] {
-        self.digits()
-    }
-
-    /// Constructs a code from raw digits. Test-only: the mint's only
-    /// production constructor is [`OtpCode::generate`].
-    #[cfg(test)]
-    pub fn for_test(digits: [u8; 6]) -> Self {
-        Self::from_digits(&digits).expect("test digits are valid")
+        s.parse::<u32>().ok().map(Self)
     }
 }
 
-// ---------------------------------------------------------------------------
-// OtpRequest — one pending OTP bound to a specific transition
-// ---------------------------------------------------------------------------
-
-/// A pending OTP bound to a specific (name, action, target UA).
-///
-/// Pushed onto the [`OtpQueue`] after the relay transaction is accepted.
-/// Burned on first successful verification — one-shot, never reusable.
-/// Expires after `D_OTP` seconds of chain MTP.
+/// A valid user-initiated pending OTP request bound to a specific (name, action, target UA).
 pub struct OtpRequest {
     pub name: Name,
     pub action: Action,
@@ -113,14 +55,7 @@ pub struct OtpRequest {
     pub expires_at: Timestamp,
 }
 
-// ---------------------------------------------------------------------------
-// OtpQueue — single-use TTL cache of pending OTPs
-// ---------------------------------------------------------------------------
-
-/// A bag of pending OTP requests. Push appends with no checks; every
-/// accepted relay gets an entry. Verification scans for a match on
-/// (name, action, ua, code) plus the expiry check, and removes the
-/// first match — burning it permanently.
+/// A time ordered list of pending OTP requests.
 pub struct OtpQueue(Vec<OtpRequest>);
 
 impl Default for OtpQueue {
@@ -174,45 +109,7 @@ impl OtpQueue {
     }
 }
 
-// ---------------------------------------------------------------------------
-// OTP relay memo encoding
-// ---------------------------------------------------------------------------
-
-/// Returns the canonical verb string for an action in the OTP relay grammar.
-///
-/// Only `Update` and `Release` are valid relay actions — claims do not use OTPs.
-fn verb_str(action: Action) -> Option<&'static str> {
-    match action {
-        Action::Update => Some("update"),
-        Action::Release => Some("release"),
-        Action::Claim => None,
-    }
-}
-
-/// Whether the fixed-width OTP relay form fits in one Zcash memo.
-pub fn otp_relay_memo_fits<P: zcash_protocol::consensus::Parameters>(
-    network: &P,
-    name: &Name,
-    action: Action,
-    ua: &UnifiedAddress,
-) -> bool {
-    let Some(verb) = verb_str(action) else {
-        return false;
-    };
-    8usize // "ZNS:otp:"
-        .checked_add(6) // six-digit OTP
-        .and_then(|l| l.checked_add(1 + name.as_str().len()))
-        .and_then(|l| l.checked_add(1 + verb.len()))
-        .and_then(|l| l.checked_add(1 + ua.encode(network).len()))
-        .is_some_and(|l| l <= 512)
-}
-
-/// Encodes an OTP relay memo: `ZNS:otp:<otp>:<name>:<verb>:<ua>`, zero-padded
-/// to 512 bytes.
-///
-/// This memo is sent from the Treasury to the current controller's address so
-/// only they can decrypt it and forward it back. Returns `None` if the action
-/// is `Claim` (claims don't use OTPs) or if the encoded text exceeds 512 bytes.
+/// Encodes an OTP relay memo: `ZNS:otp:<otp>:<name>:<verb>:<ua>`
 pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
     network: &P,
     name: &Name,
@@ -220,10 +117,10 @@ pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
     ua: &UnifiedAddress,
     otp: &OtpCode,
 ) -> Option<[u8; 512]> {
-    let verb = verb_str(action)?;
-    if !otp_relay_memo_fits(network, name, action, ua) {
+    if action == Action::Claim {
         return None;
     }
+    let verb = action.as_str();
 
     let ua_field = ua.encode(network);
     let otp_digits = otp.digits();
@@ -246,9 +143,16 @@ pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
     Some(memo)
 }
 
-/// Parses a 512-byte OTP relay memo and returns its fields if the grammar
-/// matches `ZNS:otp:<otp>:<name>:<verb>:<ua>`. Returns `None` otherwise.
-pub fn decode_otp_relay_memo(memo: &[u8; 512]) -> Option<(Name, Action, String, [u8; 6])> {
+/// Decodes an OTP relay memo: `ZNS:otp:<otp>:<name>:<verb>:<ua>`
+///
+/// The embedded UA is decoded for `network` and must carry an Orchard-family
+/// receiver — the same rule [`crate::mint::treasury::parse_request`] enforces
+/// at the request door: Ironwood delivery (relay notes, refunds) has no other
+/// address.
+pub fn decode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
+    network: &P,
+    memo: &[u8; 512],
+) -> Option<(Name, Action, UnifiedAddress, [u8; 6])> {
     let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
     if memo[end..].iter().any(|&b| b != 0) {
         return None;
@@ -274,16 +178,16 @@ pub fn decode_otp_relay_memo(memo: &[u8; 512]) -> Option<(Name, Action, String, 
         _ => return None,
     };
 
-    let ua = parts[5].to_string();
-    if ua.is_empty() {
-        return None;
-    }
+    let ua = match zcash_keys::address::Address::decode(network, parts[5])? {
+        zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
+        _ => return None,
+    };
 
     Some((name, action, ua, otp))
 }
 
 // ---------------------------------------------------------------------------
-// OTP relay issuance
+// OTP relay issuance (THIS FUNCTION COULD TAKE SOME SERIOUS WORK)
 // ---------------------------------------------------------------------------
 
 /// Builds, proves, signs, and records the OTP relay payment, returning its
@@ -368,8 +272,8 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
         Vec::new(),
     )
     .expect("memo to a guarded Orchard UA with a nonzero fee cannot fail");
-    let request = zip321::TransactionRequest::new(vec![payment])
-        .expect("single-payment request cannot fail");
+    let request =
+        zip321::TransactionRequest::new(vec![payment]).expect("single-payment request cannot fail");
 
     let input_selector = GreedyInputSelector::new();
     let change_strategy = SingleOutputChangeStrategy::<crate::wallet::Wallet>::new(
@@ -500,11 +404,11 @@ mod tests {
             .expect("memo fits");
 
         let (decoded_name, decoded_action, decoded_ua, decoded_otp) =
-            decode_otp_relay_memo(&memo).expect("memo decodes");
+            decode_otp_relay_memo(&MAIN_NETWORK, &memo).expect("memo decodes");
 
         assert_eq!(decoded_name, name);
         assert_eq!(decoded_action, Action::Update);
-        assert_eq!(decoded_ua, ua.encode(&MAIN_NETWORK));
+        assert_eq!(decoded_ua.encode(&MAIN_NETWORK), ua.encode(&MAIN_NETWORK));
         assert_eq!(decoded_otp, *b"004206");
     }
 
@@ -530,7 +434,7 @@ mod tests {
         let mut memo = [0u8; 512];
         memo[..legacy.len()].copy_from_slice(legacy.as_bytes());
 
-        assert!(decode_otp_relay_memo(&memo).is_none());
+        assert!(decode_otp_relay_memo(&MAIN_NETWORK, &memo).is_none());
     }
 
     #[test]
@@ -564,7 +468,7 @@ mod tests {
         memo[first_nul + 10] = 0x42;
 
         // The post-NUL check must reject this.
-        assert!(decode_otp_relay_memo(&memo).is_none());
+        assert!(decode_otp_relay_memo(&MAIN_NETWORK, &memo).is_none());
     }
 
     #[test]
