@@ -110,18 +110,23 @@ impl Name {
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::value::Zatoshis;
 
-// The claim price is not a constant: it is the pricing oracle's daily rate
-// applied to the claimant's name (`Oracle::price_zat`), fail-closed — no
-// usable rate, no claims.
+// The claim price is `Oracle::quote_forever(name)`: the USD name schedule
+// converted to zats at the oracle's daily rate.
 
-/// Flat charge deducted from a claim payment's excess over the claim price:
-/// the payer receives `payment − price − REFUND_FEE` when that is positive,
-/// and nothing otherwise — the Treasury retains the payment in full and no
-/// refund output is emitted. Only a completed claim emits a refund; rejected
-/// claims (stale, underpaid, or the name is live) are likewise retained in
-/// full, so every claim is self-funding and refund delivery is always paid
-/// for by the payment that caused it.
-pub const REFUND_FEE: Zatoshis = Zatoshis::const_from_u64(50_000);
+/// Whole-dollar refund fee, settled by [`grid_usd`] at the daily rate,
+/// rounded up to the next 100,000-zat step.
+pub const REFUND_FEE_USD: u64 = 1;
+
+/// Policy fees settle in steps of 100,000 zats.
+const FEE_STEP: u64 = 100_000;
+
+/// Settles a whole-dollar policy amount on the fee lattice: converted at
+/// the daily rate, rounded up to the next [`FEE_STEP`].
+pub fn grid_usd(oracle: &pricing::Oracle, usd: u64) -> Zatoshis {
+    let raw = usd * oracle.current().into_u64();
+    Zatoshis::from_u64(raw.next_multiple_of(FEE_STEP))
+        .expect("step rounding adds less than one step")
+}
 
 /// The result of processing a single Treasury note request: the txid of the
 /// issued OTP relay payment, or the relay pipeline's error.
@@ -140,4 +145,34 @@ pub struct RequestOutcome {
         >,
     >,
     pub relay_otp: Option<crate::mint::otp::OtpRequest>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn oracle_at_price(usd: u64) -> pricing::Oracle {
+        pricing::Oracle::new(
+            rust_decimal::Decimal::from(usd),
+            Timestamp::from_seconds(0).unwrap(),
+        )
+    }
+
+    #[test]
+    fn grid_keeps_on_grid_amounts() {
+        // $1,000/ZEC ⇒ 100,000 zats per dollar: $1 sits exactly on the grid.
+        assert_eq!(grid_usd(&oracle_at_price(1_000), 1).into_u64(), 100_000);
+    }
+
+    #[test]
+    fn grid_rounds_up_to_the_next_step() {
+        // $833/ZEC ⇒ 120,049 zats per dollar: $1 rounds up to 200,000.
+        assert_eq!(grid_usd(&oracle_at_price(833), 1).into_u64(), 200_000);
+    }
+
+    #[test]
+    fn grid_rounds_the_whole_amount_once() {
+        // $2 at 120,049 zats/dollar = 240,098 ⇒ one rounding: 300,000.
+        assert_eq!(grid_usd(&oracle_at_price(833), 2).into_u64(), 300_000);
+    }
 }

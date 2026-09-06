@@ -134,8 +134,8 @@ impl<P: Parameters> Boot<P> {
             u32::from(checkpoint_height)
         );
 
-        // 3c. MTP backfill: the 10 predecessor header timestamps, so the
-        // MTP window completes with the first scanned block.
+        // 3c. MTP backfill: the 11 header timestamps through the origin
+        // checkpoint, so the MTP window is complete before the first scan.
         let mut mtp = MtpTracker::default();
         mtp.backfill(checkpoint_height, |height| {
             let rpc = rpc.clone();
@@ -152,15 +152,14 @@ impl<P: Parameters> Boot<P> {
         .await
         .expect("FATAL: MTP backfill from Zebra failed");
         tracing::info!(
-            "boot: MTP backfilled from headers below checkpoint {}",
+            "boot: MTP backfilled from headers through checkpoint {}",
             u32::from(checkpoint_height)
         );
 
-        let mut oracle = Oracle::default();
         let mtp_now = mtp.current().expect("MTP complete after backfill");
         let price = crate::mint::pricing::fetch_round().await
             .expect("FATAL: initial price fetch failed; restart when exchanges are reachable");
-        oracle.ingest(Some(price), mtp_now);
+        let oracle = Oracle::new(price, mtp_now);
         tracing::info!("boot: initial price ingested");
 
         // 4. Attestation (production only)
