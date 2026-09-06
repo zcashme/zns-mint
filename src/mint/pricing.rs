@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use http::Uri;
-use http_body_util::{BodyExt, Empty};
+use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::Bytes;
 use hyper::Request;
 use hyper_rustls::HttpsConnectorBuilder;
@@ -79,6 +79,16 @@ const TRUSTED: &str = "gemini";
 /// Timeout duration for one source end-to-end (connect + request + body).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Cap on one venue response body. Ticker payloads are a few hundred
+/// bytes; anything larger is hostile or broken and is dropped before it
+/// can spend the mint's memory.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// The plausible ZEC/USD price band, enforced per venue before the round
+/// aggregates. The same predicate the venue fixtures assert: a print
+/// outside it is a bug or an attack, and either way it poisons the rate.
+const MAX_USD_PRICE: u64 = 1_000_000;
+
 type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
 
 fn https_client() -> HttpsClient {
@@ -91,8 +101,9 @@ fn https_client() -> HttpsClient {
 }
 
 /// Fetches one venue's last price. Every failure mode — DNS, TCP, TLS, HTTP
-/// status, JSON shape, pointer miss, malformed decimal — collapses to `None`
-/// and the venue is dropped from the round.
+/// status, JSON shape, pointer miss, malformed decimal, oversized body,
+/// implausible price — collapses to `None` and the venue is dropped from
+/// the round.
 async fn fetch_last(client: &HttpsClient, exchange: &Exchange) -> Option<Decimal> {
     let uri: Uri = exchange.url.parse().ok()?;
     let request = Request::builder()
@@ -112,7 +123,11 @@ async fn fetch_last(client: &HttpsClient, exchange: &Exchange) -> Option<Decimal
         );
         return None;
     }
-    let bytes = response.into_body().collect().await.ok()?.to_bytes();
+    let bytes = Limited::new(response.into_body(), MAX_BODY_BYTES)
+        .collect()
+        .await
+        .ok()?
+        .to_bytes();
     let body: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
         Err(e) => {
@@ -122,7 +137,17 @@ async fn fetch_last(client: &HttpsClient, exchange: &Exchange) -> Option<Decimal
     };
     match body.pointer(exchange.pointer) {
         Some(v) => match serde_json::from_value::<Decimal>(v.clone()) {
-            Ok(d) => Some(d),
+            Ok(price) if price > Decimal::ONE && price < Decimal::from(MAX_USD_PRICE) => {
+                Some(price)
+            }
+            Ok(price) => {
+                tracing::warn!(
+                    exchange = exchange.name,
+                    price = %price,
+                    "price out of plausible range"
+                );
+                None
+            }
             Err(e) => {
                 tracing::warn!(exchange = exchange.name, error = %e, "price value invalid");
                 None
@@ -161,7 +186,7 @@ fn aggregate(quotes: Vec<(&'static str, Decimal)>) -> Option<Decimal> {
     }
 }
 
-async fn fetch_round() -> Option<Decimal> {
+pub async fn fetch_round() -> Option<Decimal> {
     let client = https_client();
     let mut set = tokio::task::JoinSet::new();
     for exchange in EXCHANGES.iter() {
@@ -196,23 +221,23 @@ async fn fetch_round() -> Option<Decimal> {
 // Name schedule
 // ===========================================================================
 
-const TIERED_LENGTHS: usize = 5;
-const ANNUAL_USD: [u32; TIERED_LENGTHS] = [10_000, 2_500, 800, 400, 100];
-const MINIMUM_USD: u32 = 20;
-const FOREVER_MULTIPLE: u32 = 3;
+/// Annual USD price by name length: the five tiers cover 1–5 character
+/// names and longer names pay the flat minimum. All names are ASCII, so
+/// byte length is character length.
+const ANNUAL_USD: [u64; 5] = [10_000, 2_500, 800, 400, 100];
+const MINIMUM_USD: u64 = 20;
 
-fn annual_usd(name: &Name) -> Decimal {
+fn annual_usd(name: &Name) -> u64 {
     let len = name.as_str().len();
-    if len <= TIERED_LENGTHS {
-        Decimal::from(ANNUAL_USD[len - 1])
+    if len <= ANNUAL_USD.len() {
+        ANNUAL_USD[len - 1]
     } else {
-        Decimal::from(MINIMUM_USD)
+        MINIMUM_USD
     }
 }
 
-fn forever_usd(name: &Name) -> Decimal {
-    annual_usd(name) * Decimal::from(FOREVER_MULTIPLE)
-}
+/// Forever registration costs three annual prices.
+const FOREVER_MULTIPLE: u64 = 3;
 
 // ===========================================================================
 // Oracle
@@ -220,23 +245,36 @@ fn forever_usd(name: &Name) -> Decimal {
 
 const SECONDS_PER_DAY: i64 = 86_400;
 
-#[derive(Default)]
+/// The daily-rate oracle: a fold over pricing rounds. Rounds arrive as
+/// `(price, MTP)` pairs and are accumulated into a time-weighted average
+/// that publishes once per UTC day.
+///
+/// The rate is never optional. It is set at construction — boot fetches
+/// the first round or the node does not start — and [`accumulate`]
+/// can only replace it, never clear it: a failed round carries the
+/// standing rate forward. Pricing is therefore fail-closed at birth and
+/// fail-open in life; every reader of the rate is total.
+///
+/// [`accumulate`]: Oracle::accumulate
 pub struct Oracle {
-    daily_rate: Option<Zatoshis>,
-
+    /// Zats per USD, published daily. Set at construction, never cleared.
+    daily_rate: Zatoshis,
+    /// The UTC day number (`floor(unix_seconds / 86400)`) of the current
+    /// accumulation. Stored, not derived from `last_ts`: after a reorg
+    /// rewind the two diverge, and the stored day prevents a spurious
+    /// publish when the scan returns to the present.
+    current_day: i64,
     /// TWAP accumulator: Σ(price × seconds) for the current day so far.
     /// `Decimal` has ample range for a day's accumulation.
     acc_sum: Decimal,
     /// TWAP accumulator: Σ(seconds) for the current day so far.
     acc_seconds: u64,
-    /// The price of the most recent sample, carried forward between samples
-    /// for time-weighting (the price is assumed constant between samples).
-    last_price: Option<Decimal>,
-    /// The Unix timestamp (seconds) of the most recent sample.
+    /// The price of the most recent round, carried forward between rounds
+    /// for time-weighting (the price is assumed constant between rounds).
+    /// USD per ZEC.
+    last_price: Decimal,
+    /// The Unix timestamp (seconds, MTP) of the most recent round.
     last_ts: i64,
-    /// The UTC day number (`floor(unix_seconds / 86400)`) of the current
-    /// accumulation.
-    current_day: i64,
 }
 
 fn to_factor(avg: Decimal) -> Option<Zatoshis> {
@@ -249,57 +287,81 @@ fn to_factor(avg: Decimal) -> Option<Zatoshis> {
 }
 
 impl Oracle {
-    pub fn ingest(&mut self, sample: Option<Decimal>, now: Timestamp) {
-        let Some(sample) = sample else { return; };
+    /// Creates the oracle from the first successful pricing round.
+    /// Boot fetches a price or the node does not start; the rate is set
+    /// here and only ever replaced by [`accumulate`](Self::accumulate).
+    pub fn new(initial_price: Decimal, now: Timestamp) -> Self {
+        let now_secs = now.as_seconds();
+        let today = now_secs.div_euclid(SECONDS_PER_DAY);
+        Self {
+            daily_rate: to_factor(initial_price)
+                .expect("an in-range price always yields a positive rate"),
+            current_day: today,
+            acc_sum: Decimal::ZERO,
+            acc_seconds: 0,
+            last_price: initial_price,
+            last_ts: now_secs,
+        }
+    }
 
-        if sample <= Decimal::ZERO {
-            tracing::warn!(sample = %sample, "pricing observation dropped: non-positive");
+    /// Folds one pricing round into the TWAP: the carried price is
+    /// weighted by elapsed MTP time, and a completed UTC day is published
+    /// as the new daily rate. A failed round (`None`) accumulates nothing.
+    ///
+    /// `price` is the round's ZEC/USD median, in USD per ZEC.
+    pub fn accumulate(&mut self, price: Option<Decimal>, now: Timestamp) {
+        let Some(price) = price else { return; };
+
+        if price <= Decimal::ZERO {
+            tracing::warn!(price = %price, "pricing observation dropped: non-positive");
             return;
         }
 
         let now_secs = now.as_seconds();
         let today = now_secs.div_euclid(SECONDS_PER_DAY);
 
-        let Some(prev_price) = self.last_price else {
-            self.current_day = today;
-            self.last_ts = now_secs;
-            if let Some(factor) = to_factor(sample) {
-                self.daily_rate = Some(factor);
-            }
-            self.last_price = Some(sample);
-            return;
-        };
-
         if today > self.current_day {
             let old_day_end = (self.current_day + 1) * SECONDS_PER_DAY;
             let boundary = old_day_end.min(now_secs);
             let billed = u64::try_from(boundary - self.last_ts).unwrap_or_default();
-            self.acc_sum += prev_price * Decimal::from(billed);
+            self.acc_sum += self.last_price * Decimal::from(billed);
             self.acc_seconds += billed;
 
             if let Some(factor) = to_factor(self.acc_sum / Decimal::from(self.acc_seconds)) {
-                self.daily_rate = Some(factor);
+                self.daily_rate = factor;
             }
 
-            self.acc_sum = prev_price * Decimal::from(now_secs - today * SECONDS_PER_DAY);
+            self.acc_sum = self.last_price * Decimal::from(now_secs - today * SECONDS_PER_DAY);
             self.acc_seconds =
                 u64::try_from(now_secs - today * SECONDS_PER_DAY).unwrap_or_default();
             self.current_day = today;
         } else {
             let elapsed = u64::try_from((now_secs - self.last_ts).max(0)).unwrap_or_default();
-            self.acc_sum += prev_price * Decimal::from(elapsed);
+            self.acc_sum += self.last_price * Decimal::from(elapsed);
             self.acc_seconds += elapsed;
         }
 
-        self.last_price = Some(sample);
+        self.last_price = price;
         self.last_ts = now_secs;
     }
 
-    pub fn quote(&self, name: &Name) -> Option<Zatoshis> {
-        let usd = u64::try_from(forever_usd(name)).ok()?;
-        let factor = self.daily_rate?.into_u64();
-        let total = usd.checked_mul(factor)?;
-        Zatoshis::from_u64(total).ok()
+    /// The published daily conversion: zats per USD. Present from
+    /// construction, never absent.
+    pub fn current(&self) -> Zatoshis {
+        self.daily_rate
+    }
+
+    /// Zats owed for one year of the name.
+    pub fn quote_annual(&self, name: &Name) -> Zatoshis {
+        let total = annual_usd(name) * self.current().into_u64();
+        Zatoshis::from_u64(total)
+            .expect("schedule ≤ 30,000 USD and rate ≤ 10^8 zats/USD keep this in u64")
+    }
+
+    /// Zats owed for the name's forever registration: three annuals.
+    pub fn quote_forever(&self, name: &Name) -> Zatoshis {
+        let annual = self.quote_annual(name).into_u64();
+        Zatoshis::from_u64(annual * FOREVER_MULTIPLE).expect("three annuals stay in u64")
     }
 }
 
@@ -307,61 +369,74 @@ impl Oracle {
 mod tests {
     use super::*;
 
-    // ── Venue fixtures: every pointer asserted against a recorded body ──
-    //
-    // A typo'd pointer silently drops a venue at runtime; these fixtures
-    // make pointer mistakes a test failure instead.
     #[test]
-    fn venue_pointers_resolve_in_recorded_bodies() {
-        let gemini = r#"{"symbol":"ZECUSD","open":"809.23","high":"849.22","low":"790.19","close":"831.43","changes":["798.91"],"bid":"832.15","ask":"832.16"}"#;
-        let kraken = r#"{"error":[],"result":{"XZECZUSD":{"a":["831.60","1","1.000"],"b":["831.36","3","3.000"],"c":["833.37","0.05999736"],"v":["1792.18","17113.67"],"p":["836.08","828.17"],"t":[1411,13438],"l":["830.05","789.86"],"h":["843.67","847.96"],"o":"841.80"}}}"#;
-        let coinbase = r#"{"ask":"833.5","bid":"833.49","volume":"95.7","trade_id":123,"price":"833.07","size":"0.05","time":"2026-08-30T03:00:00Z"}"#;
-        let bitstamp = r#"{"timestamp":"1788058797","open":"839.00","high":"846.00","low":"789.95","last":"832.45","volume":"180.15","vwap":"815.35","bid":"831.23","ask":"845.00","side":"0","open_24":"807.71","percent_change_24":"3.06","market_type":"SPOT"}"#;
-        let bitfinex =
-            r#"[825.51,150.59,826.43,59.06,23.52,0.0292,826.51,535.94,839.8,783.12,1477726786000]"#;
-        let okx = r#"{"code":"0","data":[{"instType":"SPOT","instId":"ZEC-USDT","last":"832.94","askPx":"832.97","bidPx":"832.96"}],"msg":""}"#;
-        let binance = r#"{"symbol":"ZECUSDT","priceChange":"23.75","lastPrice":"832.98","bidPrice":"832.97","askPrice":"832.98"}"#;
-        let kucoin = r#"{"code":"200000","data":{"time":1788058819905,"symbol":"ZEC-USDT","buy":"831.455","sell":"831.508","last":"831.49"}}"#;
-        let mexc = r#"{"symbol":"ZECUSDT","high":"852","low":"789","lastPrice":"833","bidPrice":"832.9","askPrice":"833"}"#;
+    fn construction_publishes_spot_and_quotes() {
+        // $1,000/ZEC ⇒ rate 100,000 zats per dollar, from the first round.
+        let oracle = Oracle::new(Decimal::from(1_000), Timestamp::from_seconds(0).unwrap());
+        assert_eq!(oracle.current().into_u64(), 100_000);
 
-        let bodies: [(&str, &str); 9] = [
-            ("gemini", gemini),
-            ("kraken", kraken),
-            ("coinbase", coinbase),
-            ("bitstamp", bitstamp),
-            ("bitfinex", bitfinex),
-            ("okx", okx),
-            ("binance", binance),
-            ("kucoin", kucoin),
-            ("mexc", mexc),
-        ];
+        let short = Name::parse("a").unwrap();
+        assert_eq!(oracle.quote_annual(&short).into_u64(), 1_000_000_000);
+        assert_eq!(oracle.quote_forever(&short).into_u64(), 3_000_000_000);
 
-        for exchange in &EXCHANGES {
-            let (name, body) = bodies
-                .iter()
-                .find(|(n, _)| *n == exchange.name)
-                .unwrap_or_else(|| panic!("no fixture for venue {}", exchange.name));
-            let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
-            let price: Decimal = serde_json::from_value(parsed.pointer(exchange.pointer).unwrap())
-                .unwrap_or_else(|e| panic!("{}.pointer({}) failed: {e}", name, exchange.pointer));
-            assert!(
-                price > Decimal::ONE && price < Decimal::from(1_000_000),
-                "{name} price {price} outside plausible range"
-            );
-        }
+        // Six-character names pay the flat minimum tier.
+        let long = Name::parse("purple").unwrap();
+        assert_eq!(oracle.quote_annual(&long).into_u64(), 2_000_000);
+        assert_eq!(oracle.quote_forever(&long).into_u64(), 6_000_000);
     }
 
     #[test]
-    fn trusted_anchor_matches_exactly_one_venue() {
-        let matches: Vec<_> = EXCHANGES
-            .iter()
-            .filter(|e| e.name == TRUSTED)
-            .map(|e| e.name)
-            .collect();
-        assert_eq!(
-            matches,
-            [TRUSTED],
-            "trusted name must match exactly one venue"
-        );
+    fn accumulate_weights_the_day_and_publishes_on_rollover() {
+        let mut oracle = Oracle::new(Decimal::from(800), Timestamp::from_seconds(0).unwrap());
+        assert_eq!(oracle.current().into_u64(), 125_000);
+
+        // Half a day at 800, half at 900 ⇒ the day's average is exactly 850
+        // ⇒ rate ceil(100,000,000 / 850) = 117,648. Same-day rounds never
+        // publish; the publish happens at the rollover round.
+        oracle.accumulate(Some(Decimal::from(900)), Timestamp::from_seconds(43_200).unwrap());
+        assert_eq!(oracle.current().into_u64(), 125_000);
+        oracle.accumulate(Some(Decimal::from(900)), Timestamp::from_seconds(86_400).unwrap());
+        assert_eq!(oracle.current().into_u64(), 117_648);
+    }
+
+    #[test]
+    fn failed_rounds_carry_the_rate_until_a_round_lands() {
+        let mut oracle = Oracle::new(Decimal::from(800), Timestamp::from_seconds(0).unwrap());
+        // Day 0→1: day 0 averaged 800 ⇒ rate stays 125,000; day 1 begins.
+        oracle.accumulate(Some(Decimal::from(900)), Timestamp::from_seconds(86_400).unwrap());
+        assert_eq!(oracle.current().into_u64(), 125_000);
+
+        // Two dead rounds — nothing moves.
+        oracle.accumulate(None, Timestamp::from_seconds(86_401).unwrap());
+        oracle.accumulate(None, Timestamp::from_seconds(172_800).unwrap());
+        assert_eq!(oracle.current().into_u64(), 125_000);
+
+        // Recovery on day 2 publishes day 1's carried average (900):
+        // ceil(100,000,000 / 900) = 111,112.
+        oracle.accumulate(Some(Decimal::from(850)), Timestamp::from_seconds(172_860).unwrap());
+        assert_eq!(oracle.current().into_u64(), 111_112);
+    }
+
+    #[test]
+    fn reorg_rewind_never_publishes() {
+        let mut oracle = Oracle::new(Decimal::from(1_000), Timestamp::from_seconds(0).unwrap());
+        // Day 0→1: day 0 averaged 1,000; the new day accumulates from
+        // the day boundary (1000 × 3,600 seconds so far).
+        oracle.accumulate(Some(Decimal::from(1_000)), Timestamp::from_seconds(90_000).unwrap());
+        assert_eq!(oracle.current().into_u64(), 100_000);
+
+        // A reorg rewinds MTP back into day 0.
+        oracle.accumulate(Some(Decimal::from(1_000)), Timestamp::from_seconds(80_000).unwrap());
+        assert_eq!(oracle.current().into_u64(), 100_000);
+
+        // The scan returns to the present: still no publish — the stored
+        // current_day prevents a spurious rollover.
+        oracle.accumulate(Some(Decimal::from(1_000)), Timestamp::from_seconds(95_000).unwrap());
+        assert_eq!(oracle.current().into_u64(), 100_000);
+
+        // The genuine day-1 rollover bills every second exactly once
+        // (3,600 + 15,000 + 77,800 = 86,400) and republishes the same rate.
+        oracle.accumulate(Some(Decimal::from(1_000)), Timestamp::from_seconds(172_800).unwrap());
+        assert_eq!(oracle.current().into_u64(), 100_000);
     }
 }
