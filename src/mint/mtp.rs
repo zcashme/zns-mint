@@ -8,13 +8,12 @@
 //! the same chain derives the same value.
 //!
 //! The tracker is constructed and backfilled during boot:
-//! [`backfill`](MtpTracker::backfill) fetches the 10 headers below the
-//! origin checkpoint via `get_block_header` so MTP is available from the
-//! first scanned block. The run loop then owns the tracker alongside
-//! `wallet` and `registry`: after each block is processed,
-//! [`update`](MtpTracker::update) records its header time; once 11
-//! entries are present, [`current`](MtpTracker::current) returns the
-//! median.
+//! [`backfill`](MtpTracker::backfill) fetches the 11 header timestamps
+//! through the origin checkpoint via `get_block_header`, so the window is
+//! complete and MTP is available before the first scanned block. The run
+//! loop then owns the tracker alongside `wallet` and `registry`: after
+//! each block is processed, [`update`](MtpTracker::update) records its
+//! header time and the window slides forward.
 //!
 //! MTP is chain state, not mint state.
 
@@ -46,19 +45,18 @@ pub struct MtpTracker {
 }
 
 impl MtpTracker {
-    /// Fills the tracker with block timestamps below `scan_floor` so MTP
-    /// is available after the first scanned block.
+    /// Fills the tracker with the `MTP_WINDOW` block timestamps through
+    /// `scan_floor`, inclusive, so MTP is available immediately.
     ///
-    /// Called during boot (cold start) to fill the window below the
-    /// origin checkpoint. After a deep reorg the tracker refills
-    /// naturally as blocks are re-scanned. The first scanned block
-    /// provides the 11th timestamp; `get_block_header` is used because
-    /// the blocks themselves have not been fetched yet.
+    /// Called during boot (cold start) to fill the window ending at the
+    /// origin checkpoint. After a deep reorg the tracker refills the same
+    /// way from the rewound tip. `get_block_header` is used because the
+    /// blocks themselves have not been fetched yet.
     ///
-    /// If `scan_floor` is near genesis and fewer than 10 predecessors
-    /// exist, as many as available are fetched. The tracker will return
-    /// `None` from [`current`](Self::current) until enough blocks
-    /// are scanned to fill the window.
+    /// If `scan_floor` is near genesis and fewer than `MTP_WINDOW` blocks
+    /// exist through it, as many as available are fetched. The tracker
+    /// will return `None` from [`current`](Self::current) until enough
+    /// blocks are scanned to fill the window.
     ///
     /// The `fetch` closure receives a block height and returns its
     /// timestamp (the `time` field from the block header, a `u32` Unix
@@ -258,22 +256,18 @@ mod tests {
         tracker.truncate_to(h(50));
         assert!(tracker.current().is_none());
 
-        // Backfill refills from the chain
+        // Backfill refills the whole window through the rewound tip
         tracker
             .backfill(h(50), |height| async move { Ok(3000 + u32::from(height)) })
             .await?;
 
-        // Still not enough (backfill adds 10, need 11)
-        assert!(tracker.current().is_none());
-
-        // First re-scanned block provides the 11th
-        tracker.update(h(50), 3000 + 50);
-        assert!(tracker.current().is_some());
+        let mtp = tracker.current().expect("backfill alone refills the window");
+        assert_eq!(mtp.as_seconds(), 3000 + 45);
         Ok(())
     }
 
     #[tokio::test]
-    async fn backfill_populates_10_entries() -> Result<(), BoxError> {
+    async fn backfill_completes_the_window() -> Result<(), BoxError> {
         let mut tracker = MtpTracker::default();
         tracker
             .backfill(h(100), |height| {
@@ -282,12 +276,10 @@ mod tests {
             })
             .await?;
 
-        // Should have entries for heights 90..=99 (10 entries)
-        assert!(tracker.current().is_none()); // need 11
-
-        // First scanned block provides the 11th
-        tracker.update(h(100), 1_700_000_100);
-        assert!(tracker.current().is_some());
+        // Heights 90..=100: the full 11-entry window through the checkpoint.
+        assert_eq!(tracker.blocktimes.len(), 11);
+        let mtp = tracker.current().expect("window complete after backfill");
+        assert_eq!(mtp.as_seconds(), 1_700_000_000 + 95);
         Ok(())
     }
 
@@ -300,7 +292,8 @@ mod tests {
             })
             .await?;
 
-        // Only 3 entries (heights 0, 1, 2), not enough for MTP
+        // Only 4 entries (heights 0..=3), not enough for MTP
+        assert_eq!(tracker.blocktimes.len(), 4);
         assert!(tracker.current().is_none());
         Ok(())
     }
