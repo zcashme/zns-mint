@@ -3,7 +3,8 @@
 
 use crate::mint::otp::OtpQueue;
 use crate::mint::{
-    Action, Expiry, Name, NameCommitment, NameNote, UnifiedAddress, REGISTRY_ACCOUNT,
+    Action, Expiry, LIVENESS_INTERVAL, MAX_TERM_YEARS, Name, NameCommitment, NameNote, Request,
+    Term, UnifiedAddress, REGISTRY_ACCOUNT,
 };
 use crate::wallet::Wallet;
 use std::collections::BTreeMap;
@@ -18,97 +19,6 @@ use zip32::AccountId;
 /// Reads the current record of the name chain for `name`.
 pub fn current_record(registry: &Registry, name: &Name) -> Option<NameRecord> {
     registry.record(name).cloned()
-}
-
-/// Authorizes a claim, producing the typed [`NameNote`] transition to commit.
-///
-/// The Treasury layer must have already verified that the claim payment was
-/// made. This function verifies that the name is available (either no record,
-/// or record is `Release`).
-pub fn authorize_claim(
-    registry: &Registry,
-    name: Name,
-    ua: UnifiedAddress,
-) -> Option<NameNote> {
-    match current_record(registry, &name) {
-        None | Some(NameRecord {
-            action: Action::Release,
-            ..
-        }) => Some(NameNote::Claim {
-            name,
-            ua,
-            // expires_at: from the request's term + the claim block's MTP —
-            // lands in the next step.
-        }),
-        Some(_) => None, // Name is already live
-    }
-}
-
-/// Authorizes an update, producing the typed [`NameNote`] transition to
-/// commit.
-///
-/// Verifies the name is live and consumes an OTP bound to its exact current
-/// predecessor commitment, which becomes the transition's `prev` — the
-/// settle path therefore cannot bind a predecessor other than the live
-/// tip's.
-pub fn authorize_update(
-    registry: &Registry,
-    otp_queue: &mut OtpQueue,
-    mtp: Timestamp,
-    name: Name,
-    new_ua: UnifiedAddress,
-    otp: &[u8; 6],
-) -> Option<NameNote> {
-    let record = current_record(registry, &name)?;
-    if record.action == Action::Release {
-        return None;
-    }
-
-    if !otp_queue.verify_and_burn(&name, Action::Update, &new_ua, otp, mtp) {
-        return None;
-    }
-
-    Some(NameNote::Update {
-        name,
-        ua: new_ua,
-        // §4.5.3: an ordinary update MUST NOT change the registration
-        // period; the expiry is carried forward from the live record.
-        expires_at: record.expires_at,
-        prev: record.commitment,
-    })
-}
-
-/// Authorizes a release, producing the typed [`NameNote`] transition to
-/// commit.
-///
-/// Verifies the name is live, that the requester holds the live binding, and
-/// consumes an OTP bound to its exact current predecessor commitment.
-pub fn authorize_release(
-    registry: &Registry,
-    otp_queue: &mut OtpQueue,
-    mtp: Timestamp,
-    name: Name,
-    current_ua: UnifiedAddress,
-    otp: &[u8; 6],
-) -> Option<NameNote> {
-    let record = current_record(registry, &name)?;
-    if record.action == Action::Release {
-        return None;
-    }
-
-    let controller = &record.ua;
-    if controller != &current_ua {
-        return None;
-    }
-    if !otp_queue.verify_and_burn(&name, Action::Release, &current_ua, otp, mtp) {
-        return None;
-    }
-
-    Some(NameNote::Release {
-        name,
-        ua: current_ua,
-        prev: record.commitment,
-    })
 }
 
 
@@ -198,6 +108,9 @@ pub struct NameRecord {
     pub commitment: NameCommitment,
     /// The block height at which this Name Note was confirmed.
     pub confirmed_height: BlockHeight,
+    /// The MTP by which an accepted update must re-prove control of the
+    /// bound address; past it, the Mint releases the name (§4.5.4).
+    pub release_deadline: Timestamp,
     /// The note's unique identity — links to the shielded note in the wallet.
     pub rho: orchard::note::Rho,
 }
@@ -207,6 +120,7 @@ impl NameRecord {
         params: &P,
         received: ReceivedNameNote,
         confirmed_height: BlockHeight,
+        mtp: Timestamp,
     ) -> Self {
         let note = received.payload();
         let rcm = note.rcm(params);
@@ -218,6 +132,10 @@ impl NameRecord {
                 rcm,
             )),
             confirmed_height,
+            release_deadline: Timestamp::from_seconds(
+                mtp.as_seconds() + crate::mint::LIVENESS_INTERVAL,
+            )
+            .expect("liveness deadline fits Timestamp"),
             rho: received.note().rho(),
         }
     }
@@ -227,6 +145,7 @@ impl NameRecord {
         action: Action,
         ua: UnifiedAddress,
         expires_at: Expiry,
+        release_deadline: Timestamp,
         commitment: NameCommitment,
         confirmed_height: BlockHeight,
         rho: orchard::note::Rho,
@@ -235,6 +154,7 @@ impl NameRecord {
             action,
             ua,
             expires_at,
+            release_deadline,
             commitment,
             confirmed_height,
             rho,
@@ -284,6 +204,95 @@ impl Registry {
         }
     }
 
+    /// The transition law: is this request lawful against the current
+    /// registry state, and what NameNote does it produce?
+    ///
+    /// `None` means unlawful. Claims keep their payment — retained in full,
+    /// by policy; the payer may re-request. Echoes that fail verification
+    /// are dropped: the name was simply not renewed.
+    pub fn authorize(
+        &self,
+        otp_queue: &mut OtpQueue,
+        request: Request,
+        otp: Option<&[u8; 6]>,
+        mtp: Timestamp,
+    ) -> Option<NameNote> {
+        match request {
+            Request::Claim { name, ua, term } => {
+                // Availability: unseen, or the tip is a release.
+                match current_record(self, &name) {
+                    None | Some(NameRecord { action: Action::Release, .. }) => {}
+                    Some(_) => return None, // live
+                }
+                let expires_at = match term {
+                    Term::Forever => Expiry::Never,
+                    Term::Years(years) => {
+                        let seconds = years.checked_mul(LIVENESS_INTERVAL as u64)? as i64;
+                        let at = mtp.as_seconds().checked_add(seconds)?;
+                        Expiry::At(Timestamp::from_seconds(at).ok()?)
+                    }
+                };
+                Some(NameNote::Claim { name, ua, expires_at })
+            }
+            Request::Update { name, ua, extend_years } => {
+                let record = current_record(self, &name)?;
+                if record.action == Action::Release {
+                    return None;
+                }
+                // §4.5.3: no update is accepted once expiry is reached —
+                // the Mint's lifecycle release owns that moment.
+                if record.expires_at.expired(mtp) {
+                    return None;
+                }
+                let otp = otp?;
+                if !otp_queue.verify_and_burn(&name, Action::Update, &ua, otp, mtp) {
+                    return None;
+                }
+                // §4.5.3: an ordinary update carries the current expiry
+                // forward; an extension adds whole years to it — never
+                // past the ninety-nine-year fence measured from now.
+                let expires_at = match (record.expires_at, extend_years) {
+                    (Expiry::Never, _) | (_, None) => record.expires_at,
+                    (Expiry::At(current), Some(years)) => {
+                        let extension = years.checked_mul(LIVENESS_INTERVAL as u64)? as i64;
+                        let extended = current.as_seconds().checked_add(extension)?;
+                        let fence = mtp
+                            .as_seconds()
+                            .checked_add((MAX_TERM_YEARS as i64).checked_mul(LIVENESS_INTERVAL)?)?;
+                        if extended > fence {
+                            return None;
+                        }
+                        Expiry::At(Timestamp::from_seconds(extended).ok()?)
+                    }
+                };
+                Some(NameNote::Update {
+                    name,
+                    ua,
+                    expires_at,
+                    prev: record.commitment,
+                })
+            }
+            Request::Release { name, ua } => {
+                let record = current_record(self, &name)?;
+                if record.action == Action::Release {
+                    return None;
+                }
+                if record.ua != ua {
+                    return None;
+                }
+                let otp = otp?;
+                if !otp_queue.verify_and_burn(&name, Action::Release, &ua, otp, mtp) {
+                    return None;
+                }
+                Some(NameNote::Release {
+                    name,
+                    ua,
+                    prev: record.commitment,
+                })
+            }
+        }
+    }
+
     /// Read the current record of a ZNS name chain.
     pub fn record(&self, name: &Name) -> Option<&NameRecord> {
         self.records.get(name)
@@ -308,6 +317,7 @@ impl Registry {
         wallet: &Wallet,
         scanned: &ScannedBlock<AccountId>,
         name_notes: &[ReceivedNameNote],
+        mtp: Timestamp,
     ) -> Self {
         let mut next = self.clone();
         let height = scanned.height();
@@ -434,7 +444,7 @@ impl Registry {
 
                     next.set_record(
                         name.clone(),
-                        NameRecord::from_received(params, (*note).clone(), height),
+                        NameRecord::from_received(params, (*note).clone(), height, mtp),
                         height,
                     );
                 }
@@ -504,15 +514,24 @@ impl Registry {
         &mut self,
         name: Name,
         action: Action,
-        ua: Option<UnifiedAddress>,
+        ua: UnifiedAddress,
         expires_at: Expiry,
+        release_deadline: Timestamp,
         commitment: NameCommitment,
         height: BlockHeight,
         rho: orchard::note::Rho,
     ) {
         self.set_record(
             name,
-            NameRecord::for_test(action, ua, expires_at, commitment, height, rho),
+            NameRecord::for_test(
+                action,
+                ua,
+                expires_at,
+                release_deadline,
+                commitment,
+                height,
+                rho,
+            ),
             height,
         );
     }
@@ -567,12 +586,19 @@ mod tests {
     #[test]
     fn claim_fits_unseen_or_released_name() {
         let mut reg = mock_registry();
+        let mut otps = mock_otp_queue();
         let name = Name::parse("alice").unwrap();
         let ua = mock_ua();
         let height = BlockHeight::from_u32(100);
+        let mtp = Timestamp::from_seconds(1_000_000).unwrap();
+        let forever = |name: &Name, ua: &UnifiedAddress| Request::Claim {
+            name: name.clone(),
+            ua: ua.clone(),
+            term: crate::mint::Term::Forever,
+        };
 
         // Unseen name is claimable
-        let req = authorize_claim(&reg, name.clone(), ua.clone()).unwrap();
+        let req = reg.authorize(&mut otps, forever(&name, &ua), None, mtp).unwrap();
         assert_eq!(req.action(), Action::Claim);
 
         // Released name is claimable
@@ -581,11 +607,12 @@ mod tests {
             Action::Release,
             ua.clone(),
             crate::mint::Expiry::Never,
+            Timestamp::from_seconds(0).unwrap(),
             dummy_commitment(),
             height,
             dummy_rho(),
         );
-        let req2 = authorize_claim(&reg, name.clone(), ua.clone()).unwrap();
+        let req2 = reg.authorize(&mut otps, forever(&name, &ua), None, mtp).unwrap();
         assert_eq!(req2.action(), Action::Claim);
 
         // Live name is NOT claimable
@@ -594,11 +621,12 @@ mod tests {
             Action::Claim,
             ua.clone(),
             crate::mint::Expiry::Never,
+            Timestamp::from_seconds(0).unwrap(),
             dummy_commitment(),
             height,
             dummy_rho(),
         );
-        assert!(authorize_claim(&reg, name, ua).is_none());
+        assert!(reg.authorize(&mut otps, forever(&name, &ua), None, mtp).is_none());
     }
 
     #[test]
@@ -611,12 +639,22 @@ mod tests {
 
         let dummy_otp = *b"000000";
         // Unseen name cannot be updated/released
-        assert!(
-            authorize_update(&reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp).is_none()
-        );
-        assert!(
-            authorize_release(&reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp).is_none()
-        );
+        assert!(reg
+            .authorize(
+                &mut otps,
+                Request::Update { name: name.clone(), ua: ua.clone(), extend_years: None },
+                Some(&dummy_otp),
+                now
+            )
+            .is_none());
+        assert!(reg
+            .authorize(
+                &mut otps,
+                Request::Release { name: name.clone(), ua: ua.clone() },
+                Some(&dummy_otp),
+                now
+            )
+            .is_none());
 
         // Released name cannot be updated/released
         reg.set_record_for_test(
@@ -624,16 +662,27 @@ mod tests {
             Action::Release,
             ua.clone(),
             crate::mint::Expiry::Never,
+            Timestamp::from_seconds(0).unwrap(),
             dummy_commitment(),
             BlockHeight::from_u32(100),
             dummy_rho(),
         );
-        assert!(
-            authorize_update(&reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp).is_none()
-        );
-        assert!(
-            authorize_release(&reg, &mut otps, now, name.clone(), ua.clone(), &dummy_otp).is_none()
-        );
+        assert!(reg
+            .authorize(
+                &mut otps,
+                Request::Update { name: name.clone(), ua: ua.clone(), extend_years: None },
+                Some(&dummy_otp),
+                now
+            )
+            .is_none());
+        assert!(reg
+            .authorize(
+                &mut otps,
+                Request::Release { name: name.clone(), ua: ua.clone() },
+                Some(&dummy_otp),
+                now
+            )
+            .is_none());
     }
 
     #[test]
@@ -649,6 +698,7 @@ mod tests {
             Action::Update,
             ua.clone(),
             crate::mint::Expiry::Never,
+            Timestamp::from_seconds(0).unwrap(),
             dummy_commitment(),
             BlockHeight::from_u32(100),
             dummy_rho(),
@@ -657,9 +707,14 @@ mod tests {
         // Invalid OTP fails
         let mut bad_otp = *b"000000";
         bad_otp[0] = b'X';
-        assert!(
-            authorize_update(&reg, &mut otps, now, name.clone(), ua.clone(), &bad_otp).is_none()
-        );
+        assert!(reg
+            .authorize(
+                &mut otps,
+                Request::Update { name: name.clone(), ua: ua.clone(), extend_years: None },
+                Some(&bad_otp),
+                now
+            )
+            .is_none());
 
         // Issue real OTP and it succeeds
         let issued_otp = OtpCode::generate();
@@ -671,7 +726,14 @@ mod tests {
             code: OtpCode::for_test(real_otp),
             expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
         });
-        let req = authorize_update(&reg, &mut otps, now, name.clone(), ua, &real_otp).unwrap();
+        let req = reg
+            .authorize(
+                &mut otps,
+                Request::Update { name: name.clone(), ua, extend_years: None },
+                Some(&real_otp),
+                now,
+            )
+            .unwrap();
         assert_eq!(req.action(), Action::Update);
     }
 
@@ -688,6 +750,7 @@ mod tests {
             Action::Claim,
             ua.clone(),
             crate::mint::Expiry::Never,
+            Timestamp::from_seconds(0).unwrap(),
             dummy_commitment(),
             BlockHeight::from_u32(100),
             dummy_rho(),
@@ -700,11 +763,124 @@ mod tests {
             expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
         });
 
-        let transition = authorize_release(&reg, &mut otps, now, name, ua.clone(), b"004206")
+        let transition = reg
+            .authorize(
+                &mut otps,
+                Request::Release { name, ua: ua.clone() },
+                Some(b"004206"),
+                now,
+            )
             .expect("valid OTP authorizes release");
         match transition {
             NameNote::Release { ua: bound, .. } => assert_eq!(bound, ua),
             other => panic!("expected release transition, got {}", other.action().as_str()),
         }
+    }
+
+    /// §4.5.4: an accepted update re-proves liveness; the extension may not
+    /// push `expires_at` past the ninety-nine-year fence measured from now.
+    #[test]
+    fn update_extension_respects_the_release_fence() {
+        let mut reg = mock_registry();
+        let mut otps = mock_otp_queue();
+        let name = Name::parse("fence").unwrap();
+        let ua = mock_ua();
+        let now = Timestamp::from_seconds(1_000_000).unwrap();
+
+        reg.set_record_for_test(
+            name.clone(),
+            Action::Claim,
+            ua.clone(),
+            crate::mint::Expiry::At(Timestamp::from_seconds(1_100_000).unwrap()),
+            Timestamp::from_seconds(0).unwrap(),
+            dummy_commitment(),
+            BlockHeight::from_u32(100),
+            dummy_rho(),
+        );
+
+        let push = |otps: &mut OtpQueue, name: &Name, ua: &UnifiedAddress| {
+            otps.push(OtpRequest {
+                name: name.clone(),
+                action: Action::Update,
+                ua: ua.clone(),
+                code: OtpCode::for_test(*b"004206"),
+                expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
+            });
+        };
+
+        // +1y inside the fence: new expiry = 1,100,000 + 31,557,600.
+        push(&mut otps, &name, &ua);
+        let req = reg
+            .authorize(
+                &mut otps,
+                Request::Update {
+                    name: name.clone(),
+                    ua: ua.clone(),
+                    extend_years: Some(1),
+                },
+                Some(b"004206"),
+                now,
+            )
+            .unwrap();
+        match req {
+            NameNote::Update { expires_at, .. } => assert_eq!(
+                expires_at,
+                crate::mint::Expiry::At(Timestamp::from_seconds(1_131_557_600).unwrap())
+            ),
+            _ => panic!("expected update"),
+        }
+
+        // +99y would land at 3,125,302,400 — past the fence (3,125,202,400).
+        push(&mut otps, &name, &ua);
+        assert!(reg
+            .authorize(
+                &mut otps,
+                Request::Update {
+                    name: name.clone(),
+                    ua: ua.clone(),
+                    extend_years: Some(99),
+                },
+                Some(b"004206"),
+                now,
+            )
+            .is_none());
+    }
+
+    /// §4.5.3: once expiry is reached, the Mint owns the name's ending —
+    /// no update is accepted, echoed OTP or not.
+    #[test]
+    fn expired_names_reject_updates() {
+        let mut reg = mock_registry();
+        let mut otps = mock_otp_queue();
+        let name = Name::parse("gone").unwrap();
+        let ua = mock_ua();
+        let now = Timestamp::from_seconds(1_000_000).unwrap();
+
+        reg.set_record_for_test(
+            name.clone(),
+            Action::Claim,
+            ua.clone(),
+            crate::mint::Expiry::At(Timestamp::from_seconds(999_999).unwrap()),
+            Timestamp::from_seconds(0).unwrap(),
+            dummy_commitment(),
+            BlockHeight::from_u32(100),
+            dummy_rho(),
+        );
+        otps.push(OtpRequest {
+            name: name.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            code: OtpCode::for_test(*b"004206"),
+            expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
+        });
+
+        assert!(reg
+            .authorize(
+                &mut otps,
+                Request::Update { name: name.clone(), ua: ua.clone(), extend_years: Some(1) },
+                Some(b"004206"),
+                now,
+            )
+            .is_none());
     }
 }
