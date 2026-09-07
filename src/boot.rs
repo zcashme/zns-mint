@@ -18,6 +18,7 @@ use zeroize::Zeroize;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::mtp::MtpTracker;
+use crate::mint::otp::OtpQueue;
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
@@ -43,6 +44,7 @@ pub struct Boot<P: Parameters> {
     sapling_output: OutputParameters,
     mtp: MtpTracker,
     oracle: Oracle,
+    otp_queue: OtpQueue,
 }
 
 /// Network label for logging.
@@ -162,6 +164,10 @@ impl<P: Parameters> Boot<P> {
         let oracle = Oracle::new(price, mtp_now);
         tracing::info!("boot: initial price ingested");
 
+        // The challenge memory: empty by construction, filled by the run
+        // loop as liveness challenges and update/release relays are issued.
+        let otp_queue = OtpQueue::new();
+
         // 4. Attestation (production only)
         #[cfg(not(feature = "regtest"))]
         {
@@ -198,6 +204,7 @@ impl<P: Parameters> Boot<P> {
             sapling_output,
             mtp,
             oracle,
+            otp_queue,
         }
     }
 
@@ -229,6 +236,7 @@ impl<P: Parameters> Boot<P> {
         OutputParameters,
         MtpTracker,
         Oracle,
+        OtpQueue,
     ) {
         (
             self.network,
@@ -241,6 +249,7 @@ impl<P: Parameters> Boot<P> {
             self.sapling_output,
             self.mtp,
             self.oracle,
+            self.otp_queue,
         )
     }
 }

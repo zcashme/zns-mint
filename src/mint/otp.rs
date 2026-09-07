@@ -190,6 +190,24 @@ pub fn decode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
 // OTP relay issuance (THIS FUNCTION COULD TAKE SOME SERIOUS WORK)
 // ---------------------------------------------------------------------------
 
+/// The outcome of issuing an OTP relay: the relay payment's result, plus the
+/// pending challenge to push onto the queue once the relay is accepted for
+/// broadcast.
+pub struct RequestOutcome {
+    pub result: Result<
+        zcash_primitives::transaction::TxId,
+        zcash_client_backend::data_api::wallet::ProposeTransferErrT<
+            crate::wallet::Wallet,
+            std::convert::Infallible,
+            zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector<
+                crate::wallet::Wallet,
+            >,
+            zcash_client_backend::fees::standard::SingleOutputChangeStrategy<crate::wallet::Wallet>,
+        >,
+    >,
+    pub relay_otp: Option<OtpRequest>,
+}
+
 /// Builds, proves, signs, and records the OTP relay payment, returning its
 /// txid and serialized hex for broadcast.
 ///
@@ -340,8 +358,7 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
     treasury_keys: &crate::key::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
-) -> Option<crate::mint::RequestOutcome> {
-    use crate::mint::RequestOutcome;
+) -> Option<RequestOutcome> {
     use time::Duration;
 
     if action == Action::Claim || controller_ua.orchard().is_none() {

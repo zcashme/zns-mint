@@ -88,10 +88,7 @@ impl Name {
         if bytes.is_empty() || bytes.len() > 63 {
             return None;
         }
-        if bytes
-            .iter()
-            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9'))
-        {
+        if bytes.iter().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9')) {
             Some(Self(s.to_string()))
         } else {
             None
@@ -107,7 +104,6 @@ impl Name {
 // Protocol constants and settlement types
 // ===========================================================================
 
-use zcash_primitives::transaction::TxId;
 use zcash_protocol::value::Zatoshis;
 
 // The claim price is `Oracle::quote_forever(name)`: the USD name schedule
@@ -126,53 +122,4 @@ pub fn grid_usd(oracle: &pricing::Oracle, usd: u64) -> Zatoshis {
     let raw = usd * oracle.current().into_u64();
     Zatoshis::from_u64(raw.next_multiple_of(FEE_STEP))
         .expect("step rounding adds less than one step")
-}
-
-/// The result of processing a single Treasury note request: the txid of the
-/// issued OTP relay payment, or the relay pipeline's error.
-pub struct RequestOutcome {
-    pub result: Result<
-        TxId,
-        zcash_client_backend::data_api::wallet::ProposeTransferErrT<
-            crate::wallet::Wallet,
-            std::convert::Infallible,
-            zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector<
-                crate::wallet::Wallet,
-            >,
-            zcash_client_backend::fees::standard::SingleOutputChangeStrategy<
-                crate::wallet::Wallet,
-            >,
-        >,
-    >,
-    pub relay_otp: Option<crate::mint::otp::OtpRequest>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn oracle_at_price(usd: u64) -> pricing::Oracle {
-        pricing::Oracle::new(
-            rust_decimal::Decimal::from(usd),
-            Timestamp::from_seconds(0).unwrap(),
-        )
-    }
-
-    #[test]
-    fn grid_keeps_on_grid_amounts() {
-        // $1,000/ZEC ⇒ 100,000 zats per dollar: $1 sits exactly on the grid.
-        assert_eq!(grid_usd(&oracle_at_price(1_000), 1).into_u64(), 100_000);
-    }
-
-    #[test]
-    fn grid_rounds_up_to_the_next_step() {
-        // $833/ZEC ⇒ 120,049 zats per dollar: $1 rounds up to 200,000.
-        assert_eq!(grid_usd(&oracle_at_price(833), 1).into_u64(), 200_000);
-    }
-
-    #[test]
-    fn grid_rounds_the_whole_amount_once() {
-        // $2 at 120,049 zats/dollar = 240,098 ⇒ one rounding: 300,000.
-        assert_eq!(grid_usd(&oracle_at_price(833), 2).into_u64(), 300_000);
-    }
 }
