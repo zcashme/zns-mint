@@ -1,32 +1,8 @@
 //! Zcash on-chain Median Time Past (MTP).
-//!
-//! ZNS (§4.5) designates MTP as the sole authoritative time
-//! source for protocol-defined lifecycle periods: name expiration, OTP
-//! validity, and liveness enforcement. MTP is the median of the last 11
-//! block timestamps — manipulation-resistant because an attacker needs 6
-//! of 11 blocks to shift it, and deterministic because every node reading
-//! the same chain derives the same value.
-//!
-//! The tracker is constructed and backfilled during boot:
-//! [`backfill`](MtpTracker::backfill) fetches the 11 header timestamps
-//! through the origin checkpoint via `get_block_header`, so the window is
-//! complete and MTP is available before the first scanned block. The run
-//! loop then owns the tracker alongside `wallet` and `registry`: after
-//! each block is processed, [`update`](MtpTracker::update) records its
-//! header time and the window slides forward.
-//!
-//! MTP is chain state, not mint state.
-
 use std::collections::VecDeque;
 
 use time::Timestamp;
 use zcash_protocol::consensus::BlockHeight;
-
-/// Type-erased error for the `backfill` fetch closure, matching Zebra's
-/// `BoxError` pattern. The only concrete error in production is
-/// `TransportError`; the boxing lets `mint::mtp` stay free of RPC
-/// type dependencies.
-type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// The MTP window size. This is a Zcash consensus constant inherited from
 /// Bitcoin, not a ZNS protocol parameter — the whitepaper (§4.5) references
@@ -61,14 +37,14 @@ impl MtpTracker {
     /// The `fetch` closure receives a block height and returns its
     /// timestamp (the `time` field from the block header, a `u32` Unix
     /// seconds value).
-    pub async fn backfill<F, Fut>(
+    pub async fn backfill<F, Fut, E>(
         &mut self,
         scan_floor: BlockHeight,
         mut fetch: F,
-    ) -> Result<(), BoxError>
+    ) -> Result<(), E>
     where
         F: FnMut(BlockHeight) -> Fut,
-        Fut: std::future::Future<Output = Result<u32, BoxError>>,
+        Fut: std::future::Future<Output = Result<u32, E>>,
     {
         let floor_u32 = u32::from(scan_floor);
         let start = floor_u32.saturating_sub(MTP_WINDOW as u32 - 1);
@@ -245,7 +221,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backfill_after_truncate_refills() -> Result<(), BoxError> {
+    async fn backfill_after_truncate_refills() -> Result<(), std::convert::Infallible> {
         let mut tracker = MtpTracker::default();
         for i in 90..101 {
             tracker.update(h(i), 2000 + i);
@@ -261,13 +237,15 @@ mod tests {
             .backfill(h(50), |height| async move { Ok(3000 + u32::from(height)) })
             .await?;
 
-        let mtp = tracker.current().expect("backfill alone refills the window");
+        let mtp = tracker
+            .current()
+            .expect("backfill alone refills the window");
         assert_eq!(mtp.as_seconds(), 3000 + 45);
         Ok(())
     }
 
     #[tokio::test]
-    async fn backfill_completes_the_window() -> Result<(), BoxError> {
+    async fn backfill_completes_the_window() -> Result<(), std::convert::Infallible> {
         let mut tracker = MtpTracker::default();
         tracker
             .backfill(h(100), |height| {
@@ -284,7 +262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backfill_near_genesis_fetches_fewer() -> Result<(), BoxError> {
+    async fn backfill_near_genesis_fetches_fewer() -> Result<(), std::convert::Infallible> {
         let mut tracker = MtpTracker::default();
         tracker
             .backfill(h(3), |height| async move {

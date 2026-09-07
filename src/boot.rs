@@ -142,10 +142,8 @@ impl<P: Parameters> Boot<P> {
         mtp.backfill(checkpoint_height, |height| {
             let rpc = rpc.clone();
             async move {
-                let (_, _, timestamp) = rpc.get_block_header(height).await.map_err(
-                    |error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) },
-                )?;
-                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
+                let (_, _, timestamp) = rpc.get_block_header(height).await?;
+                Ok::<_, zcash::TransportError>(
                     u32::try_from(timestamp.as_seconds())
                         .expect("Zcash block-header timestamps are u32 seconds"),
                 )
