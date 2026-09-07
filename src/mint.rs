@@ -30,6 +30,12 @@ pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
 /// per interval or the Mint releases it.
 pub const LIVENESS_INTERVAL: i64 = 31_557_600;
 
+/// The longest term money can buy: 99 years from the current block.
+///
+/// Presence, not prepayment, holds a name past a decade — no stack of
+/// extensions can push `expires_at` beyond the fence.
+pub const MAX_TERM_YEARS: u64 = 99;
+
 /// ZNS action kinds.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Action {
@@ -62,7 +68,8 @@ impl Action {
     }
 
     /// Parses a whole number of years in canonical `Ny` form: decimal
-    /// digits, no sign, no leading zeroes, at least one year.
+    /// digits, no sign, no leading zeroes, at least one, at most
+    /// [`MAX_TERM_YEARS`].
     fn parse_years(kind: &str) -> Option<u64> {
         let digits = kind.strip_suffix('y')?;
         if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -72,7 +79,7 @@ impl Action {
             return None;
         }
         let years = digits.parse().ok()?;
-        (years > 0).then_some(years)
+        (years > 0 && years <= crate::mint::MAX_TERM_YEARS).then_some(years)
     }
 
     /// Parses a 512-byte request memo sent to the Treasury:
@@ -146,7 +153,8 @@ impl Action {
 pub enum Term {
     /// No fixed expiration — the name is held while its liveness checks pass.
     Forever,
-    /// A fixed term of N years, whole multiples of [`LIVENESS_INTERVAL`].
+    /// A fixed term of N years, whole multiples of [`LIVENESS_INTERVAL`],
+    /// capped at [`MAX_TERM_YEARS`].
     Years(u64),
 }
 
@@ -297,6 +305,14 @@ mod tests {
             }
         );
         assert_eq!(
+            parse(&format!("ZNS:claim:alice:{TEST_UA}:99y")).unwrap(),
+            Request::Claim {
+                name: name.clone(),
+                ua: ua.clone(),
+                term: Term::Years(99)
+            }
+        );
+        assert_eq!(
             parse(&format!("ZNS:claim:alice:{TEST_UA}:10y")).unwrap(),
             Request::Claim {
                 name,
@@ -342,7 +358,7 @@ mod tests {
 
     #[test]
     fn rejects_malformed_kinds() {
-        for kind in ["0y", "03y", "3", "y", "Forever", "forevers", ""] {
+        for kind in ["0y", "03y", "100y", "3", "y", "Forever", "forevers", ""] {
             assert!(
                 parse(&format!("ZNS:claim:alice:{TEST_UA}:{kind}")).is_none(),
                 "claim kind {kind:?} must reject"
