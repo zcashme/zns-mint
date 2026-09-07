@@ -529,7 +529,7 @@ impl Default for Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mint::otp::{encode_otp_relay_memo, OtpCode, OtpQueue, OtpRequest};
+    use crate::mint::otp::{OtpCode, OtpQueue, OtpRequest};
     use crate::mint::NameCommitment;
     use time::{Duration, Timestamp};
 
@@ -708,21 +708,5 @@ mod tests {
             NameNote::Release { ua: bound, .. } => assert_eq!(bound, ua),
             other => panic!("expected release transition, got {}", other.action().as_str()),
         }
-    }
-
-    #[test]
-    fn relay_memo_is_not_a_request_memo() {
-        // OTP relay memos use verb "otp", which is not a valid request verb.
-        // parse_request must reject them.
-        let name = Name::parse("alice").unwrap();
-        let ua = mock_ua();
-        let otp = OtpCode::for_test(*b"123456");
-
-        let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp).unwrap();
-        let result = crate::mint::treasury::parse_request(&MAIN_NETWORK, &memo);
-        assert!(
-            result.is_none(),
-            "relay memo must not parse as a request memo"
-        );
     }
 }

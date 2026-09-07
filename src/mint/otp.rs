@@ -44,6 +44,20 @@ impl OtpCode {
         }
         s.parse::<u32>().ok().map(Self)
     }
+
+    /// Constructs a code from raw digits. Test-only: the mint's only
+    /// production constructor is [`OtpCode::generate`].
+    #[cfg(test)]
+    pub fn for_test(digits: [u8; 6]) -> Self {
+        Self::from_digits(&digits).expect("test digits are valid")
+    }
+
+    /// Reveals the digits. Test-only: registry tests push queue entries for
+    /// codes the relay just generated, and compare them at verification.
+    #[cfg(test)]
+    pub fn expose_for_test(&self) -> [u8; 6] {
+        self.digits()
+    }
 }
 
 /// A valid user-initiated pending OTP request bound to a specific (name, action, target UA).
@@ -452,21 +466,6 @@ mod tests {
         memo[..legacy.len()].copy_from_slice(legacy.as_bytes());
 
         assert!(decode_otp_relay_memo(&MAIN_NETWORK, &memo).is_none());
-    }
-
-    #[test]
-    fn otp_relay_memo_is_not_a_request_memo() {
-        let name = test_name();
-        let ua = test_ua();
-        let otp = OtpCode::for_test(*b"123456");
-
-        let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp)
-            .expect("memo fits");
-        let result = crate::mint::treasury::parse_request(&MAIN_NETWORK, &memo);
-        assert!(
-            result.is_none(),
-            "relay memo must not parse as a request memo"
-        );
     }
 
     #[test]

@@ -25,63 +25,11 @@
 
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
 use zcash_client_backend::wallet::{NoteId, ReceivedNote};
-use zcash_keys::address::UnifiedAddress;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 
-use crate::mint::{Action, Name, TREASURY_ACCOUNT};
+use crate::mint::TREASURY_ACCOUNT;
 use crate::wallet::Wallet;
-
-/// Parses a 512-byte memo sent to the Treasury as a ZNS transition request.
-///
-/// A request memo is `ZNS:<verb>:<name>:<ua>`, where `verb` is `claim`,
-/// `update`, or `release`. OTPs are delivered through the separate relay-memo
-/// path; request memos never carry an OTP.
-///
-/// Returns `None` unless the memo's grammar, name, and Unified Address for
-/// `network` are all valid. The intake loop then tries
-/// [`crate::mint::otp::decode_otp_relay_memo`] for non-request memos.
-pub fn parse_request<P: Parameters>(
-    network: &P,
-    raw: &[u8; 512],
-) -> Option<(Action, Name, UnifiedAddress)> {
-    let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
-    if raw[end..].iter().any(|b| *b != 0) {
-        return None;
-    }
-    let text = core::str::from_utf8(&raw[..end]).ok()?;
-
-    let mut fields = text.split(':');
-    if fields.next()? != "ZNS" {
-        return None;
-    }
-    let verb = fields.next()?;
-    let name_str = fields.next()?;
-    let name = Name::parse(name_str)?;
-
-    let ua_str = fields.next()?;
-    if ua_str.is_empty() {
-        return None;
-    }
-
-    if fields.next().is_some() {
-        return None;
-    }
-
-    let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
-        zcash_keys::address::Address::Unified(ua) => ua,
-        _ => return None,
-    };
-
-    let action = match verb {
-        "claim" => Action::Claim,
-        "update" => Action::Update,
-        "release" => Action::Release,
-        _ => return None,
-    };
-
-    Some((action, name, ua))
-}
 
 /// The Treasury's Ironwood fee-note candidates, largest value first.
 ///
@@ -276,73 +224,4 @@ pub fn sweep_sapling_to_vault<P: Parameters>(
     )?;
 
     Ok(Some(*txids.first()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use zcash_protocol::consensus::MainNetwork;
-
-    const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
-
-    fn padded(s: &str) -> [u8; 512] {
-        let mut m = [0u8; 512];
-        m[..s.len()].copy_from_slice(s.as_bytes());
-        m
-    }
-
-    #[test]
-    fn accepts_exactly_the_three_request_forms() {
-        let network = MainNetwork;
-
-        let (action, name, _) =
-            parse_request(&network, &padded(&format!("ZNS:claim:alice:{TEST_UA}"))).unwrap();
-        assert_eq!(action, Action::Claim);
-        assert_eq!(name.as_str(), "alice");
-
-        let (action, name, _) =
-            parse_request(&network, &padded(&format!("ZNS:update:alice:{TEST_UA}"))).unwrap();
-        assert_eq!(action, Action::Update);
-        assert_eq!(name.as_str(), "alice");
-
-        let (action, name, _) =
-            parse_request(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))).unwrap();
-        assert_eq!(action, Action::Release);
-        assert_eq!(name.as_str(), "alice");
-    }
-
-    #[test]
-    fn rejects_extra_field() {
-        let network = MainNetwork;
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:update:alice:{TEST_UA}:004206"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:alice:{TEST_UA}:extra"))
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn rejects_unknown_verb() {
-        let network = MainNetwork;
-        assert!(parse_request(&network, &padded(&format!("ZNS:otp:alice:{TEST_UA}"))).is_none());
-    }
-
-    #[test]
-    fn rejects_non_zns() {
-        let network = MainNetwork;
-        assert!(parse_request(&network, &padded("hello world")).is_none());
-    }
-
-    #[test]
-    fn rejects_invalid_name() {
-        let network = MainNetwork;
-        assert!(
-            parse_request(&network, &padded(&format!("ZNS:claim:INVALID:{TEST_UA}"))).is_none()
-        );
-    }
 }
