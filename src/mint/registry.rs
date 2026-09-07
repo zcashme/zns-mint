@@ -24,8 +24,7 @@ pub fn current_record(registry: &Registry, name: &Name) -> Option<NameRecord> {
 ///
 /// The Treasury layer must have already verified that the claim payment was
 /// made. This function verifies that the name is available (either no record,
-/// or record is `Release`). Until term-request plumbing exists in the intake
-/// path, claims register without fixed expiration.
+/// or record is `Release`).
 pub fn authorize_claim(
     registry: &Registry,
     name: Name,
@@ -38,7 +37,8 @@ pub fn authorize_claim(
         }) => Some(NameNote::Claim {
             name,
             ua,
-            expires_at: Expiry::Never,
+            // expires_at: from the request's term + the claim block's MTP —
+            // lands in the next step.
         }),
         Some(_) => None, // Name is already live
     }
@@ -96,9 +96,7 @@ pub fn authorize_release(
         return None;
     }
 
-    let Some(controller) = &record.ua else {
-        return None;
-    };
+    let controller = &record.ua;
     if controller != &current_ua {
         return None;
     }
@@ -194,7 +192,7 @@ pub struct NameRecord {
     pub action: Action,
     /// The binding UA. A release retains the address it terminated so the
     /// on-chain transition remains historically complete.
-    pub ua: Option<UnifiedAddress>,
+    pub ua: UnifiedAddress,
     /// The committed expiration (§4.5); absent for the post-release state.
     pub expires_at: Expiry,
     pub commitment: NameCommitment,
@@ -214,7 +212,7 @@ impl NameRecord {
         let rcm = note.rcm(params);
         Self {
             action: note.action(),
-            ua: note.ua().cloned(),
+            ua: note.ua().clone(),
             expires_at: note.expires_at().unwrap_or(Expiry::Never),
             commitment: NameCommitment::from_inner(orchard::note::NoteCommitTrapdoor::from_inner(
                 rcm,
@@ -227,7 +225,7 @@ impl NameRecord {
     #[cfg(test)]
     pub(crate) fn for_test(
         action: Action,
-        ua: Option<UnifiedAddress>,
+        ua: UnifiedAddress,
         expires_at: Expiry,
         commitment: NameCommitment,
         confirmed_height: BlockHeight,
@@ -581,7 +579,7 @@ mod tests {
         reg.set_record_for_test(
             name.clone(),
             Action::Release,
-            None,
+            ua.clone(),
             crate::mint::Expiry::Never,
             dummy_commitment(),
             height,
@@ -594,7 +592,7 @@ mod tests {
         reg.set_record_for_test(
             name.clone(),
             Action::Claim,
-            Some(ua.clone()),
+            ua.clone(),
             crate::mint::Expiry::Never,
             dummy_commitment(),
             height,
@@ -624,7 +622,7 @@ mod tests {
         reg.set_record_for_test(
             name.clone(),
             Action::Release,
-            None,
+            ua.clone(),
             crate::mint::Expiry::Never,
             dummy_commitment(),
             BlockHeight::from_u32(100),
@@ -649,7 +647,7 @@ mod tests {
         reg.set_record_for_test(
             name.clone(),
             Action::Update,
-            Some(ua.clone()),
+            ua.clone(),
             crate::mint::Expiry::Never,
             dummy_commitment(),
             BlockHeight::from_u32(100),
@@ -688,7 +686,7 @@ mod tests {
         reg.set_record_for_test(
             name.clone(),
             Action::Claim,
-            Some(ua.clone()),
+            ua.clone(),
             crate::mint::Expiry::Never,
             dummy_commitment(),
             BlockHeight::from_u32(100),
