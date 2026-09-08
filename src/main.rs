@@ -79,7 +79,7 @@ async fn main() {
     let scanning_keys = ScanningKeys::from_account_ufvks(wallet.ufvk_map().clone());
 
     tracing::info!(
-        boot = u32::from(boot.height()),
+        boot = u32::from(origin.block_height()),
         "run loop starting"
     );
 

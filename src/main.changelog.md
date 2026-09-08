@@ -4,6 +4,13 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-08 — The run-loop-start log reads the origin, not the ghost
+
+- The "run loop starting" line logged `boot.height()` after
+  `boot.into_parts()` had already moved `boot` — a use-after-move left over
+  from the stub era. It now reads `origin.block_height()`: the same
+  checkpoint height, from the part that survived the handoff.
+
 ## 2026-09-08 — Prologue sheds Registry key derivation
 
 - The run-loop prologue no longer derives Registry key material. The
