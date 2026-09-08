@@ -63,8 +63,6 @@ async fn main() {
         mut registry,
         treasury_keys,
         registry_keys,
-        sapling_spend,
-        sapling_output,
         mut mtp,
         mut oracle,
         mut otp_queue,
@@ -77,6 +75,12 @@ async fn main() {
     let mut chain_tip: ChainTip = zns_mint::boot::block_metadata(&origin);
 
     let scanning_keys = ScanningKeys::from_account_ufvks(wallet.ufvk_map().clone());
+
+    // Acquired here, not at boot: the loop can load these itself, with the
+    // same fail-loud checks. Boot passes what the loop cannot acquire for
+    // itself, or must not.
+    let spend = zns_mint::boot::load_sapling_spend_params();
+    let output = zns_mint::boot::load_sapling_output_params();
 
     tracing::info!(
         boot = u32::from(origin.block_height()),

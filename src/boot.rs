@@ -39,8 +39,6 @@ pub struct Boot<P: Parameters> {
     origin: ChainState,
     treasury_keys: TreasuryKeys,
     registry_keys: RegistryKeys,
-    sapling_spend: SpendParameters,
-    sapling_output: OutputParameters,
     mtp: MtpTracker,
     oracle: Oracle,
     otp_queue: OtpQueue,
@@ -166,11 +164,6 @@ impl<P: Parameters> Boot<P> {
             }
         }
 
-        // 5. Sapling proving parameters — load and verify against ceremony hashes.
-        let sapling_spend = load_sapling_spend_params();
-        let sapling_output = load_sapling_output_params();
-        tracing::info!("boot: Sapling proving parameters loaded and verified");
-
         tracing::info!(
             network = NETWORK_LABEL,
             "boot: complete at node tip {}",
@@ -185,8 +178,6 @@ impl<P: Parameters> Boot<P> {
             origin,
             treasury_keys,
             registry_keys,
-            sapling_spend,
-            sapling_output,
             mtp,
             oracle,
             otp_queue,
@@ -215,8 +206,6 @@ impl<P: Parameters> Boot<P> {
         Registry,
         TreasuryKeys,
         RegistryKeys,
-        SpendParameters,
-        OutputParameters,
         MtpTracker,
         Oracle,
         OtpQueue,
@@ -229,8 +218,6 @@ impl<P: Parameters> Boot<P> {
             self.registry,
             self.treasury_keys,
             self.registry_keys,
-            self.sapling_spend,
-            self.sapling_output,
             self.mtp,
             self.oracle,
             self.otp_queue,
@@ -567,7 +554,14 @@ fn read_verified_sapling_params(
     bytes
 }
 
-fn load_sapling_spend_params() -> SpendParameters {
+/// Loads and verifies the Sapling spend prover: file size, BLAKE2b-512 hash,
+/// then upstream's own deserializer. Acquired by the run loop's prologue, not
+/// by boot — boot passes what the loop cannot acquire for itself.
+///
+/// `verify_point_encodings: false` is upstream-documented for exactly this
+/// pattern: verify the parameters another way, "such as checking the hash of
+/// the parameters file on disk" (sapling-crypto 0.7.0, circuit.rs).
+pub(crate) fn load_sapling_spend_params() -> SpendParameters {
     let dir = sapling_params_dir();
     let path = dir.join("sapling-spend.params");
     let bytes = read_verified_sapling_params(&path, SAPLING_SPEND_HASH, SAPLING_SPEND_BYTES);
@@ -575,7 +569,9 @@ fn load_sapling_spend_params() -> SpendParameters {
         .expect("FATAL: failed to deserialize sapling-spend.params")
 }
 
-fn load_sapling_output_params() -> OutputParameters {
+/// Loads and verifies the Sapling output prover. See
+/// [`load_sapling_spend_params`].
+pub(crate) fn load_sapling_output_params() -> OutputParameters {
     let dir = sapling_params_dir();
     let path = dir.join("sapling-output.params");
     let bytes = read_verified_sapling_params(&path, SAPLING_OUTPUT_HASH, SAPLING_OUTPUT_BYTES);

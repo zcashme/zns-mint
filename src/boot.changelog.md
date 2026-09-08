@@ -2,6 +2,22 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-08 — The proving parameters stop crossing the seam
+
+- `Boot` no longer carries `sapling_spend`/`sapling_output`; `into_parts`
+  returns ten parts, not twelve. The loaders stay in this module — now
+  `pub(crate)` — and the orchestrator's prologue acquires them itself.
+- The seam criterion, now written down: **a value crosses only if the loop
+  cannot acquire it for itself, or must not.** Keys, origin, wallet, clock,
+  oracle, and the chain connection pass it. The proving parameters fail it —
+  the loop can load them with the same fail-loud checks — so boot stops
+  couriering them.
+- The load pattern is upstream-documented: `SpendParameters::read`'s
+  `verify_point_encodings: false` is prescribed "if you are verifying the
+  parameters in another way (such as checking the hash of the parameters
+  file on disk)" (sapling-crypto 0.7.0, `circuit.rs`). Hash-then-read is
+  that documented way, not custom paranoia.
+
 ## 2026-08-22 — Direct fixed-UFVK WalletDb construction
 
 - Boot now passes the two fixed Treasury/Registry UFVKs directly to `Wallet`.
