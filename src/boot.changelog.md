@@ -2,6 +2,15 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-08 — Boot is the handoff
+
+- `Boot`'s fields go `pub`, one seam-criterion line per field (verified /
+  acquired / produced / cannot / must not). The struct definition is the
+  seam contract, compiler-checked at construction.
+- `into_parts` and `height` are deleted. The ladder's last line constructs
+  `Boot`; the orchestrator destructures it exhaustively — no `..`, ever.
+  A `Boot` value existing is the certificate that the ladder completed.
+
 ## 2026-09-08 — The proving parameters stop crossing the seam
 
 - `Boot` no longer carries `sapling_spend`/`sapling_output`; `into_parts`

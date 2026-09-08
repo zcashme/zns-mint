@@ -21,6 +21,7 @@ use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
 use zcash_client_backend::scanning::{Nullifiers, ScanningKeys};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::Parameters;
 use zcash_protocol::memo::Memo;
 use zcash_protocol::value::Zatoshis;
 
@@ -55,7 +56,13 @@ async fn main() {
     #[cfg(not(feature = "regtest"))]
     let boot = Boot::run().await;
 
-    let (
+    run(boot).await
+}
+
+/// The orchestrator: on boot success, straight into the loop. Destructures
+/// `Boot` exhaustively — the airlock; no `..`, ever.
+async fn run<P: Parameters>(boot: Boot<P>) -> ! {
+    let Boot {
         network,
         mut chain,
         mut wallet,
@@ -66,7 +73,7 @@ async fn main() {
         mut mtp,
         mut oracle,
         mut pending_challenges,
-    ) = boot.into_parts();
+    } = boot;
 
     let rpc = JsonRpc::new();
     let source = CanonicalBlockSource::new();

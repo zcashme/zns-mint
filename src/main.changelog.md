@@ -4,6 +4,13 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-08 — main is boot-then-loop
+
+- `main` is logging, `Boot::run()`, `run(boot).await`.
+- `run` destructures `Boot` exhaustively (no `..`), acquires the loop's
+  tools on its own side of the seam, and enters `'reconnect`. No state
+  between dead and looping.
+
 ## 2026-09-08 — scanning_keys stays in the prologue
 
 - The scanner keyset derives from the wallet's own UFVK map rather than

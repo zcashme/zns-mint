@@ -31,17 +31,31 @@ use zcash_client_backend::data_api::chain::ChainState;
 // Boot life-cycle
 // ---------------------------------------------------------------------------
 
+/// The boot product: constructed only at the ladder's tail, so a `Boot`
+/// value is the certificate that every rung held. Consumed exactly once, by
+/// the orchestrator's exhaustive destructure — the seam contract, one
+/// criterion line per field.
 pub struct Boot<P: Parameters> {
-    network: P,
-    chain: ChainClient,
-    wallet: Wallet,
-    registry: Registry,
-    origin: ChainState,
-    treasury_keys: TreasuryKeys,
-    registry_keys: RegistryKeys,
-    mtp: MtpTracker,
-    oracle: Oracle,
-    pending_challenges: OtpQueue,
+    /// verified: boot-to-loop consensus — the loop never discovers parameters
+    pub network: P,
+    /// acquired: boot consumed it in the liveness rung
+    pub chain: ChainClient,
+    /// produced: trees seeded from the verified origin
+    pub wallet: Wallet,
+    /// boot-initialized faculty: the name chain, born empty
+    pub registry: Registry,
+    /// produced: the only legal first `from_state`
+    pub origin: ChainState,
+    /// cannot: derived from the seed — the seed dies before this exists
+    pub treasury_keys: TreasuryKeys,
+    /// cannot: derived from the seed
+    pub registry_keys: RegistryKeys,
+    /// produced: backfilled before the first scan
+    pub mtp: MtpTracker,
+    /// must not: fail-closed at birth — the first price or no start
+    pub oracle: Oracle,
+    /// boot-initialized faculty: born empty, filled by the run loop
+    pub pending_challenges: OtpQueue,
 }
 
 /// Network label for logging.
@@ -184,45 +198,6 @@ impl<P: Parameters> Boot<P> {
         }
     }
 
-    /// The chain height at the boot checkpoint.
-    pub fn height(&self) -> BlockHeight {
-        self.origin.block_height()
-    }
-
-    /// Consumes the boot evidence and returns the mutable run-loop components.
-    ///
-    /// The orchestrator is the only caller; this keeps the fields private
-    /// while allowing the run loop to take ownership of the initialized
-    /// subsystems. `origin` is the exact [`ChainState`] the wallet trees were
-    /// seeded from and the only legal `from_state` for the first `put_blocks`
-    /// (and for any `put_blocks` after a rewind back to origin).
-    pub fn into_parts(
-        self,
-    ) -> (
-        P,
-        ChainClient,
-        Wallet,
-        ChainState,
-        Registry,
-        TreasuryKeys,
-        RegistryKeys,
-        MtpTracker,
-        Oracle,
-        OtpQueue,
-    ) {
-        (
-            self.network,
-            self.chain,
-            self.wallet,
-            self.origin,
-            self.registry,
-            self.treasury_keys,
-            self.registry_keys,
-            self.mtp,
-            self.oracle,
-            self.pending_challenges,
-        )
-    }
 }
 
 pub use crate::wallet::block_metadata;
