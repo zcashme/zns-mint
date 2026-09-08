@@ -65,7 +65,7 @@ async fn main() {
         registry_keys,
         mut mtp,
         mut oracle,
-        mut otp_queue,
+        mut pending_challenges,
     ) = boot.into_parts();
 
     let rpc = JsonRpc::new();
@@ -295,7 +295,7 @@ async fn main() {
                         &mut wallet,
                         &registry,
                         &mut oracle,
-                        &mut otp_queue,
+                        &mut pending_challenges,
                         &treasury_keys,
                         &registry_keys,
                         &spend,
@@ -327,7 +327,7 @@ async fn main() {
                 };
 
                 let Some(transition) = registry.authorize(
-                    &mut otp_queue,
+                    &mut pending_challenges,
                     request,
                     Some(&challenge.code.digits()),
                     mtp_now,
@@ -354,7 +354,7 @@ async fn main() {
 
                 if due_in <= 0 {
                     let Some(transition) = registry.authorize(
-                        &mut otp_queue,
+                        &mut pending_challenges,
                         Request::Release {
                             name: name.clone(),
                             ua: record.ua.clone().expect("live names are bound"),
@@ -398,7 +398,7 @@ async fn main() {
                     };
                     ...submit relay...
                     if let Some(request) = outcome.relay_otp {
-                        otp_queue.push(request);
+                        pending_challenges.push(request);
                     }
                 }
             }

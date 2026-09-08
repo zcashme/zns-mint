@@ -212,7 +212,7 @@ impl Registry {
     /// are dropped: the name was simply not renewed.
     pub fn authorize(
         &self,
-        otp_queue: &mut OtpQueue,
+        pending_challenges: &mut OtpQueue,
         request: Request,
         otp: Option<&[u8; 6]>,
         mtp: Timestamp,
@@ -245,7 +245,7 @@ impl Registry {
                     return None;
                 }
                 let otp = otp?;
-                if !otp_queue.verify_and_burn(&name, Action::Update, &ua, otp, mtp) {
+                if !pending_challenges.verify_and_burn(&name, Action::Update, &ua, otp, mtp) {
                     return None;
                 }
                 // §4.5.3: an ordinary update carries the current expiry
@@ -281,7 +281,7 @@ impl Registry {
                     return None;
                 }
                 let otp = otp?;
-                if !otp_queue.verify_and_burn(&name, Action::Release, &ua, otp, mtp) {
+                if !pending_challenges.verify_and_burn(&name, Action::Release, &ua, otp, mtp) {
                     return None;
                 }
                 Some(NameNote::Release {

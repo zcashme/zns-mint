@@ -41,7 +41,7 @@ pub struct Boot<P: Parameters> {
     registry_keys: RegistryKeys,
     mtp: MtpTracker,
     oracle: Oracle,
-    otp_queue: OtpQueue,
+    pending_challenges: OtpQueue,
 }
 
 /// Network label for logging.
@@ -149,7 +149,7 @@ impl<P: Parameters> Boot<P> {
 
         // The challenge memory: empty by construction, filled by the run
         // loop as liveness challenges and update/release relays are issued.
-        let otp_queue = OtpQueue::new();
+        let pending_challenges = OtpQueue::new();
 
         // 4. Attestation (production only)
         #[cfg(not(feature = "regtest"))]
@@ -180,7 +180,7 @@ impl<P: Parameters> Boot<P> {
             registry_keys,
             mtp,
             oracle,
-            otp_queue,
+            pending_challenges,
         }
     }
 
@@ -220,7 +220,7 @@ impl<P: Parameters> Boot<P> {
             self.registry_keys,
             self.mtp,
             self.oracle,
-            self.otp_queue,
+            self.pending_challenges,
         )
     }
 }
