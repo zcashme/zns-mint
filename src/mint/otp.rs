@@ -160,9 +160,8 @@ pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
 /// Decodes an OTP relay memo: `ZNS:otp:<otp>:<name>:<verb>:<ua>`
 ///
 /// The embedded UA is decoded for `network` and must carry an Orchard-family
-/// receiver — the same rule [`crate::mint::treasury::parse_request`] enforces
-/// at the request door: Ironwood delivery (relay notes, refunds) has no other
-/// address.
+/// receiver — the same rule [`crate::mint::Action::parse_request`] enforces
+/// at the request door: Ironwood delivery (relays) has no other address.
 pub fn decode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
     network: &P,
     memo: &[u8; 512],

@@ -1,5 +1,13 @@
 # Mint live-work design record
 
+## 2026-09-08 — No refunds
+- Refunds are gone as policy: a payment's excess over the price is retained,
+  and underpaid or rejected claims are retained in full. No refund
+  transaction is ever created.
+- Deleted the unused settlement lattice — `REFUND_FEE_USD`, `FEE_STEP`,
+  `grid_usd` — so a refund cannot be wired. Delivery-path comments no longer
+  list refunds; Ironwood delivery is relays-only.
+
 ## 2026-09-03 — Oracle-only claim pricing, USD-denominated
 
 - The fixed `CLAIM_PRICE` (1 ZEC) is gone. The claim price is

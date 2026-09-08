@@ -99,7 +99,7 @@ impl Action {
     /// Per-verb arity is enforced here: a release with a term, an update
     /// with `forever`, or a claim without a kind is not a request memo.
     /// The UA must carry an Orchard-family receiver — Ironwood delivery
-    /// (refunds, relays) has no other path.
+    /// (relays) has no other path.
     pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Request> {
         let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
         if raw[end..].iter().any(|b| *b != 0) {
@@ -247,25 +247,8 @@ impl Name {
 // Protocol constants and settlement types
 // ===========================================================================
 
-use zcash_protocol::value::Zatoshis;
-
 // The claim price is `Oracle::quote_forever(name)`: the USD name schedule
 // converted to zats at the oracle's daily rate.
-
-/// Whole-dollar refund fee, settled by [`grid_usd`] at the daily rate,
-/// rounded up to the next 100,000-zat step.
-pub const REFUND_FEE_USD: u64 = 1;
-
-/// Policy fees settle in steps of 100,000 zats.
-const FEE_STEP: u64 = 100_000;
-
-/// Settles a whole-dollar policy amount on the fee lattice: converted at
-/// the daily rate, rounded up to the next [`FEE_STEP`].
-pub fn grid_usd(oracle: &pricing::Oracle, usd: u64) -> Zatoshis {
-    let raw = usd * oracle.current().into_u64();
-    Zatoshis::from_u64(raw.next_multiple_of(FEE_STEP))
-        .expect("step rounding adds less than one step")
-}
 
 #[cfg(test)]
 mod tests {
