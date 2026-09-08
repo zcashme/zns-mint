@@ -11,7 +11,7 @@
   by `ValidatedZnsNote`; consumers do not independently reparse the memo.
 - `claim` requires an absent/zero predecessor and a nonempty UA. `update`
   requires a present predecessor and a nonempty UA. `release` requires a
-  present predecessor and an empty UA.
+  present predecessor and a nonempty UA (the address being released).
 - Encoding and decoding are exact inverses over the accepted canonical domain.
   A decoded payload must re-encode byte-for-byte to the input memo, including
   its zero padding.

@@ -19,8 +19,8 @@ use crate::mint::{
 use crate::wallet::Wallet;
 use std::collections::BTreeMap;
 use time::Timestamp;
-use zcash_client_backend::data_api::ScannedBlock;
 use zcash_client_backend::data_api::wallet::TargetHeight;
+use zcash_client_backend::data_api::ScannedBlock;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
@@ -37,13 +37,10 @@ pub fn current_record(registry: &Registry, name: &Name) -> Option<NameRecord> {
 /// made. This function verifies that the name is available (either no record,
 /// or record is `Release`). Until term-request plumbing exists in the intake
 /// path, claims register without fixed expiration.
-pub fn authorize_claim(
-    registry: &Registry,
-    name: Name,
-    ua: UnifiedAddress,
-) -> Option<NameNote> {
+pub fn authorize_claim(registry: &Registry, name: Name, ua: UnifiedAddress) -> Option<NameNote> {
     match current_record(registry, &name) {
-        None | Some(NameRecord {
+        None
+        | Some(NameRecord {
             action: Action::Release,
             ..
         }) => Some(NameNote::Claim {
@@ -75,7 +72,7 @@ pub fn authorize_update(
         return None;
     }
 
-    if !otp_queue.verify_and_burn(&name, Action::Update, &new_ua, otp, mtp) {
+    if !otp_queue.verify_and_burn(&name, Action::Update, &new_ua, record.commitment, otp, mtp) {
         return None;
     }
 
@@ -84,6 +81,8 @@ pub fn authorize_update(
         ua: new_ua,
         // §4.5.3: an ordinary update MUST NOT change the registration
         // period; the expiry is carried forward from the live record.
+        // TODO: bind requested term once renewal intake exists; until then
+        // `tip_rcm` on the OTP already pins this carried-forward period.
         expires_at: record.expires_at,
         prev: record.commitment,
     })
@@ -113,7 +112,14 @@ pub fn authorize_release(
     if controller != &current_ua {
         return None;
     }
-    if !otp_queue.verify_and_burn(&name, Action::Release, &current_ua, otp, mtp) {
+    if !otp_queue.verify_and_burn(
+        &name,
+        Action::Release,
+        &current_ua,
+        record.commitment,
+        otp,
+        mtp,
+    ) {
         return None;
     }
 
@@ -123,8 +129,6 @@ pub fn authorize_release(
         prev: record.commitment,
     })
 }
-
-
 
 // ---------------------------------------------------------------------------
 // ReceivedNameNote — scanner evidence for one Name Note
@@ -681,11 +685,49 @@ mod tests {
             name: Name::parse("carol").unwrap(),
             action: Action::Update,
             ua: mock_ua(),
+            tip_rcm: dummy_commitment(),
             code: OtpCode::for_test(real_otp),
             expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
         });
         let req = authorize_update(&reg, &mut otps, now, name.clone(), ua, &real_otp).unwrap();
         assert_eq!(req.action(), Action::Update);
+    }
+
+    #[test]
+    fn update_rejects_otp_bound_to_a_superseded_tip() {
+        let mut reg = mock_registry();
+        let mut otps = mock_otp_queue();
+        let name = Name::parse("carol").unwrap();
+        let ua = mock_ua();
+        let now = Timestamp::now();
+
+        let mut stale = [0u8; 32];
+        stale[0] = 2;
+        let stale_tip = NameCommitment::from_bytes(&stale).unwrap();
+
+        reg.set_record_for_test(
+            name.clone(),
+            Action::Update,
+            Some(ua.clone()),
+            crate::mint::Expiry::Never,
+            dummy_commitment(),
+            BlockHeight::from_u32(100),
+            dummy_rho(),
+        );
+
+        otps.push(OtpRequest {
+            name: name.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            tip_rcm: stale_tip,
+            code: OtpCode::for_test(*b"004206"),
+            expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
+        });
+
+        assert!(
+            authorize_update(&reg, &mut otps, now, name, ua, b"004206").is_none(),
+            "OTP issued against a previous tip must not authorize the live one"
+        );
     }
 
     #[test]
@@ -709,6 +751,7 @@ mod tests {
             name: name.clone(),
             action: Action::Release,
             ua: ua.clone(),
+            tip_rcm: dummy_commitment(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
         });
@@ -717,7 +760,10 @@ mod tests {
             .expect("valid OTP authorizes release");
         match transition {
             NameNote::Release { ua: bound, .. } => assert_eq!(bound, ua),
-            other => panic!("expected release transition, got {}", other.action().as_str()),
+            other => panic!(
+                "expected release transition, got {}",
+                other.action().as_str()
+            ),
         }
     }
 
