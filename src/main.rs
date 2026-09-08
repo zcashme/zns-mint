@@ -70,15 +70,15 @@ async fn main() {
 
     let rpc = JsonRpc::new();
     let source = CanonicalBlockSource::new();
-    // Cursor at birth is the origin the trees were seeded from — not a
-    // later RPC treestate at the same height.
+
     let mut chain_tip: ChainTip = zns_mint::boot::block_metadata(&origin);
 
+    // The scanner's keyset is derived from the wallet's own UFVK map — not
+    // from the keys, and not handed over by boot. The scanner scans exactly
+    // the accounts the wallet stores, by construction. (Seam criterion: the
+    // loop acquires this for itself.)
     let scanning_keys = ScanningKeys::from_account_ufvks(wallet.ufvk_map().clone());
 
-    // Acquired here, not at boot: the loop can load these itself, with the
-    // same fail-loud checks. Boot passes what the loop cannot acquire for
-    // itself, or must not.
     let spend = zns_mint::boot::load_sapling_spend_params();
     let output = zns_mint::boot::load_sapling_output_params();
 

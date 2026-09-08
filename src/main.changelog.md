@@ -4,6 +4,15 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-08 — scanning_keys stays in the prologue
+
+- The scanner keyset derives from the wallet's own UFVK map rather than
+  being handed over by `Boot`. That is the seam criterion applied, not an
+  oversight: the loop can acquire this for itself. Deriving it from the
+  wallet — never from the keys — makes "the scanner scans exactly the
+  accounts the wallet stores" true by construction. Boot's UFVKs reach the
+  wallet at seed time; the scanner follows the wallet.
+
 ## 2026-09-08 — The run-loop-start log reads the origin, not the ghost
 
 - The "run loop starting" line logged `boot.height()` after
