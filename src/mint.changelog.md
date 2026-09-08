@@ -1,5 +1,19 @@
 # Mint live-work design record
 
+## 2026-09-08 — Sentence types: one type per wire grammar, all in mint.rs
+- Every memo grammar is now a typed sentence with encode/decode as its
+  methods, written explicitly in `mint.rs`: `Request::decode` (the request
+  door — decode-only, the mint never authors requests), `Challenge` (the
+  relay sentence, both directions — encode + decode, `code: OtpCode`), and
+  `NameNote::encode/decode` (note.rs — the mint's self-sentence, home
+  unchanged). The relay decoder's anonymous return tuple is dead.
+- `otp.rs` sheds its memo codec and keeps only machinery: issuance, queue,
+  delivery. `decode_name_note` is promoted to `NameNote::decode`.
+- The legacy `ZNS:otp:<name>:<verb>:<ua>:<code>` wire form is dropped
+  outright (pre-launch: no old-format echoes exist in the wild).
+- `OtpCode` gains `Clone, PartialEq, Eq` and a redacted `Debug`
+  (`OtpCode(REDACTED)`); no `Copy` — `#[zeroize(drop)]` forbids it.
+
 ## 2026-09-08 — No refunds
 - Refunds are gone as policy: a payment's excess over the price is retained,
   and underpaid or rejected claims are retained in full. No refund

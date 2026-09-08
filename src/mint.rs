@@ -12,13 +12,15 @@ pub mod treasury;
 pub use zcash_client_backend::data_api::BlockMetadata as ChainTip;
 
 // The Name Note type and its codec.
-pub use note::{decode_name_note, decrypt_name_notes, DecryptedNameNote, Expiry, NameNote};
+pub use note::{decrypt_name_notes, DecryptedNameNote, Expiry, NameNote};
 pub use time::Timestamp;
 
 pub use zcash_keys::address::UnifiedAddress;
 
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zip32::AccountId;
+
+use otp::OtpCode;
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
@@ -89,71 +91,6 @@ impl Action {
         let years = digits.parse().ok()?;
         (years > 0 && years <= crate::mint::MAX_TERM_YEARS).then_some(years)
     }
-
-    /// Parses a 512-byte request memo sent to the Treasury:
-    ///
-    /// - `ZNS:claim:<name>:<ua>:<kind>` — `kind` is `forever` or `<N>y`
-    /// - `ZNS:update:<name>:<ua>[:<N>y]` — `<N>y` requests an extension
-    /// - `ZNS:release:<name>:<ua>`
-    ///
-    /// Per-verb arity is enforced here: a release with a term, an update
-    /// with `forever`, or a claim without a kind is not a request memo.
-    /// The UA must carry an Orchard-family receiver — Ironwood delivery
-    /// (relays) has no other path.
-    pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Request> {
-        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
-        if raw[end..].iter().any(|b| *b != 0) {
-            return None;
-        }
-        let text = core::str::from_utf8(&raw[..end]).ok()?;
-
-        let mut fields = text.split(':');
-        if fields.next()? != "ZNS" {
-            return None;
-        }
-        let action = Self::from_verb(fields.next()?)?;
-        let name = Name::parse(fields.next()?)?;
-
-        let ua_str = fields.next()?;
-        if ua_str.is_empty() {
-            return None;
-        }
-        let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
-            zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
-            _ => return None,
-        };
-
-        let kind = fields.next();
-        // No verb carries a second term-like field.
-        if fields.next().is_some() {
-            return None;
-        }
-
-        match action {
-            Action::Claim => {
-                let term = match kind {
-                    Some("forever") => Term::Forever,
-                    Some(years) => Term::Years(Self::parse_years(years)?),
-                    // A claim always states its term.
-                    None => return None,
-                };
-                Some(Request::Claim { name, ua, term })
-            }
-            Action::Update => {
-                let extend_years = match kind {
-                    None => None,
-                    Some(years) => Some(Self::parse_years(years)?),
-                };
-                Some(Request::Update { name, ua, extend_years })
-            }
-            Action::Release => {
-                if kind.is_some() {
-                    return None;
-                }
-                Some(Request::Release { name, ua })
-            }
-        }
-    }
 }
 
 /// The registration term a claim asks for.
@@ -187,6 +124,163 @@ pub enum Request {
     Release { name: Name, ua: UnifiedAddress },
 }
 
+impl Request {
+    /// Decodes a 512-byte request memo sent to the Treasury:
+    ///
+    /// - `ZNS:claim:<name>:<ua>:<kind>` — `kind` is `forever` or `<N>y`
+    /// - `ZNS:update:<name>:<ua>[:<N>y]` — `<N>y` requests an extension
+    /// - `ZNS:release:<name>:<ua>`
+    ///
+    /// Per-verb arity is enforced here: a release with a term, an update
+    /// with `forever`, or a claim without a kind is not a request memo.
+    /// The UA must carry an Orchard-family receiver — Ironwood delivery
+    /// (relays) has no other path.
+    pub fn decode<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Self> {
+        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+        if raw[end..].iter().any(|b| *b != 0) {
+            return None;
+        }
+        let text = core::str::from_utf8(&raw[..end]).ok()?;
+
+        let mut fields = text.split(':');
+        if fields.next()? != "ZNS" {
+            return None;
+        }
+        let action = Action::from_verb(fields.next()?)?;
+        let name = Name::parse(fields.next()?)?;
+
+        let ua_str = fields.next()?;
+        if ua_str.is_empty() {
+            return None;
+        }
+        let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
+            zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
+            _ => return None,
+        };
+
+        let kind = fields.next();
+        // No verb carries a second term-like field.
+        if fields.next().is_some() {
+            return None;
+        }
+
+        match action {
+            Action::Claim => {
+                let term = match kind {
+                    Some("forever") => Term::Forever,
+                    Some(years) => Term::Years(Action::parse_years(years)?),
+                    // A claim always states its term.
+                    None => return None,
+                };
+                Some(Request::Claim { name, ua, term })
+            }
+            Action::Update => {
+                let extend_years = match kind {
+                    None => None,
+                    Some(years) => Some(Action::parse_years(years)?),
+                };
+                Some(Request::Update {
+                    name,
+                    ua,
+                    extend_years,
+                })
+            }
+            Action::Release => {
+                if kind.is_some() {
+                    return None;
+                }
+                Some(Request::Release { name, ua })
+            }
+        }
+    }
+}
+
+/// The relay sentence: `ZNS:otp:<code>:<name>:<verb>:<ua>`
+///
+/// Spoken in both directions — the mint encodes it as a relay challenge to
+/// the controller, and the controller echoes it back to the Treasury to
+/// prove authority. The verb is `update` or `release` — challenges never
+/// claim. The UA is the request's target address and must carry an
+/// Orchard-family receiver; Ironwood delivery (relays) has no other path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Challenge {
+    pub code: OtpCode,
+    pub name: Name,
+    pub action: Action,
+    pub ua: UnifiedAddress,
+}
+
+impl Challenge {
+    /// Encodes the relay sentence, NUL-padded to 512 bytes.
+    pub fn encode<P: Parameters>(&self, network: &P) -> Option<[u8; 512]> {
+        if self.action == Action::Claim {
+            return None;
+        }
+        let verb = self.action.as_str();
+
+        let ua_field = self.ua.encode(network);
+        let otp_digits = self.code.digits();
+        let mut memo = [0u8; 512];
+        let mut offset = 0usize;
+        for field in [
+            b"ZNS:otp:".as_slice(),
+            otp_digits.as_slice(),
+            b":".as_slice(),
+            self.name.as_str().as_bytes(),
+            b":".as_slice(),
+            verb.as_bytes(),
+            b":".as_slice(),
+            ua_field.as_bytes(),
+        ] {
+            let end = offset + field.len();
+            memo[offset..end].copy_from_slice(field);
+            offset = end;
+        }
+        Some(memo)
+    }
+
+    /// Decodes a relay sentence. The verb is `update` or `release` —
+    /// challenges never claim — and the UA must carry an Orchard-family
+    /// receiver.
+    pub fn decode<P: Parameters>(network: &P, memo: &[u8; 512]) -> Option<Self> {
+        let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
+        if memo[end..].iter().any(|&b| b != 0) {
+            return None;
+        }
+        let text = std::str::from_utf8(&memo[..end]).ok()?;
+
+        let parts: Vec<&str> = text.split(':').collect();
+        if parts.len() != 6 || parts[0] != "ZNS" || parts[1] != "otp" {
+            return None;
+        }
+
+        let digits = parts[2].as_bytes();
+        if digits.len() != 6 || !digits.iter().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let code = OtpCode::from_digits(digits.try_into().ok()?)?;
+
+        let name = Name::parse(parts[3])?;
+        let action = match parts[4] {
+            "update" => Action::Update,
+            "release" => Action::Release,
+            _ => return None,
+        };
+
+        let ua = match zcash_keys::address::Address::decode(network, parts[5])? {
+            zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
+            _ => return None,
+        };
+
+        Some(Self {
+            code,
+            name,
+            action,
+            ua,
+        })
+    }
+}
+
 /// A ZNS name-chain commitment — the trapdoor that links consecutive Name Notes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NameCommitment(orchard::note::NoteCommitTrapdoor);
@@ -203,8 +297,6 @@ impl NameCommitment {
     }
 
     /// Deserializes from the canonical 32-byte little-endian representation.
-    ///
-    /// Returns `None` if the bytes do not encode a valid Pallas scalar.
     pub fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
         orchard::note::NoteCommitTrapdoor::from_bytes(bytes)
             .into_option()
@@ -223,9 +315,6 @@ pub struct Name(String);
 
 impl Name {
     /// Attempts to parse a string into a valid ZNS name.
-    ///
-    /// Per §3 the name field is 1–63 bytes of ASCII `a`–`z` and `0`–`9` —
-    /// no hyphens, no separators.
     pub fn parse(s: &str) -> Option<Self> {
         let bytes = s.as_bytes();
         if bytes.is_empty() || bytes.len() > 63 {
@@ -242,13 +331,6 @@ impl Name {
         &self.0
     }
 }
-
-// ===========================================================================
-// Protocol constants and settlement types
-// ===========================================================================
-
-// The claim price is `Oracle::quote_forever(name)`: the USD name schedule
-// converted to zats at the oracle's daily rate.
 
 #[cfg(test)]
 mod tests {
@@ -270,17 +352,18 @@ mod tests {
         }
     }
 
-    fn parse(s: &str) -> Option<Request> {
-        Action::parse_request(&MainNetwork, &padded(s))
+    fn test_name() -> Name {
+        Name::parse("alice").unwrap()
     }
 
     #[test]
     fn claims_parse_their_kinds() {
-        let name = Name::parse("alice").unwrap();
+        let name = test_name();
         let ua = test_ua();
 
         assert_eq!(
-            parse(&format!("ZNS:claim:alice:{TEST_UA}:forever")).unwrap(),
+            Request::decode(&MainNetwork, &padded(&format!("ZNS:claim:alice:{TEST_UA}:forever")))
+                .unwrap(),
             Request::Claim {
                 name: name.clone(),
                 ua: ua.clone(),
@@ -288,7 +371,8 @@ mod tests {
             }
         );
         assert_eq!(
-            parse(&format!("ZNS:claim:alice:{TEST_UA}:1y")).unwrap(),
+            Request::decode(&MainNetwork, &padded(&format!("ZNS:claim:alice:{TEST_UA}:1y")))
+                .unwrap(),
             Request::Claim {
                 name: name.clone(),
                 ua: ua.clone(),
@@ -296,7 +380,8 @@ mod tests {
             }
         );
         assert_eq!(
-            parse(&format!("ZNS:claim:alice:{TEST_UA}:99y")).unwrap(),
+            Request::decode(&MainNetwork, &padded(&format!("ZNS:claim:alice:{TEST_UA}:99y")))
+                .unwrap(),
             Request::Claim {
                 name: name.clone(),
                 ua: ua.clone(),
@@ -304,7 +389,8 @@ mod tests {
             }
         );
         assert_eq!(
-            parse(&format!("ZNS:claim:alice:{TEST_UA}:10y")).unwrap(),
+            Request::decode(&MainNetwork, &padded(&format!("ZNS:claim:alice:{TEST_UA}:10y")))
+                .unwrap(),
             Request::Claim {
                 name,
                 ua,
@@ -315,11 +401,12 @@ mod tests {
 
     #[test]
     fn update_parses_with_and_without_extension() {
-        let name = Name::parse("alice").unwrap();
+        let name = test_name();
         let ua = test_ua();
 
         assert_eq!(
-            parse(&format!("ZNS:update:alice:{TEST_UA}")).unwrap(),
+            Request::decode(&MainNetwork, &padded(&format!("ZNS:update:alice:{TEST_UA}")))
+                .unwrap(),
             Request::Update {
                 name: name.clone(),
                 ua: ua.clone(),
@@ -327,7 +414,8 @@ mod tests {
             }
         );
         assert_eq!(
-            parse(&format!("ZNS:update:alice:{TEST_UA}:3y")).unwrap(),
+            Request::decode(&MainNetwork, &padded(&format!("ZNS:update:alice:{TEST_UA}:3y")))
+                .unwrap(),
             Request::Update {
                 name,
                 ua,
@@ -339,7 +427,8 @@ mod tests {
     #[test]
     fn release_parses_without_a_term() {
         assert_eq!(
-            parse(&format!("ZNS:release:alice:{TEST_UA}")).unwrap(),
+            Request::decode(&MainNetwork, &padded(&format!("ZNS:release:alice:{TEST_UA}")))
+                .unwrap(),
             Request::Release {
                 name: Name::parse("alice").unwrap(),
                 ua: test_ua()
@@ -351,56 +440,119 @@ mod tests {
     fn rejects_malformed_kinds() {
         for kind in ["0y", "03y", "100y", "3", "y", "Forever", "forevers", ""] {
             assert!(
-                parse(&format!("ZNS:claim:alice:{TEST_UA}:{kind}")).is_none(),
+                Request::decode(&MainNetwork, &padded(&format!("ZNS:claim:alice:{TEST_UA}:{kind}")))
+                    .is_none(),
                 "claim kind {kind:?} must reject"
             );
             assert!(
-                parse(&format!("ZNS:update:alice:{TEST_UA}:{kind}")).is_none(),
+                Request::decode(&MainNetwork, &padded(&format!("ZNS:update:alice:{TEST_UA}:{kind}")))
+                    .is_none(),
                 "update kind {kind:?} must reject"
             );
         }
         // A release never carries a term.
-        assert!(parse(&format!("ZNS:release:alice:{TEST_UA}:1y")).is_none());
+        assert!(Request::decode(
+            &MainNetwork,
+            &padded(&format!("ZNS:release:alice:{TEST_UA}:1y"))
+        )
+        .is_none());
         // A claim never omits its kind.
-        assert!(parse(&format!("ZNS:claim:alice:{TEST_UA}")).is_none());
+        assert!(Request::decode(
+            &MainNetwork,
+            &padded(&format!("ZNS:claim:alice:{TEST_UA}"))
+        )
+        .is_none());
     }
 
     #[test]
     fn rejects_unknown_verbs_and_non_memos() {
-        assert!(parse(&format!("ZNS:otp:alice:{TEST_UA}")).is_none());
-        assert!(parse("hello world").is_none());
-        assert!(parse("").is_none());
+        assert!(Request::decode(
+            &MainNetwork,
+            &padded(&format!("ZNS:otp:alice:{TEST_UA}"))
+        )
+        .is_none());
+        assert!(Request::decode(&MainNetwork, &padded("hello world")).is_none());
+        assert!(Request::decode(&MainNetwork, &padded("")).is_none());
     }
 
     #[test]
     fn rejects_invalid_names_and_extra_fields() {
-        assert!(parse(&format!("ZNS:claim:INVALID:{TEST_UA}:forever")).is_none());
-        assert!(parse(&format!("ZNS:claim:alice:{TEST_UA}:1y:extra")).is_none());
+        assert!(Request::decode(
+            &MainNetwork,
+            &padded(&format!("ZNS:claim:INVALID:{TEST_UA}:forever"))
+        )
+        .is_none());
+        assert!(Request::decode(
+            &MainNetwork,
+            &padded(&format!("ZNS:claim:alice:{TEST_UA}:1y:extra"))
+        )
+        .is_none());
     }
 
     #[test]
-    fn rejects_uas_without_an_orchard_receiver() {
-        // Ironwood delivery (refunds, relays) has no other path: a request
-        // UA without an Orchard receiver is not a request memo.
-        let keys = crate::key::TreasuryKeys::derive(
-            &MainNetwork,
-            &secrecy::Secret::new(zcash_address::test_vectors::UNIFIED[0].root_seed),
-        );
-        let ua = keys
-            .fvk()
-            .address(
-                zip32::DiversifierIndex::from(
-                    zcash_address::test_vectors::UNIFIED[0].diversifier_index,
-                ),
-                zcash_keys::keys::UnifiedAddressRequest::unsafe_custom(
-                    zcash_keys::keys::ReceiverRequirement::Omit,
-                    zcash_keys::keys::ReceiverRequirement::Require,
-                    zcash_keys::keys::ReceiverRequirement::Omit,
-                ),
-            )
-            .unwrap();
-        let ua_str = ua.encode(&MainNetwork);
-        assert!(ua.orchard().is_none());
-        assert!(parse(&format!("ZNS:claim:alice:{ua_str}:forever")).is_none());
+    fn challenge_round_trips_update_and_release() {
+        for action in [Action::Update, Action::Release] {
+            let challenge = Challenge {
+                code: OtpCode::for_test(*b"004206"),
+                name: test_name(),
+                action,
+                ua: test_ua(),
+            };
+            let memo = challenge.encode(&MainNetwork).expect("memo fits");
+            assert_eq!(Challenge::decode(&MainNetwork, &memo).unwrap(), challenge);
+        }
+    }
+
+    #[test]
+    fn challenge_encodes_the_canonical_format() {
+        let challenge = Challenge {
+            code: OtpCode::for_test(*b"004206"),
+            name: test_name(),
+            action: Action::Update,
+            ua: test_ua(),
+        };
+        let memo = challenge.encode(&MainNetwork).expect("memo fits");
+
+        let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
+        let text = std::str::from_utf8(&memo[..end]).unwrap();
+        assert!(text.starts_with("ZNS:otp:004206:alice:update:"));
+        assert!(text.ends_with(&TEST_UA));
+    }
+
+    #[test]
+    fn challenge_rejects_the_legacy_otp_last_format() {
+        let legacy = format!("ZNS:otp:alice:update:{}:004206", TEST_UA);
+        assert!(Challenge::decode(&MainNetwork, &padded(&legacy)).is_none());
+    }
+
+    #[test]
+    fn challenge_rejects_non_zero_bytes_after_nul_padding() {
+        let challenge = Challenge {
+            code: OtpCode::for_test(*b"004206"),
+            name: test_name(),
+            action: Action::Update,
+            ua: test_ua(),
+        };
+        let mut memo = challenge.encode(&MainNetwork).expect("memo fits");
+
+        let first_nul = memo.iter().position(|&b| b == 0).unwrap();
+        memo[first_nul + 10] = 0x42;
+
+        assert!(Challenge::decode(&MainNetwork, &memo).is_none());
+    }
+
+    #[test]
+    fn challenges_never_claim() {
+        let claim = Challenge {
+            code: OtpCode::for_test(*b"004206"),
+            name: test_name(),
+            action: Action::Claim,
+            ua: test_ua(),
+        };
+        assert!(claim.encode(&MainNetwork).is_none());
+
+        let ua = test_ua();
+        let wire = format!("ZNS:otp:004206:alice:claim:{TEST_UA}");
+        assert!(Challenge::decode(&MainNetwork, &padded(&wire)).is_none());
     }
 }

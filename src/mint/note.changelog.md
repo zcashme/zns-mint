@@ -1,5 +1,18 @@
 # `mint/note.rs` design record
 
+## 2026-09-08 — `decrypt_name_notes` takes the Registry capability
+
+- The signature drops the pre-chewed primitives
+  (`&PreparedIncomingViewingKey`, `orchard::Address`). It now takes
+  `&RegistryKeys` and derives the Registry's published identity — the
+  external-scope address at diversifier index 0 — and its prepared ivk
+  internally, in exactly one ivk derivation per call. This matches the
+  `assemble` convention (capability in, derivation inside) and removes the
+  orchestrator's last piece of key math. No change to the `key.rs` impl:
+  the existing `pub(crate) orchard_fvk()` is total, so the old caller-side
+  `.expect("Registry UFVK carries an Orchard component")` is gone — the
+  boot-established invariant is type-guaranteed, not runtime-checked.
+
 ## Canonical Name Note payload
 
 - The on-chain form is exactly

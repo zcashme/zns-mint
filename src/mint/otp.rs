@@ -5,7 +5,7 @@ use subtle::ConstantTimeEq;
 use time::Timestamp;
 use zeroize::Zeroize;
 
-use crate::mint::{Action, Name, UnifiedAddress};
+use crate::mint::{Action, Challenge, Name, UnifiedAddress};
 use zcash_client_backend::data_api::wallet::{
     input_selection::GreedyInputSelector, ProposeTransferErrT,
 };
@@ -15,9 +15,15 @@ use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 pub const D_OTP: i64 = 1800;
 
 /// A six-digit one-time passcode for update/release authorization.
-#[derive(Zeroize)]
+#[derive(Clone, PartialEq, Eq, Zeroize)]
 #[zeroize(drop)]
 pub struct OtpCode(u32);
+
+impl std::fmt::Debug for OtpCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OtpCode(REDACTED)")
+    }
+}
 
 impl OtpCode {
     /// Generates a new uniformly random six-digit decimal OTP.
@@ -121,82 +127,6 @@ impl OtpQueue {
         }
         false
     }
-}
-
-/// Encodes an OTP relay memo: `ZNS:otp:<otp>:<name>:<verb>:<ua>`
-pub fn encode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
-    network: &P,
-    name: &Name,
-    action: Action,
-    ua: &UnifiedAddress,
-    otp: &OtpCode,
-) -> Option<[u8; 512]> {
-    if action == Action::Claim {
-        return None;
-    }
-    let verb = action.as_str();
-
-    let ua_field = ua.encode(network);
-    let otp_digits = otp.digits();
-    let mut memo = [0u8; 512];
-    let mut offset = 0usize;
-    for field in [
-        b"ZNS:otp:".as_slice(),
-        otp_digits.as_slice(),
-        b":".as_slice(),
-        name.as_str().as_bytes(),
-        b":".as_slice(),
-        verb.as_bytes(),
-        b":".as_slice(),
-        ua_field.as_bytes(),
-    ] {
-        let end = offset + field.len();
-        memo[offset..end].copy_from_slice(field);
-        offset = end;
-    }
-    Some(memo)
-}
-
-/// Decodes an OTP relay memo: `ZNS:otp:<otp>:<name>:<verb>:<ua>`
-///
-/// The embedded UA is decoded for `network` and must carry an Orchard-family
-/// receiver — the same rule [`crate::mint::Action::parse_request`] enforces
-/// at the request door: Ironwood delivery (relays) has no other address.
-pub fn decode_otp_relay_memo<P: zcash_protocol::consensus::Parameters>(
-    network: &P,
-    memo: &[u8; 512],
-) -> Option<(Name, Action, UnifiedAddress, [u8; 6])> {
-    let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
-    if memo[end..].iter().any(|&b| b != 0) {
-        return None;
-    }
-    let text = std::str::from_utf8(&memo[..end]).ok()?;
-
-    let parts: Vec<&str> = text.split(':').collect();
-    if parts.len() != 6 || parts[0] != "ZNS" || parts[1] != "otp" {
-        return None;
-    }
-
-    let digits = parts[2].as_bytes();
-    if digits.len() != 6 || !digits.iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let mut otp = [0u8; 6];
-    otp.copy_from_slice(digits);
-
-    let name = Name::parse(parts[3])?;
-    let action = match parts[4] {
-        "update" => Action::Update,
-        "release" => Action::Release,
-        _ => return None,
-    };
-
-    let ua = match zcash_keys::address::Address::decode(network, parts[5])? {
-        zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
-        _ => return None,
-    };
-
-    Some((name, action, ua, otp))
 }
 
 // ---------------------------------------------------------------------------
@@ -379,7 +309,13 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
     }
 
     let otp = OtpCode::generate();
-    let memo = encode_otp_relay_memo(network, name, action, requested_ua, &otp)?;
+    let challenge = Challenge {
+        code: otp.clone(),
+        name: name.clone(),
+        action,
+        ua: requested_ua.clone(),
+    };
+    let memo = challenge.encode(network)?;
 
     let result = build_relay_payment(
         network,
@@ -422,68 +358,6 @@ mod tests {
 
     fn test_name() -> Name {
         Name::parse("alice").unwrap()
-    }
-
-    #[test]
-    fn round_trip_otp_relay_memo() {
-        let name = test_name();
-        let ua = test_ua();
-        let otp = OtpCode::for_test(*b"004206");
-
-        let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp)
-            .expect("memo fits");
-
-        let (decoded_name, decoded_action, decoded_ua, decoded_otp) =
-            decode_otp_relay_memo(&MAIN_NETWORK, &memo).expect("memo decodes");
-
-        assert_eq!(decoded_name, name);
-        assert_eq!(decoded_action, Action::Update);
-        assert_eq!(decoded_ua.encode(&MAIN_NETWORK), ua.encode(&MAIN_NETWORK));
-        assert_eq!(decoded_otp, *b"004206");
-    }
-
-    #[test]
-    fn otp_relay_memo_format_is_otp_name_verb_ua() {
-        let name = test_name();
-        let ua = test_ua();
-        let otp = OtpCode::for_test(*b"004206");
-
-        let memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp)
-            .expect("memo fits");
-
-        let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
-        let text = std::str::from_utf8(&memo[..end]).unwrap();
-        assert!(text.starts_with("ZNS:otp:004206:alice:update:"));
-        assert!(text.ends_with(&ua.encode(&MAIN_NETWORK)));
-    }
-
-    #[test]
-    fn otp_relay_rejects_the_legacy_otp_last_format() {
-        let ua = test_ua();
-        let legacy = format!("ZNS:otp:alice:update:{}:004206", ua.encode(&MAIN_NETWORK));
-        let mut memo = [0u8; 512];
-        memo[..legacy.len()].copy_from_slice(legacy.as_bytes());
-
-        assert!(decode_otp_relay_memo(&MAIN_NETWORK, &memo).is_none());
-    }
-
-    #[test]
-    fn otp_relay_rejects_non_zero_bytes_after_nul_padding() {
-        let name = test_name();
-        let ua = test_ua();
-        let otp = OtpCode::for_test(*b"004206");
-
-        let mut memo = encode_otp_relay_memo(&MAIN_NETWORK, &name, Action::Update, &ua, &otp)
-            .expect("memo fits");
-
-        // Inject non-zero garbage after the NUL padding.
-        // `encode_otp_relay_memo` zero-pads, so the first NUL is right after
-        // the content.  Find it and write garbage further out.
-        let first_nul = memo.iter().position(|&b| b == 0).unwrap();
-        memo[first_nul + 10] = 0x42;
-
-        // The post-NUL check must reject this.
-        assert!(decode_otp_relay_memo(&MAIN_NETWORK, &memo).is_none());
     }
 
     #[test]

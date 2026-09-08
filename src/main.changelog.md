@@ -4,6 +4,15 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-08 — Prologue sheds Registry key derivation
+
+- The run-loop prologue no longer derives Registry key material. The
+  `registry_orchard`/`registry_ivk`/`registry_recipient` locals are gone;
+  `decrypt_name_notes` now takes `&RegistryKeys` and derives internally
+  (see `mint/note.changelog.md`). The prologue retains only
+  `scanning_keys` — the wallet-facing detector, derived from the wallet's
+  own UFVK map by deliberate choice.
+
 ## 2026-08-23 — Spec and governance docs deleted
 
 - Deleted `docs/protocol.md`, `docs/policy.md`, `REFERENCE.md`, and the

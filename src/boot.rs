@@ -36,9 +36,6 @@ pub struct Boot<P: Parameters> {
     chain: ChainClient,
     wallet: Wallet,
     registry: Registry,
-    /// The origin treestate the wallet trees were seeded from. The run loop
-    /// hands this exact value to the first `put_blocks` — it is never
-    /// re-fetched.
     origin: ChainState,
     treasury_keys: TreasuryKeys,
     registry_keys: RegistryKeys,
@@ -146,7 +143,8 @@ impl<P: Parameters> Boot<P> {
         );
 
         let mtp_now = mtp.current().expect("MTP complete after backfill");
-        let price = crate::mint::pricing::fetch_round().await
+        let price = crate::mint::pricing::fetch_round()
+            .await
             .expect("FATAL: initial price fetch failed; restart when exchanges are reachable");
         let oracle = Oracle::new(price, mtp_now);
         tracing::info!("boot: initial price ingested");

@@ -26,13 +26,13 @@ use zcash_protocol::value::Zatoshis;
 
 use zns_mint::boot::Boot;
 use zns_mint::key::{RegistryKeys, TreasuryKeys};
-use zns_mint::mint::otp::{decode_otp_relay_memo, issue_relay, OtpQueue};
+use zns_mint::mint::otp::{issue_relay, OtpQueue};
 use zns_mint::mint::registry::ReceivedNameNote;
 use zns_mint::mint::treasury::{
     fee_note_candidates, sweep_ironwood_to_vault, sweep_sapling_to_vault,
 };
 use zns_mint::mint::{
-    Action, ChainTip, MINT_BIRTHDAY, Name, Request, Term, TREASURY_ACCOUNT,
+    Action, Challenge, ChainTip, MINT_BIRTHDAY, Name, Request, Term, TREASURY_ACCOUNT,
 };
 use zns_mint::wallet::Wallet;
 use zns_mint::zcash::{self, CanonicalBlockSource, JsonRpc, SubmitOutcome};
@@ -77,16 +77,6 @@ async fn main() {
     let mut chain_tip: ChainTip = zns_mint::boot::block_metadata(&origin);
 
     let scanning_keys = ScanningKeys::from_account_ufvks(wallet.ufvk_map().clone());
-    let registry_orchard = registry_keys
-        .fvk()
-        .orchard()
-        .expect("Registry UFVK carries an Orchard component")
-        .clone();
-    let registry_ivk = registry_orchard
-        .to_ivk(orchard::keys::Scope::External)
-        .prepare();
-    let registry_recipient =
-        registry_orchard.address_at(0u32, orchard::keys::Scope::External);
 
     tracing::info!(
         boot = u32::from(boot.height()),
@@ -186,8 +176,7 @@ async fn main() {
                 let candidates = zns_mint::mint::decrypt_name_notes(
                     &network,
                     &block,
-                    &registry_ivk,
-                    registry_recipient,
+                    &registry_keys,
                 );
                 let name_notes: Vec<_> = candidates
                     .iter()
@@ -294,7 +283,7 @@ async fn main() {
                 };
                 handled.push(note_id);
 
-                if let Some(request) = Action::parse_request(&network, &memo) {
+                if let Some(request) = Request::decode(&network, &memo) {
                     handle_request(
                         request,
                         &note,
@@ -317,19 +306,18 @@ async fn main() {
                     continue;
                 }
 
-                let Some((name, action, ua, otp)) = decode_otp_relay_memo(&network, &memo)
-                else {
+                let Some(challenge) = Challenge::decode(&network, &memo) else {
                     continue; // not ours
                 };
-                let request = match action {
+                let request = match challenge.action {
                     Action::Update => Request::Update {
-                        name: name.clone(),
-                        ua: ua.clone(),
+                        name: challenge.name.clone(),
+                        ua: challenge.ua.clone(),
                         extend_years: None,
                     },
                     Action::Release => Request::Release {
-                        name: name.clone(),
-                        ua: ua.clone(),
+                        name: challenge.name.clone(),
+                        ua: challenge.ua.clone(),
                     },
                     Action::Claim => continue,
                 };
@@ -337,10 +325,10 @@ async fn main() {
                 let Some(transition) = registry.authorize(
                     &mut otp_queue,
                     request,
-                    Some(&otp),
+                    Some(&challenge.code.digits()),
                     mtp_now,
                 ) else {
-                    tracing::debug!(action = action.as_str(), "echo not authorized");
+                    tracing::debug!(action = challenge.action.as_str(), "echo not authorized");
                     continue;
                 };
 
@@ -348,7 +336,7 @@ async fn main() {
                     NameNote for update/release → assemble on a treasury-funded builder,
                     _ => unreachable!(),
                 };
-                let _ = submit(&source, &tx, tip, target_height, action.as_str()).await;
+                let _ = submit(&source, &tx, tip, target_height, challenge.action.as_str()).await;
             }
 
             // Liveness: every live name owes an accepted update per interval.
