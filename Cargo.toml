@@ -63,7 +63,7 @@ zcash_note_encryption = "0.4"
 # CSPRNG for Orchard spend-auth + binding nonces in the signer. Already a
 # transitive dep (orchard); pulled direct with default features so `OsRng` is
 # available (orchard itself uses `default-features = false`).
-rand = "0.8"
+rand = "0.10"
 
 zebra-indexer-proto = "2.5"
 
