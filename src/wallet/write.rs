@@ -31,9 +31,9 @@ use zip32::{AccountId, DiversifierIndex};
 
 use super::{
     Wallet,
-    read::{WalletError, account_birthday, next_height},
+    read::{WalletError, next_height},
 };
-use crate::mint::REGISTRY_ACCOUNT;
+use crate::mint::{MINT_BIRTHDAY, REGISTRY_ACCOUNT};
 
 impl Wallet {
     /// Returns the account that owns a wallet output, if the reference names
@@ -322,9 +322,14 @@ impl WalletWrite for Wallet {
             // a from-state above it: both would desynchronize note commitment
             // positions.
             Some((&applied_tip, _)) => return Err(WalletError::ChainDiscontinuity(applied_tip)),
-            // First batch after boot seeding; the trees were seeded from the
-            // checkpoint at `from_state.block_height()`.
-            None => {}
+            // First batch: `from_state` must be the recorded boot origin.
+            None => {
+                if from_state.block_height() != self.seed.block_height()
+                    || from_state.block_hash() != self.seed.block_hash()
+                {
+                    return Err(WalletError::ChainDiscontinuity(from_state.block_height()));
+                }
+            }
         }
 
         // Commitment trees are mutated before the infallible tables: if a
@@ -600,12 +605,12 @@ impl WalletWrite for Wallet {
         // lowered; a rewind below the birthday floor can only proceed when no
         // reset was requested.
         if !reset_account_birthdays.is_empty()
-            && next_height(chain_state.block_height()) < account_birthday()
+            && next_height(chain_state.block_height()) < MINT_BIRTHDAY
         {
             let birthdays = self
                 .ufvks
                 .keys()
-                .map(|account| (*account, account_birthday()))
+                .map(|account| (*account, MINT_BIRTHDAY))
                 .collect();
             return Err(RewindError::RewindBeyondBirthdays(birthdays));
         }

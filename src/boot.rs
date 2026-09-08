@@ -5,7 +5,7 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use secrecy::{ExposeSecret, Secret};
-use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkUpgrade, Parameters};
+use zcash_protocol::consensus::{BlockHeight, MainNetwork, Parameters};
 #[cfg(feature = "regtest")]
 use zcash_protocol::local_consensus::LocalNetwork;
 use zip32::fingerprint::SeedFingerprint;
@@ -21,12 +21,11 @@ use crate::mint::mtp::MtpTracker;
 use crate::mint::otp::OtpQueue;
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
-use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::{MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::chain::ChainState;
-use zcash_client_backend::data_api::BlockMetadata;
 
 // ---------------------------------------------------------------------------
 // Boot life-cycle
@@ -37,7 +36,10 @@ pub struct Boot<P: Parameters> {
     chain: ChainClient,
     wallet: Wallet,
     registry: Registry,
-    checkpoint_metadata: BlockMetadata,
+    /// The origin treestate the wallet trees were seeded from. The run loop
+    /// hands this exact value to the first `put_blocks` — it is never
+    /// re-fetched.
+    origin: ChainState,
     treasury_keys: TreasuryKeys,
     registry_keys: RegistryKeys,
     sapling_spend: SpendParameters,
@@ -106,21 +108,8 @@ impl<P: Parameters> Boot<P> {
         // call produce. Sizes derive from the frontiers (`Frontier::tree_size`),
         // mirroring upstream's `ScannedBlock::to_block_metadata`.
         let rpc = zcash::JsonRpc::new();
-        let chain_state = origin_checkpoint(&rpc, &network).await;
-        let checkpoint_height = chain_state.block_height();
-        let sapling_size = u32::try_from(chain_state.final_sapling_tree().tree_size())
-            .expect("tree size fits u32");
-        let orchard_size = u32::try_from(chain_state.final_orchard_tree().tree_size())
-            .expect("tree size fits u32");
-        let ironwood_size = u32::try_from(chain_state.final_ironwood_tree().tree_size())
-            .expect("tree size fits u32");
-        let checkpoint_metadata = BlockMetadata::from_parts(
-            checkpoint_height,
-            chain_state.block_hash(),
-            Some(sapling_size),
-            Some(orchard_size),
-            Some(ironwood_size),
-        );
+        let origin = origin_checkpoint(&rpc, &network).await;
+        let checkpoint_height = origin.block_height();
 
         // 3b. Wallet initialization from the checkpoint's chain state.
         let wallet = Wallet::new(
@@ -128,7 +117,7 @@ impl<P: Parameters> Boot<P> {
                 (TREASURY_ACCOUNT, treasury_keys.fvk()),
                 (REGISTRY_ACCOUNT, registry_keys.fvk()),
             ],
-            &chain_state,
+            &origin,
         )
         .expect("FATAL: failed to seed commitment trees from the verified Zebra checkpoint");
         tracing::info!(
@@ -195,7 +184,7 @@ impl<P: Parameters> Boot<P> {
             chain: chain_client,
             wallet,
             registry: Registry::new(),
-            checkpoint_metadata,
+            origin,
             treasury_keys,
             registry_keys,
             sapling_spend,
@@ -208,25 +197,23 @@ impl<P: Parameters> Boot<P> {
 
     /// The chain height at the boot checkpoint.
     pub fn height(&self) -> BlockHeight {
-        self.checkpoint_metadata.block_height()
-    }
-
-    /// The boot checkpoint's continuity metadata.
-    pub fn checkpoint_metadata(&self) -> &BlockMetadata {
-        &self.checkpoint_metadata
+        self.origin.block_height()
     }
 
     /// Consumes the boot evidence and returns the mutable run-loop components.
     ///
     /// The orchestrator is the only caller; this keeps the fields private
     /// while allowing the run loop to take ownership of the initialized
-    /// subsystems.
+    /// subsystems. `origin` is the exact [`ChainState`] the wallet trees were
+    /// seeded from and the only legal `from_state` for the first `put_blocks`
+    /// (and for any `put_blocks` after a rewind back to origin).
     pub fn into_parts(
         self,
     ) -> (
         P,
         ChainClient,
         Wallet,
+        ChainState,
         Registry,
         TreasuryKeys,
         RegistryKeys,
@@ -240,6 +227,7 @@ impl<P: Parameters> Boot<P> {
             self.network,
             self.chain,
             self.wallet,
+            self.origin,
             self.registry,
             self.treasury_keys,
             self.registry_keys,
@@ -251,6 +239,8 @@ impl<P: Parameters> Boot<P> {
         )
     }
 }
+
+pub use crate::wallet::block_metadata;
 
 #[cfg(feature = "regtest")]
 fn regtest_network() -> LocalNetwork {
@@ -449,28 +439,17 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 // Step 3: Initialize (origin checkpoint, wallet, MTP)
 // ---------------------------------------------------------------------------
 
-/// Fetches the origin checkpoint from Zebra via `z_gettreestate`.
-///
-/// The checkpoint is the block immediately before NU6.3 (Ironwood) activation —
-/// the earliest height where Ironwood commitments can exist. The wallet trees
-/// are seeded from this state.
-///
-/// Sapling and Orchard trees are fetched from Zebra (they contain years of
-/// commitments at this height). The Ironwood tree is empty — it does not
-/// exist until Ironwood activates.
+/// Fetches the origin treestate from Zebra: the block before the birthday.
 ///
 /// Zebra is part of the same measured TEE image; its identity is guaranteed
 /// by the SEV-SNP attestation, not by runtime RPC checks.
-async fn origin_checkpoint<P: Parameters>(rpc: &zcash::JsonRpc, network: &P) -> ChainState {
-    let checkpoint_height = network
-        .activation_height(NetworkUpgrade::Nu6_3)
-        .expect("NU6.3 activation height must be set in zcash_protocol")
-        .saturating_sub(1);
+async fn origin_checkpoint<P: Parameters>(rpc: &zcash::JsonRpc, _network: &P) -> ChainState {
+    let checkpoint_height = MINT_BIRTHDAY - 1;
 
     let chain_state = rpc
         .chain_state_at(checkpoint_height)
         .await
-        .expect("FATAL: failed to fetch origin checkpoint from Zebra");
+        .expect("FATAL: birthday treestate unavailable from Zebra");
 
     tracing::info!(
         "boot: origin checkpoint at height {}, hash {}",
@@ -626,9 +605,24 @@ mod tests {
         verify_fingerprint(&seed, &wrong_fp);
     }
 
+    #[test]
+    fn block_metadata_carries_origin_height_hash_and_tree_sizes() {
+        let height = BlockHeight::from_u32(42);
+        let hash = zcash_primitives::block::BlockHash([0x11; 32]);
+        let state = ChainState::empty(height, hash);
+        let meta = block_metadata(&state);
+        assert_eq!(meta.block_height(), height);
+        assert_eq!(meta.block_hash(), hash);
+        assert_eq!(meta.sapling_tree_size(), Some(0));
+        assert_eq!(meta.orchard_tree_size(), Some(0));
+        assert_eq!(meta.ironwood_tree_size(), Some(0));
+    }
+
     #[cfg(feature = "regtest")]
     #[test]
     fn regtest_parameters_match_the_pinned_harness_schedule() {
+        use zcash_protocol::consensus::NetworkUpgrade;
+
         let network = regtest_network();
         let one = BlockHeight::from_u32(1);
         let four = BlockHeight::from_u32(4);
@@ -657,5 +651,8 @@ mod tests {
         }
         assert!(!network.is_nu_active(NetworkUpgrade::Nu6_3, BlockHeight::from_u32(3)));
         assert!(network.is_nu_active(NetworkUpgrade::Nu6_3, four));
+        // The regtest birthday mirrors the harness: origin at 3, first
+        // observed block at 4.
+        assert_eq!(MINT_BIRTHDAY, four);
     }
 }

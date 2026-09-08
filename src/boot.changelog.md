@@ -79,3 +79,17 @@ Tracks design-relevant changes to `src/boot.rs`.
   `BlockHeight` rather than the `u32` difference between two heights.
 - This fixes the `get_checkpoint` argument mismatch surfaced by `cargo check`
   after the Orchard fork compile error was resolved.
+
+## 2026-09-07 (birthday origin)
+- `MINT_BIRTHDAY` (3_400_000) hoisted to `mint.rs`; `origin_checkpoint` now
+  fetches `z_gettreestate(MINT_BIRTHDAY - 1)`. The NU6.3 activation anchor
+  and its rationale are deleted — the birthday is identity, not a derived
+  consensus height.
+- `Boot::checkpoint_metadata` deleted (no callers); `boot::block_metadata`
+  moved to `wallet.rs` and re-exported, so `Wallet::new` and the run loop
+  derive the cursor from the same helper.
+- `MINT_BIRTHDAY` is cfg-gated: regtest uses 4 (first block after the
+  harness's NU6.3 activation), restoring the previous regtest origin at 3;
+  the schedule test asserts the constant against the pinned harness config.
+- Dropped the unused `BlockMetadata` import; the `NetworkUpgrade` import
+  moved into the regtest test that uses it.

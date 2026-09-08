@@ -274,3 +274,17 @@ Tracks design-relevant changes to `src/wallet.rs` and `src/wallet/trees.rs`.
 - `store_name_note` moved to `wallet/write.rs` as the ZNS ingestion lane —
   a write, sibling of `put_blocks`.
 - No signature, visibility, or behavior changes.
+
+## 2026-09-07 (seed record; origin enforcement; one birthday)
+- `Wallet` records the boot origin cursor (`seed`) at construction.
+  `put_blocks`' first-batch arm now verifies `from_state` against it instead
+  of assuming it matches the seed (issue #23).
+- `block_hash_at` / `block_metadata_at` fall back to the seed at the origin
+  height, and `truncate_to` reuses them — the reorg walk can terminate at and
+  rewind to the origin, which is a `Reference` checkpoint in all three trees.
+- Empty frontiers are checkpointed at the origin (upstream sqlite skips them);
+  the per-pool origin checkpoint is the reorg floor.
+- `read.rs`'s private `MINT_BIRTHDAY_HEIGHT`, `account_birthday()`, and
+  `scan_floor()` are deleted; all birthday reads use `mint::MINT_BIRTHDAY`.
+  The declared birthday and the seeded origin now agree: origin = 3_399_999,
+  first observed block = 3_400_000.

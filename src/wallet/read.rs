@@ -27,7 +27,7 @@ use zcash_protocol::value::{BalanceError, Zatoshis};
 use zcash_protocol::{PoolType, ShieldedPool};
 use zip32::AccountId;
 
-use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::{MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 
 use super::Wallet;
 
@@ -96,21 +96,6 @@ impl std::fmt::Display for WalletError {
 
 impl std::error::Error for WalletError {}
 
-/// The fixed earliest height at which either mint account may have been
-/// exposed. This is application identity, not mutable wallet state.
-const MINT_BIRTHDAY_HEIGHT: u32 = 3_400_000;
-
-/// The birthday shared by both fixed mint accounts.
-pub(super) fn account_birthday() -> BlockHeight {
-    BlockHeight::from_u32(MINT_BIRTHDAY_HEIGHT)
-}
-
-/// The first height at or above the birthday from which a catch-up scan would
-/// start when no block has been applied yet.
-pub(super) fn scan_floor() -> BlockHeight {
-    account_birthday()
-}
-
 /// `height + 1`, saturating instead of panicking at the top of the `u32`
 /// height space.
 pub(super) fn next_height(height: BlockHeight) -> BlockHeight {
@@ -165,7 +150,7 @@ impl UpstreamAccount for FixedAccount {
     }
 
     fn birthday_height(&self) -> BlockHeight {
-        account_birthday()
+        MINT_BIRTHDAY
     }
 
     fn source(&self) -> &AccountSource {
@@ -363,13 +348,13 @@ impl WalletRead for Wallet {
 
     fn get_account_birthday(&self, account: Self::AccountId) -> Result<BlockHeight, Self::Error> {
         match self.ufvks.get(&account) {
-            Some(_) => Ok(account_birthday()),
+            Some(_) => Ok(MINT_BIRTHDAY),
             None => Err(WalletError::AccountUnknown(account)),
         }
     }
 
     fn get_wallet_birthday(&self) -> Result<Option<BlockHeight>, Self::Error> {
-        Ok((!self.ufvks.is_empty()).then(account_birthday))
+        Ok((!self.ufvks.is_empty()).then_some(MINT_BIRTHDAY))
     }
 
     fn get_wallet_recover_until(&self) -> Result<Option<BlockHeight>, Self::Error> {
@@ -389,7 +374,7 @@ impl WalletRead for Wallet {
 
         let fully_scanned_height = self
             .max_applied_height()
-            .unwrap_or_else(|| BlockHeight::from_u32(MINT_BIRTHDAY_HEIGHT - 1));
+            .unwrap_or_else(|| self.seed.block_height());
 
         let mut account_balances = self
             .ufvks
@@ -495,7 +480,7 @@ impl WalletRead for Wallet {
         };
         let start = self
             .max_applied_height()
-            .map_or_else(scan_floor, next_height);
+            .map_or_else(|| MINT_BIRTHDAY, next_height);
         let end = next_height(tip);
         if start >= end {
             Ok(Vec::new())
@@ -664,7 +649,7 @@ impl WalletRead for Wallet {
         match self.ufvks.get(&account) {
             // No transparent receiver is ever derived, so there is nothing to
             // observe below the fixed scan floor.
-            Some(_) => Ok(scan_floor()),
+            Some(_) => Ok(MINT_BIRTHDAY),
             None => Err(WalletError::AccountUnknown(account)),
         }
     }

@@ -60,6 +60,9 @@ pub struct Wallet {
     /// Canonical Zebra blocks this in-memory projection has applied.
     blocks: BTreeMap<BlockHeight, BlockMetadata>,
 
+    /// The boot origin cursor: the block before the birthday.
+    seed: BlockMetadata,
+
     transactions: BTreeMap<TxId, Transaction>,
     transaction_statuses: BTreeMap<TxId, TransactionStatus>,
     transaction_indices: BTreeMap<TxId, TxIndex>,
@@ -115,6 +118,7 @@ impl Wallet {
             ufvks: ufvks.into_iter().collect(),
             zebra_tip: None,
             blocks: BTreeMap::new(),
+            seed: block_metadata(chain_state),
             transactions: BTreeMap::new(),
             transaction_statuses: BTreeMap::new(),
             transaction_indices: BTreeMap::new(),
@@ -142,6 +146,9 @@ impl Wallet {
             id: chain_state.block_height(),
             marking: Marking::Reference,
         };
+        // Checkpoint id is birthday − 1: each frontier is the tree state at
+        // the start of `MINT_BIRTHDAY`. Empty frontiers are inserted too —
+        // the per-pool origin checkpoint is the reorg floor.
         wallet
             .sapling_tree
             .insert_frontier(chain_state.final_sapling_tree().clone(), retention)?;
@@ -164,10 +171,19 @@ impl Wallet {
         self.ufvks.get(&account)
     }
 
-    /// The block hash at `height`, if that height was applied.
-    /// Used for reorg walk hash comparison.
+    /// The block hash at `height`: an applied block, or the boot origin.
     pub fn block_hash_at(&self, height: BlockHeight) -> Option<BlockHash> {
-        self.blocks.get(&height).map(|m| m.block_hash())
+        self.blocks
+            .get(&height)
+            .map(|m| m.block_hash())
+            .or_else(|| (height == self.seed.block_height()).then(|| self.seed.block_hash()))
+    }
+
+    /// Continuity metadata at `height`: an applied block, or the boot origin.
+    pub fn block_metadata_at(&self, height: BlockHeight) -> Option<BlockMetadata> {
+        self.blocks.get(&height).cloned().or_else(|| {
+            (height == self.seed.block_height()).then(|| self.seed.clone())
+        })
     }
 
     /// Truncates the wallet to `max_height` and returns the
@@ -177,9 +193,24 @@ impl Wallet {
         max_height: BlockHeight,
     ) -> Result<BlockMetadata, WalletError> {
         WalletWrite::truncate_to_height(self, max_height)?;
-        self.blocks
-            .get(&max_height)
-            .cloned()
+        self.block_metadata_at(max_height)
             .ok_or(WalletError::TruncationTargetUnavailable(max_height))
     }
+}
+
+/// Scan-cursor metadata implied by a [`ChainState`]: height, hash, tree sizes.
+pub fn block_metadata(state: &ChainState) -> BlockMetadata {
+    let sapling_size =
+        u32::try_from(state.final_sapling_tree().tree_size()).expect("tree size fits u32");
+    let orchard_size =
+        u32::try_from(state.final_orchard_tree().tree_size()).expect("tree size fits u32");
+    let ironwood_size =
+        u32::try_from(state.final_ironwood_tree().tree_size()).expect("tree size fits u32");
+    BlockMetadata::from_parts(
+        state.block_height(),
+        state.block_hash(),
+        Some(sapling_size),
+        Some(orchard_size),
+        Some(ironwood_size),
+    )
 }

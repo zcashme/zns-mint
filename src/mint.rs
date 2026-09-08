@@ -17,11 +17,19 @@ pub use time::Timestamp;
 
 pub use zcash_keys::address::UnifiedAddress;
 
-use zcash_protocol::consensus::Parameters;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zip32::AccountId;
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
+
+/// First block the mint observes; everything before it is pre-birth.
+#[cfg(not(feature = "regtest"))]
+pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(3_400_000);
+
+/// Regtest birth: first block after the harness's NU6.3 activation (height 4).
+#[cfg(feature = "regtest")]
+pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(4);
 
 /// The liveness interval: one Julian year (365.25 days), in seconds.
 ///

@@ -74,3 +74,8 @@
   a canonical name binding. A reorg resets confirmations above its common
   ancestor and retains an unconfirmed submission only when its exact reserved
   notes remain unspent on the rebuilt branch.
+
+## 2026-09-07 (MINT_BIRTHDAY)
+- `MINT_BIRTHDAY = 3_400_000`: the first block the mint observes; everything
+  before it is pre-birth. Single source for the boot origin (birthday − 1)
+  and the wallet's account/scan/rewind floors.
