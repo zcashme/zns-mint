@@ -9,12 +9,14 @@ use std::num::NonZeroU32;
 use secrecy::SecretVec;
 use shardtree::store::ShardStore;
 use zcash_client_backend::data_api::{
+    defaults,
+    error::FindAccountForAddressError,
+    scanning::{ScanPriority, ScanRange},
+    wallet::{ConfirmationsPolicy, TargetHeight},
     Account as UpstreamAccount, AccountBalance, AccountPurpose, AccountSource, AddressInfo,
     Balance, BlockMetadata, NullifierQuery, Progress, Ratio, ReceivedTransactionOutput,
     SeedRelevance, TransactionDataRequest, TransactionStatus, TransparentBalances, WalletRead,
-    WalletSummary, Zip32Derivation, defaults, error::FindAccountForAddressError,
-    scanning::{ScanPriority, ScanRange},
-    wallet::{ConfirmationsPolicy, TargetHeight},
+    WalletSummary, Zip32Derivation,
 };
 use zcash_client_backend::wallet::{NoteId, ReceivedNote, TransparentAddressMetadata};
 use zcash_keys::address::{Address, UnifiedAddress};
@@ -83,7 +85,10 @@ impl std::fmt::Display for WalletError {
                 write!(f, "unknown account {account:?}")
             }
             WalletError::ChainDiscontinuity(height) => {
-                write!(f, "chain discontinuity detected at or before height {height}")
+                write!(
+                    f,
+                    "chain discontinuity detected at or before height {height}"
+                )
             }
             WalletError::TruncationTargetUnavailable(height) => {
                 write!(f, "no retained checkpoint at or below height {height}")
@@ -232,7 +237,8 @@ impl Wallet {
             .get(&OutputRef::from(*note_id))
             .is_some_and(|(_, expiry)| *expiry >= BlockHeight::from(target_height));
 
-        let mut with_pool = |f: &mut dyn FnMut(&mut Balance) -> Result<(), WalletError>| match pool {
+        let mut with_pool = |f: &mut dyn FnMut(&mut Balance) -> Result<(), WalletError>| match pool
+        {
             ShieldedPool::Sapling => balance.with_sapling_balance_mut(|b| f(b)),
             ShieldedPool::Orchard => balance.with_orchard_balance_mut(|b| f(b)),
             ShieldedPool::Ironwood => balance.with_ironwood_balance_mut(|b| f(b)),
@@ -420,14 +426,11 @@ impl WalletRead for Wallet {
         // Progress over the block span between the fixed birthday and the
         // Zebra tip; a display metric, not an authoritative note count.
         let scanned_span = u64::from(
-            (u32::from(fully_scanned_height) + 1).saturating_sub(MINT_BIRTHDAY_HEIGHT),
+            (u32::from(fully_scanned_height) + 1).saturating_sub(u32::from(MINT_BIRTHDAY)),
         );
         let total_span =
-            u64::from(u32::from(chain_tip_height).saturating_sub(MINT_BIRTHDAY_HEIGHT) + 1);
-        let progress = Progress::new(
-            Ratio::new(scanned_span.min(total_span), total_span),
-            None,
-        );
+            u64::from(u32::from(chain_tip_height).saturating_sub(u32::from(MINT_BIRTHDAY)) + 1);
+        let progress = Progress::new(Ratio::new(scanned_span.min(total_span), total_span), None);
 
         let summary = WalletSummary::new(
             account_balances,
@@ -504,9 +507,8 @@ impl WalletRead for Wallet {
         let target = next_height(tip);
         // The anchor must have at least `min_confirmations` blocks on top of
         // it, relative to the next block.
-        let bound = BlockHeight::from_u32(
-            u32::from(target).saturating_sub(u32::from(min_confirmations)),
-        );
+        let bound =
+            BlockHeight::from_u32(u32::from(target).saturating_sub(u32::from(min_confirmations)));
         let start = self.max_applied_height().unwrap_or(bound);
         // The mint only ever spends Sapling and Ironwood, so the ordinary
         // Orchard compatibility tree does not constrain the anchor.
@@ -611,8 +613,10 @@ impl WalletRead for Wallet {
         _account: Self::AccountId,
         _include_change: bool,
         _include_standalone: bool,
-    ) -> Result<HashMap<transparent::address::TransparentAddress, TransparentAddressMetadata>, Self::Error>
-    {
+    ) -> Result<
+        HashMap<transparent::address::TransparentAddress, TransparentAddressMetadata>,
+        Self::Error,
+    > {
         // Transparent support is outbound-only: neither fixed account owns,
         // derives, or reserves a transparent receiver through this wallet.
         Ok(HashMap::new())
@@ -623,8 +627,10 @@ impl WalletRead for Wallet {
         _account: Self::AccountId,
         _exposure_depth: u32,
         _exclude_used: bool,
-    ) -> Result<HashMap<transparent::address::TransparentAddress, TransparentAddressMetadata>, Self::Error>
-    {
+    ) -> Result<
+        HashMap<transparent::address::TransparentAddress, TransparentAddressMetadata>,
+        Self::Error,
+    > {
         Ok(HashMap::new())
     }
 
@@ -746,19 +752,26 @@ impl Wallet {
         let note_id = self
             .ironwood_notes
             .iter()
-            .find(|(_, output)| {
-                *output.account_id() == account && output.note().0.rho() == rho
-            })
+            .find(|(_, output)| *output.account_id() == account && output.note().0.rho() == rho)
             .map(|(note_id, _)| *note_id)?;
         self.unspent_ironwood_note(account, note_id, tip)
     }
 
+    /// Finds an unspent owned Ironwood note by the exact nullifier it reveals
+    /// when spent. Registry authority is expressed in nullifiers: claim
+    /// anchors and current Name Notes are selected through this boundary.
+    pub(crate) fn unspent_ironwood_note_by_nullifier(
+        &self,
+        account: AccountId,
+        nullifier: orchard::note::Nullifier,
+        tip: TargetHeight,
+    ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
+        let note_id = *self.ironwood_nullifiers.get(&nullifier)?;
+        self.unspent_ironwood_note(account, note_id, tip)
+    }
+
     /// Returns the nullifiers of all Ironwood notes owned by `account` with
-    /// no pending-or-mined spend as of `tip`, including value-0 notes: the
-    /// Registry's Name Notes are value-0, and their nullifiers are what
-    /// identifies a Registry spend in
-    /// [`Registry::apply_block`](crate::mint::registry::Registry::apply_block)'s
-    /// mint-authority check.
+    /// no pending-or-mined spend as of `tip`, including value-0 notes.
     ///
     /// Distinct from the [`WalletRead::get_ironwood_nullifiers`] impl above:
     /// that one classifies a spend as spent once its transaction is mined,
@@ -771,8 +784,7 @@ impl Wallet {
         self.ironwood_notes
             .iter()
             .filter(|(note_id, output)| {
-                *output.account_id() == account
-                    && !self.ironwood_note_is_spent(note_id, tip)
+                *output.account_id() == account && !self.ironwood_note_is_spent(note_id, tip)
             })
             .filter_map(|(_, output)| output.nf().copied())
             .collect()

@@ -24,8 +24,10 @@
 //!    Name Note transaction in a multi-authority bundle with the Registry.
 
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
+use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::wallet::{NoteId, ReceivedNote};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::memo::Memo;
 use zcash_protocol::value::Zatoshis;
 
 use crate::mint::TREASURY_ACCOUNT;
@@ -44,20 +46,29 @@ pub(crate) fn fee_note_candidates(
         TREASURY_ACCOUNT,
         zcash_client_backend::data_api::wallet::TargetHeight::from(tip),
     );
+    // Protocol messages and the operating float share the Treasury account.
+    // A Name Note fee must never consume some other message before its own
+    // rule sees it, so only empty-memo notes are fee candidates.
+    notes.retain(|note| {
+        matches!(
+            wallet.get_memo(*note.internal_note_id()),
+            Ok(None) | Ok(Some(Memo::Empty))
+        )
+    });
     notes.sort_by_key(|note| std::cmp::Reverse(note.note().value().inner()));
     notes
 }
 
 /// Minimum spendable Treasury balance to trigger a vault sweep (2 ZEC).
-const SWEEP_THRESHOLD: Zatoshis = Zatoshis::const_from_u64(200_000_000);
+pub const SWEEP_THRESHOLD: Zatoshis = Zatoshis::const_from_u64(200_000_000);
 
 /// Amount retained as Treasury change after a sweep (0.01 ZEC): the
 /// operating float that funds the next Name Note's fee.
-const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
+pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 
 /// The project vault's P2PKH address (placeholder pending final approved
 /// address).
-const VAULT_ADDRESS: transparent::address::TransparentAddress =
+pub const VAULT_ADDRESS: transparent::address::TransparentAddress =
     transparent::address::TransparentAddress::PublicKeyHash([0x42; 20]);
 
 /// The upstream error surface of a vault sweep. Both the proposal and the
@@ -116,14 +127,14 @@ pub fn sweep_ironwood_to_vault<P: Parameters>(
 
     // The threshold (2 ZEC) dwarfs the reserve (0.01 ZEC), so after the
     // threshold check the subtraction cannot fail.
-    let sweep_amount = (spendable - SWEEP_RESERVE)
-        .expect("spendable above SWEEP_THRESHOLD exceeds SWEEP_RESERVE");
+    let sweep_amount =
+        (spendable - SWEEP_RESERVE).expect("spendable above SWEEP_THRESHOLD exceeds SWEEP_RESERVE");
     let recipient =
         zcash_keys::address::Address::Transparent(VAULT_ADDRESS).to_zcash_address(network);
     let payment = zip321::Payment::new(recipient, Some(sweep_amount), None, None, None, Vec::new())
         .expect("a transparent recipient with a nonzero amount cannot fail");
-    let request = zip321::TransactionRequest::new(vec![payment])
-        .expect("single-payment request cannot fail");
+    let request =
+        zip321::TransactionRequest::new(vec![payment]).expect("single-payment request cannot fail");
 
     let input_selector = GreedyInputSelector::new();
     let change_strategy = SingleOutputChangeStrategy::<Wallet>::new(

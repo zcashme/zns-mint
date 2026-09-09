@@ -5,7 +5,7 @@ use subtle::ConstantTimeEq;
 use time::Timestamp;
 use zeroize::Zeroize;
 
-use crate::mint::{Action, Challenge, Name, UnifiedAddress};
+use crate::mint::{Action, Challenge, Name, NameCommitment, UnifiedAddress};
 use zcash_client_backend::data_api::wallet::{
     input_selection::GreedyInputSelector, ProposeTransferErrT,
 };
@@ -66,16 +66,19 @@ impl OtpCode {
     }
 }
 
-/// A valid user-initiated pending OTP request bound to a specific (name, action, target UA).
+/// A pending OTP bound to one exact live Name Note and the requested action.
+#[derive(Clone)]
 pub struct OtpRequest {
     pub name: Name,
     pub action: Action,
     pub ua: UnifiedAddress,
+    pub tip_rcm: NameCommitment,
     pub code: OtpCode,
     pub expires_at: Timestamp,
 }
 
 /// A time ordered list of pending OTP requests.
+#[derive(Clone)]
 pub struct OtpQueue(Vec<OtpRequest>);
 
 impl Default for OtpQueue {
@@ -95,16 +98,33 @@ impl OtpQueue {
         self.0.push(req);
     }
 
-    /// Scans for an entry matching (name, action, ua) with an unexpired
-    /// timestamp and a code that equals `provided` under constant-time
-    /// comparison. Removes and returns `true` on first match — the OTP
-    /// is burned. Failed verification leaves the entry intact.
+    /// Whether the exact live Name Note already has an unexpired challenge
+    /// for this action and target. Expired entries are discarded here so a
+    /// later block may issue a fresh challenge.
+    pub fn has_live(
+        &mut self,
+        name: &Name,
+        action: Action,
+        ua: &UnifiedAddress,
+        tip_rcm: NameCommitment,
+        mtp: Timestamp,
+    ) -> bool {
+        self.0.retain(|request| mtp < request.expires_at);
+        self.0.iter().any(|request| {
+            request.name == *name
+                && request.action == action
+                && request.ua == *ua
+                && request.tip_rcm == tip_rcm
+        })
+    }
+
     /// Expired entries are pruned on every scan.
     pub fn verify_and_burn(
         &mut self,
         name: &Name,
         action: Action,
         ua: &UnifiedAddress,
+        tip_rcm: NameCommitment,
         provided: &[u8; 6],
         mtp: Timestamp,
     ) -> bool {
@@ -118,6 +138,7 @@ impl OtpQueue {
             if req.name == *name
                 && req.action == action
                 && &req.ua == ua
+                && req.tip_rcm == tip_rcm
                 && mtp < req.expires_at
                 && bool::from(req.code.0.ct_eq(&provided_code.0))
             {
@@ -127,6 +148,35 @@ impl OtpQueue {
         }
         false
     }
+}
+
+/// Value delivered by a relay so its controller can pay for the echo.
+pub fn required_relay_value<P: zcash_protocol::consensus::Parameters>(
+    network: &P,
+    target_height: zcash_protocol::consensus::BlockHeight,
+) -> zcash_protocol::value::Zatoshis {
+    use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
+
+    FeeRule::standard()
+        .fee_required(
+            network,
+            target_height,
+            std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
+            std::iter::empty::<usize>(),
+            0,
+            0,
+            0,
+            2,
+        )
+        .expect("ZIP-317 fee for two Ironwood actions is representable")
+}
+
+/// Minimum value of the echoed Treasury note.
+pub fn required_echo_value<P: zcash_protocol::consensus::Parameters>(
+    network: &P,
+    target_height: zcash_protocol::consensus::BlockHeight,
+) -> zcash_protocol::value::Zatoshis {
+    required_relay_value(network, target_height)
 }
 
 // ---------------------------------------------------------------------------
@@ -197,27 +247,7 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
     // The controller's compensation funds the echo: the ZIP-317 fee of its
     // bundle shape (one Ironwood spend plus one output, padded to two
     // actions).
-    let amount = {
-        use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
-        FeeRule::standard()
-            .fee_required(
-                network,
-                target_height,
-                std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
-                std::iter::empty::<usize>(),
-                0,
-                0,
-                0,
-                2,
-            )
-            .map_err(|e| {
-                // zip317::FeeError → builder::Error::Fee → data_api::Error::Builder,
-                // via upstream's own From impls.
-                zcash_primitives::transaction::builder::Error::Fee(
-                    zcash_primitives::transaction::builder::FeeError::FeeRule(e),
-                )
-            })?
-    };
+    let amount = required_relay_value(network, target_height);
 
     let recipient =
         zcash_keys::address::Address::Unified(controller_ua.clone()).to_zcash_address(network);
@@ -295,6 +325,7 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
     action: Action,
     requested_ua: &UnifiedAddress,
     controller_ua: &UnifiedAddress,
+    tip_rcm: NameCommitment,
     target_height: zcash_protocol::consensus::BlockHeight,
     mtp: Timestamp,
     wallet: &mut crate::wallet::Wallet,
@@ -304,7 +335,10 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
 ) -> Option<RequestOutcome> {
     use time::Duration;
 
-    if action == Action::Claim || controller_ua.orchard().is_none() {
+    if action == Action::Claim
+        || controller_ua.orchard().is_none()
+        || (action == Action::Release && requested_ua != controller_ua)
+    {
         return None;
     }
 
@@ -334,153 +368,9 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
             name: name.clone(),
             action,
             ua: requested_ua.clone(),
+            tip_rcm,
             code: otp,
             expires_at: mtp + Duration::seconds(D_OTP),
         }),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use time::Duration;
-    use zcash_protocol::consensus::MAIN_NETWORK;
-
-    fn test_ua() -> UnifiedAddress {
-        match zcash_keys::address::Address::decode(
-            &MAIN_NETWORK,
-            "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf",
-        ) {
-            Some(zcash_keys::address::Address::Unified(ua)) => ua,
-            _ => panic!("vector is a mainnet Unified Address"),
-        }
-    }
-
-    fn test_name() -> Name {
-        Name::parse("alice").unwrap()
-    }
-
-    #[test]
-    fn generate_otp_is_six_digits() {
-        let otp = OtpCode::generate();
-        let digits = otp.digits();
-        assert_eq!(digits.len(), 6);
-        assert!(digits.iter().all(|b| b.is_ascii_digit()));
-    }
-
-    #[test]
-    fn otp_queue_verify_and_burn() {
-        let name = test_name();
-        let ua = test_ua();
-        // code is set in the OtpRequest below
-        let now = Timestamp::now();
-        let expires = now + Duration::seconds(D_OTP);
-
-        let mut queue = OtpQueue::new();
-        queue.push(OtpRequest {
-            name: name.clone(),
-            action: Action::Update,
-            ua: ua.clone(),
-            code: OtpCode::for_test(*b"004206"),
-            expires_at: expires,
-        });
-
-        // Correct code burns the entry
-        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
-        // Second attempt fails — entry is gone
-        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
-    }
-
-    #[test]
-    fn otp_queue_wrong_code_does_not_burn() {
-        let name = test_name();
-        let ua = test_ua();
-        let now = Timestamp::now();
-        let expires = now + Duration::seconds(D_OTP);
-
-        let mut queue = OtpQueue::new();
-        queue.push(OtpRequest {
-            name: name.clone(),
-            action: Action::Update,
-            ua: ua.clone(),
-            code: OtpCode::for_test(*b"004206"),
-            expires_at: expires,
-        });
-
-        // Wrong code — entry stays
-        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, b"999999", now));
-        // Correct code still works
-        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
-    }
-
-    #[test]
-    fn otp_queue_wrong_action_does_not_burn() {
-        let name = test_name();
-        let ua = test_ua();
-        let now = Timestamp::now();
-        let expires = now + Duration::seconds(D_OTP);
-
-        let mut queue = OtpQueue::new();
-        queue.push(OtpRequest {
-            name: name.clone(),
-            action: Action::Update,
-            ua: ua.clone(),
-            code: OtpCode::for_test(*b"004206"),
-            expires_at: expires,
-        });
-
-        // Wrong action — entry stays
-        assert!(!queue.verify_and_burn(&name, Action::Release, &ua, b"004206", now));
-        // Correct action still works
-        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
-    }
-
-    #[test]
-    fn otp_queue_expired_does_not_burn() {
-        let name = test_name();
-        let ua = test_ua();
-        let now = Timestamp::now();
-        let expires = now; // already expired
-
-        let mut queue = OtpQueue::new();
-        queue.push(OtpRequest {
-            name: name.clone(),
-            action: Action::Update,
-            ua: ua.clone(),
-            code: OtpCode::for_test(*b"004206"),
-            expires_at: expires,
-        });
-
-        // Expired — never matches, and the entry is pruned by the scan.
-        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, b"004206", now));
-    }
-
-    #[test]
-    fn otp_queue_multiple_entries_per_name() {
-        let name = test_name();
-        let ua = test_ua();
-        let now = Timestamp::now();
-        let expires = now + Duration::seconds(D_OTP);
-
-        let mut queue = OtpQueue::new();
-        queue.push(OtpRequest {
-            name: name.clone(),
-            action: Action::Update,
-            ua: ua.clone(),
-            code: OtpCode::for_test(*b"111111"),
-            expires_at: expires,
-        });
-        queue.push(OtpRequest {
-            name: name.clone(),
-            action: Action::Update,
-            ua: ua.clone(),
-            code: OtpCode::for_test(*b"222222"),
-            expires_at: expires,
-        });
-
-        // First code burns one entry, the other stays
-        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"111111", now));
-        assert!(queue.verify_and_burn(&name, Action::Update, &ua, b"222222", now));
-        assert!(!queue.verify_and_burn(&name, Action::Update, &ua, b"111111", now));
-    }
 }

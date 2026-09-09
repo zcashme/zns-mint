@@ -361,6 +361,10 @@ pub struct DecryptedNameNote {
     /// fixes the note's tree position.
     pub ordinal: usize,
     pub note: orchard::note::Note,
+    /// The nullifier this ZNS-bound note reveals when spent. It must be
+    /// derived from the same authenticated `(rcm, psi)` pair as `cmx`; the
+    /// ordinary rseed-derived nullifier is not the Name Note's nullifier.
+    pub nullifier: orchard::note::Nullifier,
     /// The epk bytes directly — the `ShieldedOutput` trait method is
     /// ambiguous across the three Ironwood-family domains.
     pub ephemeral_key: zcash_note_encryption::EphemeralKeyBytes,
@@ -398,41 +402,43 @@ pub fn decrypt_name_notes<P: Parameters>(
             && bundle.flags().outputs_enabled();
         for (action_index, action) in bundle.actions().iter().enumerate() {
             if zns_capable {
-                if let Some((note, recipient, memo)) =
-                    orchard::note_encryption::ZnsIronwoodDomain::for_action(action).try_decrypt(
-                        action,
-                        &registry_ivk,
-                        |note, memo, cmx| {
-                            let payload = match NameNote::decode(network, memo) {
-                                Some(p) => p,
-                                None => return subtle::Choice::from(0),
-                            };
-                            let rcm =
-                                orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network));
-                            let psi = payload.psi(network);
-                            match note.zns_cmx(rcm, psi) {
-                                Some(computed) => computed.ct_eq(cmx),
-                                None => subtle::Choice::from(0),
-                            }
-                        },
-                    )
+                if let Some((candidate, recipient, memo)) =
+                    orchard::note_encryption::ZnsIronwoodDomain::for_action(action)
+                        .try_decrypt(action, &registry_ivk)
                 {
-                    if note.value() == orchard::value::NoteValue::ZERO
-                        && recipient == registry_recipient
-                    {
-                        let payload = NameNote::decode(network, &memo)
-                            .expect("memo was validated in callback");
-                        candidates.push(DecryptedNameNote {
-                            txid: tx.txid(),
-                            action_index,
-                            ordinal,
-                            note,
-                            ephemeral_key: zcash_note_encryption::EphemeralKeyBytes(
-                                action.encrypted_note().epk_bytes,
-                            ),
-                            memo,
-                            payload,
-                        });
+                    if let Some(payload) = NameNote::decode(network, &memo) {
+                        // The authorship check, caller-side: the memo's transition,
+                        // hashed under the ZNS binding, must reproduce the action's
+                        // published cmx.
+                        let note = candidate.note().clone();
+                        let rcm =
+                            orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network));
+                        let psi = payload.psi(network);
+                        let authored = match note.zns_cmx(rcm, psi) {
+                            Some(computed) => computed.ct_eq(candidate.cmx()),
+                            None => subtle::Choice::from(0),
+                        };
+
+                        if authored.into()
+                            && note.value() == orchard::value::NoteValue::ZERO
+                            && recipient == registry_recipient
+                        {
+                            let nullifier = note
+                                .zns_nullifier(&registry_fvk, rcm, psi)
+                                .expect("authenticated Name Note commitment is not identity");
+                            candidates.push(DecryptedNameNote {
+                                txid: tx.txid(),
+                                action_index,
+                                ordinal,
+                                note,
+                                nullifier,
+                                ephemeral_key: zcash_note_encryption::EphemeralKeyBytes(
+                                    action.encrypted_note().epk_bytes,
+                                ),
+                                memo,
+                                payload,
+                            });
+                        }
                     }
                 }
             }

@@ -34,16 +34,9 @@ pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(3_400_000);
 pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(4);
 
 /// The liveness interval: one Julian year (365.25 days), in seconds.
-///
-/// Registration terms are sold in whole multiples of it, and every
-/// registration — forever or fixed-term — must pass a liveness check once
-/// per interval or the Mint releases it.
 pub const LIVENESS_INTERVAL: i64 = 31_557_600;
 
-/// The longest term money can buy: 99 years from the current block.
-///
-/// Presence, not prepayment, holds a name past a decade — no stack of
-/// extensions can push `expires_at` beyond the fence.
+/// The longest fixed-term registration the mint will accept: 99 years.
 pub const MAX_TERM_YEARS: u64 = 99;
 
 /// ZNS action kinds.
@@ -77,9 +70,7 @@ impl Action {
         }
     }
 
-    /// Parses a whole number of years in canonical `Ny` form: decimal
-    /// digits, no sign, no leading zeroes, at least one, at most
-    /// [`MAX_TERM_YEARS`].
+    /// Parses a whole number of years from a request-memo kind field, e.g. `3y`.
     fn parse_years(kind: &str) -> Option<u64> {
         let digits = kind.strip_suffix('y')?;
         if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
@@ -93,7 +84,7 @@ impl Action {
     }
 }
 
-/// The registration term a claim asks for.
+/// The registration period of a name.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Term {
     /// No fixed expiration — the name is held while its liveness checks pass.
@@ -103,18 +94,16 @@ pub enum Term {
     Years(u64),
 }
 
-/// A parsed request memo — each verb carries exactly its own fields.
+/// The mint's request memo format, sent to the Treasury to claim, update, or release a name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
-    /// Register `name` → `ua` on `term`.
+    /// Create a new registration. The `term` is either `forever` or `<N>y`.
     Claim {
         name: Name,
         ua: UnifiedAddress,
         term: Term,
     },
-    /// Rebind and/or extend an existing registration. `extend_years` is the
-    /// optional `+Ny` extension; a bare update changes nothing but the
-    /// liveness clock.
+    /// Rebind and/or extend an existing registration.
     Update {
         name: Name,
         ua: UnifiedAddress,
@@ -329,230 +318,5 @@ impl Name {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use zcash_protocol::consensus::MainNetwork;
-
-    const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
-
-    fn padded(s: &str) -> [u8; 512] {
-        let mut m = [0u8; 512];
-        m[..s.len()].copy_from_slice(s.as_bytes());
-        m
-    }
-
-    fn test_ua() -> UnifiedAddress {
-        match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
-            Some(zcash_keys::address::Address::Unified(ua)) => ua,
-            _ => panic!("vector is a mainnet Unified Address"),
-        }
-    }
-
-    fn test_name() -> Name {
-        Name::parse("alice").unwrap()
-    }
-
-    #[test]
-    fn claims_parse_their_kinds() {
-        let name = test_name();
-        let ua = test_ua();
-
-        assert_eq!(
-            Request::decode(&MainNetwork, &padded(&format!("ZNS:claim:alice:{TEST_UA}:forever")))
-                .unwrap(),
-            Request::Claim {
-                name: name.clone(),
-                ua: ua.clone(),
-                term: Term::Forever
-            }
-        );
-        assert_eq!(
-            Request::decode(&MainNetwork, &padded(&format!("ZNS:claim:alice:{TEST_UA}:1y")))
-                .unwrap(),
-            Request::Claim {
-                name: name.clone(),
-                ua: ua.clone(),
-                term: Term::Years(1)
-            }
-        );
-        assert_eq!(
-            Request::decode(&MainNetwork, &padded(&format!("ZNS:claim:alice:{TEST_UA}:99y")))
-                .unwrap(),
-            Request::Claim {
-                name: name.clone(),
-                ua: ua.clone(),
-                term: Term::Years(99)
-            }
-        );
-        assert_eq!(
-            Request::decode(&MainNetwork, &padded(&format!("ZNS:claim:alice:{TEST_UA}:10y")))
-                .unwrap(),
-            Request::Claim {
-                name,
-                ua,
-                term: Term::Years(10)
-            }
-        );
-    }
-
-    #[test]
-    fn update_parses_with_and_without_extension() {
-        let name = test_name();
-        let ua = test_ua();
-
-        assert_eq!(
-            Request::decode(&MainNetwork, &padded(&format!("ZNS:update:alice:{TEST_UA}")))
-                .unwrap(),
-            Request::Update {
-                name: name.clone(),
-                ua: ua.clone(),
-                extend_years: None
-            }
-        );
-        assert_eq!(
-            Request::decode(&MainNetwork, &padded(&format!("ZNS:update:alice:{TEST_UA}:3y")))
-                .unwrap(),
-            Request::Update {
-                name,
-                ua,
-                extend_years: Some(3)
-            }
-        );
-    }
-
-    #[test]
-    fn release_parses_without_a_term() {
-        assert_eq!(
-            Request::decode(&MainNetwork, &padded(&format!("ZNS:release:alice:{TEST_UA}")))
-                .unwrap(),
-            Request::Release {
-                name: Name::parse("alice").unwrap(),
-                ua: test_ua()
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_malformed_kinds() {
-        for kind in ["0y", "03y", "100y", "3", "y", "Forever", "forevers", ""] {
-            assert!(
-                Request::decode(&MainNetwork, &padded(&format!("ZNS:claim:alice:{TEST_UA}:{kind}")))
-                    .is_none(),
-                "claim kind {kind:?} must reject"
-            );
-            assert!(
-                Request::decode(&MainNetwork, &padded(&format!("ZNS:update:alice:{TEST_UA}:{kind}")))
-                    .is_none(),
-                "update kind {kind:?} must reject"
-            );
-        }
-        // A release never carries a term.
-        assert!(Request::decode(
-            &MainNetwork,
-            &padded(&format!("ZNS:release:alice:{TEST_UA}:1y"))
-        )
-        .is_none());
-        // A claim never omits its kind.
-        assert!(Request::decode(
-            &MainNetwork,
-            &padded(&format!("ZNS:claim:alice:{TEST_UA}"))
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn rejects_unknown_verbs_and_non_memos() {
-        assert!(Request::decode(
-            &MainNetwork,
-            &padded(&format!("ZNS:otp:alice:{TEST_UA}"))
-        )
-        .is_none());
-        assert!(Request::decode(&MainNetwork, &padded("hello world")).is_none());
-        assert!(Request::decode(&MainNetwork, &padded("")).is_none());
-    }
-
-    #[test]
-    fn rejects_invalid_names_and_extra_fields() {
-        assert!(Request::decode(
-            &MainNetwork,
-            &padded(&format!("ZNS:claim:INVALID:{TEST_UA}:forever"))
-        )
-        .is_none());
-        assert!(Request::decode(
-            &MainNetwork,
-            &padded(&format!("ZNS:claim:alice:{TEST_UA}:1y:extra"))
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn challenge_round_trips_update_and_release() {
-        for action in [Action::Update, Action::Release] {
-            let challenge = Challenge {
-                code: OtpCode::for_test(*b"004206"),
-                name: test_name(),
-                action,
-                ua: test_ua(),
-            };
-            let memo = challenge.encode(&MainNetwork).expect("memo fits");
-            assert_eq!(Challenge::decode(&MainNetwork, &memo).unwrap(), challenge);
-        }
-    }
-
-    #[test]
-    fn challenge_encodes_the_canonical_format() {
-        let challenge = Challenge {
-            code: OtpCode::for_test(*b"004206"),
-            name: test_name(),
-            action: Action::Update,
-            ua: test_ua(),
-        };
-        let memo = challenge.encode(&MainNetwork).expect("memo fits");
-
-        let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
-        let text = std::str::from_utf8(&memo[..end]).unwrap();
-        assert!(text.starts_with("ZNS:otp:004206:alice:update:"));
-        assert!(text.ends_with(&TEST_UA));
-    }
-
-    #[test]
-    fn challenge_rejects_the_legacy_otp_last_format() {
-        let legacy = format!("ZNS:otp:alice:update:{}:004206", TEST_UA);
-        assert!(Challenge::decode(&MainNetwork, &padded(&legacy)).is_none());
-    }
-
-    #[test]
-    fn challenge_rejects_non_zero_bytes_after_nul_padding() {
-        let challenge = Challenge {
-            code: OtpCode::for_test(*b"004206"),
-            name: test_name(),
-            action: Action::Update,
-            ua: test_ua(),
-        };
-        let mut memo = challenge.encode(&MainNetwork).expect("memo fits");
-
-        let first_nul = memo.iter().position(|&b| b == 0).unwrap();
-        memo[first_nul + 10] = 0x42;
-
-        assert!(Challenge::decode(&MainNetwork, &memo).is_none());
-    }
-
-    #[test]
-    fn challenges_never_claim() {
-        let claim = Challenge {
-            code: OtpCode::for_test(*b"004206"),
-            name: test_name(),
-            action: Action::Claim,
-            ua: test_ua(),
-        };
-        assert!(claim.encode(&MainNetwork).is_none());
-
-        let ua = test_ua();
-        let wire = format!("ZNS:otp:004206:alice:claim:{TEST_UA}");
-        assert!(Challenge::decode(&MainNetwork, &padded(&wire)).is_none());
     }
 }

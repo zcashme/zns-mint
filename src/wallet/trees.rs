@@ -201,7 +201,7 @@ impl Wallet {
     ///
     /// `Ok(None)` means no witness exists yet at that checkpoint (note not
     /// yet observed under that anchor); errors are tree-structural.
-    pub(crate) fn ironwood_witness(
+    pub fn ironwood_witness(
         &mut self,
         position: Position,
         anchor_height: BlockHeight,
@@ -218,7 +218,7 @@ impl Wallet {
 
     /// The Ironwood tree root at `anchor_height` as an Orchard-family
     /// anchor for the builder.
-    pub(crate) fn ironwood_anchor(
+    pub fn ironwood_anchor(
         &mut self,
         anchor_height: BlockHeight,
     ) -> Result<Option<orchard::tree::Anchor>, TreeError> {

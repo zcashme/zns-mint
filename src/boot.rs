@@ -5,7 +5,9 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use secrecy::{ExposeSecret, Secret};
-use zcash_protocol::consensus::{BlockHeight, MainNetwork, Parameters};
+#[cfg(not(feature = "regtest"))]
+use zcash_protocol::consensus::MainNetwork;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 #[cfg(feature = "regtest")]
 use zcash_protocol::local_consensus::LocalNetwork;
 use zip32::fingerprint::SeedFingerprint;
@@ -13,14 +15,12 @@ use zip32::fingerprint::SeedFingerprint;
 #[cfg(not(feature = "regtest"))]
 use std::str::FromStr;
 
-use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
 use zeroize::Zeroize;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::mtp::MtpTracker;
 use crate::mint::otp::OtpQueue;
 use crate::mint::pricing::Oracle;
-use crate::mint::registry::Registry;
 use crate::mint::{MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
@@ -31,30 +31,32 @@ use zcash_client_backend::data_api::chain::ChainState;
 // Boot life-cycle
 // ---------------------------------------------------------------------------
 
-/// The boot product: constructed only at the ladder's tail, so a `Boot`
-/// value is the certificate that every rung held. Consumed exactly once, by
-/// the orchestrator's exhaustive destructure — the seam contract, one
-/// criterion line per field.
+/// The boot product: constructed only after every boot check succeeds.
+/// Consumed exactly once by `main`'s exhaustive destructure — the seam
+/// contract, one criterion line per field.
 pub struct Boot<P: Parameters> {
     /// verified: boot-to-loop consensus — the loop never discovers parameters
     pub network: P,
-    /// acquired: boot consumed it in the liveness rung
+    /// acquired: boot proved that both Zebra transports are live
     pub chain: ChainClient,
     /// produced: trees seeded from the verified origin
     pub wallet: Wallet,
-    /// boot-initialized faculty: the name chain, born empty
-    pub registry: Registry,
-    /// produced: the only legal first `from_state`
+    /// verified: the block-before-birthday checkpoint from which `main`
+    /// reconstructs the wallet and Registry projections
     pub origin: ChainState,
     /// cannot: derived from the seed — the seed dies before this exists
     pub treasury_keys: TreasuryKeys,
     /// cannot: derived from the seed
     pub registry_keys: RegistryKeys,
+    /// must not fail after attestation: hash-verified before the report
+    pub sapling_spend: SpendParameters,
+    /// must not fail after attestation: hash-verified before the report
+    pub sapling_output: OutputParameters,
     /// produced: backfilled before the first scan
     pub mtp: MtpTracker,
     /// must not: fail-closed at birth — the first price or no start
     pub oracle: Oracle,
-    /// boot-initialized faculty: born empty, filled by the run loop
+    /// boot-initialized faculty: born empty, filled by `main`
     pub pending_challenges: OtpQueue,
 }
 
@@ -65,11 +67,12 @@ const NETWORK_LABEL: &str = "mainnet";
 #[cfg(feature = "regtest")]
 const NETWORK_LABEL: &str = "regtest";
 
+#[cfg(not(feature = "regtest"))]
 impl Boot<MainNetwork> {
     /// Production entry point. This is deliberately parameterless and only
     /// permits the mainnet parameters compiled by librustzcash.
-    pub async fn run() -> Self {
-        Self::run_with_network(zcash_protocol::consensus::MAIN_NETWORK).await
+    pub async fn start() -> Self {
+        Self::start_with_network(zcash_protocol::consensus::MAIN_NETWORK).await
     }
 }
 
@@ -77,15 +80,15 @@ impl Boot<MainNetwork> {
 impl Boot<LocalNetwork> {
     /// Development-harness entry point. It is unavailable unless the
     /// development-only `regtest` feature is compiled in.
-    pub async fn run_regtest() -> Self {
-        Self::run_with_network(regtest_network()).await
+    pub async fn start() -> Self {
+        Self::start_with_network(regtest_network()).await
     }
 }
 
 impl<P: Parameters> Boot<P> {
     /// Boot sequence for a concrete, boot-owned network parameter set.
     ///
-    async fn run_with_network(network: P) -> Self {
+    async fn start_with_network(network: P) -> Self {
         tracing::info!("boot: starting");
 
         // 1. Liveness + connect: confirm both Zebra transports, get chain client.
@@ -165,7 +168,14 @@ impl<P: Parameters> Boot<P> {
         // loop as liveness challenges and update/release relays are issued.
         let pending_challenges = OtpQueue::new();
 
-        // 4. Attestation (production only)
+        // 4. Sapling proving parameters. Loading and hash verification happen
+        // before attestation: a mint that produces a report can also prove
+        // every transaction shape it is responsible for broadcasting.
+        let sapling_spend = load_sapling_spend_params();
+        let sapling_output = load_sapling_output_params();
+
+        // 5. Attestation (production only). Nothing fallible is acquired
+        // after this point.
         #[cfg(not(feature = "regtest"))]
         {
             let report_data =
@@ -188,16 +198,16 @@ impl<P: Parameters> Boot<P> {
             network,
             chain: chain_client,
             wallet,
-            registry: Registry::new(),
             origin,
             treasury_keys,
             registry_keys,
+            sapling_spend,
+            sapling_output,
             mtp,
             oracle,
             pending_challenges,
         }
     }
-
 }
 
 pub use crate::wallet::block_metadata;
@@ -330,7 +340,10 @@ fn decrypt_capsule(blob: &[u8], raw_key: &[u8; 32]) -> Secret<[u8; 32]> {
 }
 
 //where does the mint fetch the seealing private key
+#[cfg(target_os = "linux")]
 fn derive_sealing_key() -> [u8; 32] {
+    use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
+
     let mut firmware = Firmware::open()
         .expect("FATAL: SEV-SNP firmware not available — cannot derive sealing key");
 
@@ -352,6 +365,11 @@ fn derive_sealing_key() -> [u8; 32] {
     firmware
         .get_derived_key(Some(1), request)
         .expect("FATAL: failed to derive SEV-SNP VCEK sealing key")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn derive_sealing_key() -> [u8; 32] {
+    panic!("FATAL: the mint boots only on AMD SEV-SNP Linux. This platform cannot hold the seed.")
 }
 
 static SEED_FINGERPRINT_RAW: &str = "PLACEHOLDER";
@@ -454,6 +472,7 @@ fn generate_attestation_report_data<P: Parameters>(
     report_data
 }
 
+#[cfg(target_os = "linux")]
 fn generate_mint_attestation(report_data: [u8; 64]) -> Vec<u8> {
     use sev::firmware::guest::Firmware;
 
@@ -465,6 +484,11 @@ fn generate_mint_attestation(report_data: [u8; 64]) -> Vec<u8> {
     firmware
         .get_report(None, Some(report_data), None)
         .expect("FATAL: failed to request SEV-SNP attestation report")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn generate_mint_attestation(_report_data: [u8; 64]) -> Vec<u8> {
+    panic!("FATAL: mint attestation requires AMD SEV-SNP Linux.")
 }
 
 // ---------------------------------------------------------------------------
