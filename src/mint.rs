@@ -39,10 +39,6 @@ pub const LIVENESS_INTERVAL: i64 = 31_557_600;
 /// The longest fixed-term registration the mint will accept: 99 years.
 pub const MAX_TERM_YEARS: u64 = 99;
 
-/// The confirmations an inbound request message — claim payment, update or
-/// release request, or OTP echo — must have before the mint acts on it.
-pub const REQUEST_CONFIRMATIONS: u32 = 10;
-
 /// The blocks past the target height at which a mint-built transaction
 /// expires unmined.
 pub const TRANSACTION_EXPIRY_BUFFER: u32 = 20;

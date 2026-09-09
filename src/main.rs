@@ -19,7 +19,6 @@ use zcash_client_backend::data_api::{
 };
 use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
 use zcash_client_backend::scanning::{Nullifiers, ScanningKeys};
-use zcash_client_backend::wallet::NoteId;
 use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
 use zcash_primitives::transaction::fees::zip317::{FeeRule, P2PKH_STANDARD_OUTPUT_SIZE};
 use zcash_primitives::transaction::fees::FeeRule as _;
@@ -40,7 +39,6 @@ use zns_mint::mint::{
 use zns_mint::zcash::{self, CanonicalBlockSource, JsonRpc, SubmitOutcome};
 
 const RETRY_PAUSE: Duration = Duration::from_secs(5);
-const REQUEST_CONFIRMATIONS: u32 = 10;
 const TRANSACTION_EXPIRY_BUFFER: u32 = 20;
 const CHALLENGE_WINDOW: i64 = D_OTP;
 
@@ -59,7 +57,7 @@ async fn main() {
         sapling_output,
         mut mtp,
         mut oracle,
-        mut pending_challenges,
+        mut challenges,
     } = Boot::start().await;
 
     let rpc = JsonRpc::new();
@@ -67,10 +65,6 @@ async fn main() {
     let scanning_keys = ScanningKeys::from_account_ufvks(wallet.ufvk_map().clone());
     let mut chain_tip = block_metadata(&origin);
     let mut registry: Option<Registry> = None;
-    // The request memo remains the source of every requested transition.
-    // This index carries only the join from an echoed OTP back to the exact
-    // Treasury note consumed by the challenge transaction.
-    let mut challenged_requests: Vec<([u8; 6], NoteId, time::Timestamp)> = Vec::new();
 
     tracing::info!(
         height = u32::from(chain_tip.block_height()),
@@ -190,8 +184,7 @@ async fn main() {
                 })
                 .await
                 .expect("FATAL: MTP reconstruction after reorg failed");
-                pending_challenges = OtpQueue::new();
-                challenged_requests.clear();
+                challenges = OtpQueue::new();
                 tracing::warn!(
                     height = u32::from(ancestor),
                     hash = %chain_tip.block_hash(),
@@ -475,13 +468,6 @@ async fn main() {
                 let Some(payment_height) = payment.mined_height() else {
                     continue;
                 };
-                if u32::from(tip)
-                    .saturating_sub(u32::from(payment_height))
-                    .saturating_add(1)
-                    < REQUEST_CONFIRMATIONS
-                {
-                    continue;
-                }
                 let memo = wallet
                     .get_memo(*payment.internal_note_id())
                     .expect("FATAL: Treasury memo lookup failed");
@@ -512,7 +498,7 @@ async fn main() {
                     .expect("registration quote fits the Zcash monetary range"),
                 };
                 let Some(claim_note) = registry.authorize(
-                    &mut pending_challenges,
+                    &mut challenges,
                     decoded.expect("claim pattern matched above"),
                     None,
                     mtp_now,
@@ -584,13 +570,6 @@ async fn main() {
                 let Some(request_height) = request_note.mined_height() else {
                     continue;
                 };
-                if u32::from(tip)
-                    .saturating_sub(u32::from(request_height))
-                    .saturating_add(1)
-                    < REQUEST_CONFIRMATIONS
-                {
-                    continue;
-                }
                 let memo = wallet
                     .get_memo(*request_note.internal_note_id())
                     .expect("FATAL: Treasury memo lookup failed");
@@ -599,13 +578,11 @@ async fn main() {
                 let Some(request) = Request::decode(&network, memo.as_array()) else {
                     continue;
                 };
-                let (name, action, requested_ua) = match request {
-                    Request::Update {
-                        name,
-                        ua,
-                        extend_years: _,
-                    } => (name, Action::Update, ua),
-                    Request::Release { name, ua } => (name, Action::Release, ua),
+                let (name, action, requested_ua, extend_years) = match request {
+                    Request::Update { name, ua, extend_years } => {
+                        (name, Action::Update, ua, extend_years)
+                    }
+                    Request::Release { name, ua } => (name, Action::Release, ua, None),
                     Request::Claim { .. } => continue,
                 };
                 let Some(record) = registry.record(&name).cloned() else {
@@ -615,7 +592,7 @@ async fn main() {
                     || record.expires_at.expired(mtp_now)
                     || request_height <= record.confirmed_height
                     || (action == Action::Release && requested_ua != record.ua)
-                    || pending_challenges.has_live(
+                    || challenges.pending(
                         &name,
                         action,
                         &requested_ua,
@@ -665,6 +642,7 @@ async fn main() {
                     tip_rcm: record.commitment,
                     code,
                     expires_at: mtp_now + time::Duration::seconds(D_OTP),
+                    extend_years,
                 };
                 let accepted = loop {
                     match source.send_transaction(&transaction).await {
@@ -691,12 +669,7 @@ async fn main() {
                     }
                 };
                 if accepted {
-                    challenged_requests.push((
-                        pending.code.digits(),
-                        *request_note.internal_note_id(),
-                        pending.expires_at,
-                    ));
-                    pending_challenges.push(pending);
+                    challenges.issue(pending);
                     tracing::info!(
                         txid = %transaction.txid(),
                         name = %name.as_str(),
@@ -706,21 +679,11 @@ async fn main() {
                 }
             }
 
-            // Echoes. The exact pending request supplies any update extension
-            // that was not repeated in the challenge sentence. Authorization
-            // is burned on a clone and committed only after Zebra accepts the
-            // transaction that consumes the echo and current Name Note.
+            // Returns authorize transitions.
             let echo_messages =
                 wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip));
             for echo_note in echo_messages {
-                let Some(echo_height) = echo_note.mined_height() else {
-                    continue;
-                };
-                if u32::from(tip)
-                    .saturating_sub(u32::from(echo_height))
-                    .saturating_add(1)
-                    < REQUEST_CONFIRMATIONS
-                {
+                if echo_note.mined_height().is_none() {
                     continue;
                 }
                 let memo = wallet
@@ -737,47 +700,23 @@ async fn main() {
                 if record.action == Action::Release {
                     continue;
                 }
-                let digits = challenge.code.digits();
-                challenged_requests.retain(|(_, _, expires_at)| mtp_now < *expires_at);
-                let original_request =
-                    challenged_requests
-                        .iter()
-                        .find_map(|(pending_code, request_note_id, _)| {
-                            if pending_code != &digits {
-                                return None;
-                            }
-                            let memo = wallet.get_memo(*request_note_id).ok().flatten()?.encode();
-                            let request = Request::decode(&network, memo.as_array())?;
-                            let same_request = match &request {
-                                Request::Update { name, ua, .. } => {
-                                    challenge.action == Action::Update
-                                        && name == &challenge.name
-                                        && ua == &challenge.ua
-                                }
-                                Request::Release { name, ua } => {
-                                    challenge.action == Action::Release
-                                        && name == &challenge.name
-                                        && ua == &challenge.ua
-                                }
-                                Request::Claim { .. } => false,
-                            };
-                            same_request.then_some((*request_note_id, request))
-                        });
-                let (request_note_id, request) = match original_request {
-                    Some((request_note_id, request)) => (Some(request_note_id), request),
-                    // A lifecycle challenge has no inbound request note. Its
-                    // echo only re-proves the unchanged controller binding.
-                    None if challenge.action == Action::Update && challenge.ua == record.ua => (
-                        None,
-                        Request::Update {
-                            name: challenge.name.clone(),
-                            ua: challenge.ua.clone(),
-                            extend_years: None,
-                        },
-                    ),
-                    None => continue,
+                let Some(sent) = challenges.awaiting(&challenge, mtp_now) else {
+                    continue;
                 };
-                let mut authorized_challenges = pending_challenges.clone();
+                let digits = sent.code.digits();
+                let request = match challenge.action {
+                    Action::Update => Request::Update {
+                        name: challenge.name.clone(),
+                        ua: challenge.ua.clone(),
+                        extend_years: sent.extend_years,
+                    },
+                    Action::Release => Request::Release {
+                        name: challenge.name.clone(),
+                        ua: challenge.ua.clone(),
+                    },
+                    Action::Claim => continue,
+                };
+                let mut authorized_challenges = challenges.clone();
                 let Some(transition_note) =
                     registry.authorize(&mut authorized_challenges, request, Some(&digits), mtp_now)
                 else {
@@ -829,10 +768,7 @@ async fn main() {
                     }
                 };
                 if accepted {
-                    if let Some(request_note_id) = request_note_id {
-                        challenged_requests.retain(|(_, note_id, _)| *note_id != request_note_id);
-                    }
-                    pending_challenges = authorized_challenges;
+                    challenges = authorized_challenges;
                     tracing::info!(
                         txid = %transaction.txid(),
                         name = %challenge.name.as_str(),
@@ -911,7 +847,7 @@ async fn main() {
 
                 let due_in = record.release_deadline.as_seconds() - mtp_now.as_seconds();
                 if due_in > CHALLENGE_WINDOW
-                    || pending_challenges.has_live(
+                    || challenges.pending(
                         &name,
                         Action::Update,
                         &record.ua,
@@ -959,6 +895,7 @@ async fn main() {
                     tip_rcm: record.commitment,
                     code,
                     expires_at: mtp_now + time::Duration::seconds(D_OTP),
+                    extend_years: None,
                 };
                 let accepted = loop {
                     match source.send_transaction(&transaction).await {
@@ -986,7 +923,7 @@ async fn main() {
                     }
                 };
                 if accepted {
-                    pending_challenges.push(pending);
+                    challenges.issue(pending);
                     tracing::info!(
                         txid = %transaction.txid(),
                         name = %name.as_str(),
@@ -1002,17 +939,12 @@ async fn main() {
             let mut sweep_notes =
                 wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip));
             sweep_notes.retain(|note| {
-                let confirmed = note.mined_height().is_some_and(|height| {
-                    u32::from(tip)
-                        .saturating_sub(u32::from(height))
-                        .saturating_add(1)
-                        >= REQUEST_CONFIRMATIONS
-                });
+                let mined = note.mined_height().is_some();
                 let empty_memo = matches!(
                     wallet.get_memo(*note.internal_note_id()),
                     Ok(None) | Ok(Some(Memo::Empty))
                 );
-                confirmed && empty_memo
+                mined && empty_memo
             });
             let sweep_funding = sweep_notes.iter().fold(Zatoshis::ZERO, |total, note| {
                 (total

@@ -57,7 +57,7 @@ pub struct Boot<P: Parameters> {
     /// must not: fail-closed at birth — the first price or no start
     pub oracle: Oracle,
     /// boot-initialized faculty: born empty, filled by `main`
-    pub pending_challenges: OtpQueue,
+    pub challenges: OtpQueue,
 }
 
 /// Network label for logging.
@@ -166,7 +166,7 @@ impl<P: Parameters> Boot<P> {
 
         // The challenge memory: empty by construction, filled by the run
         // loop as liveness challenges and update/release relays are issued.
-        let pending_challenges = OtpQueue::new();
+        let challenges = OtpQueue::new();
 
         // 4. Sapling proving parameters. Loading and hash verification happen
         // before attestation: a mint that produces a report can also prove
@@ -205,7 +205,7 @@ impl<P: Parameters> Boot<P> {
             sapling_output,
             mtp,
             oracle,
-            pending_challenges,
+            challenges,
         }
     }
 }

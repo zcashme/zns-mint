@@ -213,7 +213,7 @@ impl Registry {
     /// are dropped: the name was simply not renewed.
     pub fn authorize(
         &self,
-        pending_challenges: &mut OtpQueue,
+        challenges: &mut OtpQueue,
         request: Request,
         otp: Option<&[u8; 6]>,
         mtp: Timestamp,
@@ -258,7 +258,7 @@ impl Registry {
                     return None;
                 }
                 let otp = otp?;
-                if !pending_challenges.verify_and_burn(
+                if !challenges.accept(
                     &name,
                     Action::Update,
                     &ua,
@@ -301,7 +301,7 @@ impl Registry {
                     return None;
                 }
                 let otp = otp?;
-                if !pending_challenges.verify_and_burn(
+                if !challenges.accept(
                     &name,
                     Action::Release,
                     &ua,
