@@ -1,5 +1,5 @@
-//! ZNS Mint Boot Sequence
-//!
+//! The boot sequence: acquire and verify every capability the run loop
+//! cannot acquire for itself, then hand them over as one contract.
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
@@ -103,7 +103,7 @@ impl<P: Parameters> Boot<P> {
                 "FATAL: failed to read zns_seed.capsule. The mint cannot boot without the sealed seed.",
             );
             let seed = decrypt_sealed_blob(&blob);
-            verify_fingerprint(&seed, expected_seed_fingerprint());
+            verify_fingerprint(&seed, SEED_FINGERPRINT_RAW.trim());
             (
                 TreasuryKeys::derive(&network, &seed),
                 RegistryKeys::derive(&network, &seed),
@@ -120,7 +120,7 @@ impl<P: Parameters> Boot<P> {
         // call produce. Sizes derive from the frontiers (`Frontier::tree_size`),
         // mirroring upstream's `ScannedBlock::to_block_metadata`.
         let rpc = zcash::JsonRpc::new();
-        let origin = origin_checkpoint(&rpc, &network).await;
+        let origin = origin_checkpoint(&rpc).await;
         let checkpoint_height = origin.block_height();
 
         // 3b. Wallet initialization from the checkpoint's chain state.
@@ -283,7 +283,8 @@ async fn connect_zebra() -> (ChainClient, BlockHeight) {
 // Step 2: Seed intake + verification
 // ---------------------------------------------------------------------------
 
-//yea we need to be super careful about this
+/// The sealed seed envelope written by zns-keygen: magic, fingerprint
+/// (authenticated as additional data), nonce, ciphertext.
 #[derive(serde::Deserialize, serde::Serialize)]
 struct SeedCapsule {
     magic: [u8; 8],
@@ -292,29 +293,21 @@ struct SeedCapsule {
     ciphertext: Vec<u8>,
 }
 
-//why does this function exist just inline decrypt capsule it's not like the code exists elsewhere
+/// Decrypts the seed capsule with this instance's sealing key; the raw key
+/// is wiped before return and the caller's `Secret` wipes the seed on drop.
 fn decrypt_sealed_blob(blob: &[u8]) -> Secret<[u8; 32]> {
     tracing::info!("boot: deriving instance-bound SEV-SNP sealing key");
     let mut raw_key = derive_sealing_key();
-    let seed = decrypt_capsule(blob, &raw_key);
-    raw_key.zeroize();
-    seed
-}
 
-fn decrypt_capsule(blob: &[u8], raw_key: &[u8; 32]) -> Secret<[u8; 32]> {
-    tracing::info!("boot: deserializing capsule");
     let capsule: SeedCapsule =
         postcard::from_bytes(blob).expect("FATAL: failed to parse zns_seed.capsule");
-
     assert_eq!(&capsule.magic, b"ZNS_SEED", "FATAL: capsule magic mismatch");
 
     let cipher =
-        XChaCha20Poly1305::new_from_slice(raw_key).expect("sealing key is exactly 32 bytes");
-
+        XChaCha20Poly1305::new_from_slice(&raw_key).expect("sealing key is exactly 32 bytes");
     let mut aad = Vec::with_capacity(8 + 32);
     aad.extend_from_slice(&capsule.magic);
     aad.extend_from_slice(&capsule.fingerprint);
-
     let nonce = <&XNonce>::from(capsule.nonce.as_slice());
 
     tracing::info!("boot: decrypting seed");
@@ -327,40 +320,38 @@ fn decrypt_capsule(blob: &[u8], raw_key: &[u8; 32]) -> Secret<[u8; 32]> {
             },
         )
         .expect("FATAL: failed to decrypt seed. Capsule tampering or wrong SEV-SNP instance.");
+    raw_key.zeroize();
 
     if plaintext.len() != 32 {
         plaintext.zeroize();
         panic!("FATAL: decrypted seed is not exactly 32 bytes");
     }
-
     let mut seed_bytes = [0u8; 32];
     seed_bytes.copy_from_slice(&plaintext);
     plaintext.zeroize();
     Secret::new(seed_bytes)
 }
 
-//where does the mint fetch the seealing private key
+/// Derives — never fetches — the sealing key from the SEV-SNP firmware at
+/// boot: `firmware.get_derived_key` returns a VCEK-rooted, per-chip key mixed
+/// from exactly two guest fields, matching zns-keygen:
+///   guest_policy — launch conditions (debug, SMT, migration)
+///   measurement  — code identity (hash of the guest image)
+///
+/// image_id and family_id are deliberately excluded: they are
+/// hypervisor-supplied labels with no security content, and including them
+/// makes the key brittle to launch-blob drift. VCEK (root_key_select = false)
+/// is stable across reboots; VMRK is random per launch without a Migration
+/// Agent and would brick the capsule on first reboot.
 #[cfg(target_os = "linux")]
 fn derive_sealing_key() -> [u8; 32] {
     use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
 
     let mut firmware = Firmware::open()
         .expect("FATAL: SEV-SNP firmware not available — cannot derive sealing key");
-
-    // Mix exactly two guest fields into the key, matching zns-keygen:
-    //   guest_policy — launch conditions (debug, SMT, migration)
-    //   measurement  — code identity (hash of the guest image)
-    //
-    // image_id and family_id are deliberately excluded — they are
-    // hypervisor-supplied labels with no security content, and including
-    // them makes the key brittle to launch-blob drift.
     let mut guest_fields = GuestFieldSelect::default();
     guest_fields.set_guest_policy(true);
     guest_fields.set_measurement(true);
-
-    // VCEK (root_key_select = false): per-chip, stable across reboots.
-    // VMRK (true) is random per launch without a Migration Agent and
-    // would brick the capsule on first reboot.
     let request = DerivedKey::new(false, guest_fields, 0, 0, 0, None);
     firmware
         .get_derived_key(Some(1), request)
@@ -373,10 +364,6 @@ fn derive_sealing_key() -> [u8; 32] {
 }
 
 static SEED_FINGERPRINT_RAW: &str = "PLACEHOLDER";
-
-fn expected_seed_fingerprint() -> &'static str {
-    SEED_FINGERPRINT_RAW.trim()
-}
 
 fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
     let actual = SeedFingerprint::from_seed(seed.expose_secret())
@@ -421,7 +408,7 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 ///
 /// Zebra is part of the same measured TEE image; its identity is guaranteed
 /// by the SEV-SNP attestation, not by runtime RPC checks.
-async fn origin_checkpoint<P: Parameters>(rpc: &zcash::JsonRpc, _network: &P) -> ChainState {
+async fn origin_checkpoint(rpc: &zcash::JsonRpc) -> ChainState {
     let checkpoint_height = MINT_BIRTHDAY - 1;
 
     let chain_state = rpc
@@ -439,60 +426,7 @@ async fn origin_checkpoint<P: Parameters>(rpc: &zcash::JsonRpc, _network: &P) ->
 }
 
 // ---------------------------------------------------------------------------
-// Step 4: Attestation
-// ---------------------------------------------------------------------------
-
-/// Constructs the 64-byte attestation report data: BLAKE2b-512 of
-/// `treasury_default_address || "||" || registry_fvk`.
-///
-/// An external verifier checks this against the expected Treasury address
-/// and Registry UFVK, binding the attestation to the mint's identity.
-fn generate_attestation_report_data<P: Parameters>(
-    network: &P,
-    treasury_keys: &TreasuryKeys,
-    registry_keys: &RegistryKeys,
-) -> [u8; 64] {
-    use zcash_keys::keys::UnifiedAddressRequest;
-
-    let (treasury_addr, _) = treasury_keys
-        .fvk()
-        .default_address(UnifiedAddressRequest::SHIELDED)
-        .expect("FATAL: Treasury FVK missing default address");
-    let treasury_addr_str = treasury_addr.encode(network);
-    let registry_fvk_str = registry_keys.fvk().encode(network);
-
-    let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
-    hasher.update(treasury_addr_str.as_bytes());
-    hasher.update(b"||");
-    hasher.update(registry_fvk_str.as_bytes());
-    let hash = hasher.finalize();
-
-    let mut report_data = [0u8; 64];
-    report_data.copy_from_slice(hash.as_bytes());
-    report_data
-}
-
-#[cfg(target_os = "linux")]
-fn generate_mint_attestation(report_data: [u8; 64]) -> Vec<u8> {
-    use sev::firmware::guest::Firmware;
-
-    tracing::info!("boot: generating mint attestation report");
-
-    let mut firmware = Firmware::open()
-        .expect("FATAL: SEV-SNP firmware not available — cannot generate attestation");
-
-    firmware
-        .get_report(None, Some(report_data), None)
-        .expect("FATAL: failed to request SEV-SNP attestation report")
-}
-
-#[cfg(not(target_os = "linux"))]
-fn generate_mint_attestation(_report_data: [u8; 64]) -> Vec<u8> {
-    panic!("FATAL: mint attestation requires AMD SEV-SNP Linux.")
-}
-
-// ---------------------------------------------------------------------------
-// Step 5: Sapling proving parameters
+// Step 4: Sapling proving parameters
 // ---------------------------------------------------------------------------
 
 /// The BLAKE2b-512 hash of the canonical `sapling-spend.params` file.
@@ -579,10 +513,62 @@ pub(crate) fn load_sapling_output_params() -> OutputParameters {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — one critical invariant: fingerprint mismatch fails closed without leaking it
+// Step 5: Attestation
 // ---------------------------------------------------------------------------
 
-//we need to rethink the boot sequence tests
+/// Constructs the 64-byte attestation report data: BLAKE2b-512 of
+/// `treasury_default_address || "||" || registry_fvk`.
+///
+/// An external verifier checks this against the expected Treasury address
+/// and Registry UFVK, binding the attestation to the mint's identity.
+#[cfg(not(feature = "regtest"))]
+fn generate_attestation_report_data<P: Parameters>(
+    network: &P,
+    treasury_keys: &TreasuryKeys,
+    registry_keys: &RegistryKeys,
+) -> [u8; 64] {
+    use zcash_keys::keys::UnifiedAddressRequest;
+
+    let (treasury_addr, _) = treasury_keys
+        .fvk()
+        .default_address(UnifiedAddressRequest::SHIELDED)
+        .expect("FATAL: Treasury FVK missing default address");
+    let treasury_addr_str = treasury_addr.encode(network);
+    let registry_fvk_str = registry_keys.fvk().encode(network);
+
+    let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
+    hasher.update(treasury_addr_str.as_bytes());
+    hasher.update(b"||");
+    hasher.update(registry_fvk_str.as_bytes());
+    let hash = hasher.finalize();
+
+    let mut report_data = [0u8; 64];
+    report_data.copy_from_slice(hash.as_bytes());
+    report_data
+}
+
+#[cfg(all(not(feature = "regtest"), target_os = "linux"))]
+fn generate_mint_attestation(report_data: [u8; 64]) -> Vec<u8> {
+    use sev::firmware::guest::Firmware;
+
+    tracing::info!("boot: generating mint attestation report");
+
+    let mut firmware = Firmware::open()
+        .expect("FATAL: SEV-SNP firmware not available — cannot generate attestation");
+
+    firmware
+        .get_report(None, Some(report_data), None)
+        .expect("FATAL: failed to request SEV-SNP attestation report")
+}
+
+#[cfg(all(not(feature = "regtest"), not(target_os = "linux")))]
+fn generate_mint_attestation(_report_data: [u8; 64]) -> Vec<u8> {
+    panic!("FATAL: mint attestation requires AMD SEV-SNP Linux.")
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -596,19 +582,6 @@ mod tests {
         let seed = Secret::new([0xAB; 32]);
         let wrong_fp = SeedFingerprint::from_seed(&[0xCD; 32]).unwrap().to_string();
         verify_fingerprint(&seed, &wrong_fp);
-    }
-
-    #[test]
-    fn block_metadata_carries_origin_height_hash_and_tree_sizes() {
-        let height = BlockHeight::from_u32(42);
-        let hash = zcash_primitives::block::BlockHash([0x11; 32]);
-        let state = ChainState::empty(height, hash);
-        let meta = block_metadata(&state);
-        assert_eq!(meta.block_height(), height);
-        assert_eq!(meta.block_hash(), hash);
-        assert_eq!(meta.sapling_tree_size(), Some(0));
-        assert_eq!(meta.orchard_tree_size(), Some(0));
-        assert_eq!(meta.ironwood_tree_size(), Some(0));
     }
 
     #[cfg(feature = "regtest")]

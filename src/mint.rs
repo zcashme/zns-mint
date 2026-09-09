@@ -39,6 +39,14 @@ pub const LIVENESS_INTERVAL: i64 = 31_557_600;
 /// The longest fixed-term registration the mint will accept: 99 years.
 pub const MAX_TERM_YEARS: u64 = 99;
 
+/// The confirmations an inbound request message — claim payment, update or
+/// release request, or OTP echo — must have before the mint acts on it.
+pub const REQUEST_CONFIRMATIONS: u32 = 10;
+
+/// The blocks past the target height at which a mint-built transaction
+/// expires unmined.
+pub const TRANSACTION_EXPIRY_BUFFER: u32 = 20;
+
 /// ZNS action kinds.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Action {
@@ -109,21 +117,12 @@ pub enum Request {
         ua: UnifiedAddress,
         extend_years: Option<u64>,
     },
-    /// Terminate the registration.
+    /// Terminate the registration initiated by expiration or voluntary release.
     Release { name: Name, ua: UnifiedAddress },
 }
 
 impl Request {
-    /// Decodes a 512-byte request memo sent to the Treasury:
-    ///
-    /// - `ZNS:claim:<name>:<ua>:<kind>` — `kind` is `forever` or `<N>y`
-    /// - `ZNS:update:<name>:<ua>[:<N>y]` — `<N>y` requests an extension
-    /// - `ZNS:release:<name>:<ua>`
-    ///
-    /// Per-verb arity is enforced here: a release with a term, an update
-    /// with `forever`, or a claim without a kind is not a request memo.
-    /// The UA must carry an Orchard-family receiver — Ironwood delivery
-    /// (relays) has no other path.
+    /// Decodes valid name request memo sent to the Treasury:
     pub fn decode<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Self> {
         let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
         if raw[end..].iter().any(|b| *b != 0) {
@@ -184,13 +183,7 @@ impl Request {
     }
 }
 
-/// The relay sentence: `ZNS:otp:<code>:<name>:<verb>:<ua>`
-///
-/// Spoken in both directions — the mint encodes it as a relay challenge to
-/// the controller, and the controller echoes it back to the Treasury to
-/// prove authority. The verb is `update` or `release` — challenges never
-/// claim. The UA is the request's target address and must carry an
-/// Orchard-family receiver; Ironwood delivery (relays) has no other path.
+/// A mint-issued challenge to a wallet, proving that the wallet controls a name via shielded-memos.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Challenge {
     pub code: OtpCode,
@@ -200,7 +193,7 @@ pub struct Challenge {
 }
 
 impl Challenge {
-    /// Encodes the relay sentence, NUL-padded to 512 bytes.
+    /// Encodes the challenge memo.
     pub fn encode<P: Parameters>(&self, network: &P) -> Option<[u8; 512]> {
         if self.action == Action::Claim {
             return None;

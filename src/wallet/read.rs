@@ -1,6 +1,6 @@
 //! Upstream `WalletRead` implementation, its private fixed-account value,
 //! and the Ironwood note reads that upstream's generic traits cannot express
-//! — notably the ZNS lookup by a record's `rho`.
+//! — notably the Registry lookup by a record's nullifier.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -741,22 +741,6 @@ impl Wallet {
             .flatten()
     }
 
-    /// Finds an unspent owned Ironwood note by the `rho` persisted in a ZNS
-    /// record, returning its native LRZ wallet representation.
-    pub(crate) fn unspent_ironwood_note_by_rho(
-        &self,
-        account: AccountId,
-        rho: orchard::note::Rho,
-        tip: TargetHeight,
-    ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
-        let note_id = self
-            .ironwood_notes
-            .iter()
-            .find(|(_, output)| *output.account_id() == account && output.note().0.rho() == rho)
-            .map(|(note_id, _)| *note_id)?;
-        self.unspent_ironwood_note(account, note_id, tip)
-    }
-
     /// Finds an unspent owned Ironwood note by the exact nullifier it reveals
     /// when spent. Registry authority is expressed in nullifiers: claim
     /// anchors and current Name Notes are selected through this boundary.
@@ -768,25 +752,5 @@ impl Wallet {
     ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
         let note_id = *self.ironwood_nullifiers.get(&nullifier)?;
         self.unspent_ironwood_note(account, note_id, tip)
-    }
-
-    /// Returns the nullifiers of all Ironwood notes owned by `account` with
-    /// no pending-or-mined spend as of `tip`, including value-0 notes.
-    ///
-    /// Distinct from the [`WalletRead::get_ironwood_nullifiers`] impl above:
-    /// that one classifies a spend as spent once its transaction is mined,
-    /// while this read also blocks on locally recorded but unmined spends.
-    pub(crate) fn unspent_ironwood_nullifiers(
-        &self,
-        account: AccountId,
-        tip: TargetHeight,
-    ) -> Vec<orchard::note::Nullifier> {
-        self.ironwood_notes
-            .iter()
-            .filter(|(note_id, output)| {
-                *output.account_id() == account && !self.ironwood_note_is_spent(note_id, tip)
-            })
-            .filter_map(|(_, output)| output.nf().copied())
-            .collect()
     }
 }

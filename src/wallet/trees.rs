@@ -5,16 +5,16 @@ use std::convert::Infallible;
 
 use incrementalmerkletree::{Address, MerklePath, Position};
 use shardtree::{
-    ShardTree,
     error::ShardTreeError,
-    store::{ShardStore, memory::MemoryShardStore},
+    store::{memory::MemoryShardStore, ShardStore},
+    ShardTree,
 };
-use zcash_client_backend::data_api::{WalletCommitmentTrees, chain::CommitmentTreeRoot};
+use zcash_client_backend::data_api::{chain::CommitmentTreeRoot, WalletCommitmentTrees};
 use zcash_protocol::consensus::BlockHeight;
 
 use super::{
-    ORCHARD_NOTE_COMMITMENT_TREE_DEPTH, ORCHARD_SHARD_HEIGHT, SAPLING_NOTE_COMMITMENT_TREE_DEPTH,
-    SAPLING_SHARD_HEIGHT, TreeError, Wallet,
+    TreeError, Wallet, ORCHARD_NOTE_COMMITMENT_TREE_DEPTH, ORCHARD_SHARD_HEIGHT,
+    SAPLING_NOTE_COMMITMENT_TREE_DEPTH, SAPLING_SHARD_HEIGHT,
 };
 
 impl WalletCommitmentTrees for Wallet {

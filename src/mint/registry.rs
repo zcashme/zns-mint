@@ -133,27 +133,6 @@ impl NameRecord {
             nullifier: received.nullifier(),
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(
-        action: Action,
-        ua: UnifiedAddress,
-        expires_at: Expiry,
-        release_deadline: Timestamp,
-        commitment: NameCommitment,
-        confirmed_height: BlockHeight,
-        nullifier: orchard::note::Nullifier,
-    ) -> Self {
-        Self {
-            action,
-            ua,
-            expires_at,
-            release_deadline,
-            commitment,
-            confirmed_height,
-            nullifier,
-        }
-    }
 }
 
 impl std::fmt::Debug for NameRecord {
@@ -583,32 +562,5 @@ impl Registry {
             let entry = self.claim_anchor_history.pop().unwrap();
             self.claim_anchor = entry.previous;
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_record_for_test(
-        &mut self,
-        name: Name,
-        action: Action,
-        ua: UnifiedAddress,
-        expires_at: Expiry,
-        release_deadline: Timestamp,
-        commitment: NameCommitment,
-        height: BlockHeight,
-        nullifier: orchard::note::Nullifier,
-    ) {
-        self.set_record(
-            name,
-            NameRecord::for_test(
-                action,
-                ua,
-                expires_at,
-                release_deadline,
-                commitment,
-                height,
-                nullifier,
-            ),
-            height,
-        );
     }
 }

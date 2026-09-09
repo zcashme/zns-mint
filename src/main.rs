@@ -538,21 +538,14 @@ async fn main() {
                 };
 
                 loop {
-                    match source.submit_transaction(&transaction, tip, tip_hash).await {
-                        Ok(SubmitOutcome::Accepted | SubmitOutcome::AlreadyInChain) => {
+                    match source.send_transaction(&transaction).await {
+                        Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => {
                             tracing::info!(
                                 txid = %transaction.txid(),
                                 name = %name.as_str(),
                                 "registration submitted"
                             );
                             break;
-                        }
-                        Ok(SubmitOutcome::TipChanged) => continue 'tips,
-                        Ok(SubmitOutcome::TxIdMismatch { returned_txid }) => {
-                            panic!(
-                                "FATAL: Zebra returned txid {returned_txid} for registration {}",
-                                transaction.txid()
-                            )
                         }
                         Ok(SubmitOutcome::Rejected(error)) => {
                             tracing::error!(
@@ -674,15 +667,8 @@ async fn main() {
                     expires_at: mtp_now + time::Duration::seconds(D_OTP),
                 };
                 let accepted = loop {
-                    match source.submit_transaction(&transaction, tip, tip_hash).await {
-                        Ok(SubmitOutcome::Accepted | SubmitOutcome::AlreadyInChain) => break true,
-                        Ok(SubmitOutcome::TipChanged) => continue 'tips,
-                        Ok(SubmitOutcome::TxIdMismatch { returned_txid }) => {
-                            panic!(
-                                "FATAL: Zebra returned txid {returned_txid} for challenge {}",
-                                transaction.txid()
-                            )
-                        }
+                    match source.send_transaction(&transaction).await {
+                        Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => break true,
                         Ok(SubmitOutcome::Rejected(error)) => {
                             tracing::error!(
                                 %error,
@@ -819,15 +805,8 @@ async fn main() {
                 };
 
                 let accepted = loop {
-                    match source.submit_transaction(&transaction, tip, tip_hash).await {
-                        Ok(SubmitOutcome::Accepted | SubmitOutcome::AlreadyInChain) => break true,
-                        Ok(SubmitOutcome::TipChanged) => continue 'tips,
-                        Ok(SubmitOutcome::TxIdMismatch { returned_txid }) => {
-                            panic!(
-                                "FATAL: Zebra returned txid {returned_txid} for transition {}",
-                                transaction.txid()
-                            )
-                        }
+                    match source.send_transaction(&transaction).await {
+                        Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => break true,
                         Ok(SubmitOutcome::Rejected(error)) => {
                             tracing::error!(
                                 %error,
@@ -896,21 +875,14 @@ async fn main() {
                         continue;
                     };
                     loop {
-                        match source.submit_transaction(&transaction, tip, tip_hash).await {
-                            Ok(SubmitOutcome::Accepted | SubmitOutcome::AlreadyInChain) => {
+                        match source.send_transaction(&transaction).await {
+                            Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => {
                                 tracing::info!(
                                     txid = %transaction.txid(),
                                     name = %name.as_str(),
                                     "lifecycle release submitted"
                                 );
                                 break;
-                            }
-                            Ok(SubmitOutcome::TipChanged) => continue 'tips,
-                            Ok(SubmitOutcome::TxIdMismatch { returned_txid }) => {
-                                panic!(
-                                    "FATAL: Zebra returned txid {returned_txid} for release {}",
-                                    transaction.txid()
-                                )
                             }
                             Ok(SubmitOutcome::Rejected(error)) => {
                                 tracing::error!(
@@ -989,15 +961,8 @@ async fn main() {
                     expires_at: mtp_now + time::Duration::seconds(D_OTP),
                 };
                 let accepted = loop {
-                    match source.submit_transaction(&transaction, tip, tip_hash).await {
-                        Ok(SubmitOutcome::Accepted | SubmitOutcome::AlreadyInChain) => break true,
-                        Ok(SubmitOutcome::TipChanged) => continue 'tips,
-                        Ok(SubmitOutcome::TxIdMismatch { returned_txid }) => {
-                            panic!(
-                                "FATAL: Zebra returned txid {returned_txid} for liveness challenge {}",
-                                transaction.txid()
-                            )
-                        }
+                    match source.send_transaction(&transaction).await {
+                        Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => break true,
                         Ok(SubmitOutcome::Rejected(error)) => {
                             tracing::error!(
                                 %error,
@@ -1148,17 +1113,10 @@ async fn main() {
                     .expect("FATAL: wallet rejected the Ironwood vault sweep");
 
                 loop {
-                    match source.submit_transaction(&transaction, tip, tip_hash).await {
-                        Ok(SubmitOutcome::Accepted | SubmitOutcome::AlreadyInChain) => {
+                    match source.send_transaction(&transaction).await {
+                        Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => {
                             tracing::info!(txid = %transaction.txid(), "Ironwood vault sweep submitted");
                             break;
-                        }
-                        Ok(SubmitOutcome::TipChanged) => continue 'tips,
-                        Ok(SubmitOutcome::TxIdMismatch { returned_txid }) => {
-                            panic!(
-                                "FATAL: Zebra returned txid {returned_txid} for Ironwood sweep {}",
-                                transaction.txid()
-                            )
                         }
                         Ok(SubmitOutcome::Rejected(error)) => {
                             tracing::error!(%error, txid = %transaction.txid(), "Ironwood vault sweep rejected");
@@ -1186,16 +1144,10 @@ async fn main() {
                         .expect("FATAL: Sapling sweep transaction lookup failed")
                         .expect("FATAL: Sapling sweep was not recorded by its builder");
                     loop {
-                        match source.submit_transaction(&transaction, tip, tip_hash).await {
-                            Ok(SubmitOutcome::Accepted | SubmitOutcome::AlreadyInChain) => {
+                        match source.send_transaction(&transaction).await {
+                            Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => {
                                 tracing::info!(%txid, "Sapling vault sweep submitted");
                                 break;
-                            }
-                            Ok(SubmitOutcome::TipChanged) => continue 'tips,
-                            Ok(SubmitOutcome::TxIdMismatch { returned_txid }) => {
-                                panic!(
-                                    "FATAL: Zebra returned txid {returned_txid} for Sapling sweep {txid}"
-                                )
                             }
                             Ok(SubmitOutcome::Rejected(error)) => {
                                 tracing::error!(%error, %txid, "Sapling vault sweep rejected");

@@ -18,7 +18,7 @@ use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
-const TX_EXPIRY_BUFFER: u32 = 20;
+use crate::mint::TRANSACTION_EXPIRY_BUFFER;
 
 /// Stages a claim's two inseparable zero-value Registry outputs: the ZNS Name
 /// Note and the ordinary successor anchor that authorizes the next claim.
@@ -545,7 +545,7 @@ fn fee<P: Parameters>(
 fn expiry(target_height: BlockHeight) -> BlockHeight {
     BlockHeight::from_u32(
         u32::from(target_height)
-            .checked_add(TX_EXPIRY_BUFFER)
+            .checked_add(TRANSACTION_EXPIRY_BUFFER)
             .expect("target height plus expiry buffer fits u32"),
     )
 }

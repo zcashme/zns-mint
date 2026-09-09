@@ -181,17 +181,15 @@ impl Wallet {
 
     /// Continuity metadata at `height`: an applied block, or the boot origin.
     pub fn block_metadata_at(&self, height: BlockHeight) -> Option<BlockMetadata> {
-        self.blocks.get(&height).cloned().or_else(|| {
-            (height == self.seed.block_height()).then(|| self.seed.clone())
-        })
+        self.blocks
+            .get(&height)
+            .cloned()
+            .or_else(|| (height == self.seed.block_height()).then(|| self.seed.clone()))
     }
 
     /// Truncates the wallet to `max_height` and returns the
     /// [`BlockMetadata`] at that height — the new chain tip after reorg.
-    pub fn truncate_to(
-        &mut self,
-        max_height: BlockHeight,
-    ) -> Result<BlockMetadata, WalletError> {
+    pub fn truncate_to(&mut self, max_height: BlockHeight) -> Result<BlockMetadata, WalletError> {
         WalletWrite::truncate_to_height(self, max_height)?;
         self.block_metadata_at(max_height)
             .ok_or(WalletError::TruncationTargetUnavailable(max_height))
