@@ -187,12 +187,6 @@ impl<P: Parameters> Boot<P> {
             }
         }
 
-        tracing::info!(
-            network = NETWORK_LABEL,
-            "boot: complete at node tip {}",
-            u32::from(tip_height)
-        );
-
         let cursor = block_metadata(&origin);
 
         tracing::info!(
@@ -244,13 +238,7 @@ fn regtest_network() -> LocalNetwork {
 // Step 1: Liveness + connect
 // ---------------------------------------------------------------------------
 
-/// Confirms both Zebra transports are reachable and returns the gRPC chain
-/// client plus the current tip height.
-///
-/// JSON-RPC confirms the RPC transport the run loop uses for block fetches,
-/// tree state, and transaction submission. gRPC confirms the indexer stream
-/// the run loop uses for tip change and mempool events. Zebra's identity is
-/// guaranteed by the SEV-SNP TEE measurement, not by these localhost RPCs.
+/// Zebra liveness; boot tip.
 async fn connect_zebra() -> (ChainClient, BlockHeight) {
     // JSON-RPC liveness
     let rpc = zcash::JsonRpc::new();
@@ -264,26 +252,18 @@ async fn connect_zebra() -> (ChainClient, BlockHeight) {
         "boot: zebra json-rpc liveness ok"
     );
 
-    // gRPC connect + first tip
+    // gRPC liveness; the tip stream is change-only, so the boot tip comes
+    // from the getblockchaininfo answer above.
     let mut chain = ChainClient::connect()
         .await
         .expect("FATAL: Zebra gRPC unreachable or timed out");
-    let mut stream = chain
+    chain
         .chain_tip_change_stream()
         .await
         .expect("FATAL: chain_tip_change gRPC call failed");
-    let tip_msg = stream
-        .message()
-        .await
-        .expect("FATAL: no chain tip message from gRPC stream")
-        .expect("FATAL: gRPC tip stream closed with no tip");
-    let (tip_height, _) = zcash::tip_height_hash(&tip_msg);
-    tracing::info!(
-        height = u32::from(tip_height),
-        "boot: gRPC chain client connected"
-    );
+    tracing::info!("boot: gRPC chain client connected");
 
-    (chain, tip_height)
+    (chain, BlockHeight::from_u32(info.blocks))
 }
 
 // ---------------------------------------------------------------------------
