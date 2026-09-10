@@ -29,6 +29,7 @@ use zcash_protocol::{
     memo::Memo,
 };
 use zip32::AccountId;
+use zcash_client_backend::scanning::ScanningKeys;
 
 /// Depth of the Sapling note commitment tree,
 const SAPLING_NOTE_COMMITMENT_TREE_DEPTH: u8 = 32;
@@ -53,6 +54,10 @@ pub(crate) type TreeError = ShardTreeError<Infallible>;
 pub struct Wallet {
     /// Exactly account 0 (Treasury) and account 1 (Registry).
     ufvks: BTreeMap<AccountId, UnifiedFullViewingKey>,
+
+    /// Derived from those same UFVKs at birth: the scanner scans exactly
+    /// what the wallet stores, by construction.
+    scanning_keys: ScanningKeys<AccountId, (AccountId, zip32::Scope)>,
 
     /// The Zebra consensus tip last supplied through `WalletWrite::update_chain_tip`.
     zebra_tip: Option<BlockHeight>,
@@ -114,8 +119,11 @@ impl Wallet {
         ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
         chain_state: &ChainState,
     ) -> Result<Self, TreeError> {
+        let ufvks: BTreeMap<AccountId, UnifiedFullViewingKey> = ufvks.into_iter().collect();
+        let scanning_keys = ScanningKeys::from_account_ufvks(ufvks.clone());
         let mut wallet = Self {
-            ufvks: ufvks.into_iter().collect(),
+            ufvks,
+            scanning_keys,
             zebra_tip: None,
             blocks: BTreeMap::new(),
             seed: block_metadata(chain_state),
@@ -161,9 +169,9 @@ impl Wallet {
         Ok(wallet)
     }
 
-    /// Returns the fixed account UFVKs for scanner construction.
-    pub fn ufvk_map(&self) -> &BTreeMap<AccountId, UnifiedFullViewingKey> {
-        &self.ufvks
+    /// The wallet's own scanning faculty, born from the same UFVKs.
+    pub fn scanning_keys(&self) -> &ScanningKeys<AccountId, (AccountId, zip32::Scope)> {
+        &self.scanning_keys
     }
 
     /// Returns the viewing key of one fixed mint account.

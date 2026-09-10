@@ -18,7 +18,7 @@ use zcash_client_backend::data_api::{
     NullifierQuery, SentTransaction, WalletRead as _, WalletWrite as _,
 };
 use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
-use zcash_client_backend::scanning::{Nullifiers, ScanningKeys};
+use zcash_client_backend::scanning::Nullifiers;
 use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
 use zcash_primitives::transaction::fees::zip317::{FeeRule, P2PKH_STANDARD_OUTPUT_SIZE};
 use zcash_primitives::transaction::fees::FeeRule as _;
@@ -62,7 +62,6 @@ async fn main() {
 
     let rpc = JsonRpc::new();
     let source = CanonicalBlockSource::new();
-    let scanning_keys = ScanningKeys::from_account_ufvks(wallet.ufvk_map().clone());
     let mut chain_tip = block_metadata(&origin);
     let mut registry: Option<Registry> = None;
 
@@ -270,7 +269,7 @@ async fn main() {
                     })
                     .collect::<Vec<_>>();
 
-                let (header, batches) = decrypt_block(&network, block, &scanning_keys);
+                let (header, batches) = decrypt_block(&network, block, wallet.scanning_keys());
                 let nullifiers = Nullifiers::unspent(&wallet)
                     .expect("FATAL: wallet could not expose its unspent nullifiers");
                 let scanned = scan_block(
@@ -278,7 +277,7 @@ async fn main() {
                     next_height,
                     &header,
                     batches,
-                    &scanning_keys,
+                    wallet.scanning_keys(),
                     &nullifiers,
                     Some(&chain_tip),
                     |_| {
