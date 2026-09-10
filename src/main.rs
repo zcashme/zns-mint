@@ -15,16 +15,11 @@ use futures_util::StreamExt as _;
 use incrementalmerkletree::Position;
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::{
-    NullifierQuery, SentTransaction, WalletRead as _, WalletWrite as _,
+    NullifierQuery, WalletRead as _, WalletWrite as _,
 };
-use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
 use zcash_client_backend::scanning::Nullifiers;
-use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
-use zcash_primitives::transaction::fees::zip317::P2PKH_STANDARD_OUTPUT_SIZE;
-use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::memo::Memo;
 use zcash_protocol::value::Zatoshis;
 
 use zns_mint::boot::Boot;
@@ -32,9 +27,6 @@ use zns_mint::mint::note::assemble;
 use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D_OTP};
 use zns_mint::mint::registry::{NameRecord, ReceivedNameNote, Registry};
 use zns_mint::mint::treasury;
-use zns_mint::mint::treasury::{
-    sweep_sapling_to_vault, SWEEP_RESERVE, SWEEP_THRESHOLD, VAULT_ADDRESS,
-};
 use zns_mint::mint::{
     Action, Challenge, Request, Term, MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
@@ -499,15 +491,18 @@ async fn main() {
             ) else {
                 continue;
             };
-            let Ok((builder, fee)) = assemble::claim_prepare(
+            let Some(transaction) = assemble::prepare(
                 &network,
                 &mut wallet,
                 &treasury_keys,
                 &registry_keys,
+                &sapling_spend,
+                &sapling_output,
                 claim_request,
                 registry.claim_anchor(),
-                &payment,
+                Some(&payment),
                 tip,
+                target_height,
             ) else {
                 tracing::debug!(
                     name = %name.as_str(),
@@ -515,14 +510,6 @@ async fn main() {
                 );
                 continue;
             };
-            let transaction = assemble::create_claim(
-                &treasury_keys,
-                &registry_keys,
-                &sapling_spend,
-                &sapling_output,
-                builder,
-            );
-            wallet.record_sent(&transaction, target_height, fee);
 
             if source.submit(&transaction, "registration").await {
                 tracing::info!(name = %name.as_str(), "registration in flight");
@@ -699,7 +686,7 @@ async fn main() {
             else {
                 continue;
             };
-            let Some(transaction) = assemble::transition(
+            let Some(transaction) = assemble::prepare(
                 &network,
                 &mut wallet,
                 &treasury_keys,
@@ -768,7 +755,7 @@ async fn main() {
             }
 
             if let Some(release_note) = registry.release_due(&name, mtp_now) {
-                let Some(transaction) = assemble::transition(
+                let Some(transaction) = assemble::prepare(
                     &network,
                     &mut wallet,
                     &treasury_keys,
@@ -883,169 +870,16 @@ async fn main() {
             }
         }
 
-        // Ironwood housekeeping is intentionally assembled here instead
-        // of using generic wallet selection: only confirmed empty-memo
-        // Treasury notes may be swept. Protocol messages and every
-        // zero-value Registry authority note are outside this set.
-        let mut sweep_notes =
-            wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip));
-        sweep_notes.retain(|note| {
-            let mined = note.mined_height().is_some();
-            let empty_memo = matches!(
-                wallet.get_memo(*note.internal_note_id()),
-                Ok(None) | Ok(Some(Memo::Empty))
-            );
-            mined && empty_memo
-        });
-        let sweep_funding = sweep_notes.iter().fold(Zatoshis::ZERO, |total, note| {
-            (total
-                + Zatoshis::from_u64(note.note().value().inner())
-                    .expect("Treasury note value fits the monetary range"))
-            .expect("Treasury balance fits the monetary range")
-        });
-        if sweep_funding > SWEEP_THRESHOLD {
-            let ironwood_actions = sweep_notes.len().max(1);
-            let transaction_fee = StandardFeeRule::Zip317
-                .fee_required(
-                    &network,
-                    target_height,
-                    std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(
-                    ),
-                    [P2PKH_STANDARD_OUTPUT_SIZE],
-                    0,
-                    0,
-                    0,
-                    ironwood_actions,
-                )
-                .expect("FATAL: vault-sweep fee is not representable");
-            let sweep_amount = (sweep_funding - SWEEP_RESERVE)
-                .and_then(|remaining| remaining - transaction_fee)
-                .expect("sweep threshold covers reserve and fee");
-            let anchor = wallet
-                .ironwood_anchor(tip)
-                .expect("FATAL: Ironwood tree access failed")
-                .expect("FATAL: wallet has no Ironwood anchor at its applied tip");
-            let mut prepared = Vec::with_capacity(sweep_notes.len());
-            for note in &sweep_notes {
-                let path = wallet
-                    .ironwood_witness(note.note_commitment_tree_position(), tip)
-                    .expect("FATAL: Ironwood tree access failed")
-                    .expect("FATAL: sweep input has no witness");
-                prepared.push((note.note().clone(), orchard::tree::MerklePath::from(path)));
-            }
-
-            let treasury_fvk = treasury_keys.orchard_fvk();
-            let mut builder = Builder::new(
-                network.clone(),
-                target_height,
-                BuildConfig::Standard {
-                    sapling_anchor: None,
-                    orchard_anchor: None,
-                    ironwood_anchor: Some(anchor),
-                    orchard_padding: BundlePadding::DEFAULT,
-                    ironwood_padding: BundlePadding::DEFAULT,
-                },
-            );
-            for (note, path) in prepared {
-                builder
-                    .add_ironwood_spend::<zcash_primitives::transaction::fees::zip317::FeeError>(
-                        treasury_fvk.clone(),
-                        note,
-                        path,
-                    )
-                    .expect("FATAL: valid Treasury sweep input was rejected");
-            }
-            builder
-                .add_transparent_output(&VAULT_ADDRESS, sweep_amount)
-                .expect("FATAL: valid vault output was rejected");
-            builder
-                .add_ironwood_output::<zcash_primitives::transaction::fees::zip317::FeeError>(
-                    Some(treasury_fvk.to_ovk(orchard::keys::Scope::Internal)),
-                    treasury_fvk.address_at(0u32, orchard::keys::Scope::Internal),
-                    SWEEP_RESERVE,
-                    zcash_protocol::memo::MemoBytes::empty(),
-                )
-                .expect("FATAL: valid Treasury reserve was rejected");
-            let built = builder
-                .build(
-                    &Default::default(),
-                    &[],
-                    &[orchard::keys::SpendAuthorizingKey::from(
-                        treasury_keys.orchard_spending_key(),
-                    )],
-                    &mut rand::rngs::OsRng,
-                    &sapling_spend,
-                    &sapling_output,
-                    &StandardFeeRule::Zip317,
-                )
-                .expect("FATAL: Ironwood vault sweep proving or signing failed");
-            let transaction = built.transaction().clone();
-            let sent = SentTransaction::new(
-                &transaction,
-                time::OffsetDateTime::now_utc(),
-                TargetHeight::from(target_height),
-                TREASURY_ACCOUNT,
-                &[],
-                transaction_fee,
-                &[],
-            );
-            wallet
-                .store_transactions_to_be_sent(&[sent])
-                .expect("FATAL: wallet rejected the Ironwood vault sweep");
-
-            loop {
-                match source.send_transaction(&transaction).await {
-                    Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => {
-                        tracing::info!(txid = %transaction.txid(), "Ironwood vault sweep submitted");
-                        break;
-                    }
-                    Ok(SubmitOutcome::Rejected(error)) => {
-                        tracing::error!(%error, txid = %transaction.txid(), "Ironwood vault sweep rejected");
-                        break;
-                    }
-                    Err(error) if error.is_retryable() => {
-                        tracing::warn!(%error, txid = %transaction.txid(), "Ironwood sweep submission uncertain; retrying");
-                        tokio::time::sleep(RETRY_PAUSE).await;
-                    }
-                    Err(error) => panic!("FATAL: Ironwood sweep submission failed: {error}"),
-                }
-            }
+        if let Some(tx) = treasury::sweep_ironwood_to_vault(
+            &network, &mut wallet, &treasury_keys, &sapling_spend, &sapling_output, tip, target_height,
+        ) {
+            source.submit(&tx, "Ironwood vault sweep").await;
         }
 
-        match sweep_sapling_to_vault(
-            &network,
-            &mut wallet,
-            &treasury_keys,
-            &sapling_spend,
-            &sapling_output,
+        if let Some(tx) = treasury::sweep_sapling_to_vault(
+            &network, &mut wallet, &treasury_keys, &sapling_spend, &sapling_output,
         ) {
-            Ok(Some(txid)) => {
-                let transaction = wallet
-                    .get_transaction(txid)
-                    .expect("FATAL: Sapling sweep transaction lookup failed")
-                    .expect("FATAL: Sapling sweep was not recorded by its builder");
-                loop {
-                    match source.send_transaction(&transaction).await {
-                        Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => {
-                            tracing::info!(%txid, "Sapling vault sweep submitted");
-                            break;
-                        }
-                        Ok(SubmitOutcome::Rejected(error)) => {
-                            tracing::error!(%error, %txid, "Sapling vault sweep rejected");
-                            break;
-                        }
-                        Err(error) if error.is_retryable() => {
-                            tracing::warn!(%error, %txid, "Sapling sweep submission uncertain; retrying");
-                            tokio::time::sleep(RETRY_PAUSE).await;
-                        }
-                        Err(error) => {
-                            panic!("FATAL: Sapling sweep submission failed: {error}")
-                        }
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(error) => tracing::error!(?error, "Sapling vault sweep construction failed"),
+            source.submit(&tx, "Sapling vault sweep").await;
         }
 
         tracing::debug!(

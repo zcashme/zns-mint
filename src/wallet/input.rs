@@ -17,10 +17,8 @@ use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{
     Note, NoteId, OutputRef, ReceivedNote, WalletTransparentOutput,
 };
-use zcash_client_backend::data_api::WalletRead as _;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::memo::Memo;
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
 use zip32::AccountId;
@@ -233,10 +231,6 @@ impl Wallet {
 
     /// Collects the eligible Ironwood notes of `account`, oldest first by
     /// commitment tree position.
-    ///
-    /// Notes carrying a protocol sentence (non-empty memo) are never
-    /// eligible: messages are not money, and a claim, request, or echo
-    /// consumed as fee funding would destroy an unprocessed instruction.
     fn eligible_ironwood(
         &self,
         account: AccountId,
@@ -254,10 +248,6 @@ impl Wallet {
                     && output.recipient_key_scope().is_some()
                     && !self.ironwood_note_is_spent(note_id, target_height)
                     && self.lock_admits(&OutputRef::from(**note_id), target_height, lock_filter)
-                    && matches!(
-                        self.get_memo(**note_id),
-                        Ok(None) | Ok(Some(Memo::Empty))
-                    )
                     && confirmations_policy.is_none_or(|policy| {
                         self.confirmations_satisfied(
                             note_id.txid(),
