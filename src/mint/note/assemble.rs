@@ -6,7 +6,9 @@ use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::wallet::{NoteId, OutputRef, ReceivedNote};
 use zcash_primitives::transaction::builder::Error as BuildError;
-use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
+use zcash_primitives::transaction::builder::{
+    BuildConfig, Builder, BundlePadding, DEFAULT_TX_EXPIRY_DELTA,
+};
 use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_primitives::transaction::Transaction;
@@ -19,7 +21,6 @@ use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
-use crate::mint::TRANSACTION_EXPIRY_BUFFER;
 
 /// Why a transaction could not be prepared. Every variant is transient —
 /// prepare re-fires each tip and succeeds once the world allows it.
@@ -199,7 +200,7 @@ pub fn claim_prepare<P: Parameters>(
         .lock_outputs(
             &locked_refs,
             LockOwner::random(&mut rand::rngs::OsRng),
-            expiry(target_height),
+            target_height + DEFAULT_TX_EXPIRY_DELTA,
         )
         .expect("FATAL: wallet rejected the input lock");
 
@@ -225,8 +226,7 @@ pub fn claim_prepare<P: Parameters>(
             orchard_padding: BundlePadding::DEFAULT,
             ironwood_padding: BundlePadding::DEFAULT,
         },
-    )
-    .with_expiry_height(expiry(target_height));
+    );
 
     builder
         .add_ironwood_spend::<FeeError>(registry_fvk.clone(), claim_anchor_note, claim_anchor_path)
@@ -340,8 +340,7 @@ pub fn transition<P: Parameters>(
             orchard_padding: BundlePadding::DEFAULT,
             ironwood_padding: BundlePadding::DEFAULT,
         },
-    )
-    .with_expiry_height(expiry(target_height));
+    );
 
     builder
         .add_zns_spend::<FeeError>(
@@ -473,8 +472,7 @@ pub fn challenge<P: Parameters>(
             orchard_padding: BundlePadding::DEFAULT,
             ironwood_padding: BundlePadding::DEFAULT,
         },
-    )
-    .with_expiry_height(expiry(target_height));
+    );
 
     if let Some((request_note, request_path)) = prepared_request {
         builder
@@ -632,10 +630,3 @@ fn fee<P: Parameters>(
         .expect("FATAL: ZIP-317 fee is not representable")
 }
 
-fn expiry(target_height: BlockHeight) -> BlockHeight {
-    BlockHeight::from_u32(
-        u32::from(target_height)
-            .checked_add(TRANSACTION_EXPIRY_BUFFER)
-            .expect("target height plus expiry buffer fits u32"),
-    )
-}

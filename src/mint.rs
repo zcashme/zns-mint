@@ -39,10 +39,6 @@ pub const LIVENESS_INTERVAL: i64 = 31_557_600;
 /// The longest fixed-term registration the mint will accept: 99 years.
 pub const MAX_TERM_YEARS: u64 = 99;
 
-/// The blocks past the target height at which a mint-built transaction
-/// expires unmined.
-pub const TRANSACTION_EXPIRY_BUFFER: u32 = 20;
-
 /// ZNS action kinds.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Action {

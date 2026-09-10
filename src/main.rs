@@ -39,7 +39,6 @@ use zns_mint::mint::{
 use zns_mint::zcash::{self, CanonicalBlockSource, ChainClient, JsonRpc, SubmitOutcome, TipStream};
 
 const RETRY_PAUSE: Duration = Duration::from_secs(5);
-const TRANSACTION_EXPIRY_BUFFER: u32 = 20;
 const CHALLENGE_WINDOW: i64 = D_OTP;
 
 #[tokio::main]
@@ -419,11 +418,6 @@ async fn main() {
         let tip = chain_tip.block_height();
         let tip_hash = chain_tip.block_hash();
         let target_height = tip + 1;
-        let expiry_height = BlockHeight::from_u32(
-            u32::from(target_height)
-                .checked_add(TRANSACTION_EXPIRY_BUFFER)
-                .expect("target height plus expiry buffer fits u32"),
-        );
         let mtp_now = mtp
             .current()
             .expect("FATAL: MTP unavailable at the applied tip");
@@ -978,8 +972,7 @@ async fn main() {
                     orchard_padding: BundlePadding::DEFAULT,
                     ironwood_padding: BundlePadding::DEFAULT,
                 },
-            )
-            .with_expiry_height(expiry_height);
+            );
             for (note, path) in prepared {
                 builder
                     .add_ironwood_spend::<zcash_primitives::transaction::fees::zip317::FeeError>(
