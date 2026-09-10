@@ -95,3 +95,103 @@ pub fn sweep_sapling_to_vault<P: Parameters>(
 
     Ok(Some(*txids.first()))
 }
+
+/// Proposes, builds, and records a Treasury payment carrying an OTP challenge
+/// memo to the controller. Funded from empty-memo Treasury notes via
+/// upstream's generic selection path — the empty-memo filter in
+/// `eligible_ironwood` ensures protocol messages are never spent as fee
+/// funding. Returns `None` when the Treasury cannot cover the relay value
+/// and fee; the lane retries next tip.
+pub fn challenge<P: Parameters>(
+    network: &P,
+    wallet: &mut Wallet,
+    treasury_keys: &crate::key::TreasuryKeys,
+    spend_prover: &sapling::circuit::SpendParameters,
+    output_prover: &sapling::circuit::OutputParameters,
+    controller: &zcash_keys::address::UnifiedAddress,
+    memo: [u8; 512],
+    relay_value: Zatoshis,
+) -> Option<zcash_primitives::transaction::Transaction> {
+    use zcash_client_backend::data_api::wallet::{
+        create_proposed_transactions, propose_transfer, ConfirmationsPolicy, SpendingKeys,
+    };
+    use zcash_client_backend::data_api::wallet::input_selection::{
+        GreedyInputSelector, SpendPolicy,
+    };
+    use zcash_client_backend::data_api::WalletRead as _;
+    use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
+    use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
+    use zcash_client_backend::wallet::OvkPolicy;
+
+    let request = zip321::TransactionRequest::new(vec![
+        zip321::Payment::new(
+        zcash_keys::address::Address::Unified(controller.clone())
+            .to_zcash_address(network),
+            Some(relay_value),
+            Some(
+                zcash_protocol::memo::MemoBytes::from_bytes(&memo)
+                    .expect("a 512-byte protocol memo is valid"),
+            ),
+            None,
+            None,
+            vec![],
+        )
+        .expect("valid ZIP-321 payment"),
+    ])
+    .expect("valid ZIP-321 request");
+
+    let input_selector = GreedyInputSelector::<Wallet>::new();
+    let change_strategy = SingleOutputChangeStrategy::<Wallet>::new(
+        StandardFeeRule::Zip317,
+        None,
+        zcash_protocol::ShieldedPool::Ironwood,
+        DustOutputPolicy::default(),
+    );
+
+    let proposal = propose_transfer::<
+        Wallet,
+        P,
+        GreedyInputSelector<Wallet>,
+        SingleOutputChangeStrategy<Wallet>,
+        std::convert::Infallible,
+    >(
+        wallet,
+        network,
+        TREASURY_ACCOUNT,
+        &input_selector,
+        &change_strategy,
+        request,
+        ConfirmationsPolicy::new_symmetrical(std::num::NonZeroU32::MIN, false),
+        &SpendPolicy::default(),
+        None,
+        None,
+    )
+    .ok()?;
+
+    let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
+    let txids = create_proposed_transactions::<
+        Wallet,
+        P,
+        GreedyInputSelectorError,
+        StandardFeeRule,
+        zcash_primitives::transaction::fees::zip317::FeeError,
+        NoteId,
+    >(
+        wallet,
+        network,
+        spend_prover,
+        output_prover,
+        &spending_keys,
+        OvkPolicy::Sender,
+        &proposal,
+        None,
+    )
+    .expect("FATAL: challenge transaction creation failed");
+
+    Some(
+        wallet
+            .get_transaction(*txids.first())
+            .expect("FATAL: challenge transaction lookup failed")
+            .expect("FATAL: challenge transaction was not recorded"),
+    )
+}

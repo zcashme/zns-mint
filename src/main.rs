@@ -17,10 +17,11 @@ use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::{
     NullifierQuery, SentTransaction, WalletRead as _, WalletWrite as _,
 };
+use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
 use zcash_client_backend::scanning::Nullifiers;
 use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
-use zcash_primitives::transaction::fees::zip317::{FeeRule, P2PKH_STANDARD_OUTPUT_SIZE};
+use zcash_primitives::transaction::fees::zip317::P2PKH_STANDARD_OUTPUT_SIZE;
 use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::memo::Memo;
@@ -30,6 +31,7 @@ use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D_OTP};
 use zns_mint::mint::registry::{NameRecord, ReceivedNameNote, Registry};
+use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{
     sweep_sapling_to_vault, SWEEP_RESERVE, SWEEP_THRESHOLD, VAULT_ADDRESS,
 };
@@ -587,18 +589,15 @@ async fn main() {
                 continue;
             };
             let relay_value = required_relay_value(&network, target_height);
-            let Some(transaction) = assemble::challenge(
+            let Some(transaction) = treasury::challenge(
                 &network,
                 &mut wallet,
                 &treasury_keys,
                 &sapling_spend,
                 &sapling_output,
-                Some(&request_note),
                 &record.ua,
                 memo,
                 relay_value,
-                tip,
-                target_height,
             ) else {
                 tracing::debug!(
                     name = %name.as_str(),
@@ -847,18 +846,15 @@ async fn main() {
                 .encode(&network)
                 .expect("liveness challenges are always encodable");
             let relay_value = required_relay_value(&network, target_height);
-            let Some(transaction) = assemble::challenge(
+            let Some(transaction) = treasury::challenge(
                 &network,
                 &mut wallet,
                 &treasury_keys,
                 &sapling_spend,
                 &sapling_output,
-                None,
                 &record.ua,
                 memo,
                 relay_value,
-                tip,
-                target_height,
             ) else {
                 tracing::debug!(
                     name = %name.as_str(),
@@ -866,6 +862,7 @@ async fn main() {
                 );
                 continue;
             };
+
             let pending = OtpRequest {
                 name: name.clone(),
                 action: Action::Update,
@@ -875,31 +872,7 @@ async fn main() {
                 expires_at: mtp_now + time::Duration::seconds(D_OTP),
                 extend_years: None,
             };
-            let accepted = loop {
-                match source.send_transaction(&transaction).await {
-                    Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => break true,
-                    Ok(SubmitOutcome::Rejected(error)) => {
-                        tracing::error!(
-                            %error,
-                            txid = %transaction.txid(),
-                            name = %name.as_str(),
-                            "liveness challenge rejected"
-                        );
-                        break false;
-                    }
-                    Err(error) if error.is_retryable() => {
-                        tracing::warn!(
-                            %error,
-                            txid = %transaction.txid(),
-                            "liveness challenge submission uncertain; retrying"
-                        );
-                        tokio::time::sleep(RETRY_PAUSE).await;
-                    }
-                    Err(error) => {
-                        panic!("FATAL: liveness challenge submission failed: {error}")
-                    }
-                }
-            };
+            let accepted = source.submit(&transaction, "liveness challenge").await;
             if accepted {
                 challenges.issue(pending);
                 tracing::info!(
@@ -932,7 +905,7 @@ async fn main() {
         });
         if sweep_funding > SWEEP_THRESHOLD {
             let ironwood_actions = sweep_notes.len().max(1);
-            let transaction_fee = FeeRule::standard()
+            let transaction_fee = StandardFeeRule::Zip317
                 .fee_required(
                     &network,
                     target_height,
@@ -1003,7 +976,7 @@ async fn main() {
                     &mut rand::rngs::OsRng,
                     &sapling_spend,
                     &sapling_output,
-                    &FeeRule::standard(),
+                    &StandardFeeRule::Zip317,
                 )
                 .expect("FATAL: Ironwood vault sweep proving or signing failed");
             let transaction = built.transaction().clone();

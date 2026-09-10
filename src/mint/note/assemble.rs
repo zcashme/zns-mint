@@ -4,6 +4,7 @@
 use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore as _};
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
+use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{NoteId, OutputRef, ReceivedNote};
 use zcash_primitives::transaction::builder::Error as BuildError;
 use zcash_primitives::transaction::builder::{
@@ -20,7 +21,6 @@ use super::NameNote;
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
-
 
 /// Why a transaction could not be prepared. Every variant is transient —
 /// prepare re-fires each tip and succeeds once the world allows it.
@@ -144,11 +144,7 @@ pub fn claim_prepare<P: Parameters>(
     let target_height = BlockHeight::from_u32(u32::from(tip) + 1);
 
     let claim_anchor_note = wallet
-        .unspent_ironwood_note_by_nullifier(
-            REGISTRY_ACCOUNT,
-            claim_anchor,
-            TargetHeight::from(tip),
-        )
+        .unspent_ironwood_note_by_nullifier(REGISTRY_ACCOUNT, claim_anchor, TargetHeight::from(tip))
         .ok_or(PrepareError::AuthorityUnavailable)?;
     let excluded = [
         *payment.internal_note_id(),
@@ -174,7 +170,9 @@ pub fn claim_prepare<P: Parameters>(
         if fee_funding >= transaction_fee {
             break transaction_fee;
         }
-        let candidate = candidates.get(fee_notes.len()).ok_or(PrepareError::InsufficientFunds)?;
+        let candidate = candidates
+            .get(fee_notes.len())
+            .ok_or(PrepareError::InsufficientFunds)?;
         fee_funding = (fee_funding + zatoshis(candidate))
             .expect("Treasury balance fits in the Zcash monetary range");
         fee_notes.push(prepare(wallet, candidate, tip));
@@ -274,7 +272,7 @@ pub fn create_claim<P: Parameters>(
             &mut rand::rngs::OsRng,
             spend_prover,
             output_prover,
-            &zcash_primitives::transaction::fees::zip317::FeeRule::standard(),
+            &StandardFeeRule::Zip317,
         )
         .expect("FATAL: registration proving or signing failed");
     built.transaction().clone()
@@ -385,7 +383,7 @@ pub fn transition<P: Parameters>(
             &mut rand::rngs::OsRng,
             spend_prover,
             output_prover,
-            &zcash_primitives::transaction::fees::zip317::FeeRule::standard(),
+            &StandardFeeRule::Zip317,
         )
         .expect("FATAL: transition proving or signing failed");
     let transaction = built.transaction().clone();
@@ -393,133 +391,6 @@ pub fn transition<P: Parameters>(
     Some(transaction)
 }
 
-/// Builds and records the controller challenge for one update or release
-/// message. When `request` is present, that exact inbound Treasury note is
-/// consumed; lifecycle challenges have no inbound trigger. Empty-memo
-/// Treasury notes supply the relay value and network fee, and every remainder
-/// returns to the Treasury account.
-#[allow(clippy::too_many_arguments)]
-pub fn challenge<P: Parameters>(
-    network: &P,
-    wallet: &mut Wallet,
-    treasury_keys: &TreasuryKeys,
-    spend_prover: &sapling::circuit::SpendParameters,
-    output_prover: &sapling::circuit::OutputParameters,
-    request: Option<&ReceivedNote<NoteId, orchard::note::Note>>,
-    controller: &zcash_keys::address::UnifiedAddress,
-    memo: [u8; 512],
-    relay_value: Zatoshis,
-    tip: BlockHeight,
-    target_height: BlockHeight,
-) -> Option<Transaction> {
-    let request_value = request.map(zatoshis).unwrap_or(Zatoshis::ZERO);
-    let request_id = request.map(|note| *note.internal_note_id());
-    let mut fee_notes = Vec::new();
-    let mut funding = request_value;
-    let candidates = {
-        // Treasury funding policy: empty-memo notes only — messages are not
-        // money — largest first, so fewest notes fund the relay.
-        let mut candidates =
-            wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip));
-        candidates.retain(|note| {
-            matches!(
-                wallet.get_memo(*note.internal_note_id()),
-                Ok(None) | Ok(Some(Memo::Empty))
-            )
-        });
-        candidates.sort_by_key(|note| std::cmp::Reverse(note.note().value().inner()));
-        candidates
-    }
-    .into_iter()
-    .filter(|note| Some(*note.internal_note_id()) != request_id)
-    .collect::<Vec<_>>();
-    let mut candidate_index = 0;
-
-    let transaction_fee = loop {
-        let action_count = (usize::from(request.is_some()) + fee_notes.len()).max(2);
-        let fee = fee(network, target_height, action_count);
-        let required = (relay_value + fee).expect("relay value plus fee fits monetary range");
-        if funding >= required {
-            break fee;
-        }
-        let candidate = candidates.get(candidate_index)?;
-        candidate_index += 1;
-        funding = (funding + zatoshis(candidate))
-            .expect("Treasury balance fits in the Zcash monetary range");
-        fee_notes.push((
-            candidate.note().clone(),
-            wallet
-                .witness(candidate, tip)
-                .expect("FATAL: owned note has no witness at the applied tip"),
-        ));
-    };
-    let treasury_change = (funding - relay_value)
-        .and_then(|remaining| remaining - transaction_fee)
-        .expect("selection guarantees relay value and fee coverage");
-
-    let anchor = wallet.anchor_at(tip);
-    let prepared_request =
-        request.map(|note| (note.note().clone(), wallet.witness(note, tip).expect("FATAL: owned note has no witness at the applied tip")));
-    let treasury_fvk = treasury_keys.orchard_fvk();
-    let controller = controller.orchard().copied()?;
-    let mut builder = Builder::new(
-        network.clone(),
-        target_height,
-        BuildConfig::Standard {
-            sapling_anchor: None,
-            orchard_anchor: None,
-            ironwood_anchor: Some(anchor),
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
-        },
-    );
-
-    if let Some((request_note, request_path)) = prepared_request {
-        builder
-            .add_ironwood_spend::<FeeError>(treasury_fvk.clone(), request_note, request_path)
-            .expect("FATAL: valid Treasury request rejected by the builder");
-    }
-    for (note, path) in fee_notes {
-        builder
-            .add_ironwood_spend::<FeeError>(treasury_fvk.clone(), note, path)
-            .expect("FATAL: valid Treasury relay funding rejected by the builder");
-    }
-    builder
-        .add_ironwood_output::<FeeError>(
-            Some(treasury_fvk.to_ovk(orchard::keys::Scope::External)),
-            controller,
-            relay_value,
-            zcash_protocol::memo::MemoBytes::from_bytes(&memo)
-                .expect("a 512-byte protocol memo is valid"),
-        )
-        .expect("FATAL: valid controller challenge rejected by the builder");
-    if treasury_change > Zatoshis::ZERO {
-        builder
-            .add_ironwood_output::<FeeError>(
-                Some(treasury_fvk.to_ovk(orchard::keys::Scope::Internal)),
-                treasury_fvk.address_at(0u32, orchard::keys::Scope::Internal),
-                treasury_change,
-                zcash_protocol::memo::MemoBytes::empty(),
-            )
-            .expect("FATAL: valid Treasury change rejected by the builder");
-    }
-    let built = builder
-        .build(
-            &Default::default(),
-            &[],
-            &[orchard::keys::SpendAuthorizingKey::from(
-                treasury_keys.orchard_spending_key(),
-            )],
-            &mut rand::rngs::OsRng,
-            spend_prover,
-            output_prover,
-            &zcash_primitives::transaction::fees::zip317::FeeRule::standard(),
-        )
-        .expect("FATAL: controller challenge proving or signing failed");
-    let transaction = built.transaction().clone();
-    wallet.record_sent(&transaction, target_height, transaction_fee);
-    Some(transaction)
-}
 
 fn zatoshis(note: &ReceivedNote<NoteId, orchard::note::Note>) -> Zatoshis {
     Zatoshis::from_u64(note.note().value().inner())
@@ -616,7 +487,7 @@ fn fee<P: Parameters>(
     target_height: BlockHeight,
     ironwood_actions: usize,
 ) -> Zatoshis {
-    zcash_primitives::transaction::fees::zip317::FeeRule::standard()
+    StandardFeeRule::Zip317
         .fee_required(
             network,
             target_height,
@@ -629,4 +500,3 @@ fn fee<P: Parameters>(
         )
         .expect("FATAL: ZIP-317 fee is not representable")
 }
-

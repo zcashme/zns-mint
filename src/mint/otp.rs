@@ -162,9 +162,10 @@ pub fn required_relay_value<P: zcash_protocol::consensus::Parameters>(
     network: &P,
     target_height: zcash_protocol::consensus::BlockHeight,
 ) -> zcash_protocol::value::Zatoshis {
-    use zcash_primitives::transaction::fees::{zip317::FeeRule, FeeRule as _};
+    use zcash_client_backend::fees::StandardFeeRule;
+    use zcash_primitives::transaction::fees::FeeRule as _;
 
-    FeeRule::standard()
+    StandardFeeRule::Zip317
         .fee_required(
             network,
             target_height,

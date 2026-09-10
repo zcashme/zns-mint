@@ -75,7 +75,7 @@ impl<A: MintAccount> AccountKeys<A> {
     /// The one sanctioned copy of the spending key — handed to upstream's generic payment path ([`create_proposed_transactions`][upstream], Sapling-disabled and Ironwood-only) and dropped with the call.
     ///
     /// [upstream]: zcash_client_backend::data_api::wallet::create_proposed_transactions
-    pub(crate) fn usk_clone(&self) -> UnifiedSpendingKey {
+    pub fn usk_clone(&self) -> UnifiedSpendingKey {
         self.spending.clone()
     }
 }
