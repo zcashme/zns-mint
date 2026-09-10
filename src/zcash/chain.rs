@@ -30,16 +30,8 @@ impl ChainClient {
         Ok(Self(client))
     }
 
-    /// Opens the gRPC stream of best-chain tip changes.
-    ///
-    /// The first message names the current tip; later messages name changes.
-    /// A message is a wake-up, never an authoritative read — re-read the tip
-    /// through [`CanonicalBlockSource::exact_tip`]. The stream may end
-    /// silently or with an error; both mean reconnect and treat the gap as
-    /// missed.
-    pub async fn chain_tip_change_stream(
-        &mut self,
-    ) -> Result<tonic::codec::Streaming<BlockHashAndHeight>, TransportError> {
+    /// Change-only tip stream.
+    pub async fn chain_tip_change_stream(&mut self) -> Result<TipStream, TransportError> {
         self.0
             .chain_tip_change(Empty {})
             .await
@@ -47,6 +39,9 @@ impl ChainClient {
             .map_err(TransportError::from)
     }
 }
+
+/// The live gRPC tip stream: one notification per canonical tip change.
+pub type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
 
 /// A tip announcement, decoded: `(height, hash)` from one message.
 pub fn tip_height_hash(tip: &BlockHashAndHeight) -> (BlockHeight, BlockHash) {

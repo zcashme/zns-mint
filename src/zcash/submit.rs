@@ -2,6 +2,8 @@
 
 use zcash_primitives::transaction::Transaction;
 
+use super::RETRY_PAUSE;
+
 use super::{JsonRpc, TransportError};
 
 /// The node's answer to "carry this".
@@ -30,6 +32,36 @@ impl JsonRpc {
 }
 
 impl super::CanonicalBlockSource {
+    /// Broadcasts a transaction, retrying transport uncertainty until the
+    /// node decides; both acceptance and rejection return `false`-or-`true`
+    /// respectively — what the caller does with the verdict is its own.
+    /// `label` names the flow in the logs ("registration", "controller
+    /// challenge", …).
+    pub async fn submit(&self, tx: &Transaction, label: &'static str) -> bool {
+        loop {
+            match self.send_transaction(tx).await {
+                Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => {
+                    tracing::info!(txid = %tx.txid(), what = label, "submitted");
+                    return true;
+                }
+                Ok(SubmitOutcome::Rejected(error)) => {
+                    tracing::error!(%error, txid = %tx.txid(), what = label, "rejected");
+                    return false;
+                }
+                Err(error) if error.is_retryable() => {
+                    tracing::warn!(
+                        %error,
+                        txid = %tx.txid(),
+                        what = label,
+                        "submission uncertain; retrying"
+                    );
+                    tokio::time::sleep(RETRY_PAUSE).await;
+                }
+                Err(error) => panic!("FATAL: {label} submission failed: {error}"),
+            }
+        }
+    }
+
     /// Broadcasts a signed transaction — one honest attempt, no retries, no
     /// hidden tip guard.
     ///

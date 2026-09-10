@@ -1,63 +1,14 @@
 //! Treasury wallet view and Treasury policy for the mint.
 //!
-//! The Treasury is the user-facing account's agent (ZIP-32 account 0): it is
-//! everything that account must do, and nothing more. Five responsibilities:
-//!
-//! 1. **Interpret intake** — claim payments and OTP relay requests arrive as
-//!    Ironwood notes owned by the wallet; Treasury decodes their stored memos
-//!    (`memo`) and classifies them. Treasury is keyless: it holds no keys and
-//!    no notes of its own — not even viewing keys. Every fact it learns flows
-//!    through a wallet projection, and every signing capability arrives as a
-//!    borrowed argument.
-//! 2. **Guarantee payment freshness** — a payment confirmed at or before the
-//!    name's current tip is rejected; a payment cannot be reused after a
-//!    release/reclaim boundary.
-//! 3. **Participate in settlements** — the atomic claim (spend the payment
-//!    note, retain the fixed price). OTP relay delivery is a mint-level
-//!    concern ([`crate::mint::otp`]): an ordinary upstream-built Treasury
-//!    payment to the current controller. Treasury never decides a name's
-//!    lifecycle — that is the Registry's.
-//! 4. **Deposit to the vault** — when the spendable balance exceeds
-//!    the threshold, send the excess to the project vault's transparent
-//!    address, retaining a fixed reserve.
-//! 5. **Pay Name Note fees** — the Treasury funds the ZIP-317 fee for every
-//!    Name Note transaction in a multi-authority bundle with the Registry.
 
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
-use zcash_client_backend::data_api::WalletRead as _;
-use zcash_client_backend::wallet::{NoteId, ReceivedNote};
-use zcash_protocol::consensus::{BlockHeight, Parameters};
-use zcash_protocol::memo::Memo;
+use zcash_client_backend::wallet::NoteId;
+use zcash_protocol::consensus::Parameters;
 use zcash_protocol::value::Zatoshis;
 
 use crate::mint::TREASURY_ACCOUNT;
 use crate::wallet::Wallet;
 
-/// The Treasury's Ironwood fee-note candidates, largest value first.
-///
-/// The builder consumes these greedily (fewest notes → fewest actions →
-/// lowest fee); the ordering here implements the Treasury's selection
-/// policy so the builder stays a mechanical composer.
-pub(crate) fn fee_note_candidates(
-    wallet: &Wallet,
-    tip: BlockHeight,
-) -> Vec<ReceivedNote<NoteId, orchard::note::Note>> {
-    let mut notes = wallet.unspent_ironwood_notes(
-        TREASURY_ACCOUNT,
-        zcash_client_backend::data_api::wallet::TargetHeight::from(tip),
-    );
-    // Protocol messages and the operating float share the Treasury account.
-    // A Name Note fee must never consume some other message before its own
-    // rule sees it, so only empty-memo notes are fee candidates.
-    notes.retain(|note| {
-        matches!(
-            wallet.get_memo(*note.internal_note_id()),
-            Ok(None) | Ok(Some(Memo::Empty))
-        )
-    });
-    notes.sort_by_key(|note| std::cmp::Reverse(note.note().value().inner()));
-    notes
-}
 
 /// Minimum spendable Treasury balance to trigger a vault sweep (2 ZEC).
 pub const SWEEP_THRESHOLD: Zatoshis = Zatoshis::const_from_u64(200_000_000);

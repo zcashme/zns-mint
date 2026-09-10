@@ -13,12 +13,16 @@ use std::convert::Infallible;
 use incrementalmerkletree::{Address, Marking, Retention};
 use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTree};
 use transparent::bundle::OutPoint;
+use zcash_client_backend::scanning::ScanningKeys;
 use zcash_client_backend::{
     data_api::chain::ChainState,
     data_api::locking::LockOwner,
-    data_api::{BlockMetadata, SentTransactionOutput, TransactionStatus, WalletWrite},
+    data_api::{
+        BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus, WalletWrite,
+    },
     wallet::{
-        NoteId, OutputRef, WalletIronwoodOutput, WalletSaplingOutput, WalletTransparentOutput,
+        NoteId, OutputRef, ReceivedNote, WalletIronwoodOutput, WalletSaplingOutput,
+        WalletTransparentOutput,
     },
 };
 use zcash_keys::keys::UnifiedFullViewingKey;
@@ -27,9 +31,11 @@ use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
     consensus::{BlockHeight, TxIndex},
     memo::Memo,
+    value::Zatoshis,
 };
 use zip32::AccountId;
-use zcash_client_backend::scanning::ScanningKeys;
+
+use crate::mint::TREASURY_ACCOUNT;
 
 /// Depth of the Sapling note commitment tree,
 const SAPLING_NOTE_COMMITMENT_TREE_DEPTH: u8 = 32;
@@ -177,6 +183,52 @@ impl Wallet {
     /// Returns the viewing key of one fixed mint account.
     pub fn ufvk_for(&self, account: AccountId) -> Option<&UnifiedFullViewingKey> {
         self.ufvks.get(&account)
+    }
+
+    /// Witnesses one received Ironwood note at `tip`.
+    pub fn witness(
+        &mut self,
+        note: &ReceivedNote<NoteId, orchard::note::Note>,
+        tip: BlockHeight,
+    ) -> Option<orchard::tree::MerklePath> {
+        let path = self
+            .ironwood_witness(note.note_commitment_tree_position(), tip)
+            .expect("FATAL: Ironwood tree access failed")
+            .expect("FATAL: owned note has no witness at the applied tip");
+        Some(orchard::tree::MerklePath::from(path))
+    }
+
+    /// The Ironwood anchor at `tip`: the root every spend of this block's
+    /// transaction must prove against.
+    pub fn anchor_at(&mut self, tip: BlockHeight) -> orchard::tree::Anchor {
+        self.ironwood_anchor(tip)
+            .expect("FATAL: Ironwood tree access failed")
+            .expect("FATAL: wallet has no Ironwood anchor at its applied tip")
+    }
+
+    /// Records a mint-built transaction as sent-but-unconfirmed intent:
+    /// marks its input spends (which also releases any locks) so the same
+    /// notes cannot be selected again until the transaction either mines
+    /// or expires.
+    pub fn record_sent(
+        &mut self,
+        transaction: &Transaction,
+        target_height: BlockHeight,
+        fee: Zatoshis,
+    ) {
+        use zcash_client_backend::data_api::WalletWrite as _;
+        use zcash_client_backend::data_api::wallet::TargetHeight;
+        let sent = SentTransaction::new(
+            transaction,
+            time::OffsetDateTime::now_utc(),
+            TargetHeight::from(target_height),
+            TREASURY_ACCOUNT,
+            &[],
+            fee,
+            &[],
+        );
+        self.store_transactions_to_be_sent(&[sent])
+            .expect("FATAL: wallet rejected a locally built transaction");
     }
 
     /// The block hash at `height`: an applied block, or the boot origin.

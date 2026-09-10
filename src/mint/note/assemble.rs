@@ -1,16 +1,17 @@
-//! The write path: one function per action — `claim`, `update`, `release` —
-//! each stages its zero-value Registry Name Note onto a caller-owned builder.
-//! Final assembly (build → prove → sign) returns when the orchestrator exists.
+//! The write path: per transaction shape, a prepare/create pair — prepare
+//! resolves the law's inputs, create proves, signs, and records.
 
+use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore as _};
 use zcash_client_backend::data_api::wallet::TargetHeight;
-use zcash_client_backend::data_api::{SentTransaction, WalletRead as _, WalletWrite as _};
-use zcash_client_backend::wallet::{NoteId, ReceivedNote};
+use zcash_client_backend::data_api::WalletRead as _;
+use zcash_client_backend::wallet::{NoteId, OutputRef, ReceivedNote};
 use zcash_primitives::transaction::builder::Error as BuildError;
 use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
 use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::memo::Memo;
 use zcash_protocol::value::Zatoshis;
 
 use super::NameNote;
@@ -19,6 +20,17 @@ use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
 use crate::mint::TRANSACTION_EXPIRY_BUFFER;
+
+/// Why a transaction could not be prepared. Every variant is transient —
+/// prepare re-fires each tip and succeeds once the world allows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepareError {
+    /// The claim anchor or predecessor note is not selectable: a rival
+    /// transaction holds it until expiry, or consumed it on chain.
+    AuthorityUnavailable,
+    /// The Treasury could not fund the fee from eligible notes.
+    InsufficientFunds,
+}
 
 /// Stages a claim's two inseparable zero-value Registry outputs: the ZNS Name
 /// Note and the ordinary successor anchor that authorizes the next claim.
@@ -111,52 +123,97 @@ pub fn release<P: Parameters>(
     Ok(())
 }
 
-/// Builds and records one registration. The claim message is consumed as
-/// the transaction's trigger. Separate Treasury notes cover the network fee,
-/// and all remaining Treasury value returns to the Treasury account. The
-/// Registry output is always zero-valued.
+/// Prepares a claim transaction: resolves the law's NameNote against the
+/// wallet — the exact claim anchor, the inbound payment, Treasury fee notes
+/// — and stages the full transaction. Locks the selected inputs until the
+/// transaction expires. `Err` means "awaits Treasury funds": re-fire next
+/// tip.
 #[allow(clippy::too_many_arguments)]
-pub fn register<P: Parameters>(
+pub fn claim_prepare<P: Parameters>(
     network: &P,
     wallet: &mut Wallet,
     treasury_keys: &TreasuryKeys,
     registry_keys: &RegistryKeys,
-    spend_prover: &sapling::circuit::SpendParameters,
-    output_prover: &sapling::circuit::OutputParameters,
-    claim_note: NameNote,
+    claim_request: NameNote,
     claim_anchor: orchard::note::Nullifier,
     payment: &ReceivedNote<NoteId, orchard::note::Note>,
-    price: Zatoshis,
     tip: BlockHeight,
-    target_height: BlockHeight,
-) -> Option<Transaction> {
-    assert_eq!(claim_note.action(), crate::mint::Action::Claim);
+) -> Result<(Builder<P, ()>, Zatoshis), PrepareError> {
+    assert_eq!(claim_request.action(), crate::mint::Action::Claim);
+    let target_height = BlockHeight::from_u32(u32::from(tip) + 1);
 
-    let payment_value = zatoshis(payment);
-    if payment_value < price {
-        return None;
-    }
-
-    let claim_anchor = wallet.unspent_ironwood_note_by_nullifier(
-        REGISTRY_ACCOUNT,
-        claim_anchor,
-        TargetHeight::from(tip),
-    )?;
+    let claim_anchor_note = wallet
+        .unspent_ironwood_note_by_nullifier(
+            REGISTRY_ACCOUNT,
+            claim_anchor,
+            TargetHeight::from(tip),
+        )
+        .ok_or(PrepareError::AuthorityUnavailable)?;
     let excluded = [
         *payment.internal_note_id(),
-        *claim_anchor.internal_note_id(),
+        *claim_anchor_note.internal_note_id(),
     ];
-    let (fee_notes, fee_funding, transaction_fee) =
-        select_fee_notes(network, wallet, tip, target_height, None, &excluded, 2, 3)?;
-    let treasury_change = (payment_value + fee_funding)
+
+    // Treasury funding policy: empty-memo notes only — messages are not
+    // money — largest first, so fewest notes fund the fee.
+    let mut candidates = wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip));
+    candidates.retain(|note| {
+        matches!(
+            wallet.get_memo(*note.internal_note_id()),
+            Ok(None) | Ok(Some(Memo::Empty))
+        )
+    });
+    candidates.retain(|note| !excluded.contains(note.internal_note_id()));
+    candidates.sort_by_key(|note| std::cmp::Reverse(note.note().value().inner()));
+
+    let mut fee_notes = Vec::new();
+    let mut fee_funding = Zatoshis::ZERO;
+    let transaction_fee = loop {
+        let transaction_fee = fee(network, target_height, 2 + fee_notes.len());
+        if fee_funding >= transaction_fee {
+            break transaction_fee;
+        }
+        let candidate = candidates.get(fee_notes.len()).ok_or(PrepareError::InsufficientFunds)?;
+        fee_funding = (fee_funding + zatoshis(candidate))
+            .expect("Treasury balance fits in the Zcash monetary range");
+        fee_notes.push(prepare(wallet, candidate, tip));
+    };
+    let treasury_change = (zatoshis(payment) + fee_funding)
         .and_then(|total| total - transaction_fee)
         .expect("separate Treasury fee selection preserves the full claim payment");
 
-    let anchor = anchor(wallet, tip);
-    let (payment_note, payment_path) = prepare(wallet, payment, tip);
-    let (claim_anchor_note, claim_anchor_path) = prepare(wallet, &claim_anchor, tip);
-    let treasury_fvk = treasury_keys.orchard_fvk();
+    // Reserve every selected input until the transaction expires: a rival
+    // prepare cannot select them while this one is in flight.
+    let locked_refs = std::iter::once(OutputRef::from(*payment.internal_note_id()))
+        .chain(std::iter::once(OutputRef::from(
+            *claim_anchor_note.internal_note_id(),
+        )))
+        .chain(
+            candidates
+                .iter()
+                .take(fee_notes.len())
+                .map(|note| OutputRef::from(*note.internal_note_id())),
+        )
+        .collect::<Vec<_>>();
+    wallet
+        .lock_outputs(
+            &locked_refs,
+            LockOwner::random(&mut rand::rngs::OsRng),
+            expiry(target_height),
+        )
+        .expect("FATAL: wallet rejected the input lock");
+
+    let anchor = wallet.anchor_at(tip);
+    let payment_path = wallet
+        .witness(payment, tip)
+        .expect("FATAL: owned note has no witness at the applied tip");
+    let payment_note = payment.note().clone();
+    let claim_anchor_path = wallet
+        .witness(&claim_anchor_note, tip)
+        .expect("FATAL: owned note has no witness at the applied tip");
+    let claim_anchor_note = claim_anchor_note.note().clone();
     let registry_fvk = registry_keys.orchard_fvk();
+    let treasury_fvk = treasury_keys.orchard_fvk();
 
     let mut builder = Builder::new(
         network.clone(),
@@ -182,7 +239,7 @@ pub fn register<P: Parameters>(
             .add_ironwood_spend::<FeeError>(treasury_fvk.clone(), note, path)
             .expect("FATAL: valid Treasury fee note rejected by the builder");
     }
-    claim(&mut builder, registry_keys, claim_note)
+    claim(&mut builder, registry_keys, claim_request)
         .expect("FATAL: valid registration rejected by the builder");
     builder
         .add_ironwood_output::<FeeError>(
@@ -193,6 +250,19 @@ pub fn register<P: Parameters>(
         )
         .expect("FATAL: valid Treasury change rejected by the builder");
 
+    Ok((builder, transaction_fee))
+}
+
+/// Creates a prepared claim transaction: proves, signs with both
+/// authorities. Pure — values in, transaction out; recording the intent is
+/// the caller's step. Infallible once preparation succeeded.
+pub fn create_claim<P: Parameters>(
+    treasury_keys: &TreasuryKeys,
+    registry_keys: &RegistryKeys,
+    spend_prover: &sapling::circuit::SpendParameters,
+    output_prover: &sapling::circuit::OutputParameters,
+    builder: Builder<P, ()>,
+) -> Transaction {
     let built = builder
         .build(
             &Default::default(),
@@ -207,9 +277,7 @@ pub fn register<P: Parameters>(
             &zcash_primitives::transaction::fees::zip317::FeeRule::standard(),
         )
         .expect("FATAL: registration proving or signing failed");
-    let transaction = built.transaction().clone();
-    record(wallet, &transaction, target_height, transaction_fee);
-    Some(transaction)
+    built.transaction().clone()
 }
 
 /// Builds and records an update or release. The exact current Registry note
@@ -253,8 +321,11 @@ pub fn transition<P: Parameters>(
     )?;
     let treasury_change =
         (funding - transaction_fee).expect("Treasury selection guarantees exact fee coverage");
-    let anchor = anchor(wallet, tip);
-    let (predecessor_note, predecessor_path) = prepare(wallet, &predecessor, tip);
+    let anchor = wallet.anchor_at(tip);
+    let predecessor_note = predecessor.note().clone();
+    let predecessor_path = wallet
+        .witness(&predecessor, tip)
+        .expect("FATAL: owned note has no witness at the applied tip");
     let (predecessor_rcm, predecessor_psi) = predecessor_opening(network, wallet, &predecessor);
 
     let registry_fvk = registry_keys.orchard_fvk();
@@ -319,7 +390,7 @@ pub fn transition<P: Parameters>(
         )
         .expect("FATAL: transition proving or signing failed");
     let transaction = built.transaction().clone();
-    record(wallet, &transaction, target_height, transaction_fee);
+    wallet.record_sent(&transaction, target_height, transaction_fee);
     Some(transaction)
 }
 
@@ -346,10 +417,23 @@ pub fn challenge<P: Parameters>(
     let request_id = request.map(|note| *note.internal_note_id());
     let mut fee_notes = Vec::new();
     let mut funding = request_value;
-    let candidates = crate::mint::treasury::fee_note_candidates(wallet, tip)
-        .into_iter()
-        .filter(|note| Some(*note.internal_note_id()) != request_id)
-        .collect::<Vec<_>>();
+    let candidates = {
+        // Treasury funding policy: empty-memo notes only — messages are not
+        // money — largest first, so fewest notes fund the relay.
+        let mut candidates =
+            wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip));
+        candidates.retain(|note| {
+            matches!(
+                wallet.get_memo(*note.internal_note_id()),
+                Ok(None) | Ok(Some(Memo::Empty))
+            )
+        });
+        candidates.sort_by_key(|note| std::cmp::Reverse(note.note().value().inner()));
+        candidates
+    }
+    .into_iter()
+    .filter(|note| Some(*note.internal_note_id()) != request_id)
+    .collect::<Vec<_>>();
     let mut candidate_index = 0;
 
     let transaction_fee = loop {
@@ -363,14 +447,20 @@ pub fn challenge<P: Parameters>(
         candidate_index += 1;
         funding = (funding + zatoshis(candidate))
             .expect("Treasury balance fits in the Zcash monetary range");
-        fee_notes.push(prepare(wallet, candidate, tip));
+        fee_notes.push((
+            candidate.note().clone(),
+            wallet
+                .witness(candidate, tip)
+                .expect("FATAL: owned note has no witness at the applied tip"),
+        ));
     };
     let treasury_change = (funding - relay_value)
         .and_then(|remaining| remaining - transaction_fee)
         .expect("selection guarantees relay value and fee coverage");
 
-    let anchor = anchor(wallet, tip);
-    let prepared_request = request.map(|note| prepare(wallet, note, tip));
+    let anchor = wallet.anchor_at(tip);
+    let prepared_request =
+        request.map(|note| (note.note().clone(), wallet.witness(note, tip).expect("FATAL: owned note has no witness at the applied tip")));
     let treasury_fvk = treasury_keys.orchard_fvk();
     let controller = controller.orchard().copied()?;
     let mut builder = Builder::new(
@@ -429,7 +519,7 @@ pub fn challenge<P: Parameters>(
         )
         .expect("FATAL: controller challenge proving or signing failed");
     let transaction = built.transaction().clone();
-    record(wallet, &transaction, target_height, transaction_fee);
+    wallet.record_sent(&transaction, target_height, transaction_fee);
     Some(transaction)
 }
 
@@ -438,23 +528,15 @@ fn zatoshis(note: &ReceivedNote<NoteId, orchard::note::Note>) -> Zatoshis {
         .expect("note values fit in the Zcash monetary range")
 }
 
-fn anchor(wallet: &mut Wallet, tip: BlockHeight) -> orchard::tree::Anchor {
-    wallet
-        .ironwood_anchor(tip)
-        .expect("FATAL: Ironwood tree access failed")
-        .expect("FATAL: wallet has no Ironwood anchor at its applied tip")
-}
-
 fn prepare(
     wallet: &mut Wallet,
     note: &ReceivedNote<NoteId, orchard::note::Note>,
     tip: BlockHeight,
 ) -> (orchard::note::Note, orchard::tree::MerklePath) {
     let path = wallet
-        .ironwood_witness(note.note_commitment_tree_position(), tip)
-        .expect("FATAL: Ironwood tree access failed")
+        .witness(note, tip)
         .expect("FATAL: owned note has no witness at the applied tip");
-    (note.note().clone(), orchard::tree::MerklePath::from(path))
+    (note.note().clone(), path)
 }
 
 fn predecessor_opening<P: Parameters>(
@@ -496,7 +578,15 @@ fn select_fee_notes<P: Parameters>(
     Zatoshis,
 )> {
     let required_id = required.map(|note| *note.internal_note_id());
-    let mut candidates = crate::mint::treasury::fee_note_candidates(wallet, tip);
+    // Treasury funding policy: empty-memo notes only — messages are not
+    // money — largest first, so fewest notes fund the fee.
+    let mut candidates = wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip));
+    candidates.retain(|note| {
+        matches!(
+            wallet.get_memo(*note.internal_note_id()),
+            Ok(None) | Ok(Some(Memo::Empty))
+        )
+    });
     candidates.retain(|note| {
         Some(*note.internal_note_id()) != required_id && !excluded.contains(note.internal_note_id())
     });
@@ -548,24 +638,4 @@ fn expiry(target_height: BlockHeight) -> BlockHeight {
             .checked_add(TRANSACTION_EXPIRY_BUFFER)
             .expect("target height plus expiry buffer fits u32"),
     )
-}
-
-fn record(
-    wallet: &mut Wallet,
-    transaction: &Transaction,
-    target_height: BlockHeight,
-    transaction_fee: Zatoshis,
-) {
-    let sent = SentTransaction::new(
-        transaction,
-        time::OffsetDateTime::now_utc(),
-        TargetHeight::from(target_height),
-        TREASURY_ACCOUNT,
-        &[],
-        transaction_fee,
-        &[],
-    );
-    wallet
-        .store_transactions_to_be_sent(&[sent])
-        .expect("FATAL: wallet rejected a locally built transaction");
 }

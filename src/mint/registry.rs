@@ -216,17 +216,21 @@ impl Registry {
         challenges: &mut OtpQueue,
         request: Request,
         otp: Option<&[u8; 6]>,
+        payment_height: BlockHeight,
         mtp: Timestamp,
     ) -> Option<NameNote> {
         match request {
             Request::Claim { name, ua, term } => {
-                // Availability: unseen, or the tip is a release.
+                // Availability: unseen, or released with a payment that
+                // postdates the tombstone — a payment mined before the
+                // release predates the freedom it claims.
                 match current_record(self, &name) {
-                    None
-                    | Some(NameRecord {
-                        action: Action::Release,
-                        ..
-                    }) => {}
+                    None => {}
+                    Some(record @ NameRecord { action: Action::Release, .. }) => {
+                        if payment_height <= record.confirmed_height {
+                            return None;
+                        }
+                    }
                     Some(_) => return None, // live
                 }
                 let expires_at = match term {
@@ -258,14 +262,7 @@ impl Registry {
                     return None;
                 }
                 let otp = otp?;
-                if !challenges.accept(
-                    &name,
-                    Action::Update,
-                    &ua,
-                    record.commitment,
-                    otp,
-                    mtp,
-                ) {
+                if !challenges.accept(&name, Action::Update, &ua, record.commitment, otp, mtp) {
                     return None;
                 }
                 // §4.5.3: an ordinary update carries the current expiry
@@ -301,14 +298,7 @@ impl Registry {
                     return None;
                 }
                 let otp = otp?;
-                if !challenges.accept(
-                    &name,
-                    Action::Release,
-                    &ua,
-                    record.commitment,
-                    otp,
-                    mtp,
-                ) {
+                if !challenges.accept(&name, Action::Release, &ua, record.commitment, otp, mtp) {
                     return None;
                 }
                 Some(NameNote::Release {

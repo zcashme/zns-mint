@@ -8,6 +8,7 @@ use std::num::NonZeroU32;
 
 use secrecy::SecretVec;
 use shardtree::store::ShardStore;
+use zcash_client_backend::data_api::locking::{LockFilter, LockedInputPolicy};
 use zcash_client_backend::data_api::{
     defaults,
     error::FindAccountForAddressError,
@@ -18,7 +19,7 @@ use zcash_client_backend::data_api::{
     SeedRelevance, TransactionDataRequest, TransactionStatus, TransparentBalances, WalletRead,
     WalletSummary, Zip32Derivation,
 };
-use zcash_client_backend::wallet::{NoteId, ReceivedNote, TransparentAddressMetadata};
+use zcash_client_backend::wallet::{NoteId, OutputRef, ReceivedNote, TransparentAddressMetadata};
 use zcash_keys::address::{Address, UnifiedAddress};
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_primitives::block::BlockHash;
@@ -712,9 +713,10 @@ impl WalletRead for Wallet {
 // ---------------------------------------------------------------------------
 
 impl Wallet {
-    /// Returns every Ironwood note owned by `account` with no spend that is
-    /// pending or mined as of `tip`: a spend recorded by a transaction whose
-    /// expiry height has passed releases its note.
+    /// Returns every Ironwood note owned by `account` that is selectable at
+    /// `tip`: unspent (a spend recorded by a transaction whose expiry height
+    /// has passed releases its note) and not actively locked for an
+    /// in-flight transaction.
     pub fn unspent_ironwood_notes(
         &self,
         account: AccountId,
@@ -723,12 +725,19 @@ impl Wallet {
         self.ironwood_notes
             .iter()
             .filter(move |(_, output)| *output.account_id() == account)
-            .filter(|(note_id, _)| !self.ironwood_note_is_spent(note_id, tip))
+            .filter(|(note_id, _)| {
+                !self.ironwood_note_is_spent(note_id, tip)
+                    && self.lock_admits(
+                        &OutputRef::from(**note_id),
+                        tip,
+                        LockFilter::Policy(&LockedInputPolicy::default()),
+                    )
+            })
             .filter_map(|(note_id, _)| self.ironwood_received_note(*note_id))
             .collect()
     }
 
-    /// Returns one Ironwood note with no pending-or-mined spend as of `tip`.
+    /// Returns one Ironwood note selectable at `tip`.
     pub(crate) fn unspent_ironwood_note(
         &self,
         account: AccountId,
@@ -736,9 +745,15 @@ impl Wallet {
         tip: TargetHeight,
     ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
         let output = self.ironwood_notes.get(&note_id)?;
-        (*output.account_id() == account && !self.ironwood_note_is_spent(&note_id, tip))
-            .then(|| self.ironwood_received_note(note_id))
-            .flatten()
+        (*output.account_id() == account
+            && !self.ironwood_note_is_spent(&note_id, tip)
+            && self.lock_admits(
+                &OutputRef::from(note_id),
+                tip,
+                LockFilter::Policy(&LockedInputPolicy::default()),
+            ))
+        .then(|| self.ironwood_received_note(note_id))
+        .flatten()
     }
 
     /// Finds an unspent owned Ironwood note by the exact nullifier it reveals

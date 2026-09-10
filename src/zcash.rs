@@ -10,7 +10,7 @@ pub mod chain;
 pub mod mempool;
 pub mod submit;
 
-pub use chain::{tip_height_hash, BlockchainInfo, ChainClient};
+pub use chain::{tip_height_hash, BlockchainInfo, ChainClient, TipStream};
 pub use submit::SubmitOutcome;
 
 use std::{any::type_name, fmt, time::Duration};
