@@ -25,7 +25,7 @@ use crate::mint::{MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
-use zcash_client_backend::data_api::chain::ChainState;
+use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata};
 
 // ---------------------------------------------------------------------------
 // Boot life-cycle
@@ -41,9 +41,8 @@ pub struct Boot<P: Parameters> {
     pub chain: ChainClient,
     /// produced: trees seeded from the verified origin
     pub wallet: Wallet,
-    /// verified: the block-before-birthday checkpoint from which `main`
-    /// reconstructs the wallet and Registry projections
-    pub origin: ChainState,
+    /// produced: the origin cursor the loop extends
+    pub cursor: BlockMetadata,
     /// cannot: derived from the seed — the seed dies before this exists
     pub treasury_keys: TreasuryKeys,
     /// cannot: derived from the seed
@@ -194,11 +193,19 @@ impl<P: Parameters> Boot<P> {
             u32::from(tip_height)
         );
 
+        let cursor = block_metadata(&origin);
+
+        tracing::info!(
+            network = NETWORK_LABEL,
+            "boot: complete at node tip {}",
+            u32::from(tip_height)
+        );
+
         Boot {
             network,
             chain: chain_client,
+            cursor,
             wallet,
-            origin,
             treasury_keys,
             registry_keys,
             sapling_spend,
@@ -210,7 +217,7 @@ impl<P: Parameters> Boot<P> {
     }
 }
 
-pub use crate::wallet::block_metadata;
+use crate::wallet::block_metadata;
 
 #[cfg(feature = "regtest")]
 fn regtest_network() -> LocalNetwork {

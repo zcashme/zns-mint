@@ -26,7 +26,7 @@ use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::memo::Memo;
 use zcash_protocol::value::Zatoshis;
 
-use zns_mint::boot::{block_metadata, Boot};
+use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D_OTP};
 use zns_mint::mint::registry::{NameRecord, ReceivedNameNote, Registry};
@@ -50,7 +50,7 @@ async fn main() {
         network,
         mut chain,
         mut wallet,
-        origin,
+        cursor: mut chain_tip,
         treasury_keys,
         registry_keys,
         sapling_spend,
@@ -60,9 +60,11 @@ async fn main() {
         mut challenges,
     } = Boot::start().await;
 
+    // Stateless POST stubs: boot proved the endpoint live; there is no
+    // state to hand over.
     let rpc = JsonRpc::new();
     let source = CanonicalBlockSource::new();
-    let mut chain_tip = block_metadata(&origin);
+    // The loop knows no names until the chain proves the root anchor.
     let mut registry: Option<Registry> = None;
 
     tracing::info!(
