@@ -203,6 +203,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
                 .iter()
                 .map(|c| ReceivedNameNote::new(c.txid, c.action_index, c.nullifier, c.payload.clone()))
                 .collect();
+            let treasury_memos = crate::mint::note::decrypt_treasury_memos(&block, &treasury_keys);
 
             let (header, batches) = decrypt_block(&network, block, wallet.scanning_keys());
             let nullifiers = Nullifiers::unspent(&wallet)
@@ -252,6 +253,18 @@ impl<P: Parameters + Send + 'static> Boot<P> {
 
             wallet.put_blocks(&from_state, vec![scanned])
                 .expect("FATAL: wallet commit failed during boot sync");
+            // Upstream's ScannedBlock drops note plaintexts; the Treasury
+            // lane's memos were decrypted above and are stored alongside.
+            for (txid, action_index, memo) in treasury_memos {
+                wallet.store_scanned_memo(
+                    zcash_client_backend::wallet::NoteId::new(
+                        txid,
+                        zcash_protocol::ShieldedPool::Ironwood,
+                        u16::try_from(action_index).expect("Ironwood action index fits u16"),
+                    ),
+                    memo,
+                );
+            }
             for (index, position) in accepted_name_notes {
                 let c = &candidates[index];
                 wallet.store_name_note(

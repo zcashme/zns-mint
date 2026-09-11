@@ -21,8 +21,10 @@ use zcash_client_backend::data_api::{
 };
 use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
 use zcash_client_backend::scanning::Nullifiers;
+use zcash_client_backend::wallet::NoteId;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
+use zcash_protocol::ShieldedPool;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
@@ -245,6 +247,8 @@ async fn main() {
 
             let block_time = block.header().time;
             let candidates = zns_mint::mint::decrypt_name_notes(&network, &block, &registry_keys);
+            let treasury_memos =
+                zns_mint::mint::note::decrypt_treasury_memos(&block, &treasury_keys);
             let name_notes = candidates
                 .iter()
                 .map(|candidate| {
@@ -336,6 +340,18 @@ async fn main() {
             wallet
                 .put_blocks(&from_state, vec![scanned])
                 .expect("FATAL: wallet block commit failed");
+            // Upstream's ScannedBlock drops note plaintexts; the Treasury
+            // lane's memos were decrypted above and are stored alongside.
+            for (txid, action_index, memo) in treasury_memos {
+                wallet.store_scanned_memo(
+                    NoteId::new(
+                        txid,
+                        ShieldedPool::Ironwood,
+                        u16::try_from(action_index).expect("Ironwood action index fits u16"),
+                    ),
+                    memo,
+                );
+            }
             for (index, position) in accepted_name_notes {
                 let candidate = &candidates[index];
                 wallet.store_name_note(

@@ -448,6 +448,39 @@ pub fn decrypt_name_notes<P: Parameters>(
     candidates
 }
 
+/// Trial-decrypts the block's Ironwood actions sent to the Treasury's
+/// external address, exposing each `(txid, action index, memo)`. The
+/// upstream scanner deliberately drops note plaintexts; request memos
+/// arrive through this pass instead.
+pub fn decrypt_treasury_memos(
+    block: &Block,
+    treasury_keys: &crate::key::TreasuryKeys,
+) -> Vec<(zcash_primitives::transaction::TxId, usize, [u8; 512])> {
+    let ivk = treasury_keys
+        .orchard_fvk()
+        .to_ivk(orchard::keys::Scope::External)
+        .prepare();
+
+    let mut memos = Vec::new();
+    for tx in block.vtx() {
+        let Some(bundle) = tx.ironwood_bundle() else {
+            continue;
+        };
+        if bundle.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3() {
+            continue;
+        }
+        for (action_index, action) in bundle.actions().iter().enumerate() {
+            let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
+            if let Some((_note, _recipient, memo)) =
+                zcash_note_encryption::try_note_decryption(&domain, &ivk, action)
+            {
+                memos.push((tx.txid(), action_index, memo));
+            }
+        }
+    }
+    memos
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
