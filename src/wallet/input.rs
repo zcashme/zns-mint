@@ -156,7 +156,7 @@ impl Wallet {
 
     /// Builds the [`ReceivedNote`] for a retained Sapling output, or `None`
     /// when the spending key scope was not retained.
-    fn sapling_received_note(
+    pub(crate) fn sapling_received_note(
         &self,
         note_id: NoteId,
     ) -> Option<ReceivedNote<NoteId, sapling::Note>> {

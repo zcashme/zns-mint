@@ -713,6 +713,28 @@ impl WalletRead for Wallet {
 // ---------------------------------------------------------------------------
 
 impl Wallet {
+    /// Returns every Sapling note owned by `account` that is selectable at
+    /// `tip`: the same selection rule as the Ironwood lane.
+    pub fn unspent_sapling_notes(
+        &self,
+        account: AccountId,
+        tip: TargetHeight,
+    ) -> Vec<ReceivedNote<NoteId, sapling::Note>> {
+        self.sapling_notes
+            .iter()
+            .filter(move |(_, output)| *output.account_id() == account)
+            .filter(|(note_id, _)| {
+                !self.sapling_note_is_spent(note_id, tip)
+                    && self.lock_admits(
+                        &OutputRef::from(**note_id),
+                        tip,
+                        LockFilter::Policy(&LockedInputPolicy::default()),
+                    )
+            })
+            .filter_map(|(note_id, _)| self.sapling_received_note(*note_id))
+            .collect()
+    }
+
     /// Returns every Ironwood note owned by `account` that is selectable at
     /// `tip`: unspent (a spend recorded by a transaction whose expiry height
     /// has passed releases its note) and not actively locked for an

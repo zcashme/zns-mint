@@ -68,7 +68,13 @@ async fn main() {
     // the Treasury happened to be holding when the mint went live is
     // balance, not instruction.
     let live_from = chain_tip.block_height();
+    // Treasury notes already announced in the logs: receipts and
+    // underpaid claims log once per note, not once per tip. Membership
+    // also excludes a note from re-evaluation: an underpaid claim is
+    // dead, not retained — a moving quote never resurrects it.
+    let mut seen_notes: std::collections::BTreeSet<NoteId> = std::collections::BTreeSet::new();
 
+    zns_mint::metrics::install();
     tracing::info!(
         height = u32::from(chain_tip.block_height()),
         hash = %chain_tip.block_hash(),
@@ -404,16 +410,30 @@ async fn main() {
             continue;
         }
 
+        // The three gauges: chain level, money level, price level.
+        let treasury_zats: u64 = wallet
+            .unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip))
+            .iter()
+            .map(|n| n.note().value().inner())
+            .chain(
+                wallet
+                    .unspent_sapling_notes(TREASURY_ACCOUNT, TargetHeight::from(tip))
+                    .iter()
+                    .map(|n| n.note().value().inner()),
+            )
+            .sum();
+        zns_mint::metrics::snapshot(tip, treasury_zats, oracle.current().into_u64());
+
         // Treasury messages. Each inbound note carries exactly one memo —
         // a paid claim, an update or release request, or an OTP echo — so
         // every note is decoded once and dispatched once. Notes mined
         // before the mint went live are balance, not instruction.
-        let mut anchors_exhausted = false;
         for note in wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip)) {
+            let note_id = *note.internal_note_id();
             let Some(note_height) = note.mined_height() else {
                 continue;
             };
-            if note_height <= live_from {
+            if note_height <= live_from || seen_notes.contains(&note_id) {
                 continue;
             }
             let memo = wallet
@@ -519,10 +539,16 @@ async fn main() {
                         );
                     }
                 } else {
-                    tracing::debug!(
-                        height = u32::from(note_height),
-                        "Treasury note carries no decodable ZNS memo"
-                    );
+                    // Not mint-aware at all: a funding top-up or junk. It
+                    // is money either way — every deposit is an event.
+                    if seen_notes.insert(note_id) {
+                        tracing::info!(
+                            txid = %note_id.txid(),
+                            value_zec = note.note().value().inner() as f64 / 1e8,
+                            height = u32::from(note_height),
+                            "treasury received non-request payment"
+                        );
+                    }
                 }
                 continue;
             };
@@ -533,9 +559,6 @@ async fn main() {
                     // the inbound payment note, draws the network fee from
                     // separate eligible Treasury notes, and creates both
                     // the Name Note and the next zero-value claim anchor.
-                    if anchors_exhausted {
-                        continue;
-                    }
                     let price = match term {
                         Term::Forever => oracle.quote_forever(&name),
                         Term::Years(years) => Zatoshis::from_u64(
@@ -547,18 +570,13 @@ async fn main() {
                         )
                         .expect("registration quote fits the Zcash monetary range"),
                     };
-                    // Payment gate: the quote is commercial policy — an
-                    // underpaid claim is retained and re-checked against
-                    // the moving quote on every tip.
+                    // Payment gate: the quote at first sight is binding.
+                    // An underpaid claim is dead and silent; a new
+                    // payment settles a new evaluation.
                     let payment_value = Zatoshis::from_u64(note.note().value().inner())
                         .expect("note value fits in the Zcash monetary range");
                     if payment_value < price {
-                        tracing::debug!(
-                            name = %name.as_str(),
-                            paid = payment_value.into_u64(),
-                            quoted = price.into_u64(),
-                            "claim underpaid; retained for re-quote"
-                        );
+                        seen_notes.insert(note_id);
                         continue;
                     }
                     let Some(claim_note) = registry.authorize(
@@ -598,7 +616,6 @@ async fn main() {
                                 .then_some(nf)
                         });
                     let Some(authority_nf) = authority_nf else {
-                        anchors_exhausted = true;
                         tracing::warn!(
                             name = %name.as_str(),
                             "no available claim anchor (all locked or spent)"

@@ -6,6 +6,7 @@ compile_error!(
 
 pub mod boot;
 pub mod key;
+pub mod metrics;
 pub mod mint;
 pub mod wallet;
 pub mod zcash;
