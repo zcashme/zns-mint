@@ -25,8 +25,14 @@ use serde::{Deserialize, Serialize};
 /// The wait between retries of a retryable transport call.
 pub const RETRY_PAUSE: Duration = Duration::from_secs(5);
 
+#[cfg(not(feature = "testnet"))]
 pub(crate) const ZEBRA_INDEXER_URL: &str = "http://127.0.0.1:8230";
+#[cfg(not(feature = "testnet"))]
 pub(crate) const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:8232";
+#[cfg(feature = "testnet")]
+pub(crate) const ZEBRA_INDEXER_URL: &str = "http://127.0.0.1:18230";
+#[cfg(feature = "testnet")]
+pub(crate) const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:18232";
 
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);

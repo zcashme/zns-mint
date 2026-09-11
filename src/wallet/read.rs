@@ -759,7 +759,7 @@ impl Wallet {
     /// Finds an unspent owned Ironwood note by the exact nullifier it reveals
     /// when spent. Registry authority is expressed in nullifiers: claim
     /// anchors and current Name Notes are selected through this boundary.
-    pub(crate) fn unspent_ironwood_note_by_nullifier(
+    pub fn unspent_ironwood_note_by_nullifier(
         &self,
         account: AccountId,
         nullifier: orchard::note::Nullifier,

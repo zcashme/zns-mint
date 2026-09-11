@@ -1,12 +1,14 @@
 //! The Zcash Name Service attested Mint.
 //!
-//! This binary is deliberately linear. Boot establishes the process identity
-//! and capabilities; `main` then follows Zebra's canonical chain, rebuilds the
-//! Registry from its zero-value anchor and Name Notes, and applies the mint's
-//! rules at every observed tip. The anchor root is created once by the keygen
-//! ceremony (`zns-keygen`), never here: the mint authenticates it on every
-//! rescan and suspends all Registry rules until it is recovered. The ordering
-//! is visible here because ordering is part of the protocol.
+//! Boot establishes identity, syncs from the birthday checkpoint to the
+//! chain tip, and verifies genesis (40 anchors, minimum Treasury balance).
+//! `main` is then a pure run loop: it follows Zebra's canonical chain,
+//! scans each new block, enforces the Registry transition law, services
+//! Treasury memos (paid claims, update and release requests, OTP echoes),
+//! runs the lifecycle (expiry releases and liveness challenges), and
+//! sweeps the Treasury. The mint authors no genesis state: the anchor
+//! pool is created once by the keygen ceremony and replenishes itself
+//! through every claim.
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -25,7 +27,7 @@ use zcash_protocol::value::Zatoshis;
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D_OTP};
-use zns_mint::mint::registry::{NameRecord, ReceivedNameNote, Registry};
+use zns_mint::mint::registry::{NameRecord, ReceivedNameNote};
 use zns_mint::mint::treasury;
 use zns_mint::mint::{
     Action, Challenge, Request, Term, MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
@@ -51,14 +53,19 @@ async fn main() {
         mut mtp,
         mut oracle,
         mut challenges,
+        mut registry,
     } = Boot::start().await;
 
     // A pure function of config — hardcoded node, hardcoded timeouts;
     // reconstructing it loses nothing.
     let rpc = JsonRpc::new();
     let source = CanonicalBlockSource::new();
-    // The loop knows no names until the chain proves the root anchor.
-    let mut registry: Option<Registry> = None;
+
+    // Notes mined at or before the boot tip are not requests. The
+    // Registry rebuilt from Name Notes is the source of truth; whatever
+    // the Treasury happened to be holding when the mint went live is
+    // balance, not instruction.
+    let live_from = chain_tip.block_height();
 
     tracing::info!(
         height = u32::from(chain_tip.block_height()),
@@ -66,8 +73,6 @@ async fn main() {
         "mint awaiting Zebra tips"
     );
 
-    // The tip stream is a renewable session over `chain`: lost streams are
-    // re-opened, and the gap is treated as missed.
     let mut tips = tip_stream(&mut chain).await;
     loop {
         let notification = match tips.next().await {
@@ -84,10 +89,10 @@ async fn main() {
             }
         };
         let (announced_height, announced_hash) = zcash::tip_height_hash(&notification);
-
-        // A pushed notification is a wake-up, not the authoritative read.
-        // Re-read height and hash atomically through JSON-RPC so a burst of
-        // coalesced notifications cannot make the mint act on a stale tip.
+        tracing::info!(
+            height = u32::from(announced_height),
+            "tip notification received"
+        );
         let (best_height, best_hash) = loop {
             match source.exact_tip().await {
                 Ok(tip) => break tip,
@@ -146,14 +151,7 @@ async fn main() {
         }
 
         if ancestor < chain_tip.block_height() {
-            if registry
-                .as_ref()
-                .is_some_and(|registry| ancestor < registry.claim_anchor_height())
-            {
-                registry = None;
-            } else if let Some(registry) = registry.as_mut() {
-                registry.truncate_to_height(ancestor);
-            }
+            registry.truncate_to_height(ancestor);
             chain_tip = wallet
                 .truncate_to(ancestor)
                 .expect("FATAL: wallet could not rewind to the common ancestor");
@@ -282,54 +280,28 @@ async fn main() {
             )
             .expect("FATAL: a canonical block failed deterministic wallet scanning");
 
-            // Root recovery: adopt the first transaction that both spends
-            // a known Treasury note and produces an ordinary zero-value
-            // Registry output. The Treasury spend is the authorship proof —
-            // anyone can send a zero-valued note to the public Registry
-            // address, but only the mint can spend a Treasury note.
-            // Canonical order does the rest: a claim can only follow the
-            // root on the same fork. ZNS Name Notes use a different
-            // decryption domain and never enter this lane.
-            let recovered_anchor = if registry.is_none() {
-                let treasury_nullifiers: std::collections::BTreeSet<_> = wallet
-                    .get_ironwood_nullifiers(NullifierQuery::All)
-                    .expect("FATAL: wallet could not expose its nullifiers")
-                    .into_iter()
-                    .filter(|(account, _)| *account == TREASURY_ACCOUNT)
-                    .map(|(_, nullifier)| nullifier)
-                    .collect();
-                let mut nullifiers_by_tx: std::collections::BTreeMap<
-                    zcash_primitives::transaction::TxId,
-                    Vec<orchard::note::Nullifier>,
-                > = std::collections::BTreeMap::new();
-                for (_, txid, nullifiers) in scanned.ironwood().nullifier_map() {
-                    nullifiers_by_tx
-                        .entry(*txid)
-                        .or_default()
-                        .extend(nullifiers.iter().copied());
-                }
-                scanned.transactions().iter().find_map(|transaction| {
-                    let authored =
-                        nullifiers_by_tx
-                            .get(&transaction.txid())
-                            .is_some_and(|nullifiers| {
-                                nullifiers
-                                    .iter()
-                                    .any(|nullifier| treasury_nullifiers.contains(nullifier))
-                            });
-                    if !authored {
-                        return None;
-                    }
-                    transaction.ironwood_outputs().iter().find_map(|output| {
-                        (*output.account_id() == REGISTRY_ACCOUNT
-                            && output.note().0.value().inner() == 0)
-                            .then(|| output.nf().copied())
-                            .flatten()
-                    })
+            // Compute the set of anchor nullifiers from the wallet:
+            // unspent zero-value Registry Ironwood notes that are not
+            // current Name Notes. The wallet is the source of truth;
+            // the Registry only enforces the transition law.
+            let name_note_nullifiers: std::collections::BTreeSet<_> =
+                registry.name_chain().map(|(_, rec)| rec.nullifier).collect();
+            let anchor_nullifiers: std::collections::BTreeSet<orchard::note::Nullifier> = wallet
+                .get_ironwood_nullifiers(NullifierQuery::Unspent)
+                .expect("FATAL: wallet could not expose its nullifiers")
+                .into_iter()
+                .filter(|(acct, _)| *acct == REGISTRY_ACCOUNT)
+                .filter_map(|(_, nf)| {
+                    let note = wallet.unspent_ironwood_note_by_nullifier(
+                        REGISTRY_ACCOUNT,
+                        nf,
+                        TargetHeight::from(next_height),
+                    )?;
+                    (note.note().value().inner() == 0
+                        && !name_note_nullifiers.contains(&nf))
+                        .then_some(nf)
                 })
-            } else {
-                None
-            };
+                .collect();
 
             let mut next_mtp = mtp.clone();
             next_mtp.update(next_height, block_time);
@@ -337,27 +309,8 @@ async fn main() {
                 .current()
                 .expect("FATAL: MTP unavailable after applying a block");
 
-            let (next_registry, accepted_name_notes) = match registry.as_ref() {
-                Some(registry) => {
-                    let (next, accepted) =
-                        registry.apply_block(&network, &scanned, &name_notes, block_mtp);
-                    (Some(next), accepted)
-                }
-                None => match recovered_anchor {
-                    Some(anchor) => {
-                        let root = Registry::new(anchor, next_height);
-                        let (next, accepted) =
-                            root.apply_block(&network, &scanned, &name_notes, block_mtp);
-                        tracing::info!(
-                            height = u32::from(next_height),
-                            nullifier = %hex::encode(anchor.to_bytes()),
-                            "recovered Registry claim anchor"
-                        );
-                        (Some(next), accepted)
-                    }
-                    None => (None, Vec::new()),
-                },
-            };
+            let (next_registry, accepted_name_notes) =
+                registry.apply_block(&network, &scanned, &name_notes, block_mtp, &anchor_nullifiers);
 
             let ironwood_start = scanned
                 .ironwood()
@@ -409,6 +362,10 @@ async fn main() {
 
         assert_eq!(chain_tip.block_height(), best_height);
         assert_eq!(chain_tip.block_hash(), best_hash);
+        tracing::info!(
+            height = u32::from(best_height),
+            "scanned to tip"
+        );
         let tip = chain_tip.block_height();
         let tip_hash = chain_tip.block_hash();
         let target_height = tip + 1;
@@ -431,314 +388,345 @@ async fn main() {
             continue;
         }
 
-        // No Registry rule can run before a canonical root exists. The
-        // root anchor is created once by the keygen ceremony and confirmed
-        // on-chain before this binary ever ships; the mint authenticates it
-        // (the recovery lane above) but never creates it. Until it is
-        // recovered, every Registry action is suspended.
-        let Some(registry) = registry.as_mut() else {
-            tracing::warn!("Registry root anchor not yet recovered; mint rules suspended");
-            continue;
-        };
-
-        // Registration messages. A registration spends the exact current
-        // claim anchor, spends the inbound Treasury payment, uses separate
-        // eligible Treasury notes for the network fee, and creates both
-        // the Name Note and the next zero-value claim anchor.
-        let registration_messages =
-            wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip));
-        for payment in registration_messages {
-            let Some(payment_height) = payment.mined_height() else {
+        // Treasury messages. Each inbound note carries exactly one memo —
+        // a paid claim, an update or release request, or an OTP echo — so
+        // every note is decoded once and dispatched once. Notes mined
+        // before the mint went live are balance, not instruction.
+        let mut anchors_exhausted = false;
+        for note in wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip)) {
+            let Some(note_height) = note.mined_height() else {
                 continue;
             };
+            if note_height <= live_from {
+                continue;
+            }
             let memo = wallet
-                .get_memo(*payment.internal_note_id())
+                .get_memo(*note.internal_note_id())
                 .expect("FATAL: Treasury memo lookup failed");
             let Some(memo) = memo else { continue };
             let memo = memo.encode();
-            let decoded = Request::decode(&network, memo.as_array());
-            let Some(Request::Claim { ref name, term, .. }) = decoded else {
-                continue;
-            };
-            // The decoded request is moved into `authorize` below; the
-            // name is needed in logs afterward, so own it here.
-            let name = name.clone();
+            let raw = memo.as_array();
 
-            let price = match term {
-                Term::Forever => oracle.quote_forever(&name),
-                Term::Years(years) => Zatoshis::from_u64(
-                    oracle
-                        .quote_annual(&name)
-                        .into_u64()
-                        .checked_mul(years)
-                        .expect("registration quote fits u64"),
-                )
-                .expect("registration quote fits the Zcash monetary range"),
-            };
-            // Payment gate: the quote is commercial policy — an underpaid
-            // claim is retained and re-checked against the moving quote.
-            let payment_value = Zatoshis::from_u64(payment.note().value().inner())
-                .expect("note value fits in the Zcash monetary range");
-            if payment_value < price {
-                continue;
-            }
-            let Some(claim_request) = registry.authorize(
-                &mut challenges,
-                decoded.expect("claim pattern matched above"),
-                None,
-                payment_height,
-                mtp_now,
-            ) else {
-                continue;
-            };
-            let Some(transaction) = assemble::prepare(
-                &network,
-                &mut wallet,
-                &treasury_keys,
-                &registry_keys,
-                &sapling_spend,
-                &sapling_output,
-                claim_request,
-                registry.claim_anchor(),
-                Some(&payment),
-                tip,
-                target_height,
-            ) else {
-                tracing::debug!(
-                    name = %name.as_str(),
-                    "registration awaits Treasury funds"
-                );
-                continue;
-            };
-
-            if source.submit(&transaction, "registration").await {
-                tracing::info!(name = %name.as_str(), "registration in flight");
-            } else {
-                tracing::error!(
-                    name = %name.as_str(),
-                    "registration rejected — inputs stranded until expiry"
-                );
-            }
-
-            // The claim-anchor lock recorded by preparation prevents a
-            // second registration from being built until this one either
-            // confirms or expires.
-            break;
-        }
-
-        // Update and release requests. These consume the inbound request
-        // note while sending a challenge to the current controller. The
-        // pending authorization becomes live only after Zebra accepts the
-        // challenge transaction.
-        let challenge_messages =
-            wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip));
-        for request_note in challenge_messages {
-            let Some(request_height) = request_note.mined_height() else {
-                continue;
-            };
-            let memo = wallet
-                .get_memo(*request_note.internal_note_id())
-                .expect("FATAL: Treasury memo lookup failed");
-            let Some(memo) = memo else { continue };
-            let memo = memo.encode();
-            let Some(request) = Request::decode(&network, memo.as_array()) else {
-                continue;
-            };
-            let (name, action, requested_ua, extend_years) = match request {
-                Request::Update {
-                    name,
-                    ua,
-                    extend_years,
-                } => (name, Action::Update, ua, extend_years),
-                Request::Release { name, ua } => (name, Action::Release, ua, None),
-                Request::Claim { .. } => continue,
-            };
-            let Some(record) = registry.record(&name).cloned() else {
-                continue;
-            };
-            if record.action == Action::Release
-                || record.expires_at.expired(mtp_now)
-                || request_height <= record.confirmed_height
-                || (action == Action::Release && requested_ua != record.ua)
-                || challenges.pending(&name, action, &requested_ua, record.commitment, mtp_now)
-            {
-                continue;
-            }
-
-            let code = OtpCode::generate();
-            let challenge = Challenge {
-                code: code.clone(),
-                name: name.clone(),
-                action,
-                ua: requested_ua.clone(),
-            };
-            let Some(memo) = challenge.encode(&network) else {
-                continue;
-            };
-            let relay_value = required_relay_value(&network, target_height);
-            let Some(transaction) = treasury::challenge(
-                &network,
-                &mut wallet,
-                &treasury_keys,
-                &sapling_spend,
-                &sapling_output,
-                &record.ua,
-                memo,
-                relay_value,
-            ) else {
-                tracing::debug!(
-                    name = %name.as_str(),
-                    action = action.as_str(),
-                    "controller challenge awaits Treasury funds"
-                );
-                continue;
-            };
-
-            let pending = OtpRequest {
-                name: name.clone(),
-                action,
-                ua: requested_ua,
-                tip_rcm: record.commitment,
-                code,
-                expires_at: mtp_now + time::Duration::seconds(D_OTP),
-                extend_years,
-            };
-            let accepted = loop {
-                match source.send_transaction(&transaction).await {
-                    Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => break true,
-                    Ok(SubmitOutcome::Rejected(error)) => {
-                        tracing::error!(
-                            %error,
-                            txid = %transaction.txid(),
-                            name = %name.as_str(),
-                            action = action.as_str(),
-                            "controller challenge rejected"
-                        );
-                        break false;
+            let Some(request) = Request::decode(&network, raw) else {
+                // Not a request: an OTP echo, or junk.
+                if let Some(challenge) = Challenge::decode(&network, raw) {
+                    // OTP echoes return an authorized transition. The
+                    // challenge memory is cloned so a rejected submission
+                    // leaves the pending request alive for a later echo.
+                    let Some(record) = registry.record(&challenge.name).cloned() else {
+                        continue;
+                    };
+                    if record.action == Action::Release {
+                        continue;
                     }
-                    Err(error) if error.is_retryable() => {
-                        tracing::warn!(
-                            %error,
-                            txid = %transaction.txid(),
-                            "challenge submission uncertain; retrying"
+                    let Some(sent) = challenges.awaiting(&challenge, mtp_now) else {
+                        continue;
+                    };
+                    let digits = sent.code.digits();
+                    let request = match challenge.action {
+                        Action::Update => Request::Update {
+                            name: challenge.name.clone(),
+                            ua: challenge.ua.clone(),
+                            extend_years: sent.extend_years,
+                        },
+                        Action::Release => Request::Release {
+                            name: challenge.name.clone(),
+                            ua: challenge.ua.clone(),
+                        },
+                        Action::Claim => continue,
+                    };
+                    let mut authorized_challenges = challenges.clone();
+                    let Some(transition_note) = registry.authorize(
+                        &mut authorized_challenges,
+                        request,
+                        Some(&digits),
+                        note_height,
+                        mtp_now,
+                    )
+                    else {
+                        continue;
+                    };
+                    let Some(transaction) = assemble::prepare(
+                        &network,
+                        &mut wallet,
+                        &treasury_keys,
+                        &registry_keys,
+                        &sapling_spend,
+                        &sapling_output,
+                        transition_note,
+                        record.nullifier,
+                        Some(&note),
+                        tip,
+                        target_height,
+                    ) else {
+                        tracing::debug!(
+                            name = %challenge.name.as_str(),
+                            action = challenge.action.as_str(),
+                            "authorized transition awaits Treasury fee funds"
                         );
-                        tokio::time::sleep(RETRY_PAUSE).await;
-                    }
-                    Err(error) => panic!("FATAL: challenge submission failed: {error}"),
-                }
-            };
-            if accepted {
-                challenges.issue(pending);
-                tracing::info!(
-                    txid = %transaction.txid(),
-                    name = %name.as_str(),
-                    action = action.as_str(),
-                    "controller challenged"
-                );
-            }
-        }
+                        continue;
+                    };
 
-        // Returns authorize transitions.
-        let echo_messages =
-            wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip));
-        for echo_note in echo_messages {
-            let Some(echo_height) = echo_note.mined_height() else {
-                continue;
-            };
-            let memo = wallet
-                .get_memo(*echo_note.internal_note_id())
-                .expect("FATAL: Treasury memo lookup failed");
-            let Some(memo) = memo else { continue };
-            let memo = memo.encode();
-            let Some(challenge) = Challenge::decode(&network, memo.as_array()) else {
-                continue;
-            };
-            let Some(record) = registry.record(&challenge.name).cloned() else {
-                continue;
-            };
-            if record.action == Action::Release {
-                continue;
-            }
-            let Some(sent) = challenges.awaiting(&challenge, mtp_now) else {
-                continue;
-            };
-            let digits = sent.code.digits();
-            let request = match challenge.action {
-                Action::Update => Request::Update {
-                    name: challenge.name.clone(),
-                    ua: challenge.ua.clone(),
-                    extend_years: sent.extend_years,
-                },
-                Action::Release => Request::Release {
-                    name: challenge.name.clone(),
-                    ua: challenge.ua.clone(),
-                },
-                Action::Claim => continue,
-            };
-            let mut authorized_challenges = challenges.clone();
-            let Some(transition_note) = registry.authorize(
-                &mut authorized_challenges,
-                request,
-                Some(&digits),
-                echo_height,
-                mtp_now,
-            )
-            else {
-                continue;
-            };
-            let Some(transaction) = assemble::prepare(
-                &network,
-                &mut wallet,
-                &treasury_keys,
-                &registry_keys,
-                &sapling_spend,
-                &sapling_output,
-                transition_note,
-                record.nullifier,
-                Some(&echo_note),
-                tip,
-                target_height,
-            ) else {
-                tracing::debug!(
-                    name = %challenge.name.as_str(),
-                    action = challenge.action.as_str(),
-                    "authorized transition awaits Treasury fee funds"
-                );
-                continue;
-            };
-
-            let accepted = loop {
-                match source.send_transaction(&transaction).await {
-                    Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => break true,
-                    Ok(SubmitOutcome::Rejected(error)) => {
-                        tracing::error!(
-                            %error,
+                    let accepted = loop {
+                        match source.send_transaction(&transaction).await {
+                            Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => break true,
+                            Ok(SubmitOutcome::Rejected(error)) => {
+                                tracing::error!(
+                                    %error,
+                                    txid = %transaction.txid(),
+                                    name = %challenge.name.as_str(),
+                                    action = challenge.action.as_str(),
+                                    "authorized transition rejected"
+                                );
+                                break false;
+                            }
+                            Err(error) if error.is_retryable() => {
+                                tracing::warn!(
+                                    %error,
+                                    txid = %transaction.txid(),
+                                    "transition submission uncertain; retrying"
+                                );
+                                tokio::time::sleep(RETRY_PAUSE).await;
+                            }
+                            Err(error) => {
+                                panic!("FATAL: transition submission failed: {error}")
+                            }
+                        }
+                    };
+                    if accepted {
+                        challenges = authorized_challenges;
+                        tracing::info!(
                             txid = %transaction.txid(),
                             name = %challenge.name.as_str(),
                             action = challenge.action.as_str(),
-                            "authorized transition rejected"
+                            "authorized transition submitted"
                         );
-                        break false;
                     }
-                    Err(error) if error.is_retryable() => {
-                        tracing::warn!(
-                            %error,
-                            txid = %transaction.txid(),
-                            "transition submission uncertain; retrying"
-                        );
-                        tokio::time::sleep(RETRY_PAUSE).await;
-                    }
-                    Err(error) => panic!("FATAL: transition submission failed: {error}"),
+                } else {
+                    tracing::debug!(
+                        height = u32::from(note_height),
+                        "Treasury note carries no decodable ZNS memo"
+                    );
                 }
+                continue;
             };
-            if accepted {
-                challenges = authorized_challenges;
-                tracing::info!(
-                    txid = %transaction.txid(),
-                    name = %challenge.name.as_str(),
-                    action = challenge.action.as_str(),
-                    "authorized transition submitted"
-                );
+
+            match request {
+                Request::Claim { name, ua, term } => {
+                    // A registration spends one current claim anchor, spends
+                    // the inbound payment note, draws the network fee from
+                    // separate eligible Treasury notes, and creates both
+                    // the Name Note and the next zero-value claim anchor.
+                    if anchors_exhausted {
+                        continue;
+                    }
+                    let price = match term {
+                        Term::Forever => oracle.quote_forever(&name),
+                        Term::Years(years) => Zatoshis::from_u64(
+                            oracle
+                                .quote_annual(&name)
+                                .into_u64()
+                                .checked_mul(years)
+                                .expect("registration quote fits u64"),
+                        )
+                        .expect("registration quote fits the Zcash monetary range"),
+                    };
+                    // Payment gate: the quote is commercial policy — an
+                    // underpaid claim is retained and re-checked against
+                    // the moving quote on every tip.
+                    let payment_value = Zatoshis::from_u64(note.note().value().inner())
+                        .expect("note value fits in the Zcash monetary range");
+                    if payment_value < price {
+                        tracing::debug!(
+                            name = %name.as_str(),
+                            paid = payment_value.into_u64(),
+                            quoted = price.into_u64(),
+                            "claim underpaid; retained for re-quote"
+                        );
+                        continue;
+                    }
+                    let Some(claim_note) = registry.authorize(
+                        &mut challenges,
+                        Request::Claim {
+                            name: name.clone(),
+                            ua,
+                            term,
+                        },
+                        None,
+                        note_height,
+                        mtp_now,
+                    ) else {
+                        tracing::debug!(
+                            name = %name.as_str(),
+                            "claim not authorized"
+                        );
+                        continue;
+                    };
+                    let name_note_nullifiers: std::collections::BTreeSet<_> = registry
+                        .name_chain()
+                        .map(|(_, rec)| rec.nullifier)
+                        .collect();
+                    let authority_nf = wallet
+                        .get_ironwood_nullifiers(NullifierQuery::Unspent)
+                        .expect("FATAL: wallet could not expose its nullifiers")
+                        .into_iter()
+                        .filter(|(acct, _)| *acct == REGISTRY_ACCOUNT)
+                        .find_map(|(_, nf)| {
+                            let anchor = wallet.unspent_ironwood_note_by_nullifier(
+                                REGISTRY_ACCOUNT,
+                                nf,
+                                TargetHeight::from(tip),
+                            )?;
+                            (anchor.note().value().inner() == 0
+                                && !name_note_nullifiers.contains(&nf))
+                                .then_some(nf)
+                        });
+                    let Some(authority_nf) = authority_nf else {
+                        anchors_exhausted = true;
+                        tracing::warn!(
+                            name = %name.as_str(),
+                            "no available claim anchor (all locked or spent)"
+                        );
+                        continue;
+                    };
+                    let Some(transaction) = assemble::prepare(
+                        &network,
+                        &mut wallet,
+                        &treasury_keys,
+                        &registry_keys,
+                        &sapling_spend,
+                        &sapling_output,
+                        claim_note,
+                        authority_nf,
+                        Some(&note),
+                        tip,
+                        target_height,
+                    ) else {
+                        tracing::debug!(
+                            name = %name.as_str(),
+                            "registration awaits Treasury funds"
+                        );
+                        continue;
+                    };
+
+                    if source.submit(&transaction, "registration").await {
+                        tracing::info!(
+                            txid = %transaction.txid(),
+                            name = %name.as_str(),
+                            "registration in flight"
+                        );
+                    } else {
+                        tracing::error!(
+                            txid = %transaction.txid(),
+                            name = %name.as_str(),
+                            "registration rejected — inputs stranded until expiry"
+                        );
+                    }
+                }
+
+                Request::Update { .. } | Request::Release { .. } => {
+                    // Update and release requests are relays: the mint
+                    // sends a one-time code to the current controller and
+                    // the pending authorization lives only after Zebra
+                    // accepts the challenge transaction. The request note
+                    // itself stays put; the sweeps reclaim it.
+                    let (name, action, requested_ua, extend_years) = match request {
+                        Request::Update {
+                            name,
+                            ua,
+                            extend_years,
+                        } => (name, Action::Update, ua, extend_years),
+                        Request::Release { name, ua } => (name, Action::Release, ua, None),
+                        Request::Claim { .. } => unreachable!("claims dispatched above"),
+                    };
+                    let Some(record) = registry.record(&name).cloned() else {
+                        tracing::debug!(
+                            name = %name.as_str(),
+                            "request for an unregistered name"
+                        );
+                        continue;
+                    };
+                    if record.action == Action::Release
+                        || record.expires_at.expired(mtp_now)
+                        || note_height <= record.confirmed_height
+                        || (action == Action::Release && requested_ua != record.ua)
+                        || challenges.pending(&name, action, &requested_ua, record.commitment, mtp_now)
+                    {
+                        continue;
+                    }
+
+                    let code = OtpCode::generate();
+                    let challenge = Challenge {
+                        code: code.clone(),
+                        name: name.clone(),
+                        action,
+                        ua: requested_ua.clone(),
+                    };
+                    let Some(memo) = challenge.encode(&network) else {
+                        continue;
+                    };
+                    let relay_value = required_relay_value(&network, target_height);
+                    let Some(transaction) = treasury::challenge(
+                        &network,
+                        &mut wallet,
+                        &treasury_keys,
+                        &sapling_spend,
+                        &sapling_output,
+                        &record.ua,
+                        memo,
+                        relay_value,
+                    ) else {
+                        tracing::debug!(
+                            name = %name.as_str(),
+                            action = action.as_str(),
+                            "controller challenge awaits Treasury funds"
+                        );
+                        continue;
+                    };
+
+                    let pending = OtpRequest {
+                        name: name.clone(),
+                        action,
+                        ua: requested_ua,
+                        tip_rcm: record.commitment,
+                        code,
+                        expires_at: mtp_now + time::Duration::seconds(D_OTP),
+                        extend_years,
+                    };
+                    let accepted = loop {
+                        match source.send_transaction(&transaction).await {
+                            Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => break true,
+                            Ok(SubmitOutcome::Rejected(error)) => {
+                                tracing::error!(
+                                    %error,
+                                    txid = %transaction.txid(),
+                                    name = %name.as_str(),
+                                    action = action.as_str(),
+                                    "controller challenge rejected"
+                                );
+                                break false;
+                            }
+                            Err(error) if error.is_retryable() => {
+                                tracing::warn!(
+                                    %error,
+                                    txid = %transaction.txid(),
+                                    "challenge submission uncertain; retrying"
+                                );
+                                tokio::time::sleep(RETRY_PAUSE).await;
+                            }
+                            Err(error) => panic!("FATAL: challenge submission failed: {error}"),
+                        }
+                    };
+                    if accepted {
+                        challenges.issue(pending);
+                        tracing::info!(
+                            txid = %transaction.txid(),
+                            name = %name.as_str(),
+                            action = action.as_str(),
+                            "controller challenged"
+                        );
+                    }
+                }
             }
         }
 

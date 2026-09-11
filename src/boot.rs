@@ -6,7 +6,10 @@ use chacha20poly1305::{
 };
 use secrecy::{ExposeSecret, Secret};
 #[cfg(not(feature = "regtest"))]
+#[cfg(not(feature = "testnet"))]
 use zcash_protocol::consensus::MainNetwork;
+#[cfg(feature = "testnet")]
+use zcash_protocol::consensus::TestNetwork;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 #[cfg(feature = "regtest")]
 use zcash_protocol::local_consensus::LocalNetwork;
@@ -21,11 +24,17 @@ use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::mtp::MtpTracker;
 use crate::mint::otp::OtpQueue;
 use crate::mint::pricing::Oracle;
-use crate::mint::{MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::registry::{ReceivedNameNote, Registry};
+use crate::mint::{decrypt_name_notes, MINT_BIRTHDAY, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
-use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata};
+use incrementalmerkletree::Position;
+use zcash_client_backend::data_api::wallet::TargetHeight;
+use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata, NullifierQuery, WalletRead as _, WalletWrite as _};
+use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
+use zcash_client_backend::scanning::Nullifiers;
+use std::convert::Infallible;
 
 // ---------------------------------------------------------------------------
 // Boot life-cycle
@@ -57,21 +66,33 @@ pub struct Boot<P: Parameters> {
     pub oracle: Oracle,
     /// boot-initialized faculty: born empty, filled by `main`
     pub challenges: OtpQueue,
+    /// produced: scanned and verified during boot sync
+    pub registry: Registry,
 }
 
 /// Network label for logging.
 #[cfg(not(feature = "regtest"))]
+#[cfg(not(feature = "testnet"))]
 const NETWORK_LABEL: &str = "mainnet";
+
+#[cfg(feature = "testnet")]
+const NETWORK_LABEL: &str = "testnet";
 
 #[cfg(feature = "regtest")]
 const NETWORK_LABEL: &str = "regtest";
 
 #[cfg(not(feature = "regtest"))]
+#[cfg(not(feature = "testnet"))]
 impl Boot<MainNetwork> {
-    /// Production entry point. This is deliberately parameterless and only
-    /// permits the mainnet parameters compiled by librustzcash.
     pub async fn start() -> Self {
         Self::start_with_network(zcash_protocol::consensus::MAIN_NETWORK).await
+    }
+}
+
+#[cfg(feature = "testnet")]
+impl Boot<TestNetwork> {
+    pub async fn start() -> Self {
+        Self::start_with_network(zcash_protocol::consensus::TEST_NETWORK).await
     }
 }
 
@@ -84,22 +105,22 @@ impl Boot<LocalNetwork> {
     }
 }
 
-impl<P: Parameters> Boot<P> {
+impl<P: Parameters + Send + 'static> Boot<P> {
     /// Boot sequence for a concrete, boot-owned network parameter set.
     ///
     async fn start_with_network(network: P) -> Self {
         tracing::info!("boot: starting");
 
         // 1. Liveness + connect: confirm both Zebra transports, get chain client.
-        let (chain_client, tip_height) = connect_zebra().await;
+        let (chain_client, _tip_height) = connect_zebra().await;
 
         // 2. Seed intake + verification: read capsule, derive sealing key,
         //    decrypt, verify fingerprint, then derive keys. The seed lives
         //    only inside this block — Secret's Drop wipes it.
         let (treasury_keys, registry_keys) = {
-            tracing::info!("boot: reading seed capsule from zns_seed.capsule");
-            let blob = std::fs::read("zns_seed.capsule").expect(
-                "FATAL: failed to read zns_seed.capsule. The mint cannot boot without the sealed seed.",
+            tracing::info!("boot: reading seed capsule from keys/zns_seed.capsule");
+            let blob = std::fs::read("keys/zns_seed.capsule").expect(
+                "FATAL: failed to read keys/zns_seed.capsule. The mint cannot boot without the sealed seed.",
             );
             let seed = decrypt_sealed_blob(&blob);
             verify_fingerprint(&seed, SEED_FINGERPRINT_RAW.trim());
@@ -123,7 +144,7 @@ impl<P: Parameters> Boot<P> {
         let checkpoint_height = origin.block_height();
 
         // 3b. Wallet initialization from the checkpoint's chain state.
-        let wallet = Wallet::new(
+        let mut wallet = Wallet::new(
             [
                 (TREASURY_ACCOUNT, treasury_keys.fvk()),
                 (REGISTRY_ACCOUNT, registry_keys.fvk()),
@@ -156,12 +177,144 @@ impl<P: Parameters> Boot<P> {
             u32::from(checkpoint_height)
         );
 
-        let mtp_now = mtp.current().expect("MTP complete after backfill");
+        // 4. Boot sync: scan from checkpoint to chain tip.
+        let mut cursor = block_metadata(&origin);
+        let mut registry = Registry::new(checkpoint_height);
+        let source = crate::zcash::CanonicalBlockSource::new();
+        let (best_height, _best_hash) = source.exact_tip().await
+            .expect("FATAL: Zebra tip unavailable during boot sync");
+        tracing::info!(
+            from = u32::from(checkpoint_height),
+            to = u32::from(best_height),
+            "boot: syncing to chain tip"
+        );
+        while cursor.block_height() < best_height {
+            let from_height = cursor.block_height();
+            let next_height = from_height + 1;
+
+            let from_state = rpc.chain_state_at(from_height).await
+                .expect("FATAL: chain state unavailable during boot sync");
+            let block = rpc.get_block(&network, next_height).await
+                .expect("FATAL: block unavailable during boot sync");
+            let block_time = block.header().time;
+
+            let candidates = decrypt_name_notes(&network, &block, &registry_keys);
+            let name_notes: Vec<ReceivedNameNote> = candidates
+                .iter()
+                .map(|c| ReceivedNameNote::new(c.txid, c.action_index, c.nullifier, c.payload.clone()))
+                .collect();
+
+            let (header, batches) = decrypt_block(&network, block, wallet.scanning_keys());
+            let nullifiers = Nullifiers::unspent(&wallet)
+                .expect("FATAL: wallet nullifiers unavailable during boot sync");
+            let scanned = scan_block(
+                &network, next_height, &header, batches,
+                wallet.scanning_keys(), &nullifiers, Some(&cursor),
+                |_| Ok::<Option<(zip32::AccountId, Option<transparent::keys::TransparentKeyScope>)>, Infallible>(None),
+            ).expect("FATAL: block scan failed during boot sync");
+
+            let name_note_nullifiers: std::collections::BTreeSet<_> =
+                registry.name_chain().map(|(_, r)| r.nullifier).collect();
+            let anchor_nullifiers: std::collections::BTreeSet<orchard::note::Nullifier> = wallet
+                .get_ironwood_nullifiers(NullifierQuery::Unspent)
+                .expect("FATAL: wallet nullifiers unavailable")
+                .into_iter()
+                .filter(|(a, _)| *a == REGISTRY_ACCOUNT)
+                .filter_map(|(_, nf)| {
+                    let note = wallet.unspent_ironwood_note_by_nullifier(
+                        REGISTRY_ACCOUNT, nf, TargetHeight::from(next_height),
+                    )?;
+                    (note.note().value().inner() == 0 && !name_note_nullifiers.contains(&nf))
+                        .then_some(nf)
+                })
+                .collect();
+
+            let mut next_mtp = mtp.clone();
+            next_mtp.update(next_height, block_time);
+            let block_mtp = next_mtp.current().expect("FATAL: MTP unavailable");
+
+            let (next_registry, accepted_name_notes) =
+                registry.apply_block(&network, &scanned, &name_notes, block_mtp, &anchor_nullifiers);
+
+            let ironwood_start = scanned.ironwood().final_tree_size()
+                .checked_sub(u32::try_from(scanned.ironwood().commitments().len())
+                    .expect("Ironwood action count fits u32"))
+                .expect("FATAL: impossible Ironwood tree size");
+            let accepted_name_notes = accepted_name_notes.into_iter().map(|index| {
+                let candidate = &candidates[index];
+                let position = Position::from(
+                    u64::from(ironwood_start)
+                        + u64::try_from(candidate.ordinal).expect("ordinal fits u64"),
+                );
+                (index, position)
+            }).collect::<Vec<_>>();
+            let next_metadata = scanned.to_block_metadata();
+
+            wallet.put_blocks(&from_state, vec![scanned])
+                .expect("FATAL: wallet commit failed during boot sync");
+            for (index, position) in accepted_name_notes {
+                let c = &candidates[index];
+                wallet.store_name_note(
+                    next_height, position, c.txid, c.action_index,
+                    c.note.clone(), c.nullifier, c.ephemeral_key.clone(), c.memo,
+                );
+            }
+
+            mtp = next_mtp;
+            registry = next_registry;
+            cursor = next_metadata;
+        }
+        tracing::info!(
+            height = u32::from(cursor.block_height()),
+            "boot: synced to chain tip"
+        );
+
+        // 5. Genesis sanity checks.
+        let name_note_nullifiers: std::collections::BTreeSet<orchard::note::Nullifier> =
+            registry.name_chain().map(|(_, r)| r.nullifier).collect();
+        let anchor_count = wallet
+            .get_ironwood_nullifiers(NullifierQuery::Unspent)
+            .expect("FATAL: wallet nullifiers unavailable")
+            .into_iter()
+            .filter(|(a, _)| *a == REGISTRY_ACCOUNT)
+            .filter_map(|(_, nf)| {
+                let note = wallet.unspent_ironwood_note_by_nullifier(
+                    REGISTRY_ACCOUNT, nf, TargetHeight::from(best_height),
+                )?;
+                (note.note().value().inner() == 0 && !name_note_nullifiers.contains(&nf))
+                    .then_some(nf)
+            })
+            .count();
+        assert_eq!(
+            anchor_count, 40,
+            "FATAL: expected 40 genesis anchors, found {anchor_count}"
+        );
+        let treasury_balance: u64 = wallet
+            .unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(best_height))
+            .iter()
+            .map(|n| n.note().value().inner())
+            .sum();
+        assert!(
+            treasury_balance >= MIN_TREASURY_BALANCE,
+            "FATAL: Treasury balance {treasury_balance} below minimum {MIN_TREASURY_BALANCE}"
+        );
+        tracing::info!(
+            anchors = anchor_count,
+            treasury_balance,
+            "boot: genesis sanity checks passed"
+        );
+
+        // 6. Price fetch (MTP is now at the tip).
+        let mtp_now = mtp.current().expect("MTP complete after sync");
         let price = crate::mint::pricing::fetch_round()
             .await
             .expect("FATAL: initial price fetch failed; restart when exchanges are reachable");
         let oracle = Oracle::new(price, mtp_now);
-        tracing::info!("boot: initial price ingested");
+        tracing::info!(
+            usd_per_zec = %price.round_dp(2),
+            zats_per_usd = oracle.current().into_u64(),
+            "boot: initial price ingested"
+        );
 
         // The challenge memory: empty by construction, filled by the run
         // loop as liveness challenges and update/release relays are issued.
@@ -187,12 +340,10 @@ impl<P: Parameters> Boot<P> {
             }
         }
 
-        let cursor = block_metadata(&origin);
-
         tracing::info!(
             network = NETWORK_LABEL,
-            "boot: complete at node tip {}",
-            u32::from(tip_height)
+            "boot: complete at tip {}",
+            u32::from(cursor.block_height())
         );
 
         Boot {
@@ -207,6 +358,7 @@ impl<P: Parameters> Boot<P> {
             mtp,
             oracle,
             challenges,
+            registry,
         }
     }
 }
@@ -367,6 +519,7 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 
     #[cfg(not(feature = "regtest"))]
     {
+        #[cfg(not(feature = "testnet"))]
         if expected.eq("PLACEHOLDER") {
             panic!(
                 "FATAL: production build contains the placeholder seed fingerprint. \

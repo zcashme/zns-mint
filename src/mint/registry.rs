@@ -160,41 +160,27 @@ pub struct RegistryHistoryRecord {
     pub prev_record: Option<NameRecord>,
 }
 
-/// One claim-anchor advance, retained so a reorg restores the exact prior
-/// anchor before any replacement block is applied.
-#[derive(Debug, Clone)]
-struct ClaimAnchorHistory {
-    height: BlockHeight,
-    previous: orchard::note::Nullifier,
-}
-
 /// The name-chain state: a map from each canonical ZNS name to the most
 /// recent confirmed record for that name, plus an undo log for reorgs.
+/// Anchors are not tracked here — they are wallet notes, selected by the
+/// orchestrator from the wallet's unspent zero-value Registry Ironwood
+/// notes. The Registry only enforces the transition law.
 #[derive(Clone)]
 pub struct Registry {
     records: BTreeMap<Name, NameRecord>,
     history: Vec<RegistryHistoryRecord>,
-    claim_anchor: orchard::note::Nullifier,
     claim_anchor_height: BlockHeight,
-    claim_anchor_history: Vec<ClaimAnchorHistory>,
 }
 
 impl Registry {
-    /// Creates an empty name map rooted at the confirmed anchor created by
-    /// boot. A claim can advance this chain, but cannot create its root.
-    pub fn new(claim_anchor: orchard::note::Nullifier, claim_anchor_height: BlockHeight) -> Self {
+    /// Creates an empty name map. The height is the reorg
+    /// boundary: a rewind below it discards the Registry.
+    pub fn new(claim_anchor_height: BlockHeight) -> Self {
         Self {
             records: BTreeMap::new(),
             history: Vec::new(),
-            claim_anchor,
             claim_anchor_height,
-            claim_anchor_history: Vec::new(),
         }
-    }
-
-    /// The zero-value Registry anchor the next accepted claim must spend.
-    pub fn claim_anchor(&self) -> orchard::note::Nullifier {
-        self.claim_anchor
     }
 
     /// The height at which the current anchor chain began.
@@ -348,6 +334,7 @@ impl Registry {
         scanned: &ScannedBlock<AccountId>,
         name_notes: &[ReceivedNameNote],
         mtp: Timestamp,
+        anchor_nullifiers: &std::collections::BTreeSet<orchard::note::Nullifier>,
     ) -> (Self, Vec<usize>) {
         let mut next = self.clone();
         let mut accepted = Vec::new();
@@ -391,7 +378,9 @@ impl Registry {
                 .filter(|output| *output.account_id() == REGISTRY_ACCOUNT)
                 .collect();
 
-            let spends_claim_anchor = ironwood_nullifiers.contains(&next.claim_anchor);
+            let spends_claim_anchor = ironwood_nullifiers
+                .iter()
+                .any(|nf| anchor_nullifiers.contains(nf));
             let spent_record_names: Vec<_> = next
                 .records
                 .iter()
@@ -447,7 +436,7 @@ impl Registry {
                                 0,
                                 "Registry anchor value must remain zero"
                             );
-                            let successor_nullifier = successor
+                            let _successor_nullifier = successor
                                 .nf()
                                 .copied()
                                 .expect("Registry FVK must derive the successor anchor nullifier");
@@ -457,11 +446,10 @@ impl Registry {
                                 "claim attempted to replace live name {name:?} \
                                  — authorize_claim checks availability"
                             );
-                            next.claim_anchor_history.push(ClaimAnchorHistory {
-                                height,
-                                previous: next.claim_anchor,
-                            });
-                            next.claim_anchor = successor_nullifier;
+                            // The wallet tracks the successor anchor as a
+                            // new zero-value Registry Ironwood note. The
+                            // consumed anchor is marked spent by the wallet's
+                            // put_blocks. No Registry state to update here.
                         }
                         Action::Update | Action::Release => {
                             if spent_record_names.is_empty() {
@@ -544,13 +532,6 @@ impl Registry {
                     self.records.remove(&entry.name);
                 }
             }
-        }
-        while let Some(entry) = self.claim_anchor_history.last() {
-            if entry.height <= height {
-                break;
-            }
-            let entry = self.claim_anchor_history.pop().unwrap();
-            self.claim_anchor = entry.previous;
         }
     }
 }

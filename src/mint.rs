@@ -27,7 +27,11 @@ pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
 
 /// First block the mint observes; everything before it is pre-birth.
 #[cfg(not(feature = "regtest"))]
+#[cfg(not(feature = "testnet"))]
 pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(3_400_000);
+
+#[cfg(feature = "testnet")]
+pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(4_338_933);
 
 /// Regtest birth: first block after the harness's NU6.3 activation (height 4).
 #[cfg(feature = "regtest")]
@@ -38,6 +42,9 @@ pub const LIVENESS_INTERVAL: i64 = 31_557_600;
 
 /// The longest fixed-term registration the mint will accept: 99 years.
 pub const MAX_TERM_YEARS: u64 = 99;
+
+/// Minimum Treasury Ironwood balance after boot sync (0.002 ZEC).
+pub const MIN_TREASURY_BALANCE: u64 = 200_000;
 
 /// ZNS action kinds.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -127,46 +134,62 @@ impl Request {
             return None;
         }
         let action = Action::from_verb(fields.next()?)?;
-        let name = Name::parse(fields.next()?)?;
-
-        let ua_str = fields.next()?;
-        if ua_str.is_empty() {
-            return None;
-        }
-        let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
-            zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
-            _ => return None,
-        };
-
-        let kind = fields.next();
-        // No verb carries a second term-like field.
-        if fields.next().is_some() {
-            return None;
-        }
 
         match action {
             Action::Claim => {
-                let term = match kind {
-                    Some("forever") => Term::Forever,
-                    Some(years) => Term::Years(Action::parse_years(years)?),
-                    // A claim always states its term.
-                    None => return None,
+                // ZNS:claim:<term>:<name>:<ua>
+                let term = match fields.next()? {
+                    "forever" => Term::Forever,
+                    years => Term::Years(Action::parse_years(years)?),
                 };
+                let name = Name::parse(fields.next()?)?;
+                let ua_str = fields.next()?;
+                if ua_str.is_empty() {
+                    return None;
+                }
+                let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
+                    zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
+                    _ => return None,
+                };
+                if fields.next().is_some() {
+                    return None;
+                }
                 Some(Request::Claim { name, ua, term })
             }
             Action::Update => {
-                let extend_years = match kind {
-                    None => None,
-                    Some(years) => Some(Action::parse_years(years)?),
+                // ZNS:update:<years?>:<name>:<ua>
+                let years_str = fields.next()?;
+                let extend_years = if years_str.is_empty() {
+                    None
+                } else {
+                    Some(Action::parse_years(years_str)?)
                 };
-                Some(Request::Update {
-                    name,
-                    ua,
-                    extend_years,
-                })
+                let name = Name::parse(fields.next()?)?;
+                let ua_str = fields.next()?;
+                if ua_str.is_empty() {
+                    return None;
+                }
+                let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
+                    zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
+                    _ => return None,
+                };
+                if fields.next().is_some() {
+                    return None;
+                }
+                Some(Request::Update { name, ua, extend_years })
             }
             Action::Release => {
-                if kind.is_some() {
+                // ZNS:release:<name>:<ua>
+                let name = Name::parse(fields.next()?)?;
+                let ua_str = fields.next()?;
+                if ua_str.is_empty() {
+                    return None;
+                }
+                let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
+                    zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
+                    _ => return None,
+                };
+                if fields.next().is_some() {
                     return None;
                 }
                 Some(Request::Release { name, ua })
