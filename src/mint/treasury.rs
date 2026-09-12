@@ -110,8 +110,7 @@ pub fn sweep_sapling_to_vault<P: Parameters>(
 }
 
 /// Sweeps excess Ironwood Treasury notes to the project vault, retaining a
-/// reserve for fees. Only confirmed empty-memo notes are swept. Returns
-/// `None` when the balance is below the threshold.
+/// reserve for fees. Returns `None` when the balance is below the threshold.
 pub fn sweep_ironwood_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet,
@@ -121,24 +120,16 @@ pub fn sweep_ironwood_to_vault<P: Parameters>(
     tip: BlockHeight,
     target_height: BlockHeight,
 ) -> Option<zcash_primitives::transaction::Transaction> {
-    use zcash_client_backend::data_api::{SentTransaction, WalletRead as _, WalletWrite as _};
+    use zcash_client_backend::data_api::{SentTransaction, WalletWrite as _};
     use zcash_client_backend::data_api::wallet::TargetHeight;
     use zcash_client_backend::fees::StandardFeeRule;
     use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
     use zcash_primitives::transaction::fees::zip317::P2PKH_STANDARD_OUTPUT_SIZE;
     use zcash_primitives::transaction::fees::FeeRule as _;
-    use zcash_protocol::memo::Memo;
 
     let mut sweep_notes =
         wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip));
-    sweep_notes.retain(|note| {
-        let mined = note.mined_height().is_some();
-        let empty_memo = matches!(
-            wallet.get_memo(*note.internal_note_id()),
-            Ok(None) | Ok(Some(Memo::Empty))
-        );
-        mined && empty_memo
-    });
+    sweep_notes.retain(|note| note.mined_height().is_some());
     let sweep_funding = sweep_notes.iter().fold(Zatoshis::ZERO, |total, note| {
         (total
             + Zatoshis::from_u64(note.note().value().inner())
@@ -238,11 +229,9 @@ pub fn sweep_ironwood_to_vault<P: Parameters>(
 }
 
 /// Proposes, builds, and records a Treasury payment carrying an OTP challenge
-/// memo to the controller. Funded from empty-memo Treasury notes via
-/// upstream's generic selection path — the empty-memo filter in
-/// `eligible_ironwood` ensures protocol messages are never spent as fee
-/// funding. Returns `None` when the Treasury cannot cover the relay value
-/// and fee; the lane retries next tip.
+/// memo to the controller. Funded from Treasury notes via upstream's generic
+/// selection path. Returns `None` when the Treasury cannot cover the relay
+/// value and fee; the lane retries next tip.
 pub fn challenge<P: Parameters>(
     network: &P,
     wallet: &mut Wallet,
