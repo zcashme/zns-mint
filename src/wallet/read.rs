@@ -1,6 +1,6 @@
 //! Upstream `WalletRead` implementation, its private fixed-account value,
 //! and the Ironwood note reads that upstream's generic traits cannot express
-//! — notably the ZNS lookup by a record's `rho`.
+//! — notably the Registry lookup by a record's nullifier.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -8,15 +8,18 @@ use std::num::NonZeroU32;
 
 use secrecy::SecretVec;
 use shardtree::store::ShardStore;
+use zcash_client_backend::data_api::locking::{LockFilter, LockedInputPolicy};
 use zcash_client_backend::data_api::{
+    defaults,
+    error::FindAccountForAddressError,
+    scanning::{ScanPriority, ScanRange},
+    wallet::{ConfirmationsPolicy, TargetHeight},
     Account as UpstreamAccount, AccountBalance, AccountPurpose, AccountSource, AddressInfo,
     Balance, BlockMetadata, NullifierQuery, Progress, Ratio, ReceivedTransactionOutput,
     SeedRelevance, TransactionDataRequest, TransactionStatus, TransparentBalances, WalletRead,
-    WalletSummary, Zip32Derivation, defaults, error::FindAccountForAddressError,
-    scanning::{ScanPriority, ScanRange},
-    wallet::{ConfirmationsPolicy, TargetHeight},
+    WalletSummary, Zip32Derivation,
 };
-use zcash_client_backend::wallet::{NoteId, ReceivedNote, TransparentAddressMetadata};
+use zcash_client_backend::wallet::{NoteId, OutputRef, ReceivedNote, TransparentAddressMetadata};
 use zcash_keys::address::{Address, UnifiedAddress};
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_primitives::block::BlockHash;
@@ -27,7 +30,7 @@ use zcash_protocol::value::{BalanceError, Zatoshis};
 use zcash_protocol::{PoolType, ShieldedPool};
 use zip32::AccountId;
 
-use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::{MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 
 use super::Wallet;
 
@@ -83,7 +86,10 @@ impl std::fmt::Display for WalletError {
                 write!(f, "unknown account {account:?}")
             }
             WalletError::ChainDiscontinuity(height) => {
-                write!(f, "chain discontinuity detected at or before height {height}")
+                write!(
+                    f,
+                    "chain discontinuity detected at or before height {height}"
+                )
             }
             WalletError::TruncationTargetUnavailable(height) => {
                 write!(f, "no retained checkpoint at or below height {height}")
@@ -95,21 +101,6 @@ impl std::fmt::Display for WalletError {
 }
 
 impl std::error::Error for WalletError {}
-
-/// The fixed earliest height at which either mint account may have been
-/// exposed. This is application identity, not mutable wallet state.
-const MINT_BIRTHDAY_HEIGHT: u32 = 3_400_000;
-
-/// The birthday shared by both fixed mint accounts.
-pub(super) fn account_birthday() -> BlockHeight {
-    BlockHeight::from_u32(MINT_BIRTHDAY_HEIGHT)
-}
-
-/// The first height at or above the birthday from which a catch-up scan would
-/// start when no block has been applied yet.
-pub(super) fn scan_floor() -> BlockHeight {
-    account_birthday()
-}
 
 /// `height + 1`, saturating instead of panicking at the top of the `u32`
 /// height space.
@@ -165,7 +156,7 @@ impl UpstreamAccount for FixedAccount {
     }
 
     fn birthday_height(&self) -> BlockHeight {
-        account_birthday()
+        MINT_BIRTHDAY
     }
 
     fn source(&self) -> &AccountSource {
@@ -247,7 +238,8 @@ impl Wallet {
             .get(&OutputRef::from(*note_id))
             .is_some_and(|(_, expiry)| *expiry >= BlockHeight::from(target_height));
 
-        let mut with_pool = |f: &mut dyn FnMut(&mut Balance) -> Result<(), WalletError>| match pool {
+        let mut with_pool = |f: &mut dyn FnMut(&mut Balance) -> Result<(), WalletError>| match pool
+        {
             ShieldedPool::Sapling => balance.with_sapling_balance_mut(|b| f(b)),
             ShieldedPool::Orchard => balance.with_orchard_balance_mut(|b| f(b)),
             ShieldedPool::Ironwood => balance.with_ironwood_balance_mut(|b| f(b)),
@@ -363,13 +355,13 @@ impl WalletRead for Wallet {
 
     fn get_account_birthday(&self, account: Self::AccountId) -> Result<BlockHeight, Self::Error> {
         match self.ufvks.get(&account) {
-            Some(_) => Ok(account_birthday()),
+            Some(_) => Ok(MINT_BIRTHDAY),
             None => Err(WalletError::AccountUnknown(account)),
         }
     }
 
     fn get_wallet_birthday(&self) -> Result<Option<BlockHeight>, Self::Error> {
-        Ok((!self.ufvks.is_empty()).then(account_birthday))
+        Ok((!self.ufvks.is_empty()).then_some(MINT_BIRTHDAY))
     }
 
     fn get_wallet_recover_until(&self) -> Result<Option<BlockHeight>, Self::Error> {
@@ -389,7 +381,7 @@ impl WalletRead for Wallet {
 
         let fully_scanned_height = self
             .max_applied_height()
-            .unwrap_or_else(|| BlockHeight::from_u32(MINT_BIRTHDAY_HEIGHT - 1));
+            .unwrap_or_else(|| self.seed.block_height());
 
         let mut account_balances = self
             .ufvks
@@ -435,14 +427,11 @@ impl WalletRead for Wallet {
         // Progress over the block span between the fixed birthday and the
         // Zebra tip; a display metric, not an authoritative note count.
         let scanned_span = u64::from(
-            (u32::from(fully_scanned_height) + 1).saturating_sub(MINT_BIRTHDAY_HEIGHT),
+            (u32::from(fully_scanned_height) + 1).saturating_sub(u32::from(MINT_BIRTHDAY)),
         );
         let total_span =
-            u64::from(u32::from(chain_tip_height).saturating_sub(MINT_BIRTHDAY_HEIGHT) + 1);
-        let progress = Progress::new(
-            Ratio::new(scanned_span.min(total_span), total_span),
-            None,
-        );
+            u64::from(u32::from(chain_tip_height).saturating_sub(u32::from(MINT_BIRTHDAY)) + 1);
+        let progress = Progress::new(Ratio::new(scanned_span.min(total_span), total_span), None);
 
         let summary = WalletSummary::new(
             account_balances,
@@ -495,7 +484,7 @@ impl WalletRead for Wallet {
         };
         let start = self
             .max_applied_height()
-            .map_or_else(scan_floor, next_height);
+            .map_or_else(|| MINT_BIRTHDAY, next_height);
         let end = next_height(tip);
         if start >= end {
             Ok(Vec::new())
@@ -519,9 +508,8 @@ impl WalletRead for Wallet {
         let target = next_height(tip);
         // The anchor must have at least `min_confirmations` blocks on top of
         // it, relative to the next block.
-        let bound = BlockHeight::from_u32(
-            u32::from(target).saturating_sub(u32::from(min_confirmations)),
-        );
+        let bound =
+            BlockHeight::from_u32(u32::from(target).saturating_sub(u32::from(min_confirmations)));
         let start = self.max_applied_height().unwrap_or(bound);
         // The mint only ever spends Sapling and Ironwood, so the ordinary
         // Orchard compatibility tree does not constrain the anchor.
@@ -626,8 +614,10 @@ impl WalletRead for Wallet {
         _account: Self::AccountId,
         _include_change: bool,
         _include_standalone: bool,
-    ) -> Result<HashMap<transparent::address::TransparentAddress, TransparentAddressMetadata>, Self::Error>
-    {
+    ) -> Result<
+        HashMap<transparent::address::TransparentAddress, TransparentAddressMetadata>,
+        Self::Error,
+    > {
         // Transparent support is outbound-only: neither fixed account owns,
         // derives, or reserves a transparent receiver through this wallet.
         Ok(HashMap::new())
@@ -638,8 +628,10 @@ impl WalletRead for Wallet {
         _account: Self::AccountId,
         _exposure_depth: u32,
         _exclude_used: bool,
-    ) -> Result<HashMap<transparent::address::TransparentAddress, TransparentAddressMetadata>, Self::Error>
-    {
+    ) -> Result<
+        HashMap<transparent::address::TransparentAddress, TransparentAddressMetadata>,
+        Self::Error,
+    > {
         Ok(HashMap::new())
     }
 
@@ -664,7 +656,7 @@ impl WalletRead for Wallet {
         match self.ufvks.get(&account) {
             // No transparent receiver is ever derived, so there is nothing to
             // observe below the fixed scan floor.
-            Some(_) => Ok(scan_floor()),
+            Some(_) => Ok(MINT_BIRTHDAY),
             None => Err(WalletError::AccountUnknown(account)),
         }
     }
@@ -721,9 +713,32 @@ impl WalletRead for Wallet {
 // ---------------------------------------------------------------------------
 
 impl Wallet {
-    /// Returns every Ironwood note owned by `account` with no spend that is
-    /// pending or mined as of `tip`: a spend recorded by a transaction whose
-    /// expiry height has passed releases its note.
+    /// Returns every Sapling note owned by `account` that is selectable at
+    /// `tip`: the same selection rule as the Ironwood lane.
+    pub fn unspent_sapling_notes(
+        &self,
+        account: AccountId,
+        tip: TargetHeight,
+    ) -> Vec<ReceivedNote<NoteId, sapling::Note>> {
+        self.sapling_notes
+            .iter()
+            .filter(move |(_, output)| *output.account_id() == account)
+            .filter(|(note_id, _)| {
+                !self.sapling_note_is_spent(note_id, tip)
+                    && self.lock_admits(
+                        &OutputRef::from(**note_id),
+                        tip,
+                        LockFilter::Policy(&LockedInputPolicy::default()),
+                    )
+            })
+            .filter_map(|(note_id, _)| self.sapling_received_note(*note_id))
+            .collect()
+    }
+
+    /// Returns every Ironwood note owned by `account` that is selectable at
+    /// `tip`: unspent (a spend recorded by a transaction whose expiry height
+    /// has passed releases its note) and not actively locked for an
+    /// in-flight transaction.
     pub fn unspent_ironwood_notes(
         &self,
         account: AccountId,
@@ -732,12 +747,19 @@ impl Wallet {
         self.ironwood_notes
             .iter()
             .filter(move |(_, output)| *output.account_id() == account)
-            .filter(|(note_id, _)| !self.ironwood_note_is_spent(note_id, tip))
+            .filter(|(note_id, _)| {
+                !self.ironwood_note_is_spent(note_id, tip)
+                    && self.lock_admits(
+                        &OutputRef::from(**note_id),
+                        tip,
+                        LockFilter::Policy(&LockedInputPolicy::default()),
+                    )
+            })
             .filter_map(|(note_id, _)| self.ironwood_received_note(*note_id))
             .collect()
     }
 
-    /// Returns one Ironwood note with no pending-or-mined spend as of `tip`.
+    /// Returns one Ironwood note selectable at `tip`.
     pub(crate) fn unspent_ironwood_note(
         &self,
         account: AccountId,
@@ -745,51 +767,27 @@ impl Wallet {
         tip: TargetHeight,
     ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
         let output = self.ironwood_notes.get(&note_id)?;
-        (*output.account_id() == account && !self.ironwood_note_is_spent(&note_id, tip))
-            .then(|| self.ironwood_received_note(note_id))
-            .flatten()
+        (*output.account_id() == account
+            && !self.ironwood_note_is_spent(&note_id, tip)
+            && self.lock_admits(
+                &OutputRef::from(note_id),
+                tip,
+                LockFilter::Policy(&LockedInputPolicy::default()),
+            ))
+        .then(|| self.ironwood_received_note(note_id))
+        .flatten()
     }
 
-    /// Finds an unspent owned Ironwood note by the `rho` persisted in a ZNS
-    /// record, returning its native LRZ wallet representation.
-    pub(crate) fn unspent_ironwood_note_by_rho(
+    /// Finds an unspent owned Ironwood note by the exact nullifier it reveals
+    /// when spent. Registry authority is expressed in nullifiers: claim
+    /// anchors and current Name Notes are selected through this boundary.
+    pub fn unspent_ironwood_note_by_nullifier(
         &self,
         account: AccountId,
-        rho: orchard::note::Rho,
+        nullifier: orchard::note::Nullifier,
         tip: TargetHeight,
     ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
-        let note_id = self
-            .ironwood_notes
-            .iter()
-            .find(|(_, output)| {
-                *output.account_id() == account && output.note().0.rho() == rho
-            })
-            .map(|(note_id, _)| *note_id)?;
+        let note_id = *self.ironwood_nullifiers.get(&nullifier)?;
         self.unspent_ironwood_note(account, note_id, tip)
-    }
-
-    /// Returns the nullifiers of all Ironwood notes owned by `account` with
-    /// no pending-or-mined spend as of `tip`, including value-0 notes: the
-    /// Registry's Name Notes are value-0, and their nullifiers are what
-    /// identifies a Registry spend in
-    /// [`Registry::apply_block`](crate::mint::registry::Registry::apply_block)'s
-    /// mint-authority check.
-    ///
-    /// Distinct from the [`WalletRead::get_ironwood_nullifiers`] impl above:
-    /// that one classifies a spend as spent once its transaction is mined,
-    /// while this read also blocks on locally recorded but unmined spends.
-    pub(crate) fn unspent_ironwood_nullifiers(
-        &self,
-        account: AccountId,
-        tip: TargetHeight,
-    ) -> Vec<orchard::note::Nullifier> {
-        self.ironwood_notes
-            .iter()
-            .filter(|(note_id, output)| {
-                *output.account_id() == account
-                    && !self.ironwood_note_is_spent(note_id, tip)
-            })
-            .filter_map(|(_, output)| output.nf().copied())
-            .collect()
     }
 }

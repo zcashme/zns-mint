@@ -8,6 +8,7 @@ use zcash_protocol::consensus::Parameters;
 
 pub mod assemble;
 
+use crate::key::RegistryKeys;
 use crate::mint::{Action, Name, NameCommitment};
 
 /// A Name transition (§3.2), typed so every action carries exactly its
@@ -262,83 +263,85 @@ fn tagged_zns_hash(
     out
 }
 
-/// Decodes a 512-byte memo into a typed [`NameNote`].
-///
-/// Accepts exactly the canonical encoding: trailing-zero stripping, the
-/// six-field grammar, canonical decimal or `none` expiry, 64-char lowercase
-/// hex predecessor, action-consistent fields (release: a valid UA and `none`
-/// expiry; claim: zero predecessor; update/release: nonzero predecessor),
-/// and a re-encode that reproduces the input byte-for-byte.
-pub fn decode_name_note<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<NameNote> {
-    let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
-    if memo[end..].iter().any(|&b| b != 0) {
-        return None;
-    }
-    let memo_str = std::str::from_utf8(&memo[..end]).ok()?;
-
-    let parts: Vec<&str> = memo_str.split(':').collect();
-    if parts.len() != 6 || parts[0] != "ZNS" {
-        return None;
-    }
-
-    let name = Name::parse(parts[2])?;
-    // The single UA validation boundary: a memo whose ua field is not a
-    // valid ZIP 316 Unified Address for this network decodes to no note.
-    let ua_str = parts[3];
-    let ua = match zcash_keys::address::Address::decode(params, ua_str)? {
-        zcash_keys::address::Address::Unified(ua) => ua,
-        _ => return None,
-    };
-    let expires_at = Expiry::parse(parts[4])?;
-
-    let mut prev_rcm_bytes = [0u8; 32];
-    if parts[5].len() != 64
-        || !parts[5]
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        return None;
-    }
-    hex::decode_to_slice(parts[5], &mut prev_rcm_bytes).ok()?;
-
-    let note = match parts[1] {
-        "claim" => {
-            if prev_rcm_bytes != [0u8; 32] || ua_str.is_empty() {
-                return None;
-            }
-            NameNote::Claim {
-                name,
-                ua,
-                expires_at,
-            }
+impl NameNote {
+    /// Decodes a 512-byte memo into a typed [`NameNote`].
+    ///
+    /// Accepts exactly the canonical encoding: trailing-zero stripping, the
+    /// six-field grammar, canonical decimal or `none` expiry, 64-char lowercase
+    /// hex predecessor, action-consistent fields (release: a valid UA and `none`
+    /// expiry; claim: zero predecessor; update/release: nonzero predecessor),
+    /// and a re-encode that reproduces the input byte-for-byte.
+    pub fn decode<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<Self> {
+        let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
+        if memo[end..].iter().any(|&b| b != 0) {
+            return None;
         }
-        "update" => {
-            if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
-                return None;
-            }
-            NameNote::Update {
-                name,
-                ua,
-                expires_at,
-                prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
-            }
-        }
-        // A release MUST retain the released UA and encode the exact value
-        // `none` for its expiry.
-        "release" => {
-            if ua_str.is_empty() || expires_at != Expiry::Never || prev_rcm_bytes == [0u8; 32] {
-                return None;
-            }
-            NameNote::Release {
-                name,
-                ua,
-                prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
-            }
-        }
-        _ => return None,
-    };
+        let memo_str = std::str::from_utf8(&memo[..end]).ok()?;
 
-    (note.encode(params).as_slice() == memo).then_some(note)
+        let parts: Vec<&str> = memo_str.split(':').collect();
+        if parts.len() != 6 || parts[0] != "ZNS" {
+            return None;
+        }
+
+        let name = Name::parse(parts[2])?;
+        // The single UA validation boundary: a memo whose ua field is not a
+        // valid ZIP 316 Unified Address for this network decodes to no note.
+        let ua_str = parts[3];
+        let ua = match zcash_keys::address::Address::decode(params, ua_str)? {
+            zcash_keys::address::Address::Unified(ua) => ua,
+            _ => return None,
+        };
+        let expires_at = Expiry::parse(parts[4])?;
+
+        let mut prev_rcm_bytes = [0u8; 32];
+        if parts[5].len() != 64
+            || !parts[5]
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return None;
+        }
+        hex::decode_to_slice(parts[5], &mut prev_rcm_bytes).ok()?;
+
+        let note = match parts[1] {
+            "claim" => {
+                if prev_rcm_bytes != [0u8; 32] || ua_str.is_empty() {
+                    return None;
+                }
+                NameNote::Claim {
+                    name,
+                    ua,
+                    expires_at,
+                }
+            }
+            "update" => {
+                if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                    return None;
+                }
+                NameNote::Update {
+                    name,
+                    ua,
+                    expires_at,
+                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                }
+            }
+            // A release MUST retain the released UA and encode the exact value
+            // `none` for its expiry.
+            "release" => {
+                if ua_str.is_empty() || expires_at != Expiry::Never || prev_rcm_bytes == [0u8; 32] {
+                    return None;
+                }
+                NameNote::Release {
+                    name,
+                    ua,
+                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                }
+            }
+            _ => return None,
+        };
+
+        (note.encode(params).as_slice() == memo).then_some(note)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +361,10 @@ pub struct DecryptedNameNote {
     /// fixes the note's tree position.
     pub ordinal: usize,
     pub note: orchard::note::Note,
+    /// The nullifier this ZNS-bound note reveals when spent. It must be
+    /// derived from the same authenticated `(rcm, psi)` pair as `cmx`; the
+    /// ordinary rseed-derived nullifier is not the Name Note's nullifier.
+    pub nullifier: orchard::note::Nullifier,
     /// The epk bytes directly — the `ShieldedOutput` trait method is
     /// ambiguous across the three Ironwood-family domains.
     pub ephemeral_key: zcash_note_encryption::EphemeralKeyBytes,
@@ -367,6 +374,10 @@ pub struct DecryptedNameNote {
 
 /// Trial-decrypts the block's Ironwood actions under the ZNS domain.
 ///
+/// Derives the Registry's published identity from the capability — the
+/// external-scope address at diversifier index 0 — and its prepared ivk,
+/// in exactly one ivk derivation per call.
+///
 /// A candidate is exposed only if its memo parses as a Name Note and the
 /// payload-derived ZNS commitment reproduces the action's actual cmx — the
 /// cryptographic authorship check. Value must be zero and the recipient must
@@ -374,9 +385,13 @@ pub struct DecryptedNameNote {
 pub fn decrypt_name_notes<P: Parameters>(
     network: &P,
     block: &Block,
-    registry_ivk: &orchard::keys::PreparedIncomingViewingKey,
-    registry_recipient: orchard::Address,
+    registry_keys: &RegistryKeys,
 ) -> Vec<DecryptedNameNote> {
+    let registry_fvk = registry_keys.orchard_fvk();
+    let registry_ivk = registry_fvk.to_ivk(orchard::keys::Scope::External);
+    let registry_recipient = registry_ivk.address_at(0u32);
+    let registry_ivk = registry_ivk.prepare();
+
     let mut candidates = Vec::new();
     let mut ordinal = 0usize;
     for tx in block.vtx() {
@@ -387,41 +402,43 @@ pub fn decrypt_name_notes<P: Parameters>(
             && bundle.flags().outputs_enabled();
         for (action_index, action) in bundle.actions().iter().enumerate() {
             if zns_capable {
-                if let Some((note, recipient, memo)) =
-                    orchard::note_encryption::ZnsIronwoodDomain::for_action(action).try_decrypt(
-                        action,
-                        registry_ivk,
-                        |note, memo, cmx| {
-                            let payload = match decode_name_note(network, memo) {
-                                Some(p) => p,
-                                None => return subtle::Choice::from(0),
-                            };
-                            let rcm =
-                                orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network));
-                            let psi = payload.psi(network);
-                            match note.zns_cmx(rcm, psi) {
-                                Some(computed) => computed.ct_eq(cmx),
-                                None => subtle::Choice::from(0),
-                            }
-                        },
-                    )
+                if let Some((candidate, recipient, memo)) =
+                    orchard::note_encryption::ZnsIronwoodDomain::for_action(action)
+                        .try_decrypt(action, &registry_ivk)
                 {
-                    if note.value() == orchard::value::NoteValue::ZERO
-                        && recipient == registry_recipient
-                    {
-                        let payload = decode_name_note(network, &memo)
-                            .expect("memo was validated in callback");
-                        candidates.push(DecryptedNameNote {
-                            txid: tx.txid(),
-                            action_index,
-                            ordinal,
-                            note,
-                            ephemeral_key: zcash_note_encryption::EphemeralKeyBytes(
-                                action.encrypted_note().epk_bytes,
-                            ),
-                            memo,
-                            payload,
-                        });
+                    if let Some(payload) = NameNote::decode(network, &memo) {
+                        // The authorship check, caller-side: the memo's transition,
+                        // hashed under the ZNS binding, must reproduce the action's
+                        // published cmx.
+                        let note = candidate.note().clone();
+                        let rcm =
+                            orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network));
+                        let psi = payload.psi(network);
+                        let authored = match note.zns_cmx(rcm, psi) {
+                            Some(computed) => computed.ct_eq(candidate.cmx()),
+                            None => subtle::Choice::from(0),
+                        };
+
+                        if authored.into()
+                            && note.value() == orchard::value::NoteValue::ZERO
+                            && recipient == registry_recipient
+                        {
+                            let nullifier = note
+                                .zns_nullifier(&registry_fvk, rcm, psi)
+                                .expect("authenticated Name Note commitment is not identity");
+                            candidates.push(DecryptedNameNote {
+                                txid: tx.txid(),
+                                action_index,
+                                ordinal,
+                                note,
+                                nullifier,
+                                ephemeral_key: zcash_note_encryption::EphemeralKeyBytes(
+                                    action.encrypted_note().epk_bytes,
+                                ),
+                                memo,
+                                payload,
+                            });
+                        }
                     }
                 }
             }
@@ -429,6 +446,39 @@ pub fn decrypt_name_notes<P: Parameters>(
         }
     }
     candidates
+}
+
+/// Trial-decrypts the block's Ironwood actions sent to the Treasury's
+/// external address, exposing each `(txid, action index, memo)`. The
+/// upstream scanner deliberately drops note plaintexts; request memos
+/// arrive through this pass instead.
+pub fn decrypt_treasury_memos(
+    block: &Block,
+    treasury_keys: &crate::key::TreasuryKeys,
+) -> Vec<(zcash_primitives::transaction::TxId, usize, [u8; 512])> {
+    let ivk = treasury_keys
+        .orchard_fvk()
+        .to_ivk(orchard::keys::Scope::External)
+        .prepare();
+
+    let mut memos = Vec::new();
+    for tx in block.vtx() {
+        let Some(bundle) = tx.ironwood_bundle() else {
+            continue;
+        };
+        if bundle.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3() {
+            continue;
+        }
+        for (action_index, action) in bundle.actions().iter().enumerate() {
+            let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
+            if let Some((_note, _recipient, memo)) =
+                zcash_note_encryption::try_note_decryption(&domain, &ivk, action)
+            {
+                memos.push((tx.txid(), action_index, memo));
+            }
+        }
+    }
+    memos
 }
 
 #[cfg(test)]
@@ -465,7 +515,7 @@ mod tests {
             expires_at: Expiry::Never,
         };
         assert_eq!(
-            decode_name_note(&MAIN_NETWORK, &claim.encode(&MAIN_NETWORK)).as_ref(),
+            NameNote::decode(&MAIN_NETWORK, &claim.encode(&MAIN_NETWORK)).as_ref(),
             Some(&claim)
         );
 
@@ -476,7 +526,7 @@ mod tests {
             expires_at: Expiry::At(t),
         };
         assert_eq!(
-            decode_name_note(&MAIN_NETWORK, &claim_t.encode(&MAIN_NETWORK)).as_ref(),
+            NameNote::decode(&MAIN_NETWORK, &claim_t.encode(&MAIN_NETWORK)).as_ref(),
             Some(&claim_t)
         );
 
@@ -487,13 +537,13 @@ mod tests {
             prev,
         };
         assert_eq!(
-            decode_name_note(&MAIN_NETWORK, &update.encode(&MAIN_NETWORK)).as_ref(),
+            NameNote::decode(&MAIN_NETWORK, &update.encode(&MAIN_NETWORK)).as_ref(),
             Some(&update)
         );
 
         let release = NameNote::Release { name, ua, prev };
         assert_eq!(
-            decode_name_note(&MAIN_NETWORK, &release.encode(&MAIN_NETWORK)).as_ref(),
+            NameNote::decode(&MAIN_NETWORK, &release.encode(&MAIN_NETWORK)).as_ref(),
             Some(&release)
         );
     }
@@ -510,7 +560,7 @@ mod tests {
         );
         let mut m = [0u8; 512];
         m[..forged.len()].copy_from_slice(forged.as_bytes());
-        assert!(decode_name_note(&MAIN_NETWORK, &m).is_none());
+        assert!(NameNote::decode(&MAIN_NETWORK, &m).is_none());
         assert!(zcash_keys::address::Address::decode(&MAIN_NETWORK, "u1xxx").is_none());
     }
 
@@ -592,7 +642,7 @@ mod tests {
             prev,
         }
         .encode(&MAIN_NETWORK);
-        assert!(decode_name_note(&MAIN_NETWORK, &m).is_some());
+        assert!(NameNote::decode(&MAIN_NETWORK, &m).is_some());
         // Releases must use the literal expiry `none`.
         let forged = format!(
             "ZNS:release:{}:{}:1000:{}",
@@ -601,7 +651,7 @@ mod tests {
             hex::encode([1u8; 32])
         );
         m[..forged.len()].copy_from_slice(forged.as_bytes());
-        assert!(decode_name_note(&MAIN_NETWORK, &m).is_none());
+        assert!(NameNote::decode(&MAIN_NETWORK, &m).is_none());
 
         // The released UA is mandatory.
         let forged = format!(
@@ -611,7 +661,7 @@ mod tests {
         );
         m.fill(0);
         m[..forged.len()].copy_from_slice(forged.as_bytes());
-        assert!(decode_name_note(&MAIN_NETWORK, &m).is_none());
+        assert!(NameNote::decode(&MAIN_NETWORK, &m).is_none());
 
         // Claim with a nonzero predecessor is not a claim.
         let mut m2 = NameNote::Claim {
@@ -622,7 +672,7 @@ mod tests {
         .encode(&MAIN_NETWORK);
         let forged = format!("ZNS:claim:bob:{}:none:{}", TEST_UA, hex::encode([1u8; 32]));
         m2[..forged.len()].copy_from_slice(forged.as_bytes());
-        assert!(decode_name_note(&MAIN_NETWORK, &m2).is_none());
+        assert!(NameNote::decode(&MAIN_NETWORK, &m2).is_none());
     }
 
     #[test]

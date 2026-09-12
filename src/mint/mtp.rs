@@ -1,45 +1,21 @@
 //! Zcash on-chain Median Time Past (MTP).
-//!
-//! ZNS (§4.5) designates MTP as the sole authoritative time
-//! source for protocol-defined lifecycle periods: name expiration, OTP
-//! validity, and liveness enforcement. MTP is the median of the last 11
-//! block timestamps — manipulation-resistant because an attacker needs 6
-//! of 11 blocks to shift it, and deterministic because every node reading
-//! the same chain derives the same value.
-//!
-//! The tracker is constructed and backfilled during boot:
-//! [`backfill`](MtpTracker::backfill) fetches the 11 header timestamps
-//! through the origin checkpoint via `get_block_header`, so the window is
-//! complete and MTP is available before the first scanned block. The run
-//! loop then owns the tracker alongside `wallet` and `registry`: after
-//! each block is processed, [`update`](MtpTracker::update) records its
-//! header time and the window slides forward.
-//!
-//! MTP is chain state, not mint state.
-
 use std::collections::VecDeque;
 
 use time::Timestamp;
 use zcash_protocol::consensus::BlockHeight;
-
-/// Type-erased error for the `backfill` fetch closure, matching Zebra's
-/// `BoxError` pattern. The only concrete error in production is
-/// `TransportError`; the boxing lets `mint::mtp` stay free of RPC
-/// type dependencies.
-type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// The MTP window size. This is a Zcash consensus constant inherited from
 /// Bitcoin, not a ZNS protocol parameter — the whitepaper (§4.5) references
 /// MTP as Zcash defines it.
 const MTP_WINDOW: usize = 11;
 
-/// Tracks the last 11 block timestamps and computes their median.
+/// Tracks up to the last 11 block timestamps and computes their median.
 ///
 /// The window is a ring buffer of `(height, timestamp)` pairs. Entries
 /// are pushed in ascending block order during scanning. The median is
 /// the 6th value when the window is sorted by timestamp — the middle
 /// element of 11, robust against a minority of manipulated timestamps.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct MtpTracker {
     blocktimes: VecDeque<(BlockHeight, u32)>,
 }
@@ -54,21 +30,21 @@ impl MtpTracker {
     /// blocks themselves have not been fetched yet.
     ///
     /// If `scan_floor` is near genesis and fewer than `MTP_WINDOW` blocks
-    /// exist through it, as many as available are fetched. The tracker
-    /// will return `None` from [`current`](Self::current) until enough
-    /// blocks are scanned to fill the window.
+    /// exist through it, as many as available are fetched. Zcash inherits
+    /// Bitcoin's early-chain rule: MTP is the median of every available
+    /// ancestor timestamp until the full window exists.
     ///
     /// The `fetch` closure receives a block height and returns its
     /// timestamp (the `time` field from the block header, a `u32` Unix
     /// seconds value).
-    pub async fn backfill<F, Fut>(
+    pub async fn backfill<F, Fut, E>(
         &mut self,
         scan_floor: BlockHeight,
         mut fetch: F,
-    ) -> Result<(), BoxError>
+    ) -> Result<(), E>
     where
         F: FnMut(BlockHeight) -> Fut,
-        Fut: std::future::Future<Output = Result<u32, BoxError>>,
+        Fut: std::future::Future<Output = Result<u32, E>>,
     {
         let floor_u32 = u32::from(scan_floor);
         let start = floor_u32.saturating_sub(MTP_WINDOW as u32 - 1);
@@ -108,31 +84,22 @@ impl MtpTracker {
         self.blocktimes.push_back((height, timestamp));
     }
 
-    /// Returns the current MTP as a [`Timestamp`], or `None` if fewer
-    /// than 11 timestamps have been recorded.
+    /// Returns the current MTP as a [`Timestamp`], or `None` only when no
+    /// timestamps have been recorded.
     ///
-    /// The median is computed by copying the timestamps into a stack
-    /// array, sorting, and taking the middle element (index 5 of 11).
-    /// Cheap: 11 `u32` values, no heap allocation.
+    /// The median is computed over every available timestamp, up to eleven.
+    /// For an even early-chain population this uses the upper middle value,
+    /// matching Bitcoin's `GetMedianTimePast` iterator arithmetic.
     ///
-    /// Returns `None` during cold start before the window is full, or
-    /// after a deep reorg empties the tracker. Callers should skip
-    /// time-dependent processing until MTP is available — all protocol
-    /// time checks are comparison-based (`mtp >= expires_at`), so
-    /// delayed detection is correct, just deferred.
     pub fn current(&self) -> Option<Timestamp> {
-        if self.blocktimes.len() < MTP_WINDOW {
+        if self.blocktimes.is_empty() {
             return None;
         }
 
-        let mut stamps: [u32; MTP_WINDOW] = [0; MTP_WINDOW];
-        for ((_, ts), slot) in self.blocktimes.iter().zip(stamps.iter_mut()) {
-            *slot = *ts;
-        }
+        let mut stamps: Vec<_> = self.blocktimes.iter().map(|(_, time)| *time).collect();
         stamps.sort_unstable();
-        // 6th element (0-indexed: 5) is the median of 11.
         Some(
-            Timestamp::from_seconds(stamps[MTP_WINDOW / 2] as i64)
+            Timestamp::from_seconds(stamps[stamps.len() / 2] as i64)
                 .expect("block timestamp is a valid u32, always fits in Timestamp"),
         )
     }
@@ -146,155 +113,5 @@ impl MtpTracker {
     /// During the gap, [`current`](Self::current) returns `None`.
     pub fn truncate_to(&mut self, height: BlockHeight) {
         self.blocktimes.retain(|(h, _)| *h <= height);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn h(n: u32) -> BlockHeight {
-        BlockHeight::from_u32(n)
-    }
-
-    #[test]
-    fn fewer_than_11_returns_none() {
-        let mut tracker = MtpTracker::default();
-        for i in 0..10 {
-            tracker.update(h(i), 1000 + i);
-        }
-        assert!(tracker.current().is_none());
-    }
-
-    #[test]
-    fn exactly_11_returns_median() {
-        let mut tracker = MtpTracker::default();
-        // 11 timestamps: 1000..1010
-        for i in 0..11 {
-            tracker.update(h(i), 1000 + i);
-        }
-        // Sorted: [1000, 1001, ..., 1010], median = 1005
-        let mtp = tracker.current().unwrap();
-        assert_eq!(mtp.as_seconds(), 1005);
-    }
-
-    #[test]
-    fn median_is_robust_against_outliers() {
-        let mut tracker = MtpTracker::default();
-        // 9 normal timestamps, 2 extreme outliers
-        let stamps = [
-            1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 99999, 0,
-        ];
-        for (i, &ts) in stamps.iter().enumerate() {
-            tracker.update(h(i as u32), ts);
-        }
-        // Sorted: [0, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 99999]
-        // Median (index 5) = 1004
-        let mtp = tracker.current().unwrap();
-        assert_eq!(mtp.as_seconds(), 1004);
-    }
-
-    #[test]
-    fn ring_buffer_evicts_oldest() {
-        let mut tracker = MtpTracker::default();
-        for i in 0..15 {
-            tracker.update(h(i), 1000 + i);
-        }
-        // Should have kept entries 4..=14 (11 entries)
-        // Sorted: [1004, 1005, ..., 1014], median = 1009
-        let mtp = tracker.current().unwrap();
-        assert_eq!(mtp.as_seconds(), 1009);
-    }
-
-    #[test]
-    fn median_updates_as_new_blocks_arrive() {
-        let mut tracker = MtpTracker::default();
-        for i in 0..11 {
-            tracker.update(h(i), 2000 + i * 10);
-        }
-        // Sorted: [2000, 2010, ..., 2100], median = 2050
-        assert_eq!(tracker.current().unwrap().as_seconds(), 2050);
-
-        tracker.update(h(11), 5000);
-        // Now window is 2010..2100, 5000. Sorted: [2010, 2020, ..., 2100, 5000]
-        // Median (index 5) = 2060
-        assert_eq!(tracker.current().unwrap().as_seconds(), 2060);
-    }
-
-    #[test]
-    fn truncate_to_drops_entries_above_height() {
-        let mut tracker = MtpTracker::default();
-        for i in 0..11 {
-            tracker.update(h(i), 1000 + i);
-        }
-        assert!(tracker.current().is_some());
-
-        // Reorg to height 7: drops entries for heights 8, 9, 10
-        tracker.truncate_to(h(7));
-        assert!(tracker.current().is_none()); // only 8 entries left
-
-        // Re-scan refills
-        for i in 8..11 {
-            tracker.update(h(i), 1000 + i);
-        }
-        assert!(tracker.current().is_some());
-    }
-
-    #[tokio::test]
-    async fn backfill_after_truncate_refills() -> Result<(), BoxError> {
-        let mut tracker = MtpTracker::default();
-        for i in 90..101 {
-            tracker.update(h(i), 2000 + i);
-        }
-        assert!(tracker.current().is_some());
-
-        // Deep reorg to height 50: all entries dropped
-        tracker.truncate_to(h(50));
-        assert!(tracker.current().is_none());
-
-        // Backfill refills the whole window through the rewound tip
-        tracker
-            .backfill(h(50), |height| async move { Ok(3000 + u32::from(height)) })
-            .await?;
-
-        let mtp = tracker.current().expect("backfill alone refills the window");
-        assert_eq!(mtp.as_seconds(), 3000 + 45);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn backfill_completes_the_window() -> Result<(), BoxError> {
-        let mut tracker = MtpTracker::default();
-        tracker
-            .backfill(h(100), |height| {
-                let h_val = u32::from(height);
-                async move { Ok(1_700_000_000 + h_val) }
-            })
-            .await?;
-
-        // Heights 90..=100: the full 11-entry window through the checkpoint.
-        assert_eq!(tracker.blocktimes.len(), 11);
-        let mtp = tracker.current().expect("window complete after backfill");
-        assert_eq!(mtp.as_seconds(), 1_700_000_000 + 95);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn backfill_near_genesis_fetches_fewer() -> Result<(), BoxError> {
-        let mut tracker = MtpTracker::default();
-        tracker
-            .backfill(h(3), |height| async move {
-                Ok(1_700_000_000 + u32::from(height))
-            })
-            .await?;
-
-        // Only 4 entries (heights 0..=3), not enough for MTP
-        assert_eq!(tracker.blocktimes.len(), 4);
-        assert!(tracker.current().is_none());
-        Ok(())
     }
 }

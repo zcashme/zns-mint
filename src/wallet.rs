@@ -13,12 +13,16 @@ use std::convert::Infallible;
 use incrementalmerkletree::{Address, Marking, Retention};
 use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTree};
 use transparent::bundle::OutPoint;
+use zcash_client_backend::scanning::ScanningKeys;
 use zcash_client_backend::{
     data_api::chain::ChainState,
     data_api::locking::LockOwner,
-    data_api::{BlockMetadata, SentTransactionOutput, TransactionStatus, WalletWrite},
+    data_api::{
+        BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus, WalletWrite,
+    },
     wallet::{
-        NoteId, OutputRef, WalletIronwoodOutput, WalletSaplingOutput, WalletTransparentOutput,
+        NoteId, OutputRef, ReceivedNote, WalletIronwoodOutput, WalletSaplingOutput,
+        WalletTransparentOutput,
     },
 };
 use zcash_keys::keys::UnifiedFullViewingKey;
@@ -27,8 +31,11 @@ use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
     consensus::{BlockHeight, TxIndex},
     memo::Memo,
+    value::Zatoshis,
 };
 use zip32::AccountId;
+
+use crate::mint::TREASURY_ACCOUNT;
 
 /// Depth of the Sapling note commitment tree,
 const SAPLING_NOTE_COMMITMENT_TREE_DEPTH: u8 = 32;
@@ -54,11 +61,18 @@ pub struct Wallet {
     /// Exactly account 0 (Treasury) and account 1 (Registry).
     ufvks: BTreeMap<AccountId, UnifiedFullViewingKey>,
 
+    /// Derived from those same UFVKs at birth: the scanner scans exactly
+    /// what the wallet stores, by construction.
+    scanning_keys: ScanningKeys<AccountId, (AccountId, zip32::Scope)>,
+
     /// The Zebra consensus tip last supplied through `WalletWrite::update_chain_tip`.
     zebra_tip: Option<BlockHeight>,
 
     /// Canonical Zebra blocks this in-memory projection has applied.
     blocks: BTreeMap<BlockHeight, BlockMetadata>,
+
+    /// The boot origin cursor: the block before the birthday.
+    seed: BlockMetadata,
 
     transactions: BTreeMap<TxId, Transaction>,
     transaction_statuses: BTreeMap<TxId, TransactionStatus>,
@@ -111,10 +125,14 @@ impl Wallet {
         ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
         chain_state: &ChainState,
     ) -> Result<Self, TreeError> {
+        let ufvks: BTreeMap<AccountId, UnifiedFullViewingKey> = ufvks.into_iter().collect();
+        let scanning_keys = ScanningKeys::from_account_ufvks(ufvks.clone());
         let mut wallet = Self {
-            ufvks: ufvks.into_iter().collect(),
+            ufvks,
+            scanning_keys,
             zebra_tip: None,
             blocks: BTreeMap::new(),
+            seed: block_metadata(chain_state),
             transactions: BTreeMap::new(),
             transaction_statuses: BTreeMap::new(),
             transaction_indices: BTreeMap::new(),
@@ -142,6 +160,9 @@ impl Wallet {
             id: chain_state.block_height(),
             marking: Marking::Reference,
         };
+        // Checkpoint id is birthday − 1: each frontier is the tree state at
+        // the start of `MINT_BIRTHDAY`. Empty frontiers are inserted too —
+        // the per-pool origin checkpoint is the reorg floor.
         wallet
             .sapling_tree
             .insert_frontier(chain_state.final_sapling_tree().clone(), retention)?;
@@ -154,9 +175,9 @@ impl Wallet {
         Ok(wallet)
     }
 
-    /// Returns the fixed account UFVKs for scanner construction.
-    pub fn ufvk_map(&self) -> &BTreeMap<AccountId, UnifiedFullViewingKey> {
-        &self.ufvks
+    /// The wallet's own scanning faculty, born from the same UFVKs.
+    pub fn scanning_keys(&self) -> &ScanningKeys<AccountId, (AccountId, zip32::Scope)> {
+        &self.scanning_keys
     }
 
     /// Returns the viewing key of one fixed mint account.
@@ -164,22 +185,90 @@ impl Wallet {
         self.ufvks.get(&account)
     }
 
-    /// The block hash at `height`, if that height was applied.
-    /// Used for reorg walk hash comparison.
+    /// Witnesses one received Ironwood note at `tip`.
+    pub fn witness(
+        &mut self,
+        note: &ReceivedNote<NoteId, orchard::note::Note>,
+        tip: BlockHeight,
+    ) -> Option<orchard::tree::MerklePath> {
+        let path = self
+            .ironwood_witness(note.note_commitment_tree_position(), tip)
+            .expect("FATAL: Ironwood tree access failed")
+            .expect("FATAL: owned note has no witness at the applied tip");
+        Some(orchard::tree::MerklePath::from(path))
+    }
+
+    /// The Ironwood anchor at `tip`: the root every spend of this block's
+    /// transaction must prove against.
+    pub fn anchor_at(&mut self, tip: BlockHeight) -> orchard::tree::Anchor {
+        self.ironwood_anchor(tip)
+            .expect("FATAL: Ironwood tree access failed")
+            .expect("FATAL: wallet has no Ironwood anchor at its applied tip")
+    }
+
+    /// Records a mint-built transaction as sent-but-unconfirmed intent:
+    /// marks its input spends (which also releases any locks) so the same
+    /// notes cannot be selected again until the transaction either mines
+    /// or expires.
+    pub fn record_sent(
+        &mut self,
+        transaction: &Transaction,
+        target_height: BlockHeight,
+        fee: Zatoshis,
+    ) {
+        use zcash_client_backend::data_api::WalletWrite as _;
+        use zcash_client_backend::data_api::wallet::TargetHeight;
+        let sent = SentTransaction::new(
+            transaction,
+            time::OffsetDateTime::now_utc(),
+            TargetHeight::from(target_height),
+            TREASURY_ACCOUNT,
+            &[],
+            fee,
+            &[],
+        );
+        self.store_transactions_to_be_sent(&[sent])
+            .expect("FATAL: wallet rejected a locally built transaction");
+    }
+
+    /// The block hash at `height`: an applied block, or the boot origin.
     pub fn block_hash_at(&self, height: BlockHeight) -> Option<BlockHash> {
-        self.blocks.get(&height).map(|m| m.block_hash())
+        self.blocks
+            .get(&height)
+            .map(|m| m.block_hash())
+            .or_else(|| (height == self.seed.block_height()).then(|| self.seed.block_hash()))
+    }
+
+    /// Continuity metadata at `height`: an applied block, or the boot origin.
+    pub fn block_metadata_at(&self, height: BlockHeight) -> Option<BlockMetadata> {
+        self.blocks
+            .get(&height)
+            .cloned()
+            .or_else(|| (height == self.seed.block_height()).then(|| self.seed.clone()))
     }
 
     /// Truncates the wallet to `max_height` and returns the
     /// [`BlockMetadata`] at that height — the new chain tip after reorg.
-    pub fn truncate_to(
-        &mut self,
-        max_height: BlockHeight,
-    ) -> Result<BlockMetadata, WalletError> {
+    pub fn truncate_to(&mut self, max_height: BlockHeight) -> Result<BlockMetadata, WalletError> {
         WalletWrite::truncate_to_height(self, max_height)?;
-        self.blocks
-            .get(&max_height)
-            .cloned()
+        self.block_metadata_at(max_height)
             .ok_or(WalletError::TruncationTargetUnavailable(max_height))
     }
+}
+
+/// Scan-cursor metadata implied by a [`ChainState`]: height, hash, tree sizes.
+pub fn block_metadata(state: &ChainState) -> BlockMetadata {
+    let sapling_size =
+        u32::try_from(state.final_sapling_tree().tree_size()).expect("tree size fits u32");
+    let orchard_size =
+        u32::try_from(state.final_orchard_tree().tree_size()).expect("tree size fits u32");
+    let ironwood_size =
+        u32::try_from(state.final_ironwood_tree().tree_size()).expect("tree size fits u32");
+    BlockMetadata::from_parts(
+        state.block_height(),
+        state.block_hash(),
+        Some(sapling_size),
+        Some(orchard_size),
+        Some(ironwood_size),
+    )
 }

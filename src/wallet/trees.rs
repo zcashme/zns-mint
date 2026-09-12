@@ -5,16 +5,16 @@ use std::convert::Infallible;
 
 use incrementalmerkletree::{Address, MerklePath, Position};
 use shardtree::{
-    ShardTree,
     error::ShardTreeError,
-    store::{ShardStore, memory::MemoryShardStore},
+    store::{memory::MemoryShardStore, ShardStore},
+    ShardTree,
 };
-use zcash_client_backend::data_api::{WalletCommitmentTrees, chain::CommitmentTreeRoot};
+use zcash_client_backend::data_api::{chain::CommitmentTreeRoot, WalletCommitmentTrees};
 use zcash_protocol::consensus::BlockHeight;
 
 use super::{
-    ORCHARD_NOTE_COMMITMENT_TREE_DEPTH, ORCHARD_SHARD_HEIGHT, SAPLING_NOTE_COMMITMENT_TREE_DEPTH,
-    SAPLING_SHARD_HEIGHT, TreeError, Wallet,
+    TreeError, Wallet, ORCHARD_NOTE_COMMITMENT_TREE_DEPTH, ORCHARD_SHARD_HEIGHT,
+    SAPLING_NOTE_COMMITMENT_TREE_DEPTH, SAPLING_SHARD_HEIGHT,
 };
 
 impl WalletCommitmentTrees for Wallet {
@@ -201,7 +201,7 @@ impl Wallet {
     ///
     /// `Ok(None)` means no witness exists yet at that checkpoint (note not
     /// yet observed under that anchor); errors are tree-structural.
-    pub(crate) fn ironwood_witness(
+    pub fn ironwood_witness(
         &mut self,
         position: Position,
         anchor_height: BlockHeight,
@@ -218,7 +218,7 @@ impl Wallet {
 
     /// The Ironwood tree root at `anchor_height` as an Orchard-family
     /// anchor for the builder.
-    pub(crate) fn ironwood_anchor(
+    pub fn ironwood_anchor(
         &mut self,
         anchor_height: BlockHeight,
     ) -> Result<Option<orchard::tree::Anchor>, TreeError> {
