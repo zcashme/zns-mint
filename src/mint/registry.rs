@@ -6,7 +6,7 @@ use crate::mint::{
     Action, Expiry, Name, NameCommitment, NameNote, Request, Term, UnifiedAddress,
     LIVENESS_INTERVAL, MAX_TERM_YEARS, REGISTRY_ACCOUNT,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
 use zcash_client_backend::data_api::ScannedBlock;
 use zcash_primitives::transaction::TxId;
@@ -160,16 +160,24 @@ pub struct RegistryHistoryRecord {
     pub prev_record: Option<NameRecord>,
 }
 
+/// The standing size of the anchor lineage pool: the ceremony's root,
+/// conserved one-for-one by every accepted claim (spend one anchor, mint
+/// one successor). Mirrors keygen's NUM_ANCHORS.
+pub const ANCHOR_POOL_SIZE: usize = 40;
+
 /// The name-chain state: a map from each canonical ZNS name to the most
 /// recent confirmed record for that name, plus an undo log for reorgs.
-/// Anchors are not tracked here — they are wallet notes, selected by the
-/// orchestrator from the wallet's unspent zero-value Registry Ironwood
-/// notes. The Registry only enforces the transition law.
+/// The anchor lineage pool lives here too: born as the first
+/// ANCHOR_POOL_SIZE zero-value Registry outputs in chain history (the
+/// ceremony's root — nothing can predate them), extended only by
+/// successors of accepted claims, retired when spent.
 #[derive(Clone)]
 pub struct Registry {
     records: BTreeMap<Name, NameRecord>,
     history: Vec<RegistryHistoryRecord>,
     claim_anchor_height: BlockHeight,
+    anchor_pool: BTreeSet<orchard::note::Nullifier>,
+    pool_checkpoints: BTreeMap<BlockHeight, BTreeSet<orchard::note::Nullifier>>,
 }
 
 impl Registry {
@@ -180,6 +188,8 @@ impl Registry {
             records: BTreeMap::new(),
             history: Vec::new(),
             claim_anchor_height,
+            anchor_pool: BTreeSet::new(),
+            pool_checkpoints: BTreeMap::new(),
         }
     }
 
@@ -334,7 +344,6 @@ impl Registry {
         scanned: &ScannedBlock<AccountId>,
         name_notes: &[ReceivedNameNote],
         mtp: Timestamp,
-        anchor_nullifiers: &std::collections::BTreeSet<orchard::note::Nullifier>,
     ) -> (Self, Vec<usize>) {
         let mut next = self.clone();
         let mut accepted = Vec::new();
@@ -378,9 +387,28 @@ impl Registry {
                 .filter(|output| *output.account_id() == REGISTRY_ACCOUNT)
                 .collect();
 
-            let spends_claim_anchor = ironwood_nullifiers
+            // Anchor adoption: while the lineage pool is below its standing
+            // size, zero-value Registry outputs join it in canonical order.
+            // The first ANCHOR_POOL_SIZE are the ceremony's root — nothing
+            // can predate them, so nothing later can displace them. Name
+            // Notes are invisible to the standard scanner and never adopted;
+            // post-root successors enter only by induction on accepted
+            // claims below, never by this cap.
+            for output in &registry_outputs {
+                if next.anchor_pool.len() < ANCHOR_POOL_SIZE
+                    && output.note().0.value().inner() == 0
+                {
+                    if let Some(nf) = output.nf() {
+                        next.anchor_pool.insert(*nf);
+                    }
+                }
+            }
+            let spent_pool: Vec<orchard::note::Nullifier> = ironwood_nullifiers
                 .iter()
-                .any(|nf| anchor_nullifiers.contains(nf));
+                .filter(|nf| next.anchor_pool.contains(*nf))
+                .copied()
+                .collect();
+            let spends_claim_anchor = !spent_pool.is_empty();
             let spent_record_names: Vec<_> = next
                 .records
                 .iter()
@@ -436,10 +464,16 @@ impl Registry {
                                 0,
                                 "Registry anchor value must remain zero"
                             );
-                            let _successor_nullifier = successor
+                            // The successor anchor joins the lineage pool —
+                            // the only way a post-genesis anchor is born. The
+                            // wallet tracks it as a new zero-value Registry
+                            // Ironwood note; the consumed anchor is marked
+                            // spent by the wallet's put_blocks.
+                            let successor_nf = successor
                                 .nf()
                                 .copied()
                                 .expect("Registry FVK must derive the successor anchor nullifier");
+                            next.anchor_pool.insert(successor_nf);
                             assert!(
                                 next.record(name)
                                     .is_none_or(|r| r.action == Action::Release),
@@ -494,6 +528,17 @@ impl Registry {
                 }
                 _ => unreachable!("slice cardinality was handled above"),
             }
+
+            // Retirement: anchors spent by this transaction leave the pool.
+            for nf in &spent_pool {
+                next.anchor_pool.remove(nf);
+            }
+        }
+
+        // Snapshot the pool whenever it changed, so truncation restores
+        // the as-of-this-height state without replaying history.
+        if next.anchor_pool != self.anchor_pool {
+            next.pool_checkpoints.insert(height, next.anchor_pool.clone());
         }
 
         (next, accepted)
@@ -511,6 +556,14 @@ impl Registry {
     /// Read-only iterator over all known name records. Used for diagnostics.
     pub fn name_chain(&self) -> impl Iterator<Item = (&Name, &NameRecord)> {
         self.records.iter()
+    }
+
+    /// The anchor lineage pool: the ceremony's root, conserved one-for-one
+    /// by every accepted claim. Registration authority is drawn only from
+    /// this set; forged or donated zero-value Registry notes are not in it,
+    /// never count toward genesis, and can never be spent as anchors.
+    pub fn anchor_pool(&self) -> &BTreeSet<orchard::note::Nullifier> {
+        &self.anchor_pool
     }
 
     /// Rewinds the registry state back to the specified height (linear undo).
@@ -533,5 +586,11 @@ impl Registry {
                 }
             }
         }
+        self.pool_checkpoints.retain(|&h, _| h <= height);
+        self.anchor_pool = self
+            .pool_checkpoints
+            .last_key_value()
+            .map(|(_, pool)| pool.clone())
+            .unwrap_or_default();
     }
 }

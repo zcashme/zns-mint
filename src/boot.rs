@@ -31,7 +31,7 @@ use crate::zcash::{self, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
 use incrementalmerkletree::Position;
 use zcash_client_backend::data_api::wallet::TargetHeight;
-use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata, NullifierQuery, WalletRead as _, WalletWrite as _};
+use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata, WalletWrite as _};
 use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
 use zcash_client_backend::scanning::Nullifiers;
 use std::convert::Infallible;
@@ -214,28 +214,12 @@ impl<P: Parameters + Send + 'static> Boot<P> {
                 |_| Ok::<Option<(zip32::AccountId, Option<transparent::keys::TransparentKeyScope>)>, Infallible>(None),
             ).expect("FATAL: block scan failed during boot sync");
 
-            let name_note_nullifiers: std::collections::BTreeSet<_> =
-                registry.name_chain().map(|(_, r)| r.nullifier).collect();
-            let anchor_nullifiers: std::collections::BTreeSet<orchard::note::Nullifier> = wallet
-                .get_ironwood_nullifiers(NullifierQuery::Unspent)
-                .expect("FATAL: wallet nullifiers unavailable")
-                .into_iter()
-                .filter(|(a, _)| *a == REGISTRY_ACCOUNT)
-                .filter_map(|(_, nf)| {
-                    let note = wallet.unspent_ironwood_note_by_nullifier(
-                        REGISTRY_ACCOUNT, nf, TargetHeight::from(next_height),
-                    )?;
-                    (note.note().value().inner() == 0 && !name_note_nullifiers.contains(&nf))
-                        .then_some(nf)
-                })
-                .collect();
-
             let mut next_mtp = mtp.clone();
             next_mtp.update(next_height, block_time);
             let block_mtp = next_mtp.current().expect("FATAL: MTP unavailable");
 
             let (next_registry, accepted_name_notes) =
-                registry.apply_block(&network, &scanned, &name_notes, block_mtp, &anchor_nullifiers);
+                registry.apply_block(&network, &scanned, &name_notes, block_mtp);
 
             let ironwood_start = scanned.ironwood().final_tree_size()
                 .checked_sub(u32::try_from(scanned.ironwood().commitments().len())
@@ -282,25 +266,16 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             "boot: synced to chain tip"
         );
 
-        // 5. Genesis sanity checks.
-        let name_note_nullifiers: std::collections::BTreeSet<orchard::note::Nullifier> =
-            registry.name_chain().map(|(_, r)| r.nullifier).collect();
-        let anchor_count = wallet
-            .get_ironwood_nullifiers(NullifierQuery::Unspent)
-            .expect("FATAL: wallet nullifiers unavailable")
-            .into_iter()
-            .filter(|(a, _)| *a == REGISTRY_ACCOUNT)
-            .filter_map(|(_, nf)| {
-                let note = wallet.unspent_ironwood_note_by_nullifier(
-                    REGISTRY_ACCOUNT, nf, TargetHeight::from(best_height),
-                )?;
-                (note.note().value().inner() == 0 && !name_note_nullifiers.contains(&nf))
-                    .then_some(nf)
-            })
-            .count();
+        // 5. Genesis sanity checks. The anchor lineage pool is the ceremony's
+        // root, conserved one-for-one by every accepted claim: exactly
+        // ANCHOR_POOL_SIZE standing, forever. Forged or donated zero-value
+        // Registry notes are not in the pool and never count.
+        let anchor_count = registry.anchor_pool().len();
         assert_eq!(
-            anchor_count, 40,
-            "FATAL: expected 40 genesis anchors, found {anchor_count}"
+            anchor_count,
+            crate::mint::registry::ANCHOR_POOL_SIZE,
+            "FATAL: anchor lineage pool expected {}, found {anchor_count}",
+            crate::mint::registry::ANCHOR_POOL_SIZE
         );
         let treasury_balance: u64 = wallet
             .unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(best_height))

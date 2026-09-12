@@ -16,9 +16,7 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use incrementalmerkletree::Position;
 use zcash_client_backend::data_api::wallet::TargetHeight;
-use zcash_client_backend::data_api::{
-    NullifierQuery, WalletRead as _, WalletWrite as _,
-};
+use zcash_client_backend::data_api::{WalletRead as _, WalletWrite as _};
 use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
 use zcash_client_backend::scanning::Nullifiers;
 use zcash_client_backend::wallet::NoteId;
@@ -290,29 +288,6 @@ async fn main() {
             )
             .expect("FATAL: a canonical block failed deterministic wallet scanning");
 
-            // Compute the set of anchor nullifiers from the wallet:
-            // unspent zero-value Registry Ironwood notes that are not
-            // current Name Notes. The wallet is the source of truth;
-            // the Registry only enforces the transition law.
-            let name_note_nullifiers: std::collections::BTreeSet<_> =
-                registry.name_chain().map(|(_, rec)| rec.nullifier).collect();
-            let anchor_nullifiers: std::collections::BTreeSet<orchard::note::Nullifier> = wallet
-                .get_ironwood_nullifiers(NullifierQuery::Unspent)
-                .expect("FATAL: wallet could not expose its nullifiers")
-                .into_iter()
-                .filter(|(acct, _)| *acct == REGISTRY_ACCOUNT)
-                .filter_map(|(_, nf)| {
-                    let note = wallet.unspent_ironwood_note_by_nullifier(
-                        REGISTRY_ACCOUNT,
-                        nf,
-                        TargetHeight::from(next_height),
-                    )?;
-                    (note.note().value().inner() == 0
-                        && !name_note_nullifiers.contains(&nf))
-                        .then_some(nf)
-                })
-                .collect();
-
             let mut next_mtp = mtp.clone();
             next_mtp.update(next_height, block_time);
             let block_mtp = next_mtp
@@ -320,7 +295,7 @@ async fn main() {
                 .expect("FATAL: MTP unavailable after applying a block");
 
             let (next_registry, accepted_name_notes) =
-                registry.apply_block(&network, &scanned, &name_notes, block_mtp, &anchor_nullifiers);
+                registry.apply_block(&network, &scanned, &name_notes, block_mtp);
 
             let ironwood_start = scanned
                 .ironwood()
@@ -596,24 +571,22 @@ async fn main() {
                         );
                         continue;
                     };
-                    let name_note_nullifiers: std::collections::BTreeSet<_> = registry
-                        .name_chain()
-                        .map(|(_, rec)| rec.nullifier)
-                        .collect();
-                    let authority_nf = wallet
-                        .get_ironwood_nullifiers(NullifierQuery::Unspent)
-                        .expect("FATAL: wallet could not expose its nullifiers")
-                        .into_iter()
-                        .filter(|(acct, _)| *acct == REGISTRY_ACCOUNT)
-                        .find_map(|(_, nf)| {
-                            let anchor = wallet.unspent_ironwood_note_by_nullifier(
-                                REGISTRY_ACCOUNT,
-                                nf,
-                                TargetHeight::from(tip),
-                            )?;
-                            (anchor.note().value().inner() == 0
-                                && !name_note_nullifiers.contains(&nf))
-                                .then_some(nf)
+                    // Anchor authority comes only from the lineage pool:
+                    // ceremony-born at the root, mint-born by induction on
+                    // accepted claims. Forged or donated zero-value Registry
+                    // notes are not in the pool and can never be spent here.
+                    let authority_nf = registry
+                        .anchor_pool()
+                        .iter()
+                        .copied()
+                        .find(|nf| {
+                            wallet
+                                .unspent_ironwood_note_by_nullifier(
+                                    REGISTRY_ACCOUNT,
+                                    *nf,
+                                    TargetHeight::from(tip),
+                                )
+                                .is_some()
                         });
                     let Some(authority_nf) = authority_nf else {
                         tracing::warn!(
