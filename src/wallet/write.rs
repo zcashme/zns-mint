@@ -390,22 +390,26 @@ impl WalletWrite for Wallet {
                 }
             }
 
-            // Spends are resolved from the block's full nullifier map rather
-            // than only the scanner's `WalletTx` spend lists: notes received
-            // earlier in this same batch are not yet in the nullifier set the
-            // scanner matched against, and a note can be created and spent
-            // within one batch.
-            for (_index, txid, nullifiers) in block.sapling().nullifier_map() {
-                for nf in nullifiers {
-                    if let Some(note_id) = self.sapling_nullifiers.get(nf) {
-                        self.sapling_note_spends.insert(*note_id, *txid);
+            // Spends are recorded from the scanner's matched `WalletSpend`s.
+            // The watch list the scanner matched against came from this
+            // wallet, so every spend of an owned note is present, already
+            // account-tagged. The nullifier map carries only foreign
+            // nullifiers — upstream's gap-scan recovery mechanism, useless
+            // to a wallet that scans contiguously from its birthday — and
+            // owned spends never appear in it. (A note cannot be spent in
+            // the block that creates it, and the mint applies one block per
+            // `put_blocks` call, so same-batch create-and-spend cannot
+            // arise.)
+            for wtx in block.transactions() {
+                let txid = wtx.txid();
+                for spend in wtx.sapling_spends() {
+                    if let Some(note_id) = self.sapling_nullifiers.get(spend.nf()) {
+                        self.sapling_note_spends.insert(*note_id, txid);
                     }
                 }
-            }
-            for (_index, txid, nullifiers) in block.ironwood().nullifier_map() {
-                for nf in nullifiers {
-                    if let Some(note_id) = self.ironwood_nullifiers.get(nf) {
-                        self.ironwood_note_spends.insert(*note_id, *txid);
+                for spend in wtx.ironwood_spends() {
+                    if let Some(note_id) = self.ironwood_nullifiers.get(spend.nf()) {
+                        self.ironwood_note_spends.insert(*note_id, txid);
                     }
                 }
             }

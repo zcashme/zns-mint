@@ -363,12 +363,18 @@ impl Registry {
         for notes in name_notes_by_tx.values_mut() {
             notes.sort_by_key(|(_, note)| note.action_index());
         }
+
+        // Group the wallet's OWN spend nullifiers by transaction. The
+        // scanner's matched `WalletSpend`s are the authoritative record of
+        // every spend of a wallet-owned note (anchors, Treasury notes, Name
+        // Notes) — the nullifier map holds only foreign nullifiers, so
+        // owned spends never appear there.
         let mut nullifiers_by_tx: BTreeMap<TxId, Vec<orchard::note::Nullifier>> = BTreeMap::new();
-        for (_index, txid, nullifiers) in scanned.ironwood().nullifier_map() {
+        for wtx in scanned.transactions() {
             nullifiers_by_tx
-                .entry(*txid)
+                .entry(wtx.txid())
                 .or_default()
-                .extend(nullifiers.iter().copied());
+                .extend(wtx.ironwood_spends().iter().map(|s| *s.nf()));
         }
 
         for wtx in scanned.transactions() {
