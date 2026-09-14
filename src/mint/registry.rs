@@ -77,9 +77,7 @@ pub fn authorize_update(
         return None;
     }
 
-    let Some(burned) = otp_queue.verify_and_take(&name, Action::Update, &new_ua, otp, mtp) else {
-        return None;
-    };
+    let burned = otp_queue.verify_and_take(&name, Action::Update, &new_ua, otp, mtp)?;
 
     Some(NameNote::Update {
         name,
