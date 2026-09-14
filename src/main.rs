@@ -227,7 +227,7 @@ async fn main() {
                             zns_mint::mint::registry::ReceivedNameNote::new(
                                 candidate.txid,
                                 candidate.action_index,
-                                candidate.note.clone(),
+                                candidate.note,
                                 candidate.payload.clone(),
                             )
                         })
@@ -242,9 +242,13 @@ async fn main() {
                                 candidate.ordinal,
                                 candidate.txid,
                                 candidate.action_index,
-                                candidate.note.clone(),
+                                candidate.note,
                                 candidate.ephemeral_key.clone(),
                                 candidate.memo,
+                                orchard::note::NoteCommitTrapdoor::from_inner(
+                                    candidate.payload.rcm(&network),
+                                ),
+                                candidate.payload.psi(&network),
                             )
                             .is_none()
                         {

@@ -405,7 +405,7 @@ pub fn decrypt_name_notes<P: Parameters>(
                                     txid: tx.txid(),
                                     action_index,
                                     ordinal,
-                                    note: note.clone(),
+                                    note: *note,
                                     ephemeral_key: zcash_note_encryption::EphemeralKeyBytes(
                                         action.encrypted_note().epk_bytes,
                                     ),

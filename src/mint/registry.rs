@@ -508,6 +508,7 @@ impl Registry {
     }
 
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn set_record_for_test(
         &mut self,
         name: Name,

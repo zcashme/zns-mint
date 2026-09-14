@@ -299,6 +299,7 @@ pub fn decode_otp_relay_memo(memo: &[u8; 512]) -> Option<(Name, Action, String, 
 /// The spend policy and change strategy are Ironwood-only, so the constructed
 /// transaction cannot carry Sapling material even though it is built by generic
 /// upstream code and passed a real Sapling prover (which is never invoked).
+#[allow(clippy::too_many_arguments)]
 fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
     network: &P,
     wallet: &mut crate::wallet::Wallet,

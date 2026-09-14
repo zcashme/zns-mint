@@ -327,7 +327,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
                         self.registry_keys.orchard_spending_key(),
                     ),
                 ],
-                &mut rand::rngs::OsRng,
+                rand::rngs::OsRng,
                 self.spend_prover,
                 self.output_prover,
                 &zcash_primitives::transaction::fees::zip317::FeeRule::standard(),
@@ -393,7 +393,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
 
         for spend in &fee_notes {
             builder
-                .add_ironwood_spend(treasury_fvk.clone(), spend.0.clone(), spend.1.clone())
+                .add_ironwood_spend(treasury_fvk.clone(), spend.0, spend.1.clone())
                 .map_err(SettleError::Build)?;
         }
 
@@ -420,7 +420,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
                         self.registry_keys.orchard_spending_key(),
                     ),
                 ],
-                &mut rand::rngs::OsRng,
+                rand::rngs::OsRng,
                 self.spend_prover,
                 self.output_prover,
                 &zcash_primitives::transaction::fees::zip317::FeeRule::standard(),
@@ -486,7 +486,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
 
         for spend in &fee_notes {
             builder
-                .add_ironwood_spend(treasury_fvk.clone(), spend.0.clone(), spend.1.clone())
+                .add_ironwood_spend(treasury_fvk.clone(), spend.0, spend.1.clone())
                 .map_err(SettleError::Build)?;
         }
 
@@ -513,7 +513,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
                         self.registry_keys.orchard_spending_key(),
                     ),
                 ],
-                &mut rand::rngs::OsRng,
+                rand::rngs::OsRng,
                 self.spend_prover,
                 self.output_prover,
                 &zcash_primitives::transaction::fees::zip317::FeeRule::standard(),
@@ -573,7 +573,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
 
         for (note, path) in &fee_notes {
             builder
-                .add_ironwood_spend(treasury_fvk.clone(), note.clone(), path.clone())
+                .add_ironwood_spend(treasury_fvk.clone(), *note, path.clone())
                 .map_err(SettleError::Build)?;
         }
 
@@ -611,7 +611,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
                         self.registry_keys.orchard_spending_key(),
                     ),
                 ],
-                &mut rand::rngs::OsRng,
+                rand::rngs::OsRng,
                 self.spend_prover,
                 self.output_prover,
                 &zcash_primitives::transaction::fees::zip317::FeeRule::standard(),
@@ -639,7 +639,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
             .map_err(SettleError::Tree)?
             .ok_or(SettleError::Witness)
             .map(orchard::tree::MerklePath::from)?;
-        Ok((note.note().clone(), path))
+        Ok((*note.note(), path))
     }
 
     fn expiry(&self) -> BlockHeight {

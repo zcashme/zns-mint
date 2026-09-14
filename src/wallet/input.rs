@@ -186,7 +186,7 @@ impl Wallet {
             note_id,
             *note_id.txid(),
             note_id.output_index(),
-            output.note().0.clone(),
+            output.note().0,
             output.recipient_key_scope()?,
             output.note_commitment_tree_position(),
             self.mined_height(note_id.txid()),

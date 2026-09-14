@@ -710,6 +710,7 @@ impl Wallet {
     /// because that is the value a spend of this note publishes; the
     /// rseed-derived [`orchard::note::Note::nullifier`] never matches and
     /// would blind the wallet to its own Name Notes being spent.
+    #[allow(clippy::too_many_arguments)]
     pub fn store_name_note(
         &mut self,
         scanned: &ScannedBlock<AccountId>,
@@ -726,9 +727,7 @@ impl Wallet {
         // Filed once, used for both the stored output's nullifier field and
         // the spend-detection map: every detection pass is a lookup against
         // this key, so it must be the value a spend reveals.
-        let Some(nf) = note.zns_nullifier(&fvk, rcm, psi) else {
-            return None;
-        };
+        let nf = note.zns_nullifier(&fvk, rcm, psi)?;
         let bundles = scanned.ironwood();
         let start_size = bundles
             .final_tree_size()
@@ -744,7 +743,7 @@ impl Wallet {
             WalletIronwoodOutput::from_parts(
                 action_index,
                 ephemeral_key,
-                (note.clone(), orchard::ValuePool::Ironwood),
+                (note, orchard::ValuePool::Ironwood),
                 false,
                 position,
                 Some(nf),

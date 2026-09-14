@@ -136,6 +136,12 @@ pub struct JsonRpc {
     client: HyperClient<HttpConnector, Full<Bytes>>,
 }
 
+impl Default for JsonRpc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JsonRpc {
     pub fn new() -> Self {
         let client = HyperClient::builder(TokioExecutor::new()).build(HttpConnector::new());

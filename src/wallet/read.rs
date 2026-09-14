@@ -223,6 +223,7 @@ impl Wallet {
     ///
     /// Confirmation and trust classification is delegated to `wallet::input`
     /// so that balance reporting and input selection can never disagree.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn add_note_to_balance(
         &self,
         balances: &mut HashMap<AccountId, AccountBalance>,
