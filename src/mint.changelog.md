@@ -1,5 +1,32 @@
 # Mint live-work design record
 
+## 2026-09-03 — Oracle-only claim pricing, USD-denominated
+
+- The fixed `CLAIM_PRICE` (1 ZEC) is gone. The claim price is
+  `Oracle::quote_forever(name)` — the USD schedule (annual price by name
+  length, ×3) converted at the daily rate. `quote_annual` joins it as the
+  renewal-day hook.
+- The oracle's rate is never optional. `Oracle::new(initial_price, now)`
+  is the only constructor — boot fetches the first pricing round or the
+  node does not start — and `accumulate(price, now)` can only replace the
+  published rate, never clear it: a failed round carries the standing rate
+  forward. Pricing is fail-closed at birth, fail-open in life.
+  `Oracle::current()` reads the rate, total.
+- Policy denomination is USD only. The schedule and every fee are stated
+  in whole dollars and settle in zats through the daily rate. Fees snap up
+  to the 100,000-zat step (`FEE_STEP`, `grid_usd` in `mint.rs`) —
+  `REFUND_FEE_USD = 1` replaces the flat 50,000-zat fee, and the oracle no
+  longer knows fees exist.
+- Venue hardening in `fetch_last`: response bodies capped at 64 KiB
+  (`Limited`) and prints outside 1–1,000,000 USD drop the venue, the same
+  collapse-to-`None` as every other failure mode. The range bound is also
+  what makes the rate bounded, which is what makes the quotes' plain
+  multiplication provably overflow-free — total functions, not checked
+  ladders.
+- The schedule is typed `u64` (ASCII names: byte length is character
+  length); the `Decimal` schedule conversions and `checked_mul` ladders
+  are deleted.
+
 ## 2026-07-30 — Boot-proven Unified Address validation
 
 - Unified Address receiver validation accepts the immutable consensus

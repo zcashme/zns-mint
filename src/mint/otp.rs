@@ -1,8 +1,8 @@
 //! OTP challenge machinery for ZNS name transitions.
 //!
 //! The OTP queue is a single-use TTL cache: each entry binds a 6-digit
-//! passcode to a specific (name, action, target UA, live tip `rcm`) and
-//! expires after 30 minutes of chain MTP. Entries are pushed when a relay
+//! passcode to a specific (name, action, target UA, live tip `rcm`,
+//! optional term) and expires after 30 minutes of chain MTP. Entries are pushed when a relay
 //! transaction is accepted for broadcast and burned on first successful
 //! verification — one-shot, never reusable. Expired entries are pruned on
 //! each verification scan.
@@ -25,7 +25,7 @@ use subtle::ConstantTimeEq;
 use time::Timestamp;
 use zeroize::Zeroize;
 
-use crate::mint::{Action, Name, NameCommitment, UnifiedAddress};
+use crate::mint::{Action, Name, NameCommitment, Term, UnifiedAddress};
 use zcash_client_backend::data_api::wallet::{
     input_selection::GreedyInputSelector, ProposeTransferErrT,
 };
@@ -108,14 +108,11 @@ impl OtpCode {
 /// Burned on first successful verification — one-shot, never reusable.
 /// Expires after `D_OTP` seconds of chain MTP.
 ///
-/// Registration `expires_at` is not part of this binding until renewal
-/// intake can request a term (`new_expires_at = current + term`). Until
-/// then every ordinary update from a tip carries the same period forward,
-/// so [`OtpRequest::tip_rcm`] already pins it.
-///
-/// TODO: when renewal intake can request a term, bind that resulting
-/// successor `expires_at` here so the OTP consents to one period, not
-/// whatever assembly writes.
+/// [`OtpRequest::term`] is the registration term from the triggering
+/// request: a claim/update duration to apply when the echo is authorized,
+/// or `None` to carry the live period forward. [`OtpRequest::tip_rcm`] is
+/// the live Name Note at issuance, so an echo cannot authorize a successor
+/// of a superseded tip.
 pub struct OtpRequest {
     pub name: Name,
     pub action: Action,
@@ -125,6 +122,9 @@ pub struct OtpRequest {
     pub tip_rcm: NameCommitment,
     pub code: OtpCode,
     pub expires_at: Timestamp,
+    /// Requested registration term (update extension). `None` means the
+    /// successor keeps the live `expires_at`.
+    pub term: Option<Term>,
 }
 
 // ---------------------------------------------------------------------------
@@ -156,10 +156,10 @@ impl OtpQueue {
 
     /// Scans for an entry matching (name, action, ua, tip_rcm) with an
     /// unexpired timestamp and a code that equals `provided` under
-    /// constant-time comparison. Removes and returns `true` on first
-    /// match — the OTP is burned. Failed verification leaves the entry
-    /// intact. Expired entries are pruned on every scan.
-    pub fn verify_and_burn(
+    /// constant-time comparison. Removes and returns the burned request
+    /// on first match. Failed verification leaves the entry intact.
+    /// Expired entries are pruned on every scan.
+    pub fn verify_and_take(
         &mut self,
         name: &Name,
         action: Action,
@@ -167,12 +167,10 @@ impl OtpQueue {
         tip_rcm: NameCommitment,
         provided: &[u8; 6],
         mtp: Timestamp,
-    ) -> bool {
+    ) -> Option<OtpRequest> {
         // Expire first: entries past their TTL never match and are dropped.
         self.0.retain(|req| mtp < req.expires_at);
-        let Some(provided_code) = OtpCode::from_digits(provided) else {
-            return false;
-        };
+        let provided_code = OtpCode::from_digits(provided)?;
         for i in 0..self.0.len() {
             let req = &self.0[i];
             if req.name == *name
@@ -182,11 +180,24 @@ impl OtpQueue {
                 && mtp < req.expires_at
                 && bool::from(req.code.0.ct_eq(&provided_code.0))
             {
-                self.0.remove(i);
-                return true;
+                return Some(self.0.remove(i));
             }
         }
-        false
+        None
+    }
+
+    /// [`verify_and_take`] as a boolean — the OTP is burned on match.
+    pub fn verify_and_burn(
+        &mut self,
+        name: &Name,
+        action: Action,
+        ua: &UnifiedAddress,
+        tip_rcm: NameCommitment,
+        provided: &[u8; 6],
+        mtp: Timestamp,
+    ) -> bool {
+        self.verify_and_take(name, action, ua, tip_rcm, provided, mtp)
+            .is_some()
     }
 }
 
@@ -366,6 +377,7 @@ fn may_issue_relay(
 /// The spend policy and change strategy are Ironwood-only, so the constructed
 /// transaction cannot carry Sapling material even though it is built by generic
 /// upstream code and passed a real Sapling prover (which is never invoked).
+#[allow(clippy::too_many_arguments)]
 fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
     network: &P,
     wallet: &mut crate::wallet::Wallet,
@@ -482,6 +494,7 @@ pub fn issue_relay<P: Parameters>(
     requested_ua: &UnifiedAddress,
     controller_ua: &UnifiedAddress,
     tip_rcm: NameCommitment,
+    term: Option<Term>,
     target_height: BlockHeight,
     mtp: Timestamp,
     wallet: &mut crate::wallet::Wallet,
@@ -519,6 +532,7 @@ pub fn issue_relay<P: Parameters>(
             tip_rcm,
             code: otp,
             expires_at: mtp + Duration::seconds(D_OTP),
+            term,
         }),
     })
 }
@@ -666,6 +680,7 @@ mod tests {
             tip_rcm: dummy_tip(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: expires,
+            term: None,
         });
 
         // Correct code burns the entry
@@ -689,6 +704,7 @@ mod tests {
             tip_rcm: dummy_tip(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: expires,
+            term: None,
         });
 
         // Wrong code — entry stays
@@ -712,6 +728,7 @@ mod tests {
             tip_rcm: dummy_tip(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: expires,
+            term: None,
         });
 
         // Wrong action — entry stays
@@ -735,6 +752,7 @@ mod tests {
             tip_rcm: dummy_tip(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: expires,
+            term: None,
         });
 
         // Expired — never matches, and the entry is pruned by the scan.
@@ -756,6 +774,7 @@ mod tests {
             tip_rcm: dummy_tip(),
             code: OtpCode::for_test(*b"111111"),
             expires_at: expires,
+            term: None,
         });
         queue.push(OtpRequest {
             name: name.clone(),
@@ -764,6 +783,7 @@ mod tests {
             tip_rcm: dummy_tip(),
             code: OtpCode::for_test(*b"222222"),
             expires_at: expires,
+            term: None,
         });
 
         // First code burns one entry, the other stays
@@ -787,6 +807,7 @@ mod tests {
             tip_rcm: dummy_tip(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: expires,
+            term: None,
         });
 
         assert!(!queue.verify_and_burn(&name, Action::Update, &ua, other_tip(), b"004206", now));

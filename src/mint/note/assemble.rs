@@ -24,9 +24,7 @@ pub fn claim<P: Parameters>(
         panic!("assemble::claim requires a claim NameNote");
     };
 
-    let memo = claim
-        .encode(builder.params())
-        .expect("a valid name note encodes into 512 bytes");
+    let memo = claim.encode(builder.params());
     let rcm = claim.rcm(builder.params());
     let psi = claim.psi(builder.params());
     let opening = orchard::note::NoteCommitTrapdoor::from_inner(rcm);
@@ -57,9 +55,7 @@ pub fn update<P: Parameters>(
         panic!("assemble::update requires an update NameNote");
     };
 
-    let memo = update
-        .encode(builder.params())
-        .expect("a valid name note encodes into 512 bytes");
+    let memo = update.encode(builder.params());
     let rcm = update.rcm(builder.params());
     let psi = update.psi(builder.params());
     let opening = orchard::note::NoteCommitTrapdoor::from_inner(rcm);
@@ -90,9 +86,7 @@ pub fn release<P: Parameters>(
         panic!("assemble::release requires a release NameNote");
     };
 
-    let memo = release
-        .encode(builder.params())
-        .expect("a valid name note encodes into 512 bytes");
+    let memo = release.encode(builder.params());
     let rcm = release.rcm(builder.params());
     let psi = release.psi(builder.params());
     let opening = orchard::note::NoteCommitTrapdoor::from_inner(rcm);

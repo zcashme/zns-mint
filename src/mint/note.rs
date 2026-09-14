@@ -190,6 +190,59 @@ impl Expiry {
             Expiry::At(t) => mtp >= t,
         }
     }
+
+    /// Successor expiry for an update (§4.5.3).
+    ///
+    /// No term, or `none`, leaves the period unchanged.
+    /// A term extends a fixed instant: `current + requested_term`. Returns
+    /// `None` if that sum is not a representable timestamp.
+    pub fn extend(self, term: Option<Term>) -> Option<Self> {
+        match (self, term) {
+            (Expiry::Never, _) => Some(Expiry::Never),
+            (expiry, None) => Some(expiry),
+            (Expiry::At(t), Some(term)) => t.checked_add(term.duration()).map(Expiry::At),
+        }
+    }
+}
+
+/// A requested registration period, in whole seconds.
+///
+/// This is a duration, not an absolute `expires_at`. The user supplies it
+/// on a claim or as an update extension; the Mint computes the resulting
+/// instant (`MTP + term` on claim, `current + term` on renewal).
+///
+/// Canonical request spelling is decimal digits with no sign and no
+/// leading zeroes. Zero and `none` are not terms — omit the field, or
+/// write `none`, for no fixed expiration / no extension.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Term(i64);
+
+impl Term {
+    /// Parses a canonical duration field: digits only, no sign, no leading
+    /// zeroes, at least one second.
+    pub fn parse(field: &str) -> Option<Self> {
+        if field.is_empty() || field.len() > 20 || !field.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if field.starts_with('0') {
+            return None;
+        }
+        let seconds: i64 = field.parse().ok()?;
+        if seconds < 1 {
+            return None;
+        }
+        Some(Self(seconds))
+    }
+
+    /// The period as a `time` duration.
+    pub fn duration(self) -> time::Duration {
+        time::Duration::new(self.0, 0)
+    }
+
+    /// Claim expiry: canonical-chain MTP plus this term (§4.5).
+    pub fn claim_expiry(self, mtp: Timestamp) -> Option<Expiry> {
+        mtp.checked_add(self.duration()).map(Expiry::At)
+    }
 }
 
 /// Derives the ZNS note-commitment randomness `rcm` for a transition (§3.3):
@@ -387,41 +440,33 @@ pub fn decrypt_name_notes<P: Parameters>(
             && bundle.flags().outputs_enabled();
         for (action_index, action) in bundle.actions().iter().enumerate() {
             if zns_capable {
-                if let Some((note, recipient, memo)) =
-                    orchard::note_encryption::ZnsIronwoodDomain::for_action(action).try_decrypt(
-                        action,
-                        registry_ivk,
-                        |note, memo, cmx| {
-                            let payload = match decode_name_note(network, memo) {
-                                Some(p) => p,
-                                None => return subtle::Choice::from(0),
-                            };
-                            let rcm =
-                                orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network));
-                            let psi = payload.psi(network);
-                            match note.zns_cmx(rcm, psi) {
-                                Some(computed) => computed.ct_eq(cmx),
-                                None => subtle::Choice::from(0),
-                            }
-                        },
-                    )
+                if let Some((candidate, recipient, memo)) =
+                    orchard::note_encryption::ZnsIronwoodDomain::for_action(action)
+                        .try_decrypt(action, registry_ivk)
                 {
-                    if note.value() == orchard::value::NoteValue::ZERO
-                        && recipient == registry_recipient
-                    {
-                        let payload = decode_name_note(network, &memo)
-                            .expect("memo was validated in callback");
-                        candidates.push(DecryptedNameNote {
-                            txid: tx.txid(),
-                            action_index,
-                            ordinal,
-                            note,
-                            ephemeral_key: zcash_note_encryption::EphemeralKeyBytes(
-                                action.encrypted_note().epk_bytes,
-                            ),
-                            memo,
-                            payload,
-                        });
+                    if let Some(payload) = decode_name_note(network, &memo) {
+                        let note = candidate.note();
+                        let rcm =
+                            orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network));
+                        let psi = payload.psi(network);
+                        if let Some(computed) = note.zns_cmx(rcm, psi) {
+                            if bool::from(computed.ct_eq(candidate.cmx()))
+                                && note.value() == orchard::value::NoteValue::ZERO
+                                && recipient == registry_recipient
+                            {
+                                candidates.push(DecryptedNameNote {
+                                    txid: tx.txid(),
+                                    action_index,
+                                    ordinal,
+                                    note: *note,
+                                    ephemeral_key: zcash_note_encryption::EphemeralKeyBytes(
+                                        action.encrypted_note().epk_bytes,
+                                    ),
+                                    memo,
+                                    payload,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -575,6 +620,33 @@ mod tests {
             Expiry::parse("1000"),
             Some(Expiry::At(Timestamp::from_seconds(1000).unwrap()))
         );
+    }
+
+    #[test]
+    fn term_parsing_is_canonical_duration() {
+        assert_eq!(Term::parse("0"), None);
+        assert_eq!(Term::parse("01"), None);
+        assert_eq!(Term::parse("none"), None);
+        assert_eq!(Term::parse(""), None);
+        assert_eq!(Term::parse("+31536000"), None);
+
+        let term = Term::parse("31536000").unwrap();
+        let mtp = Timestamp::from_seconds(1_000).unwrap();
+        assert_eq!(
+            term.claim_expiry(mtp),
+            Some(Expiry::At(
+                Timestamp::from_seconds(1_000 + 31_536_000).unwrap()
+            ))
+        );
+
+        assert_eq!(
+            Expiry::At(mtp).extend(Some(term)),
+            Some(Expiry::At(
+                Timestamp::from_seconds(1_000 + 31_536_000).unwrap()
+            ))
+        );
+        assert_eq!(Expiry::Never.extend(Some(term)), Some(Expiry::Never));
+        assert_eq!(Expiry::At(mtp).extend(None), Some(Expiry::At(mtp)));
     }
 
     /// A release must encode its released UA and exactly `none`; a claim must

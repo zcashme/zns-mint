@@ -5,16 +5,16 @@ use std::convert::Infallible;
 
 use incrementalmerkletree::{Address, MerklePath, Position};
 use shardtree::{
-    ShardTree,
     error::ShardTreeError,
-    store::{ShardStore, memory::MemoryShardStore},
+    store::{memory::MemoryShardStore, ShardStore},
+    ShardTree,
 };
-use zcash_client_backend::data_api::{WalletCommitmentTrees, chain::CommitmentTreeRoot};
+use zcash_client_backend::data_api::{chain::CommitmentTreeRoot, WalletCommitmentTrees};
 use zcash_protocol::consensus::BlockHeight;
 
 use super::{
-    ORCHARD_NOTE_COMMITMENT_TREE_DEPTH, ORCHARD_SHARD_HEIGHT, SAPLING_NOTE_COMMITMENT_TREE_DEPTH,
-    SAPLING_SHARD_HEIGHT, TreeError, Wallet,
+    TreeError, Wallet, ORCHARD_NOTE_COMMITMENT_TREE_DEPTH, ORCHARD_SHARD_HEIGHT,
+    SAPLING_NOTE_COMMITMENT_TREE_DEPTH, SAPLING_SHARD_HEIGHT,
 };
 
 impl WalletCommitmentTrees for Wallet {
@@ -208,11 +208,9 @@ impl Wallet {
     ) -> Result<Option<MerklePath<orchard::tree::MerkleHashOrchard, 32>>, TreeError> {
         // with_ironwood_tree_mut wraps the callback's Ok payload in an
         // outer Option; `?` then flatten collapses both layers.
-        let witnessed = self
-            .with_ironwood_tree_mut(|tree| {
-                tree.witness_at_checkpoint_id_caching(position, &anchor_height)
-            })
-            .map_err(|e| e)?;
+        let witnessed = self.with_ironwood_tree_mut(|tree| {
+            tree.witness_at_checkpoint_id_caching(position, &anchor_height)
+        })?;
         Ok(witnessed.flatten())
     }
 
@@ -222,9 +220,8 @@ impl Wallet {
         &mut self,
         anchor_height: BlockHeight,
     ) -> Result<Option<orchard::tree::Anchor>, TreeError> {
-        let root = self
-            .with_ironwood_tree_mut(|tree| tree.root_at_checkpoint_id(&anchor_height))
-            .map_err(|e| e)?;
+        let root =
+            self.with_ironwood_tree_mut(|tree| tree.root_at_checkpoint_id(&anchor_height))?;
         Ok(root.flatten().map(Into::into))
     }
 }
