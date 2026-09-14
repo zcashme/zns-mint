@@ -10,8 +10,8 @@ use std::num::NonZeroU32;
 
 use shardtree::store::ShardStore;
 use zcash_client_backend::data_api::{
+    wallet::{input_selection::LockFilter, ConfirmationsPolicy, TargetHeight},
     AccountMeta, CoinbaseFilter, InputSource, NoteFilter, PoolMeta, ReceivedNotes, TargetValue,
-    wallet::{ConfirmationsPolicy, TargetHeight, input_selection::LockFilter},
 };
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{
@@ -23,7 +23,7 @@ use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
 use zip32::AccountId;
 
-use super::{Wallet, read::WalletError};
+use super::{read::WalletError, Wallet};
 
 impl Wallet {
     /// Whether the Sapling note identified by `note_id` is spent as of
@@ -32,7 +32,11 @@ impl Wallet {
     /// A spend recorded by an unmined transaction still blocks re-selection
     /// unless the spending transaction has expired before the target height
     /// (in which case it can never be mined).
-    pub(super) fn sapling_note_is_spent(&self, note_id: &NoteId, target_height: TargetHeight) -> bool {
+    pub(super) fn sapling_note_is_spent(
+        &self,
+        note_id: &NoteId,
+        target_height: TargetHeight,
+    ) -> bool {
         self.sapling_note_spends
             .get(note_id)
             .is_some_and(|txid| self.spend_confirms_or_blocks(txid, target_height))
@@ -116,9 +120,7 @@ impl Wallet {
                 } else {
                     match lock_filter {
                         LockFilter::Unfiltered => true,
-                        LockFilter::Policy(policy) => {
-                            policy.overridable_owners().contains(owner)
-                        }
+                        LockFilter::Policy(policy) => policy.overridable_owners().contains(owner),
                     }
                 }
             }
@@ -154,7 +156,10 @@ impl Wallet {
 
     /// Builds the [`ReceivedNote`] for a retained Sapling output, or `None`
     /// when the spending key scope was not retained.
-    fn sapling_received_note(&self, note_id: NoteId) -> Option<ReceivedNote<NoteId, sapling::Note>> {
+    fn sapling_received_note(
+        &self,
+        note_id: NoteId,
+    ) -> Option<ReceivedNote<NoteId, sapling::Note>> {
         let output = self.sapling_notes.get(&note_id)?;
         Some(ReceivedNote::from_parts(
             note_id,
@@ -181,7 +186,7 @@ impl Wallet {
             note_id,
             *note_id.txid(),
             note_id.output_index(),
-            output.note().0.clone(),
+            output.note().0,
             output.recipient_key_scope()?,
             output.note_commitment_tree_position(),
             self.mined_height(note_id.txid()),
@@ -279,10 +284,11 @@ impl Wallet {
                     (a, b) => Some(a.unwrap_or(true) && b.unwrap_or(true)),
                 }
             }
-            NoteFilter::Attempt { condition, fallback } => {
-                Self::note_matches_filter(value, condition)
-                    .or_else(|| Self::note_matches_filter(value, fallback))
-            }
+            NoteFilter::Attempt {
+                condition,
+                fallback,
+            } => Self::note_matches_filter(value, condition)
+                .or_else(|| Self::note_matches_filter(value, fallback)),
         }
     }
 
@@ -324,9 +330,8 @@ impl Wallet {
         for value in values {
             if Self::note_matches_filter(value, selector)? {
                 count += 1;
-                total = (total + value).expect(
-                    "balance cannot overflow MAX_MONEY; mirrors upstream Balance::total",
-                );
+                total = (total + value)
+                    .expect("balance cannot overflow MAX_MONEY; mirrors upstream Balance::total");
             }
         }
         Some(PoolMeta::new(count, total))
@@ -406,7 +411,7 @@ impl InputSource for Wallet {
         exclude: &[Self::NoteRef],
         lock_filter: LockFilter<'_>,
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
-        if self.ufvks.get(&account).is_none() {
+        if !self.ufvks.contains_key(&account) {
             return Err(WalletError::AccountUnknown(account));
         }
 
@@ -485,7 +490,7 @@ impl InputSource for Wallet {
         exclude: &[Self::NoteRef],
         lock_filter: LockFilter<'_>,
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
-        if self.ufvks.get(&account).is_none() {
+        if !self.ufvks.contains_key(&account) {
             return Err(WalletError::AccountUnknown(account));
         }
 
@@ -521,7 +526,7 @@ impl InputSource for Wallet {
         exclude: &[Self::NoteRef],
         lock_filter: LockFilter<'_>,
     ) -> Result<AccountMeta, Self::Error> {
-        if self.ufvks.get(&account).is_none() {
+        if !self.ufvks.contains_key(&account) {
             return Err(WalletError::AccountUnknown(account));
         }
 

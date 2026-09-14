@@ -27,7 +27,7 @@ use zeroize::Zeroize;
 
 use crate::mint::{Action, Name, UnifiedAddress};
 use zcash_client_backend::data_api::wallet::{
-    ProposeTransferErrT, input_selection::GreedyInputSelector,
+    input_selection::GreedyInputSelector, ProposeTransferErrT,
 };
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 
@@ -299,6 +299,7 @@ pub fn decode_otp_relay_memo(memo: &[u8; 512]) -> Option<(Name, Action, String, 
 /// The spend policy and change strategy are Ironwood-only, so the constructed
 /// transaction cannot carry Sapling material even though it is built by generic
 /// upstream code and passed a real Sapling prover (which is never invoked).
+#[allow(clippy::too_many_arguments)]
 fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
     network: &P,
     wallet: &mut crate::wallet::Wallet,
@@ -368,8 +369,8 @@ fn build_relay_payment<P: zcash_protocol::consensus::Parameters>(
         Vec::new(),
     )
     .expect("memo to a guarded Orchard UA with a nonzero fee cannot fail");
-    let request = zip321::TransactionRequest::new(vec![payment])
-        .expect("single-payment request cannot fail");
+    let request =
+        zip321::TransactionRequest::new(vec![payment]).expect("single-payment request cannot fail");
 
     let input_selector = GreedyInputSelector::new();
     let change_strategy = SingleOutputChangeStrategy::<crate::wallet::Wallet>::new(

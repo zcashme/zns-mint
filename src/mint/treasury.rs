@@ -168,14 +168,14 @@ pub fn sweep_ironwood_to_vault<P: Parameters>(
 
     // The threshold (2 ZEC) dwarfs the reserve (0.01 ZEC), so after the
     // threshold check the subtraction cannot fail.
-    let sweep_amount = (spendable - SWEEP_RESERVE)
-        .expect("spendable above SWEEP_THRESHOLD exceeds SWEEP_RESERVE");
+    let sweep_amount =
+        (spendable - SWEEP_RESERVE).expect("spendable above SWEEP_THRESHOLD exceeds SWEEP_RESERVE");
     let recipient =
         zcash_keys::address::Address::Transparent(VAULT_ADDRESS).to_zcash_address(network);
     let payment = zip321::Payment::new(recipient, Some(sweep_amount), None, None, None, Vec::new())
         .expect("a transparent recipient with a nonzero amount cannot fail");
-    let request = zip321::TransactionRequest::new(vec![payment])
-        .expect("single-payment request cannot fail");
+    let request =
+        zip321::TransactionRequest::new(vec![payment]).expect("single-payment request cannot fail");
 
     let input_selector = GreedyInputSelector::new();
     let change_strategy = SingleOutputChangeStrategy::<Wallet>::new(

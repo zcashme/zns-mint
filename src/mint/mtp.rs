@@ -261,7 +261,9 @@ mod tests {
             .backfill(h(50), |height| async move { Ok(3000 + u32::from(height)) })
             .await?;
 
-        let mtp = tracker.current().expect("backfill alone refills the window");
+        let mtp = tracker
+            .current()
+            .expect("backfill alone refills the window");
         assert_eq!(mtp.as_seconds(), 3000 + 45);
         Ok(())
     }

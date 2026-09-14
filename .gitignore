@@ -2,6 +2,8 @@
 **/target/
 Cargo.lock
 **/*.rs.bk
+coverage/
+lcov.info
 
 # Vendored external code (reference only)
 /librustzcash/

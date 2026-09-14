@@ -310,7 +310,9 @@ impl Oracle {
     ///
     /// `price` is the round's ZEC/USD median, in USD per ZEC.
     pub fn accumulate(&mut self, price: Option<Decimal>, now: Timestamp) {
-        let Some(price) = price else { return; };
+        let Some(price) = price else {
+            return;
+        };
 
         if price <= Decimal::ZERO {
             tracing::warn!(price = %price, "pricing observation dropped: non-positive");
@@ -393,9 +395,15 @@ mod tests {
         // Half a day at 800, half at 900 ⇒ the day's average is exactly 850
         // ⇒ rate ceil(100,000,000 / 850) = 117,648. Same-day rounds never
         // publish; the publish happens at the rollover round.
-        oracle.accumulate(Some(Decimal::from(900)), Timestamp::from_seconds(43_200).unwrap());
+        oracle.accumulate(
+            Some(Decimal::from(900)),
+            Timestamp::from_seconds(43_200).unwrap(),
+        );
         assert_eq!(oracle.current().into_u64(), 125_000);
-        oracle.accumulate(Some(Decimal::from(900)), Timestamp::from_seconds(86_400).unwrap());
+        oracle.accumulate(
+            Some(Decimal::from(900)),
+            Timestamp::from_seconds(86_400).unwrap(),
+        );
         assert_eq!(oracle.current().into_u64(), 117_648);
     }
 
@@ -403,7 +411,10 @@ mod tests {
     fn failed_rounds_carry_the_rate_until_a_round_lands() {
         let mut oracle = Oracle::new(Decimal::from(800), Timestamp::from_seconds(0).unwrap());
         // Day 0→1: day 0 averaged 800 ⇒ rate stays 125,000; day 1 begins.
-        oracle.accumulate(Some(Decimal::from(900)), Timestamp::from_seconds(86_400).unwrap());
+        oracle.accumulate(
+            Some(Decimal::from(900)),
+            Timestamp::from_seconds(86_400).unwrap(),
+        );
         assert_eq!(oracle.current().into_u64(), 125_000);
 
         // Two dead rounds — nothing moves.
@@ -413,7 +424,10 @@ mod tests {
 
         // Recovery on day 2 publishes day 1's carried average (900):
         // ceil(100,000,000 / 900) = 111,112.
-        oracle.accumulate(Some(Decimal::from(850)), Timestamp::from_seconds(172_860).unwrap());
+        oracle.accumulate(
+            Some(Decimal::from(850)),
+            Timestamp::from_seconds(172_860).unwrap(),
+        );
         assert_eq!(oracle.current().into_u64(), 111_112);
     }
 
@@ -422,21 +436,33 @@ mod tests {
         let mut oracle = Oracle::new(Decimal::from(1_000), Timestamp::from_seconds(0).unwrap());
         // Day 0→1: day 0 averaged 1,000; the new day accumulates from
         // the day boundary (1000 × 3,600 seconds so far).
-        oracle.accumulate(Some(Decimal::from(1_000)), Timestamp::from_seconds(90_000).unwrap());
+        oracle.accumulate(
+            Some(Decimal::from(1_000)),
+            Timestamp::from_seconds(90_000).unwrap(),
+        );
         assert_eq!(oracle.current().into_u64(), 100_000);
 
         // A reorg rewinds MTP back into day 0.
-        oracle.accumulate(Some(Decimal::from(1_000)), Timestamp::from_seconds(80_000).unwrap());
+        oracle.accumulate(
+            Some(Decimal::from(1_000)),
+            Timestamp::from_seconds(80_000).unwrap(),
+        );
         assert_eq!(oracle.current().into_u64(), 100_000);
 
         // The scan returns to the present: still no publish — the stored
         // current_day prevents a spurious rollover.
-        oracle.accumulate(Some(Decimal::from(1_000)), Timestamp::from_seconds(95_000).unwrap());
+        oracle.accumulate(
+            Some(Decimal::from(1_000)),
+            Timestamp::from_seconds(95_000).unwrap(),
+        );
         assert_eq!(oracle.current().into_u64(), 100_000);
 
         // The genuine day-1 rollover bills every second exactly once
         // (3,600 + 15,000 + 77,800 = 86,400) and republishes the same rate.
-        oracle.accumulate(Some(Decimal::from(1_000)), Timestamp::from_seconds(172_800).unwrap());
+        oracle.accumulate(
+            Some(Decimal::from(1_000)),
+            Timestamp::from_seconds(172_800).unwrap(),
+        );
         assert_eq!(oracle.current().into_u64(), 100_000);
     }
 }

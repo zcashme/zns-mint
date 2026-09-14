@@ -84,6 +84,7 @@ async fn main() {
         sapling_spend,
         sapling_output,
         mut mtp,
+        oracle,
     ) = boot.into_parts();
     let rpc = JsonRpc::new();
     let source = CanonicalBlockSource::new();
@@ -226,7 +227,7 @@ async fn main() {
                             zns_mint::mint::registry::ReceivedNameNote::new(
                                 candidate.txid,
                                 candidate.action_index,
-                                candidate.note.clone(),
+                                candidate.note,
                                 candidate.payload.clone(),
                             )
                         })
@@ -241,9 +242,13 @@ async fn main() {
                                 candidate.ordinal,
                                 candidate.txid,
                                 candidate.action_index,
-                                candidate.note.clone(),
+                                candidate.note,
                                 candidate.ephemeral_key.clone(),
                                 candidate.memo,
+                                orchard::note::NoteCommitTrapdoor::from_inner(
+                                    candidate.payload.rcm(&network),
+                                ),
+                                candidate.payload.psi(&network),
                             )
                             .is_none()
                         {
@@ -306,6 +311,7 @@ async fn main() {
                                     &sapling_output,
                                     tip,
                                     target_height,
+                                    &oracle,
                                 );
                                 settle.claim(name, ua, &note)
                             };
@@ -395,6 +401,7 @@ async fn main() {
                         &sapling_output,
                         tip,
                         target_height,
+                        &oracle,
                     );
                     match action {
                         Action::Update => settle.update(name, ua, &otp, mtp_now),
