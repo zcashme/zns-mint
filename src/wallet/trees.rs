@@ -208,11 +208,9 @@ impl Wallet {
     ) -> Result<Option<MerklePath<orchard::tree::MerkleHashOrchard, 32>>, TreeError> {
         // with_ironwood_tree_mut wraps the callback's Ok payload in an
         // outer Option; `?` then flatten collapses both layers.
-        let witnessed = self
-            .with_ironwood_tree_mut(|tree| {
-                tree.witness_at_checkpoint_id_caching(position, &anchor_height)
-            })
-            .map_err(|e| e)?;
+        let witnessed = self.with_ironwood_tree_mut(|tree| {
+            tree.witness_at_checkpoint_id_caching(position, &anchor_height)
+        })?;
         Ok(witnessed.flatten())
     }
 
@@ -222,9 +220,8 @@ impl Wallet {
         &mut self,
         anchor_height: BlockHeight,
     ) -> Result<Option<orchard::tree::Anchor>, TreeError> {
-        let root = self
-            .with_ironwood_tree_mut(|tree| tree.root_at_checkpoint_id(&anchor_height))
-            .map_err(|e| e)?;
+        let root =
+            self.with_ironwood_tree_mut(|tree| tree.root_at_checkpoint_id(&anchor_height))?;
         Ok(root.flatten().map(Into::into))
     }
 }

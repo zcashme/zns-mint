@@ -474,10 +474,7 @@ impl WalletRead for Wallet {
     fn block_fully_scanned(&self) -> Result<Option<BlockMetadata>, Self::Error> {
         // Blocks are only ever applied sequentially, so the highest applied
         // block is by definition fully scanned.
-        Ok(self
-            .blocks
-            .last_key_value()
-            .map(|(_, metadata)| metadata.clone()))
+        Ok(self.blocks.last_key_value().map(|(_, metadata)| *metadata))
     }
 
     fn get_max_height_hash(&self) -> Result<Option<(BlockHeight, BlockHash)>, Self::Error> {

@@ -411,7 +411,7 @@ impl InputSource for Wallet {
         exclude: &[Self::NoteRef],
         lock_filter: LockFilter<'_>,
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
-        if self.ufvks.get(&account).is_none() {
+        if !self.ufvks.contains_key(&account) {
             return Err(WalletError::AccountUnknown(account));
         }
 
@@ -490,7 +490,7 @@ impl InputSource for Wallet {
         exclude: &[Self::NoteRef],
         lock_filter: LockFilter<'_>,
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
-        if self.ufvks.get(&account).is_none() {
+        if !self.ufvks.contains_key(&account) {
             return Err(WalletError::AccountUnknown(account));
         }
 
@@ -526,7 +526,7 @@ impl InputSource for Wallet {
         exclude: &[Self::NoteRef],
         lock_filter: LockFilter<'_>,
     ) -> Result<AccountMeta, Self::Error> {
-        if self.ufvks.get(&account).is_none() {
+        if !self.ufvks.contains_key(&account) {
             return Err(WalletError::AccountUnknown(account));
         }
 

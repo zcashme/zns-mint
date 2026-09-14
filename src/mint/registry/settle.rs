@@ -40,6 +40,11 @@ const DUST: Zatoshis = Zatoshis::const_from_u64(5_000);
 /// The expiry height buffer: 20 blocks (~25 minutes at 75s/block).
 const TX_EXPIRY_BUFFER: u32 = 20;
 
+/// An Ironwood note witnessed at the settle anchor, ready to spend.
+type PreparedSpend = (orchard::note::Note, orchard::tree::MerklePath);
+/// Notes selected to fund a settle fee, plus the funded value and the fee.
+type FeeSelection = (Vec<PreparedSpend>, Zatoshis, Zatoshis);
+
 /// The error surface of the settle step.
 #[derive(Debug)]
 pub enum SettleError {
@@ -632,7 +637,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
     fn prepare(
         &mut self,
         note: &ReceivedNote<NoteId, orchard::note::Note>,
-    ) -> Result<(orchard::note::Note, orchard::tree::MerklePath), SettleError> {
+    ) -> Result<PreparedSpend, SettleError> {
         let path = self
             .wallet
             .ironwood_witness(note.note_commitment_tree_position(), self.tip)
@@ -680,14 +685,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
         &mut self,
         base_actions: usize,
         covered: impl Fn(Zatoshis, Zatoshis) -> bool,
-    ) -> Result<
-        (
-            Vec<(orchard::note::Note, orchard::tree::MerklePath)>,
-            Zatoshis,
-            Zatoshis,
-        ),
-        SettleError,
-    > {
+    ) -> Result<FeeSelection, SettleError> {
         let candidates = crate::mint::treasury::fee_note_candidates(self.wallet, self.tip);
         let mut prepared = Vec::new();
         let mut funding = Zatoshis::ZERO;
