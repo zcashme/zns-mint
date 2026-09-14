@@ -77,7 +77,8 @@ pub fn authorize_update(
         return None;
     }
 
-    let burned = otp_queue.verify_and_take(&name, Action::Update, &new_ua, otp, mtp)?;
+    let burned =
+        otp_queue.verify_and_take(&name, Action::Update, &new_ua, record.commitment, otp, mtp)?;
 
     Some(NameNote::Update {
         name,
@@ -113,7 +114,14 @@ pub fn authorize_release(
     if controller != &current_ua {
         return None;
     }
-    if !otp_queue.verify_and_burn(&name, Action::Release, &current_ua, otp, mtp) {
+    if !otp_queue.verify_and_burn(
+        &name,
+        Action::Release,
+        &current_ua,
+        record.commitment,
+        otp,
+        mtp,
+    ) {
         return None;
     }
 
@@ -681,6 +689,7 @@ mod tests {
             name: Name::parse("carol").unwrap(),
             action: Action::Update,
             ua: mock_ua(),
+            tip_rcm: dummy_commitment(),
             code: OtpCode::for_test(real_otp),
             expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
             term: None,
@@ -726,6 +735,7 @@ mod tests {
             name: name.clone(),
             action: Action::Update,
             ua: ua.clone(),
+            tip_rcm: dummy_commitment(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
             term: Some(term),
@@ -735,6 +745,44 @@ mod tests {
         assert_eq!(
             req.expires_at(),
             Some(Expiry::At(Timestamp::from_seconds(1_500).unwrap()))
+        );
+    }
+
+    #[test]
+    fn update_rejects_otp_bound_to_a_superseded_tip() {
+        let mut reg = mock_registry();
+        let mut otps = mock_otp_queue();
+        let name = Name::parse("carol").unwrap();
+        let ua = mock_ua();
+        let now = Timestamp::now();
+
+        let mut stale = [0u8; 32];
+        stale[0] = 2;
+        let stale_tip = NameCommitment::from_bytes(&stale).unwrap();
+
+        reg.set_record_for_test(
+            name.clone(),
+            Action::Update,
+            Some(ua.clone()),
+            crate::mint::Expiry::Never,
+            dummy_commitment(),
+            BlockHeight::from_u32(100),
+            dummy_rho(),
+        );
+
+        otps.push(OtpRequest {
+            name: name.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            tip_rcm: stale_tip,
+            code: OtpCode::for_test(*b"004206"),
+            expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
+            term: None,
+        });
+
+        assert!(
+            authorize_update(&reg, &mut otps, now, name, ua, b"004206").is_none(),
+            "OTP issued against a previous tip must not authorize the live one"
         );
     }
 
@@ -759,6 +807,7 @@ mod tests {
             name: name.clone(),
             action: Action::Release,
             ua: ua.clone(),
+            tip_rcm: dummy_commitment(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
             term: None,

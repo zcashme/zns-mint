@@ -26,7 +26,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
-use crate::mint::otp::OtpQueue;
+use crate::mint::otp::{required_echo_value, OtpQueue};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::NameNote;
@@ -187,11 +187,14 @@ impl<'a, P: Parameters> Settle<'a, P> {
     }
 
     /// Settles an OTP-authorized update from the controller's echo.
-    /// Returns `Ok(None)` on policy rejection — no money at stake.
+    /// Returns `Ok(None)` on policy rejection — the echo value is checked
+    /// before the OTP is burned, so a dust or mis-valued echo leaves the
+    /// challenge intact.
     pub fn update(
         &mut self,
         name: crate::mint::Name,
         ua: zcash_keys::address::UnifiedAddress,
+        payment: &ReceivedNote<NoteId, orchard::note::Note>,
         otp: &[u8; 6],
         mtp: Timestamp,
     ) -> Result<Option<Transaction>, SettleError> {
@@ -204,6 +207,12 @@ impl<'a, P: Parameters> Settle<'a, P> {
         let Some(predecessor) = self.predecessor_for(&record)? else {
             return Ok(None);
         };
+
+        let paid = Zatoshis::from_u64(payment.note().value().inner())
+            .expect("note values fit in u64 zatoshis by consensus");
+        if paid != required_echo_value(self.network, self.target_height) {
+            return Ok(None);
+        }
 
         let Some(transition) =
             super::authorize_update(self.registry, self.otp_queue, mtp, name, ua, otp)
@@ -222,6 +231,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
         &mut self,
         name: crate::mint::Name,
         ua: zcash_keys::address::UnifiedAddress,
+        payment: &ReceivedNote<NoteId, orchard::note::Note>,
         otp: &[u8; 6],
         mtp: Timestamp,
     ) -> Result<Option<Transaction>, SettleError> {
@@ -234,6 +244,12 @@ impl<'a, P: Parameters> Settle<'a, P> {
         let Some(predecessor) = self.predecessor_for(&record)? else {
             return Ok(None);
         };
+
+        let paid = Zatoshis::from_u64(payment.note().value().inner())
+            .expect("note values fit in u64 zatoshis by consensus");
+        if paid != required_echo_value(self.network, self.target_height) {
+            return Ok(None);
+        }
 
         let Some(transition) =
             super::authorize_release(self.registry, self.otp_queue, mtp, name, ua, otp)
