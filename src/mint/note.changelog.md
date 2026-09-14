@@ -19,7 +19,10 @@
   request forms remain the user-approved `ZNS:claim`, `ZNS:update`, and
   `ZNS:release` forms without a version, nonce, network field, or challenge ID.
   `claim` and `update` may append a canonical second-duration `term` (or `none`);
-  `release` does not. The Mint computes `expires_at` from that term.
+  `release` does not. An update Respond is `ZNS:update:<name>:<ua>:<term>:<otp>`
+  (`none` when the Request carried no term). A release Respond is
+  `ZNS:release:<name>:<ua>:<otp>`. The Mint computes `expires_at` from the
+  Request term bound at relay issuance.
 
 ## Rejected designs
 
