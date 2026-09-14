@@ -157,7 +157,8 @@ impl<P: Parameters> Boot<P> {
         );
 
         let mtp_now = mtp.current().expect("MTP complete after backfill");
-        let price = crate::mint::pricing::fetch_round().await
+        let price = crate::mint::pricing::fetch_round()
+            .await
             .expect("FATAL: initial price fetch failed; restart when exchanges are reachable");
         let oracle = Oracle::new(price, mtp_now);
         tracing::info!("boot: initial price ingested");
