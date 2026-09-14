@@ -30,7 +30,7 @@ use crate::mint::otp::OtpQueue;
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::NameNote;
-use crate::mint::{grid_usd, Action, REFUND_FEE_USD, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::{grid_usd, Action, Term, REFUND_FEE_USD, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
 /// A change output below this value is not emitted; the fee absorbs it.
@@ -137,11 +137,19 @@ impl<'a, P: Parameters> Settle<'a, P> {
     /// fresh (confirmed after the name's current chain state — a payment
     /// cannot reach across a release/reclaim boundary), and the payment
     /// covers the claim price. Every other outcome refunds.
+    ///
+    /// `term` is the requested registration period. `None` records
+    /// `expires_at = none`. A present term is added to `mtp` (canonical-chain
+    /// MTP at evaluation). Intake defers until MTP is available when a term
+    /// is present; a missing MTP here refunds rather than silently
+    /// registering without expiration.
     pub fn claim(
         &mut self,
         name: crate::mint::Name,
         ua: zcash_keys::address::UnifiedAddress,
         payment: &ReceivedNote<NoteId, orchard::note::Note>,
+        term: Option<Term>,
+        mtp: Option<Timestamp>,
     ) -> Result<Transaction, SettleError> {
         let confirmed_height = payment
             .mined_height()
@@ -157,11 +165,16 @@ impl<'a, P: Parameters> Settle<'a, P> {
         // The payment must at least cover the claim price.
         let price = self.oracle.quote_forever(&name);
         let paid = payment.note().value().inner() >= price.into_u64();
-        // Policy gate: name availability.
-        let claim = if fresh && paid {
-            super::authorize_claim(self.registry, name, ua.clone())
-        } else {
-            None
+        let expires_at = match term {
+            None => Some(crate::mint::Expiry::Never),
+            Some(term) => mtp.and_then(|mtp| term.claim_expiry(mtp)),
+        };
+        // Policy gate: name availability and a representable expiry.
+        let claim = match (fresh && paid, expires_at) {
+            (true, Some(expires_at)) => {
+                super::authorize_claim(self.registry, name, ua.clone(), expires_at)
+            }
+            _ => None,
         };
 
         let tx = match claim {

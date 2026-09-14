@@ -25,7 +25,7 @@ use subtle::ConstantTimeEq;
 use time::Timestamp;
 use zeroize::Zeroize;
 
-use crate::mint::{Action, Name, UnifiedAddress};
+use crate::mint::{Action, Name, Term, UnifiedAddress};
 use zcash_client_backend::data_api::wallet::{
     input_selection::GreedyInputSelector, ProposeTransferErrT,
 };
@@ -105,12 +105,19 @@ impl OtpCode {
 /// Pushed onto the [`OtpQueue`] after the relay transaction is accepted.
 /// Burned on first successful verification — one-shot, never reusable.
 /// Expires after `D_OTP` seconds of chain MTP.
+///
+/// [`OtpRequest::term`] is the registration term from the triggering
+/// request: a claim/update duration to apply when the echo is authorized,
+/// or `None` to carry the live period forward.
 pub struct OtpRequest {
     pub name: Name,
     pub action: Action,
     pub ua: UnifiedAddress,
     pub code: OtpCode,
     pub expires_at: Timestamp,
+    /// Requested registration term (update extension). `None` means the
+    /// successor keeps the live `expires_at`.
+    pub term: Option<Term>,
 }
 
 // ---------------------------------------------------------------------------
@@ -142,22 +149,20 @@ impl OtpQueue {
 
     /// Scans for an entry matching (name, action, ua) with an unexpired
     /// timestamp and a code that equals `provided` under constant-time
-    /// comparison. Removes and returns `true` on first match — the OTP
-    /// is burned. Failed verification leaves the entry intact.
-    /// Expired entries are pruned on every scan.
-    pub fn verify_and_burn(
+    /// comparison. Removes and returns the burned request on first match.
+    /// Failed verification leaves the entry intact. Expired entries are
+    /// pruned on every scan.
+    pub fn verify_and_take(
         &mut self,
         name: &Name,
         action: Action,
         ua: &UnifiedAddress,
         provided: &[u8; 6],
         mtp: Timestamp,
-    ) -> bool {
+    ) -> Option<OtpRequest> {
         // Expire first: entries past their TTL never match and are dropped.
         self.0.retain(|req| mtp < req.expires_at);
-        let Some(provided_code) = OtpCode::from_digits(provided) else {
-            return false;
-        };
+        let provided_code = OtpCode::from_digits(provided)?;
         for i in 0..self.0.len() {
             let req = &self.0[i];
             if req.name == *name
@@ -166,11 +171,23 @@ impl OtpQueue {
                 && mtp < req.expires_at
                 && bool::from(req.code.0.ct_eq(&provided_code.0))
             {
-                self.0.remove(i);
-                return true;
+                return Some(self.0.remove(i));
             }
         }
-        false
+        None
+    }
+
+    /// [`verify_and_take`] as a boolean — the OTP is burned on match.
+    pub fn verify_and_burn(
+        &mut self,
+        name: &Name,
+        action: Action,
+        ua: &UnifiedAddress,
+        provided: &[u8; 6],
+        mtp: Timestamp,
+    ) -> bool {
+        self.verify_and_take(name, action, ua, provided, mtp)
+            .is_some()
     }
 }
 
@@ -431,6 +448,7 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
     action: Action,
     requested_ua: &UnifiedAddress,
     controller_ua: &UnifiedAddress,
+    term: Option<Term>,
     target_height: zcash_protocol::consensus::BlockHeight,
     mtp: Timestamp,
     wallet: &mut crate::wallet::Wallet,
@@ -467,6 +485,7 @@ pub fn issue_relay<P: zcash_protocol::consensus::Parameters>(
             ua: requested_ua.clone(),
             code: otp,
             expires_at: mtp + Duration::seconds(D_OTP),
+            term,
         }),
     })
 }
@@ -591,6 +610,7 @@ mod tests {
             ua: ua.clone(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: expires,
+            term: None,
         });
 
         // Correct code burns the entry
@@ -613,6 +633,7 @@ mod tests {
             ua: ua.clone(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: expires,
+            term: None,
         });
 
         // Wrong code — entry stays
@@ -635,6 +656,7 @@ mod tests {
             ua: ua.clone(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: expires,
+            term: None,
         });
 
         // Wrong action — entry stays
@@ -657,6 +679,7 @@ mod tests {
             ua: ua.clone(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: expires,
+            term: None,
         });
 
         // Expired — never matches, and the entry is pruned by the scan.
@@ -677,6 +700,7 @@ mod tests {
             ua: ua.clone(),
             code: OtpCode::for_test(*b"111111"),
             expires_at: expires,
+            term: None,
         });
         queue.push(OtpRequest {
             name: name.clone(),
@@ -684,6 +708,7 @@ mod tests {
             ua: ua.clone(),
             code: OtpCode::for_test(*b"222222"),
             expires_at: expires,
+            term: None,
         });
 
         // First code burns one entry, the other stays
