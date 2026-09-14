@@ -569,13 +569,15 @@ mod tests {
         NameCommitment::from_bytes(&b).unwrap()
     }
 
-    fn other_ua() -> UnifiedAddress {
+    // Relays pay Ironwood, so the live controller must have an Orchard
+    // receiver. `test_ua` is a ZIP-316 vector with only Sapling + transparent.
+    fn orchard_ua(seed_byte: u8) -> UnifiedAddress {
         use secrecy::Secret;
         use zcash_keys::keys::UnifiedAddressRequest;
-        crate::key::TreasuryKeys::derive(&MAIN_NETWORK, &Secret::new([7u8; 32]))
+        crate::key::TreasuryKeys::derive(&MAIN_NETWORK, &Secret::new([seed_byte; 32]))
             .fvk()
-            .default_address(UnifiedAddressRequest::SHIELDED)
-            .expect("test FVK has a shielded address")
+            .default_address(UnifiedAddressRequest::ORCHARD)
+            .expect("test FVK has an Orchard address")
             .0
     }
 
@@ -816,14 +818,27 @@ mod tests {
 
     #[test]
     fn release_relay_rejects_non_controller_ua() {
-        let controller = test_ua();
-        let other = other_ua();
+        let controller = orchard_ua(7);
+        let other = orchard_ua(8);
         assert_ne!(controller, other);
 
         assert!(may_issue_relay(Action::Update, &other, &controller));
         assert!(may_issue_relay(Action::Release, &controller, &controller));
         assert!(!may_issue_relay(Action::Release, &other, &controller));
         assert!(!may_issue_relay(Action::Claim, &controller, &controller));
+    }
+
+    #[test]
+    fn relay_rejects_controller_without_orchard() {
+        let sapling_only = test_ua();
+        assert!(sapling_only.orchard().is_none());
+        let other = orchard_ua(8);
+        assert!(!may_issue_relay(Action::Update, &other, &sapling_only));
+        assert!(!may_issue_relay(
+            Action::Release,
+            &sapling_only,
+            &sapling_only
+        ));
     }
 
     #[test]
