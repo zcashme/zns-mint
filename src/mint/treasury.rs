@@ -29,22 +29,31 @@ use zcash_keys::address::UnifiedAddress;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 
-use crate::mint::{Action, Name, TREASURY_ACCOUNT};
+use crate::mint::{Action, Name, Term, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
+
+/// A user request decoded from a Treasury memo.
+///
+/// `term` is the optional registration period (claim) or extension (update).
+/// `None` means no fixed expiration on a claim, or carry-forward on an update.
+pub struct ParsedRequest {
+    pub action: Action,
+    pub name: Name,
+    pub ua: UnifiedAddress,
+    pub term: Option<Term>,
+}
 
 /// Parses a 512-byte memo sent to the Treasury as a ZNS transition request.
 ///
-/// A request memo is `ZNS:<verb>:<name>:<ua>`, where `verb` is `claim`,
-/// `update`, or `release`. OTPs are delivered through the separate relay-memo
-/// path; request memos never carry an OTP.
+/// A request memo is `ZNS:<verb>:<name>:<ua>` or, for `claim` and `update`,
+/// `ZNS:<verb>:<name>:<ua>:<term>`. `term` is a canonical second-duration or
+/// the exact field `none`. `release` does not take a term. OTPs are delivered
+/// through the separate relay-memo path; request memos never carry an OTP.
 ///
-/// Returns `None` unless the memo's grammar, name, and Unified Address for
-/// `network` are all valid. The intake loop then tries
-/// [`crate::mint::otp::decode_otp_relay_memo`] for non-request memos.
-pub fn parse_request<P: Parameters>(
-    network: &P,
-    raw: &[u8; 512],
-) -> Option<(Action, Name, UnifiedAddress)> {
+/// Returns `None` unless the memo's grammar, name, Unified Address for
+/// `network`, and term (when present) are all valid. The intake loop then
+/// tries [`crate::mint::otp::decode_otp_relay_memo`] for non-request memos.
+pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<ParsedRequest> {
     let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
     if raw[end..].iter().any(|b| *b != 0) {
         return None;
@@ -64,6 +73,7 @@ pub fn parse_request<P: Parameters>(
         return None;
     }
 
+    let term_field = fields.next();
     if fields.next().is_some() {
         return None;
     }
@@ -80,7 +90,22 @@ pub fn parse_request<P: Parameters>(
         _ => return None,
     };
 
-    Some((action, name, ua))
+    // A release has no registration period to set or extend.
+    if action == Action::Release && term_field.is_some() {
+        return None;
+    }
+
+    let term = match term_field {
+        None | Some("none") => None,
+        Some(field) => Some(Term::parse(field)?),
+    };
+
+    Some(ParsedRequest {
+        action,
+        name,
+        ua,
+        term,
+    })
 }
 
 /// The Treasury's Ironwood fee-note candidates, largest value first.
@@ -295,20 +320,50 @@ mod tests {
     fn accepts_exactly_the_three_request_forms() {
         let network = MainNetwork;
 
-        let (action, name, _) =
-            parse_request(&network, &padded(&format!("ZNS:claim:alice:{TEST_UA}"))).unwrap();
-        assert_eq!(action, Action::Claim);
-        assert_eq!(name.as_str(), "alice");
+        let req = parse_request(&network, &padded(&format!("ZNS:claim:alice:{TEST_UA}"))).unwrap();
+        assert_eq!(req.action, Action::Claim);
+        assert_eq!(req.name.as_str(), "alice");
+        assert_eq!(req.term, None);
 
-        let (action, name, _) =
-            parse_request(&network, &padded(&format!("ZNS:update:alice:{TEST_UA}"))).unwrap();
-        assert_eq!(action, Action::Update);
-        assert_eq!(name.as_str(), "alice");
+        let req = parse_request(&network, &padded(&format!("ZNS:update:alice:{TEST_UA}"))).unwrap();
+        assert_eq!(req.action, Action::Update);
+        assert_eq!(req.name.as_str(), "alice");
+        assert_eq!(req.term, None);
 
-        let (action, name, _) =
+        let req =
             parse_request(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))).unwrap();
-        assert_eq!(action, Action::Release);
-        assert_eq!(name.as_str(), "alice");
+        assert_eq!(req.action, Action::Release);
+        assert_eq!(req.name.as_str(), "alice");
+        assert_eq!(req.term, None);
+    }
+
+    #[test]
+    fn claim_and_update_accept_a_canonical_term() {
+        let network = MainNetwork;
+        let term = Term::parse("31536000").unwrap();
+
+        let req = parse_request(
+            &network,
+            &padded(&format!("ZNS:claim:alice:{TEST_UA}:31536000")),
+        )
+        .unwrap();
+        assert_eq!(req.action, Action::Claim);
+        assert_eq!(req.term, Some(term));
+
+        let req = parse_request(
+            &network,
+            &padded(&format!("ZNS:update:alice:{TEST_UA}:31536000")),
+        )
+        .unwrap();
+        assert_eq!(req.action, Action::Update);
+        assert_eq!(req.term, Some(term));
+
+        let req = parse_request(
+            &network,
+            &padded(&format!("ZNS:claim:alice:{TEST_UA}:none")),
+        )
+        .unwrap();
+        assert_eq!(req.term, None);
     }
 
     #[test]
@@ -322,6 +377,21 @@ mod tests {
         assert!(parse_request(
             &network,
             &padded(&format!("ZNS:claim:alice:{TEST_UA}:extra"))
+        )
+        .is_none());
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:claim:alice:{TEST_UA}:31536000:more"))
+        )
+        .is_none());
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:release:alice:{TEST_UA}:31536000"))
+        )
+        .is_none());
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:release:alice:{TEST_UA}:none"))
         )
         .is_none());
     }

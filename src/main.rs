@@ -296,9 +296,18 @@ async fn main() {
                 };
                 handled.push(note_id);
 
-                if let Some((action, name, ua)) = parse_request(&network, &memo) {
-                    match action {
+                if let Some(parsed) = parse_request(&network, &memo) {
+                    match parsed.action {
                         Action::Claim => {
+                            let mtp_now = if parsed.term.is_some() {
+                                let Some(mtp_now) = mtp.current() else {
+                                    tracing::debug!("MTP window incomplete; deferring term claim");
+                                    continue;
+                                };
+                                Some(mtp_now)
+                            } else {
+                                None
+                            };
                             let result = {
                                 let mut settle = Settle::new(
                                     &network,
@@ -313,7 +322,7 @@ async fn main() {
                                     target_height,
                                     &oracle,
                                 );
-                                settle.claim(name, ua, &note)
+                                settle.claim(parsed.name, parsed.ua, &note, parsed.term, mtp_now)
                             };
                             match result {
                                 Ok(tx) => {
@@ -328,7 +337,7 @@ async fn main() {
                                 tracing::debug!("MTP window incomplete; deferring OTP relay");
                                 continue;
                             };
-                            let Some(record) = registry.record(&name) else {
+                            let Some(record) = registry.record(&parsed.name) else {
                                 continue;
                             };
                             let Some(controller_ua) = record.ua.as_ref() else {
@@ -336,10 +345,11 @@ async fn main() {
                             };
                             let Some(outcome) = issue_relay(
                                 &network,
-                                &name,
-                                action,
-                                &ua,
+                                &parsed.name,
+                                parsed.action,
+                                &parsed.ua,
                                 controller_ua,
+                                parsed.term,
                                 target_height,
                                 mtp_now,
                                 &mut wallet,

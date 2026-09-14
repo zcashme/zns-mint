@@ -12,7 +12,7 @@ pub mod treasury;
 pub use zcash_client_backend::data_api::BlockMetadata as ChainTip;
 
 // The Name Note type and its codec.
-pub use note::{decode_name_note, decrypt_name_notes, DecryptedNameNote, Expiry, NameNote};
+pub use note::{decode_name_note, decrypt_name_notes, DecryptedNameNote, Expiry, NameNote, Term};
 pub use time::Timestamp;
 
 pub use zcash_keys::address::UnifiedAddress;

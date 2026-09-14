@@ -35,9 +35,14 @@ pub fn current_record(registry: &Registry, name: &Name) -> Option<NameRecord> {
 ///
 /// The Treasury layer must have already verified that the claim payment was
 /// made. This function verifies that the name is available (either no record,
-/// or record is `Release`). Until term-request plumbing exists in the intake
-/// path, claims register without fixed expiration.
-pub fn authorize_claim(registry: &Registry, name: Name, ua: UnifiedAddress) -> Option<NameNote> {
+/// or record is `Release`) and records the caller-computed `expires_at`
+/// (MTP + requested term, or `none` when no term was supplied).
+pub fn authorize_claim(
+    registry: &Registry,
+    name: Name,
+    ua: UnifiedAddress,
+    expires_at: Expiry,
+) -> Option<NameNote> {
     match current_record(registry, &name) {
         None
         | Some(NameRecord {
@@ -46,7 +51,7 @@ pub fn authorize_claim(registry: &Registry, name: Name, ua: UnifiedAddress) -> O
         }) => Some(NameNote::Claim {
             name,
             ua,
-            expires_at: Expiry::Never,
+            expires_at,
         }),
         Some(_) => None, // Name is already live
     }
@@ -72,16 +77,14 @@ pub fn authorize_update(
         return None;
     }
 
-    if !otp_queue.verify_and_burn(&name, Action::Update, &new_ua, otp, mtp) {
-        return None;
-    }
+    let burned = otp_queue.verify_and_take(&name, Action::Update, &new_ua, otp, mtp)?;
 
     Some(NameNote::Update {
         name,
         ua: new_ua,
-        // §4.5.3: an ordinary update MUST NOT change the registration
-        // period; the expiry is carried forward from the live record.
-        expires_at: record.expires_at,
+        // §4.5.3: no term carries the live period; a term extends it
+        // (`current + requested_term`). `none` is unchanged by an extension.
+        expires_at: record.expires_at.extend(burned.term)?,
         prev: record.commitment,
     })
 }
@@ -537,7 +540,7 @@ impl Default for Registry {
 mod tests {
     use super::*;
     use crate::mint::otp::{encode_otp_relay_memo, OtpCode, OtpQueue, OtpRequest};
-    use crate::mint::NameCommitment;
+    use crate::mint::{Expiry, NameCommitment, Term};
     use time::{Duration, Timestamp};
 
     fn mock_registry() -> Registry {
@@ -581,20 +584,21 @@ mod tests {
         let height = BlockHeight::from_u32(100);
 
         // Unseen name is claimable
-        let req = authorize_claim(&reg, name.clone(), ua.clone()).unwrap();
+        let req = authorize_claim(&reg, name.clone(), ua.clone(), Expiry::Never).unwrap();
         assert_eq!(req.action(), Action::Claim);
+        assert_eq!(req.expires_at(), Some(Expiry::Never));
 
         // Released name is claimable
         reg.set_record_for_test(
             name.clone(),
             Action::Release,
             None,
-            crate::mint::Expiry::Never,
+            Expiry::Never,
             dummy_commitment(),
             height,
             dummy_rho(),
         );
-        let req2 = authorize_claim(&reg, name.clone(), ua.clone()).unwrap();
+        let req2 = authorize_claim(&reg, name.clone(), ua.clone(), Expiry::Never).unwrap();
         assert_eq!(req2.action(), Action::Claim);
 
         // Live name is NOT claimable
@@ -602,12 +606,12 @@ mod tests {
             name.clone(),
             Action::Claim,
             Some(ua.clone()),
-            crate::mint::Expiry::Never,
+            Expiry::Never,
             dummy_commitment(),
             height,
             dummy_rho(),
         );
-        assert!(authorize_claim(&reg, name, ua).is_none());
+        assert!(authorize_claim(&reg, name, ua, Expiry::Never).is_none());
     }
 
     #[test]
@@ -632,7 +636,7 @@ mod tests {
             name.clone(),
             Action::Release,
             None,
-            crate::mint::Expiry::Never,
+            Expiry::Never,
             dummy_commitment(),
             BlockHeight::from_u32(100),
             dummy_rho(),
@@ -657,7 +661,7 @@ mod tests {
             name.clone(),
             Action::Update,
             Some(ua.clone()),
-            crate::mint::Expiry::Never,
+            Expiry::Never,
             dummy_commitment(),
             BlockHeight::from_u32(100),
             dummy_rho(),
@@ -679,9 +683,59 @@ mod tests {
             ua: mock_ua(),
             code: OtpCode::for_test(real_otp),
             expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
+            term: None,
         });
         let req = authorize_update(&reg, &mut otps, now, name.clone(), ua, &real_otp).unwrap();
         assert_eq!(req.action(), Action::Update);
+        assert_eq!(req.expires_at(), Some(Expiry::Never));
+    }
+
+    #[test]
+    fn claim_records_a_computed_term_expiry() {
+        let reg = mock_registry();
+        let name = Name::parse("erin").unwrap();
+        let ua = mock_ua();
+        let mtp = Timestamp::from_seconds(1_000).unwrap();
+        let term = Term::parse("31536000").unwrap();
+        let expires_at = term.claim_expiry(mtp).unwrap();
+
+        let req = authorize_claim(&reg, name, ua, expires_at).unwrap();
+        assert_eq!(req.expires_at(), Some(expires_at));
+    }
+
+    #[test]
+    fn update_applies_a_requested_extension() {
+        let mut reg = mock_registry();
+        let mut otps = mock_otp_queue();
+        let name = Name::parse("frank").unwrap();
+        let ua = mock_ua();
+        let now = Timestamp::now();
+        let current = Expiry::At(Timestamp::from_seconds(1_000).unwrap());
+        let term = Term::parse("500").unwrap();
+
+        reg.set_record_for_test(
+            name.clone(),
+            Action::Claim,
+            Some(ua.clone()),
+            current,
+            dummy_commitment(),
+            BlockHeight::from_u32(100),
+            dummy_rho(),
+        );
+        otps.push(OtpRequest {
+            name: name.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            code: OtpCode::for_test(*b"004206"),
+            expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
+            term: Some(term),
+        });
+
+        let req = authorize_update(&reg, &mut otps, now, name, ua, b"004206").unwrap();
+        assert_eq!(
+            req.expires_at(),
+            Some(Expiry::At(Timestamp::from_seconds(1_500).unwrap()))
+        );
     }
 
     #[test]
@@ -696,7 +750,7 @@ mod tests {
             name.clone(),
             Action::Claim,
             Some(ua.clone()),
-            crate::mint::Expiry::Never,
+            Expiry::Never,
             dummy_commitment(),
             BlockHeight::from_u32(100),
             dummy_rho(),
@@ -707,6 +761,7 @@ mod tests {
             ua: ua.clone(),
             code: OtpCode::for_test(*b"004206"),
             expires_at: now + Duration::seconds(crate::mint::otp::D_OTP),
+            term: None,
         });
 
         let transition = authorize_release(&reg, &mut otps, now, name, ua.clone(), b"004206")

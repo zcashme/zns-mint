@@ -1,5 +1,16 @@
 # Treasury design record
 
+## Request memos accept a registration term
+
+- `parse_request` returns [`ParsedRequest`] with an optional `term`.
+  `ZNS:claim:<name>:<ua>` and `ZNS:update:<name>:<ua>` still mean no
+  fixed expiration / no extension. Those verbs may append a canonical
+  second-duration or the exact field `none`. `release` still rejects any
+  extra field. Leading-zero spellings (including a 6-digit OTP) are not
+  terms.
+- The intake loop forwards `term` into claim settlement and OTP issuance
+  so `authorize_claim` / `authorize_update` can compute `expires_at`.
+
 ## OTP relay construction moves to upstream wallet assembly (mint-level)
 
 - The `relay` module is deleted. OTPs are a mint concern, not a Treasury

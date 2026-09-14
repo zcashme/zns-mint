@@ -18,6 +18,8 @@
 - This codec defines Name Note artifact grammar, not user request grammar. The
   request forms remain the user-approved `ZNS:claim`, `ZNS:update`, and
   `ZNS:release` forms without a version, nonce, network field, or challenge ID.
+  `claim` and `update` may append a canonical second-duration `term` (or `none`);
+  `release` does not. The Mint computes `expires_at` from that term.
 
 ## Rejected designs
 
