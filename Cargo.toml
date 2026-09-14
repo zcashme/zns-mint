@@ -39,11 +39,8 @@ time = "0.3"
 tonic = "0.14"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
-# The `Service` trait for pricing's HTTPS connector. Already compiled via
-# hyper/tonic — direct listing adds no code.
-tower-service = "0.3"
-tokio-rustls = "0.26.4"
-webpki-roots = "1.0.9"
+# Standard HTTPS connector for Hyper, using rustls and webpki roots.
+hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "webpki-roots"] }
 http-body-util = "0.1"
 http = "1"
 bytes = "1"
@@ -61,10 +58,6 @@ incrementalmerkletree = "0.8.2"
 blake2b_simd = "1"
 pasta_curves = "0.5"
 
-# Sinsemilla commitment for ZNS cmx validation in the scanner. Same crate
-# zns-verify uses — computes the Orchard note commitment from raw bytes
-# without pulling in the full orchard crate.
-sinsemilla = "0.1"
 zcash_note_encryption = "0.4"
 
 # CSPRNG for Orchard spend-auth + binding nonces in the signer. Already a
@@ -105,22 +98,19 @@ zcash_client_backend = { version = "0.24.0-rc.7", default-features = false, feat
 
 # Orchard with the `unsafe-zns` feature: Name Notes override the standard
 # note commitment so a note commits to a ZNS payload. The fork lives at
-# https://github.com/zcashme/orchard; consumed from crates.io (zns-orchard)
-# and unified with the librustzcash graph via the [patch.crates-io] git tag.
-# zns-mint calls `Builder::add_zns_output` / `add_zns_spend` directly, so
-# this is a first-class dep, not just a transitive one.
+# https://github.com/zcashme/orchard and is unified with the librustzcash
+# graph via the [patch.crates-io] git tag. zns-mint calls
+# `Builder::add_zns_output` / `add_zns_spend` directly, so this is a
+# first-class dep, not just a transitive one.
 orchard = { version = "0.15.5", default-features = false, features = ["unsafe-zns", "circuit"] }
 shardtree = "0.7.1"
 
 
-# Redirect the crates.io `orchard` consumed transitively by librustzcash to
-# the ZNS fork so the whole graph builds against the same source.
-# Also redirect `zcash_primitives` to the standalone fork so the transaction
-# Builder can compose ZNS Name Notes (add_zns_spend / add_zns_output).
+# Also redirect `zcash_primitives` to the ZNS fork so the transaction
+# Builder can compose Name Notes (add_zns_spend / add_zns_output).
 [patch.crates-io]
-# Tag of the last commit whose package name is still `orchard` (pre-rename).
-orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.15.5" }
-zcash_primitives = { git = "https://github.com/zcashme/zns-zcash_primitives.git" }
+orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.15.5.2" }
+zcash_primitives = { git = "https://github.com/zcashme/zns-zcash_primitives.git", tag = "zns-zcash_primitives-v0.30.1.2" }
 
 # Upstream ZIP-316 unified test vectors for the key-derivation regression
 # tests (`zcash_address::test_vectors::UNIFIED` is gated behind the crate's
