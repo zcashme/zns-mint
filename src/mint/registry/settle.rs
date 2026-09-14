@@ -27,9 +27,10 @@ use zcash_protocol::value::Zatoshis;
 
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::otp::OtpQueue;
+use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::NameNote;
-use crate::mint::{Action, CLAIM_PRICE, PROCESSING_FEE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::{grid_usd, Action, REFUND_FEE_USD, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
 /// A change output below this value is not emitted; the fee absorbs it.
@@ -58,8 +59,6 @@ pub enum SettleError {
     /// The predecessor's stored memo does not decode into the transition
     /// that produced it — the note and its memo disagree.
     Opening(zcash_primitives::transaction::TxId),
-    /// The authorized transition's memo overflows 512 bytes.
-    Memo,
 }
 
 impl std::fmt::Display for SettleError {
@@ -74,7 +73,6 @@ impl std::fmt::Display for SettleError {
             SettleError::Opening(txid) => {
                 write!(f, "predecessor memo does not re-open its note: {txid}")
             }
-            SettleError::Memo => write!(f, "transition memo overflows 512 bytes"),
         }
     }
 }
@@ -94,6 +92,7 @@ pub struct Settle<'a, P: Parameters> {
     output_prover: &'a sapling::circuit::OutputParameters,
     tip: BlockHeight,
     target_height: BlockHeight,
+    oracle: &'a Oracle,
 }
 
 impl<'a, P: Parameters> Settle<'a, P> {
@@ -109,6 +108,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
         output_prover: &'a sapling::circuit::OutputParameters,
         tip: BlockHeight,
         target_height: BlockHeight,
+        oracle: &'a Oracle,
     ) -> Self {
         Self {
             network,
@@ -121,6 +121,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
             output_prover,
             tip,
             target_height,
+            oracle,
         }
     }
 
@@ -149,7 +150,8 @@ impl<'a, P: Parameters> Settle<'a, P> {
             .record(&name)
             .is_none_or(|record| confirmed_height > record.confirmed_height);
         // The payment must at least cover the claim price.
-        let paid = payment.note().value().inner() >= CLAIM_PRICE.into_u64();
+        let price = self.oracle.quote_forever(&name);
+        let paid = payment.note().value().inner() >= price.into_u64();
         // Policy gate: name availability.
         let claim = if fresh && paid {
             super::authorize_claim(self.registry, name, ua.clone())
@@ -235,26 +237,29 @@ impl<'a, P: Parameters> Settle<'a, P> {
     ) -> Result<Transaction, SettleError> {
         let payment_value = Zatoshis::from_u64(payment.note().value().inner())
             .expect("note values fit in u64 zatoshis by consensus");
-        let excess = (payment_value - CLAIM_PRICE).unwrap_or(Zatoshis::ZERO);
-        let kept = PROCESSING_FEE.min(excess);
-        let payer = claim.ua().and_then(|ua| ua.orchard().copied());
-        let refund = match (payer, excess > PROCESSING_FEE) {
+        let price = self.oracle.quote_forever(claim.name());
+        let processing_fee = grid_usd(self.oracle, REFUND_FEE_USD);
+        let excess = (payment_value - price).unwrap_or(Zatoshis::ZERO);
+        let kept = processing_fee.min(excess);
+        let payer = claim.ua().orchard().copied();
+        let refund = match (payer, excess > processing_fee) {
             (Some(payer), true) => Some((
                 payer,
-                (excess - PROCESSING_FEE).expect("excess > processing fee"),
+                (excess - processing_fee).expect("excess > processing fee"),
             )),
             _ => None,
         };
 
         let fee = self.fee(3 + usize::from(refund.is_some()))?;
-        let change =
-            ((CLAIM_PRICE + kept).expect("price plus processing fee fits in u64 zatoshis") - fee)
-                .expect("CLAIM_PRICE dwarfs any ZIP-317 fee");
+        let change = ((price + kept).expect("price plus processing fee fits in u64 zatoshis")
+            - fee)
+            .expect("claim price dwarfs any ZIP-317 fee");
 
         let anchor = self.anchor()?;
         let (payment_note, payment_path) = self.prepare(payment)?;
-        let memo = claim.encode(self.network).ok_or(SettleError::Memo)?;
-        let (rcm, psi) = claim.opening(self.network);
+        let memo = claim.encode(self.network);
+        let rcm = claim.rcm(self.network);
+        let psi = claim.psi(self.network);
         let opening = orchard::note::NoteCommitTrapdoor::from_inner(rcm);
 
         let registry_fvk = self.registry_keys.orchard_fvk();
@@ -344,8 +349,9 @@ impl<'a, P: Parameters> Settle<'a, P> {
         let anchor = self.anchor()?;
         let (pred_note, pred_path) = self.prepare(predecessor)?;
         let pred_opening = self.predecessor_opening(predecessor)?;
-        let memo = transition.encode(self.network).ok_or(SettleError::Memo)?;
-        let (rcm, psi) = transition.opening(self.network);
+        let memo = transition.encode(self.network);
+        let rcm = transition.rcm(self.network);
+        let psi = transition.psi(self.network);
         let opening = orchard::note::NoteCommitTrapdoor::from_inner(rcm);
 
         let registry_fvk = self.registry_keys.orchard_fvk();
@@ -436,8 +442,9 @@ impl<'a, P: Parameters> Settle<'a, P> {
         let anchor = self.anchor()?;
         let (pred_note, pred_path) = self.prepare(predecessor)?;
         let pred_opening = self.predecessor_opening(predecessor)?;
-        let memo = transition.encode(self.network).ok_or(SettleError::Memo)?;
-        let (rcm, psi) = transition.opening(self.network);
+        let memo = transition.encode(self.network);
+        let rcm = transition.rcm(self.network);
+        let psi = transition.psi(self.network);
         let opening = orchard::note::NoteCommitTrapdoor::from_inner(rcm);
 
         let registry_fvk = self.registry_keys.orchard_fvk();
@@ -522,10 +529,11 @@ impl<'a, P: Parameters> Settle<'a, P> {
         payment: &ReceivedNote<NoteId, orchard::note::Note>,
         payer: Option<orchard::Address>,
     ) -> Result<Transaction, SettleError> {
+        let processing_fee = grid_usd(self.oracle, REFUND_FEE_USD);
         let covered = |funding: Zatoshis, fee: Zatoshis| match payer {
             Some(_) => {
                 funding
-                    >= (fee + PROCESSING_FEE).expect("fee and processing fee fit in u64 zatoshis")
+                    >= (fee + processing_fee).expect("fee and processing fee fit in u64 zatoshis")
             }
             None => funding >= fee,
         };
@@ -533,7 +541,7 @@ impl<'a, P: Parameters> Settle<'a, P> {
         let fee = self.fee(1 + fee_notes.len() + usize::from(payer.is_some()))?;
 
         let refund =
-            payer.and_then(|payer| (funding - fee - PROCESSING_FEE).map(|value| (payer, value)));
+            payer.and_then(|payer| (funding - fee - processing_fee).map(|value| (payer, value)));
         let change = match &refund {
             Some((_, value)) => {
                 (funding - *value - fee).expect("refund plus fee is at most the pool")
@@ -723,8 +731,10 @@ impl<'a, P: Parameters> Settle<'a, P> {
             _ => None,
         }
         .ok_or(SettleError::Opening(*note.txid()))?;
-        let (rcm, psi) = payload.opening(self.network);
-        Ok((orchard::note::NoteCommitTrapdoor::from_inner(rcm), psi))
+        Ok((
+            orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(self.network)),
+            payload.psi(self.network),
+        ))
     }
 
     fn record(&mut self, tx: &Transaction) -> Result<(), SettleError> {

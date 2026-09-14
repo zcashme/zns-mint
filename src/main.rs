@@ -84,6 +84,7 @@ async fn main() {
         sapling_spend,
         sapling_output,
         mut mtp,
+        oracle,
     ) = boot.into_parts();
     let rpc = JsonRpc::new();
     let source = CanonicalBlockSource::new();
@@ -306,6 +307,7 @@ async fn main() {
                                     &sapling_output,
                                     tip,
                                     target_height,
+                                    &oracle,
                                 );
                                 settle.claim(name, ua, &note)
                             };
@@ -395,6 +397,7 @@ async fn main() {
                         &sapling_output,
                         tip,
                         target_height,
+                        &oracle,
                     );
                     match action {
                         Action::Update => settle.update(name, ua, &otp, mtp_now),

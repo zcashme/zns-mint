@@ -220,7 +220,7 @@ impl NameRecord {
         let rcm = note.rcm(params);
         Self {
             action: note.action(),
-            ua: note.ua().cloned(),
+            ua: Some(note.ua().clone()),
             expires_at: note.expires_at().unwrap_or(Expiry::Never),
             commitment: NameCommitment::from_inner(orchard::note::NoteCommitTrapdoor::from_inner(
                 rcm,

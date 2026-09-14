@@ -387,41 +387,33 @@ pub fn decrypt_name_notes<P: Parameters>(
             && bundle.flags().outputs_enabled();
         for (action_index, action) in bundle.actions().iter().enumerate() {
             if zns_capable {
-                if let Some((note, recipient, memo)) =
-                    orchard::note_encryption::ZnsIronwoodDomain::for_action(action).try_decrypt(
-                        action,
-                        registry_ivk,
-                        |note, memo, cmx| {
-                            let payload = match decode_name_note(network, memo) {
-                                Some(p) => p,
-                                None => return subtle::Choice::from(0),
-                            };
-                            let rcm =
-                                orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network));
-                            let psi = payload.psi(network);
-                            match note.zns_cmx(rcm, psi) {
-                                Some(computed) => computed.ct_eq(cmx),
-                                None => subtle::Choice::from(0),
-                            }
-                        },
-                    )
+                if let Some((candidate, recipient, memo)) =
+                    orchard::note_encryption::ZnsIronwoodDomain::for_action(action)
+                        .try_decrypt(action, registry_ivk)
                 {
-                    if note.value() == orchard::value::NoteValue::ZERO
-                        && recipient == registry_recipient
-                    {
-                        let payload = decode_name_note(network, &memo)
-                            .expect("memo was validated in callback");
-                        candidates.push(DecryptedNameNote {
-                            txid: tx.txid(),
-                            action_index,
-                            ordinal,
-                            note,
-                            ephemeral_key: zcash_note_encryption::EphemeralKeyBytes(
-                                action.encrypted_note().epk_bytes,
-                            ),
-                            memo,
-                            payload,
-                        });
+                    if let Some(payload) = decode_name_note(network, &memo) {
+                        let note = candidate.note();
+                        let rcm =
+                            orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network));
+                        let psi = payload.psi(network);
+                        if let Some(computed) = note.zns_cmx(rcm, psi) {
+                            if bool::from(computed.ct_eq(candidate.cmx()))
+                                && note.value() == orchard::value::NoteValue::ZERO
+                                && recipient == registry_recipient
+                            {
+                                candidates.push(DecryptedNameNote {
+                                    txid: tx.txid(),
+                                    action_index,
+                                    ordinal,
+                                    note: note.clone(),
+                                    ephemeral_key: zcash_note_encryption::EphemeralKeyBytes(
+                                        action.encrypted_note().epk_bytes,
+                                    ),
+                                    memo,
+                                    payload,
+                                });
+                            }
+                        }
                     }
                 }
             }
