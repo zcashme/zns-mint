@@ -2,6 +2,18 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-09-15 — release_due reports which §4.5 clock fired (issue #14)
+
+- `Registry::release_due` now returns `Option<(NameNote, ReleaseReason)>`.
+  `ReleaseReason::Expiry` marks the purchased-term clock (§4.5.2);
+  `ReleaseReason::Liveness` marks the τ+L clock (§4.5.4). When both
+  fire at the same MTP, expiry wins — the purchased term is the more
+  specific rule.
+- `release_deadline` is set inside `NameRecord::from_received` from the
+  block's MTP plus `LIVENESS_INTERVAL` — the same on any accepted
+  transition (claim or update), so a fresh update rebinds the deadline
+  by construction.
+
 ## 2026-07-23 — Operational state removed from canonical owners
 
 - The exported fee-input selector now requires caller-owned exclusions.
