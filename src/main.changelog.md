@@ -4,6 +4,12 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-14 — OTP echo is a request-memo Respond
+
+- Intake classifies update/release memos from `ParsedRequest.otp`. A
+  present access code settles the echo; an absent one issues the relay.
+  Relay memos (`ZNS:otp:…`) are no longer decoded as user echoes.
+
 ## 2026-08-23 — Spec and governance docs deleted
 
 - Deleted `docs/protocol.md`, `docs/policy.md`, `REFERENCE.md`, and the

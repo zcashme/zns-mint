@@ -19,7 +19,7 @@ use zcash_protocol::memo::Memo;
 use zip32::AccountId;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::otp::{decode_otp_relay_memo, issue_relay, OtpQueue};
+use zns_mint::mint::otp::{issue_relay, OtpQueue};
 use zns_mint::mint::registry::settle::Settle;
 use zns_mint::mint::treasury::{parse_request, sweep_ironwood_to_vault, sweep_sapling_to_vault};
 use zns_mint::mint::{decrypt_name_notes, Action, ChainTip, TREASURY_ACCOUNT};
@@ -333,106 +333,110 @@ async fn main() {
                             }
                         }
                         Action::Update | Action::Release => {
-                            let Some(mtp_now) = mtp.current() else {
-                                tracing::debug!("MTP window incomplete; deferring OTP relay");
-                                continue;
-                            };
-                            let Some(record) = registry.record(&parsed.name) else {
-                                continue;
-                            };
-                            let Some(controller_ua) = record.ua.as_ref() else {
-                                continue;
-                            };
-                            let Some(outcome) = issue_relay(
-                                &network,
-                                &parsed.name,
-                                parsed.action,
-                                &parsed.ua,
-                                controller_ua,
-                                parsed.term,
-                                target_height,
-                                mtp_now,
-                                &mut wallet,
-                                &treasury_keys,
-                                &sapling_spend,
-                                &sapling_output,
-                            ) else {
-                                continue;
-                            };
-
-                            match outcome.result {
-                                Ok(txid) => match wallet.get_transaction(txid) {
-                                    Ok(Some(tx)) => {
-                                        if submit(&source, &tx, tip, tip_hash, "OTP relay").await {
-                                            if let Some(request) = outcome.relay_otp {
-                                                otp_queue.push(request);
-                                            }
+                            if let Some(otp) = parsed.otp {
+                                let Some(mtp_now) = mtp.current() else {
+                                    tracing::debug!("MTP window incomplete; deferring OTP echo");
+                                    continue;
+                                };
+                                let result = {
+                                    let mut settle = Settle::new(
+                                        &network,
+                                        &mut wallet,
+                                        &registry,
+                                        &mut otp_queue,
+                                        &treasury_keys,
+                                        &registry_keys,
+                                        &sapling_spend,
+                                        &sapling_output,
+                                        tip,
+                                        target_height,
+                                        &oracle,
+                                    );
+                                    match parsed.action {
+                                        Action::Update => {
+                                            settle.update(parsed.name, parsed.ua, &otp, mtp_now)
+                                        }
+                                        Action::Release => {
+                                            settle.release(parsed.name, parsed.ua, &otp, mtp_now)
+                                        }
+                                        Action::Claim => {
+                                            unreachable!("claim memos never carry an OTP")
                                         }
                                     }
-                                    Ok(None) => {
-                                        tracing::error!(%txid, "stored OTP relay transaction missing")
+                                };
+                                match result {
+                                    Ok(Some(tx)) => {
+                                        let kind = match parsed.action {
+                                            Action::Update => "update",
+                                            Action::Release => "release",
+                                            Action::Claim => {
+                                                unreachable!("claim memos never carry an OTP")
+                                            }
+                                        };
+                                        let _ = submit(&source, &tx, tip, tip_hash, kind).await;
                                     }
+                                    Ok(None) => tracing::debug!(
+                                        action = parsed.action.as_str(),
+                                        "OTP echo was not authorized"
+                                    ),
+                                    Err(error) => tracing::warn!(
+                                        ?error,
+                                        action = parsed.action.as_str(),
+                                        "OTP settlement failed"
+                                    ),
+                                }
+                            } else {
+                                let Some(mtp_now) = mtp.current() else {
+                                    tracing::debug!("MTP window incomplete; deferring OTP relay");
+                                    continue;
+                                };
+                                let Some(record) = registry.record(&parsed.name) else {
+                                    continue;
+                                };
+                                let Some(controller_ua) = record.ua.as_ref() else {
+                                    continue;
+                                };
+                                let Some(outcome) = issue_relay(
+                                    &network,
+                                    &parsed.name,
+                                    parsed.action,
+                                    &parsed.ua,
+                                    controller_ua,
+                                    parsed.term,
+                                    target_height,
+                                    mtp_now,
+                                    &mut wallet,
+                                    &treasury_keys,
+                                    &sapling_spend,
+                                    &sapling_output,
+                                ) else {
+                                    continue;
+                                };
+
+                                match outcome.result {
+                                    Ok(txid) => match wallet.get_transaction(txid) {
+                                        Ok(Some(tx)) => {
+                                            if submit(&source, &tx, tip, tip_hash, "OTP relay")
+                                                .await
+                                            {
+                                                if let Some(request) = outcome.relay_otp {
+                                                    otp_queue.push(request);
+                                                }
+                                            }
+                                        }
+                                        Ok(None) => {
+                                            tracing::error!(%txid, "stored OTP relay transaction missing")
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(?error, %txid, "could not retrieve OTP relay transaction")
+                                        }
+                                    },
                                     Err(error) => {
-                                        tracing::error!(?error, %txid, "could not retrieve OTP relay transaction")
+                                        tracing::warn!(?error, "OTP relay construction failed")
                                     }
-                                },
-                                Err(error) => {
-                                    tracing::warn!(?error, "OTP relay construction failed")
                                 }
                             }
                         }
-                    }
-                    continue;
-                }
-
-                let Some((name, action, ua_string, otp)) = decode_otp_relay_memo(&memo) else {
-                    continue;
-                };
-                let Some(ua) = (match zcash_keys::address::Address::decode(&network, &ua_string) {
-                    Some(zcash_keys::address::Address::Unified(ua)) => Some(ua),
-                    _ => None,
-                }) else {
-                    continue;
-                };
-                let Some(mtp_now) = mtp.current() else {
-                    tracing::debug!("MTP window incomplete; deferring OTP echo");
-                    continue;
-                };
-
-                let result = {
-                    let mut settle = Settle::new(
-                        &network,
-                        &mut wallet,
-                        &registry,
-                        &mut otp_queue,
-                        &treasury_keys,
-                        &registry_keys,
-                        &sapling_spend,
-                        &sapling_output,
-                        tip,
-                        target_height,
-                        &oracle,
-                    );
-                    match action {
-                        Action::Update => settle.update(name, ua, &otp, mtp_now),
-                        Action::Release => settle.release(name, ua, &otp, mtp_now),
-                        Action::Claim => unreachable!("OTP memo decoder rejects claims"),
-                    }
-                };
-                match result {
-                    Ok(Some(tx)) => {
-                        let kind = match action {
-                            Action::Update => "update",
-                            Action::Release => "release",
-                            Action::Claim => unreachable!("OTP memo decoder rejects claims"),
-                        };
-                        let _ = submit(&source, &tx, tip, tip_hash, kind).await;
-                    }
-                    Ok(None) => {
-                        tracing::debug!(action = action.as_str(), "OTP echo was not authorized")
-                    }
-                    Err(error) => {
-                        tracing::warn!(?error, action = action.as_str(), "OTP settlement failed")
                     }
                 }
             }

@@ -1,5 +1,20 @@
 # Treasury design record
 
+## Request memos carry access codes in a trailing slot
+
+- Update and release Responds append a six-digit OTP. Field count is the
+  discriminator: an update Request is `ZNS:update:<name>:<ua>[:<term>]`;
+  an update Respond is `ZNS:update:<name>:<ua>:<term>:<otp>` (`none` in
+  the term slot when the Request carried none). A release Request stays
+  `ZNS:release:<name>:<ua>`; a release Respond is
+  `ZNS:release:<name>:<ua>:<otp>`. Claim never takes an OTP.
+- `ParsedRequest.otp` is `Some` only on a Respond. Intake settles that
+  note and issues a relay only when the slot is empty. Relay memos
+  (`ZNS:otp:…`) are still not Requests or Responds.
+- A six-digit update field without a following OTP remains a term
+  (`123456` is 123456 seconds, not an access code). Leading-zero OTP
+  spellings (`004206`) are not terms, so they cannot occupy the term slot.
+
 ## Request memos accept a registration term
 
 - `parse_request` returns [`ParsedRequest`] with an optional `term`.

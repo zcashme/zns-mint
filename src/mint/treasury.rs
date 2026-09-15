@@ -29,30 +29,41 @@ use zcash_keys::address::UnifiedAddress;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 
+use crate::mint::otp::OtpCode;
 use crate::mint::{Action, Name, Term, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
-/// A user request decoded from a Treasury memo.
+/// A user memo decoded from a Treasury note.
 ///
 /// `term` is the optional registration period (claim) or extension (update).
 /// `None` means no fixed expiration on a claim, or carry-forward on an update.
+/// `otp` is present only on an update/release Respond; its absence is a
+/// Request (claim, or the first step of authorization).
 pub struct ParsedRequest {
     pub action: Action,
     pub name: Name,
     pub ua: UnifiedAddress,
     pub term: Option<Term>,
+    pub otp: Option<[u8; 6]>,
 }
 
-/// Parses a 512-byte memo sent to the Treasury as a ZNS transition request.
+/// Parses a 512-byte memo sent to the Treasury as a ZNS Request or Respond.
 ///
-/// A request memo is `ZNS:<verb>:<name>:<ua>` or, for `claim` and `update`,
-/// `ZNS:<verb>:<name>:<ua>:<term>`. `term` is a canonical second-duration or
-/// the exact field `none`. `release` does not take a term. OTPs are delivered
-/// through the separate relay-memo path; request memos never carry an OTP.
+/// Field slots are positional. Trailing OTP is omitted on a Request:
+///
+/// - Claim: `ZNS:claim:<name>:<ua>[:<term>]` — never an OTP.
+/// - Update request: `ZNS:update:<name>:<ua>[:<term>]`
+/// - Update respond: `ZNS:update:<name>:<ua>:<term>:<otp>`
+/// - Release request: `ZNS:release:<name>:<ua>`
+/// - Release respond: `ZNS:release:<name>:<ua>:<otp>`
+///
+/// `term` is a canonical second-duration or the exact field `none`. An update
+/// Respond always occupies the term slot (`none` if the Request carried none).
+/// `otp` is exactly six ASCII decimal digits, including leading zeroes.
+/// Relay memos (`ZNS:otp:…`) are not Requests or Responds.
 ///
 /// Returns `None` unless the memo's grammar, name, Unified Address for
-/// `network`, and term (when present) are all valid. The intake loop then
-/// tries [`crate::mint::otp::decode_otp_relay_memo`] for non-request memos.
+/// `network`, and occupied term/OTP slots are all valid.
 pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<ParsedRequest> {
     let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
     if raw[end..].iter().any(|b| *b != 0) {
@@ -73,7 +84,8 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Pars
         return None;
     }
 
-    let term_field = fields.next();
+    let extra1 = fields.next();
+    let extra2 = fields.next();
     if fields.next().is_some() {
         return None;
     }
@@ -90,14 +102,30 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Pars
         _ => return None,
     };
 
-    // A release has no registration period to set or extend.
-    if action == Action::Release && term_field.is_some() {
-        return None;
-    }
-
-    let term = match term_field {
-        None | Some("none") => None,
-        Some(field) => Some(Term::parse(field)?),
+    let (term, otp) = match action {
+        Action::Claim => {
+            if extra2.is_some() {
+                return None;
+            }
+            (parse_term_slot(extra1)?, None)
+        }
+        Action::Update => {
+            let otp = match extra2 {
+                None => None,
+                Some(field) => Some(parse_otp_slot(field)?),
+            };
+            (parse_term_slot(extra1)?, otp)
+        }
+        Action::Release => {
+            if extra2.is_some() {
+                return None;
+            }
+            let otp = match extra1 {
+                None => None,
+                Some(field) => Some(parse_otp_slot(field)?),
+            };
+            (None, otp)
+        }
     };
 
     Some(ParsedRequest {
@@ -105,7 +133,21 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Pars
         name,
         ua,
         term,
+        otp,
     })
+}
+
+fn parse_term_slot(field: Option<&str>) -> Option<Option<Term>> {
+    match field {
+        None | Some("none") => Some(None),
+        Some(field) => Term::parse(field).map(Some),
+    }
+}
+
+fn parse_otp_slot(field: &str) -> Option<[u8; 6]> {
+    let digits: [u8; 6] = field.as_bytes().try_into().ok()?;
+    OtpCode::from_digits(&digits)?;
+    Some(digits)
 }
 
 /// The Treasury's Ironwood fee-note candidates, largest value first.
@@ -324,17 +366,20 @@ mod tests {
         assert_eq!(req.action, Action::Claim);
         assert_eq!(req.name.as_str(), "alice");
         assert_eq!(req.term, None);
+        assert_eq!(req.otp, None);
 
         let req = parse_request(&network, &padded(&format!("ZNS:update:alice:{TEST_UA}"))).unwrap();
         assert_eq!(req.action, Action::Update);
         assert_eq!(req.name.as_str(), "alice");
         assert_eq!(req.term, None);
+        assert_eq!(req.otp, None);
 
         let req =
             parse_request(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))).unwrap();
         assert_eq!(req.action, Action::Release);
         assert_eq!(req.name.as_str(), "alice");
         assert_eq!(req.term, None);
+        assert_eq!(req.otp, None);
     }
 
     #[test]
@@ -349,6 +394,7 @@ mod tests {
         .unwrap();
         assert_eq!(req.action, Action::Claim);
         assert_eq!(req.term, Some(term));
+        assert_eq!(req.otp, None);
 
         let req = parse_request(
             &network,
@@ -357,6 +403,7 @@ mod tests {
         .unwrap();
         assert_eq!(req.action, Action::Update);
         assert_eq!(req.term, Some(term));
+        assert_eq!(req.otp, None);
 
         let req = parse_request(
             &network,
@@ -364,6 +411,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(req.term, None);
+        assert_eq!(req.otp, None);
+    }
+
+    #[test]
+    fn six_digit_update_field_is_a_term_not_an_otp() {
+        let network = MainNetwork;
+        let term = Term::parse("123456").unwrap();
+        let req = parse_request(
+            &network,
+            &padded(&format!("ZNS:update:alice:{TEST_UA}:123456")),
+        )
+        .unwrap();
+        assert_eq!(req.term, Some(term));
+        assert_eq!(req.otp, None);
+    }
+
+    #[test]
+    fn update_and_release_accept_a_respond_otp() {
+        let network = MainNetwork;
+        let term = Term::parse("31536000").unwrap();
+
+        let req = parse_request(
+            &network,
+            &padded(&format!("ZNS:update:alice:{TEST_UA}:none:004206")),
+        )
+        .unwrap();
+        assert_eq!(req.action, Action::Update);
+        assert_eq!(req.term, None);
+        assert_eq!(req.otp, Some(*b"004206"));
+
+        let req = parse_request(
+            &network,
+            &padded(&format!("ZNS:update:alice:{TEST_UA}:31536000:004206")),
+        )
+        .unwrap();
+        assert_eq!(req.action, Action::Update);
+        assert_eq!(req.term, Some(term));
+        assert_eq!(req.otp, Some(*b"004206"));
+
+        let req = parse_request(
+            &network,
+            &padded(&format!("ZNS:release:alice:{TEST_UA}:004206")),
+        )
+        .unwrap();
+        assert_eq!(req.action, Action::Release);
+        assert_eq!(req.term, None);
+        assert_eq!(req.otp, Some(*b"004206"));
+
+        let req = parse_request(
+            &network,
+            &padded(&format!("ZNS:update:alice:{TEST_UA}:none:123456")),
+        )
+        .unwrap();
+        assert_eq!(req.term, None);
+        assert_eq!(req.otp, Some(*b"123456"));
     }
 
     #[test]
@@ -392,6 +494,31 @@ mod tests {
         assert!(parse_request(
             &network,
             &padded(&format!("ZNS:release:alice:{TEST_UA}:none"))
+        )
+        .is_none());
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:claim:alice:{TEST_UA}:none:004206"))
+        )
+        .is_none());
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:update:alice:{TEST_UA}::004206"))
+        )
+        .is_none());
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:release:alice:{TEST_UA}:none:004206"))
+        )
+        .is_none());
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:update:alice:{TEST_UA}:none:00420"))
+        )
+        .is_none());
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:release:alice:{TEST_UA}:00420a"))
         )
         .is_none());
     }
