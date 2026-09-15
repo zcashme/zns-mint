@@ -30,12 +30,12 @@ use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D
 use zns_mint::mint::registry::{NameRecord, ReceivedNameNote};
 use zns_mint::mint::treasury::{self, parse_request};
 use zns_mint::mint::{
-    Action, Challenge, Request, MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    Action, Challenge, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN, MINT_BIRTHDAY,
+    REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{self, CanonicalBlockSource, ChainClient, JsonRpc, SubmitOutcome, TipStream};
 
 const RETRY_PAUSE: Duration = Duration::from_secs(5);
-const CHALLENGE_WINDOW: i64 = D_OTP;
 
 #[tokio::main]
 async fn main() {
@@ -738,7 +738,7 @@ async fn main() {
                 continue;
             }
 
-            if let Some(release_note) = registry.release_due(&name, mtp_now) {
+            if let Some((release_note, reason)) = registry.release_due(&name, mtp_now) {
                 let Some(transaction) = assemble::prepare(
                     &network,
                     &mut wallet,
@@ -754,6 +754,7 @@ async fn main() {
                 ) else {
                     tracing::debug!(
                         name = %name.as_str(),
+                        reason = reason.as_str(),
                         "lifecycle release awaits Treasury fee funds"
                     );
                     continue;
@@ -764,6 +765,7 @@ async fn main() {
                             tracing::info!(
                                 txid = %transaction.txid(),
                                 name = %name.as_str(),
+                                reason = reason.as_str(),
                                 "lifecycle release submitted"
                             );
                             break;
@@ -773,6 +775,7 @@ async fn main() {
                                 %error,
                                 txid = %transaction.txid(),
                                 name = %name.as_str(),
+                                reason = reason.as_str(),
                                 "lifecycle release rejected"
                             );
                             break;
@@ -793,8 +796,27 @@ async fn main() {
                 continue;
             }
 
+            // Liveness lead: while `mtp_now` is within CHALLENGE_LEAD of the
+            // deadline, ask the current controller to prove control. Skip if
+            // an OTP is still in play OR the same record was challenged
+            // inside its cooldown. Both are anti-spam bounds; without them a
+            // 7-day lead would issue up to ~336 challenges per name.
+            //
+            // Liveness is a mint-originated Relay, not a WP §5 Request →
+            // Relay → Respond authorization: the mint hasn't been asked
+            // anything, it is reminding the controller a deadline is near.
+            // Liveness is only *satisfied* when a fresh update Name Note
+            // lands (a real §5 flow the controller initiates), which resets
+            // `release_deadline` via `NameRecord::from_received`.
+            //
+            // The `liveness_issued` ledger lives in `OtpQueue`, which resets
+            // on restart and on any reorg (both call `OtpQueue::new()`), so
+            // a re-challenge inside the cooldown can occur after either.
+            // Harmless — an extra reminder to a live controller — but worth
+            // knowing when reading the logs.
             let due_in = record.release_deadline.as_seconds() - mtp_now.as_seconds();
-            if due_in > CHALLENGE_WINDOW
+            let cooldown = time::Duration::seconds(LIVENESS_RETRY_COOLDOWN);
+            if due_in > CHALLENGE_LEAD
                 || challenges.pending(
                     &name,
                     Action::Update,
@@ -802,6 +824,7 @@ async fn main() {
                     record.commitment,
                     mtp_now,
                 )
+                || challenges.liveness_recently_issued(&name, record.commitment, mtp_now, cooldown)
             {
                 continue;
             }
@@ -846,6 +869,7 @@ async fn main() {
             let accepted = source.submit(&transaction, "liveness challenge").await;
             if accepted {
                 challenges.issue(pending);
+                challenges.mark_liveness_issued(name.clone(), record.commitment, mtp_now);
                 tracing::info!(
                     txid = %transaction.txid(),
                     name = %name.as_str(),

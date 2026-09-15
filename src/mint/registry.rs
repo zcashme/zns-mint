@@ -18,6 +18,31 @@ pub fn current_record(registry: &Registry, name: &Name) -> Option<NameRecord> {
     registry.record(name).cloned()
 }
 
+/// Which §4.5 clock fired to make a unilateral release due.
+///
+/// The mint releases a name for one of two reasons: the purchased term
+/// (§4.5.2) or the liveness deadline `τ + L` (§4.5.4). Both settle to the
+/// same on-chain `NameNote::Release`; the distinction is for operators.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ReleaseReason {
+    /// The purchased registration term has passed (`expires_at ≤ mtp`).
+    Expiry,
+    /// One liveness interval has elapsed since the last accepted
+    /// transition (claim or update) and the controller did not re-prove
+    /// control by `release_deadline`.
+    Liveness,
+}
+
+impl ReleaseReason {
+    /// A short label for logs and metrics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ReleaseReason::Expiry => "expiry",
+            ReleaseReason::Liveness => "liveness",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ReceivedNameNote — scanner evidence for one Name Note
 // ---------------------------------------------------------------------------
@@ -287,20 +312,32 @@ impl Registry {
     }
 
     /// Produces the mint's unilateral release when a live registration has
-    /// reached either its purchased expiry or its liveness deadline.
-    pub fn release_due(&self, name: &Name, mtp: Timestamp) -> Option<NameNote> {
+    /// reached either its purchased expiry or its liveness deadline (§4.5).
+    ///
+    /// The second component names which clock fired: `Expiry` for §4.5.2,
+    /// `Liveness` for §4.5.4. When both are due at the same MTP, expiry
+    /// wins — the purchased term is the more specific rule.
+    pub fn release_due(&self, name: &Name, mtp: Timestamp) -> Option<(NameNote, ReleaseReason)> {
         let record = self.record(name)?;
-        if record.action == Action::Release
-            || (!record.expires_at.expired(mtp) && mtp < record.release_deadline)
-        {
+        if record.action == Action::Release {
             return None;
         }
+        let reason = if record.expires_at.expired(mtp) {
+            ReleaseReason::Expiry
+        } else if mtp >= record.release_deadline {
+            ReleaseReason::Liveness
+        } else {
+            return None;
+        };
 
-        Some(NameNote::Release {
-            name: name.clone(),
-            ua: record.ua.clone(),
-            prev: record.commitment,
-        })
+        Some((
+            NameNote::Release {
+                name: name.clone(),
+                ua: record.ua.clone(),
+                prev: record.commitment,
+            },
+            reason,
+        ))
     }
 
     /// Applies every Registry transition in block order.
@@ -570,5 +607,194 @@ impl Registry {
             .last_key_value()
             .map(|(_, pool)| pool.clone())
             .unwrap_or_default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mint::NameNote;
+    use zcash_primitives::transaction::TxId;
+    use zcash_protocol::consensus::MAIN_NETWORK;
+
+    /// A valid mainnet ZIP-316 UA with an Orchard receiver (test vector
+    /// shared with the note and treasury tests).
+    const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
+
+    fn test_ua() -> UnifiedAddress {
+        match zcash_keys::address::Address::decode(&MAIN_NETWORK, TEST_UA) {
+            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            _ => panic!("vector is a mainnet Unified Address"),
+        }
+    }
+
+    fn test_name() -> Name {
+        Name::parse("alice").unwrap()
+    }
+
+    /// Any [u8; 32] whose top two bits are zero is a valid Pallas base
+    /// element; putting the seed in the low byte keeps the number small.
+    fn commitment(seed: u8) -> NameCommitment {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        NameCommitment::from_bytes(&bytes).unwrap()
+    }
+
+    fn nullifier(seed: u8) -> orchard::note::Nullifier {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        orchard::note::Nullifier::from_bytes(&bytes)
+            .into_option()
+            .expect("test nullifier fits Pallas base")
+    }
+
+    fn ts(secs: i64) -> Timestamp {
+        Timestamp::from_seconds(secs).unwrap()
+    }
+
+    fn record(action: Action, expires_at: Expiry, release_deadline: i64, seed: u8) -> NameRecord {
+        NameRecord {
+            action,
+            ua: test_ua(),
+            expires_at,
+            commitment: commitment(seed),
+            confirmed_height: BlockHeight::from_u32(100),
+            release_deadline: ts(release_deadline),
+            nullifier: nullifier(seed),
+        }
+    }
+
+    /// A live claim before either clock fires: nothing to do.
+    #[test]
+    fn release_due_returns_none_while_live() {
+        let mut r = Registry::new(BlockHeight::from_u32(100));
+        let name = test_name();
+        r.set_record(
+            name.clone(),
+            record(Action::Claim, Expiry::Never, 2_000_000_000, 1),
+            BlockHeight::from_u32(100),
+        );
+        assert_eq!(r.release_due(&name, ts(1_999_999_999)), None);
+    }
+
+    /// The purchased term is up but the liveness deadline is not: the mint
+    /// releases with `ReleaseReason::Expiry`.
+    #[test]
+    fn release_due_reports_expiry_when_purchased_term_lapses() {
+        let mut r = Registry::new(BlockHeight::from_u32(100));
+        let name = test_name();
+        // deadline far in the future — only the expiry clock can fire.
+        r.set_record(
+            name.clone(),
+            record(
+                Action::Claim,
+                Expiry::At(ts(1_500_000_000)),
+                3_000_000_000,
+                1,
+            ),
+            BlockHeight::from_u32(100),
+        );
+        let (note, reason) = r
+            .release_due(&name, ts(1_500_000_000))
+            .expect("purchased term expired");
+        assert_eq!(reason, ReleaseReason::Expiry);
+        assert!(matches!(note, NameNote::Release { .. }));
+    }
+
+    /// A Never-expiring name whose liveness deadline has passed: only the
+    /// liveness clock can retire it.
+    #[test]
+    fn release_due_reports_liveness_when_deadline_passes() {
+        let mut r = Registry::new(BlockHeight::from_u32(100));
+        let name = test_name();
+        r.set_record(
+            name.clone(),
+            record(Action::Claim, Expiry::Never, 1_700_000_000, 1),
+            BlockHeight::from_u32(100),
+        );
+        let (_, reason) = r
+            .release_due(&name, ts(1_700_000_000))
+            .expect("liveness deadline passed");
+        assert_eq!(reason, ReleaseReason::Liveness);
+    }
+
+    /// The purchased term is the more specific rule: when both clocks
+    /// fire at the same MTP, expiry is reported.
+    #[test]
+    fn release_due_prefers_expiry_when_both_clocks_fire_together() {
+        let mut r = Registry::new(BlockHeight::from_u32(100));
+        let name = test_name();
+        let same = 1_700_000_000_i64;
+        r.set_record(
+            name.clone(),
+            record(Action::Claim, Expiry::At(ts(same)), same, 1),
+            BlockHeight::from_u32(100),
+        );
+        let (_, reason) = r.release_due(&name, ts(same)).expect("both clocks fired");
+        assert_eq!(reason, ReleaseReason::Expiry);
+    }
+
+    /// An already-released record is not releasable again, no matter how
+    /// far the tip has moved past its deadlines.
+    #[test]
+    fn release_due_yields_nothing_for_already_released_records() {
+        let mut r = Registry::new(BlockHeight::from_u32(100));
+        let name = test_name();
+        r.set_record(
+            name.clone(),
+            record(Action::Release, Expiry::Never, 1_000_000_000, 1),
+            BlockHeight::from_u32(100),
+        );
+        assert_eq!(r.release_due(&name, ts(9_999_999_999)), None);
+    }
+
+    /// A claim sets `release_deadline = τ + L`. An update at a later block
+    /// resets it to that block's MTP plus L (the σ+L check across §4.5.4).
+    #[test]
+    fn record_from_received_sets_deadline_from_mtp_and_liveness_interval() {
+        let name = test_name();
+        let ua = test_ua();
+        let l = crate::mint::LIVENESS_INTERVAL;
+
+        // Claim block MTP.
+        let tau_claim = 1_700_000_000_i64;
+        let claim = ReceivedNameNote::new(
+            TxId::from_bytes([0u8; 32]),
+            0,
+            nullifier(1),
+            NameNote::Claim {
+                name: name.clone(),
+                ua: ua.clone(),
+                expires_at: Expiry::Never,
+            },
+        );
+        let rec = NameRecord::from_received(
+            &MAIN_NETWORK,
+            claim,
+            BlockHeight::from_u32(100),
+            ts(tau_claim),
+        );
+        assert_eq!(rec.release_deadline.as_seconds(), tau_claim + l);
+
+        // Update at a later block: deadline resets.
+        let tau_update = 1_710_000_000_i64;
+        let update = ReceivedNameNote::new(
+            TxId::from_bytes([1u8; 32]),
+            0,
+            nullifier(2),
+            NameNote::Update {
+                name: name.clone(),
+                ua: ua.clone(),
+                expires_at: Expiry::Never,
+                prev: commitment(3),
+            },
+        );
+        let rec2 = NameRecord::from_received(
+            &MAIN_NETWORK,
+            update,
+            BlockHeight::from_u32(200),
+            ts(tau_update),
+        );
+        assert_eq!(rec2.release_deadline.as_seconds(), tau_update + l);
     }
 }

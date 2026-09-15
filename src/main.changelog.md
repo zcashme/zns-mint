@@ -4,6 +4,24 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-15 — Liveness τ+L enforcement in the lifecycle pass (issue #14)
+
+- The lifecycle pass uses `CHALLENGE_LEAD` (7 days) for its
+  challenge-issuance window, decoupled from `D_OTP` (the 30-min
+  response window). A liveness reminder is issued at most once per
+  `LIVENESS_RETRY_COOLDOWN` (24 h) per current record —
+  `OtpQueue::liveness_recently_issued` is checked alongside
+  `pending()`, and `mark_liveness_issued` is called on the accepted
+  submission.
+- `release_due` is destructured for its `ReleaseReason`, which is
+  attached to every "lifecycle release" log line as `reason = expiry`
+  or `reason = liveness`.
+- The liveness reminder is documented in the loop as a
+  mint-originated Relay, not a §5 Request/Respond authorization: it's
+  a courtesy. Liveness is satisfied only when a fresh update Name Note
+  lands (a controller-initiated §5 flow), which resets
+  `release_deadline` through `NameRecord::from_received`.
+
 ## 2026-09-15 — Loop intake is parse_request
 
 - The orchestrator run loop classifies Treasury notes with

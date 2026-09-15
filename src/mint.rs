@@ -40,6 +40,16 @@ pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(4);
 /// The liveness interval: one Julian year (365.25 days), in seconds.
 pub const LIVENESS_INTERVAL: i64 = 31_557_600;
 
+/// Liveness challenge lead: how far before `release_deadline` the mint
+/// begins asking the current controller to prove control. Independent of
+/// `D_OTP`: the notification lead is not the response window. Seven days.
+pub const CHALLENGE_LEAD: i64 = 7 * 24 * 60 * 60;
+
+/// Minimum cadence between successive liveness challenges for the same
+/// current record. Bounds challenge issuance during the lead window so a
+/// silent controller sees at most one relay per day, not one per OTP TTL.
+pub const LIVENESS_RETRY_COOLDOWN: i64 = 24 * 60 * 60;
+
 /// Minimum Treasury Ironwood balance after boot sync (0.002 ZEC).
 pub const MIN_TREASURY_BALANCE: u64 = 200_000;
 
