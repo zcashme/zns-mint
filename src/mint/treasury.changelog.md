@@ -1,5 +1,15 @@
 # Treasury design record
 
+## 2026-09-15 — Loop keeps parse_request and challenge()
+
+- User memos stay on `parse_request` (WP slots, canonical seconds, OTP
+  Respond). The orchestrator loop classifies from `ParsedRequest.otp`.
+- Outbound controller relays are `treasury::challenge` with
+  `required_relay_value`. Relay memos are not decoded as echoes.
+- `registry.authorize` consumes the internal `Request`. Names
+  `authorize_claim` / `authorize_update` in older entries below are
+  historical.
+
 ## Request memos carry access codes in a trailing slot
 
 - Update and release Responds append a six-digit OTP. Field count is the

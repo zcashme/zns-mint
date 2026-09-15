@@ -4,6 +4,15 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-15 — Loop intake is parse_request
+
+- The orchestrator run loop classifies Treasury notes with
+  `parse_request`. Claim price is `quote_forever`; `term` is canonical
+  seconds (`None` = forever / no extension). OTP Responds use
+  `ParsedRequest.otp`; the bound term is the one stored on the issued
+  challenge. Outbound relays still encode `ZNS:otp:…`. Term-as-years
+  (`Ny`) is not this loop.
+
 ## 2026-09-14 — OTP echo is a request-memo Respond
 
 - Intake classifies update/release memos from `ParsedRequest.otp`. A

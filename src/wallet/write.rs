@@ -32,10 +32,10 @@ use zcash_protocol::{PoolType, ShieldedPool};
 use zip32::{AccountId, DiversifierIndex};
 
 use super::{
-    read::{account_birthday, next_height, WalletError},
+    read::{next_height, WalletError},
     Wallet,
 };
-use crate::mint::REGISTRY_ACCOUNT;
+use crate::mint::{MINT_BIRTHDAY, REGISTRY_ACCOUNT};
 
 impl Wallet {
     /// Returns the account that owns a wallet output, if the reference names
@@ -330,9 +330,14 @@ impl WalletWrite for Wallet {
             // a from-state above it: both would desynchronize note commitment
             // positions.
             Some((&applied_tip, _)) => return Err(WalletError::ChainDiscontinuity(applied_tip)),
-            // First batch after boot seeding; the trees were seeded from the
-            // checkpoint at `from_state.block_height()`.
-            None => {}
+            // First batch: `from_state` must be the recorded boot origin.
+            None => {
+                if from_state.block_height() != self.seed.block_height()
+                    || from_state.block_hash() != self.seed.block_hash()
+                {
+                    return Err(WalletError::ChainDiscontinuity(from_state.block_height()));
+                }
+            }
         }
 
         // Commitment trees are mutated before the infallible tables: if a
@@ -385,22 +390,26 @@ impl WalletWrite for Wallet {
                 }
             }
 
-            // Spends are resolved from the block's full nullifier map rather
-            // than only the scanner's `WalletTx` spend lists: notes received
-            // earlier in this same batch are not yet in the nullifier set the
-            // scanner matched against, and a note can be created and spent
-            // within one batch.
-            for (_index, txid, nullifiers) in block.sapling().nullifier_map() {
-                for nf in nullifiers {
-                    if let Some(note_id) = self.sapling_nullifiers.get(nf) {
-                        self.sapling_note_spends.insert(*note_id, *txid);
+            // Spends are recorded from the scanner's matched `WalletSpend`s.
+            // The watch list the scanner matched against came from this
+            // wallet, so every spend of an owned note is present, already
+            // account-tagged. The nullifier map carries only foreign
+            // nullifiers — upstream's gap-scan recovery mechanism, useless
+            // to a wallet that scans contiguously from its birthday — and
+            // owned spends never appear in it. (A note cannot be spent in
+            // the block that creates it, and the mint applies one block per
+            // `put_blocks` call, so same-batch create-and-spend cannot
+            // arise.)
+            for wtx in block.transactions() {
+                let txid = wtx.txid();
+                for spend in wtx.sapling_spends() {
+                    if let Some(note_id) = self.sapling_nullifiers.get(spend.nf()) {
+                        self.sapling_note_spends.insert(*note_id, txid);
                     }
                 }
-            }
-            for (_index, txid, nullifiers) in block.ironwood().nullifier_map() {
-                for nf in nullifiers {
-                    if let Some(note_id) = self.ironwood_nullifiers.get(nf) {
-                        self.ironwood_note_spends.insert(*note_id, *txid);
+                for spend in wtx.ironwood_spends() {
+                    if let Some(note_id) = self.ironwood_nullifiers.get(spend.nf()) {
+                        self.ironwood_note_spends.insert(*note_id, txid);
                     }
                 }
             }
@@ -444,9 +453,9 @@ impl WalletWrite for Wallet {
             }
         }
 
-        // Memos are stored for the owned pools. Received notes themselves are
-        // established only by `put_blocks`: a decrypted output carries no
-        // nullifier or commitment position with which to maintain them.
+        // Memos for mempool observations. Scanned-block memos arrive via
+        // `store_scanned_memo`: upstream's ScannedBlock drops note
+        // plaintexts, so the run loop extracts memos from the block.
         for output in received_tx.sapling_outputs() {
             if let Ok(memo) = Memo::from_bytes(output.memo().as_slice()) {
                 self.memos.insert(
@@ -610,12 +619,12 @@ impl WalletWrite for Wallet {
         // lowered; a rewind below the birthday floor can only proceed when no
         // reset was requested.
         if !reset_account_birthdays.is_empty()
-            && next_height(chain_state.block_height()) < account_birthday()
+            && next_height(chain_state.block_height()) < MINT_BIRTHDAY
         {
             let birthdays = self
                 .ufvks
                 .keys()
-                .map(|account| (*account, account_birthday()))
+                .map(|account| (*account, MINT_BIRTHDAY))
                 .collect();
             return Err(RewindError::RewindBeyondBirthdays(birthdays));
         }
@@ -700,43 +709,38 @@ impl Wallet {
     ///
     /// The standard scanning lane cannot see Name Notes (its domain re-derives
     /// the commitment from rseed and rejects the ZNS-derived cmx), so the
-    /// orchestrator's ZNS pass supplies them here. Storage mirrors
-    /// `put_blocks`: note table + memo + mined status. `ordinal` is the
-    /// action's index in the block's full Ironwood commitment stream.
+    /// orchestrator's ZNS pass supplies them here, after `put_blocks` has
+    /// committed the block. The caller derives `position` from that same
+    /// scanned block before moving it into `put_blocks`.
+    /// Stores the memo of a note revealed by block scanning. Upstream's
+    /// `ScannedBlock` drops note plaintexts, so the run loop decrypts the
+    /// Treasury lane itself and hands the memo here alongside `put_blocks`.
+    pub fn store_scanned_memo(&mut self, note_id: NoteId, memo: [u8; 512]) {
+        if let Ok(memo) = Memo::from_bytes(&memo) {
+            self.memos.insert(note_id, memo);
+        }
+    }
+
     ///
-    /// `rcm` and `psi` are the note's ZNS commitment parameters, already
-    /// authenticated by the caller's cmx check. The nullifier filed for the
-    /// note is derived from them — [`orchard::note::Note::zns_nullifier`] —
-    /// because that is the value a spend of this note publishes; the
-    /// rseed-derived [`orchard::note::Note::nullifier`] never matches and
-    /// would blind the wallet to its own Name Notes being spent.
+    /// `nullifier` was derived by the ZNS decryption pass from the same
+    /// authenticated `(rcm, psi)` pair that reproduced the action's cmx. The
+    /// ordinary rseed-derived nullifier never matches a Name Note spend.
     #[allow(clippy::too_many_arguments)]
     pub fn store_name_note(
         &mut self,
-        scanned: &ScannedBlock<AccountId>,
-        ordinal: usize,
+        height: BlockHeight,
+        position: Position,
         txid: TxId,
         action_index: usize,
         note: orchard::note::Note,
+        nullifier: orchard::note::Nullifier,
         ephemeral_key: zcash_note_encryption::EphemeralKeyBytes,
         memo: [u8; 512],
-        rcm: orchard::note::NoteCommitTrapdoor,
-        psi: pasta_curves::pallas::Base,
-    ) -> Option<()> {
-        let fvk = self.ufvks.get(&REGISTRY_ACCOUNT)?.orchard()?.clone();
-        // Filed once, used for both the stored output's nullifier field and
-        // the spend-detection map: every detection pass is a lookup against
-        // this key, so it must be the value a spend reveals.
-        let nf = note.zns_nullifier(&fvk, rcm, psi)?;
-        let bundles = scanned.ironwood();
-        let start_size = bundles
-            .final_tree_size()
-            .checked_sub(u32::try_from(bundles.commitments().len()).ok()?)?;
-        let position = Position::from(u64::from(start_size) + ordinal as u64);
+    ) {
         let note_id = NoteId::new(
             txid,
             ShieldedPool::Ironwood,
-            u16::try_from(action_index).ok()?,
+            u16::try_from(action_index).expect("Ironwood action index fits u16"),
         );
         self.ironwood_notes.insert(
             note_id,
@@ -746,12 +750,12 @@ impl Wallet {
                 (note, orchard::ValuePool::Ironwood),
                 false,
                 position,
-                Some(nf),
+                Some(nullifier),
                 REGISTRY_ACCOUNT,
                 Some(zip32::Scope::External),
             ),
         );
-        self.ironwood_nullifiers.insert(nf, note_id);
+        self.ironwood_nullifiers.insert(nullifier, note_id);
         self.memos.insert(
             note_id,
             Memo::Future(
@@ -761,8 +765,7 @@ impl Wallet {
         );
         self.transaction_statuses.insert(
             txid,
-            zcash_client_backend::data_api::TransactionStatus::Mined(scanned.height()),
+            zcash_client_backend::data_api::TransactionStatus::Mined(height),
         );
-        Some(())
     }
 }
