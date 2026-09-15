@@ -1,9 +1,5 @@
 //! The boot sequence: acquire and verify every capability the run loop
 //! cannot acquire for itself, then hand them over as one contract.
-use chacha20poly1305::{
-    aead::{Aead, KeyInit, Payload},
-    XChaCha20Poly1305, XNonce,
-};
 use secrecy::{ExposeSecret, Secret};
 #[cfg(not(feature = "regtest"))]
 #[cfg(not(feature = "testnet"))]
@@ -18,8 +14,7 @@ use zip32::fingerprint::SeedFingerprint;
 #[cfg(not(feature = "regtest"))]
 use std::str::FromStr;
 
-use zeroize::Zeroize;
-
+use crate::capsule;
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::mtp::MtpTracker;
 use crate::mint::otp::OtpQueue;
@@ -28,6 +23,7 @@ use crate::mint::registry::{ReceivedNameNote, Registry};
 use crate::mint::{
     decrypt_name_notes, MINT_BIRTHDAY, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
+use crate::tee::{self, Tee};
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
 use incrementalmerkletree::Position;
@@ -116,15 +112,25 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         // 1. Liveness + connect: confirm both Zebra transports, get chain client.
         let (chain_client, _tip_height) = connect_zebra().await;
 
-        // 2. Seed intake + verification: read capsule, derive sealing key,
-        //    decrypt, verify fingerprint, then derive keys. The seed lives
-        //    only inside this block — Secret's Drop wipes it.
+        // 1b. TEE handshake: pick the enclave seam. Production = `RealSnpTee`;
+        // `fake-tee` feature = `FakeTee` for off-SNP tests. Capsule AEAD and
+        // `report_data` stay real; only the key/report source changes.
+        let tee = select_tee();
+
+        // 2. Seed intake + verification: read capsule, unseal with the
+        //    TEE-derived sealing key, verify the compiled-in fingerprint,
+        //    then derive keys. The seed lives only inside this block —
+        //    Secret's Drop wipes it.
         let (treasury_keys, registry_keys) = {
             tracing::info!("boot: reading seed capsule from keys/zns_seed.capsule");
             let blob = std::fs::read("keys/zns_seed.capsule").expect(
                 "FATAL: failed to read keys/zns_seed.capsule. The mint cannot boot without the sealed seed.",
             );
-            let seed = decrypt_sealed_blob(&blob);
+            let capsule =
+                capsule::parse_capsule(&blob).expect("FATAL: failed to parse zns_seed.capsule");
+            tracing::info!("boot: deriving instance-bound sealing key from the TEE");
+            let seed = capsule::unseal_seed(tee.as_ref(), &capsule)
+                .expect("FATAL: failed to unseal seed. Capsule tampering, wrong TEE, or wrong capsule for this instance.");
             verify_fingerprint(&seed, SEED_FINGERPRINT_RAW.trim());
             (
                 TreasuryKeys::derive(&network, &seed),
@@ -352,18 +358,21 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         let sapling_spend = load_sapling_spend_params();
         let sapling_output = load_sapling_output_params();
 
-        // 5. Attestation (production only). Nothing fallible is acquired
-        // after this point.
-        #[cfg(not(feature = "regtest"))]
+        // 5. Attestation. Nothing fallible is acquired after this point.
+        //
+        // Regtest does NOT skip attestation: regtest is a local-consensus
+        // toggle, not a TEE toggle. `--features fake-tee` (typically with
+        // `regtest,fake-tee`) is what substitutes the report source so
+        // the mint can produce a report outside SEV-SNP.
         {
             let report_data =
                 generate_attestation_report_data(&network, &treasury_keys, &registry_keys);
-            let attestation_bytes = generate_mint_attestation(report_data);
-            if !attestation_bytes.is_empty() {
-                std::fs::write("zns_mint_attestation.bin", &attestation_bytes)
-                    .expect("FATAL: failed to write attestation to disk");
-                tracing::info!("boot: attestation report written to zns_mint_attestation.bin");
-            }
+            let attestation = tee
+                .get_attestation(&report_data)
+                .expect("FATAL: failed to obtain TEE attestation report");
+            std::fs::write("zns_mint_attestation.bin", attestation.as_bytes())
+                .expect("FATAL: failed to write attestation to disk");
+            tracing::info!("boot: attestation report written to zns_mint_attestation.bin");
         }
 
         tracing::info!(
@@ -448,84 +457,26 @@ async fn connect_zebra() -> (ChainClient, BlockHeight) {
 // Step 2: Seed intake + verification
 // ---------------------------------------------------------------------------
 
-/// The sealed seed envelope written by zns-keygen: magic, fingerprint
-/// (authenticated as additional data), nonce, ciphertext.
-#[derive(serde::Deserialize, serde::Serialize)]
-struct SeedCapsule {
-    magic: [u8; 8],
-    fingerprint: [u8; 32],
-    nonce: Vec<u8>,
-    ciphertext: Vec<u8>,
-}
-
-/// Decrypts the seed capsule with this instance's sealing key; the raw key
-/// is wiped before return and the caller's `Secret` wipes the seed on drop.
-fn decrypt_sealed_blob(blob: &[u8]) -> Secret<[u8; 32]> {
-    tracing::info!("boot: deriving instance-bound SEV-SNP sealing key");
-    let mut raw_key = derive_sealing_key();
-
-    let capsule: SeedCapsule =
-        postcard::from_bytes(blob).expect("FATAL: failed to parse zns_seed.capsule");
-    assert_eq!(&capsule.magic, b"ZNS_SEED", "FATAL: capsule magic mismatch");
-
-    let cipher =
-        XChaCha20Poly1305::new_from_slice(&raw_key).expect("sealing key is exactly 32 bytes");
-    let mut aad = Vec::with_capacity(8 + 32);
-    aad.extend_from_slice(&capsule.magic);
-    aad.extend_from_slice(&capsule.fingerprint);
-    let nonce = <&XNonce>::from(capsule.nonce.as_slice());
-
-    tracing::info!("boot: decrypting seed");
-    let mut plaintext = cipher
-        .decrypt(
-            nonce,
-            Payload {
-                msg: &capsule.ciphertext,
-                aad: &aad,
-            },
-        )
-        .expect("FATAL: failed to decrypt seed. Capsule tampering or wrong SEV-SNP instance.");
-    raw_key.zeroize();
-
-    if plaintext.len() != 32 {
-        plaintext.zeroize();
-        panic!("FATAL: decrypted seed is not exactly 32 bytes");
-    }
-    let mut seed_bytes = [0u8; 32];
-    seed_bytes.copy_from_slice(&plaintext);
-    plaintext.zeroize();
-    Secret::new(seed_bytes)
-}
-
-/// Derives — never fetches — the sealing key from the SEV-SNP firmware at
-/// boot: `firmware.get_derived_key` returns a VCEK-rooted, per-chip key mixed
-/// from exactly two guest fields, matching zns-keygen:
-///   guest_policy — launch conditions (debug, SMT, migration)
-///   measurement  — code identity (hash of the guest image)
+/// Selects the TEE seam for this build: [`crate::tee::FakeTee`] behind the
+/// `fake-tee` feature (dev-only; blocked from release by a
+/// `compile_error!` in `crate::lib`), otherwise [`crate::tee::RealSnpTee`].
 ///
-/// image_id and family_id are deliberately excluded: they are
-/// hypervisor-supplied labels with no security content, and including them
-/// makes the key brittle to launch-blob drift. VCEK (root_key_select = false)
-/// is stable across reboots; VMRK is random per launch without a Migration
-/// Agent and would brick the capsule on first reboot.
-#[cfg(target_os = "linux")]
-fn derive_sealing_key() -> [u8; 32] {
-    use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
-
-    let mut firmware = Firmware::open()
-        .expect("FATAL: SEV-SNP firmware not available — cannot derive sealing key");
-    let mut guest_fields = GuestFieldSelect::default();
-    guest_fields.set_guest_policy(true);
-    guest_fields.set_measurement(true);
-    let request = DerivedKey::new(false, guest_fields, 0, 0, 0, None);
-    firmware
-        .get_derived_key(Some(1), request)
-        .expect("FATAL: failed to derive SEV-SNP VCEK sealing key")
-}
-
-#[cfg(not(target_os = "linux"))]
-fn derive_sealing_key() -> [u8; 32] {
-    panic!("FATAL: the mint boots only on AMD SEV-SNP Linux. This platform cannot hold the seed.")
+/// Returned as a boxed trait object because boot doesn't specialise on
+/// which TEE it holds — the two capabilities it needs (sealing key,
+/// attestation) are exactly what the trait exposes.
+fn select_tee() -> Box<dyn Tee> {
+    #[cfg(feature = "fake-tee")]
+    {
+        tracing::warn!(
+            "boot: FAKE TEE selected — sealing key and attestation are dev-only; \
+             any real verifier rejects this report"
+        );
+        Box::new(tee::FakeTee)
+    }
+    #[cfg(not(feature = "fake-tee"))]
+    {
+        Box::new(tee::RealSnpTee)
+    }
 }
 
 static SEED_FINGERPRINT_RAW: &str = "PLACEHOLDER";
@@ -687,7 +638,8 @@ pub(crate) fn load_sapling_output_params() -> OutputParameters {
 ///
 /// An external verifier checks this against the expected Treasury address
 /// and Registry UFVK, binding the attestation to the mint's identity.
-#[cfg(not(feature = "regtest"))]
+/// Production code path — not gated on any dev feature, so a `fake-tee`
+/// build still binds a real identity into its (unverifiable) report.
 fn generate_attestation_report_data<P: Parameters>(
     network: &P,
     treasury_keys: &TreasuryKeys,
@@ -711,25 +663,6 @@ fn generate_attestation_report_data<P: Parameters>(
     let mut report_data = [0u8; 64];
     report_data.copy_from_slice(hash.as_bytes());
     report_data
-}
-
-#[cfg(all(not(feature = "regtest"), target_os = "linux"))]
-fn generate_mint_attestation(report_data: [u8; 64]) -> Vec<u8> {
-    use sev::firmware::guest::Firmware;
-
-    tracing::info!("boot: generating mint attestation report");
-
-    let mut firmware = Firmware::open()
-        .expect("FATAL: SEV-SNP firmware not available — cannot generate attestation");
-
-    firmware
-        .get_report(None, Some(report_data), None)
-        .expect("FATAL: failed to request SEV-SNP attestation report")
-}
-
-#[cfg(all(not(feature = "regtest"), not(target_os = "linux")))]
-fn generate_mint_attestation(_report_data: [u8; 64]) -> Vec<u8> {
-    panic!("FATAL: mint attestation requires AMD SEV-SNP Linux.")
 }
 
 // ---------------------------------------------------------------------------
