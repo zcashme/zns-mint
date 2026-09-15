@@ -92,7 +92,7 @@ pub fn prepare<P: Parameters>(
         fee_funding = (fee_funding + zatoshis(candidate))
             .expect("Treasury balance fits in the Zcash monetary range");
         fee_notes.push((
-            candidate.note().clone(),
+            *candidate.note(),
             wallet
                 .witness(candidate, tip)
                 .expect("FATAL: owned note has no witness at the applied tip"),
@@ -107,7 +107,11 @@ pub fn prepare<P: Parameters>(
 
     // Lock every selected input until the transaction expires.
     let locked_refs = std::iter::once(OutputRef::from(*authority.internal_note_id()))
-        .chain(funding.iter().map(|f| OutputRef::from(*f.internal_note_id())))
+        .chain(
+            funding
+                .iter()
+                .map(|f| OutputRef::from(*f.internal_note_id())),
+        )
         .chain(
             candidates
                 .iter()
@@ -124,7 +128,7 @@ pub fn prepare<P: Parameters>(
         .expect("FATAL: wallet rejected the input lock");
 
     let anchor = wallet.anchor_at(tip);
-    let authority_note = authority.note().clone();
+    let authority_note = *authority.note();
     let authority_path = wallet
         .witness(&authority, tip)
         .expect("FATAL: owned note has no witness at the applied tip");
@@ -173,7 +177,7 @@ pub fn prepare<P: Parameters>(
 
     // The funding note (payment or echo) is a fixed Treasury spend.
     if let Some(funding) = funding {
-        let funding_note = funding.note().clone();
+        let funding_note = *funding.note();
         let funding_path = wallet
             .witness(funding, tip)
             .expect("FATAL: owned note has no witness at the applied tip");
@@ -239,7 +243,7 @@ pub fn prepare<P: Parameters>(
                 orchard::keys::SpendAuthorizingKey::from(treasury_keys.orchard_spending_key()),
                 orchard::keys::SpendAuthorizingKey::from(registry_keys.orchard_spending_key()),
             ],
-            &mut rand::rngs::OsRng,
+            rand::rngs::OsRng,
             spend_prover,
             output_prover,
             &StandardFeeRule::Zip317,

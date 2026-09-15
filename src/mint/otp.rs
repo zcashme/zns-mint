@@ -5,7 +5,7 @@ use subtle::ConstantTimeEq;
 use time::Timestamp;
 use zeroize::Zeroize;
 
-use crate::mint::{Action, Challenge, Name, NameCommitment, UnifiedAddress};
+use crate::mint::{Action, Challenge, Name, NameCommitment, Term, UnifiedAddress};
 
 /// Thirty minutes; §5.3: D_OTP.
 pub const D_OTP: i64 = 1800;
@@ -69,8 +69,8 @@ pub struct OtpRequest {
     pub tip_rcm: NameCommitment,
     pub code: OtpCode,
     pub expires_at: Timestamp,
-    /// Extension the sentence omits.
-    pub extend_years: Option<u64>,
+    /// Requested extension; `None` carries the live period forward.
+    pub term: Option<Term>,
 }
 
 /// Issued challenges, in order.

@@ -186,7 +186,7 @@ impl Wallet {
             note_id,
             *note_id.txid(),
             note_id.output_index(),
-            output.note().0.clone(),
+            output.note().0,
             output.recipient_key_scope()?,
             output.note_commitment_tree_position(),
             self.mined_height(note_id.txid()),
@@ -411,7 +411,7 @@ impl InputSource for Wallet {
         exclude: &[Self::NoteRef],
         lock_filter: LockFilter<'_>,
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
-        if self.ufvks.get(&account).is_none() {
+        if !self.ufvks.contains_key(&account) {
             return Err(WalletError::AccountUnknown(account));
         }
 
@@ -490,7 +490,7 @@ impl InputSource for Wallet {
         exclude: &[Self::NoteRef],
         lock_filter: LockFilter<'_>,
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
-        if self.ufvks.get(&account).is_none() {
+        if !self.ufvks.contains_key(&account) {
             return Err(WalletError::AccountUnknown(account));
         }
 
@@ -526,7 +526,7 @@ impl InputSource for Wallet {
         exclude: &[Self::NoteRef],
         lock_filter: LockFilter<'_>,
     ) -> Result<AccountMeta, Self::Error> {
-        if self.ufvks.get(&account).is_none() {
+        if !self.ufvks.contains_key(&account) {
             return Err(WalletError::AccountUnknown(account));
         }
 

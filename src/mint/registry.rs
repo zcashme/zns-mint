@@ -3,8 +3,7 @@
 
 use crate::mint::otp::OtpQueue;
 use crate::mint::{
-    Action, Expiry, Name, NameCommitment, NameNote, Request, Term, UnifiedAddress,
-    LIVENESS_INTERVAL, MAX_TERM_YEARS, REGISTRY_ACCOUNT,
+    Action, Expiry, Name, NameCommitment, NameNote, Request, UnifiedAddress, REGISTRY_ACCOUNT,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
@@ -217,12 +216,14 @@ impl Registry {
     ) -> Option<NameNote> {
         match request {
             Request::Claim { name, ua, term } => {
-                // Availability: unseen, or released with a payment that
-                // postdates the tombstone — a payment mined before the
-                // release predates the freedom it claims.
                 match current_record(self, &name) {
                     None => {}
-                    Some(record @ NameRecord { action: Action::Release, .. }) => {
+                    Some(
+                        record @ NameRecord {
+                            action: Action::Release,
+                            ..
+                        },
+                    ) => {
                         if payment_height <= record.confirmed_height {
                             return None;
                         }
@@ -230,12 +231,8 @@ impl Registry {
                     Some(_) => return None, // live
                 }
                 let expires_at = match term {
-                    Term::Forever => Expiry::Never,
-                    Term::Years(years) => {
-                        let seconds = years.checked_mul(LIVENESS_INTERVAL as u64)? as i64;
-                        let at = mtp.as_seconds().checked_add(seconds)?;
-                        Expiry::At(Timestamp::from_seconds(at).ok()?)
-                    }
+                    None => Expiry::Never,
+                    Some(term) => term.claim_expiry(mtp)?,
                 };
                 Some(NameNote::Claim {
                     name,
@@ -243,17 +240,11 @@ impl Registry {
                     expires_at,
                 })
             }
-            Request::Update {
-                name,
-                ua,
-                extend_years,
-            } => {
+            Request::Update { name, ua, term } => {
                 let record = current_record(self, &name)?;
                 if record.action == Action::Release {
                     return None;
                 }
-                // §4.5.3: no update is accepted once expiry is reached —
-                // the Mint's lifecycle release owns that moment.
                 if record.expires_at.expired(mtp) {
                     return None;
                 }
@@ -261,23 +252,7 @@ impl Registry {
                 if !challenges.accept(&name, Action::Update, &ua, record.commitment, otp, mtp) {
                     return None;
                 }
-                // §4.5.3: an ordinary update carries the current expiry
-                // forward; an extension adds whole years to it — never
-                // past the ninety-nine-year fence measured from now.
-                let expires_at = match (record.expires_at, extend_years) {
-                    (Expiry::Never, _) | (_, None) => record.expires_at,
-                    (Expiry::At(current), Some(years)) => {
-                        let extension = years.checked_mul(LIVENESS_INTERVAL as u64)? as i64;
-                        let extended = current.as_seconds().checked_add(extension)?;
-                        let fence = mtp
-                            .as_seconds()
-                            .checked_add((MAX_TERM_YEARS as i64).checked_mul(LIVENESS_INTERVAL)?)?;
-                        if extended > fence {
-                            return None;
-                        }
-                        Expiry::At(Timestamp::from_seconds(extended).ok()?)
-                    }
-                };
+                let expires_at = record.expires_at.extend(term)?;
                 Some(NameNote::Update {
                     name,
                     ua,
@@ -401,8 +376,7 @@ impl Registry {
             // post-root successors enter only by induction on accepted
             // claims below, never by this cap.
             for output in &registry_outputs {
-                if next.anchor_pool.len() < ANCHOR_POOL_SIZE
-                    && output.note().0.value().inner() == 0
+                if next.anchor_pool.len() < ANCHOR_POOL_SIZE && output.note().0.value().inner() == 0
                 {
                     if let Some(nf) = output.nf() {
                         next.anchor_pool.insert(*nf);
@@ -418,11 +392,8 @@ impl Registry {
             let spent_record_names: Vec<_> = next
                 .records
                 .iter()
-                .filter_map(|(name, record)| {
-                    ironwood_nullifiers
-                        .contains(&record.nullifier)
-                        .then(|| name.clone())
-                })
+                .filter(|(_, record)| ironwood_nullifiers.contains(&record.nullifier))
+                .map(|(name, _)| name.clone())
                 .collect();
             let spends_registry_authority = spends_claim_anchor || !spent_record_names.is_empty();
 
@@ -544,7 +515,8 @@ impl Registry {
         // Snapshot the pool whenever it changed, so truncation restores
         // the as-of-this-height state without replaying history.
         if next.anchor_pool != self.anchor_pool {
-            next.pool_checkpoints.insert(height, next.anchor_pool.clone());
+            next.pool_checkpoints
+                .insert(height, next.anchor_pool.clone());
         }
 
         (next, accepted)

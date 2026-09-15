@@ -209,6 +209,7 @@ impl Wallet {
     ///
     /// Confirmation and trust classification is delegated to `wallet::input`
     /// so that balance reporting and input selection can never disagree.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn add_note_to_balance(
         &self,
         balances: &mut HashMap<AccountId, AccountBalance>,
@@ -460,10 +461,7 @@ impl WalletRead for Wallet {
     fn block_fully_scanned(&self) -> Result<Option<BlockMetadata>, Self::Error> {
         // Blocks are only ever applied sequentially, so the highest applied
         // block is by definition fully scanned.
-        Ok(self
-            .blocks
-            .last_key_value()
-            .map(|(_, metadata)| metadata.clone()))
+        Ok(self.blocks.last_key_value().map(|(_, metadata)| *metadata))
     }
 
     fn get_max_height_hash(&self) -> Result<Option<(BlockHeight, BlockHash)>, Self::Error> {

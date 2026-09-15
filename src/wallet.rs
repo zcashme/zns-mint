@@ -216,8 +216,8 @@ impl Wallet {
         target_height: BlockHeight,
         fee: Zatoshis,
     ) {
-        use zcash_client_backend::data_api::WalletWrite as _;
         use zcash_client_backend::data_api::wallet::TargetHeight;
+        use zcash_client_backend::data_api::WalletWrite as _;
         let sent = SentTransaction::new(
             transaction,
             time::OffsetDateTime::now_utc(),
@@ -244,7 +244,7 @@ impl Wallet {
         self.blocks
             .get(&height)
             .cloned()
-            .or_else(|| (height == self.seed.block_height()).then(|| self.seed.clone()))
+            .or_else(|| (height == self.seed.block_height()).then_some(self.seed))
     }
 
     /// Truncates the wallet to `max_height` and returns the

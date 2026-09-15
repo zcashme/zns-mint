@@ -725,6 +725,7 @@ impl Wallet {
     /// `nullifier` was derived by the ZNS decryption pass from the same
     /// authenticated `(rcm, psi)` pair that reproduced the action's cmx. The
     /// ordinary rseed-derived nullifier never matches a Name Note spend.
+    #[allow(clippy::too_many_arguments)]
     pub fn store_name_note(
         &mut self,
         height: BlockHeight,
@@ -746,7 +747,7 @@ impl Wallet {
             WalletIronwoodOutput::from_parts(
                 action_index,
                 ephemeral_key,
-                (note.clone(), orchard::ValuePool::Ironwood),
+                (note, orchard::ValuePool::Ironwood),
                 false,
                 position,
                 Some(nullifier),

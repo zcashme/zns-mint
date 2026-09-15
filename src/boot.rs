@@ -8,7 +8,7 @@ use secrecy::{ExposeSecret, Secret};
 #[cfg(not(feature = "regtest"))]
 #[cfg(not(feature = "testnet"))]
 use zcash_protocol::consensus::MainNetwork;
-#[cfg(feature = "testnet")]
+#[cfg(all(feature = "testnet", not(feature = "regtest")))]
 use zcash_protocol::consensus::TestNetwork;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 #[cfg(feature = "regtest")]
@@ -25,16 +25,18 @@ use crate::mint::mtp::MtpTracker;
 use crate::mint::otp::OtpQueue;
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::{ReceivedNameNote, Registry};
-use crate::mint::{decrypt_name_notes, MINT_BIRTHDAY, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::{
+    decrypt_name_notes, MINT_BIRTHDAY, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+};
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
-use sapling::circuit::{OutputParameters, SpendParameters};
 use incrementalmerkletree::Position;
+use sapling::circuit::{OutputParameters, SpendParameters};
+use std::convert::Infallible;
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata, WalletWrite as _};
 use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
 use zcash_client_backend::scanning::Nullifiers;
-use std::convert::Infallible;
 
 // ---------------------------------------------------------------------------
 // Boot life-cycle
@@ -75,7 +77,7 @@ pub struct Boot<P: Parameters> {
 #[cfg(not(feature = "testnet"))]
 const NETWORK_LABEL: &str = "mainnet";
 
-#[cfg(feature = "testnet")]
+#[cfg(all(feature = "testnet", not(feature = "regtest")))]
 const NETWORK_LABEL: &str = "testnet";
 
 #[cfg(feature = "regtest")]
@@ -89,7 +91,7 @@ impl Boot<MainNetwork> {
     }
 }
 
-#[cfg(feature = "testnet")]
+#[cfg(all(feature = "testnet", not(feature = "regtest")))]
 impl Boot<TestNetwork> {
     pub async fn start() -> Self {
         Self::start_with_network(zcash_protocol::consensus::TEST_NETWORK).await
@@ -181,7 +183,9 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         let mut cursor = block_metadata(&origin);
         let mut registry = Registry::new(checkpoint_height);
         let source = crate::zcash::CanonicalBlockSource::new();
-        let (best_height, _best_hash) = source.exact_tip().await
+        let (best_height, _best_hash) = source
+            .exact_tip()
+            .await
             .expect("FATAL: Zebra tip unavailable during boot sync");
         tracing::info!(
             from = u32::from(checkpoint_height),
@@ -192,16 +196,22 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             let from_height = cursor.block_height();
             let next_height = from_height + 1;
 
-            let from_state = rpc.chain_state_at(from_height).await
+            let from_state = rpc
+                .chain_state_at(from_height)
+                .await
                 .expect("FATAL: chain state unavailable during boot sync");
-            let block = rpc.get_block(&network, next_height).await
+            let block = rpc
+                .get_block(&network, next_height)
+                .await
                 .expect("FATAL: block unavailable during boot sync");
             let block_time = block.header().time;
 
             let candidates = decrypt_name_notes(&network, &block, &registry_keys);
             let name_notes: Vec<ReceivedNameNote> = candidates
                 .iter()
-                .map(|c| ReceivedNameNote::new(c.txid, c.action_index, c.nullifier, c.payload.clone()))
+                .map(|c| {
+                    ReceivedNameNote::new(c.txid, c.action_index, c.nullifier, c.payload.clone())
+                })
                 .collect();
             let treasury_memos = crate::mint::note::decrypt_treasury_memos(&block, &treasury_keys);
 
@@ -209,10 +219,24 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             let nullifiers = Nullifiers::unspent(&wallet)
                 .expect("FATAL: wallet nullifiers unavailable during boot sync");
             let scanned = scan_block(
-                &network, next_height, &header, batches,
-                wallet.scanning_keys(), &nullifiers, Some(&cursor),
-                |_| Ok::<Option<(zip32::AccountId, Option<transparent::keys::TransparentKeyScope>)>, Infallible>(None),
-            ).expect("FATAL: block scan failed during boot sync");
+                &network,
+                next_height,
+                &header,
+                batches,
+                wallet.scanning_keys(),
+                &nullifiers,
+                Some(&cursor),
+                |_| {
+                    Ok::<
+                        Option<(
+                            zip32::AccountId,
+                            Option<transparent::keys::TransparentKeyScope>,
+                        )>,
+                        Infallible,
+                    >(None)
+                },
+            )
+            .expect("FATAL: block scan failed during boot sync");
 
             let mut next_mtp = mtp.clone();
             next_mtp.update(next_height, block_time);
@@ -221,21 +245,29 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             let (next_registry, accepted_name_notes) =
                 registry.apply_block(&network, &scanned, &name_notes, block_mtp);
 
-            let ironwood_start = scanned.ironwood().final_tree_size()
-                .checked_sub(u32::try_from(scanned.ironwood().commitments().len())
-                    .expect("Ironwood action count fits u32"))
+            let ironwood_start = scanned
+                .ironwood()
+                .final_tree_size()
+                .checked_sub(
+                    u32::try_from(scanned.ironwood().commitments().len())
+                        .expect("Ironwood action count fits u32"),
+                )
                 .expect("FATAL: impossible Ironwood tree size");
-            let accepted_name_notes = accepted_name_notes.into_iter().map(|index| {
-                let candidate = &candidates[index];
-                let position = Position::from(
-                    u64::from(ironwood_start)
-                        + u64::try_from(candidate.ordinal).expect("ordinal fits u64"),
-                );
-                (index, position)
-            }).collect::<Vec<_>>();
+            let accepted_name_notes = accepted_name_notes
+                .into_iter()
+                .map(|index| {
+                    let candidate = &candidates[index];
+                    let position = Position::from(
+                        u64::from(ironwood_start)
+                            + u64::try_from(candidate.ordinal).expect("ordinal fits u64"),
+                    );
+                    (index, position)
+                })
+                .collect::<Vec<_>>();
             let next_metadata = scanned.to_block_metadata();
 
-            wallet.put_blocks(&from_state, vec![scanned])
+            wallet
+                .put_blocks(&from_state, vec![scanned])
                 .expect("FATAL: wallet commit failed during boot sync");
             // Upstream's ScannedBlock drops note plaintexts; the Treasury
             // lane's memos were decrypted above and are stored alongside.
@@ -252,8 +284,14 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             for (index, position) in accepted_name_notes {
                 let c = &candidates[index];
                 wallet.store_name_note(
-                    next_height, position, c.txid, c.action_index,
-                    c.note.clone(), c.nullifier, c.ephemeral_key.clone(), c.memo,
+                    next_height,
+                    position,
+                    c.txid,
+                    c.action_index,
+                    c.note,
+                    c.nullifier,
+                    c.ephemeral_key.clone(),
+                    c.memo,
                 );
             }
 

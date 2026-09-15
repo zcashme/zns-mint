@@ -12,7 +12,7 @@ pub mod treasury;
 pub use zcash_client_backend::data_api::BlockMetadata as ChainTip;
 
 // The Name Note type and its codec.
-pub use note::{decrypt_name_notes, DecryptedNameNote, Expiry, NameNote};
+pub use note::{decrypt_name_notes, DecryptedNameNote, Expiry, NameNote, Term};
 pub use time::Timestamp;
 
 pub use zcash_keys::address::UnifiedAddress;
@@ -30,7 +30,7 @@ pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
 #[cfg(not(feature = "testnet"))]
 pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(3_400_000);
 
-#[cfg(feature = "testnet")]
+#[cfg(all(feature = "testnet", not(feature = "regtest")))]
 pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(4_338_933);
 
 /// Regtest birth: first block after the harness's NU6.3 activation (height 4).
@@ -39,9 +39,6 @@ pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(4);
 
 /// The liveness interval: one Julian year (365.25 days), in seconds.
 pub const LIVENESS_INTERVAL: i64 = 31_557_600;
-
-/// The longest fixed-term registration the mint will accept: 99 years.
-pub const MAX_TERM_YEARS: u64 = 99;
 
 /// Minimum Treasury Ironwood balance after boot sync (0.002 ZEC).
 pub const MIN_TREASURY_BALANCE: u64 = 200_000;
@@ -66,136 +63,29 @@ impl Action {
             Action::Release => "release",
         }
     }
-
-    /// Parses a request-memo verb.
-    fn from_verb(verb: &str) -> Option<Self> {
-        match verb {
-            "claim" => Some(Action::Claim),
-            "update" => Some(Action::Update),
-            "release" => Some(Action::Release),
-            _ => None,
-        }
-    }
-
-    /// Parses a whole number of years from a request-memo kind field, e.g. `3y`.
-    fn parse_years(kind: &str) -> Option<u64> {
-        let digits = kind.strip_suffix('y')?;
-        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        if digits.len() > 1 && digits.starts_with('0') {
-            return None;
-        }
-        let years = digits.parse().ok()?;
-        (years > 0 && years <= crate::mint::MAX_TERM_YEARS).then_some(years)
-    }
 }
 
-/// The registration period of a name.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Term {
-    /// No fixed expiration — the name is held while its liveness checks pass.
-    Forever,
-    /// A fixed term of N years, whole multiples of [`LIVENESS_INTERVAL`],
-    /// capped at [`MAX_TERM_YEARS`].
-    Years(u64),
-}
-
-/// The mint's request memo format, sent to the Treasury to claim, update, or release a name.
+/// An authorized transition the loop is about to assemble.
+///
+/// Built from [`treasury::parse_request`](crate::mint::treasury::parse_request);
+/// memo bytes stay on that parser. `term` is a canonical second-duration
+/// (`None` = forever on a claim, no extension on an update).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
-    /// Create a new registration. The `term` is either `forever` or `<N>y`.
     Claim {
         name: Name,
         ua: UnifiedAddress,
-        term: Term,
+        term: Option<Term>,
     },
-    /// Rebind and/or extend an existing registration.
     Update {
         name: Name,
         ua: UnifiedAddress,
-        extend_years: Option<u64>,
+        term: Option<Term>,
     },
-    /// Terminate the registration initiated by expiration or voluntary release.
-    Release { name: Name, ua: UnifiedAddress },
-}
-
-impl Request {
-    /// Decodes valid name request memo sent to the Treasury:
-    pub fn decode<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Self> {
-        let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
-        if raw[end..].iter().any(|b| *b != 0) {
-            return None;
-        }
-        let text = core::str::from_utf8(&raw[..end]).ok()?;
-
-        let mut fields = text.split(':');
-        if fields.next()? != "ZNS" {
-            return None;
-        }
-        let action = Action::from_verb(fields.next()?)?;
-
-        match action {
-            Action::Claim => {
-                // ZNS:claim:<term>:<name>:<ua>
-                let term = match fields.next()? {
-                    "forever" => Term::Forever,
-                    years => Term::Years(Action::parse_years(years)?),
-                };
-                let name = Name::parse(fields.next()?)?;
-                let ua_str = fields.next()?;
-                if ua_str.is_empty() {
-                    return None;
-                }
-                let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
-                    zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
-                    _ => return None,
-                };
-                if fields.next().is_some() {
-                    return None;
-                }
-                Some(Request::Claim { name, ua, term })
-            }
-            Action::Update => {
-                // ZNS:update:<years?>:<name>:<ua>
-                let years_str = fields.next()?;
-                let extend_years = if years_str.is_empty() {
-                    None
-                } else {
-                    Some(Action::parse_years(years_str)?)
-                };
-                let name = Name::parse(fields.next()?)?;
-                let ua_str = fields.next()?;
-                if ua_str.is_empty() {
-                    return None;
-                }
-                let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
-                    zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
-                    _ => return None,
-                };
-                if fields.next().is_some() {
-                    return None;
-                }
-                Some(Request::Update { name, ua, extend_years })
-            }
-            Action::Release => {
-                // ZNS:release:<name>:<ua>
-                let name = Name::parse(fields.next()?)?;
-                let ua_str = fields.next()?;
-                if ua_str.is_empty() {
-                    return None;
-                }
-                let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
-                    zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
-                    _ => return None,
-                };
-                if fields.next().is_some() {
-                    return None;
-                }
-                Some(Request::Release { name, ua })
-            }
-        }
-    }
+    Release {
+        name: Name,
+        ua: UnifiedAddress,
+    },
 }
 
 /// A mint-issued challenge to a wallet, proving that the wallet controls a name via shielded-memos.

@@ -191,6 +191,59 @@ impl Expiry {
             Expiry::At(t) => mtp >= t,
         }
     }
+
+    /// Successor expiry for an update (§4.5.3).
+    ///
+    /// No term, or `none`, leaves the period unchanged.
+    /// A term extends a fixed instant: `current + requested_term`. Returns
+    /// `None` if that sum is not a representable timestamp.
+    pub fn extend(self, term: Option<Term>) -> Option<Self> {
+        match (self, term) {
+            (Expiry::Never, _) => Some(Expiry::Never),
+            (expiry, None) => Some(expiry),
+            (Expiry::At(t), Some(term)) => t.checked_add(term.duration()).map(Expiry::At),
+        }
+    }
+}
+
+/// A requested registration period, in whole seconds.
+///
+/// This is a duration, not an absolute `expires_at`. The user supplies it
+/// on a claim or as an update extension; the Mint computes the resulting
+/// instant (`MTP + term` on claim, `current + term` on renewal).
+///
+/// Canonical request spelling is decimal digits with no sign and no
+/// leading zeroes. Zero and `none` are not terms — omit the field, or
+/// write `none`, for no fixed expiration / no extension.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Term(i64);
+
+impl Term {
+    /// Parses a canonical duration field: digits only, no sign, no leading
+    /// zeroes, at least one second.
+    pub fn parse(field: &str) -> Option<Self> {
+        if field.is_empty() || field.len() > 20 || !field.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if field.starts_with('0') {
+            return None;
+        }
+        let seconds: i64 = field.parse().ok()?;
+        if seconds < 1 {
+            return None;
+        }
+        Some(Self(seconds))
+    }
+
+    /// The period as a `time` duration.
+    pub fn duration(self) -> time::Duration {
+        time::Duration::new(self.0, 0)
+    }
+
+    /// Claim expiry: canonical-chain MTP plus this term (§4.5).
+    pub fn claim_expiry(self, mtp: Timestamp) -> Option<Expiry> {
+        mtp.checked_add(self.duration()).map(Expiry::At)
+    }
 }
 
 /// Derives the ZNS note-commitment randomness `rcm` for a transition (§3.3):
@@ -410,7 +463,7 @@ pub fn decrypt_name_notes<P: Parameters>(
                         // The authorship check, caller-side: the memo's transition,
                         // hashed under the ZNS binding, must reproduce the action's
                         // published cmx.
-                        let note = candidate.note().clone();
+                        let note = *candidate.note();
                         let rcm =
                             orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network));
                         let psi = payload.psi(network);
@@ -682,5 +735,17 @@ mod tests {
         assert!(Expiry::At(t).expired(Timestamp::from_seconds(1_001).unwrap()));
         assert!(!Expiry::At(t).expired(Timestamp::from_seconds(999).unwrap()));
         assert!(!Expiry::Never.expired(Timestamp::MAX));
+    }
+
+    #[test]
+    fn update_extend_adds_the_term() {
+        let mtp = Timestamp::from_seconds(1_000).unwrap();
+        let term = Term::parse("500").unwrap();
+        assert_eq!(
+            Expiry::At(mtp).extend(Some(term)),
+            Some(Expiry::At(Timestamp::from_seconds(1_500).unwrap()))
+        );
+        assert_eq!(Expiry::Never.extend(Some(term)), Some(Expiry::Never));
+        assert_eq!(Expiry::At(mtp).extend(None), Some(Expiry::At(mtp)));
     }
 }

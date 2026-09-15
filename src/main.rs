@@ -28,9 +28,9 @@ use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D_OTP};
 use zns_mint::mint::registry::{NameRecord, ReceivedNameNote};
-use zns_mint::mint::treasury;
+use zns_mint::mint::treasury::{self, parse_request};
 use zns_mint::mint::{
-    Action, Challenge, Request, Term, MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    Action, Challenge, Request, MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{self, CanonicalBlockSource, ChainClient, JsonRpc, SubmitOutcome, TipStream};
 
@@ -340,7 +340,7 @@ async fn main() {
                     position,
                     candidate.txid,
                     candidate.action_index,
-                    candidate.note.clone(),
+                    candidate.note,
                     candidate.nullifier,
                     candidate.ephemeral_key.clone(),
                     candidate.memo,
@@ -359,10 +359,7 @@ async fn main() {
 
         assert_eq!(chain_tip.block_height(), best_height);
         assert_eq!(chain_tip.block_hash(), best_hash);
-        tracing::info!(
-            height = u32::from(best_height),
-            "scanned to tip"
-        );
+        tracing::info!(height = u32::from(best_height), "scanned to tip");
         let tip = chain_tip.block_height();
         let tip_hash = chain_tip.block_hash();
         let target_height = tip + 1;
@@ -418,31 +415,49 @@ async fn main() {
             let memo = memo.encode();
             let raw = memo.as_array();
 
-            let Some(request) = Request::decode(&network, raw) else {
-                // Not a request: an OTP echo, or junk.
-                if let Some(challenge) = Challenge::decode(&network, raw) {
-                    // OTP echoes return an authorized transition. The
-                    // challenge memory is cloned so a rejected submission
-                    // leaves the pending request alive for a later echo.
-                    let Some(record) = registry.record(&challenge.name).cloned() else {
+            let Some(parsed) = parse_request(&network, raw) else {
+                if seen_notes.insert(note_id) {
+                    tracing::info!(
+                        txid = %note_id.txid(),
+                        value_zec = note.note().value().inner() as f64 / 1e8,
+                        height = u32::from(note_height),
+                        "treasury received non-request payment"
+                    );
+                }
+                continue;
+            };
+
+            match (parsed.action, parsed.otp) {
+                (Action::Claim, Some(_)) => continue,
+                (Action::Update | Action::Release, Some(otp)) => {
+                    let Some(record) = registry.record(&parsed.name).cloned() else {
                         continue;
                     };
                     if record.action == Action::Release {
                         continue;
                     }
+                    let Some(code) = OtpCode::from_digits(&otp) else {
+                        continue;
+                    };
+                    let challenge = Challenge {
+                        code,
+                        name: parsed.name.clone(),
+                        action: parsed.action,
+                        ua: parsed.ua.clone(),
+                    };
                     let Some(sent) = challenges.awaiting(&challenge, mtp_now) else {
                         continue;
                     };
                     let digits = sent.code.digits();
-                    let request = match challenge.action {
+                    let request = match parsed.action {
                         Action::Update => Request::Update {
-                            name: challenge.name.clone(),
-                            ua: challenge.ua.clone(),
-                            extend_years: sent.extend_years,
+                            name: parsed.name.clone(),
+                            ua: parsed.ua.clone(),
+                            term: sent.term,
                         },
                         Action::Release => Request::Release {
-                            name: challenge.name.clone(),
-                            ua: challenge.ua.clone(),
+                            name: parsed.name.clone(),
+                            ua: parsed.ua.clone(),
                         },
                         Action::Claim => continue,
                     };
@@ -453,8 +468,7 @@ async fn main() {
                         Some(&digits),
                         note_height,
                         mtp_now,
-                    )
-                    else {
+                    ) else {
                         continue;
                     };
                     let Some(transaction) = assemble::prepare(
@@ -471,8 +485,8 @@ async fn main() {
                         target_height,
                     ) else {
                         tracing::debug!(
-                            name = %challenge.name.as_str(),
-                            action = challenge.action.as_str(),
+                            name = %parsed.name.as_str(),
+                            action = parsed.action.as_str(),
                             "authorized transition awaits Treasury fee funds"
                         );
                         continue;
@@ -485,8 +499,8 @@ async fn main() {
                                 tracing::error!(
                                     %error,
                                     txid = %transaction.txid(),
-                                    name = %challenge.name.as_str(),
-                                    action = challenge.action.as_str(),
+                                    name = %parsed.name.as_str(),
+                                    action = parsed.action.as_str(),
                                     "authorized transition rejected"
                                 );
                                 break false;
@@ -508,43 +522,22 @@ async fn main() {
                         challenges = authorized_challenges;
                         tracing::info!(
                             txid = %transaction.txid(),
-                            name = %challenge.name.as_str(),
-                            action = challenge.action.as_str(),
+                            name = %parsed.name.as_str(),
+                            action = parsed.action.as_str(),
                             "authorized transition submitted"
                         );
                     }
-                } else {
-                    // Not mint-aware at all: a funding top-up or junk. It
-                    // is money either way — every deposit is an event.
-                    if seen_notes.insert(note_id) {
-                        tracing::info!(
-                            txid = %note_id.txid(),
-                            value_zec = note.note().value().inner() as f64 / 1e8,
-                            height = u32::from(note_height),
-                            "treasury received non-request payment"
-                        );
-                    }
                 }
-                continue;
-            };
 
-            match request {
-                Request::Claim { name, ua, term } => {
+                (Action::Claim, None) => {
+                    let name = parsed.name;
+                    let ua = parsed.ua;
+                    let term = parsed.term;
                     // A registration spends one current claim anchor, spends
                     // the inbound payment note, draws the network fee from
                     // separate eligible Treasury notes, and creates both
                     // the Name Note and the next zero-value claim anchor.
-                    let price = match term {
-                        Term::Forever => oracle.quote_forever(&name),
-                        Term::Years(years) => Zatoshis::from_u64(
-                            oracle
-                                .quote_annual(&name)
-                                .into_u64()
-                                .checked_mul(years)
-                                .expect("registration quote fits u64"),
-                        )
-                        .expect("registration quote fits the Zcash monetary range"),
-                    };
+                    let price = oracle.quote_forever(&name);
                     // Payment gate: the quote at first sight is binding.
                     // An underpaid claim is dead and silent; a new
                     // payment settles a new evaluation.
@@ -575,19 +568,15 @@ async fn main() {
                     // ceremony-born at the root, mint-born by induction on
                     // accepted claims. Forged or donated zero-value Registry
                     // notes are not in the pool and can never be spent here.
-                    let authority_nf = registry
-                        .anchor_pool()
-                        .iter()
-                        .copied()
-                        .find(|nf| {
-                            wallet
-                                .unspent_ironwood_note_by_nullifier(
-                                    REGISTRY_ACCOUNT,
-                                    *nf,
-                                    TargetHeight::from(tip),
-                                )
-                                .is_some()
-                        });
+                    let authority_nf = registry.anchor_pool().iter().copied().find(|nf| {
+                        wallet
+                            .unspent_ironwood_note_by_nullifier(
+                                REGISTRY_ACCOUNT,
+                                *nf,
+                                TargetHeight::from(tip),
+                            )
+                            .is_some()
+                    });
                     let Some(authority_nf) = authority_nf else {
                         tracing::warn!(
                             name = %name.as_str(),
@@ -630,21 +619,16 @@ async fn main() {
                     }
                 }
 
-                Request::Update { .. } | Request::Release { .. } => {
+                (Action::Update | Action::Release, None) => {
                     // Update and release requests are relays: the mint
                     // sends a one-time code to the current controller and
                     // the pending authorization lives only after Zebra
                     // accepts the challenge transaction. The request note
                     // itself stays put; the sweeps reclaim it.
-                    let (name, action, requested_ua, extend_years) = match request {
-                        Request::Update {
-                            name,
-                            ua,
-                            extend_years,
-                        } => (name, Action::Update, ua, extend_years),
-                        Request::Release { name, ua } => (name, Action::Release, ua, None),
-                        Request::Claim { .. } => unreachable!("claims dispatched above"),
-                    };
+                    let name = parsed.name;
+                    let action = parsed.action;
+                    let requested_ua = parsed.ua;
+                    let term = parsed.term;
                     let Some(record) = registry.record(&name).cloned() else {
                         tracing::debug!(
                             name = %name.as_str(),
@@ -656,7 +640,13 @@ async fn main() {
                         || record.expires_at.expired(mtp_now)
                         || note_height <= record.confirmed_height
                         || (action == Action::Release && requested_ua != record.ua)
-                        || challenges.pending(&name, action, &requested_ua, record.commitment, mtp_now)
+                        || challenges.pending(
+                            &name,
+                            action,
+                            &requested_ua,
+                            record.commitment,
+                            mtp_now,
+                        )
                     {
                         continue;
                     }
@@ -697,7 +687,7 @@ async fn main() {
                         tip_rcm: record.commitment,
                         code,
                         expires_at: mtp_now + time::Duration::seconds(D_OTP),
-                        extend_years,
+                        term,
                     };
                     let accepted = loop {
                         match source.send_transaction(&transaction).await {
@@ -851,7 +841,7 @@ async fn main() {
                 tip_rcm: record.commitment,
                 code,
                 expires_at: mtp_now + time::Duration::seconds(D_OTP),
-                extend_years: None,
+                term: None,
             };
             let accepted = source.submit(&transaction, "liveness challenge").await;
             if accepted {
@@ -865,13 +855,23 @@ async fn main() {
         }
 
         if let Some(tx) = treasury::sweep_ironwood_to_vault(
-            &network, &mut wallet, &treasury_keys, &sapling_spend, &sapling_output, tip, target_height,
+            &network,
+            &mut wallet,
+            &treasury_keys,
+            &sapling_spend,
+            &sapling_output,
+            tip,
+            target_height,
         ) {
             source.submit(&tx, "Ironwood vault sweep").await;
         }
 
         if let Some(tx) = treasury::sweep_sapling_to_vault(
-            &network, &mut wallet, &treasury_keys, &sapling_spend, &sapling_output,
+            &network,
+            &mut wallet,
+            &treasury_keys,
+            &sapling_spend,
+            &sapling_output,
         ) {
             source.submit(&tx, "Sapling vault sweep").await;
         }
