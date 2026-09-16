@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 // Development escape hatches must never reach a production artifact.
 #[cfg(all(feature = "regtest", not(debug_assertions)))]
 compile_error!(
@@ -8,6 +6,7 @@ compile_error!(
 
 pub mod boot;
 pub mod key;
+pub mod metrics;
 pub mod mint;
 pub mod wallet;
 pub mod zcash;

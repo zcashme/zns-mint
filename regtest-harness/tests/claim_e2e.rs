@@ -174,7 +174,7 @@ async fn test_claim_e2e_matches_vector_keys() -> Result<()> {
     let claim_txid = send.as_str().map(|s| s.to_string());
 
     // ------------------------------------------------------------------
-    // 11. Mine until the Mint settles: intake needs 10 confirmations, the
+    // 11. Mine until the Mint settles: intake acts on mined notes, the
     //     first assembly attempt fails until fee replenishment stocks the
     //     Registry pool, then the retry lands. Mine in small batches.
     // ------------------------------------------------------------------

@@ -1,5 +1,12 @@
 # `mint/note.rs` design record
 
+## 2026-09-15 — Term is a second-duration; updates call Expiry::extend
+
+- `Term` is a canonical whole-second duration (`Term::parse` / `duration` /
+  `claim_expiry`). Years are a subsequent task.
+- `Expiry::extend(term)` is the update successor: `Never` stays `Never`,
+  `None` keeps the current instant, a term adds to `Expiry::At`.
+
 ## Canonical Name Note payload
 
 - The on-chain form is exactly
