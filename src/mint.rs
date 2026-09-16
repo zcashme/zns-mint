@@ -77,7 +77,7 @@ impl Action {
 
 /// An authorized transition the loop is about to assemble.
 ///
-/// Built from [`treasury::parse_request`](crate::mint::treasury::parse_request);
+/// Built from [`treasury::parse_request`];
 /// memo bytes stay on that parser. `term` is a canonical second-duration
 /// (`None` = forever on a claim, no extension on an update).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,7 +183,7 @@ impl Challenge {
 pub struct NameCommitment(orchard::note::NoteCommitTrapdoor);
 
 impl NameCommitment {
-    /// Wraps a `NoteCommitTrapdoor` that was derived via [`zns_psi_rcm`].
+    /// Wraps a `NoteCommitTrapdoor` derived via [`NameNote::rcm`].
     pub fn from_inner(inner: orchard::note::NoteCommitTrapdoor) -> Self {
         Self(inner)
     }
