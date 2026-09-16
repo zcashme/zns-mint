@@ -17,8 +17,6 @@ The following repositories are in scope for this policy:
 
 ## Reporting a Vulnerability
 
-**Please do not open a public GitHub issue for security reports.**
-
 ### Preferred contact method
 
 Report vulnerabilities privately via **GitHub Security Advisories**
@@ -31,17 +29,18 @@ Report vulnerabilities privately via **GitHub Security Advisories**
 If you are unsure which repository is affected, file against zns-mint and we
 will route it.
 
-### Using this contact method securely
+### How to file
 
-GitHub Security Advisories are private by default: only you and the
-maintainers can see the report until we publish it, so no PGP key or
-encrypted email is needed — a free GitHub account is all it takes. If you
-cannot use GitHub, contact a maintainer through another channel and we will
-arrange a private exchange before any technical details are shared.
+**DO NOT open a public GitHub issue** for a security finding. File it as a
+GitHub Security Advisory via the links above, and include:
 
-Please include a description of the vulnerability and steps to reproduce it
-(PoC code welcome). If you would like credit after coordinated disclosure,
-tell us the name to use — anonymous reports are equally welcome.
+- A clear title — affected component and a one-line summary
+- What is wrong, how an attacker would exploit it, and the impact
+- A full PoC demonstrating the exploit end to end — commands, transactions,
+  or code we can run
+
+**One advisory per finding.** Separate bugs go in separate advisories so
+each can be triaged independently.
 
 ## Disclosure Timelines and Acknowledgements
 
