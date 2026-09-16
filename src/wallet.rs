@@ -15,10 +15,11 @@ use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTre
 use transparent::bundle::OutPoint;
 use zcash_client_backend::scanning::ScanningKeys;
 use zcash_client_backend::{
-    data_api::chain::ChainState,
+    data_api::chain::{ChainState, CommitmentTreeRoot},
     data_api::locking::LockOwner,
     data_api::{
-        BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus, WalletWrite,
+        BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus,
+        WalletCommitmentTrees, WalletWrite,
     },
     wallet::{
         NoteId, OutputRef, ReceivedNote, WalletIronwoodOutput, WalletSaplingOutput,
@@ -55,6 +56,40 @@ const MAX_CHECKPOINTS: usize = 100;
 /// Shard-tree error over the infallible in-memory store: only tree-structural
 /// failures (`Query`, `Insert`) are reachable, never storage failures.
 pub(crate) type TreeError = ShardTreeError<Infallible>;
+
+/// Every completed shard root, up to the mint's origin checkpoint, for the
+/// two pools the mint spends from: Ironwood (hot path — Registry Name Notes
+/// and Treasury operating pool) and Sapling (cold path — `sweep_sapling_to_vault`
+/// drains any Sapling payments to the Treasury's UA into the transparent vault).
+///
+/// Orchard is deliberately omitted: the mint has no Orchard spend path
+/// (`src/key.rs`'s `usk_clone` comment: *"Sapling-disabled and Ironwood-only"*),
+/// so seeding Orchard shard roots is dead cost. If a user does pay to the
+/// Treasury's Orchard receiver, the wallet still scans and stores the note —
+/// it simply cannot be spent, matching the current design.
+///
+/// Pre-birthday shards are immutable; one root per shard is all a wallet
+/// needs to compute witnesses through them. Boot fetches this once, feeds
+/// it to [`Wallet::new`], and the trees hold each completed pre-birthday
+/// shard as a single root address in the shard store. See boot step 3b
+/// and issue #44.
+pub struct PreBirthdaySubtreeRoots {
+    /// Sapling shard roots from index 0 upward.
+    pub sapling: Vec<CommitmentTreeRoot<sapling::Node>>,
+    /// Ironwood shard roots from index 0 upward.
+    pub ironwood: Vec<CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>>,
+}
+
+impl PreBirthdaySubtreeRoots {
+    /// The empty case: no completed shards yet in either pool. Legitimate
+    /// for regtest and the earliest mainnet birthdays.
+    pub fn empty() -> Self {
+        Self {
+            sapling: Vec::new(),
+            ironwood: Vec::new(),
+        }
+    }
+}
 
 /// The in-memory wallet for the two fixed mint accounts.
 pub struct Wallet {
@@ -121,9 +156,17 @@ pub struct Wallet {
 }
 
 impl Wallet {
+    /// Builds the wallet against the origin checkpoint.
+    ///
+    /// The origin frontier (`chain_state`) bootstraps the rightmost,
+    /// still-incomplete shard of each pool. `subtree_roots` seeds every
+    /// completed pre-birthday shard so witness computation can consult
+    /// them without ever holding the leaves the wallet did not scan.
+    /// See boot step 3b and issue #44.
     pub fn new(
         ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
         chain_state: &ChainState,
+        subtree_roots: PreBirthdaySubtreeRoots,
     ) -> Result<Self, TreeError> {
         let ufvks: BTreeMap<AccountId, UnifiedFullViewingKey> = ufvks.into_iter().collect();
         let scanning_keys = ScanningKeys::from_account_ufvks(ufvks.clone());
@@ -172,6 +215,14 @@ impl Wallet {
         wallet
             .ironwood_tree
             .insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
+        // Seed every completed pre-birthday shard for the two pools the
+        // mint spends from. Each root is immutable — a completed shard's
+        // root is a settled consensus value — so this is a one-shot
+        // boot-time operation. Orchard is deliberately not seeded (the
+        // mint has no Orchard spend path); see [`PreBirthdaySubtreeRoots`]
+        // and issue #44.
+        wallet.put_sapling_subtree_roots(0, &subtree_roots.sapling)?;
+        wallet.put_ironwood_subtree_roots(0, &subtree_roots.ironwood)?;
         Ok(wallet)
     }
 

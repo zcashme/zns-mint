@@ -1,5 +1,13 @@
 # Zcash I/O changelog
 
+## 2026-09-16 — `JsonRpc::get_subtree_roots` (`z_getsubtreesbyindex`)
+
+- New method, generic over `Node: HashSer`. Boot calls it for `"sapling"`
+  and `"ironwood"` (not `"orchard"` — no Orchard spend path).
+- Cross-checks echoed `pool` and `start_index` (`BadNodeData` on mismatch).
+  Root hex is canonical HashSer, not display-order reversal; tests lock
+  that with an asymmetric field element.
+
 ## 2026-09-01 — `CanonicalTip` deleted; tips are `(BlockHeight, BlockHash)` tuples
 
 - `CanonicalBlockSource::exact_tip()` returns `(BlockHeight, BlockHash)` —

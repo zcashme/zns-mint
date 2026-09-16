@@ -4,7 +4,7 @@ use incrementalmerkletree::frontier::Frontier;
 use sapling::Node as SaplingNode;
 use serde::Deserialize;
 use time::Timestamp;
-use zcash_client_backend::data_api::chain::ChainState;
+use zcash_client_backend::data_api::chain::{ChainState, CommitmentTreeRoot};
 use zcash_primitives::block::{Block, BlockHash};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -104,6 +104,44 @@ impl JsonRpc {
         }
 
         chain_state_from_rpc_response(response)
+    }
+
+    /// Fetches every completed subtree root for one shielded pool, from
+    /// `start_index` upward, via Zebra's `z_getsubtreesbyindex`.
+    ///
+    /// `pool` is a Zebra pool name (`"sapling"`, `"orchard"`, `"ironwood"`).
+    /// The mint's boot fetches Sapling and Ironwood only; Orchard is
+    /// intentionally omitted — see `PreBirthdaySubtreeRoots`.
+    ///
+    /// Each returned root pairs the shard's immutable subtree root hash
+    /// with the block height at which the shard completed
+    /// (`CommitmentTreeRoot::from_parts`). Zebra only ever returns
+    /// completed shards, never the rightmost partial one — that comes from
+    /// `z_gettreestate` (see [`Self::chain_state_at`]).
+    ///
+    /// Byte order: subtree `root` hex is canonical [`HashSer`] bytes, not
+    /// display-order reversal. Zebra's RPC does
+    /// `sapling: node.to_bytes().encode_hex()` and
+    /// `orchard|ironwood: node.encode_hex()` where orchard `encode_hex` is
+    /// `to_repr()` with no reverse (`zcashd` also does not reverse subtree
+    /// roots). Contrast `z_gettreestate` `finalRoot`, which *is* display-order
+    /// — we never parse that field. `finalState` is the HashSer tree, same
+    /// convention as these roots.
+    pub async fn get_subtree_roots<Node>(
+        &self,
+        pool: &'static str,
+        start_index: u64,
+    ) -> Result<Vec<CommitmentTreeRoot<Node>>, TransportError>
+    where
+        Node: HashSer,
+    {
+        let response: SubtreesResponse = self
+            .send_request("z_getsubtreesbyindex", (pool, start_index))
+            .await?
+            .ok_or(TransportError::BadNodeData(
+                "z_getsubtreesbyindex returned null",
+            ))?;
+        subtrees_response_to_roots(response, pool, start_index)
     }
 
     /// Fetches a block header as `(hash, height, time)`, for MTP backfill.
@@ -208,6 +246,69 @@ struct BlockHeaderResponse {
     time: u32,
 }
 
+/// The `z_getsubtreesbyindex` answer.
+#[derive(Debug, Deserialize)]
+struct SubtreesResponse {
+    pool: String,
+    start_index: u64,
+    subtrees: Vec<SubtreeInfo>,
+}
+
+/// One completed subtree entry inside [`SubtreesResponse`].
+#[derive(Debug, Deserialize)]
+struct SubtreeInfo {
+    /// The subtree root, hex-encoded internal bytes ([`HashSer`]).
+    root: String,
+    /// The block height at which this shard completed.
+    end_height: u32,
+}
+
+/// Decodes a `z_getsubtreesbyindex` response into pool-typed roots.
+/// Extracted so the wire decode is testable without Zebra.
+///
+/// Cross-checks `pool` and `start_index` against the server echo — a
+/// mismatch is `BadNodeData` (silent wrong-pool parse would poison the
+/// wallet's shard store).
+fn subtrees_response_to_roots<Node>(
+    response: SubtreesResponse,
+    expected_pool: &str,
+    expected_start_index: u64,
+) -> Result<Vec<CommitmentTreeRoot<Node>>, TransportError>
+where
+    Node: HashSer,
+{
+    if response.pool != expected_pool {
+        return Err(TransportError::BadNodeData(
+            "z_getsubtreesbyindex answered a different pool than requested",
+        ));
+    }
+    if response.start_index != expected_start_index {
+        return Err(TransportError::BadNodeData(
+            "z_getsubtreesbyindex answered a different start_index than requested",
+        ));
+    }
+
+    let mut roots = Vec::with_capacity(response.subtrees.len());
+    for entry in response.subtrees {
+        // Canonical HashSer bytes. Do not reverse: that is the block-hash /
+        // txid convention, and Zebra's subtree-root hex is not that.
+        let bytes = hex::decode(&entry.root)
+            .map_err(|_| TransportError::BadNodeData("z_getsubtreesbyindex root hex"))?;
+        if bytes.len() != 32 {
+            return Err(TransportError::BadNodeData(
+                "z_getsubtreesbyindex root length",
+            ));
+        }
+        let node = Node::read(&bytes[..])
+            .map_err(|_| TransportError::BadNodeData("z_getsubtreesbyindex root parse"))?;
+        roots.push(CommitmentTreeRoot::from_parts(
+            BlockHeight::from_u32(entry.end_height),
+            node,
+        ));
+    }
+    Ok(roots)
+}
+
 #[derive(Debug, Deserialize)]
 struct TreeStateResponse {
     height: u32,
@@ -285,4 +386,176 @@ where
     read_commitment_tree::<Node, _, 32>(&bytes[..])
         .map(|tree| tree.to_frontier())
         .map_err(|e| TransportError::BadCheckpoint(format!("{name} tree decode failed: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal `z_getsubtreesbyindex` fixture: shape matches Zebra's
+    /// live reply (`pool`, `start_index`, `subtrees[{root, end_height}]`).
+    const SAPLING_FIXTURE: &str = r#"{
+        "pool": "sapling",
+        "start_index": 0,
+        "subtrees": [
+            { "root": "0100000000000000000000000000000000000000000000000000000000000000", "end_height": 100000 },
+            { "root": "0200000000000000000000000000000000000000000000000000000000000000", "end_height": 200000 }
+        ]
+    }"#;
+
+    #[test]
+    fn subtrees_response_deserialises_wire_shape() {
+        let response: SubtreesResponse =
+            serde_json::from_str(SAPLING_FIXTURE).expect("valid fixture");
+        assert_eq!(response.pool, "sapling");
+        assert_eq!(response.start_index, 0);
+        assert_eq!(response.subtrees.len(), 2);
+        assert_eq!(response.subtrees[0].end_height, 100_000);
+        assert_eq!(response.subtrees[1].end_height, 200_000);
+    }
+
+    #[test]
+    fn subtrees_response_to_roots_preserves_index_and_height() {
+        let response: SubtreesResponse =
+            serde_json::from_str(SAPLING_FIXTURE).expect("valid fixture");
+        let roots =
+            subtrees_response_to_roots::<SaplingNode>(response, "sapling", 0).expect("parse ok");
+        assert_eq!(roots.len(), 2);
+        assert_eq!(
+            roots[0].subtree_end_height(),
+            BlockHeight::from_u32(100_000)
+        );
+        assert_eq!(
+            roots[1].subtree_end_height(),
+            BlockHeight::from_u32(200_000)
+        );
+    }
+
+    #[test]
+    fn subtrees_response_pool_mismatch_is_bad_node_data() {
+        let response: SubtreesResponse =
+            serde_json::from_str(SAPLING_FIXTURE).expect("valid fixture");
+        // Requested "ironwood", server answered "sapling".
+        match subtrees_response_to_roots::<MerkleHashOrchard>(response, "ironwood", 0) {
+            Err(TransportError::BadNodeData(_)) => {}
+            other => panic!("expected BadNodeData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subtrees_response_start_index_mismatch_is_bad_node_data() {
+        let response: SubtreesResponse =
+            serde_json::from_str(SAPLING_FIXTURE).expect("valid fixture");
+        // Requested 5, server answered 0.
+        match subtrees_response_to_roots::<SaplingNode>(response, "sapling", 5) {
+            Err(TransportError::BadNodeData(_)) => {}
+            other => panic!("expected BadNodeData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subtrees_response_bad_root_length_is_bad_node_data() {
+        let json = r#"{
+            "pool": "sapling",
+            "start_index": 0,
+            "subtrees": [
+                { "root": "01", "end_height": 100 }
+            ]
+        }"#;
+        let response: SubtreesResponse = serde_json::from_str(json).expect("valid fixture");
+        match subtrees_response_to_roots::<SaplingNode>(response, "sapling", 0) {
+            Err(TransportError::BadNodeData(_)) => {}
+            other => panic!("expected BadNodeData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subtrees_response_bad_root_hex_is_bad_node_data() {
+        let json = r#"{
+            "pool": "sapling",
+            "start_index": 0,
+            "subtrees": [
+                { "root": "zz", "end_height": 100 }
+            ]
+        }"#;
+        let response: SubtreesResponse = serde_json::from_str(json).expect("valid fixture");
+        match subtrees_response_to_roots::<SaplingNode>(response, "sapling", 0) {
+            Err(TransportError::BadNodeData(_)) => {}
+            other => panic!("expected BadNodeData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subtrees_response_empty_list_is_ok() {
+        let json = r#"{ "pool": "ironwood", "start_index": 0, "subtrees": [] }"#;
+        let response: SubtreesResponse = serde_json::from_str(json).expect("valid fixture");
+        let roots = subtrees_response_to_roots::<MerkleHashOrchard>(response, "ironwood", 0)
+            .expect("parse ok");
+        assert!(roots.is_empty());
+    }
+
+    /// Asymmetric canonical field element: byte 0 = 1, rest 0. Palindromes
+    /// cannot distinguish HashSer order from display-order reversal.
+    fn asymmetric_field_bytes() -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        bytes[0] = 1;
+        bytes
+    }
+
+    fn hashser_bytes<Node: HashSer>(node: &Node) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        node.write(&mut out[..]).expect("HashSer node is 32 bytes");
+        out
+    }
+
+    /// Zebra sapling: `subtree.root.to_bytes().encode_hex()` — `to_bytes` is
+    /// HashSer. Display-order reversal would produce a different node.
+    #[test]
+    fn sapling_subtree_root_hex_is_hashser_not_display_order() {
+        subtree_root_hex_matches_hashser::<SaplingNode>("sapling");
+    }
+
+    /// Zebra orchard/ironwood: `subtree.root.encode_hex()` where orchard
+    /// `Node::bytes_in_display_order` is `to_repr()` with no reverse
+    /// ("zcashd does not reverse the byte order of subtree roots").
+    #[test]
+    fn orchard_subtree_root_hex_is_hashser_not_display_order() {
+        subtree_root_hex_matches_hashser::<MerkleHashOrchard>("orchard");
+        subtree_root_hex_matches_hashser::<MerkleHashOrchard>("ironwood");
+    }
+
+    fn subtree_root_hex_matches_hashser<Node>(pool: &str)
+    where
+        Node: HashSer + PartialEq + std::fmt::Debug,
+    {
+        let bytes = asymmetric_field_bytes();
+        let expected = Node::read(&bytes[..]).expect("canonical field element");
+        assert_eq!(hashser_bytes(&expected), bytes);
+
+        let mut reversed = bytes;
+        reversed.reverse();
+        assert_ne!(bytes, reversed, "fixture must not be a palindrome");
+
+        let json = format!(
+            r#"{{"pool":"{pool}","start_index":0,"subtrees":[{{"root":"{}","end_height":1}}]}}"#,
+            hex::encode(bytes)
+        );
+        let response: SubtreesResponse = serde_json::from_str(&json).expect("valid fixture");
+        let roots = subtrees_response_to_roots::<Node>(response, pool, 0).expect("parse ok");
+        assert_eq!(*roots[0].root_hash(), expected);
+
+        let json_rev = format!(
+            r#"{{"pool":"{pool}","start_index":0,"subtrees":[{{"root":"{}","end_height":1}}]}}"#,
+            hex::encode(reversed)
+        );
+        let response_rev: SubtreesResponse =
+            serde_json::from_str(&json_rev).expect("valid fixture");
+        let reversed_roots = subtrees_response_to_roots::<Node>(response_rev, pool, 0)
+            .expect("reversed still 32 bytes");
+        assert_ne!(
+            *reversed_roots[0].root_hash(),
+            expected,
+            "display-order reversal must not round-trip to the HashSer node"
+        );
+    }
 }
