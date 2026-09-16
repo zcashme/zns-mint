@@ -1,5 +1,16 @@
 # Wallet changelog
 
+## 2026-09-16 — `Wallet::new` seeds pre-birthday shard roots
+
+- New `PreBirthdaySubtreeRoots { sapling, ironwood }`. Orchard omitted:
+  the mint has no Orchard spend path.
+- `Wallet::new` takes that as a third argument. After the origin frontier
+  (rightmost partial shard), it calls `put_sapling_subtree_roots` and
+  `put_ironwood_subtree_roots` so post-birthday witnesses can walk
+  completed pre-birthday shards without their leaves.
+- Boot step 3b fetches the roots. Empty vectors are legitimate (regtest)
+  and match the previous constructor.
+
 ## 2026-09-01 — Local named tree depths; `seed_trees` consumes `ChainState`
 
 - Depth and shard height are no longer spelled via pool-crate or

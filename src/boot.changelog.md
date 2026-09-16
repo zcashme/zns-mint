@@ -2,6 +2,18 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-16 — Seed pre-birthday subtree roots at boot (issue #44)
+
+- New step 3b: `fetch_prebirthday_subtree_roots` pulls Sapling and Ironwood
+  completed-shard roots via `z_getsubtreesbyindex` and feeds them to
+  `Wallet::new`. Without them, post-birthday witnesses that cross a
+  pre-birthday sibling shard fail — no anchors, no spends.
+- Orchard is not fetched: the mint has no Orchard spend path. An Orchard
+  payment to Treasury is scanned and left unspendable.
+- Fatal on transport error (fail closed). Zebra returns only completed
+  shards; the rightmost partial shard still comes from the origin
+  `ChainState` frontier. Later shards fill in during scan.
+
 ## 2026-09-15 — TEE boundary is a trait; regtest no longer skips attestation
 
 - Boot delegates the two TEE capabilities it needs — sealing-key derivation
