@@ -2,6 +2,27 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-15 — TEE boundary is a trait; regtest no longer skips attestation
+
+- Boot delegates the two TEE capabilities it needs — sealing-key derivation
+  and signed attestation — to `crate::tee::Tee`. Capsule unsealing moves to
+  `crate::capsule::{parse_capsule, unseal_seed}`; boot owns only the
+  `SEED_FINGERPRINT_RAW` cross-check and the ZIP-32 derivation.
+- Production still uses `RealSnpTee` (VCEK-derived sealing key via
+  `/dev/sev-guest`, `firmware.get_report` for the signed report). The
+  `fake-tee` feature substitutes `FakeTee` so integration tests can boot
+  outside SEV-SNP; `fake-tee` is blocked from release builds by a
+  `compile_error!` in `crate::lib`.
+- Attestation is no longer gated on `#[cfg(not(feature = "regtest"))]`.
+  Regtest is a local-consensus toggle, not a TEE toggle: a
+  `--features regtest,fake-tee` mint still writes
+  `zns_mint_attestation.bin` (with a synthetic report), and a
+  `--features regtest` mint on a real SEV-SNP host still writes a real
+  report.
+- Removed the inlined `SeedCapsule`, `decrypt_sealed_blob`,
+  `derive_sealing_key` (SNP-only), and `generate_mint_attestation`. All
+  four are covered by the two new modules.
+
 ## 2026-08-22 — Direct fixed-UFVK WalletDb construction
 
 - Boot now passes the two fixed Treasury/Registry UFVKs directly to `Wallet`.
