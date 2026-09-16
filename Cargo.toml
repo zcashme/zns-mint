@@ -9,10 +9,24 @@ publish = false
 default = []
 regtest = ["zcash_protocol/local-consensus"]
 testnet = []
+# Development-only: substitutes the SEV-SNP source of the sealing key and
+# the attestation report so the mint can boot outside a TEE (macOS/Linux
+# without /dev/sev-guest). Capsule AEAD and the report_data derivation
+# stay real production code. Blocked from release builds by a
+# `compile_error!` in `src/lib.rs`. Combine with `regtest` for local e2e.
+fake-tee = []
 
 [[bin]]
 name = "zns-mint"
 path = "src/main.rs"
+
+# Dev helper: seals an all-zeros seed with `FakeTee` and writes it to
+# `keys/zns_seed.capsule` so a `fake-tee` mint can boot on macOS/Linux
+# without `/dev/sev-guest`. `required-features` prevents it from compiling
+# under a default (production) build where `FakeTee` is not exported.
+[[example]]
+name = "write_fake_capsule"
+required-features = ["fake-tee"]
 
 [dependencies]
 tracing = "0.1"
