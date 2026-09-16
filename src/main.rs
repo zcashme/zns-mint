@@ -878,26 +878,14 @@ async fn main() {
             }
         }
 
-        if let Some(tx) = treasury::sweep_ironwood_to_vault(
-            &network,
-            &mut wallet,
-            &treasury_keys,
-            &sapling_spend,
-            &sapling_output,
-            tip,
-            target_height,
-        ) {
-            source.submit(&tx, "Ironwood vault sweep").await;
-        }
-
-        if let Some(tx) = treasury::sweep_sapling_to_vault(
+        for (label, tx) in treasury::sweep_to_vault(
             &network,
             &mut wallet,
             &treasury_keys,
             &sapling_spend,
             &sapling_output,
         ) {
-            source.submit(&tx, "Sapling vault sweep").await;
+            source.submit(&tx, label).await;
         }
 
         tracing::debug!(
