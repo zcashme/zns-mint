@@ -31,22 +31,17 @@ Report vulnerabilities privately via **GitHub Security Advisories**
 If you are unsure which repository is affected, file against zns-mint and we
 will route it.
 
-### How to use this contact method securely
+### Using this contact method securely
 
-GitHub Security Advisories are private by default: only the reporter and the
-maintainers can see the report until we publish it. Nothing is transmitted in
-the clear to other parties, so no separate PGP key is required. To use it you
-need a (free) GitHub account; if you cannot use GitHub for this purpose, contact
-a maintainer through another channel and we will arrange a private exchange
-before any technical details are shared.
+GitHub Security Advisories are private by default: only you and the
+maintainers can see the report until we publish it, so no PGP key or
+encrypted email is needed — a free GitHub account is all it takes. If you
+cannot use GitHub, contact a maintainer through another channel and we will
+arrange a private exchange before any technical details are shared.
 
-Please include in your report:
-
-- A description of the suspected vulnerability
-- Steps to reproduce the issue (PoC code welcome)
-- Your email address or another secure mechanism to contact you
-- Your name and/or colleagues, if you wish to be recognized later
-- Optionally, a patch and/or suggestions to resolve the vulnerability
+Please include a description of the vulnerability and steps to reproduce it
+(PoC code welcome). If you would like credit after coordinated disclosure,
+tell us the name to use — anonymous reports are equally welcome.
 
 ## Disclosure Timelines and Acknowledgements
 
