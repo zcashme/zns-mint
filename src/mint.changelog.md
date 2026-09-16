@@ -1,5 +1,24 @@
 # Mint live-work design record
 
+## 2026-09-15 — Liveness τ+L enforcement (issue #14)
+
+- `CHALLENGE_LEAD` (7 days) and `LIVENESS_RETRY_COOLDOWN` (24 h) are
+  distinct from `D_OTP` (the response window, 30 min). The lead is how
+  far before `release_deadline` the mint begins reminding the current
+  controller; the cooldown is the minimum interval between successive
+  liveness reminders for the same record.
+- The rate-limit ledger lives on `OtpQueue` alongside the active-code
+  queue but is scoped by `(name, rcm)` — a fresh update (new
+  commitment) is challengeable immediately, and the ledger clears on
+  reorg or restart (harmless: at most one extra reminder to a live
+  controller).
+- Liveness enforcement itself is unchanged: `NameRecord::release_deadline
+  = τ + LIVENESS_INTERVAL` on every accepted claim or update, and
+  `Registry::release_due` returns `(NameNote::Release, ReleaseReason)`
+  when either the purchased term or the deadline has passed. The
+  liveness reminder is a mint-originated Relay, not a §5 authorization;
+  liveness is only satisfied when a fresh update Name Note lands.
+
 ## 2026-09-03 — Oracle-only claim pricing, USD-denominated
 
 - The fixed `CLAIM_PRICE` (1 ZEC) is gone. The claim price is
