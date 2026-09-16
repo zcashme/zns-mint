@@ -20,6 +20,14 @@ fake-tee = []
 name = "zns-mint"
 path = "src/main.rs"
 
+# Dev helper: seals an all-zeros seed with `FakeTee` and writes it to
+# `keys/zns_seed.capsule` so a `fake-tee` mint can boot on macOS/Linux
+# without `/dev/sev-guest`. `required-features` prevents it from compiling
+# under a default (production) build where `FakeTee` is not exported.
+[[example]]
+name = "write_fake_capsule"
+required-features = ["fake-tee"]
+
 [dependencies]
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }

@@ -8,3 +8,9 @@ lcov.info
 # Vendored external code (reference only)
 /librustzcash/
 /ens-contracts/
+
+# Boot secrets and artifacts. Never commit.
+# The sealed seed capsule (real or FakeTee-produced) and the attestation
+# report written on boot are per-instance, per-machine outputs.
+/keys/zns_seed.capsule
+/zns_mint_attestation.bin
