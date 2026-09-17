@@ -712,15 +712,6 @@ impl Wallet {
     /// orchestrator's ZNS pass supplies them here, after `put_blocks` has
     /// committed the block. The caller derives `position` from that same
     /// scanned block before moving it into `put_blocks`.
-    /// Stores the memo of a note revealed by block scanning. Upstream's
-    /// `ScannedBlock` drops note plaintexts, so the run loop decrypts the
-    /// Treasury lane itself and hands the memo here alongside `put_blocks`.
-    pub fn store_scanned_memo(&mut self, note_id: NoteId, memo: [u8; 512]) {
-        if let Ok(memo) = Memo::from_bytes(&memo) {
-            self.memos.insert(note_id, memo);
-        }
-    }
-
     ///
     /// `nullifier` was derived by the ZNS decryption pass from the same
     /// authenticated `(rcm, psi)` pair that reproduced the action's cmx. The

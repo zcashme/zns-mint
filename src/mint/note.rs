@@ -508,7 +508,12 @@ pub fn decrypt_name_notes<P: Parameters>(
 pub fn decrypt_treasury_memos(
     block: &Block,
     treasury_keys: &crate::key::TreasuryKeys,
-) -> Vec<(zcash_primitives::transaction::TxId, usize, [u8; 512])> {
+) -> Vec<(
+    zcash_primitives::transaction::TxId,
+    usize,
+    zcash_protocol::value::Zatoshis,
+    [u8; 512],
+)> {
     let ivk = treasury_keys
         .orchard_fvk()
         .to_ivk(orchard::keys::Scope::External)
@@ -524,10 +529,12 @@ pub fn decrypt_treasury_memos(
         }
         for (action_index, action) in bundle.actions().iter().enumerate() {
             let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
-            if let Some((_note, _recipient, memo)) =
+            if let Some((note, _recipient, memo)) =
                 zcash_note_encryption::try_note_decryption(&domain, &ivk, action)
             {
-                memos.push((tx.txid(), action_index, memo));
+                let paid = zcash_protocol::value::Zatoshis::from_u64(note.value().inner())
+                    .expect("note values are consensus-bounded");
+                memos.push((tx.txid(), action_index, paid, memo));
             }
         }
     }
