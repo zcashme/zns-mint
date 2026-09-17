@@ -256,12 +256,14 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     requests: &mut treasury::RequestQueue,
     name_notes: &mut note::NameNoteQueue,
 ) {
+    use std::collections::BTreeMap;
     use std::convert::Infallible;
 
     use incrementalmerkletree::Position;
     use zcash_client_backend::data_api::WalletWrite as _;
     use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
     use zcash_client_backend::scanning::Nullifiers;
+    use zcash_primitives::transaction::TxId;
 
     assert_eq!(
         from_state.block_height(),
@@ -282,17 +284,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     let block_time = block.header().time;
     let candidates = decrypt_name_notes(network, &block, registry_keys);
     let treasury_memos = note::decrypt_treasury_memos(&block, treasury_keys);
-    let received_name_notes = candidates
-        .iter()
-        .map(|candidate| {
-            registry::ReceivedNameNote::new(
-                candidate.txid,
-                candidate.action_index,
-                candidate.nullifier,
-                candidate.payload.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
 
     let (header, batches) = decrypt_block(network, block, wallet.scanning_keys());
     let nullifiers =
@@ -323,8 +314,115 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .current()
         .expect("FATAL: MTP unavailable after applying a block");
 
-    let (next_registry, accepted_name_notes) =
-        registry.apply_block(network, &scanned, &received_name_notes, block_mtp);
+    // The confirmation pass: the scanner's transactions in canonical
+    // order, the ZNS decryption lane joined on txid — the
+    // authentication boundary — each candidate offered to the Registry.
+    // Sequencing is here; the law is the Registry's.
+    let mut notes_by_tx: BTreeMap<TxId, Vec<usize>> = BTreeMap::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        notes_by_tx.entry(candidate.txid).or_default().push(index);
+    }
+    for notes in notes_by_tx.values_mut() {
+        notes.sort_by_key(|index| candidates[*index].action_index);
+    }
+
+    let mut accepted_name_notes = Vec::new();
+    for wtx in scanned.transactions() {
+        let txid = wtx.txid();
+        let nfs: Vec<orchard::note::Nullifier> = wtx
+            .ironwood_spends()
+            .iter()
+            .map(|spend| *spend.nf())
+            .collect();
+        let registry_outputs: Vec<_> = wtx
+            .ironwood_outputs()
+            .iter()
+            .filter(|output| *output.account_id() == REGISTRY_ACCOUNT)
+            .collect();
+
+        // Ceremony filling: zero-value Registry outputs join the pool in
+        // canonical order while below standing size.
+        for output in &registry_outputs {
+            if output.note().0.value().inner() == 0 {
+                if let Some(nf) = output.nf() {
+                    registry.adopt_anchor(height, *nf);
+                }
+            }
+        }
+
+        let spends_claim_anchor = nfs.iter().any(|nf| registry.anchor_pool().contains(nf));
+        let spends_record = !registry.names_spent_by(&nfs).is_empty();
+        let notes: &[usize] = notes_by_tx.get(&txid).map(Vec::as_slice).unwrap_or(&[]);
+        match notes {
+            [] => {
+                assert!(
+                    !(spends_claim_anchor || spends_record),
+                    "Registry authority was spent without a Name Note successor"
+                );
+            }
+            [index] => {
+                let candidate = &candidates[*index];
+                let accepted = match candidate.payload.action() {
+                    Action::Claim => {
+                        // The successor anchor: a backed claim creates
+                        // exactly one zero-value Registry output.
+                        let successor = if registry_outputs.len() == 1
+                            && registry_outputs[0].note().0.value().inner() == 0
+                        {
+                            registry_outputs[0].nf().copied()
+                        } else {
+                            None
+                        };
+                        registry.accept_claim(
+                            network,
+                            &candidate.payload,
+                            candidate.nullifier,
+                            successor,
+                            &nfs,
+                            height,
+                            block_mtp,
+                        )
+                    }
+                    Action::Update | Action::Release => {
+                        assert!(
+                            registry_outputs.is_empty(),
+                            "update/release must not create a claim anchor"
+                        );
+                        match candidate.payload.action() {
+                            Action::Update => registry.accept_update(
+                                network,
+                                &candidate.payload,
+                                candidate.nullifier,
+                                &nfs,
+                                height,
+                                block_mtp,
+                            ),
+                            Action::Release => registry.accept_release(
+                                network,
+                                &candidate.payload,
+                                candidate.nullifier,
+                                &nfs,
+                                height,
+                                block_mtp,
+                            ),
+                            Action::Claim => unreachable!("claims are routed above"),
+                        }
+                    }
+                };
+                if accepted {
+                    accepted_name_notes.push(*index);
+                }
+            }
+            _ => {
+                if spends_claim_anchor || spends_record {
+                    panic!(
+                        "mint produced multiple Name Notes in one transaction \
+                         — assembly creates exactly one"
+                    );
+                }
+            }
+        }
+    }
 
     let ironwood_start = scanned
         .ironwood()
@@ -401,7 +499,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         name_notes.fulfill(&candidate.payload);
     }
     *mtp = next_mtp;
-    *registry = next_registry;
     *cursor = next_metadata;
 
     tracing::debug!(

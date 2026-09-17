@@ -2,16 +2,11 @@
 //!
 
 use crate::mint::otp::OtpQueue;
-use crate::mint::{
-    Action, Expiry, Name, NameCommitment, NameNote, Request, UnifiedAddress, REGISTRY_ACCOUNT,
-};
+use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
-use zcash_client_backend::data_api::ScannedBlock;
-use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
-use zip32::AccountId;
 
 /// Reads the current record of the name chain for `name`.
 pub fn current_record(registry: &Registry, name: &Name) -> Option<NameRecord> {
@@ -40,67 +35,6 @@ impl ReleaseReason {
             ReleaseReason::Expiry => "expiry",
             ReleaseReason::Liveness => "liveness",
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ReceivedNameNote — scanner evidence for one Name Note
-// ---------------------------------------------------------------------------
-
-/// A cryptographically validated Name Note received at the exact Registry address.
-///
-/// Produced by the orchestrator's ZNS decryption pass over an applied block
-/// (each candidate's ZNS-derived cmx is checked against the action's actual
-/// cmx before the note is exposed) and consumed by [`Registry::apply_block`].
-#[derive(Clone, PartialEq, Eq)]
-pub struct ReceivedNameNote {
-    txid: TxId,
-    action_index: usize,
-    nullifier: orchard::note::Nullifier,
-    payload: NameNote,
-}
-
-impl ReceivedNameNote {
-    pub fn new(
-        txid: TxId,
-        action_index: usize,
-        nullifier: orchard::note::Nullifier,
-        payload: NameNote,
-    ) -> Self {
-        Self {
-            txid,
-            action_index,
-            nullifier,
-            payload,
-        }
-    }
-
-    pub fn txid(&self) -> &TxId {
-        &self.txid
-    }
-
-    pub fn action_index(&self) -> usize {
-        self.action_index
-    }
-
-    /// The exact nullifier this Name Note reveals when spent.
-    pub fn nullifier(&self) -> orchard::note::Nullifier {
-        self.nullifier
-    }
-
-    /// The decoded typed transition from the note's memo.
-    pub fn payload(&self) -> &NameNote {
-        &self.payload
-    }
-}
-
-impl std::fmt::Debug for ReceivedNameNote {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReceivedNameNote")
-            .field("txid", &self.txid)
-            .field("action_index", &self.action_index)
-            .field("payload", &"<redacted>")
-            .finish()
     }
 }
 
@@ -136,11 +70,11 @@ pub struct NameRecord {
 impl NameRecord {
     fn from_received<P: Parameters>(
         params: &P,
-        received: ReceivedNameNote,
+        note: &NameNote,
+        nullifier: orchard::note::Nullifier,
         confirmed_height: BlockHeight,
         mtp: Timestamp,
     ) -> Self {
-        let note = received.payload();
         let rcm = note.rcm(params);
         Self {
             action: note.action(),
@@ -154,7 +88,7 @@ impl NameRecord {
                 mtp.as_seconds() + crate::mint::LIVENESS_INTERVAL,
             )
             .expect("liveness deadline fits Timestamp"),
-            nullifier: received.nullifier(),
+            nullifier,
         }
     }
 }
@@ -337,223 +271,178 @@ impl Registry {
         ))
     }
 
-    /// Applies every Registry transition in block order.
+    /// Ceremony filling: a zero-value Registry output joins the lineage
+    /// pool while below standing size. The first ANCHOR_POOL_SIZE are the
+    /// ceremony's root — nothing can predate them, so nothing later can
+    /// displace them. Name Notes are invisible to the standard scanner
+    /// and never adopted; post-root successors enter only by induction on
+    /// accepted claims, never by this cap.
+    pub fn adopt_anchor(&mut self, height: BlockHeight, nf: orchard::note::Nullifier) {
+        if self.anchor_pool.len() < ANCHOR_POOL_SIZE && self.anchor_pool.insert(nf) {
+            self.pool_checkpoints
+                .insert(height, self.anchor_pool.clone());
+        }
+    }
+
+    /// Offers a confirmed claim candidate. `nfs` are the transaction's
+    /// Ironwood spends; `successor` is the nullifier of the transaction's
+    /// single zero-value Registry output (`None` when the outputs lack
+    /// the claim shape).
     ///
-    /// Takes the upstream [`ScannedBlock`] directly, plus the supplemental
-    /// [`ReceivedNameNote`] lane from the orchestrator's ZNS decryption pass.
-    /// The scanner supplies both pieces of unforgeable Registry evidence:
-    /// spent nullifiers and ordinary zero-value Registry outputs.
-    ///
-    /// All ZNS invariant checks are assertions — only the mint can create or
-    /// spend Name Notes, and its assembly code prevents every violation by
-    /// construction. If an assertion fires, it's a bug in the assembly path.
-    pub fn apply_block<P: Parameters>(
-        &self,
+    /// A claim is backed only when its transaction spent a standing
+    /// anchor — a public UFVK lets anyone construct a valid ZNS output,
+    /// but only the mint can spend an anchor. All invariant checks are
+    /// assertions — only the mint can reach them; if one fires, it is a
+    /// bug in the assembly path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn accept_claim<P: Parameters>(
+        &mut self,
         params: &P,
-        scanned: &ScannedBlock<AccountId>,
-        name_notes: &[ReceivedNameNote],
+        note: &NameNote,
+        nullifier: orchard::note::Nullifier,
+        successor: Option<orchard::note::Nullifier>,
+        nfs: &[orchard::note::Nullifier],
+        height: BlockHeight,
         mtp: Timestamp,
-    ) -> (Self, Vec<usize>) {
-        let mut next = self.clone();
-        let mut accepted = Vec::new();
-        let height = scanned.height();
-
-        // Group the supplemental Name Note lane and every revealed Ironwood
-        // nullifier by transaction. Name Notes use the ZNS encryption domain,
-        // while nullifiers and ordinary anchor outputs come from the standard
-        // scanner; joining on txid is the authentication boundary.
-        let mut name_notes_by_tx: BTreeMap<TxId, Vec<(usize, &ReceivedNameNote)>> = BTreeMap::new();
-        for (index, note) in name_notes.iter().enumerate() {
-            name_notes_by_tx
-                .entry(*note.txid())
-                .or_default()
-                .push((index, note));
+    ) -> bool {
+        assert!(matches!(note, NameNote::Claim { .. }));
+        let spent: Vec<_> = nfs
+            .iter()
+            .filter(|nf| self.anchor_pool.contains(*nf))
+            .copied()
+            .collect();
+        if spent.is_empty() {
+            return false; // unbacked: a public output anyone could have written
         }
-        for notes in name_notes_by_tx.values_mut() {
-            notes.sort_by_key(|(_, note)| note.action_index());
+        assert!(
+            self.names_spent_by(nfs).is_empty(),
+            "claim transaction spent a record — assembly never \
+             spends a Name Note when claiming"
+        );
+        assert!(
+            spent.len() == 1,
+            "a claim spends exactly one anchor — assembly never batches"
+        );
+        let successor_nf = successor.expect(
+            "a backed claim creates exactly one zero-value successor anchor — \
+             the Registry FVK derives its nullifier",
+        );
+        self.anchor_pool.remove(&spent[0]);
+        self.anchor_pool.insert(successor_nf);
+        self.pool_checkpoints
+            .insert(height, self.anchor_pool.clone());
+        assert!(
+            self.record(note.name())
+                .is_none_or(|r| r.action == Action::Release),
+            "claim attempted to replace live name {:?} — authorize \
+             checks availability",
+            note.name()
+        );
+        self.set_record(
+            note.name().clone(),
+            NameRecord::from_received(params, note, nullifier, height, mtp),
+            height,
+        );
+        true
+    }
+
+    /// Offers a confirmed update candidate. Backed only when the
+    /// transaction spent exactly the current Name Note of this note's
+    /// own name; an unbacked candidate — a correctly formed public
+    /// output that is not mint-authored — has no effect. A backed
+    /// transition always enacts: only the mint can spend the current
+    /// note, and assembly checks liveness before transitioning.
+    pub fn accept_update<P: Parameters>(
+        &mut self,
+        params: &P,
+        note: &NameNote,
+        nullifier: orchard::note::Nullifier,
+        nfs: &[orchard::note::Nullifier],
+        height: BlockHeight,
+        mtp: Timestamp,
+    ) -> bool {
+        assert!(matches!(note, NameNote::Update { .. }));
+        let Some(record) = self.predecessor_spent(note, nfs) else {
+            return false;
+        };
+        assert!(
+            note.prev_rcm() == Some(record.commitment),
+            "predecessor mismatch — assembly reads commitment from the same registry"
+        );
+        self.set_record(
+            note.name().clone(),
+            NameRecord::from_received(params, note, nullifier, height, mtp),
+            height,
+        );
+        true
+    }
+
+    /// Offers a confirmed release candidate. Same law as
+    /// [`Self::accept_update`].
+    pub fn accept_release<P: Parameters>(
+        &mut self,
+        params: &P,
+        note: &NameNote,
+        nullifier: orchard::note::Nullifier,
+        nfs: &[orchard::note::Nullifier],
+        height: BlockHeight,
+        mtp: Timestamp,
+    ) -> bool {
+        assert!(matches!(note, NameNote::Release { .. }));
+        let Some(record) = self.predecessor_spent(note, nfs) else {
+            return false;
+        };
+        assert!(
+            note.prev_rcm() == Some(record.commitment),
+            "predecessor mismatch — assembly reads commitment from the same registry"
+        );
+        self.set_record(
+            note.name().clone(),
+            NameRecord::from_received(params, note, nullifier, height, mtp),
+            height,
+        );
+        true
+    }
+
+    /// The shared law of update and release: the transaction must have
+    /// spent exactly the current Name Note of `note`'s own name.
+    /// Returns the live predecessor, or `None` when unbacked.
+    fn predecessor_spent(
+        &self,
+        note: &NameNote,
+        nfs: &[orchard::note::Nullifier],
+    ) -> Option<&NameRecord> {
+        let spent = self.names_spent_by(nfs);
+        if spent.is_empty() {
+            return None; // unbacked: a public output anyone could have written
         }
+        assert!(
+            !nfs.iter().any(|nf| self.anchor_pool.contains(nf)),
+            "update/release must not advance the claim-anchor chain"
+        );
+        assert_eq!(
+            spent.as_slice(),
+            [note.name().clone()],
+            "update/release did not spend the exact current Name Note \
+             — assembly spends the exact current note"
+        );
+        Some(
+            self.record(note.name())
+                .filter(|record| record.action != Action::Release)
+                .expect(
+                    "update/release has no live predecessor \
+                     — assembly checks liveness before transitioning",
+                ),
+        )
+    }
 
-        // Group the wallet's OWN spend nullifiers by transaction. The
-        // scanner's matched `WalletSpend`s are the authoritative record of
-        // every spend of a wallet-owned note (anchors, Treasury notes, Name
-        // Notes) — the nullifier map holds only foreign nullifiers, so
-        // owned spends never appear there.
-        let mut nullifiers_by_tx: BTreeMap<TxId, Vec<orchard::note::Nullifier>> = BTreeMap::new();
-        for wtx in scanned.transactions() {
-            nullifiers_by_tx
-                .entry(wtx.txid())
-                .or_default()
-                .extend(wtx.ironwood_spends().iter().map(|s| *s.nf()));
-        }
-
-        for wtx in scanned.transactions() {
-            let txid = wtx.txid();
-            let ironwood_nullifiers: &[orchard::note::Nullifier] = nullifiers_by_tx
-                .get(&txid)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let received_name_notes: &[(usize, &ReceivedNameNote)] = name_notes_by_tx
-                .get(&txid)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let registry_outputs: Vec<_> = wtx
-                .ironwood_outputs()
-                .iter()
-                .filter(|output| *output.account_id() == REGISTRY_ACCOUNT)
-                .collect();
-
-            // Anchor adoption: while the lineage pool is below its standing
-            // size, zero-value Registry outputs join it in canonical order.
-            // The first ANCHOR_POOL_SIZE are the ceremony's root — nothing
-            // can predate them, so nothing later can displace them. Name
-            // Notes are invisible to the standard scanner and never adopted;
-            // post-root successors enter only by induction on accepted
-            // claims below, never by this cap.
-            for output in &registry_outputs {
-                if next.anchor_pool.len() < ANCHOR_POOL_SIZE && output.note().0.value().inner() == 0
-                {
-                    if let Some(nf) = output.nf() {
-                        next.anchor_pool.insert(*nf);
-                    }
-                }
-            }
-            let spent_pool: Vec<orchard::note::Nullifier> = ironwood_nullifiers
-                .iter()
-                .filter(|nf| next.anchor_pool.contains(*nf))
-                .copied()
-                .collect();
-            let spends_claim_anchor = !spent_pool.is_empty();
-            let spent_record_names: Vec<_> = next
-                .records
-                .iter()
-                .filter(|(_, record)| ironwood_nullifiers.contains(&record.nullifier))
-                .map(|(name, _)| name.clone())
-                .collect();
-            let spends_registry_authority = spends_claim_anchor || !spent_record_names.is_empty();
-
-            match received_name_notes {
-                [] => {
-                    assert!(
-                        !spends_registry_authority,
-                        "Registry authority was spent without a Name Note successor"
-                    );
-                }
-                notes if notes.len() > 1 => {
-                    if spends_registry_authority {
-                        panic!(
-                            "mint produced multiple Name Notes in one transaction \
-                                — assembly creates exactly one"
-                        );
-                    }
-                }
-                [entry] => {
-                    let (note_index, note) = *entry;
-                    let payload = note.payload();
-                    let name = payload.name();
-                    match payload.action() {
-                        Action::Claim => {
-                            // A public UFVK lets anyone construct a valid ZNS
-                            // output. Only the mint can spend the current
-                            // zero-value claim anchor, so without that spend
-                            // this candidate has no Registry effect.
-                            if !spends_claim_anchor {
-                                continue;
-                            }
-                            assert!(
-                                spent_record_names.is_empty(),
-                                "claim transaction spent a record — assembly never \
-                                 spends a Name Note when claiming"
-                            );
-                            assert_eq!(
-                                registry_outputs.len(),
-                                1,
-                                "claim must create exactly one successor anchor"
-                            );
-                            let successor = registry_outputs[0];
-                            assert_eq!(
-                                successor.note().0.value().inner(),
-                                0,
-                                "Registry anchor value must remain zero"
-                            );
-                            // The successor anchor joins the lineage pool —
-                            // the only way a post-genesis anchor is born. The
-                            // wallet tracks it as a new zero-value Registry
-                            // Ironwood note; the consumed anchor is marked
-                            // spent by the wallet's put_blocks.
-                            let successor_nf = successor
-                                .nf()
-                                .copied()
-                                .expect("Registry FVK must derive the successor anchor nullifier");
-                            next.anchor_pool.insert(successor_nf);
-                            assert!(
-                                next.record(name)
-                                    .is_none_or(|r| r.action == Action::Release),
-                                "claim attempted to replace live name {name:?} \
-                                 — authorize_claim checks availability"
-                            );
-                            // The wallet tracks the successor anchor as a
-                            // new zero-value Registry Ironwood note. The
-                            // consumed anchor is marked spent by the wallet's
-                            // put_blocks. No Registry state to update here.
-                        }
-                        Action::Update | Action::Release => {
-                            if spent_record_names.is_empty() {
-                                // Correctly formed public output, but no spend
-                                // of the current Name Note: not mint-authored.
-                                continue;
-                            }
-                            assert!(
-                                !spends_claim_anchor,
-                                "update/release must not advance the claim-anchor chain"
-                            );
-                            assert!(
-                                registry_outputs.is_empty(),
-                                "update/release must not create a claim anchor"
-                            );
-                            let record = next
-                                .record(name)
-                                .filter(|record| record.action != Action::Release)
-                                .expect(
-                                    "update/release has no live predecessor \
-                                        — assembly checks liveness before transitioning",
-                                );
-                            assert!(
-                                payload.prev_rcm() == Some(record.commitment),
-                                "predecessor mismatch — assembly reads commitment \
-                                 from the same registry"
-                            );
-                            assert!(
-                                spent_record_names.as_slice() == [name.clone()],
-                                "update/release did not spend the exact current Name Note \
-                                 — assembly spends the exact current note"
-                            );
-                        }
-                    }
-
-                    next.set_record(
-                        name.clone(),
-                        NameRecord::from_received(params, (*note).clone(), height, mtp),
-                        height,
-                    );
-                    accepted.push(note_index);
-                }
-                _ => unreachable!("slice cardinality was handled above"),
-            }
-
-            // Retirement: anchors spent by this transaction leave the pool.
-            for nf in &spent_pool {
-                next.anchor_pool.remove(nf);
-            }
-        }
-
-        // Snapshot the pool whenever it changed, so truncation restores
-        // the as-of-this-height state without replaying history.
-        if next.anchor_pool != self.anchor_pool {
-            next.pool_checkpoints
-                .insert(height, next.anchor_pool.clone());
-        }
-
-        (next, accepted)
+    /// The names whose current Name Note these nullifiers spend.
+    pub fn names_spent_by(&self, nfs: &[orchard::note::Nullifier]) -> Vec<Name> {
+        self.records
+            .iter()
+            .filter(|(_, record)| nfs.contains(&record.nullifier))
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     fn set_record(&mut self, name: Name, record: NameRecord, height: BlockHeight) {
@@ -611,7 +500,6 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::mint::NameNote;
-    use zcash_primitives::transaction::TxId;
     use zcash_protocol::consensus::MAIN_NETWORK;
 
     /// A valid mainnet ZIP-316 UA with an Orchard receiver (test vector
@@ -755,19 +643,15 @@ mod tests {
 
         // Claim block MTP.
         let tau_claim = 1_700_000_000_i64;
-        let claim = ReceivedNameNote::new(
-            TxId::from_bytes([0u8; 32]),
-            0,
-            nullifier(1),
-            NameNote::Claim {
-                name: name.clone(),
-                ua: ua.clone(),
-                expires_at: Expiry::Never,
-            },
-        );
+        let claim = NameNote::Claim {
+            name: name.clone(),
+            ua: ua.clone(),
+            expires_at: Expiry::Never,
+        };
         let rec = NameRecord::from_received(
             &MAIN_NETWORK,
-            claim,
+            &claim,
+            nullifier(1),
             BlockHeight::from_u32(100),
             ts(tau_claim),
         );
@@ -775,20 +659,16 @@ mod tests {
 
         // Update at a later block: deadline resets.
         let tau_update = 1_710_000_000_i64;
-        let update = ReceivedNameNote::new(
-            TxId::from_bytes([1u8; 32]),
-            0,
-            nullifier(2),
-            NameNote::Update {
-                name: name.clone(),
-                ua: ua.clone(),
-                expires_at: Expiry::Never,
-                prev: commitment(3),
-            },
-        );
+        let update = NameNote::Update {
+            name: name.clone(),
+            ua: ua.clone(),
+            expires_at: Expiry::Never,
+            prev: commitment(3),
+        };
         let rec2 = NameRecord::from_received(
             &MAIN_NETWORK,
-            update,
+            &update,
+            nullifier(2),
             BlockHeight::from_u32(200),
             ts(tau_update),
         );
