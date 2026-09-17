@@ -15,12 +15,8 @@ use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_keys::address::UnifiedAddress;
-use zcash_primitives::transaction::components::orchard::bundle_version_for_branch;
-use zcash_primitives::transaction::fees::zip317::{
-    FeeError, MARGINAL_FEE, P2PKH_STANDARD_OUTPUT_SIZE,
-};
-use zcash_primitives::transaction::fees::FeeRule as _;
-use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
+use zcash_primitives::transaction::fees::zip317::{FeeError, GRACE_ACTIONS, MARGINAL_FEE};
+use zcash_protocol::consensus::Parameters;
 use zcash_protocol::value::Zatoshis;
 
 use crate::mint::otp::OtpCode;
@@ -265,35 +261,16 @@ fn sweep_ironwood_to_vault<P: Parameters>(
         return None;
     }
 
-    // The fee from the padded action count the builder will produce — an
-    // unpadded estimate undercuts the padded bundle and the build fails.
-    let bundle_version = bundle_version_for_branch(
-        BranchId::for_height(network, BlockHeight::from(target_height)),
-        orchard::ValuePool::Ironwood,
-    )
-    .unwrap_or_else(orchard::bundle::BundleVersion::ironwood_v3);
-    let economic_notes = wallet
+    // The fee bound, not the fee: upstream's exact arithmetic is its own, so
+    // the payment is sized with a provable over-estimate. Any surplus stays
+    // as change and re-crosses the threshold on a later tip.
+    let note_count = wallet
         .unspent_ironwood_notes(TREASURY_ACCOUNT, target_height)
-        .iter()
-        .filter(|note| note.note().value().inner() > MARGINAL_FEE.into_u64())
-        .count()
-        .max(1);
-    let ironwood_actions = orchard::builder::BundleType::DEFAULT
-        .num_actions(bundle_version.default_flags(), economic_notes, 0)
-        .ok()?;
-    let fee = StandardFeeRule::Zip317
-        .fee_required(
-            network,
-            BlockHeight::from(target_height),
-            std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
-            [P2PKH_STANDARD_OUTPUT_SIZE],
-            0,
-            0,
-            0,
-            ironwood_actions,
-        )
-        .ok()?;
-    let payment = (spendable - SWEEP_RESERVE).and_then(|remaining| remaining - fee)?;
+        .len();
+    let actions = (1 + note_count + 2).max(GRACE_ACTIONS);
+    let bound = Zatoshis::from_u64(MARGINAL_FEE.into_u64() * actions as u64)
+        .expect("fee bound fits the monetary range");
+    let payment = (spendable - SWEEP_RESERVE).and_then(|remaining| remaining - bound)?;
     if payment.is_zero() {
         return None;
     }
@@ -326,7 +303,7 @@ fn sweep_ironwood_to_vault<P: Parameters>(
         ),
         request,
         policy,
-        &SpendPolicy::default(),
+        &SpendPolicy::shielded_pools([zcash_protocol::ShieldedPool::Ironwood]),
         None,
         None,
     )
