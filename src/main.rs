@@ -16,25 +16,22 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use incrementalmerkletree::Position;
 use zcash_client_backend::data_api::wallet::TargetHeight;
-use zcash_client_backend::data_api::{WalletRead as _, WalletWrite as _};
+use zcash_client_backend::data_api::WalletWrite as _;
 use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
 use zcash_client_backend::scanning::Nullifiers;
-use zcash_client_backend::wallet::NoteId;
 use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::value::Zatoshis;
-use zcash_protocol::ShieldedPool;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::note::NameNoteQueue;
 use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D_OTP};
 use zns_mint::mint::registry::{NameRecord, ReceivedNameNote};
-use zns_mint::mint::treasury::{self, parse_request};
+use zns_mint::mint::treasury::{self, parse_request, RequestQueue};
 use zns_mint::mint::{
     Action, Challenge, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN, MINT_BIRTHDAY,
     REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
-use zns_mint::zcash::{self, CanonicalBlockSource, ChainClient, JsonRpc, SubmitOutcome, TipStream};
+use zns_mint::zcash::{self, CanonicalBlockSource, ChainClient, JsonRpc, TipStream};
 
 const RETRY_PAUSE: Duration = Duration::from_secs(5);
 
@@ -62,19 +59,13 @@ async fn main() {
     let rpc = JsonRpc::new();
     let source = CanonicalBlockSource::new();
 
-    // Notes mined at or before the boot tip are not requests. The
-    // Registry rebuilt from Name Notes is the source of truth; whatever
-    // the Treasury happened to be holding when the mint went live is
-    // balance, not instruction.
-    let live_from = chain_tip.block_height();
-    // Treasury notes already announced in the logs: receipts and
-    // underpaid claims log once per note, not once per tip. Membership
-    // also excludes a note from re-evaluation: an underpaid claim is
-    // dead, not retained — a moving quote never resurrects it.
-    let mut seen_notes: std::collections::BTreeSet<NoteId> = std::collections::BTreeSet::new();
     // Authorized Name Notes awaiting the chain: the lanes admit, the
     // enactment phase builds and broadcasts.
     let mut name_notes = NameNoteQueue::default();
+    // Treasury requests decoded once at block application: what each memo
+    // said, what it paid, the block that carried it. The drain at each tip
+    // decides entries; a reorg truncates them.
+    let mut requests = RequestQueue::default();
 
     zns_mint::metrics::install();
     tracing::info!(
@@ -184,6 +175,7 @@ async fn main() {
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
             name_notes.truncate_to(ancestor);
+            requests.truncate_to(ancestor);
             tracing::warn!(
                 height = u32::from(ancestor),
                 hash = %chain_tip.block_hash(),
@@ -327,16 +319,21 @@ async fn main() {
                 .put_blocks(&from_state, vec![scanned])
                 .expect("FATAL: wallet block commit failed");
             // Upstream's ScannedBlock drops note plaintexts; the Treasury
-            // lane's memos were decrypted above and are stored alongside.
-            for (txid, action_index, memo) in treasury_memos {
-                wallet.store_scanned_memo(
-                    NoteId::new(
-                        txid,
-                        ShieldedPool::Ironwood,
-                        u16::try_from(action_index).expect("Ironwood action index fits u16"),
+            // lane's memos were decrypted above. Decoded once, here, they
+            // are recorded as the requests they carry — nothing is stored
+            // for later re-reading; the block is the durable source,
+            // refetched on every application. Boot never runs this:
+            // arrivals from history are balance, not instruction.
+            for (txid, _action_index, paid, memo) in treasury_memos {
+                match parse_request(&network, &memo) {
+                    Some(request) => requests.record(request, paid, next_height),
+                    None => tracing::info!(
+                        txid = %txid,
+                        value_zec = paid.into_u64() as f64 / 1e8,
+                        height = u32::from(next_height),
+                        "treasury received non-request payment"
                     ),
-                    memo,
-                );
+                }
             }
             for (index, position) in accepted_name_notes {
                 let candidate = &candidates[index];
@@ -403,240 +400,207 @@ async fn main() {
             .sum();
         zns_mint::metrics::snapshot(tip, treasury_zats, oracle.current().into_u64());
 
-        // Treasury messages. Each inbound note carries exactly one memo —
-        // a paid claim, an update or release request, or an OTP echo — so
-        // every note is decoded once and dispatched once. Notes mined
-        // before the mint went live are balance, not instruction.
-        for note in wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip)) {
-            let note_id = *note.internal_note_id();
-            let Some(note_height) = note.mined_height() else {
-                continue;
-            };
-            if note_height <= live_from || seen_notes.contains(&note_id) {
-                continue;
-            }
-            let memo = wallet
-                .get_memo(*note.internal_note_id())
-                .expect("FATAL: Treasury memo lookup failed");
-            let Some(memo) = memo else { continue };
-            let memo = memo.encode();
-            let raw = memo.as_array();
-
-            let Some(parsed) = parse_request(&network, raw) else {
-                if seen_notes.insert(note_id) {
-                    tracing::info!(
-                        txid = %note_id.txid(),
-                        value_zec = note.note().value().inner() as f64 / 1e8,
-                        height = u32::from(note_height),
-                        "treasury received non-request payment"
-                    );
-                }
-                continue;
-            };
-
-            match (parsed.action, parsed.otp) {
-                (Action::Claim, Some(_)) => continue,
-                (Action::Update | Action::Release, Some(otp)) => {
-                    let Some(record) = registry.record(&parsed.name).cloned() else {
-                        continue;
-                    };
-                    if record.action == Action::Release {
-                        continue;
-                    }
-                    let Some(code) = OtpCode::from_digits(&otp) else {
-                        continue;
-                    };
-                    let challenge = Challenge {
-                        code,
-                        name: parsed.name.clone(),
-                        action: parsed.action,
-                        ua: parsed.ua.clone(),
-                    };
-                    let Some(sent) = challenges.awaiting(&challenge, mtp_now) else {
-                        continue;
-                    };
-                    let digits = sent.code.digits();
-                    let request = match parsed.action {
-                        Action::Update => Request::Update {
-                            name: parsed.name.clone(),
-                            ua: parsed.ua.clone(),
-                            term: sent.term,
-                        },
-                        Action::Release => Request::Release {
-                            name: parsed.name.clone(),
-                            ua: parsed.ua.clone(),
-                        },
-                        Action::Claim => continue,
-                    };
-                    let mut authorized_challenges = challenges.clone();
-                    let Some(transition_note) = registry.authorize(
-                        &mut authorized_challenges,
-                        request,
-                        Some(&digits),
-                        note_height,
-                        mtp_now,
-                    ) else {
-                        continue;
-                    };
-                    // The echo answered: consume the challenge, record
-                    // the decision. Enactment builds and broadcasts.
-                    challenges = authorized_challenges;
-                    name_notes.admit(note_height, transition_note);
-                }
-
-                (Action::Claim, None) => {
-                    let name = parsed.name;
-                    let ua = parsed.ua;
-                    let term = parsed.term;
-                    // One open claim per name: the Registry lags the
-                    // mempool by a block; the queue does not. A rival
-                    // payment stays Treasury income.
-                    if name_notes.claim_pending(&name) {
-                        tracing::debug!(
-                            name = %name.as_str(),
-                            "claim already pending for this name"
-                        );
-                        continue;
-                    }
-                    // A registration spends one current claim anchor, spends
-                    // the inbound payment note, draws the network fee from
-                    // separate eligible Treasury notes, and creates both
-                    // the Name Note and the next zero-value claim anchor.
-                    let price = oracle.quote_forever(&name);
-                    // Payment gate: the quote at first sight is binding.
-                    // An underpaid claim is dead and silent; a new
-                    // payment settles a new evaluation.
-                    let payment_value = Zatoshis::from_u64(note.note().value().inner())
-                        .expect("note value fits in the Zcash monetary range");
-                    if payment_value < price {
-                        seen_notes.insert(note_id);
-                        continue;
-                    }
-                    let Some(claim_note) = registry.authorize(
-                        &mut challenges,
-                        Request::Claim {
-                            name: name.clone(),
-                            ua,
-                            term,
-                        },
-                        None,
-                        note_height,
-                        mtp_now,
-                    ) else {
-                        tracing::debug!(
-                            name = %name.as_str(),
-                            "claim not authorized"
-                        );
-                        continue;
-                    };
-                    // Enactment below resolves the anchor and broadcasts.
-                    name_notes.admit(note_height, claim_note);
-                }
-
-                (Action::Update | Action::Release, None) => {
-                    // Update and release requests are relays: the mint
-                    // sends a one-time code to the current controller and
-                    // the pending authorization lives only after Zebra
-                    // accepts the challenge transaction. The request note
-                    // itself stays put; the sweeps reclaim it.
-                    let name = parsed.name;
-                    let action = parsed.action;
-                    let requested_ua = parsed.ua;
-                    let term = parsed.term;
-                    let Some(record) = registry.record(&name).cloned() else {
-                        tracing::debug!(
-                            name = %name.as_str(),
-                            "request for an unregistered name"
-                        );
-                        continue;
-                    };
-                    if record.action == Action::Release
-                        || record.expires_at.expired(mtp_now)
-                        || note_height <= record.confirmed_height
-                        || (action == Action::Release && requested_ua != record.ua)
-                        || challenges.pending(
-                            &name,
-                            action,
-                            &requested_ua,
-                            record.commitment,
-                            mtp_now,
-                        )
-                    {
-                        continue;
-                    }
-
-                    let code = OtpCode::generate();
-                    let challenge = Challenge {
-                        code: code.clone(),
-                        name: name.clone(),
-                        action,
-                        ua: requested_ua.clone(),
-                    };
-                    let Some(memo) = challenge.encode(&network) else {
-                        continue;
-                    };
-                    let relay_value = required_relay_value(&network, target_height);
-                    let Some(transaction) = treasury::challenge(
-                        &network,
-                        &mut wallet,
-                        &treasury_keys,
-                        &sapling_spend,
-                        &sapling_output,
-                        &record.ua,
-                        memo,
-                        relay_value,
-                    ) else {
-                        tracing::debug!(
-                            name = %name.as_str(),
-                            action = action.as_str(),
-                            "controller challenge awaits Treasury funds"
-                        );
-                        continue;
-                    };
-
-                    let pending = OtpRequest {
-                        name: name.clone(),
-                        action,
-                        ua: requested_ua,
-                        tip_rcm: record.commitment,
-                        code,
-                        expires_at: mtp_now + time::Duration::seconds(D_OTP),
-                        term,
-                    };
-                    let accepted = loop {
-                        match source.send_transaction(&transaction).await {
-                            Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => break true,
-                            Ok(SubmitOutcome::Rejected(error)) => {
-                                tracing::error!(
-                                    %error,
-                                    txid = %transaction.txid(),
-                                    name = %name.as_str(),
-                                    action = action.as_str(),
-                                    "controller challenge rejected"
-                                );
-                                break false;
-                            }
-                            Err(error) if error.is_retryable() => {
-                                tracing::warn!(
-                                    %error,
-                                    txid = %transaction.txid(),
-                                    "challenge submission uncertain; retrying"
-                                );
-                                tokio::time::sleep(RETRY_PAUSE).await;
-                            }
-                            Err(error) => panic!("FATAL: challenge submission failed: {error}"),
+        // Treasury requests. Each memo was decoded once, at block
+        // application; the drain decides each entry exactly once. A
+        // decided entry leaves the queue; a deferred relay — Treasury
+        // fee funds missing, or the node rejected the challenge — waits
+        // for the next tip. Nothing is re-read.
+        let mut index = 0;
+        while index < requests.len() {
+            let (request, paid, note_height) = requests.entry(index);
+            let decided = 'lane: {
+                match (request.action, request.otp) {
+                    (Action::Claim, Some(_)) => break 'lane true, // malformed: dead
+                    (Action::Update | Action::Release, Some(otp)) => {
+                        // The echo lane: an OTP response. Decided in every
+                        // outcome — an echo never waits for money.
+                        let Some(record) = registry.record(&request.name).cloned() else {
+                            break 'lane true; // no record: no mint-issued challenge can match
+                        };
+                        if record.action == Action::Release {
+                            break 'lane true;
                         }
-                    };
-                    if accepted {
-                        challenges.issue(pending);
-                        tracing::info!(
-                            txid = %transaction.txid(),
-                            name = %name.as_str(),
-                            action = action.as_str(),
-                            "controller challenged"
-                        );
+                        let Some(code) = OtpCode::from_digits(&otp) else {
+                            break 'lane true;
+                        };
+                        let challenge = Challenge {
+                            code,
+                            name: request.name.clone(),
+                            action: request.action,
+                            ua: request.ua.clone(),
+                        };
+                        let Some(sent) = challenges.awaiting(&challenge, mtp_now) else {
+                            break 'lane true; // no pending challenge: dead
+                        };
+                        let digits = sent.code.digits();
+                        let authorized = match request.action {
+                            Action::Update => Request::Update {
+                                name: request.name.clone(),
+                                ua: request.ua.clone(),
+                                term: sent.term,
+                            },
+                            Action::Release => Request::Release {
+                                name: request.name.clone(),
+                                ua: request.ua.clone(),
+                            },
+                            Action::Claim => unreachable!("claims never carry an OTP"),
+                        };
+                        // The clone preserves the challenge if authorize
+                        // declines after consuming it — a term whose
+                        // extension overflows.
+                        let mut authorized_challenges = challenges.clone();
+                        let Some(transition_note) = registry.authorize(
+                            &mut authorized_challenges,
+                            authorized,
+                            Some(&digits),
+                            note_height,
+                            mtp_now,
+                        ) else {
+                            break 'lane true;
+                        };
+                        challenges = authorized_challenges;
+                        name_notes.admit(note_height, transition_note);
+                        true
+                    }
+
+                    (Action::Claim, None) => {
+                        let name = request.name.clone();
+                        let ua = request.ua.clone();
+                        let term = request.term;
+                        // One open claim per name: the Registry lags the
+                        // mempool by a block; the queue does not. A rival
+                        // payment stays Treasury income.
+                        if name_notes.claim_pending(&name) {
+                            tracing::debug!(
+                                name = %name.as_str(),
+                                "claim already pending for this name"
+                            );
+                            break 'lane true;
+                        }
+                        let price = oracle.quote_forever(&name);
+                        // Payment gate: the quote at first sight is binding.
+                        // An underpaid claim is dead and silent; a new
+                        // payment settles a new evaluation.
+                        if paid < price {
+                            break 'lane true;
+                        }
+                        let Some(claim_note) = registry.authorize(
+                            &mut challenges,
+                            Request::Claim {
+                                name: name.clone(),
+                                ua,
+                                term,
+                            },
+                            None,
+                            note_height,
+                            mtp_now,
+                        ) else {
+                            tracing::debug!(
+                                name = %name.as_str(),
+                                "claim not authorized"
+                            );
+                            break 'lane true;
+                        };
+                        // Enactment below resolves the anchor and broadcasts.
+                        name_notes.admit(note_height, claim_note);
+                        true
+                    }
+
+                    (Action::Update | Action::Release, None) => {
+                        // The relay lane: the mint challenges the controller.
+                        // The two ways money can refuse — no fee funds,
+                        // node rejection — defer; everything else is
+                        // decided.
+                        let name = request.name.clone();
+                        let action = request.action;
+                        let requested_ua = request.ua.clone();
+                        let term = request.term;
+                        let Some(record) = registry.record(&name).cloned() else {
+                            tracing::debug!(
+                                name = %name.as_str(),
+                                "request for an unregistered name"
+                            );
+                            // Deferral would be attacker-bought memory: the
+                            // payer re-requests once the claim lands.
+                            break 'lane true;
+                        };
+                        if record.action == Action::Release
+                            || record.expires_at.expired(mtp_now)
+                            || note_height <= record.confirmed_height
+                            || (action == Action::Release && requested_ua != record.ua)
+                            || challenges.pending(
+                                &name,
+                                action,
+                                &requested_ua,
+                                record.commitment,
+                                mtp_now,
+                            )
+                        {
+                            break 'lane true;
+                        }
+
+                        let code = OtpCode::generate();
+                        let challenge = Challenge {
+                            code: code.clone(),
+                            name: name.clone(),
+                            action,
+                            ua: requested_ua.clone(),
+                        };
+                        let Some(memo) = challenge.encode(&network) else {
+                            break 'lane true;
+                        };
+                        let relay_value = required_relay_value(&network, target_height);
+                        let Some(transaction) = treasury::challenge(
+                            &network,
+                            &mut wallet,
+                            &treasury_keys,
+                            &sapling_spend,
+                            &sapling_output,
+                            &record.ua,
+                            memo,
+                            relay_value,
+                        ) else {
+                            tracing::debug!(
+                                name = %name.as_str(),
+                                action = action.as_str(),
+                                "controller challenge awaits Treasury funds"
+                            );
+                            break 'lane false; // deferred
+                        };
+
+                        let pending = OtpRequest {
+                            name: name.clone(),
+                            action,
+                            ua: requested_ua,
+                            tip_rcm: record.commitment,
+                            code,
+                            expires_at: mtp_now + time::Duration::seconds(D_OTP),
+                            term,
+                        };
+                        if source.submit(&transaction, "controller challenge").await {
+                            challenges.issue(pending);
+                            tracing::info!(
+                                txid = %transaction.txid(),
+                                name = %name.as_str(),
+                                action = action.as_str(),
+                                "controller challenged"
+                            );
+                            true
+                        } else {
+                            tracing::debug!(
+                                name = %name.as_str(),
+                                action = action.as_str(),
+                                "controller challenge rejected — deferred"
+                            );
+                            false
+                        }
                     }
                 }
+            };
+            if decided {
+                requests.remove(index);
+            } else {
+                index += 1;
             }
         }
 

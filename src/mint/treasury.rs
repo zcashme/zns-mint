@@ -16,7 +16,7 @@ use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_keys::address::UnifiedAddress;
 use zcash_primitives::transaction::fees::zip317::{FeeError, GRACE_ACTIONS, MARGINAL_FEE};
-use zcash_protocol::consensus::Parameters;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 
 use crate::mint::otp::OtpCode;
@@ -29,6 +29,7 @@ use crate::wallet::Wallet;
 /// `None` means no fixed expiration on a claim, or carry-forward on an update.
 /// `otp` is present only on an update/release Respond; its absence is a
 /// Request (claim, or the first step of authorization).
+#[derive(Clone, Debug)]
 pub struct ParsedRequest {
     pub action: Action,
     pub name: Name,
@@ -336,12 +337,113 @@ pub fn challenge<P: Parameters>(
     )
 }
 
+// ---------------------------------------------------------------------------
+// RequestQueue — Treasury requests decoded once, at block application
+// ---------------------------------------------------------------------------
+
+/// Treasury requests decoded once at block application: what each memo
+/// said, what it paid, the block that carried it. Entries leave by
+/// decision (`remove`) or by reorg (`truncate_to`); nothing else removes
+/// them.
+#[derive(Clone, Debug, Default)]
+pub struct RequestQueue {
+    requests: Vec<(ParsedRequest, Zatoshis, BlockHeight)>,
+}
+
+impl RequestQueue {
+    /// An arrival, decoded once at block application.
+    pub fn record(&mut self, request: ParsedRequest, paid: Zatoshis, height: BlockHeight) {
+        self.requests.push((request, paid, height));
+    }
+
+    pub fn len(&self) -> usize {
+        self.requests.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+
+    /// The entry at `index`, in block order — the drain cursor reads.
+    pub fn entry(&self, index: usize) -> (&ParsedRequest, Zatoshis, BlockHeight) {
+        let (request, paid, height) = &self.requests[index];
+        (request, *paid, *height)
+    }
+
+    /// The entry is decided. The only removal besides reorg truncation.
+    pub fn remove(&mut self, index: usize) {
+        self.requests.remove(index);
+    }
+
+    /// Reorg: entries whose block was orphaned fall with it.
+    pub fn truncate_to(&mut self, ancestor: BlockHeight) {
+        self.requests.retain(|(_, _, height)| *height <= ancestor);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use zcash_protocol::consensus::MainNetwork;
 
     const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
+
+    fn request(action: Action) -> ParsedRequest {
+        match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
+            Some(zcash_keys::address::Address::Unified(ua)) => ParsedRequest {
+                action,
+                name: Name::parse("alice").unwrap(),
+                ua,
+                term: None,
+                otp: None,
+            },
+            _ => panic!("vector is a mainnet Unified Address"),
+        }
+    }
+
+    fn h(n: u32) -> BlockHeight {
+        BlockHeight::from_u32(n)
+    }
+
+    #[test]
+    fn queue_records_in_block_order() {
+        let mut queue = RequestQueue::default();
+        assert_eq!(queue.len(), 0);
+
+        queue.record(request(Action::Claim), Zatoshis::ZERO, h(100));
+        queue.record(request(Action::Update), Zatoshis::ZERO, h(101));
+
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.entry(0).2, h(100));
+        assert_eq!(queue.entry(1).2, h(101));
+    }
+
+    #[test]
+    fn queue_remove_shifts_neighbors() {
+        let mut queue = RequestQueue::default();
+        queue.record(request(Action::Claim), Zatoshis::ZERO, h(100));
+        queue.record(request(Action::Update), Zatoshis::ZERO, h(101));
+        queue.record(request(Action::Release), Zatoshis::ZERO, h(102));
+
+        queue.remove(1);
+        assert_eq!(queue.len(), 2);
+        // The entry after the removed one shifted into its place.
+        assert_eq!(queue.entry(1).0.action, Action::Release);
+        assert_eq!(queue.entry(1).2, h(102));
+    }
+
+    #[test]
+    fn queue_truncate_drops_only_orphaned_heights() {
+        let mut queue = RequestQueue::default();
+        queue.record(request(Action::Claim), Zatoshis::ZERO, h(100));
+        queue.record(request(Action::Update), Zatoshis::ZERO, h(150));
+        queue.record(request(Action::Release), Zatoshis::ZERO, h(200));
+
+        queue.truncate_to(h(120));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.entry(0).0.action, Action::Claim);
+        assert_eq!(queue.entry(0).2, h(100));
+    }
 
     fn padded(s: &str) -> [u8; 512] {
         let mut m = [0u8; 512];
