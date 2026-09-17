@@ -111,7 +111,7 @@ impl JsonRpc {
     ///
     /// `pool` is a Zebra pool name (`"sapling"`, `"orchard"`, `"ironwood"`).
     /// The mint's boot fetches Sapling and Ironwood only; Orchard is
-    /// intentionally omitted — see `PreBirthdaySubtreeRoots`.
+    /// intentionally omitted — see the boot sequence.
     ///
     /// Each returned root pairs the shard's immutable subtree root hash
     /// with the block height at which the shard completed
