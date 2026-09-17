@@ -878,14 +878,14 @@ async fn main() {
             }
         }
 
-        for (label, tx) in treasury::sweep_to_vault(
+        if let Some(tx) = treasury::sweep_to_vault(
             &network,
             &mut wallet,
             &treasury_keys,
             &sapling_spend,
             &sapling_output,
         ) {
-            source.submit(&tx, label).await;
+            source.submit(&tx, "vault sweep").await;
         }
 
         tracing::debug!(
