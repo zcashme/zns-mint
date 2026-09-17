@@ -4,6 +4,15 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-18 — Exact-tip skip is visible; RUST_LOG works
+
+- After `scanned to tip`, a racing block during `fetch_round` made
+  `exact_tip != (tip, tip_hash)` and the loop continued with no log,
+  so a skipped vault sweep looked like mint never entered sweep.
+  The continue now WARNs scanned vs Zebra height and hash.
+- `tracing_subscriber` was `fmt()` without env-filter, so `RUST_LOG`
+  was ignored. Init now uses env-filter, defaulting to `info`.
+
 ## 2026-09-17 — Intake: term-first requests; echo is the relay memo
 
 - Treasury memos: `Challenge::decode` first (`ZNS:otp:…`), else
