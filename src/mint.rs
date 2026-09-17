@@ -242,7 +242,7 @@ impl Name {
 /// fulfillment, cursor. Never fetches, never broadcasts; `main` passes the
 /// live queues, boot passes scratch ones.
 #[allow(clippy::too_many_arguments)]
-pub fn apply_block<P: Parameters + Send + Sync + 'static>(
+pub fn apply_block<P: Parameters + Send + 'static>(
     network: &P,
     registry_keys: &crate::key::RegistryKeys,
     treasury_keys: &crate::key::TreasuryKeys,

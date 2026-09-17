@@ -19,22 +19,16 @@ use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::mtp::MtpTracker;
 use crate::mint::otp::OtpQueue;
 use crate::mint::pricing::Oracle;
-use crate::mint::registry::{ReceivedNameNote, Registry};
-use crate::mint::{
-    decrypt_name_notes, MINT_BIRTHDAY, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
-};
+use crate::mint::registry::Registry;
+use crate::mint::{MINT_BIRTHDAY, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::tee::{self, Tee};
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
-use incrementalmerkletree::Position;
 use sapling::circuit::{OutputParameters, SpendParameters};
-use std::convert::Infallible;
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::{
-    chain::ChainState, BlockMetadata, WalletCommitmentTrees as _, WalletWrite as _,
+    chain::ChainState, BlockMetadata, WalletCommitmentTrees as _,
 };
-use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
-use zcash_client_backend::scanning::Nullifiers;
 
 // ---------------------------------------------------------------------------
 // Boot life-cycle
@@ -219,7 +213,11 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             u32::from(checkpoint_height)
         );
 
-        // 4. Boot sync: scan from checkpoint to chain tip.
+        // 4. Boot sync: scan from checkpoint to chain tip. The body is
+        // `apply_block` — the same one the run loop calls — with scratch
+        // queues: arrivals from history are balance, not instruction, so
+        // each block's intake lands in a queue that falls out of scope with
+        // the iteration.
         let mut cursor = block_metadata(&origin);
         let mut registry = Registry::new(checkpoint_height);
         let source = crate::zcash::CanonicalBlockSource::new();
@@ -244,86 +242,23 @@ impl<P: Parameters + Send + 'static> Boot<P> {
                 .get_block(&network, next_height)
                 .await
                 .expect("FATAL: block unavailable during boot sync");
-            let block_time = block.header().time;
 
-            let candidates = decrypt_name_notes(&network, &block, &registry_keys);
-            let name_notes: Vec<ReceivedNameNote> = candidates
-                .iter()
-                .map(|c| {
-                    ReceivedNameNote::new(c.txid, c.action_index, c.nullifier, c.payload.clone())
-                })
-                .collect();
-            let (header, batches) = decrypt_block(&network, block, wallet.scanning_keys());
-            let nullifiers = Nullifiers::unspent(&wallet)
-                .expect("FATAL: wallet nullifiers unavailable during boot sync");
-            let scanned = scan_block(
+            let mut scratch_requests = crate::mint::treasury::RequestQueue::default();
+            let mut scratch_orders = crate::mint::note::NameNoteQueue::default();
+            crate::mint::apply_block(
                 &network,
+                &registry_keys,
+                &treasury_keys,
+                &from_state,
+                block,
                 next_height,
-                &header,
-                batches,
-                wallet.scanning_keys(),
-                &nullifiers,
-                Some(&cursor),
-                |_| {
-                    Ok::<
-                        Option<(
-                            zip32::AccountId,
-                            Option<transparent::keys::TransparentKeyScope>,
-                        )>,
-                        Infallible,
-                    >(None)
-                },
-            )
-            .expect("FATAL: block scan failed during boot sync");
-
-            let mut next_mtp = mtp.clone();
-            next_mtp.update(next_height, block_time);
-            let block_mtp = next_mtp.current().expect("FATAL: MTP unavailable");
-
-            let (next_registry, accepted_name_notes) =
-                registry.apply_block(&network, &scanned, &name_notes, block_mtp);
-
-            let ironwood_start = scanned
-                .ironwood()
-                .final_tree_size()
-                .checked_sub(
-                    u32::try_from(scanned.ironwood().commitments().len())
-                        .expect("Ironwood action count fits u32"),
-                )
-                .expect("FATAL: impossible Ironwood tree size");
-            let accepted_name_notes = accepted_name_notes
-                .into_iter()
-                .map(|index| {
-                    let candidate = &candidates[index];
-                    let position = Position::from(
-                        u64::from(ironwood_start)
-                            + u64::try_from(candidate.ordinal).expect("ordinal fits u64"),
-                    );
-                    (index, position)
-                })
-                .collect::<Vec<_>>();
-            let next_metadata = scanned.to_block_metadata();
-
-            wallet
-                .put_blocks(&from_state, vec![scanned])
-                .expect("FATAL: wallet commit failed during boot sync");
-            for (index, position) in accepted_name_notes {
-                let c = &candidates[index];
-                wallet.store_name_note(
-                    next_height,
-                    position,
-                    c.txid,
-                    c.action_index,
-                    c.note,
-                    c.nullifier,
-                    c.ephemeral_key.clone(),
-                    c.memo,
-                );
-            }
-
-            mtp = next_mtp;
-            registry = next_registry;
-            cursor = next_metadata;
+                &mut wallet,
+                &mut registry,
+                &mut mtp,
+                &mut cursor,
+                &mut scratch_requests,
+                &mut scratch_orders,
+            );
         }
         tracing::info!(
             height = u32::from(cursor.block_height()),
