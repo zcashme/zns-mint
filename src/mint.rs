@@ -260,7 +260,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     use std::convert::Infallible;
 
     use incrementalmerkletree::Position;
-    use zcash_client_backend::data_api::WalletWrite as _;
     use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
     use zcash_client_backend::scanning::Nullifiers;
     use zcash_primitives::transaction::TxId;
@@ -445,8 +444,16 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .collect::<Vec<_>>();
     let next_metadata = scanned.to_block_metadata();
 
+    // Accepted Name Note commitments are marked at the commit — the
+    // scanner cannot decrypt them, so they would otherwise enter the
+    // tree Ephemeral, prune with the checkpoints, and leave the note
+    // without a witness.
+    let marks: Vec<orchard::tree::MerkleHashOrchard> = accepted_name_notes
+        .iter()
+        .map(|(index, _)| orchard::tree::MerkleHashOrchard::from_cmx(&candidates[*index].cmx))
+        .collect();
     wallet
-        .put_blocks(from_state, vec![scanned])
+        .put_blocks_marked(from_state, vec![scanned], &marks)
         .expect("FATAL: wallet block commit failed");
     // Upstream's ScannedBlock drops note plaintexts; the Treasury
     // lane's memos were decrypted above. Decoded once, here, they

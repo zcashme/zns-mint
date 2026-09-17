@@ -439,6 +439,9 @@ pub struct DecryptedNameNote {
     /// The action's index in the block's full Ironwood commitment stream —
     /// fixes the note's tree position.
     pub ordinal: usize,
+    /// The action's published note commitment — marked at the wallet
+    /// commit so the note stays witnessable.
+    pub cmx: orchard::note::ExtractedNoteCommitment,
     pub note: orchard::note::Note,
     /// The nullifier this ZNS-bound note reveals when spent. It must be
     /// derived from the same authenticated `(rcm, psi)` pair as `cmx`; the
@@ -509,6 +512,7 @@ pub fn decrypt_name_notes<P: Parameters>(
                                 txid: tx.txid(),
                                 action_index,
                                 ordinal,
+                                cmx: *candidate.cmx(),
                                 note,
                                 nullifier,
                                 ephemeral_key: zcash_note_encryption::EphemeralKeyBytes(

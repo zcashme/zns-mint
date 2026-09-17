@@ -129,7 +129,6 @@ pub const ANCHOR_POOL_SIZE: usize = 40;
 /// ANCHOR_POOL_SIZE zero-value Registry outputs in chain history (the
 /// ceremony's root — nothing can predate them), extended only by
 /// successors of accepted claims, retired when spent.
-#[derive(Clone)]
 pub struct Registry {
     records: BTreeMap<Name, NameRecord>,
     history: Vec<RegistryHistoryRecord>,
@@ -149,14 +148,6 @@ impl Registry {
             anchor_pool: BTreeSet::new(),
             pool_checkpoints: BTreeMap::new(),
         }
-    }
-
-    /// The height at which the current anchor chain began.
-    ///
-    /// A reorg below this height removes the root itself, so the orchestrator
-    /// must discard this Registry and recover the root while rescanning.
-    pub fn claim_anchor_height(&self) -> BlockHeight {
-        self.claim_anchor_height
     }
 
     /// The transition law: is this request lawful against the current
