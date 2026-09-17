@@ -4,6 +4,12 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-17 — Intake: term-first requests; echo is the relay memo
+
+- Treasury memos: `Challenge::decode` first (`ZNS:otp:…`), else
+  `parse_request` (`forever`/`<N>y`, UA last). The echo's term is the one
+  stored on the issued challenge. Claim payment is still `quote_forever`.
+
 ## 2026-09-15 — Liveness τ+L enforcement in the lifecycle pass (issue #14)
 
 - The lifecycle pass uses `CHALLENGE_LEAD` (7 days) for its

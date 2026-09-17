@@ -1,5 +1,13 @@
 # Treasury design record
 
+## 2026-09-17 — Request grammar is term-first; echo is the relay memo
+
+- `parse_request` reads `ZNS:claim:<term>:<name>:<ua>` (`forever` or
+  `<N>y`), `ZNS:update:<term>:<name>:<ua>` (`none` or `<N>y`),
+  `ZNS:release:<name>:<ua>`. UA is terminal. No OTP on a request.
+- An echo is `ZNS:otp:…`, routed by `Challenge::decode` at intake; digits
+  ride the request queue, the bound term stays on the issued challenge.
+
 ## 2026-09-15 — Loop keeps parse_request and challenge()
 
 - User memos stay on `parse_request` (WP slots, canonical seconds, OTP

@@ -194,16 +194,14 @@ impl Expiry {
 
     /// Successor expiry for an update (§4.5.3).
     ///
-    /// No term, or `none`, leaves the period unchanged.
-    /// A term extends a fixed instant: `current + requested_term`. Returns
-    /// `None` if that sum is not a representable timestamp.
-    /// Extends by `term` (banking: from the current expiry). The result
-    /// must sit no more than `MAX_TERM_YEARS` years ahead of `mtp` —
-    /// renew indefinitely, never bank more than the horizon.
+    /// `None` leaves the period unchanged. `Some(years)` banks from the
+    /// current expiry. A forever name has no runway: `Never` plus a term
+    /// is refused. The result must sit no more than `MAX_TERM_YEARS`
+    /// ahead of `mtp`.
     pub fn extend(self, term: Option<Term>, mtp: Timestamp) -> Option<Self> {
         let extended = match (self, term) {
-            (Expiry::Never, _) => Expiry::Never,
             (expiry, None) => expiry,
+            (Expiry::Never, Some(_)) => return None,
             (Expiry::At(t), Some(term)) => t.checked_add(term.duration()).map(Expiry::At)?,
         };
         let horizon = mtp
@@ -847,7 +845,9 @@ mod tests {
             Expiry::At(mtp).extend(Some(term), mtp),
             Some(Expiry::At(mtp.checked_add(term.duration()).unwrap()))
         );
-        assert_eq!(Expiry::Never.extend(Some(term), mtp), Some(Expiry::Never));
+        // Forever has no end date, so years cannot be added to it.
+        assert_eq!(Expiry::Never.extend(Some(term), mtp), None);
+        assert_eq!(Expiry::Never.extend(None, mtp), Some(Expiry::Never));
         assert_eq!(Expiry::At(mtp).extend(None, mtp), Some(Expiry::At(mtp)));
     }
 
