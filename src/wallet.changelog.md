@@ -1,5 +1,17 @@
 # Wallet changelog
 
+## 2026-09-18 — `n == 0` transparent reserve is a no-op
+
+- `create_proposed_transactions` always calls
+  `reserve_next_n_ephemeral_addresses`, including `n == 0` (no transparent
+  change). The mint does not derive transparent receivers, so the stub
+  used to return `Err(FixedAccountsOnly)` for every `n`. A successful
+  `propose_transfer` then died as `vault sweep build failed
+  error=DataSource(FixedAccountsOnly)`.
+- Both `reserve_next_n_ephemeral_addresses` and
+  `reserve_next_n_internal_addresses` now return `Ok(vec![])` when
+  `n == 0`. `n > 0` stays `FixedAccountsOnly`.
+
 ## 2026-09-16 — `Wallet::new` seeds pre-birthday shard roots
 
 - New `PreBirthdaySubtreeRoots { sapling, ironwood }`. Orchard omitted:

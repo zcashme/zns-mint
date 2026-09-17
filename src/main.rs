@@ -37,7 +37,12 @@ const RETRY_PAUSE: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
     let Boot {
         network,
@@ -402,6 +407,13 @@ async fn main() {
             }
         };
         if exact_tip != (tip, tip_hash) {
+            tracing::warn!(
+                scanned_height = u32::from(tip),
+                scanned_hash = %tip_hash,
+                zebra_height = u32::from(exact_tip.0),
+                zebra_hash = %exact_tip.1,
+                "tip moved during price fetch; skipping rules until next notification"
+            );
             continue;
         }
 

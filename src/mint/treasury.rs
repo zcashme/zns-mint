@@ -126,17 +126,32 @@ pub fn sweep_to_vault<P: Parameters>(
     output_prover: &sapling::circuit::OutputParameters,
 ) -> Option<zcash_primitives::transaction::Transaction> {
     let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
-    let (target_height, _) = wallet
+    let Some((target_height, _)) = wallet
         .get_target_and_anchor_heights(NonZeroU32::MIN)
         .ok()
-        .flatten()?;
+        .flatten()
+    else {
+        tracing::warn!("vault sweep skipped: no target/anchor heights");
+        return None;
+    };
 
-    let summary = wallet.get_wallet_summary(policy).ok().flatten()?;
-    let account = summary.account_balances().get(&TREASURY_ACCOUNT)?;
+    let Some(summary) = wallet.get_wallet_summary(policy).ok().flatten() else {
+        tracing::warn!("vault sweep skipped: no wallet summary");
+        return None;
+    };
+    let Some(account) = summary.account_balances().get(&TREASURY_ACCOUNT) else {
+        tracing::warn!("vault sweep skipped: Treasury account missing from summary");
+        return None;
+    };
     let sapling = account.sapling_balance().spendable_value();
     let ironwood = account.ironwood_balance().spendable_value();
     let spendable = (sapling + ironwood).expect("balances sum");
     if spendable <= SWEEP_THRESHOLD {
+        tracing::debug!(
+            spendable_zats = spendable.into_u64(),
+            threshold_zats = SWEEP_THRESHOLD.into_u64(),
+            "vault sweep skipped: below threshold"
+        );
         return None;
     }
 
@@ -151,12 +166,20 @@ pub fn sweep_to_vault<P: Parameters>(
     let actions = (note_count + 3).max(GRACE_ACTIONS);
     let bound = Zatoshis::from_u64(MARGINAL_FEE.into_u64() * actions as u64)
         .expect("fee bound fits the monetary range");
-    let payment = (spendable - SWEEP_RESERVE).and_then(|remaining| remaining - bound)?;
+    let Some(payment) = (spendable - SWEEP_RESERVE).and_then(|remaining| remaining - bound) else {
+        tracing::warn!(
+            spendable_zats = spendable.into_u64(),
+            reserve_zats = SWEEP_RESERVE.into_u64(),
+            "vault sweep skipped: reserve and fee exceed spendable"
+        );
+        return None;
+    };
     if payment.is_zero() {
+        tracing::warn!("vault sweep skipped: payment is zero");
         return None;
     }
 
-    let request = zip321::TransactionRequest::new(vec![zip321::Payment::new(
+    let Some(request) = zip321::Payment::new(
         zcash_keys::address::Address::Transparent(VAULT_ADDRESS).to_zcash_address(network),
         Some(payment),
         None,
@@ -164,8 +187,11 @@ pub fn sweep_to_vault<P: Parameters>(
         None,
         vec![],
     )
-    .ok()?])
-    .ok()?;
+    .ok()
+    .and_then(|pay| zip321::TransactionRequest::new(vec![pay]).ok()) else {
+        tracing::warn!("vault sweep skipped: ZIP-321 request invalid");
+        return None;
+    };
 
     let proposal = propose_transfer::<_, _, _, _, Infallible>(
         wallet,
@@ -184,7 +210,7 @@ pub fn sweep_to_vault<P: Parameters>(
         None,
         None,
     )
-    .map_err(|error| tracing::debug!(?error, "vault sweep proposal failed; retrying next tip"))
+    .map_err(|error| tracing::warn!(?error, "vault sweep proposal failed"))
     .ok()?;
 
     let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
@@ -201,7 +227,13 @@ pub fn sweep_to_vault<P: Parameters>(
     .map_err(|error| tracing::warn!(?error, "vault sweep build failed"))
     .ok()?;
 
-    wallet.get_transaction(*txids.first()).ok().flatten()
+    match wallet.get_transaction(*txids.first()).ok().flatten() {
+        Some(tx) => Some(tx),
+        None => {
+            tracing::warn!("vault sweep skipped: built tx missing from wallet");
+            None
+        }
+    }
 }
 
 /// Proposes, builds, and records a Treasury payment carrying an OTP challenge

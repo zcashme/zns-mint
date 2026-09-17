@@ -1,5 +1,16 @@
 # Treasury design record
 
+## 2026-09-18 — Sweep None paths log why
+
+- `sweep_to_vault` returned `None` with no log on missing
+  anchor/summary, below-threshold idle, zero payment, and ZIP-321
+  construction failure. Proposal failure was debug-only. Two CI
+  timeouts looked identical: mint never called submit, and the log
+  could not tell skip from silent None.
+- Each None path now logs the reason. Unexpected skips and proposal
+  failure are WARN. Below-threshold idle is DEBUG so a dry Treasury
+  does not spam every tip.
+
 ## 2026-09-17 — Request grammar is term-first; echo is the relay memo
 
 - `parse_request` reads `ZNS:claim:<term>:<name>:<ua>` (`forever` or

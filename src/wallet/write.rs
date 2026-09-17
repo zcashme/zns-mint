@@ -635,7 +635,7 @@ impl WalletWrite for Wallet {
     fn reserve_next_n_ephemeral_addresses(
         &mut self,
         _account_id: AccountId,
-        _n: usize,
+        n: usize,
     ) -> Result<
         Vec<(
             transparent::address::TransparentAddress,
@@ -643,15 +643,19 @@ impl WalletWrite for Wallet {
         )>,
         WalletError,
     > {
-        // Neither fixed account owns, derives, or reserves a transparent
-        // receiver.
+        // `create_proposed_transactions` always calls this, including `n == 0`
+        // (no transparent change). The mint does not derive transparent
+        // receivers; a zero request is a no-op, not a policy error.
+        if n == 0 {
+            return Ok(Vec::new());
+        }
         Err(WalletError::FixedAccountsOnly)
     }
 
     fn reserve_next_n_internal_addresses(
         &mut self,
         _account_id: AccountId,
-        _n: usize,
+        n: usize,
     ) -> Result<
         Vec<(
             transparent::address::TransparentAddress,
@@ -659,6 +663,11 @@ impl WalletWrite for Wallet {
         )>,
         WalletError,
     > {
+        // Same as ephemeral: `n == 0` is a no-op; the mint does not derive
+        // transparent receivers.
+        if n == 0 {
+            return Ok(Vec::new());
+        }
         Err(WalletError::FixedAccountsOnly)
     }
 
@@ -758,5 +767,56 @@ impl Wallet {
             txid,
             zcash_client_backend::data_api::TransactionStatus::Mined(height),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Wallet, WalletError};
+    use incrementalmerkletree::frontier::Frontier;
+    use zcash_client_backend::data_api::chain::ChainState;
+    use zcash_client_backend::data_api::WalletWrite;
+    use zcash_primitives::block::BlockHash;
+    use zcash_protocol::consensus::BlockHeight;
+    use zip32::AccountId;
+
+    fn empty_origin() -> ChainState {
+        ChainState::new(
+            BlockHeight::from_u32(0),
+            BlockHash([0; 32]),
+            Frontier::empty(),
+            Frontier::empty(),
+            Frontier::empty(),
+        )
+    }
+
+    #[test]
+    fn reserve_zero_transparent_addresses_is_a_noop() {
+        let origin = empty_origin();
+        let mut wallet = Wallet::new([], &origin).expect("empty UFVK set is valid");
+        let account = AccountId::const_from_u32(0);
+        assert!(wallet
+            .reserve_next_n_ephemeral_addresses(account, 0)
+            .expect("n == 0 is not FixedAccountsOnly")
+            .is_empty());
+        assert!(wallet
+            .reserve_next_n_internal_addresses(account, 0)
+            .expect("n == 0 is not FixedAccountsOnly")
+            .is_empty());
+    }
+
+    #[test]
+    fn reserve_nonzero_transparent_addresses_is_fixed_accounts_only() {
+        let origin = empty_origin();
+        let mut wallet = Wallet::new([], &origin).expect("empty UFVK set is valid");
+        let account = AccountId::const_from_u32(0);
+        assert!(matches!(
+            wallet.reserve_next_n_ephemeral_addresses(account, 1),
+            Err(WalletError::FixedAccountsOnly)
+        ));
+        assert!(matches!(
+            wallet.reserve_next_n_internal_addresses(account, 1),
+            Err(WalletError::FixedAccountsOnly)
+        ));
     }
 }
