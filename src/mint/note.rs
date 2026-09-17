@@ -4,7 +4,7 @@
 
 use time::Timestamp;
 use zcash_keys::address::UnifiedAddress;
-use zcash_protocol::consensus::Parameters;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 pub mod assemble;
 
@@ -534,6 +534,51 @@ pub fn decrypt_treasury_memos(
     memos
 }
 
+// ---------------------------------------------------------------------------
+// NameNoteQueue — authorized Name Notes awaiting the chain
+// ---------------------------------------------------------------------------
+
+/// Authorized Name Notes awaiting the chain. Each pair is the note and
+/// the height whose evidence authorized it: a canonical block fulfills
+/// it, a reorg truncates it. Money stays in the wallet, so a restart
+/// empties the queue and the walk re-admits what still stands.
+#[derive(Clone, Debug, Default)]
+pub struct NameNoteQueue {
+    authorized: Vec<(NameNote, BlockHeight)>,
+}
+
+impl NameNoteQueue {
+    /// Records a decision. Idempotent: a note already authorized keeps its
+    /// original origin.
+    pub fn admit(&mut self, origin: BlockHeight, note: NameNote) {
+        if !self.authorized.iter().any(|(n, _)| *n == note) {
+            self.authorized.push((note, origin));
+        }
+    }
+
+    /// Reorg: drop origins above the common ancestor.
+    pub fn truncate_to(&mut self, ancestor: BlockHeight) {
+        self.authorized.retain(|(_, origin)| *origin <= ancestor);
+    }
+
+    /// The chain carried the note; forget the decision.
+    pub fn fulfill(&mut self, note: &NameNote) {
+        self.authorized.retain(|(n, _)| n != note);
+    }
+
+    /// The one-open-claim guard.
+    pub fn claim_pending(&self, name: &Name) -> bool {
+        self.authorized
+            .iter()
+            .any(|(n, _)| n.action() == Action::Claim && n.name() == name)
+    }
+
+    /// Every open decision, in admission order.
+    pub fn iter(&self) -> impl Iterator<Item = (&NameNote, BlockHeight)> {
+        self.authorized.iter().map(|(note, origin)| (note, *origin))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,5 +792,91 @@ mod tests {
         );
         assert_eq!(Expiry::Never.extend(Some(term)), Some(Expiry::Never));
         assert_eq!(Expiry::At(mtp).extend(None), Some(Expiry::At(mtp)));
+    }
+
+    #[test]
+    fn queue_admit_is_idempotent_and_fulfills() {
+        let claim = NameNote::Claim {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+        let h = |n: u32| BlockHeight::from_u32(n);
+
+        let mut queue = NameNoteQueue::default();
+        assert!(!queue.claim_pending(claim.name()));
+
+        queue.admit(h(10), claim.clone());
+        // A re-derived decision keeps its original origin.
+        queue.admit(h(12), claim.clone());
+        assert_eq!(queue.iter().count(), 1);
+        assert_eq!(queue.iter().next().map(|(_, origin)| origin), Some(h(10)));
+        assert!(queue.claim_pending(claim.name()));
+
+        // The chain carried it: the queue forgets the decision.
+        queue.fulfill(&claim);
+        assert_eq!(queue.iter().count(), 0);
+        assert!(!queue.claim_pending(claim.name()));
+    }
+
+    #[test]
+    fn queue_truncate_drops_only_orphaned_origins() {
+        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
+        let claim = NameNote::Claim {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+        let update = NameNote::Update {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+            prev,
+        };
+        let h = |n: u32| BlockHeight::from_u32(n);
+
+        let mut queue = NameNoteQueue::default();
+        queue.admit(h(100), claim);
+        queue.admit(h(150), update);
+
+        // A reorg to height 120 orphans only the later decision.
+        queue.truncate_to(h(120));
+        assert_eq!(queue.iter().count(), 1);
+        assert_eq!(
+            queue.iter().next().map(|(note, _)| note.action()),
+            Some(Action::Claim)
+        );
+    }
+
+    #[test]
+    fn queue_claim_guard_scopes_by_name() {
+        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
+        let bob = Name::parse("bob").unwrap();
+        let h = |n: u32| BlockHeight::from_u32(n);
+
+        let mut queue = NameNoteQueue::default();
+        // An open update is not an open claim.
+        queue.admit(
+            h(10),
+            NameNote::Update {
+                name: bob.clone(),
+                ua: test_ua(),
+                expires_at: Expiry::Never,
+                prev,
+            },
+        );
+        assert!(!queue.claim_pending(&bob));
+
+        queue.admit(
+            h(11),
+            NameNote::Claim {
+                name: bob.clone(),
+                ua: test_ua(),
+                expires_at: Expiry::Never,
+            },
+        );
+        assert!(queue.claim_pending(&bob));
+        // Other names are unblocked.
+        assert!(!queue.claim_pending(&test_name()));
     }
 }

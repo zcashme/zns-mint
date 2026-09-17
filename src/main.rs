@@ -26,6 +26,7 @@ use zcash_protocol::ShieldedPool;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
+use zns_mint::mint::note::NameNoteQueue;
 use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D_OTP};
 use zns_mint::mint::registry::{NameRecord, ReceivedNameNote};
 use zns_mint::mint::treasury::{self, parse_request};
@@ -71,6 +72,9 @@ async fn main() {
     // also excludes a note from re-evaluation: an underpaid claim is
     // dead, not retained — a moving quote never resurrects it.
     let mut seen_notes: std::collections::BTreeSet<NoteId> = std::collections::BTreeSet::new();
+    // Authorized Name Notes awaiting the chain: the lanes admit, the
+    // enactment phase builds and broadcasts.
+    let mut name_notes = NameNoteQueue::default();
 
     zns_mint::metrics::install();
     tracing::info!(
@@ -179,6 +183,7 @@ async fn main() {
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
+            name_notes.truncate_to(ancestor);
             tracing::warn!(
                 height = u32::from(ancestor),
                 hash = %chain_tip.block_hash(),
@@ -253,7 +258,7 @@ async fn main() {
             let candidates = zns_mint::mint::decrypt_name_notes(&network, &block, &registry_keys);
             let treasury_memos =
                 zns_mint::mint::note::decrypt_treasury_memos(&block, &treasury_keys);
-            let name_notes = candidates
+            let received_name_notes = candidates
                 .iter()
                 .map(|candidate| {
                     ReceivedNameNote::new(
@@ -295,7 +300,7 @@ async fn main() {
                 .expect("FATAL: MTP unavailable after applying a block");
 
             let (next_registry, accepted_name_notes) =
-                registry.apply_block(&network, &scanned, &name_notes, block_mtp);
+                registry.apply_block(&network, &scanned, &received_name_notes, block_mtp);
 
             let ironwood_start = scanned
                 .ironwood()
@@ -345,6 +350,8 @@ async fn main() {
                     candidate.ephemeral_key.clone(),
                     candidate.memo,
                 );
+                // The block fulfilled the order.
+                name_notes.fulfill(&candidate.payload);
             }
             mtp = next_mtp;
             registry = next_registry;
@@ -471,68 +478,26 @@ async fn main() {
                     ) else {
                         continue;
                     };
-                    let Some(transaction) = assemble::prepare(
-                        &network,
-                        &mut wallet,
-                        &treasury_keys,
-                        &registry_keys,
-                        &sapling_spend,
-                        &sapling_output,
-                        transition_note,
-                        record.nullifier,
-                        Some(&note),
-                        tip,
-                        target_height,
-                    ) else {
-                        tracing::debug!(
-                            name = %parsed.name.as_str(),
-                            action = parsed.action.as_str(),
-                            "authorized transition awaits Treasury fee funds"
-                        );
-                        continue;
-                    };
-
-                    let accepted = loop {
-                        match source.send_transaction(&transaction).await {
-                            Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => break true,
-                            Ok(SubmitOutcome::Rejected(error)) => {
-                                tracing::error!(
-                                    %error,
-                                    txid = %transaction.txid(),
-                                    name = %parsed.name.as_str(),
-                                    action = parsed.action.as_str(),
-                                    "authorized transition rejected"
-                                );
-                                break false;
-                            }
-                            Err(error) if error.is_retryable() => {
-                                tracing::warn!(
-                                    %error,
-                                    txid = %transaction.txid(),
-                                    "transition submission uncertain; retrying"
-                                );
-                                tokio::time::sleep(RETRY_PAUSE).await;
-                            }
-                            Err(error) => {
-                                panic!("FATAL: transition submission failed: {error}")
-                            }
-                        }
-                    };
-                    if accepted {
-                        challenges = authorized_challenges;
-                        tracing::info!(
-                            txid = %transaction.txid(),
-                            name = %parsed.name.as_str(),
-                            action = parsed.action.as_str(),
-                            "authorized transition submitted"
-                        );
-                    }
+                    // The echo answered: consume the challenge, record
+                    // the decision. Enactment builds and broadcasts.
+                    challenges = authorized_challenges;
+                    name_notes.admit(note_height, transition_note);
                 }
 
                 (Action::Claim, None) => {
                     let name = parsed.name;
                     let ua = parsed.ua;
                     let term = parsed.term;
+                    // One open claim per name: the Registry lags the
+                    // mempool by a block; the queue does not. A rival
+                    // payment stays Treasury income.
+                    if name_notes.claim_pending(&name) {
+                        tracing::debug!(
+                            name = %name.as_str(),
+                            "claim already pending for this name"
+                        );
+                        continue;
+                    }
                     // A registration spends one current claim anchor, spends
                     // the inbound payment note, draws the network fee from
                     // separate eligible Treasury notes, and creates both
@@ -564,59 +529,8 @@ async fn main() {
                         );
                         continue;
                     };
-                    // Anchor authority comes only from the lineage pool:
-                    // ceremony-born at the root, mint-born by induction on
-                    // accepted claims. Forged or donated zero-value Registry
-                    // notes are not in the pool and can never be spent here.
-                    let authority_nf = registry.anchor_pool().iter().copied().find(|nf| {
-                        wallet
-                            .unspent_ironwood_note_by_nullifier(
-                                REGISTRY_ACCOUNT,
-                                *nf,
-                                TargetHeight::from(tip),
-                            )
-                            .is_some()
-                    });
-                    let Some(authority_nf) = authority_nf else {
-                        tracing::warn!(
-                            name = %name.as_str(),
-                            "no available claim anchor (all locked or spent)"
-                        );
-                        continue;
-                    };
-                    let Some(transaction) = assemble::prepare(
-                        &network,
-                        &mut wallet,
-                        &treasury_keys,
-                        &registry_keys,
-                        &sapling_spend,
-                        &sapling_output,
-                        claim_note,
-                        authority_nf,
-                        Some(&note),
-                        tip,
-                        target_height,
-                    ) else {
-                        tracing::debug!(
-                            name = %name.as_str(),
-                            "registration awaits Treasury funds"
-                        );
-                        continue;
-                    };
-
-                    if source.submit(&transaction, "registration").await {
-                        tracing::info!(
-                            txid = %transaction.txid(),
-                            name = %name.as_str(),
-                            "registration in flight"
-                        );
-                    } else {
-                        tracing::error!(
-                            txid = %transaction.txid(),
-                            name = %name.as_str(),
-                            "registration rejected — inputs stranded until expiry"
-                        );
-                    }
+                    // Enactment below resolves the anchor and broadcasts.
+                    name_notes.admit(note_height, claim_note);
                 }
 
                 (Action::Update | Action::Release, None) => {
@@ -739,60 +653,15 @@ async fn main() {
             }
 
             if let Some((release_note, reason)) = registry.release_due(&name, mtp_now) {
-                let Some(transaction) = assemble::prepare(
-                    &network,
-                    &mut wallet,
-                    &treasury_keys,
-                    &registry_keys,
-                    &sapling_spend,
-                    &sapling_output,
-                    release_note,
-                    record.nullifier,
-                    None,
-                    tip,
-                    target_height,
-                ) else {
-                    tracing::debug!(
-                        name = %name.as_str(),
-                        reason = reason.as_str(),
-                        "lifecycle release awaits Treasury fee funds"
-                    );
-                    continue;
-                };
-                loop {
-                    match source.send_transaction(&transaction).await {
-                        Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => {
-                            tracing::info!(
-                                txid = %transaction.txid(),
-                                name = %name.as_str(),
-                                reason = reason.as_str(),
-                                "lifecycle release submitted"
-                            );
-                            break;
-                        }
-                        Ok(SubmitOutcome::Rejected(error)) => {
-                            tracing::error!(
-                                %error,
-                                txid = %transaction.txid(),
-                                name = %name.as_str(),
-                                reason = reason.as_str(),
-                                "lifecycle release rejected"
-                            );
-                            break;
-                        }
-                        Err(error) if error.is_retryable() => {
-                            tracing::warn!(
-                                %error,
-                                txid = %transaction.txid(),
-                                "release submission uncertain; retrying"
-                            );
-                            tokio::time::sleep(RETRY_PAUSE).await;
-                        }
-                        Err(error) => {
-                            panic!("FATAL: lifecycle release submission failed: {error}")
-                        }
-                    }
-                }
+                // The deadline clock authorized a release; `release_due`
+                // re-derives the same note each tip, so admission is
+                // idempotent.
+                tracing::debug!(
+                    name = %name.as_str(),
+                    reason = reason.as_str(),
+                    "lifecycle release authorized"
+                );
+                name_notes.admit(tip, release_note);
                 continue;
             }
 
@@ -874,6 +743,109 @@ async fn main() {
                     txid = %transaction.txid(),
                     name = %name.as_str(),
                     "liveness challenge submitted"
+                );
+            }
+        }
+
+        // --- NameNote enactment ---
+        // One assembly and submission path for every authorized Name
+        // Note. The wallet's spent marks hold a sent order's inputs until
+        // its expiry height, so nothing is re-enactable before then.
+        for (note, origin) in name_notes.iter().map(|(n, o)| (n.clone(), o)) {
+            // Authority: a claim spends a lineage pool anchor; an update
+            // or release spends the predecessor — the record's nullifier
+            // matched by commitment.
+            let authority_nf = match note.action() {
+                Action::Claim => {
+                    // The name must still be claimable: free, or released
+                    // after the payment arrived.
+                    let claimable = match registry.record(note.name()) {
+                        None => true,
+                        Some(record) => {
+                            record.action == Action::Release && origin > record.confirmed_height
+                        }
+                    };
+                    if !claimable {
+                        tracing::debug!(
+                            name = %note.name().as_str(),
+                            "claim order waits: the name is live on the chain"
+                        );
+                        continue;
+                    }
+                    match registry.anchor_pool().iter().copied().find(|nf| {
+                        wallet
+                            .unspent_ironwood_note_by_nullifier(
+                                REGISTRY_ACCOUNT,
+                                *nf,
+                                TargetHeight::from(tip),
+                            )
+                            .is_some()
+                    }) {
+                        Some(nf) => nf,
+                        None => {
+                            tracing::warn!(
+                                name = %note.name().as_str(),
+                                "no available claim anchor (all locked or spent)"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Action::Update | Action::Release => {
+                    match registry
+                        .record(note.name())
+                        .filter(|record| {
+                            record.action != Action::Release
+                                && Some(record.commitment) == note.prev_rcm()
+                        })
+                        .map(|record| record.nullifier)
+                    {
+                        Some(nf) => nf,
+                        None => {
+                            tracing::debug!(
+                                name = %note.name().as_str(),
+                                action = note.action().as_str(),
+                                "order waits: its predecessor is no longer current"
+                            );
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            let Some(transaction) = assemble::prepare(
+                &network,
+                &mut wallet,
+                &treasury_keys,
+                &registry_keys,
+                &sapling_spend,
+                &sapling_output,
+                note.clone(),
+                authority_nf,
+                tip,
+                target_height,
+            ) else {
+                tracing::debug!(
+                    name = %note.name().as_str(),
+                    action = note.action().as_str(),
+                    "NameNote order awaits Treasury fee funds"
+                );
+                continue;
+            };
+
+            if source.submit(&transaction, "NameNote").await {
+                tracing::info!(
+                    txid = %transaction.txid(),
+                    name = %note.name().as_str(),
+                    action = note.action().as_str(),
+                    "NameNote order in flight"
+                );
+            } else {
+                tracing::error!(
+                    txid = %transaction.txid(),
+                    name = %note.name().as_str(),
+                    action = note.action().as_str(),
+                    "NameNote submission rejected — inputs stranded until expiry"
                 );
             }
         }

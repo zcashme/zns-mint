@@ -1,6 +1,6 @@
 //! The write path: one prepare function resolves the law's NameNote
-//! against the wallet — the authority note, the funding note, Treasury fee
-//! notes — and stages, proves, signs, and records the full transaction.
+//! against the wallet and stages, proves, signs, and records the
+//! transaction.
 
 use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore as _};
 use zcash_client_backend::data_api::wallet::TargetHeight;
@@ -32,17 +32,10 @@ pub enum PrepareError {
     InsufficientFunds,
 }
 
-/// Builds and records a Name Note transaction for any action — claim,
-/// update, or release. Resolves the authority note (anchor or predecessor)
-/// by nullifier, selects Treasury fee notes, locks every input, stages the
-/// ZNS outputs, proves, signs with both authorities, and records.
-///
-/// `authority_nf` is the claim anchor (claim) or the predecessor (update,
-/// release). `funding` is the inbound payment (claim), the echo (update,
-/// echo-path release), or `None` (lifecycle release).
-///
-/// Returns `None` when the authority is unavailable or the Treasury cannot
-/// fund the fee; the lane retries next tip.
+/// Builds and records a Name Note transaction for any action.
+/// `authority_nf` is the claim anchor or the predecessor; Treasury fee
+/// notes cover the fee. Returns `None` while the authority is unavailable
+/// or the fee is unfunded; the caller retries next tip.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare<P: Parameters>(
     network: &P,
@@ -53,7 +46,6 @@ pub fn prepare<P: Parameters>(
     output_prover: &sapling::circuit::OutputParameters,
     note: NameNote,
     authority_nf: orchard::note::Nullifier,
-    funding: Option<&ReceivedNote<NoteId, orchard::note::Note>>,
     tip: BlockHeight,
     target_height: BlockHeight,
 ) -> Option<Transaction> {
@@ -63,13 +55,8 @@ pub fn prepare<P: Parameters>(
         TargetHeight::from(tip),
     )?;
 
-    // The funding note (payment or echo) is a fixed spend alongside the
-    // authority; the fee loop selects from the rest.
-    let mut excluded = vec![*authority.internal_note_id()];
-    if let Some(funding) = funding {
-        excluded.push(*funding.internal_note_id());
-    }
-    let fixed_spends = 1 + usize::from(funding.is_some());
+    let excluded = [*authority.internal_note_id()];
+    let fixed_spends = 1;
     let fixed_outputs = match note.action() {
         Action::Claim => 3, // NameNote + successor anchor + change
         _ => 2,             // NameNote + change
@@ -100,18 +87,11 @@ pub fn prepare<P: Parameters>(
     };
 
     // Change = every Treasury input value − the fee.
-    let funding_value = funding.map(zatoshis).unwrap_or(Zatoshis::ZERO);
-    let treasury_change = (funding_value + fee_funding)
-        .and_then(|total| total - transaction_fee)
-        .expect("selection guarantees fee coverage");
+    let treasury_change =
+        (fee_funding - transaction_fee).expect("selection guarantees fee coverage");
 
     // Lock every selected input until the transaction expires.
     let locked_refs = std::iter::once(OutputRef::from(*authority.internal_note_id()))
-        .chain(
-            funding
-                .iter()
-                .map(|f| OutputRef::from(*f.internal_note_id())),
-        )
         .chain(
             candidates
                 .iter()
@@ -173,17 +153,6 @@ pub fn prepare<P: Parameters>(
                 )
                 .expect("FATAL: valid Registry predecessor rejected by the builder");
         }
-    }
-
-    // The funding note (payment or echo) is a fixed Treasury spend.
-    if let Some(funding) = funding {
-        let funding_note = *funding.note();
-        let funding_path = wallet
-            .witness(funding, tip)
-            .expect("FATAL: owned note has no witness at the applied tip");
-        builder
-            .add_ironwood_spend::<FeeError>(treasury_fvk.clone(), funding_note, funding_path)
-            .expect("FATAL: valid Treasury funding note rejected by the builder");
     }
 
     // Fee notes.
