@@ -26,12 +26,13 @@ use zcash_protocol::ShieldedPool;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
+use zns_mint::mint::note::NameNoteQueue;
 use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D_OTP};
 use zns_mint::mint::registry::{NameRecord, ReceivedNameNote};
 use zns_mint::mint::treasury::{self, parse_request};
 use zns_mint::mint::{
-    Action, Challenge, NameNoteQueue, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
-    MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    Action, Challenge, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN, MINT_BIRTHDAY,
+    REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{self, CanonicalBlockSource, ChainClient, JsonRpc, SubmitOutcome, TipStream};
 
