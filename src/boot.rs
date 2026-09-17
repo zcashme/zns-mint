@@ -24,13 +24,15 @@ use crate::mint::{
     decrypt_name_notes, MINT_BIRTHDAY, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use crate::tee::{self, Tee};
-use crate::wallet::{PreBirthdaySubtreeRoots, Wallet};
+use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
 use incrementalmerkletree::Position;
 use sapling::circuit::{OutputParameters, SpendParameters};
 use std::convert::Infallible;
 use zcash_client_backend::data_api::wallet::TargetHeight;
-use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata, WalletWrite as _};
+use zcash_client_backend::data_api::{
+    chain::ChainState, BlockMetadata, WalletCommitmentTrees as _, WalletWrite as _,
+};
 use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
 use zcash_client_backend::scanning::Nullifiers;
 
@@ -152,37 +154,50 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         let origin = origin_checkpoint(&rpc).await;
         let checkpoint_height = origin.block_height();
 
-        // 3b. Pre-birthday subtree roots: fetch every completed shard root
-        // for the two pools the mint spends from (Sapling for the vault
-        // sweep, Ironwood for everything else — Orchard is skipped, see
-        // `PreBirthdaySubtreeRoots`). Without this the wallet has no
-        // roots for any shard left of the birthday, and witness
-        // computation for post-birthday notes fails as soon as the auth
-        // path crosses a completed sibling shard — i.e. always, on
-        // mainnet. Immutable data fetched once at boot.
-        let subtree_roots = fetch_prebirthday_subtree_roots(&rpc).await;
-        tracing::info!(
-            sapling = subtree_roots.sapling.len(),
-            ironwood = subtree_roots.ironwood.len(),
-            "boot: pre-birthday subtree roots fetched"
-        );
-
-        // 3c. Wallet initialization: origin frontier bootstraps the
-        // rightmost partial shard of each pool; the pre-birthday shard
-        // roots fill in every completed shard to its left.
+        // 3b. Wallet initialization: origin frontier bootstraps the
+        // rightmost partial shard of each pool.
         let mut wallet = Wallet::new(
             [
                 (TREASURY_ACCOUNT, treasury_keys.fvk()),
                 (REGISTRY_ACCOUNT, registry_keys.fvk()),
             ],
             &origin,
-            subtree_roots,
         )
         .expect("FATAL: failed to seed commitment trees from the verified Zebra checkpoint");
         tracing::info!(
             "boot: wallet initialized with trees seeded from origin checkpoint at height {}",
             u32::from(checkpoint_height)
         );
+
+        // 3c. Pre-birthday subtree roots: every completed shard root
+        // for the two pools the mint spends from. Without these, witness
+        // computation for post-birthday notes fails as soon as the auth
+        // path crosses a completed sibling shard.
+        {
+            let sapling_roots = rpc
+                .get_subtree_roots::<sapling::Node>("sapling", 0)
+                .await
+                .expect("FATAL: Sapling subtree roots unavailable from Zebra");
+            wallet
+                .put_sapling_subtree_roots(0, &sapling_roots)
+                .expect("FATAL: Sapling subtree root insertion failed");
+            tracing::info!(
+                "boot: {} Sapling subtree roots inserted",
+                sapling_roots.len()
+            );
+
+            let ironwood_roots = rpc
+                .get_subtree_roots::<orchard::tree::MerkleHashOrchard>("ironwood", 0)
+                .await
+                .expect("FATAL: Ironwood subtree roots unavailable from Zebra");
+            wallet
+                .put_ironwood_subtree_roots(0, &ironwood_roots)
+                .expect("FATAL: Ironwood subtree root insertion failed");
+            tracing::info!(
+                "boot: {} Ironwood subtree roots inserted",
+                ironwood_roots.len()
+            );
+        }
 
         // 3d. MTP backfill: the 11 header timestamps through the origin
         // checkpoint, so the MTP window is complete before the first scan.
@@ -559,22 +574,6 @@ async fn origin_checkpoint(rpc: &zcash::JsonRpc) -> ChainState {
     );
 
     chain_state
-}
-
-/// Fetches completed pre-birthday shard roots for Sapling and Ironwood
-/// (`z_getsubtreesbyindex`). Witnesses for post-birthday notes need those
-/// sibling roots; Orchard is omitted — see [`PreBirthdaySubtreeRoots`].
-/// One-shot, immutable. Fatal on transport error: no roots, no spends.
-async fn fetch_prebirthday_subtree_roots(rpc: &zcash::JsonRpc) -> PreBirthdaySubtreeRoots {
-    let sapling = rpc
-        .get_subtree_roots::<sapling::Node>("sapling", 0)
-        .await
-        .expect("FATAL: sapling subtree roots unavailable from Zebra");
-    let ironwood = rpc
-        .get_subtree_roots::<orchard::tree::MerkleHashOrchard>("ironwood", 0)
-        .await
-        .expect("FATAL: ironwood subtree roots unavailable from Zebra");
-    PreBirthdaySubtreeRoots { sapling, ironwood }
 }
 
 // ---------------------------------------------------------------------------
