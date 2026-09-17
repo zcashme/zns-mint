@@ -1,10 +1,22 @@
 //! Treasury wallet view and Treasury policy for the mint.
 //!
 
-use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
-use zcash_client_backend::wallet::NoteId;
+use std::convert::Infallible;
+use std::num::NonZeroU32;
+
+use zcash_client_backend::data_api::wallet::input_selection::{
+    GreedyInputSelector, GreedyInputSelectorError, SpendPolicy,
+};
+use zcash_client_backend::data_api::wallet::{
+    create_proposed_transactions, propose_transfer, ConfirmationsPolicy, SpendingKeys,
+};
+use zcash_client_backend::data_api::WalletRead as _;
+use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
+use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
+use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_keys::address::UnifiedAddress;
-use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_primitives::transaction::fees::zip317::{FeeError, GRACE_ACTIONS, MARGINAL_FEE};
+use zcash_protocol::consensus::Parameters;
 use zcash_protocol::value::Zatoshis;
 
 use crate::mint::otp::OtpCode;
@@ -140,7 +152,7 @@ pub const VAULT_ADDRESS: transparent::address::TransparentAddress =
 /// Sweeps all spendable Treasury Sapling notes to the project vault.
 /// Send-max: no reserve — Sapling is a legacy pool for the mint, nothing
 /// ZNS ever spends from it. Returns `None` when the balance is zero.
-pub fn sweep_sapling_to_vault<P: Parameters>(
+fn sweep_sapling_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet,
     treasury_keys: &crate::key::TreasuryKeys,
@@ -220,124 +232,127 @@ pub fn sweep_sapling_to_vault<P: Parameters>(
     )
 }
 
-/// Sweeps excess Ironwood Treasury notes to the project vault, retaining a
-/// reserve for fees. Returns `None` when the balance is below the threshold.
-pub fn sweep_ironwood_to_vault<P: Parameters>(
+/// Sweeps excess Ironwood Treasury value to the vault via upstream's
+/// `propose_transfer`, retaining the operating float as change. Returns
+/// `None` on any failure — retried at the next tip.
+fn sweep_ironwood_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet,
     treasury_keys: &crate::key::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
-    tip: BlockHeight,
-    target_height: BlockHeight,
 ) -> Option<zcash_primitives::transaction::Transaction> {
-    use zcash_client_backend::data_api::wallet::TargetHeight;
-    use zcash_client_backend::data_api::{SentTransaction, WalletWrite as _};
-    use zcash_client_backend::fees::StandardFeeRule;
-    use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
-    use zcash_primitives::transaction::fees::zip317::P2PKH_STANDARD_OUTPUT_SIZE;
-    use zcash_primitives::transaction::fees::FeeRule as _;
+    let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
+    // The same heights the proposal derives internally; sizing the payment
+    // at any other height risks estimating against a different shape than
+    // the one the pipeline builds.
+    let (target_height, _) = wallet
+        .get_target_and_anchor_heights(NonZeroU32::MIN)
+        .ok()
+        .flatten()?;
 
-    let mut sweep_notes = wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip));
-    sweep_notes.retain(|note| note.mined_height().is_some());
-    let sweep_funding = sweep_notes.iter().fold(Zatoshis::ZERO, |total, note| {
-        (total
-            + Zatoshis::from_u64(note.note().value().inner())
-                .expect("Treasury note value fits the monetary range"))
-        .expect("Treasury balance fits the monetary range")
-    });
-    if sweep_funding <= SWEEP_THRESHOLD {
+    let summary = wallet.get_wallet_summary(policy).ok().flatten()?;
+    let spendable = summary
+        .account_balances()
+        .get(&TREASURY_ACCOUNT)?
+        .ironwood_balance()
+        .spendable_value();
+    if spendable <= SWEEP_THRESHOLD {
         return None;
     }
 
-    let ironwood_actions = sweep_notes.len().max(1);
-    let transaction_fee = StandardFeeRule::Zip317
-        .fee_required(
-            network,
-            target_height,
-            std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
-            [P2PKH_STANDARD_OUTPUT_SIZE],
-            0,
-            0,
-            0,
-            ironwood_actions,
-        )
-        .expect("FATAL: vault-sweep fee is not representable");
-    let sweep_amount = (sweep_funding - SWEEP_RESERVE)
-        .and_then(|remaining| remaining - transaction_fee)
-        .expect("sweep threshold covers reserve and fee");
-    let anchor = wallet
-        .ironwood_anchor(tip)
-        .expect("FATAL: Ironwood tree access failed")
-        .expect("FATAL: wallet has no Ironwood anchor at its applied tip");
-    let mut prepared = Vec::with_capacity(sweep_notes.len());
-    for note in &sweep_notes {
-        let path = wallet
-            .ironwood_witness(note.note_commitment_tree_position(), tip)
-            .expect("FATAL: Ironwood tree access failed")
-            .expect("FATAL: sweep input has no witness");
-        prepared.push((*note.note(), orchard::tree::MerklePath::from(path)));
+    // The fee bound, not the fee: upstream's exact arithmetic is its own, so
+    // the payment is sized with a provable over-estimate. Any surplus stays
+    // as change and re-crosses the threshold on a later tip.
+    let note_count = wallet
+        .unspent_ironwood_notes(TREASURY_ACCOUNT, target_height)
+        .len();
+    let actions = (1 + note_count + 2).max(GRACE_ACTIONS);
+    let bound = Zatoshis::from_u64(MARGINAL_FEE.into_u64() * actions as u64)
+        .expect("fee bound fits the monetary range");
+    let payment = (spendable - SWEEP_RESERVE).and_then(|remaining| remaining - bound)?;
+    if payment.is_zero() {
+        return None;
     }
 
-    let treasury_fvk = treasury_keys.orchard_fvk();
-    let mut builder = Builder::new(
-        network.clone(),
-        target_height,
-        BuildConfig::Standard {
-            sapling_anchor: None,
-            orchard_anchor: None,
-            ironwood_anchor: Some(anchor),
-            orchard_padding: BundlePadding::DEFAULT,
-            ironwood_padding: BundlePadding::DEFAULT,
-        },
-    );
-    for (note, path) in prepared {
-        builder
-            .add_ironwood_spend::<zcash_primitives::transaction::fees::zip317::FeeError>(
-                treasury_fvk.clone(),
-                note,
-                path,
-            )
-            .expect("FATAL: valid Treasury sweep input was rejected");
-    }
-    builder
-        .add_transparent_output(&VAULT_ADDRESS, sweep_amount)
-        .expect("FATAL: valid vault output was rejected");
-    builder
-        .add_ironwood_output::<zcash_primitives::transaction::fees::zip317::FeeError>(
-            Some(treasury_fvk.to_ovk(orchard::keys::Scope::Internal)),
-            treasury_fvk.address_at(0u32, orchard::keys::Scope::Internal),
-            SWEEP_RESERVE,
-            zcash_protocol::memo::MemoBytes::empty(),
-        )
-        .expect("FATAL: valid Treasury reserve was rejected");
-    let built = builder
-        .build(
-            &Default::default(),
-            &[],
-            &[orchard::keys::SpendAuthorizingKey::from(
-                treasury_keys.orchard_spending_key(),
-            )],
-            rand::rngs::OsRng,
-            spend_prover,
-            output_prover,
-            &StandardFeeRule::Zip317,
-        )
-        .expect("FATAL: Ironwood vault sweep proving or signing failed");
-    let transaction = built.transaction().clone();
-    let sent = SentTransaction::new(
-        &transaction,
-        time::OffsetDateTime::now_utc(),
-        TargetHeight::from(target_height),
+    let request = zip321::TransactionRequest::new(vec![zip321::Payment::new(
+        zcash_keys::address::Address::Transparent(VAULT_ADDRESS).to_zcash_address(network),
+        Some(payment),
+        None,
+        None,
+        None,
+        vec![],
+    )
+    .ok()?])
+    .ok()?;
+
+    // One change note, in Ironwood: the retained operating float. No input
+    // locks (the proposal is built, signed and stored within this call) and
+    // no requested transaction version (the builder uses the one implied by
+    // the target height), matching zallet.
+    let proposal = propose_transfer::<_, _, _, _, Infallible>(
+        wallet,
+        network,
         TREASURY_ACCOUNT,
-        &[],
-        transaction_fee,
-        &[],
-    );
-    wallet
-        .store_transactions_to_be_sent(&[sent])
-        .expect("FATAL: wallet rejected the Ironwood vault sweep");
-    Some(transaction)
+        &GreedyInputSelector::new(),
+        &SingleOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            zcash_protocol::ShieldedPool::Ironwood,
+            DustOutputPolicy::default(),
+        ),
+        request,
+        policy,
+        &SpendPolicy::shielded_pools([zcash_protocol::ShieldedPool::Ironwood]),
+        None,
+        None,
+    )
+    .map_err(|error| {
+        tracing::debug!(
+            ?error,
+            "Ironwood vault sweep proposal failed; retrying next tip"
+        )
+    })
+    .ok()?;
+
+    let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
+    let txids = create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
+        wallet,
+        network,
+        spend_prover,
+        output_prover,
+        &spending_keys,
+        OvkPolicy::Sender,
+        &proposal,
+        None,
+    )
+    .map_err(|error| tracing::warn!(?error, "Ironwood vault sweep build failed"))
+    .ok()?;
+
+    wallet.get_transaction(*txids.first()).ok().flatten()
+}
+
+/// Both vault sweeps as `(label, transaction)` pairs; the caller broadcasts
+/// each under its label.
+pub fn sweep_to_vault<P: Parameters>(
+    network: &P,
+    wallet: &mut Wallet,
+    treasury_keys: &crate::key::TreasuryKeys,
+    spend_prover: &sapling::circuit::SpendParameters,
+    output_prover: &sapling::circuit::OutputParameters,
+) -> Vec<(&'static str, zcash_primitives::transaction::Transaction)> {
+    let mut sweeps = Vec::with_capacity(2);
+    if let Some(tx) =
+        sweep_ironwood_to_vault(network, wallet, treasury_keys, spend_prover, output_prover)
+    {
+        sweeps.push(("Ironwood vault sweep", tx));
+    }
+    if let Some(tx) =
+        sweep_sapling_to_vault(network, wallet, treasury_keys, spend_prover, output_prover)
+    {
+        sweeps.push(("Sapling vault sweep", tx));
+    }
+    sweeps
 }
 
 /// Proposes, builds, and records a Treasury payment carrying an OTP challenge
