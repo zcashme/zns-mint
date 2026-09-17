@@ -112,3 +112,17 @@ Tracks design-relevant changes to `src/boot.rs`.
   `BlockHeight` rather than the `u32` difference between two heights.
 - This fixes the `get_checkpoint` argument mismatch surfaced by `cargo check`
   after the Orchard fork compile error was resolved.
+
+## 2026-09-17 — Boot sync rides `apply_block` (issue #55)
+
+- Boot's own scan/apply copy is deleted. The loop fetches with
+  `.expect` and calls `mint::apply_block` with per-block scratch
+  queues — arrivals from history land in a queue that falls out of
+  scope with the iteration, so history is balance by construction and
+  `live_from` stays dead.
+- Boot runs main's intake as dead work — each block's Treasury memos
+  are decrypted and parsed, then discarded — so the body is one path,
+  not a path plus a skip flag.
+- The three continuity asserts moved inside `apply_block`; boot gets
+  them and now fails fast on a forked checkpoint or a Zebra reorg
+  mid-sync.

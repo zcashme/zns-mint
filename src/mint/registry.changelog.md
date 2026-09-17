@@ -32,3 +32,22 @@ Tracks design-relevant changes to `src/registry.rs`.
 
 - Registry assembly exports an opaque exact fee-input plan plus a reservation-
   aware selector. Callers can reserve its locators but cannot substitute them.
+
+## 2026-09-17 — The law is `accept_*`; `apply_block` owns sequencing (issue #55)
+
+- `Registry::apply_block` and `ReceivedNameNote` are deleted. The
+  confirmation pass lives in `mint::apply_block`; the Registry exposes
+  the law: `adopt_anchor`, `accept_claim`, `accept_update`,
+  `accept_release`, `names_spent_by`.
+- Claims swap the pool atomically inside `accept_claim` — retire the
+  spent anchor, insert the successor, snapshot the pool — with one new
+  invariant: a claim spends exactly one anchor; assembly never batches.
+- The Registry mutates in place. The per-block `self.clone()` is gone,
+  and `derive(Clone)` is dropped with it — whole-state forks are
+  unrepresentable.
+- `claim_anchor_height` stays as the reorg floor: it is the boot
+  checkpoint, a joint constraint the wallet seed shares — deriving it
+  from `MINT_BIRTHDAY` would permit reorgs the wallet cannot survive.
+  This amends #55's body; the backup's `MINT_BIRTHDAY` simplification
+  held only for a seed at the birthday.
+- `NameRecord::from_received` takes `(note, nullifier)` directly.

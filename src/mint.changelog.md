@@ -93,3 +93,25 @@
   a canonical name binding. A reorg resets confirmations above its common
   ancestor and retains an unconfirmed submission only when its exact reserved
   notes remain unspent on the rebuilt branch.
+
+## 2026-09-17 — `apply_block`: one body for block application (issue #55)
+
+- `mint::apply_block` applies one verified canonical successor to every
+  faculty: scan, clock, Registry law, wallet commit, Treasury intake,
+  Name Note storage, order fulfillment, cursor. It returns nothing —
+  every output is caller-owned state passed as `&mut` — and never
+  fetches or broadcasts. `main` passes the live queues; boot passes
+  scratch ones, so history is balance by construction.
+- The confirmation pass lives here: the scanner's transactions in
+  canonical order, the ZNS decryption lane joined on txid — the
+  authentication boundary — each candidate offered to the Registry
+  (`accept_claim` / `accept_update` / `accept_release`). Sequencing is
+  the caller of the law; the law is the Registry's.
+- Accepted Name Note commitments are marked at the wallet commit via
+  `put_blocks_marked` — the scanner cannot decrypt ZNS-domain outputs,
+  so they would otherwise enter the Ironwood tree Ephemeral, prune with
+  the checkpoints, and leave a dormant name's update FATAL on a
+  missing witness.
+- The continuity asserts (`from_state` describes the cursor; the block
+  extends it) moved inside the body — boot inherits them and now dies
+  loudly on a Zebra fork mid-sync instead of silently building on one.

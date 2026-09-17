@@ -21,17 +21,6 @@ use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::{Action, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
-/// Why a transaction could not be prepared. Every variant is transient —
-/// prepare re-fires each tip and succeeds once the world allows it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrepareError {
-    /// The claim anchor or predecessor note is not selectable: a rival
-    /// transaction holds it until expiry, or consumed it on chain.
-    AuthorityUnavailable,
-    /// The Treasury could not fund the fee from eligible notes.
-    InsufficientFunds,
-}
-
 /// Builds and records a Name Note transaction for any action.
 /// `authority_nf` is the claim anchor or the predecessor; Treasury fee
 /// notes cover the fee. Returns `None` while the authority is unavailable
