@@ -9,7 +9,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 pub mod assemble;
 
 use crate::key::RegistryKeys;
-use crate::mint::{Action, Name, NameCommitment};
+use crate::mint::{Action, Name, NameCommitment, LIVENESS_INTERVAL};
 
 /// A Name transition (§3.2), typed so every action carries exactly its
 /// legal fields.
@@ -194,55 +194,73 @@ impl Expiry {
 
     /// Successor expiry for an update (§4.5.3).
     ///
-    /// No term, or `none`, leaves the period unchanged.
-    /// A term extends a fixed instant: `current + requested_term`. Returns
-    /// `None` if that sum is not a representable timestamp.
-    pub fn extend(self, term: Option<Term>) -> Option<Self> {
-        match (self, term) {
-            (Expiry::Never, _) => Some(Expiry::Never),
-            (expiry, None) => Some(expiry),
-            (Expiry::At(t), Some(term)) => t.checked_add(term.duration()).map(Expiry::At),
+    /// `None` leaves the period unchanged. `Some(years)` banks from the
+    /// current expiry. A forever name has no runway: `Never` plus a term
+    /// is refused. The result must sit no more than `MAX_TERM_YEARS`
+    /// ahead of `mtp`.
+    pub fn extend(self, term: Option<Term>, mtp: Timestamp) -> Option<Self> {
+        let extended = match (self, term) {
+            (expiry, None) => expiry,
+            (Expiry::Never, Some(_)) => return None,
+            (Expiry::At(t), Some(term)) => t.checked_add(term.duration()).map(Expiry::At)?,
+        };
+        let horizon = mtp
+            .checked_add(time::Duration::seconds(
+                MAX_TERM_YEARS as i64 * LIVENESS_INTERVAL,
+            ))
+            .expect("the expiry horizon always fits Timestamp");
+        match extended {
+            Expiry::At(t) if t > horizon => None,
+            expiry => Some(expiry),
         }
     }
 }
 
-/// A requested registration period, in whole seconds.
-///
-/// This is a duration, not an absolute `expires_at`. The user supplies it
-/// on a claim or as an update extension; the Mint computes the resulting
-/// instant (`MTP + term` on claim, `current + term` on renewal).
-///
-/// Canonical request spelling is decimal digits with no sign and no
-/// leading zeroes. Zero and `none` are not terms — omit the field, or
-/// write `none`, for no fixed expiration / no extension.
+/// A request term: `forever` or whole Julian years, 1–99. Requests speak
+/// durations — seconds never appear on the request wire; the mint
+/// converts years to seconds at authorization.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Term(i64);
+pub enum Term {
+    /// No fixed expiration — held while liveness passes.
+    Forever,
+    /// A term of N whole Julian years (the liveness interval).
+    Years(u64),
+}
+
+/// The longest single term.
+pub const MAX_TERM_YEARS: u64 = 99;
 
 impl Term {
-    /// Parses a canonical duration field: digits only, no sign, no leading
-    /// zeroes, at least one second.
+    /// Parses a term field: `forever` or `<N>y` — N is 1–99, digits only,
+    /// no leading zero. `5` (missing y), `100y` (over the cap), `0y`,
+    /// `01y` are invalid on sight.
     pub fn parse(field: &str) -> Option<Self> {
-        if field.is_empty() || field.len() > 20 || !field.bytes().all(|b| b.is_ascii_digit()) {
+        if field == "forever" {
+            return Some(Self::Forever);
+        }
+        let years = field.strip_suffix('y')?;
+        if years.is_empty() || years.starts_with('0') || !years.bytes().all(|b| b.is_ascii_digit())
+        {
             return None;
         }
-        if field.starts_with('0') {
-            return None;
-        }
-        let seconds: i64 = field.parse().ok()?;
-        if seconds < 1 {
-            return None;
-        }
-        Some(Self(seconds))
+        let n: u64 = years.parse().ok()?;
+        (1..=MAX_TERM_YEARS).contains(&n).then_some(Self::Years(n))
     }
 
-    /// The period as a `time` duration.
+    /// The term as a `time` duration; one year is `LIVENESS_INTERVAL`.
     pub fn duration(self) -> time::Duration {
-        time::Duration::new(self.0, 0)
+        match self {
+            Self::Forever => time::Duration::ZERO, // claim_expiry never reads it
+            Self::Years(n) => time::Duration::seconds(n as i64 * LIVENESS_INTERVAL),
+        }
     }
 
-    /// Claim expiry: canonical-chain MTP plus this term (§4.5).
+    /// Claim expiry: forever is `Expiry::Never`; years extend MTP (§4.5).
     pub fn claim_expiry(self, mtp: Timestamp) -> Option<Expiry> {
-        mtp.checked_add(self.duration()).map(Expiry::At)
+        match self {
+            Self::Forever => Some(Expiry::Never),
+            Self::Years(_) => mtp.checked_add(self.duration()).map(Expiry::At),
+        }
     }
 }
 
@@ -790,15 +808,70 @@ mod tests {
     }
 
     #[test]
-    fn update_extend_adds_the_term() {
+    fn term_parse_is_strict() {
+        assert_eq!(Term::parse("forever"), Some(Term::Forever));
+        assert_eq!(Term::parse("1y"), Some(Term::Years(1)));
+        assert_eq!(Term::parse("12y"), Some(Term::Years(12)));
+        assert_eq!(Term::parse("99y"), Some(Term::Years(99)));
+        // Missing y, over the cap, zero, leading zero, seconds, empty.
+        assert_eq!(Term::parse("5"), None);
+        assert_eq!(Term::parse("100y"), None);
+        assert_eq!(Term::parse("0y"), None);
+        assert_eq!(Term::parse("01y"), None);
+        assert_eq!(Term::parse("31536000"), None);
+        assert_eq!(Term::parse(""), None);
+        assert_eq!(Term::parse("none"), None);
+    }
+
+    #[test]
+    fn claim_expiry_maps_forever_to_never() {
         let mtp = Timestamp::from_seconds(1_000).unwrap();
-        let term = Term::parse("500").unwrap();
         assert_eq!(
-            Expiry::At(mtp).extend(Some(term)),
-            Some(Expiry::At(Timestamp::from_seconds(1_500).unwrap()))
+            Term::parse("forever").unwrap().claim_expiry(mtp),
+            Some(Expiry::Never)
         );
-        assert_eq!(Expiry::Never.extend(Some(term)), Some(Expiry::Never));
-        assert_eq!(Expiry::At(mtp).extend(None), Some(Expiry::At(mtp)));
+        assert_eq!(
+            Term::parse("2y").unwrap().claim_expiry(mtp),
+            Some(Expiry::At(Timestamp::from_seconds(63_116_200).unwrap()))
+        );
+    }
+
+    #[test]
+    fn update_extend_banks_from_the_current_expiry() {
+        let mtp = Timestamp::from_seconds(1_000).unwrap();
+        let term = Term::parse("5y").unwrap();
+        // Banking: 5 years from the current expiry, not from now.
+        assert_eq!(
+            Expiry::At(mtp).extend(Some(term), mtp),
+            Some(Expiry::At(mtp.checked_add(term.duration()).unwrap()))
+        );
+        // Forever has no end date, so years cannot be added to it.
+        assert_eq!(Expiry::Never.extend(Some(term), mtp), None);
+        assert_eq!(Expiry::Never.extend(None, mtp), Some(Expiry::Never));
+        assert_eq!(Expiry::At(mtp).extend(None, mtp), Some(Expiry::At(mtp)));
+    }
+
+    #[test]
+    fn update_extend_never_banks_past_the_horizon() {
+        // The fence: the resulting expiry never sits more than 99 years
+        // ahead of MTP. 98 banked + 5 more crosses it; 96 + 3 lands on it.
+        let mtp = Timestamp::from_seconds(0).unwrap();
+        let at = |n: i64| {
+            Expiry::At(
+                mtp.checked_add(time::Duration::seconds(n * LIVENESS_INTERVAL))
+                    .unwrap(),
+            )
+        };
+
+        assert_eq!(at(98).extend(Some(Term::parse("5y").unwrap()), mtp), None);
+        assert_eq!(
+            at(96).extend(Some(Term::parse("3y").unwrap()), mtp),
+            Some(at(99))
+        );
+        assert_eq!(
+            at(50).extend(Some(Term::parse("3y").unwrap()), mtp),
+            Some(at(53))
+        );
     }
 
     #[test]

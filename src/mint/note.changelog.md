@@ -1,5 +1,14 @@
 # `mint/note.rs` design record
 
+## 2026-09-17 — Term is `forever` | `<N>y`; extend refuses forever+years
+
+- `Term` is `Forever | Years(1..=99)`. One year is `LIVENESS_INTERVAL`.
+  Seconds never appear on the request wire.
+- `Expiry::extend`: `None` keeps the current expiry; years are added to
+  the current expiry (not to now). The result must sit ≤ 99 years ahead
+  of MTP. `Never` plus a term is `None` — forever has no end date, so
+  years cannot be added to it.
+
 ## 2026-09-15 — Term is a second-duration; updates call Expiry::extend
 
 - `Term` is a canonical whole-second duration (`Term::parse` / `duration` /

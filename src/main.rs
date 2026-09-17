@@ -26,9 +26,9 @@ use zns_mint::mint::note::assemble;
 use zns_mint::mint::note::NameNoteQueue;
 use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D_OTP};
 use zns_mint::mint::registry::{NameRecord, ReceivedNameNote};
-use zns_mint::mint::treasury::{self, parse_request, RequestQueue};
+use zns_mint::mint::treasury::{self, parse_request, ParsedRequest, RequestQueue};
 use zns_mint::mint::{
-    Action, Challenge, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN, MINT_BIRTHDAY,
+    Action, Challenge, Expiry, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN, MINT_BIRTHDAY,
     REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{self, CanonicalBlockSource, ChainClient, JsonRpc, TipStream};
@@ -325,6 +325,25 @@ async fn main() {
             // refetched on every application. Boot never runs this:
             // arrivals from history are balance, not instruction.
             for (txid, _action_index, paid, memo) in treasury_memos {
+                // An echo is the relay memo itself, byte-for-byte — routed
+                // here, not by parse_request: the wire never carries an
+                // OTP on a request. The echo rides the queue in request
+                // shape, its digits in the OTP slot; the queue holds the
+                // order (the requested term), the memo proves identity.
+                if let Some(echo) = Challenge::decode(&network, &memo) {
+                    requests.record(
+                        ParsedRequest {
+                            action: echo.action,
+                            name: echo.name,
+                            ua: echo.ua,
+                            term: None,
+                            otp: Some(echo.code.digits()),
+                        },
+                        paid,
+                        next_height,
+                    );
+                    continue;
+                }
                 match parse_request(&network, &memo) {
                     Some(request) => requests.record(request, paid, next_height),
                     None => tracing::info!(
@@ -466,7 +485,10 @@ async fn main() {
                     (Action::Claim, None) => {
                         let name = request.name.clone();
                         let ua = request.ua.clone();
-                        let term = request.term;
+                        // Parse guarantees a claim term on the wire.
+                        let Some(term) = request.term else {
+                            break 'lane true;
+                        };
                         // One open claim per name: the Registry lags the
                         // mempool by a block; the queue does not. A rival
                         // payment stays Treasury income.
@@ -528,6 +550,10 @@ async fn main() {
                             || record.expires_at.expired(mtp_now)
                             || note_height <= record.confirmed_height
                             || (action == Action::Release && requested_ua != record.ua)
+                            // A forever name has no runway to bank; refuse
+                            // an extension at the relay, before a
+                            // challenge spends anything.
+                            || (record.expires_at == Expiry::Never && term.is_some())
                             || challenges.pending(
                                 &name,
                                 action,

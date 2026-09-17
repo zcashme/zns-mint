@@ -19,39 +19,39 @@ use zcash_primitives::transaction::fees::zip317::{FeeError, GRACE_ACTIONS, MARGI
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 
-use crate::mint::otp::OtpCode;
 use crate::mint::{Action, Name, Term, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
-/// A user memo decoded from a Treasury note.
-///
-/// `term` is the optional registration period (claim) or extension (update).
-/// `None` means no fixed expiration on a claim, or carry-forward on an update.
-/// `otp` is present only on an update/release Respond; its absence is a
-/// Request (claim, or the first step of authorization).
+/// A user memo decoded from a Treasury note. Claims always carry a term
+/// (`forever` or `<N>y`); updates carry `none` or `<N>y`. The wire never
+/// carries an OTP — `otp` is set only by intake, when a relay echo
+/// (`ZNS:otp:…`, routed by `Challenge::decode`) rides the queue in
+/// request shape.
 #[derive(Clone, Debug)]
 pub struct ParsedRequest {
     pub action: Action,
     pub name: Name,
     pub ua: UnifiedAddress,
     pub term: Option<Term>,
+    /// Intake-only: the relay echo's digits. `parse_request` never sets it.
     pub otp: Option<[u8; 6]>,
 }
 
-/// Parses a 512-byte memo sent to the Treasury as a ZNS Request or Respond.
+/// Parses a 512-byte memo sent to the Treasury as a ZNS Request.
 ///
-/// Field slots are positional. Trailing OTP is omitted on a Request:
+/// Field slots are positional; the term leads, so every human-facing memo
+/// keeps `<ua>` terminal — the NameNote is the one exception, ending in
+/// its chain link:
 ///
-/// - Claim: `ZNS:claim:<name>:<ua>[:<term>]` — never an OTP.
-/// - Update request: `ZNS:update:<name>:<ua>[:<term>]`
-/// - Update respond: `ZNS:update:<name>:<ua>:<term>:<otp>`
-/// - Release request: `ZNS:release:<name>:<ua>`
-/// - Release respond: `ZNS:release:<name>:<ua>:<otp>`
+/// - Claim: `ZNS:claim:<term>:<name>:<ua>` — `<term>` is `forever` or
+///   `<N>y`, N = 1–99.
+/// - Update: `ZNS:update:<term>:<name>:<ua>` — `<term>` is `none`
+///   (expiry carried forward) or `<N>y`.
+/// - Release: `ZNS:release:<name>:<ua>`
 ///
-/// `term` is a canonical second-duration or the exact field `none`. An update
-/// Respond always occupies the term slot (`none` if the Request carried none).
-/// `otp` is exactly six ASCII decimal digits, including leading zeroes.
-/// Relay memos (`ZNS:otp:…`) are not Requests or Responds.
+/// Requests never carry an OTP — answering is the respond's job: an echo
+/// is the relay memo itself (`ZNS:otp:…`, routed by `Challenge::decode`),
+/// never this parser.
 pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<ParsedRequest> {
     let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
     if raw[end..].iter().any(|b| *b != 0) {
@@ -63,57 +63,33 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Pars
     if fields.next()? != "ZNS" {
         return None;
     }
-    let verb = fields.next()?;
-    let name_str = fields.next()?;
-    let name = Name::parse(name_str)?;
-
-    let ua_str = fields.next()?;
-    if ua_str.is_empty() {
-        return None;
-    }
-
-    let extra1 = fields.next();
-    let extra2 = fields.next();
-    if fields.next().is_some() {
-        return None;
-    }
-
-    let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
-        zcash_keys::address::Address::Unified(ua) => ua,
-        _ => return None,
-    };
-
-    let action = match verb {
+    let action = match fields.next()? {
         "claim" => Action::Claim,
         "update" => Action::Update,
         "release" => Action::Release,
         _ => return None,
     };
 
-    let (term, otp) = match action {
-        Action::Claim => {
-            if extra2.is_some() {
-                return None;
-            }
-            (parse_term_slot(extra1)?, None)
-        }
-        Action::Update => {
-            let otp = match extra2 {
-                None => None,
-                Some(field) => Some(parse_otp_slot(field)?),
-            };
-            (parse_term_slot(extra1)?, otp)
-        }
-        Action::Release => {
-            if extra2.is_some() {
-                return None;
-            }
-            let otp = match extra1 {
-                None => None,
-                Some(field) => Some(parse_otp_slot(field)?),
-            };
-            (None, otp)
-        }
+    // The term leads: claims say `forever` or `<N>y`; updates say `none`
+    // or `<N>y` — never `forever`.
+    let term = match action {
+        Action::Claim => Some(Term::parse(fields.next()?)?),
+        Action::Update => match fields.next()? {
+            "none" => None,
+            "forever" => return None,
+            field => Some(Term::parse(field)?),
+        },
+        Action::Release => None,
+    };
+
+    let name = Name::parse(fields.next()?)?;
+    let ua_str = fields.next()?;
+    if ua_str.is_empty() || fields.next().is_some() {
+        return None;
+    }
+    let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
+        zcash_keys::address::Address::Unified(ua) => ua,
+        _ => return None,
     };
 
     Some(ParsedRequest {
@@ -121,21 +97,8 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Pars
         name,
         ua,
         term,
-        otp,
+        otp: None,
     })
-}
-
-fn parse_term_slot(field: Option<&str>) -> Option<Option<Term>> {
-    match field {
-        None | Some("none") => Some(None),
-        Some(field) => Term::parse(field).map(Some),
-    }
-}
-
-fn parse_otp_slot(field: &str) -> Option<[u8; 6]> {
-    let digits: [u8; 6] = field.as_bytes().try_into().ok()?;
-    OtpCode::from_digits(&digits)?;
-    Some(digits)
 }
 
 /// Minimum spendable Treasury balance to trigger a vault sweep (2 ZEC).
@@ -455,110 +418,104 @@ mod tests {
     fn accepts_exactly_the_three_request_forms() {
         let network = MainNetwork;
 
-        let req = parse_request(&network, &padded(&format!("ZNS:claim:alice:{TEST_UA}"))).unwrap();
+        let req = parse_request(
+            &network,
+            &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}")),
+        )
+        .unwrap();
         assert_eq!(req.action, Action::Claim);
         assert_eq!(req.name.as_str(), "alice");
-        assert_eq!(req.term, None);
-        assert_eq!(req.otp, None);
+        assert_eq!(req.term, Some(Term::Forever));
 
-        let req = parse_request(&network, &padded(&format!("ZNS:update:alice:{TEST_UA}"))).unwrap();
+        let req = parse_request(
+            &network,
+            &padded(&format!("ZNS:update:none:alice:{TEST_UA}")),
+        )
+        .unwrap();
         assert_eq!(req.action, Action::Update);
         assert_eq!(req.name.as_str(), "alice");
         assert_eq!(req.term, None);
-        assert_eq!(req.otp, None);
 
         let req =
             parse_request(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))).unwrap();
         assert_eq!(req.action, Action::Release);
         assert_eq!(req.name.as_str(), "alice");
         assert_eq!(req.term, None);
-        assert_eq!(req.otp, None);
     }
 
     #[test]
-    fn claim_and_update_accept_a_canonical_term() {
+    fn claims_say_forever_updates_say_none_or_years() {
         let network = MainNetwork;
-        let term = Term::parse("31536000").unwrap();
 
-        let req = parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:alice:{TEST_UA}:31536000")),
-        )
-        .unwrap();
-        assert_eq!(req.action, Action::Claim);
-        assert_eq!(req.term, Some(term));
-        assert_eq!(req.otp, None);
+        let req =
+            parse_request(&network, &padded(&format!("ZNS:claim:12y:alice:{TEST_UA}"))).unwrap();
+        assert_eq!(req.term, Some(Term::Years(12)));
 
-        let req = parse_request(
-            &network,
-            &padded(&format!("ZNS:update:alice:{TEST_UA}:31536000")),
-        )
-        .unwrap();
-        assert_eq!(req.action, Action::Update);
-        assert_eq!(req.term, Some(term));
-        assert_eq!(req.otp, None);
+        let req =
+            parse_request(&network, &padded(&format!("ZNS:update:3y:alice:{TEST_UA}"))).unwrap();
+        assert_eq!(req.term, Some(Term::Years(3)));
 
-        let req = parse_request(
+        // The verbs' term slots are not interchangeable.
+        assert!(parse_request(
             &network,
-            &padded(&format!("ZNS:claim:alice:{TEST_UA}:none")),
+            &padded(&format!("ZNS:claim:none:alice:{TEST_UA}"))
         )
-        .unwrap();
-        assert_eq!(req.term, None);
-        assert_eq!(req.otp, None);
+        .is_none());
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:update:forever:alice:{TEST_UA}"))
+        )
+        .is_none());
+        assert!(parse_request(&network, &padded(&format!("ZNS:claim::alice:{TEST_UA}"))).is_none());
     }
 
     #[test]
-    fn six_digit_update_field_is_a_term_not_an_otp() {
+    fn strict_spellings_are_rejected_on_sight() {
         let network = MainNetwork;
-        let term = Term::parse("123456").unwrap();
-        let req = parse_request(
+        // Missing y, over the cap, leading zero.
+        assert!(
+            parse_request(&network, &padded(&format!("ZNS:claim:5:alice:{TEST_UA}"))).is_none()
+        );
+        assert!(parse_request(
             &network,
-            &padded(&format!("ZNS:update:alice:{TEST_UA}:123456")),
+            &padded(&format!("ZNS:claim:100y:alice:{TEST_UA}"))
         )
-        .unwrap();
-        assert_eq!(req.term, Some(term));
-        assert_eq!(req.otp, None);
+        .is_none());
+        assert!(
+            parse_request(&network, &padded(&format!("ZNS:claim:01y:alice:{TEST_UA}"))).is_none()
+        );
+        // Seconds never appear on the request wire.
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:claim:31557600:alice:{TEST_UA}"))
+        )
+        .is_none());
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:update:31557600:alice:{TEST_UA}"))
+        )
+        .is_none());
     }
 
     #[test]
-    fn update_and_release_accept_a_respond_otp() {
+    fn requests_never_carry_an_otp() {
         let network = MainNetwork;
-        let term = Term::parse("31536000").unwrap();
-
-        let req = parse_request(
+        // The respond spellings are gone; the echo is the relay memo.
+        assert!(parse_request(
             &network,
-            &padded(&format!("ZNS:update:alice:{TEST_UA}:none:004206")),
+            &padded(&format!("ZNS:update:none:alice:{TEST_UA}:004206"))
         )
-        .unwrap();
-        assert_eq!(req.action, Action::Update);
-        assert_eq!(req.term, None);
-        assert_eq!(req.otp, Some(*b"004206"));
-
-        let req = parse_request(
+        .is_none());
+        assert!(parse_request(
             &network,
-            &padded(&format!("ZNS:update:alice:{TEST_UA}:31536000:004206")),
+            &padded(&format!("ZNS:release:alice:{TEST_UA}:004206"))
         )
-        .unwrap();
-        assert_eq!(req.action, Action::Update);
-        assert_eq!(req.term, Some(term));
-        assert_eq!(req.otp, Some(*b"004206"));
-
-        let req = parse_request(
+        .is_none());
+        assert!(parse_request(
             &network,
-            &padded(&format!("ZNS:release:alice:{TEST_UA}:004206")),
+            &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}:004206"))
         )
-        .unwrap();
-        assert_eq!(req.action, Action::Release);
-        assert_eq!(req.term, None);
-        assert_eq!(req.otp, Some(*b"004206"));
-
-        let req = parse_request(
-            &network,
-            &padded(&format!("ZNS:update:alice:{TEST_UA}:none:123456")),
-        )
-        .unwrap();
-        assert_eq!(req.term, None);
-        assert_eq!(req.otp, Some(*b"123456"));
+        .is_none());
     }
 
     #[test]
@@ -566,52 +523,17 @@ mod tests {
         let network = MainNetwork;
         assert!(parse_request(
             &network,
-            &padded(&format!("ZNS:update:alice:{TEST_UA}:004206"))
+            &padded(&format!("ZNS:release:alice:{TEST_UA}:004206"))
         )
         .is_none());
         assert!(parse_request(
             &network,
-            &padded(&format!("ZNS:claim:alice:{TEST_UA}:extra"))
+            &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}:extra"))
         )
         .is_none());
         assert!(parse_request(
             &network,
-            &padded(&format!("ZNS:claim:alice:{TEST_UA}:31536000:more"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:release:alice:{TEST_UA}:31536000"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:release:alice:{TEST_UA}:none"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:alice:{TEST_UA}:none:004206"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:update:alice:{TEST_UA}::004206"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:release:alice:{TEST_UA}:none:004206"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:update:alice:{TEST_UA}:none:00420"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:release:alice:{TEST_UA}:00420a"))
+            &padded(&format!("ZNS:update:none:alice:{TEST_UA}:more"))
         )
         .is_none());
     }
@@ -619,7 +541,12 @@ mod tests {
     #[test]
     fn rejects_unknown_verb() {
         let network = MainNetwork;
-        assert!(parse_request(&network, &padded(&format!("ZNS:otp:alice:{TEST_UA}"))).is_none());
+        // The echo lane is routed by Challenge::decode, never here.
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:otp:417293:alice:update:{TEST_UA}"))
+        )
+        .is_none());
     }
 
     #[test]
@@ -631,8 +558,10 @@ mod tests {
     #[test]
     fn rejects_invalid_name() {
         let network = MainNetwork;
-        assert!(
-            parse_request(&network, &padded(&format!("ZNS:claim:INVALID:{TEST_UA}"))).is_none()
-        );
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:claim:forever:INVALID:{TEST_UA}"))
+        )
+        .is_none());
     }
 }
