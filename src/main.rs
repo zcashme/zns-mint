@@ -184,9 +184,9 @@ async fn main() {
             );
         }
 
-        // Apply every missing canonical block in strict order. All derived
-        // state is prepared first; the wallet commit is the irreversible
-        // boundary; Registry, MTP, and the cursor are installed afterward.
+        // Apply every missing canonical block in strict order: fetch with
+        // retry, verify the terminal block, call `apply_block` — the
+        // application itself is the one body shared with boot.
         while chain_tip.block_height() < best_height {
             let from_height = chain_tip.block_height();
             let next_height = from_height + 1;

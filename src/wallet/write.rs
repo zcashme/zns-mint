@@ -716,8 +716,8 @@ impl Wallet {
             // to a wallet that scans contiguously from its birthday — and
             // owned spends never appear in it. (A note cannot be spent in
             // the block that creates it, and the mint applies one block per
-            // `put_blocks` call, so same-batch create-and-spend cannot
-            // arise.)
+            // `put_blocks_marked` call, so same-batch create-and-spend
+            // cannot arise.)
             for wtx in block.transactions() {
                 let txid = wtx.txid();
                 for spend in wtx.sapling_spends() {
@@ -742,9 +742,9 @@ impl Wallet {
     ///
     /// The standard scanning lane cannot see Name Notes (its domain re-derives
     /// the commitment from rseed and rejects the ZNS-derived cmx), so the
-    /// orchestrator's ZNS pass supplies them here, after `put_blocks` has
-    /// committed the block. The caller derives `position` from that same
-    /// scanned block before moving it into `put_blocks`.
+    /// orchestrator's ZNS pass supplies them here, after `put_blocks_marked`
+    /// has committed the block. The caller derives `position` from that same
+    /// scanned block before moving it into `put_blocks_marked`.
     ///
     /// `nullifier` was derived by the ZNS decryption pass from the same
     /// authenticated `(rcm, psi)` pair that reproduced the action's cmx. The
