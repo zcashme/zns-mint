@@ -28,8 +28,8 @@ use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D
 use zns_mint::mint::registry::{NameRecord, ReceivedNameNote};
 use zns_mint::mint::treasury::{self, parse_request, ParsedRequest, RequestQueue};
 use zns_mint::mint::{
-    Action, Challenge, Expiry, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN, MINT_BIRTHDAY,
-    REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    Action, Challenge, Expiry, Request, Term, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
+    MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{self, CanonicalBlockSource, ChainClient, JsonRpc, TipStream};
 
@@ -443,8 +443,9 @@ async fn main() {
                 match (request.action, request.otp) {
                     (Action::Claim, Some(_)) => break 'lane true, // malformed: dead
                     (Action::Update | Action::Release, Some(otp)) => {
-                        // The echo lane: an OTP response. Decided in every
-                        // outcome — an echo never waits for money.
+                        // The echo lane: an OTP response. Decided in every outcome —
+                        // an echo never waits for money; the upgrade premium
+                        // declines on shortfall, it does not defer.
                         let Some(record) = registry.record(&request.name).cloned() else {
                             break 'lane true; // no record: no mint-issued challenge can match
                         };
@@ -463,6 +464,23 @@ async fn main() {
                         let Some(sent) = challenges.awaiting(&challenge, mtp_now) else {
                             break 'lane true; // no pending challenge: dead
                         };
+                        // The upgrade premium: update:forever costs
+                        // the full quote_forever, carried on this respond.
+                        // A shortfall voids the attempt — but failure never
+                        // consumes: the challenge stands, and the controller
+                        // may retry with the same OTP inside D_OTP,
+                        // attaching the full premium.
+                        if request.action == Action::Update
+                            && sent.term == Some(Term::Forever)
+                            && paid < oracle.quote_forever(&request.name)
+                        {
+                            tracing::debug!(
+                                name = %request.name.as_str(),
+                                paid = paid.into_u64(),
+                                "upgrade respond underpaid — attempt void, challenge stands"
+                            );
+                            break 'lane true;
+                        }
                         let digits = sent.code.digits();
                         let authorized = match request.action {
                             Action::Update => Request::Update {
@@ -562,9 +580,9 @@ async fn main() {
                             || record.expires_at.expired(mtp_now)
                             || note_height <= record.confirmed_height
                             || (action == Action::Release && requested_ua != record.ua)
-                            // A forever name has no runway to bank; refuse
-                            // an extension at the relay, before a
-                            // challenge spends anything.
+                            // A forever name has no runway to bank and no
+                            // second upgrade to buy; refuse any term at the
+                            // relay, before a challenge spends anything.
                             || (record.expires_at == Expiry::Never && term.is_some())
                             || challenges.pending(
                                 &name,

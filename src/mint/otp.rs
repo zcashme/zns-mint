@@ -71,7 +71,8 @@ pub struct OtpRequest {
     pub tip_rcm: NameCommitment,
     pub code: OtpCode,
     pub expires_at: Timestamp,
-    /// Requested extension; `None` carries the live period forward.
+    /// Requested extension, or the forever upgrade; `None` carries
+    /// the live period forward.
     pub term: Option<Term>,
 }
 
@@ -123,7 +124,7 @@ impl OtpQueue {
         })
     }
 
-    /// The challenge a return closes.
+    /// The pending challenge this return matches.
     pub fn awaiting(&mut self, returned: &Challenge, mtp: Timestamp) -> Option<OtpRequest> {
         self.challenges.retain(|request| mtp < request.expires_at);
         self.challenges

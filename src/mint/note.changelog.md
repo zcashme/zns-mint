@@ -1,5 +1,11 @@
 # `mint/note.rs` design record
 
+## 2026-09-17 — extend gains the upgrade arm: At + forever → Never (#65)
+
+- `Expiry::extend` maps `(At, Some(Forever))` to `Never`. The arm
+  precedes the banking arm: `Term::Forever::duration` is zero, so
+  the banking arm would silently no-op the upgrade. `Never` plus
+  any term — banking or a second upgrade — stays refused.
 ## 2026-09-17 — Term is `forever` | `<N>y`; extend refuses forever+years
 
 - `Term` is `Forever | Years(1..=99)`. One year is `LIVENESS_INTERVAL`.

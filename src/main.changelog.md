@@ -13,6 +13,13 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
 - `tracing_subscriber` was `fmt()` without env-filter, so `RUST_LOG`
   was ignored. Init now uses env-filter, defaulting to `info`.
 
+
+## 2026-09-17 — Upgrade premium gate in the echo lane (#65)
+
+- An `update:forever` respond must carry `quote_forever(&name)`; a
+  shortfall voids the attempt (decided, removed) but the challenge
+  stands — failure never consumes. Ordinary updates, releases, and
+  liveness responses owe nothing on the respond.
 ## 2026-09-17 — Intake: term-first requests; echo is the relay memo
 
 - Treasury memos: `Challenge::decode` first (`ZNS:otp:…`), else

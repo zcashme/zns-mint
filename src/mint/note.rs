@@ -195,13 +195,21 @@ impl Expiry {
     /// Successor expiry for an update (§4.5.3).
     ///
     /// `None` leaves the period unchanged. `Some(years)` banks from the
-    /// current expiry. A forever name has no runway: `Never` plus a term
-    /// is refused. The result must sit no more than `MAX_TERM_YEARS`
+    /// current expiry. `Some(Forever)` is the upgrade: a fixed-term
+    /// registration converts to no fixed expiration — the arm precedes
+    /// the banking arm because `Term::Forever::duration` is zero, so the
+    /// banking arm would silently no-op it. A forever name has no
+    /// runway: `Never` plus a term — banking or a second upgrade — is
+    /// refused. The banking result must sit no more than `MAX_TERM_YEARS`
     /// ahead of `mtp`.
     pub fn extend(self, term: Option<Term>, mtp: Timestamp) -> Option<Self> {
         let extended = match (self, term) {
             (expiry, None) => expiry,
             (Expiry::Never, Some(_)) => return None,
+            // The upgrade: At + forever converts the registration kind. This arm MUST precede the banking arm below —
+            // `Term::Forever::duration` is zero, so the banking arm would
+            // silently no-op the upgrade (At + 0 = At).
+            (Expiry::At(_), Some(Term::Forever)) => Expiry::Never,
             (Expiry::At(t), Some(term)) => t.checked_add(term.duration()).map(Expiry::At)?,
         };
         let horizon = mtp
@@ -849,6 +857,19 @@ mod tests {
         assert_eq!(Expiry::Never.extend(Some(term), mtp), None);
         assert_eq!(Expiry::Never.extend(None, mtp), Some(Expiry::Never));
         assert_eq!(Expiry::At(mtp).extend(None, mtp), Some(Expiry::At(mtp)));
+    }
+
+    #[test]
+    fn update_extend_forever_upgrades_at_records() {
+        let mtp = Timestamp::from_seconds(1_000).unwrap();
+        // The upgrade: At + forever converts the registration kind.
+        assert_eq!(
+            Expiry::At(mtp).extend(Some(Term::Forever), mtp),
+            Some(Expiry::Never)
+        );
+        // Second upgrade / banking on forever: still refused — the tier
+        // is terminal in both directions.
+        assert_eq!(Expiry::Never.extend(Some(Term::Forever), mtp), None);
     }
 
     #[test]

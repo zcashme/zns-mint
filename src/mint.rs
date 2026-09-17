@@ -79,7 +79,8 @@ impl Action {
 ///
 /// Built from [`treasury::parse_request`];
 /// memo bytes stay on that parser. Claims carry a term (`forever` or
-/// `<N>y`); updates carry `none` (carried forward) or `<N>y`.
+/// `<N>y`); updates carry `none` (carried forward), `<N>y`, or
+/// `forever` — the upgrade.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// Create a new registration; the term slot is never empty.
@@ -88,7 +89,8 @@ pub enum Request {
         ua: UnifiedAddress,
         term: Term,
     },
-    /// Rebind; `None` carries the expiry forward, `Some` extends it.
+    /// Rebind; `None` carries the expiry forward, `Some(Years)` extends
+    /// it, `Some(Forever)` upgrades it to no fixed expiration.
     Update {
         name: Name,
         ua: UnifiedAddress,
