@@ -255,10 +255,7 @@ impl Registry {
                     }
                     Some(_) => return None, // live
                 }
-                let expires_at = match term {
-                    None => Expiry::Never,
-                    Some(term) => term.claim_expiry(mtp)?,
-                };
+                let expires_at = term.claim_expiry(mtp)?;
                 Some(NameNote::Claim {
                     name,
                     ua,
@@ -277,7 +274,7 @@ impl Registry {
                 if !challenges.accept(&name, Action::Update, &ua, record.commitment, otp, mtp) {
                     return None;
                 }
-                let expires_at = record.expires_at.extend(term)?;
+                let expires_at = record.expires_at.extend(term, mtp)?;
                 Some(NameNote::Update {
                     name,
                     ua,
