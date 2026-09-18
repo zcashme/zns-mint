@@ -15,12 +15,13 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletWrite as _;
+use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
 use zcash_protocol::consensus::BlockHeight;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::note::NameNoteQueue;
-use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D_OTP};
+use zns_mint::mint::otp::{OtpCode, OtpQueue, OtpRequest, D_OTP};
 use zns_mint::mint::registry::NameRecord;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
@@ -467,7 +468,7 @@ async fn main() {
                         let Some(memo) = challenge.encode(&network) else {
                             break 'lane true;
                         };
-                        let relay_value = required_relay_value(&network, target_height);
+                        let relay_value = MINIMUM_FEE;
                         let Some(transaction) = treasury::challenge(
                             &network,
                             &mut wallet,
@@ -590,7 +591,7 @@ async fn main() {
             let memo = challenge
                 .encode(&network)
                 .expect("liveness challenges are always encodable");
-            let relay_value = required_relay_value(&network, target_height);
+            let relay_value = MINIMUM_FEE;
             let Some(transaction) = treasury::challenge(
                 &network,
                 &mut wallet,
