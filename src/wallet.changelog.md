@@ -1,5 +1,27 @@
 # Wallet changelog
 
+## 2026-09-18 — valid_chain_states connected and passing (issue #69)
+
+- Connect upstream's `valid_chain_states` as a thin wrapper in `wallet/write.rs`.
+- Third upstream scenario to pass, and the first passing body that exercises
+  scanning: it explicitly asserts `chain_height() == Ok(None)` on a wallet not
+  yet notified of a tip (our design, asserted as correct by upstream), then
+  scans two contiguous blocks through the real `put_blocks` continuity path
+  with no balance lookups. The strict sequential contract holds unchanged.
+- Surveyed the rest of the `pool.rs` corpus for other scenarios that avoid the
+  funding helper: none are currently runnable. `data_db_truncation` opens by
+  asserting the summary is `None` but then requires post-scan balances;
+  `send_max_fee_overflow_is_an_error`, `receive_two_notes_with_same_value`,
+  `scan_full_block_detects_outputs`, and the truncation/rewind family all
+  fund via `add_a_single_note_checking_balance` or assert balances after
+  scanning, so they are gated at the shared missing-summary precondition.
+- `invalid_chain_cache_disconnected` is excluded: upstream marks it
+  `#[allow(dead_code)]` with "FIXME: This requires fixes to the test
+  framework."
+- Counts: 16 connected / 3 passing / 13 failing before target assertions /
+  0 at target assertions (plus the local `get_locked_outputs` diagnostic,
+  counted separately). Library run: 54 passed, 14 failed, 0 ignored.
+
 ## 2026-09-18 — Divergence observed: get_locked_outputs lists lapsed locks (issue #69)
 
 - Promoted the source-predicted `get_locked_outputs` divergence from inferred to

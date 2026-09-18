@@ -835,6 +835,11 @@ mod tests {
     }
 
     #[test]
+    fn valid_chain_states() {
+        pool::valid_chain_states::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
     fn explicit_note_locking() {
         pool::locking::explicit_note_locking::<SaplingPoolTester>(Factory, Cache::default());
     }
