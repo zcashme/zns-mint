@@ -17,7 +17,9 @@ use zcash_client_backend::data_api::{
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
-use zcash_primitives::transaction::fees::zip317::{FeeError, P2PKH_STANDARD_OUTPUT_SIZE};
+use zcash_primitives::transaction::fees::zip317::{
+    FeeError, MARGINAL_FEE, P2PKH_STANDARD_OUTPUT_SIZE,
+};
 use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
@@ -144,9 +146,9 @@ fn vault_sweep_fee<P: Parameters>(
 
 /// One sweep: all Treasury value above the operating float moves to the
 /// vault. ZIP-317 prices the selected notes; the payment is that total
-/// minus the fee and `SWEEP_RESERVE`, which returns as Ironwood change.
-/// Only Sapling and Ironwood are spent. Returns `None` on any failure;
-/// retried at the next tip.
+/// minus the fee, `SWEEP_RESERVE`, and one extra ZIP-317 action so
+/// `propose_transfer` can add Ironwood change. Only Sapling and Ironwood
+/// are spent. Returns `None` on any failure; retried at the next tip.
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet,
@@ -184,8 +186,8 @@ pub fn sweep_to_vault<P: Parameters>(
         return None;
     }
 
-    // Fee from the notes this sweep will spend, so the payment leaves
-    // SWEEP_RESERVE as change.
+    // Fee from the notes this sweep will spend. Leave one extra ZIP-317
+    // action so propose_transfer can add Ironwood change.
     let lock_policy = LockedInputPolicy::Exclude;
     let notes = match wallet.select_spendable_notes(
         TREASURY_ACCOUNT,
@@ -211,23 +213,33 @@ pub fn sweep_to_vault<P: Parameters>(
         return None;
     };
 
+    let ironwood_n = notes.ironwood().len();
     let fee = vault_sweep_fee(
         network,
         BlockHeight::from(target_height),
         notes.sapling().len(),
-        notes.ironwood().len(),
+        ironwood_n,
     )?;
-    let Some(payment) = (total - fee).and_then(|remaining| remaining - SWEEP_RESERVE) else {
+    let Some(payment) = (total - fee)
+        .and_then(|remaining| remaining - SWEEP_RESERVE)
+        .and_then(|remaining| remaining - MARGINAL_FEE)
+    else {
         tracing::warn!(
             spendable_zats = total.into_u64(),
             fee_zats = fee.into_u64(),
+            ironwood_n,
             reserve_zats = SWEEP_RESERVE.into_u64(),
             "vault sweep skipped: reserve and fee exceed spendable"
         );
         return None;
     };
     if payment.is_zero() {
-        tracing::warn!("vault sweep skipped: payment is zero");
+        tracing::warn!(
+            spendable_zats = total.into_u64(),
+            fee_zats = fee.into_u64(),
+            ironwood_n,
+            "vault sweep skipped: payment is zero"
+        );
         return None;
     }
 
@@ -262,7 +274,17 @@ pub fn sweep_to_vault<P: Parameters>(
         None,
         None,
     )
-    .map_err(|error| tracing::warn!(?error, "vault sweep proposal failed"))
+    .map_err(|error| {
+        tracing::warn!(
+            ?error,
+            fee_zats = fee.into_u64(),
+            payment_zats = payment.into_u64(),
+            ironwood_n,
+            ironwood_zats = notes.ironwood_value().ok().map(Zatoshis::into_u64),
+            spendable_zats = total.into_u64(),
+            "vault sweep proposal failed"
+        )
+    })
     .ok()?;
 
     let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
@@ -470,8 +492,9 @@ mod tests {
         assert_eq!(fee, Zatoshis::const_from_u64(15_000));
         let payment = (total - fee)
             .and_then(|rest| rest - SWEEP_RESERVE)
-            .expect("ceremony note covers reserve and fee");
-        assert_eq!(payment, Zatoshis::const_from_u64(548_770_000));
+            .and_then(|rest| rest - MARGINAL_FEE)
+            .expect("ceremony note covers reserve, fee, and one extra action");
+        assert_eq!(payment, Zatoshis::const_from_u64(548_765_000));
     }
 
     #[test]
