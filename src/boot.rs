@@ -194,9 +194,30 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             );
         }
 
-        // 3d. MTP backfill: the 11 header timestamps through the origin
+        // 3d. The mint's birthday: a throwaway window ending at the
+        // birthday block, whose median is the birthday block's MTP —
+        // the day-zero anchor for `current_day`.
+        let mut birthday = MtpTracker::default();
+        birthday
+            .backfill(MINT_BIRTHDAY, |height| {
+                let rpc = rpc.clone();
+                async move {
+                    let (_, _, timestamp) = rpc.get_block_header(height).await?;
+                    Ok::<_, zcash::TransportError>(
+                        u32::try_from(timestamp.as_seconds())
+                            .expect("Zcash block-header timestamps are u32 seconds"),
+                    )
+                }
+            })
+            .await
+            .expect("FATAL: birthday MTP backfill from Zebra failed");
+        let birthday_mtp = birthday
+            .current()
+            .expect("FATAL: birthday MTP unavailable from Zebra");
+        let mut mtp = MtpTracker::born(birthday_mtp);
+
+        // 3e. MTP backfill: the 11 header timestamps through the origin
         // checkpoint, so the MTP window is complete before the first scan.
-        let mut mtp = MtpTracker::default();
         mtp.backfill(checkpoint_height, |height| {
             let rpc = rpc.clone();
             async move {
