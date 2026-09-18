@@ -14,29 +14,12 @@ use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
-use zcash_keys::address::UnifiedAddress;
 use zcash_primitives::transaction::fees::zip317::{FeeError, GRACE_ACTIONS, MARGINAL_FEE};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 
-use crate::mint::{Action, Name, Term, TREASURY_ACCOUNT};
+use crate::mint::{Action, MintInbound, Name, Request, Term, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
-
-/// A user memo decoded from a Treasury note. Claims always carry a term
-/// (`forever` or `<N>y`); updates carry `none`, `<N>y`, or `forever` —
-/// the upgrade to the forever tier. The wire never
-/// carries an OTP — `otp` is set only by intake, when a relay echo
-/// (`ZNS:otp:…`, routed by `Challenge::decode`) rides the queue in
-/// request shape.
-#[derive(Clone, Debug)]
-pub struct ParsedRequest {
-    pub action: Action,
-    pub name: Name,
-    pub ua: UnifiedAddress,
-    pub term: Option<Term>,
-    /// Intake-only: the relay echo's digits. `parse_request` never sets it.
-    pub otp: Option<[u8; 6]>,
-}
 
 /// Parses a 512-byte memo sent to the Treasury as a ZNS Request.
 ///
@@ -54,7 +37,7 @@ pub struct ParsedRequest {
 /// Requests never carry an OTP — answering is the respond's job: an echo
 /// is the relay memo itself (`ZNS:otp:…`, routed by `Challenge::decode`),
 /// never this parser.
-pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<ParsedRequest> {
+pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Request> {
     let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
     if raw[end..].iter().any(|b| *b != 0) {
         return None;
@@ -94,12 +77,12 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Pars
         _ => return None,
     };
 
-    Some(ParsedRequest {
-        action,
-        name,
-        ua,
-        term,
-        otp: None,
+    Some(match (action, term) {
+        (Action::Claim, Some(term)) => Request::Claim { name, ua, term },
+        (Action::Update, _) => Request::Update { name, ua, term },
+        (Action::Release, _) => Request::Release { name, ua },
+        // The wire always carries a claim term.
+        (Action::Claim, None) => unreachable!("claims always carry a term"),
     })
 }
 
@@ -344,13 +327,13 @@ pub fn challenge<P: Parameters>(
 /// them.
 #[derive(Clone, Debug, Default)]
 pub struct RequestQueue {
-    requests: Vec<(ParsedRequest, Zatoshis, BlockHeight)>,
+    requests: Vec<(MintInbound, Zatoshis, BlockHeight)>,
 }
 
 impl RequestQueue {
     /// An arrival, decoded once at block application.
-    pub fn record(&mut self, request: ParsedRequest, paid: Zatoshis, height: BlockHeight) {
-        self.requests.push((request, paid, height));
+    pub fn record(&mut self, inbound: MintInbound, paid: Zatoshis, height: BlockHeight) {
+        self.requests.push((inbound, paid, height));
     }
 
     pub fn len(&self) -> usize {
@@ -362,9 +345,9 @@ impl RequestQueue {
     }
 
     /// The entry at `index`, in block order — the drain cursor reads.
-    pub fn entry(&self, index: usize) -> (&ParsedRequest, Zatoshis, BlockHeight) {
-        let (request, paid, height) = &self.requests[index];
-        (request, *paid, *height)
+    pub fn entry(&self, index: usize) -> (&MintInbound, Zatoshis, BlockHeight) {
+        let (inbound, paid, height) = &self.requests[index];
+        (inbound, *paid, *height)
     }
 
     /// The entry is decided. The only removal besides reorg truncation.
@@ -385,17 +368,25 @@ mod tests {
 
     const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
 
-    fn request(action: Action) -> ParsedRequest {
-        match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
-            Some(zcash_keys::address::Address::Unified(ua)) => ParsedRequest {
-                action,
-                name: Name::parse("alice").unwrap(),
+    fn request(action: Action) -> MintInbound {
+        let ua = match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
+            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            _ => panic!("vector is a mainnet Unified Address"),
+        };
+        let name = Name::parse("alice").unwrap();
+        MintInbound::Request(match action {
+            Action::Claim => Request::Claim {
+                name,
+                ua,
+                term: Term::Forever,
+            },
+            Action::Update => Request::Update {
+                name,
                 ua,
                 term: None,
-                otp: None,
             },
-            _ => panic!("vector is a mainnet Unified Address"),
-        }
+            Action::Release => Request::Release { name, ua },
+        })
     }
 
     fn h(n: u32) -> BlockHeight {
@@ -425,7 +416,10 @@ mod tests {
         queue.remove(1);
         assert_eq!(queue.len(), 2);
         // The entry after the removed one shifted into its place.
-        assert_eq!(queue.entry(1).0.action, Action::Release);
+        assert!(matches!(
+            queue.entry(1).0,
+            MintInbound::Request(Request::Release { .. })
+        ));
         assert_eq!(queue.entry(1).2, h(102));
     }
 
@@ -438,7 +432,10 @@ mod tests {
 
         queue.truncate_to(h(120));
         assert_eq!(queue.len(), 1);
-        assert_eq!(queue.entry(0).0.action, Action::Claim);
+        assert!(matches!(
+            queue.entry(0).0,
+            MintInbound::Request(Request::Claim { .. })
+        ));
         assert_eq!(queue.entry(0).2, h(100));
     }
 
@@ -452,42 +449,45 @@ mod tests {
     fn accepts_exactly_the_three_request_forms() {
         let network = MainNetwork;
 
-        let req = parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}")),
-        )
-        .unwrap();
-        assert_eq!(req.action, Action::Claim);
-        assert_eq!(req.name.as_str(), "alice");
-        assert_eq!(req.term, Some(Term::Forever));
-
-        let req = parse_request(
-            &network,
-            &padded(&format!("ZNS:update:none:alice:{TEST_UA}")),
-        )
-        .unwrap();
-        assert_eq!(req.action, Action::Update);
-        assert_eq!(req.name.as_str(), "alice");
-        assert_eq!(req.term, None);
-
-        let req =
-            parse_request(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))).unwrap();
-        assert_eq!(req.action, Action::Release);
-        assert_eq!(req.name.as_str(), "alice");
-        assert_eq!(req.term, None);
+        assert!(matches!(
+            parse_request(&network, &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"))),
+            Some(Request::Claim {
+                name,
+                term: Term::Forever,
+                ..
+            }) if name.as_str() == "alice"
+        ));
+        assert!(matches!(
+            parse_request(
+                &network,
+                &padded(&format!("ZNS:update:none:alice:{TEST_UA}"))
+            ),
+            Some(Request::Update { term: None, .. })
+        ));
+        assert!(matches!(
+            parse_request(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))),
+            Some(Request::Release { .. })
+        ));
     }
 
     #[test]
     fn claims_say_forever_updates_say_none_years_or_forever() {
         let network = MainNetwork;
 
-        let req =
-            parse_request(&network, &padded(&format!("ZNS:claim:12y:alice:{TEST_UA}"))).unwrap();
-        assert_eq!(req.term, Some(Term::Years(12)));
-
-        let req =
-            parse_request(&network, &padded(&format!("ZNS:update:3y:alice:{TEST_UA}"))).unwrap();
-        assert_eq!(req.term, Some(Term::Years(3)));
+        assert!(matches!(
+            parse_request(&network, &padded(&format!("ZNS:claim:12y:alice:{TEST_UA}"))),
+            Some(Request::Claim {
+                term: Term::Years(12),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_request(&network, &padded(&format!("ZNS:update:3y:alice:{TEST_UA}"))),
+            Some(Request::Update {
+                term: Some(Term::Years(3)),
+                ..
+            })
+        ));
 
         // The verbs' term slots are not interchangeable: claims never
         // say `none`. Updates may also carry the upgrade spelling.
@@ -496,12 +496,16 @@ mod tests {
             &padded(&format!("ZNS:claim:none:alice:{TEST_UA}"))
         )
         .is_none());
-        let req = parse_request(
-            &network,
-            &padded(&format!("ZNS:update:forever:alice:{TEST_UA}")),
-        )
-        .unwrap();
-        assert_eq!(req.term, Some(Term::Forever));
+        assert!(matches!(
+            parse_request(
+                &network,
+                &padded(&format!("ZNS:update:forever:alice:{TEST_UA}"))
+            ),
+            Some(Request::Update {
+                term: Some(Term::Forever),
+                ..
+            })
+        ));
         assert!(parse_request(&network, &padded(&format!("ZNS:claim::alice:{TEST_UA}"))).is_none());
     }
 

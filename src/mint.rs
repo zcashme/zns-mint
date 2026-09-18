@@ -17,6 +17,7 @@ pub use time::Timestamp;
 
 pub use zcash_keys::address::UnifiedAddress;
 
+use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zip32::AccountId;
 
@@ -182,6 +183,19 @@ impl Challenge {
     }
 }
 
+/// What a user said to the Treasury, in the shape each consumer takes.
+/// Intake classifies once, at block application; the drain decides.
+#[derive(Clone, Debug)]
+pub enum MintInbound {
+    /// A request — what `authorize` takes.
+    Request(Request),
+    /// An OTP respond — the relay memo returned; what `awaiting` takes.
+    Echo(Challenge),
+    /// A payment with no parseable message: the drain logs it once and
+    /// the sweep keeps the value; the txid names it in the log.
+    Unrecognized(TxId),
+}
+
 /// A ZNS name-chain commitment — the trapdoor that links consecutive Name Notes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NameCommitment(orchard::note::NoteCommitTrapdoor);
@@ -262,7 +276,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     use incrementalmerkletree::Position;
     use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
     use zcash_client_backend::scanning::Nullifiers;
-    use zcash_primitives::transaction::TxId;
 
     assert_eq!(
         from_state.block_height(),
@@ -460,35 +473,20 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     // are recorded as the requests they carry — nothing is stored
     // for later re-reading; the block is the durable source,
     // refetched on every application.
+    // Intake classifies; the drain decides. An echo is the relay memo
+    // itself, byte-for-byte, routed by Challenge::decode — the wire never
+    // carries an OTP on a request. A memo that parses to nothing is a
+    // payment with no message; it rides the queue like anything else.
     for (txid, _action_index, paid, memo) in treasury_memos {
-        // An echo is the relay memo itself, byte-for-byte — routed
-        // here, not by parse_request: the wire never carries an
-        // OTP on a request. The echo rides the queue in request
-        // shape, its digits in the OTP slot; the queue holds the
-        // order (the requested term), the memo proves identity.
-        if let Some(echo) = Challenge::decode(network, &memo) {
-            requests.record(
-                treasury::ParsedRequest {
-                    action: echo.action,
-                    name: echo.name,
-                    ua: echo.ua,
-                    term: None,
-                    otp: Some(echo.code.digits()),
-                },
-                paid,
-                height,
-            );
-            continue;
-        }
-        match treasury::parse_request(network, &memo) {
-            Some(request) => requests.record(request, paid, height),
-            None => tracing::info!(
-                txid = %txid,
-                value_zec = paid.into_u64() as f64 / 1e8,
-                height = u32::from(height),
-                "treasury received non-request payment"
-            ),
-        }
+        let inbound = if let Some(echo) = Challenge::decode(network, &memo) {
+            MintInbound::Echo(echo)
+        } else {
+            match treasury::parse_request(network, &memo) {
+                Some(request) => MintInbound::Request(request),
+                None => MintInbound::Unrecognized(txid),
+            }
+        };
+        requests.record(inbound, paid, height);
     }
     for (index, position) in accepted_name_notes {
         let candidate = &candidates[index];
