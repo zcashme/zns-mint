@@ -1,5 +1,45 @@
 # Wallet changelog
 
+## 2026-09-18 — Large-batch connect: truncation/rewind and send/spend corpus (issue #69)
+
+- Connected 29 more unchanged upstream Sapling scenarios as thin wrappers (16 in
+  `wallet/write.rs`, 13 in `wallet/input.rs`), bringing the corpus to 44 connected.
+  Applicability was checked per body before wiring: the two `cfg(not(orchard))`
+  send-max scenarios do not exist in our build (orchard is enabled), the
+  `pczt`-gated pair is excluded, and the multi-step spend-everything trio requires
+  `.with_gap_limits` (which the factory rejects) plus ZIP-320 ephemeral transparent
+  addresses — excluded by design. No `IronwoodPoolTester` exists in 0.24.0, so the
+  pool-crossing corpus has no Ironwood-lane scenarios to connect.
+- Results: 3 passing, 38 failing at the shared missing-summary gate, 4 failing at
+  real upstream assertions, 1 failing at a documented adapter gap.
+- Findings at target assertions (first non-gate conformance results of the batch):
+  - `truncate_to_chain_state_below_birthday`: our wallet rejects truncation to the
+    birthday−1 prior chain state with `TruncationTargetUnavailable`. Upstream's own
+    comment names this exact rejection as the buggy behavior they fixed. Our root
+    cause is two-fold: no applied block exists at birthday−1, and after
+    `MAX_CHECKPOINTS` (100) further blocks the origin checkpoint is evicted, so
+    `common_truncation_height`'s boot-floor fallback is gone. Mint context: `main.rs`
+    deliberately panics on forks crossing the mint birthday, so the refusal is mint
+    policy — but it is a divergence from the upstream wallet contract and is recorded
+    as such.
+  - `truncate_to_chain_state_above_scanned`: after `truncate_to_chain_state` to a
+    higher target, upstream expects `chain_height()` to equal the target (their
+    reference backends trim their scan queue, re-anchoring the tip). Ours keeps the
+    externally-supplied `zebra_tip` untouched — truncation is pure state rewind and
+    the caller owns the tip, by design. Same two-truths divergence as the funding
+    gate, surfacing at the truncation seam.
+  - `truncate_to_chain_state` and `rewind_to_chain_state_shallow`: both assert
+    `chain_height()` is set after scan-only operation (no `update_chain_tip`). Same
+    root cause as the funding gate; these scenarios simply reach it without funding.
+  - `reorg_to_checkpoint`: requires `WalletTest::get_checkpoint_history`, which the
+    adapter deliberately `unimplemented!()`s. An adapter gap to close by deriving the
+    history from the real commitment-tree checkpoints — not a wallet finding.
+- Library run: 54 passed, 42 failed, 0 ignored. The 42 are: 38 upstream at the shared
+  gate, 4 upstream at the findings above, and the local `get_locked_outputs`
+  diagnostic (expected red, counted separately). Upstream counts: 44 connected /
+  3 passing / 38 failing before target assertions / 4 failing at target assertions /
+  1 adapter gap. No pre-existing test regressed.
+
 ## 2026-09-18 — valid_chain_states connected and passing (issue #69)
 
 - Connect upstream's `valid_chain_states` as a thin wrapper in `wallet/write.rs`.

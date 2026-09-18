@@ -805,7 +805,7 @@ mod tests {
     use zcash_client_backend::data_api::chain::ChainState;
     use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore};
     use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
-    use zcash_client_backend::data_api::testing::pool::ShieldedPoolTester;
+    use zcash_client_backend::data_api::testing::pool::{InputTrust, ShieldedPoolTester};
     use zcash_client_backend::data_api::testing::AddressType;
     use zcash_client_backend::data_api::testing::{pool, sapling::SaplingPoolTester};
     use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
@@ -837,6 +837,102 @@ mod tests {
     #[test]
     fn valid_chain_states() {
         pool::valid_chain_states::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn scan_full_block_detects_outputs() {
+        pool::scan_full_block_detects_outputs::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn data_db_truncation() {
+        pool::data_db_truncation::<SaplingPoolTester, _>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn truncate_to_chain_state() {
+        pool::truncate_to_chain_state::<SaplingPoolTester, _>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn truncate_to_chain_state_below_birthday() {
+        pool::truncate_to_chain_state_below_birthday::<SaplingPoolTester, _>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn truncate_to_chain_state_above_scanned() {
+        pool::truncate_to_chain_state_above_scanned::<SaplingPoolTester, _>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn rewind_to_chain_state_shallow() {
+        pool::rewind_to_chain_state_shallow::<SaplingPoolTester, _>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn reorg_to_checkpoint() {
+        pool::reorg_to_checkpoint::<SaplingPoolTester, _, _>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn change_note_spends_succeed() {
+        pool::change_note_spends_succeed::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn receive_two_notes_with_same_value() {
+        pool::receive_two_notes_with_same_value::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn spend_fails_on_unverified_notes() {
+        pool::spend_fails_on_unverified_notes::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn zip317_spend() {
+        pool::zip317_spend::<SaplingPoolTester, _>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn metadata_queries_exclude_unwanted_notes() {
+        pool::metadata_queries_exclude_unwanted_notes::<SaplingPoolTester, _, _>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn zip_315_confirmations_internal() {
+        pool::zip_315_confirmations_test_steps::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+            InputTrust::Internal,
+        );
+    }
+
+    #[test]
+    fn zip_315_confirmations_external_untrusted() {
+        pool::zip_315_confirmations_test_steps::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+            InputTrust::ExternalUntrusted,
+        );
+    }
+
+    #[test]
+    fn zip_315_confirmations_external_trusted() {
+        pool::zip_315_confirmations_test_steps::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+            InputTrust::ExternalTrusted,
+        );
     }
 
     #[test]

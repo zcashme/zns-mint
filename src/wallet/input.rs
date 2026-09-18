@@ -642,4 +642,92 @@ mod tests {
             Cache::default(),
         );
     }
+
+    #[test]
+    fn send_single_step_proposed_transfer() {
+        pool::send_single_step_proposed_transfer::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn spend_max_spendable_single_step_proposed_transfer() {
+        pool::spend_max_spendable_single_step_proposed_transfer::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn spend_everything_single_step_proposed_transfer() {
+        pool::spend_everything_single_step_proposed_transfer::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn spend_all_funds_single_step_proposed_transfer() {
+        pool::spend_all_funds_single_step_proposed_transfer::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn send_with_multiple_change_outputs() {
+        pool::send_with_multiple_change_outputs::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn ovk_policy_prevents_recovery_from_chain() {
+        pool::ovk_policy_prevents_recovery_from_chain::<SaplingPoolTester, _>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn send_max_fee_overflow_is_an_error() {
+        pool::send_max_fee_overflow_is_an_error::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn send_max_fails_when_balance_is_consumed_by_fees() {
+        pool::send_max_fails_when_balance_is_consumed_by_fees::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn spend_everything_proposal_fails_when_unconfirmed_funds_present() {
+        pool::spend_everything_proposal_fails_when_unconfirmed_funds_present::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present() {
+        pool::send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present::<
+            SaplingPoolTester,
+        >(Factory, Cache::default());
+    }
+
+    #[test]
+    fn spend_succeeds_to_t_addr_zero_change() {
+        pool::spend_succeeds_to_t_addr_zero_change::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn fails_to_send_max_spendable_to_transparent_with_memo() {
+        pool::fails_to_send_max_spendable_to_transparent_with_memo::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn send_max_spendable_to_transparent() {
+        pool::send_max_spendable_to_transparent::<SaplingPoolTester>(Factory, Cache::default());
+    }
 }
