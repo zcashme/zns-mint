@@ -327,14 +327,15 @@ async fn main() {
                             break 'lane true; // no pending challenge: dead
                         };
                         // The upgrade premium: update:forever costs
-                        // the full quote_forever, carried on this respond.
+                        // The full quote(&name, Term::Forever), carried on this
+                        // respond.
                         // A shortfall voids the attempt — but failure never
                         // consumes: the challenge stands, and the controller
                         // may retry with the same OTP inside D_OTP,
                         // attaching the full premium.
                         if echo.action == Action::Update
                             && sent.term == Some(Term::Forever)
-                            && paid < oracle.quote_forever(&echo.name)
+                            && paid < oracle.quote(&echo.name, Term::Forever)
                         {
                             tracing::debug!(
                                 name = %echo.name.as_str(),
@@ -384,7 +385,7 @@ async fn main() {
                             );
                             break 'lane true;
                         }
-                        let price = oracle.quote_forever(name);
+                        let price = oracle.quote(name, *term);
                         // Payment gate: the quote at first sight is binding.
                         // An underpaid claim is dead and silent; a new
                         // payment settles a new evaluation.
