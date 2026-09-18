@@ -243,7 +243,7 @@ impl<P: Parameters> OutputLockStore for Wallet<P> {
             .iter()
             .filter(|(output, (_, expiry))| {
                 self.output_account(output) == Some(account)
-                    && target.is_none_or(|target| *expiry >= BlockHeight::from(target))
+                    && target.is_none_or(|target| *expiry >= target)
             })
             .map(|(output, _)| *output)
             .collect())
