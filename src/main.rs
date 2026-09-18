@@ -22,6 +22,7 @@ use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::note::NameNoteQueue;
 use zns_mint::mint::otp::{OtpCode, OtpQueue, OtpRequest, D_OTP};
+use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::registry::NameRecord;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
@@ -259,7 +260,10 @@ async fn main() {
             .current()
             .expect("FATAL: MTP unavailable at the applied tip");
 
-        oracle.accumulate(zns_mint::mint::pricing::fetch_round().await, mtp_now);
+        let today = mtp
+            .current_day()
+            .expect("FATAL: MTP unavailable at the applied tip");
+        oracle.accumulate(fetch_round().await, today, mtp_now);
         let exact_tip = loop {
             match source.exact_tip().await {
                 Ok(tip) => break tip,
