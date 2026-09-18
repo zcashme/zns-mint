@@ -1,5 +1,18 @@
 # Treasury design record
 
+## 2026-09-18 — Sweep payment is ZIP-317 over the pinned input set (#63)
+
+- `sweep_to_vault` guessed a ZIP-321 amount from `note_count + 3` times
+  `MARGINAL_FEE`. `unspent_*_notes` and `select_spendable_notes` did not
+  agree on the input set, so `propose_transfer` saw `InsufficientFunds`
+  with `available > required`, which made CI fail. Dummy Orchard actions
+  from `SpendPolicy::default()` could change the fee again.
+- The drain set is now `select_spendable_notes(AllFunds, [Sapling,
+  Ironwood])`. ZIP-317 prices that shape (1 P2PKH vault, Ironwood change,
+  DEFAULT padding, no Orchard). `payment = total − fee − SWEEP_RESERVE`.
+  Spend policy is Sapling+Ironwood only. Not `propose_send_max`: that
+  would sweep the 0.01 float.
+
 ## 2026-09-18 — Sweep None paths log why
 
 - `sweep_to_vault` returned `None` with no log on missing

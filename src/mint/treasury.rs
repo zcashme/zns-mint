@@ -4,19 +4,24 @@
 use std::convert::Infallible;
 use std::num::NonZeroU32;
 
+use zcash_client_backend::data_api::locking::{LockFilter, LockedInputPolicy};
 use zcash_client_backend::data_api::wallet::input_selection::{
     GreedyInputSelector, GreedyInputSelectorError, SpendPolicy,
 };
 use zcash_client_backend::data_api::wallet::{
     create_proposed_transactions, propose_transfer, ConfirmationsPolicy, SpendingKeys,
 };
-use zcash_client_backend::data_api::WalletRead as _;
+use zcash_client_backend::data_api::{
+    InputSource as _, MaxSpendMode, TargetValue, WalletRead as _,
+};
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
-use zcash_primitives::transaction::fees::zip317::{FeeError, GRACE_ACTIONS, MARGINAL_FEE};
+use zcash_primitives::transaction::fees::zip317::{FeeError, P2PKH_STANDARD_OUTPUT_SIZE};
+use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
+use zcash_protocol::ShieldedPool;
 
 use crate::mint::{Action, MintInbound, Name, Request, Term, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
@@ -98,11 +103,50 @@ pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 pub const VAULT_ADDRESS: transparent::address::TransparentAddress =
     transparent::address::TransparentAddress::PublicKeyHash([0x42; 20]);
 
+/// ZIP-317 fee for a vault sweep of this input set: one P2PKH vault
+/// output, one Ironwood change, DEFAULT Ironwood padding, no Orchard.
+fn vault_sweep_fee<P: Parameters>(
+    network: &P,
+    target_height: BlockHeight,
+    sapling_notes: usize,
+    ironwood_notes: usize,
+) -> Option<Zatoshis> {
+    let sapling_bundle = sapling::builder::BundleType::DEFAULT
+        .num_outputs(sapling_notes, 0)
+        .map_err(|error| tracing::warn!(error, "vault sweep skipped: Sapling bundle shape invalid"))
+        .ok()?;
+    let ironwood_bundle = orchard::builder::BundleType::DEFAULT
+        .num_actions(
+            orchard::bundle::BundleVersion::ironwood_v3().default_flags(),
+            ironwood_notes,
+            1,
+        )
+        .map_err(|error| {
+            tracing::warn!(error, "vault sweep skipped: Ironwood bundle shape invalid")
+        })
+        .ok()?;
+    StandardFeeRule::Zip317
+        .fee_required(
+            network,
+            target_height,
+            [],
+            [P2PKH_STANDARD_OUTPUT_SIZE],
+            sapling_notes,
+            sapling_bundle,
+            0,
+            ironwood_bundle,
+        )
+        .map_err(|error| {
+            tracing::warn!(?error, "vault sweep skipped: ZIP-317 fee not representable")
+        })
+        .ok()
+}
+
 /// One sweep: all Treasury value above the operating float moves to the
-/// vault through a single `propose_transfer` on default spend policy.
-/// The selector drains the Sapling pool first — it is dead weight — and
-/// Ironwood covers the remainder; the change returns as one Ironwood note
-/// carrying the float. Returns `None` on any failure; retried at the next tip.
+/// vault. ZIP-317 prices the selected notes; the payment is that total
+/// minus the fee and `SWEEP_RESERVE`, which returns as Ironwood change.
+/// Only Sapling and Ironwood are spent. Returns `None` on any failure;
+/// retried at the next tip.
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet,
@@ -140,20 +184,43 @@ pub fn sweep_to_vault<P: Parameters>(
         return None;
     }
 
-    // The fee bound covers every note in both pools plus the transparent
-    // output and the change note; the surplus returns as change.
-    let note_count = wallet
-        .unspent_sapling_notes(TREASURY_ACCOUNT, target_height)
-        .len()
-        + wallet
-            .unspent_ironwood_notes(TREASURY_ACCOUNT, target_height)
-            .len();
-    let actions = (note_count + 3).max(GRACE_ACTIONS);
-    let bound = Zatoshis::from_u64(MARGINAL_FEE.into_u64() * actions as u64)
-        .expect("fee bound fits the monetary range");
-    let Some(payment) = (spendable - SWEEP_RESERVE).and_then(|remaining| remaining - bound) else {
+    // Fee from the notes this sweep will spend, so the payment leaves
+    // SWEEP_RESERVE as change.
+    let lock_policy = LockedInputPolicy::Exclude;
+    let notes = match wallet.select_spendable_notes(
+        TREASURY_ACCOUNT,
+        TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
+        &[ShieldedPool::Sapling, ShieldedPool::Ironwood],
+        target_height,
+        policy,
+        &[],
+        LockFilter::Policy(&lock_policy),
+    ) {
+        Ok(notes) if !notes.is_empty() => notes,
+        Ok(_) => {
+            tracing::warn!("vault sweep skipped: no spendable notes");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(?error, "vault sweep skipped: note selection failed");
+            return None;
+        }
+    };
+    let Some(total) = notes.total_value().ok() else {
+        tracing::warn!("vault sweep skipped: selected notes overflow");
+        return None;
+    };
+
+    let fee = vault_sweep_fee(
+        network,
+        BlockHeight::from(target_height),
+        notes.sapling().len(),
+        notes.ironwood().len(),
+    )?;
+    let Some(payment) = (total - fee).and_then(|remaining| remaining - SWEEP_RESERVE) else {
         tracing::warn!(
-            spendable_zats = spendable.into_u64(),
+            spendable_zats = total.into_u64(),
+            fee_zats = fee.into_u64(),
             reserve_zats = SWEEP_RESERVE.into_u64(),
             "vault sweep skipped: reserve and fee exceed spendable"
         );
@@ -191,7 +258,7 @@ pub fn sweep_to_vault<P: Parameters>(
         ),
         request,
         policy,
-        &SpendPolicy::default(),
+        &SpendPolicy::shielded_pools([ShieldedPool::Sapling, ShieldedPool::Ironwood]),
         None,
         None,
     )
@@ -391,6 +458,20 @@ mod tests {
 
     fn h(n: u32) -> BlockHeight {
         BlockHeight::from_u32(n)
+    }
+
+    #[test]
+    fn vault_sweep_fee_matches_the_ceremony_note_shape() {
+        // One Ironwood note, 5.49785 ZEC: 1 P2PKH + padded spend and
+        // change is three ZIP-317 actions.
+        let total = Zatoshis::const_from_u64(549_785_000);
+        let fee = vault_sweep_fee(&MainNetwork, BlockHeight::from_u32(1), 0, 1)
+            .expect("ZIP-317 fee is representable");
+        assert_eq!(fee, Zatoshis::const_from_u64(15_000));
+        let payment = (total - fee)
+            .and_then(|rest| rest - SWEEP_RESERVE)
+            .expect("ceremony note covers reserve and fee");
+        assert_eq!(payment, Zatoshis::const_from_u64(548_770_000));
     }
 
     #[test]
