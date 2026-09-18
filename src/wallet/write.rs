@@ -233,7 +233,7 @@ where
     ensure_block_checkpoint(tree, height, bundles.final_tree_size())
 }
 
-impl<P: Parameters> WalletWrite for Wallet<P> {
+impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
     type UtxoRef = OutPoint;
 
     fn create_account(
@@ -243,6 +243,10 @@ impl<P: Parameters> WalletWrite for Wallet<P> {
         _birthday: &AccountBirthday,
         _key_source: Option<&str>,
     ) -> Result<(AccountId, UnifiedSpendingKey), WalletError> {
+        #[cfg(test)]
+        if self.test_network.is_some() {
+            return self.inject_test_account(_seed, _birthday);
+        }
         // Accounts 0 and 1 are installed once at boot; the database never
         // creates spending keys, and no seed crosses this boundary.
         Err(WalletError::FixedAccountsOnly)
@@ -799,10 +803,44 @@ mod tests {
     use super::{Wallet, WalletError};
     use incrementalmerkletree::frontier::Frontier;
     use zcash_client_backend::data_api::chain::ChainState;
+    use zcash_client_backend::data_api::testing::{pool, sapling::SaplingPoolTester};
     use zcash_client_backend::data_api::WalletWrite;
     use zcash_primitives::block::BlockHash;
     use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkType, Parameters};
     use zip32::AccountId;
+
+    use crate::wallet::testing::{Cache, Factory};
+
+    #[test]
+    fn scan_cached_blocks_finds_received_notes() {
+        pool::scan_cached_blocks_finds_received_notes::<SaplingPoolTester, _>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn scan_cached_blocks_finds_change_notes() {
+        pool::scan_cached_blocks_finds_change_notes::<SaplingPoolTester, _>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn explicit_note_locking() {
+        pool::locking::explicit_note_locking::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn note_locking_height_boundary() {
+        pool::locking::note_locking_height_boundary::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn clear_locked_outputs() {
+        pool::locking::clear_locked_outputs::<SaplingPoolTester>(Factory, Cache::default());
+    }
 
     fn empty_origin() -> ChainState {
         ChainState::new(

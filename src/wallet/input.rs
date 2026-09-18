@@ -597,3 +597,25 @@ impl<P: Parameters> InputSource for Wallet<P> {
         Ok(Vec::new())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use zcash_client_backend::data_api::testing::{pool, sapling::SaplingPoolTester};
+
+    use crate::wallet::testing::{Cache, Factory};
+
+    #[test]
+    fn create_to_address_fails_on_incorrect_usk() {
+        pool::create_to_address_fails_on_incorrect_usk::<SaplingPoolTester, _>(Factory);
+    }
+
+    #[test]
+    fn proposal_fails_with_no_blocks() {
+        pool::proposal_fails_with_no_blocks::<SaplingPoolTester, _>(Factory);
+    }
+
+    #[test]
+    fn spend_fails_on_locked_notes() {
+        pool::locking::spend_fails_on_locked_notes::<SaplingPoolTester>(Factory, Cache::default());
+    }
+}

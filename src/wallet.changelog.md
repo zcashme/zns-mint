@@ -1,5 +1,35 @@
 # Wallet changelog
 
+## 2026-09-18 — Initial upstream conformance scenarios (issue #69)
+
+- Enable `zcash_client_backend/test-dependencies` only through the dev dependency.
+  The local resolver selects 0.24.0; the manifest's 0.24.0-rc.7 requirement is
+  not an exact pin. Both existing patched cryptography tags support the feature.
+- Add an inline `wallet::testing` factory, compact-block cache and minimal
+  `WalletTest` adapter. Upstream account creation is supported only on wallets
+  explicitly created by this test factory: inject one Treasury viewing key and
+  initialize the normal wallet from the fixture's prior chain state. Other
+  wallets retain their fixed-account behavior, including in unit tests.
+- Add eight unchanged upstream Sapling scenarios in the existing `input.rs`
+  and `write.rs` test modules. Do not change production birthdays, balances,
+  scanning, input selection, locks or transaction persistence. Inspection
+  methods outside this batch fail explicitly instead of inventing results.
+- Run with `cargo test --lib wallet::`. Initial result: the two existing reserve
+  regressions and the upstream unknown-key/no-blocks scenarios pass. The six
+  new scanning/locking/spending scenarios fail in upstream's first balance
+  lookup (`testing.rs:1560` in 0.24.0): they do not call `update_chain_tip`,
+  while our `get_wallet_summary` returns `None` until that explicit update.
+  This is an integration-contract mismatch, not six independently verified
+  wallet bugs. The later expiry and transaction-building assertions have not
+  been reached. No tests are ignored or marked `should_panic` to hide this.
+- Full library run: 53 passed, 6 failed (all six described above). The normal
+  dependency feature graph contains only `orchard` and `transparent-inputs`
+  for `zcash_client_backend`, without `test-dependencies`.
+- Excluded from this batch: out-of-order scan scenarios (including upstream's
+  oldest-note-selection scenario), because the mint accepts sequential scans
+  only. Detailed sent-output/history scenarios still need adapter review;
+  ordinary Orchard and transparent-input spending are unsupported by design.
+
 ## 2026-09-18 — The wallet knows its network
 
 - `Wallet` is generic: `Wallet<P: Parameters>` with a `network: P` field, matching

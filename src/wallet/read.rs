@@ -113,6 +113,7 @@ pub(super) fn next_height(height: BlockHeight) -> BlockHeight {
 /// Upstream provides the `Account` trait but no production record type. This
 /// value is constructed only for an existing UFVK map entry and is never held
 /// by `Wallet`; the database itself remains the fixed account-0/account-1 map.
+#[cfg_attr(test, derive(Clone))]
 pub struct FixedAccount {
     id: AccountId,
     ufvk: UnifiedFullViewingKey,

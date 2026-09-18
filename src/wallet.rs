@@ -74,6 +74,9 @@ pub struct Wallet<P: Parameters> {
     /// wallet; callers of the free data-api functions keep passing their
     /// own `params` and must pass the same network.
     network: P,
+    /// Only upstream conformance fixtures may inject accounts through WalletWrite.
+    #[cfg(test)]
+    test_network: Option<zcash_protocol::local_consensus::LocalNetwork>,
     /// Exactly account 0 (Treasury) and account 1 (Registry).
     ufvks: BTreeMap<AccountId, UnifiedFullViewingKey>,
 
@@ -147,6 +150,8 @@ impl<P: Parameters> Wallet<P> {
         let scanning_keys = ScanningKeys::from_account_ufvks(ufvks.clone());
         let mut wallet = Self {
             network,
+            #[cfg(test)]
+            test_network: None,
             ufvks,
             scanning_keys,
             zebra_tip: None,
@@ -295,4 +300,178 @@ pub fn block_metadata(state: &ChainState) -> BlockMetadata {
         Some(orchard_size),
         Some(ironwood_size),
     )
+}
+
+/// Adapter for upstream's unchanged Sapling scenarios. Only account setup is
+/// special: all scanning, balances, input selection, locking and transaction
+/// persistence use the real Wallet implementations. In particular, this does
+/// not override the mint birthday or make unsupported operations succeed.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use secrecy::{ExposeSecret, SecretVec};
+    use zcash_client_backend::{
+        data_api::{
+            anchor_retention::AnchorRetentionInterval,
+            chain::{error, BlockSource},
+            testing::{CacheInsertionResult, DataStoreFactory, TestCache, TransactionSummary},
+            AccountBirthday, OutputOfSentTx, WalletTest,
+        },
+        proto::compact_formats::CompactBlock,
+        wallet::Note,
+    };
+    use zcash_keys::keys::{transparent::gap_limits::GapLimits, UnifiedSpendingKey};
+    use zcash_protocol::{local_consensus::LocalNetwork, ShieldedPool};
+
+    pub(crate) struct Factory;
+
+    impl DataStoreFactory for Factory {
+        type Error = WalletError;
+        type AccountId = AccountId;
+        type Account = super::read::FixedAccount;
+        type DsError = WalletError;
+        type DataStore = Wallet<LocalNetwork>;
+
+        fn new_data_store(
+            &self,
+            network: LocalNetwork,
+            anchor_retention_interval: Option<AnchorRetentionInterval>,
+            gap_limits: Option<GapLimits>,
+        ) -> Result<Wallet<LocalNetwork>, WalletError> {
+            assert!(
+                anchor_retention_interval.is_none(),
+                "custom retention is not supported"
+            );
+            assert!(gap_limits.is_none(), "address gap limits are not supported");
+            let mut wallet = Wallet::new(
+                [],
+                &ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
+                network,
+            )?;
+            wallet.test_network = Some(network);
+            Ok(wallet)
+        }
+    }
+
+    impl<P: Parameters + Clone> Wallet<P> {
+        pub(super) fn inject_test_account(
+            &mut self,
+            seed: &SecretVec<u8>,
+            birthday: &AccountBirthday,
+        ) -> Result<(AccountId, UnifiedSpendingKey), WalletError> {
+            // These scenarios need only one account. Fail loudly if a new test
+            // requires account lifecycle behavior that the mint does not have.
+            assert!(
+                self.ufvks.is_empty(),
+                "fixture supports one initial account only"
+            );
+            assert!(self.blocks.is_empty());
+            let network = self.test_network.expect("upstream fixture network");
+            let id = TREASURY_ACCOUNT;
+            let usk = UnifiedSpendingKey::from_seed(&network, seed.expose_secret(), id)
+                .expect("valid upstream test seed");
+            *self = Wallet::new(
+                [(id, usk.to_unified_full_viewing_key())],
+                birthday.prior_chain_state(),
+                self.network.clone(),
+            )?;
+            self.test_network = Some(network);
+            Ok((id, usk))
+        }
+    }
+
+    #[derive(Default)]
+    pub(crate) struct Cache(BTreeMap<BlockHeight, CompactBlock>);
+
+    pub(crate) struct Inserted(Vec<TxId>);
+
+    impl CacheInsertionResult for Inserted {
+        fn txids(&self) -> &[TxId] {
+            &self.0
+        }
+    }
+
+    impl BlockSource for Cache {
+        type Error = Infallible;
+
+        fn with_blocks<F, E>(
+            &self,
+            from_height: Option<BlockHeight>,
+            limit: Option<usize>,
+            mut with_block: F,
+        ) -> Result<(), error::Error<E, Infallible>>
+        where
+            F: FnMut(CompactBlock) -> Result<(), error::Error<E, Infallible>>,
+        {
+            for (_, block) in self
+                .0
+                .range(from_height.unwrap_or(BlockHeight::from_u32(0))..)
+                .take(limit.unwrap_or(usize::MAX))
+            {
+                with_block(block.clone())?;
+            }
+            Ok(())
+        }
+    }
+
+    impl TestCache for Cache {
+        type BsError = Infallible;
+        type BlockSource = Self;
+        type InsertResult = Inserted;
+
+        fn block_source(&self) -> &Self {
+            self
+        }
+
+        fn insert(&mut self, block: &CompactBlock) -> Inserted {
+            self.0.insert(block.height(), block.clone());
+            Inserted(block.vtx.iter().map(|tx| tx.txid()).collect())
+        }
+
+        fn truncate_to_height(&mut self, height: BlockHeight) {
+            self.0.retain(|h, _| *h <= height);
+        }
+    }
+
+    impl WalletTest for Wallet<LocalNetwork> {
+        // Not exercised by this initial batch. Never fabricate an empty result:
+        // adding a scenario needing these observations must extend the adapter.
+        fn get_tx_history(&self) -> Result<Vec<TransactionSummary<AccountId>>, WalletError> {
+            unimplemented!("transaction history inspection is outside the initial eight scenarios")
+        }
+
+        fn get_sent_note_ids(&self, _: &TxId, _: ShieldedPool) -> Result<Vec<NoteId>, WalletError> {
+            unimplemented!("sent note inspection is outside the initial eight scenarios")
+        }
+
+        fn get_sent_outputs(&self, _: &TxId) -> Result<Vec<OutputOfSentTx>, WalletError> {
+            unimplemented!("sent output inspection is outside the initial eight scenarios")
+        }
+
+        fn get_checkpoint_history(
+            &self,
+            _: &ShieldedPool,
+        ) -> Result<Vec<(BlockHeight, Option<incrementalmerkletree::Position>)>, WalletError>
+        {
+            unimplemented!("checkpoint history inspection is outside the initial eight scenarios")
+        }
+
+        fn get_notes(
+            &self,
+            protocol: ShieldedPool,
+        ) -> Result<Vec<ReceivedNote<NoteId, Note>>, WalletError> {
+            match protocol {
+                ShieldedPool::Sapling => Ok(self
+                    .sapling_notes
+                    .keys()
+                    .map(|id| {
+                        self.sapling_received_note(*id)
+                            .expect("stored note has spending scope")
+                            .map_note(Note::Sapling)
+                    })
+                    .collect()),
+                _ => unimplemented!("this batch covers Sapling only"),
+            }
+        }
+    }
 }
