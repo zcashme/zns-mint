@@ -25,7 +25,7 @@ use zns_mint::mint::otp::{OtpCode, OtpQueue, OtpRequest, D_OTP};
 use zns_mint::mint::registry::NameRecord;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
-    Action, Challenge, Expiry, MintInbound, Request, Term, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
+    Action, Challenge, Expiry, MintInbound, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
     MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{self, CanonicalBlockSource, ChainClient, JsonRpc, TipStream};
@@ -316,8 +316,8 @@ async fn main() {
                     }
                     MintInbound::Echo(echo) => {
                         // The echo lane: an OTP response. Decided in every outcome —
-                        // an echo never waits for money; the upgrade premium
-                        // declines on shortfall, it does not defer.
+                        // an echo never waits for money; the renewal or
+                        // upgrade fee declines on shortfall, it does not defer.
                         let Some(record) = registry.record(&echo.name).cloned() else {
                             break 'lane true; // no record: no mint-issued challenge can match
                         };
@@ -327,23 +327,19 @@ async fn main() {
                         let Some(sent) = challenges.awaiting(echo, mtp_now) else {
                             break 'lane true; // no pending challenge: dead
                         };
-                        // The upgrade premium: update:forever costs
-                        // The full quote(&name, Term::Forever), carried on this
-                        // respond.
-                        // A shortfall voids the attempt — but failure never
-                        // consumes: the challenge stands, and the controller
-                        // may retry with the same OTP inside D_OTP,
-                        // attaching the full premium.
-                        if echo.action == Action::Update
-                            && sent.term == Some(Term::Forever)
-                            && paid < oracle.quote(&echo.name, Term::Forever)
-                        {
-                            tracing::debug!(
-                                name = %echo.name.as_str(),
-                                paid = paid.into_u64(),
-                                "upgrade respond underpaid — attempt void, challenge stands"
-                            );
-                            break 'lane true;
+                        // The renewal or upgrade fee, binding at first
+                        // sight: a shortfall voids the attempt and never
+                        // consumes — the challenge stands, retryable with
+                        // the same OTP inside D_OTP.
+                        if let Some(term) = sent.term {
+                            if paid < oracle.quote(&echo.name, term) {
+                                tracing::debug!(
+                                    name = %echo.name.as_str(),
+                                    paid = paid.into_u64(),
+                                    "update respond underpaid — attempt void, challenge stands"
+                                );
+                                break 'lane true;
+                            }
                         }
                         let digits = sent.code.digits();
                         let authorized = match echo.action {
