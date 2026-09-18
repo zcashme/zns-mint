@@ -322,6 +322,7 @@ pub(crate) mod testing {
     use incrementalmerkletree::{Hashable, Position};
     use secrecy::{ExposeSecret, SecretVec};
     use shardtree::store::ShardStore;
+    use std::collections::BTreeSet;
     use zcash_client_backend::{
         data_api::{
             anchor_retention::AnchorRetentionInterval,
@@ -334,6 +335,7 @@ pub(crate) mod testing {
     };
     use zcash_keys::address::Address;
     use zcash_keys::keys::{transparent::gap_limits::GapLimits, UnifiedSpendingKey};
+    use zcash_protocol::value::{BalanceError, ZatBalance};
     use zcash_protocol::{local_consensus::LocalNetwork, PoolType, ShieldedPool};
 
     pub(crate) struct Factory;
@@ -480,11 +482,196 @@ pub(crate) mod testing {
         Ok(out)
     }
 
+    fn add_zat(acc: Zatoshis, value: Zatoshis) -> Result<Zatoshis, WalletError> {
+        (acc + value)
+            .ok_or(BalanceError::Overflow)
+            .map_err(Into::into)
+    }
+
+    fn sapling_value(output: &WalletSaplingOutput<AccountId>) -> Result<Zatoshis, WalletError> {
+        Zatoshis::try_from(output.note().value().inner()).map_err(Into::into)
+    }
+
+    fn ironwood_value(output: &WalletIronwoodOutput<AccountId>) -> Result<Zatoshis, WalletError> {
+        Zatoshis::from_u64(output.note().0.value().inner()).map_err(Into::into)
+    }
+
+    impl Wallet<LocalNetwork> {
+        fn transaction_summary(
+            &self,
+            account: AccountId,
+            txid: TxId,
+        ) -> Result<TransactionSummary<AccountId>, WalletError> {
+            let mut spent = Zatoshis::ZERO;
+            let mut received = Zatoshis::ZERO;
+            let mut spent_note_count = 0;
+            let mut received_note_count = 0;
+            let mut sent_note_count = 0;
+            let mut has_change = false;
+            let mut sent_output_value = Zatoshis::ZERO;
+            let mut has_sent_outputs = false;
+
+            for (note_id, output) in &self.sapling_notes {
+                if *output.account_id() != account {
+                    continue;
+                }
+                if *note_id.txid() == txid {
+                    received = add_zat(received, sapling_value(output)?)?;
+                    received_note_count += 1;
+                    if output.is_change()
+                        || output.recipient_key_scope() == Some(zip32::Scope::Internal)
+                    {
+                        has_change = true;
+                    }
+                }
+                if self.sapling_note_spends.get(note_id) == Some(&txid) {
+                    spent = add_zat(spent, sapling_value(output)?)?;
+                    spent_note_count += 1;
+                }
+            }
+            for (note_id, output) in &self.ironwood_notes {
+                if *output.account_id() != account {
+                    continue;
+                }
+                if *note_id.txid() == txid {
+                    received = add_zat(received, ironwood_value(output)?)?;
+                    received_note_count += 1;
+                    if output.is_change()
+                        || output.recipient_key_scope() == Some(zip32::Scope::Internal)
+                    {
+                        has_change = true;
+                    }
+                }
+                if self.ironwood_note_spends.get(note_id) == Some(&txid) {
+                    spent = add_zat(spent, ironwood_value(output)?)?;
+                    spent_note_count += 1;
+                }
+            }
+
+            if let Some(outputs) = self.sent_outputs.get(&txid) {
+                has_sent_outputs = true;
+                for output in outputs {
+                    sent_output_value = add_zat(sent_output_value, output.value())?;
+                    match output.recipient() {
+                        Recipient::External { .. } => sent_note_count += 1,
+                        Recipient::InternalShielded {
+                            receiving_account,
+                            external_address,
+                            note,
+                        } if *receiving_account == account => {
+                            let Ok(index) = u16::try_from(output.output_index()) else {
+                                continue;
+                            };
+                            let note_id = NoteId::new(txid, note.pool(), index);
+                            let already = self.sapling_notes.contains_key(&note_id)
+                                || self.ironwood_notes.contains_key(&note_id);
+                            if !already {
+                                received = add_zat(received, output.value())?;
+                                received_note_count += 1;
+                            }
+                            if external_address.is_none() {
+                                has_change = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let mined_height = match self.transaction_statuses.get(&txid) {
+                Some(TransactionStatus::Mined(height)) => Some(*height),
+                _ => None,
+            };
+            let expiry_height = self.transactions.get(&txid).map(|tx| tx.expiry_height());
+            let expired_unmined = mined_height.is_none()
+                && expiry_height
+                    .filter(|height| u32::from(*height) > 0)
+                    .is_some_and(|expiry| self.zebra_tip.is_some_and(|tip| expiry <= tip));
+            let fee_paid = has_sent_outputs
+                .then(|| spent - sent_output_value)
+                .flatten();
+            let delta = i64::try_from(received.into_u64()).expect("zatoshis fit i64")
+                - i64::try_from(spent.into_u64()).expect("zatoshis fit i64");
+            let memo_count = self
+                .memos
+                .iter()
+                .filter(|(note_id, memo)| *note_id.txid() == txid && !matches!(memo, Memo::Empty))
+                .count();
+
+            Ok(TransactionSummary::from_parts(
+                account,
+                txid,
+                expiry_height,
+                mined_height,
+                ZatBalance::from_i64(delta)?,
+                spent,
+                received,
+                fee_paid,
+                spent_note_count,
+                has_change,
+                sent_note_count,
+                received_note_count,
+                memo_count,
+                expired_unmined,
+                false,
+                None,
+            ))
+        }
+    }
+
     impl WalletTest for Wallet<LocalNetwork> {
-        // Not exercised by this initial batch. Never fabricate an empty result:
-        // adding a scenario needing these observations must extend the adapter.
         fn get_tx_history(&self) -> Result<Vec<TransactionSummary<AccountId>>, WalletError> {
-            unimplemented!("transaction history inspection is outside the initial eight scenarios")
+            let mut pairs = BTreeSet::new();
+            for (note_id, output) in &self.sapling_notes {
+                pairs.insert((*output.account_id(), *note_id.txid()));
+                if let Some(spend_txid) = self.sapling_note_spends.get(note_id) {
+                    pairs.insert((*output.account_id(), *spend_txid));
+                }
+            }
+            for (note_id, output) in &self.ironwood_notes {
+                pairs.insert((*output.account_id(), *note_id.txid()));
+                if let Some(spend_txid) = self.ironwood_note_spends.get(note_id) {
+                    pairs.insert((*output.account_id(), *spend_txid));
+                }
+            }
+            for (txid, outputs) in &self.sent_outputs {
+                for output in outputs {
+                    if let Recipient::InternalShielded {
+                        receiving_account, ..
+                    } = output.recipient()
+                    {
+                        pairs.insert((*receiving_account, *txid));
+                    }
+                }
+            }
+
+            let mut history = Vec::with_capacity(pairs.len());
+            for (account, txid) in pairs {
+                history.push(self.transaction_summary(account, txid)?);
+            }
+            // Newest mined height first, unmined last — sqlite's
+            // `ORDER BY mined_height DESC, tx_index DESC` with NULLs last.
+            history.sort_by(|a, b| match (a.mined_height(), b.mined_height()) {
+                (Some(ha), Some(hb)) => hb.cmp(&ha).then_with(|| {
+                    let ia = self
+                        .transaction_indices
+                        .get(&a.txid())
+                        .copied()
+                        .map(u16::from)
+                        .unwrap_or(0);
+                    let ib = self
+                        .transaction_indices
+                        .get(&b.txid())
+                        .copied()
+                        .map(u16::from)
+                        .unwrap_or(0);
+                    ib.cmp(&ia)
+                }),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.txid().cmp(&b.txid()),
+            });
+            Ok(history)
         }
 
         fn get_sent_note_ids(

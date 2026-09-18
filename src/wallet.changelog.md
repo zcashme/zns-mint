@@ -1,5 +1,16 @@
 # Wallet changelog
 
+## 2026-09-18 — WalletTest transaction history
+
+- `WalletTest::get_tx_history` now builds summaries from received notes, recorded
+  spends, and `sent_outputs`. Received-only compact-scan transactions are
+  included; change still sitting only in `sent_outputs` counts as received.
+  Rows sort newest mined height first, unmined last, matching sqlite.
+- Five send/spend wrappers that stopped at the unimplemented adapter now pass.
+  `send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present` still
+  fails: it expects two history rows, and the unconfirmed 123_456-zat receive
+  is a third.
+
 ## 2026-09-18 — Conformance suite: scan tip, truncation, locks, retention
 
 - Scanning now raises the known chain tip to the last applied block when no
