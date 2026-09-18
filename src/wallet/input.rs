@@ -730,4 +730,14 @@ mod tests {
     fn send_max_spendable_to_transparent() {
         pool::send_max_spendable_to_transparent::<SaplingPoolTester>(Factory, Cache::default());
     }
+
+    #[test]
+    fn propose_v5_payment_to_orchard_receiver_is_rejected() {
+        pool::propose_v5_payment_to_orchard_receiver_is_rejected::<_>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn proposal_records_and_serializes_proposed_version() {
+        pool::proposal_records_and_serializes_proposed_version::<_>(Factory, Cache::default());
+    }
 }

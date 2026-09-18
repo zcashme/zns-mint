@@ -968,6 +968,21 @@ mod tests {
     }
 
     #[test]
+    fn birthday_in_anchor_shard() {
+        pool::birthday_in_anchor_shard::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn checkpoint_gaps() {
+        pool::checkpoint_gaps::<SaplingPoolTester, _>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn rewind_to_chain_state_deep() {
+        pool::rewind_to_chain_state_deep::<SaplingPoolTester, _>(Factory, Cache::default());
+    }
+
+    #[test]
     fn explicit_note_locking() {
         pool::locking::explicit_note_locking::<SaplingPoolTester>(Factory, Cache::default());
     }

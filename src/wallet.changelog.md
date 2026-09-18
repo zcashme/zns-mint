@@ -1,5 +1,35 @@
 # Wallet changelog
 
+## 2026-09-18 — Final corpus inventory: five connected, two blocked (issue #69)
+
+- Connected the last five connectable upstream scenarios as thin wrappers:
+  `birthday_in_anchor_shard`, `checkpoint_gaps`, `rewind_to_chain_state_deep`
+  (`wallet/write.rs`), and `propose_v5_payment_to_orchard_receiver_is_rejected` plus
+  `proposal_records_and_serializes_proposed_version` (`wallet/input.rs`, both `cfg(orchard)`
+  and enabled in our build).
+- Observed results: `checkpoint_gaps` and the two proposal scenarios stop at the shared
+  missing-summary gate. `birthday_in_anchor_shard` stops at upstream's scan helper
+  (`testing.rs:997`): its `with_initial_chain_state` preload (subtree roots and a seeded
+  frontier written before account creation) is discarded by the factory account hook's
+  documented whole-wallet replacement, and the first scan fails the continuity contract
+  loudly — the pre-documented injection limitation, now visible in red.
+  `rewind_to_chain_state_deep` fails at its own first assertion, like its shallow sibling.
+- `stabilized_note_spendable_after_deep_rewind` and
+  `newly_discovered_notes_become_stabilized` are recorded as BLOCKED, not connected. Both
+  preload a ~131k-leaf tree via `with_initial_chain_state`; the injection replacement
+  discards it, and the scenarios then run unboundedly (verified: no completion in 150s
+  against an otherwise 1.8s suite). Connecting them would hang the suite rather than
+  document anything, so they stay out, consistent with the handoff's rule to record such
+  scenarios as blocked pending factory extension.
+- The upstream inventory is now complete. Counts: 52 connected / 3 passing /
+  39 failing at the shared missing-summary gate / 4 failing at target assertions
+  (the truncation/rewind findings) / 1 adapter gap (`reorg_to_checkpoint`) /
+  3 failing at the retention fixture boundary / 1 failing at the injection-replacement
+  boundary / 1 failing at its own rewind assertion; plus 2 blocked and the documented
+  exclusions (ordinary-Orchard funding family, transparent/TEX, ZIP-320 multi-step,
+  out-of-order scans, account lifecycle, pczt-gated, proptest model, upstream dead code).
+  Library run: 54 passed, 50 failed, 0 ignored. No pre-existing test regressed.
+
 ## 2026-09-18 — Anchor-retention scenarios connected at the retention boundary (issue #69)
 
 - Connected the two NU6.3-network Ironwood tree scenarios as thin wrappers, with the
