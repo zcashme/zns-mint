@@ -22,8 +22,7 @@ pub struct MtpTracker {
 
 impl MtpTracker {
     /// Born at the mint's birthday: registers the day-zero anchor and
-    /// returns an empty tracker. Idempotent — born twice with the same
-    /// birthday is the same mint; a different one is a bug.
+    /// returns an empty tracker.
     pub fn born(birthday: Timestamp) -> Self {
         // `set` bounces the rejected value back, not the incumbent, so
         // read the incumbent for the comparison.

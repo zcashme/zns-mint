@@ -196,8 +196,8 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         // 3d. The mint's birthday: a throwaway window ending at the
         // birthday block, whose median is the birthday block's MTP —
         // the day-zero anchor for `current_day`.
-        let mut birthday_probe = MtpTracker::default();
-        birthday_probe
+        let mut birthday = MtpTracker::default();
+        birthday
             .backfill(MINT_BIRTHDAY, |height| {
                 let rpc = rpc.clone();
                 async move {
@@ -210,7 +210,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             })
             .await
             .expect("FATAL: birthday MTP backfill from Zebra failed");
-        let birthday_mtp = birthday_probe
+        let birthday_mtp = birthday
             .current()
             .expect("FATAL: birthday MTP unavailable from Zebra");
         let mut mtp = MtpTracker::born(birthday_mtp);
