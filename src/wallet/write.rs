@@ -803,10 +803,17 @@ mod tests {
     use super::{Wallet, WalletError};
     use incrementalmerkletree::frontier::Frontier;
     use zcash_client_backend::data_api::chain::ChainState;
+    use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore};
+    use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
+    use zcash_client_backend::data_api::testing::pool::ShieldedPoolTester;
+    use zcash_client_backend::data_api::testing::AddressType;
     use zcash_client_backend::data_api::testing::{pool, sapling::SaplingPoolTester};
-    use zcash_client_backend::data_api::WalletWrite;
+    use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
+    use zcash_client_backend::data_api::Account;
+    use zcash_client_backend::data_api::{WalletRead, WalletWrite};
     use zcash_primitives::block::BlockHash;
     use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkType, Parameters};
+    use zcash_protocol::value::Zatoshis;
     use zip32::AccountId;
 
     use crate::wallet::testing::{Cache, Factory};
@@ -869,6 +876,70 @@ mod tests {
     #[test]
     fn proposal_level_note_locking() {
         pool::locking::proposal_level_note_locking::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    /// Local diagnostic, deliberately separate from the upstream corpus: the
+    /// upstream scenarios never call `update_chain_tip`, so the divergence
+    /// below is unobservable through them. This test performs the
+    /// application-style sequence the mint's run loop performs (scan, then
+    /// tip notification) and checks that the two readers of the lock map agree.
+    ///
+    /// Upstream contract, pinned by `note_locking_height_boundary` and
+    /// `lock_expiry_restores_spendability`: a lock whose expiry height has
+    /// passed is absent from `get_locked_outputs`. Our implementation reads
+    /// the raw map and lists it, while balance and selection correctly treat
+    /// the note as spendable — the same lock is simultaneously lapsed and
+    /// listed. This test pins the upstream contract and stays red until the
+    /// divergence is fixed; its result is not comparable to an unchanged
+    /// upstream scenario.
+    #[test]
+    fn get_locked_outputs_drops_expired_locks() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+
+        // Fund through the raw path: no balance-checking helper, because the
+        // helper requires a summary before any tip can exist.
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50000);
+        let (h, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h, 1);
+
+        // The application-level tip notification the upstream corpus omits.
+        st.wallet_mut().update_chain_tip(h).unwrap();
+
+        let account_id = st.test_account().unwrap().id();
+        let output_ref = st.sole_note_ref();
+
+        // A lock expiring at the current tip: `target_height` is tip + 1, so
+        // the lock is lapsed from the moment it is taken.
+        let owner = LockOwner::new([1; 32]);
+        assert_eq!(
+            st.wallet_mut()
+                .lock_outputs(&[output_ref], owner, h)
+                .unwrap(),
+            1
+        );
+
+        // Balance evaluates the lock as lapsed: the note is fully spendable
+        // and nothing is locked.
+        let summary = st
+            .wallet()
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .unwrap()
+            .unwrap();
+        let balance = summary.account_balances().get(&account_id).unwrap();
+        assert_eq!(balance.sapling_balance().spendable_value(), value);
+        assert_eq!(balance.sapling_balance().locked_value(), Zatoshis::ZERO);
+
+        // The listing disagrees: the raw map read still contains the lapsed
+        // lock. Upstream asserts this must be empty.
+        assert!(
+            st.wallet()
+                .get_locked_outputs(account_id)
+                .unwrap()
+                .is_empty(),
+            "get_locked_outputs must not list a lock whose expiry height has passed"
+        );
     }
 
     fn empty_origin() -> ChainState {

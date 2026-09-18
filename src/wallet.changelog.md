@@ -1,5 +1,35 @@
 # Wallet changelog
 
+## 2026-09-18 — Divergence observed: get_locked_outputs lists lapsed locks (issue #69)
+
+- Promoted the source-predicted `get_locked_outputs` divergence from inferred to
+  observed with a local diagnostic (`get_locked_outputs_drops_expired_locks` in
+  `wallet/write.rs`), deliberately separate from the upstream corpus: it funds
+  through the raw generate+scan path, calls the production
+  `WalletWrite::update_chain_tip` exactly as the mint's run loop does, and then
+  reads the two consumers of the lock map at the same target height.
+- Observed behavior: a lock whose expiry equals the current tip (lapsed, since
+  balance evaluates locks against `target_height = tip + 1`) is simultaneously
+  — excluded from balance: the note counts as fully spendable and
+    `locked_value` is zero (assertions passed), and
+  — present in `get_locked_outputs`, because that method reads the raw lock
+    map without an expiry filter.
+  Upstream's `note_locking_height_boundary` and `lock_expiry_restores_spendability`
+  pin the opposite listing contract: a passed lock must be absent. The
+  diagnostic pins that contract too and stays red until the divergence is fixed.
+- This is the first target-assertion-level finding of the conformance effort, and
+  it was reachable without any tip fixture because the diagnostic supplies the
+  application-style tip notification itself. No production code was changed; the
+  fix (filter lapsed locks in `get_locked_outputs`, matching the liveness rule
+  already used by `lock_admits` and `add_note_to_balance`) belongs on a separate
+  branch, where this diagnostic and the upstream lock scenarios become its
+  regression harness.
+- Library run: 53 passed, 14 failed (13 upstream scenarios at the shared
+  missing-summary precondition, plus this diagnostic at its target assertion),
+  0 ignored. Upstream counts unchanged: 15 connected / 2 passing / 13 failing
+  before target assertions / 0 at target assertions; the diagnostic is not an
+  upstream scenario and is counted separately.
+
 ## 2026-09-18 — Proposal-lock lifecycle batch connected (issue #69)
 
 - Connect three more unchanged upstream Sapling scenarios as thin wrappers:
