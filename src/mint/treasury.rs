@@ -93,8 +93,9 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Requ
     })
 }
 
-/// Minimum spendable Treasury balance to trigger a vault sweep (2 ZEC).
-pub const SWEEP_THRESHOLD: Zatoshis = Zatoshis::const_from_u64(200_000_000);
+/// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
+/// actually moves, not on the balance behind it.
+pub const SWEEP_MINIMUM: Zatoshis = Zatoshis::const_from_u64(100_000_000);
 
 /// Amount retained as Treasury change after a sweep (0.01 ZEC): the
 /// operating float that funds the next Name Note's fee.
@@ -144,18 +145,37 @@ fn vault_sweep_fee<P: Parameters>(
         .ok()
 }
 
+/// The vault payment for a swept total: everything above the fee, the
+/// reserve, and one extra ZIP-317 action, provided at least
+/// `SWEEP_MINIMUM` moves.
+pub fn sweep_payment(total: Zatoshis, fee: Zatoshis) -> Option<Zatoshis> {
+    let payment = (total - fee)
+        .and_then(|remaining| remaining - SWEEP_RESERVE)
+        .and_then(|remaining| remaining - MARGINAL_FEE)?;
+    (payment >= SWEEP_MINIMUM).then_some(payment)
+}
+
 /// One sweep: all Treasury value above the operating float moves to the
-/// vault. ZIP-317 prices the selected notes; the payment is that total
-/// minus the fee, `SWEEP_RESERVE`, and one extra ZIP-317 action so
-/// `propose_transfer` can add Ironwood change. Only Sapling and Ironwood
-/// are spent. Returns `None` on any failure; retried at the next tip.
+/// vault, and only when this tip's catch-up advanced the mint's day and
+/// at least `SWEEP_MINIMUM` moves. ZIP-317 prices the selected notes;
+/// the payment is that total minus the fee, `SWEEP_RESERVE`, and one
+/// extra ZIP-317 action so `propose_transfer` can add Ironwood change.
+/// Only Sapling and Ironwood are spent. Returns `None` on a same-day
+/// tip or any failure; the next midnight crossing tries again.
+#[allow(clippy::too_many_arguments)]
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
     treasury_keys: &crate::key::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
+    today: i64,
+    previous_day: i64,
 ) -> Option<zcash_primitives::transaction::Transaction> {
+    if today <= previous_day {
+        return None;
+    }
+
     let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
     let Some((target_height, _)) = wallet
         .get_target_and_anchor_heights(NonZeroU32::MIN)
@@ -165,26 +185,6 @@ pub fn sweep_to_vault<P: Parameters>(
         tracing::warn!("vault sweep skipped: no target/anchor heights");
         return None;
     };
-
-    let Some(summary) = wallet.get_wallet_summary(policy).ok().flatten() else {
-        tracing::warn!("vault sweep skipped: no wallet summary");
-        return None;
-    };
-    let Some(account) = summary.account_balances().get(&TREASURY_ACCOUNT) else {
-        tracing::warn!("vault sweep skipped: Treasury account missing from summary");
-        return None;
-    };
-    let sapling = account.sapling_balance().spendable_value();
-    let ironwood = account.ironwood_balance().spendable_value();
-    let spendable = (sapling + ironwood).expect("balances sum");
-    if spendable <= SWEEP_THRESHOLD {
-        tracing::debug!(
-            spendable_zats = spendable.into_u64(),
-            threshold_zats = SWEEP_THRESHOLD.into_u64(),
-            "vault sweep skipped: below threshold"
-        );
-        return None;
-    }
 
     // Fee from the notes this sweep will spend. Leave one extra ZIP-317
     // action so propose_transfer can add Ironwood change.
@@ -200,7 +200,7 @@ pub fn sweep_to_vault<P: Parameters>(
     ) {
         Ok(notes) if !notes.is_empty() => notes,
         Ok(_) => {
-            tracing::warn!("vault sweep skipped: no spendable notes");
+            tracing::debug!("vault sweep skipped: no spendable notes");
             return None;
         }
         Err(error) => {
@@ -220,28 +220,15 @@ pub fn sweep_to_vault<P: Parameters>(
         notes.sapling().len(),
         ironwood_n,
     )?;
-    let Some(payment) = (total - fee)
-        .and_then(|remaining| remaining - SWEEP_RESERVE)
-        .and_then(|remaining| remaining - MARGINAL_FEE)
-    else {
-        tracing::warn!(
+    let Some(payment) = sweep_payment(total, fee) else {
+        tracing::debug!(
             spendable_zats = total.into_u64(),
             fee_zats = fee.into_u64(),
-            ironwood_n,
-            reserve_zats = SWEEP_RESERVE.into_u64(),
-            "vault sweep skipped: reserve and fee exceed spendable"
+            minimum_zats = SWEEP_MINIMUM.into_u64(),
+            "vault sweep skipped: payment below the minimum"
         );
         return None;
     };
-    if payment.is_zero() {
-        tracing::warn!(
-            spendable_zats = total.into_u64(),
-            fee_zats = fee.into_u64(),
-            ironwood_n,
-            "vault sweep skipped: payment is zero"
-        );
-        return None;
-    }
 
     let Some(request) = zip321::Payment::new(
         zcash_keys::address::Address::Transparent(VAULT_ADDRESS).to_zcash_address(network),
@@ -490,11 +477,27 @@ mod tests {
         let fee = vault_sweep_fee(&MainNetwork, BlockHeight::from_u32(1), 0, 1)
             .expect("ZIP-317 fee is representable");
         assert_eq!(fee, Zatoshis::const_from_u64(15_000));
-        let payment = (total - fee)
-            .and_then(|rest| rest - SWEEP_RESERVE)
-            .and_then(|rest| rest - MARGINAL_FEE)
-            .expect("ceremony note covers reserve, fee, and one extra action");
+        let payment = sweep_payment(total, fee).expect("ceremony note clears the minimum");
         assert_eq!(payment, Zatoshis::const_from_u64(548_765_000));
+    }
+
+    #[test]
+    fn sweep_payment_floors_the_vault_payment() {
+        let fee = Zatoshis::const_from_u64(15_000);
+        // Everything above the fee, reserve, and one extra action — at
+        // the floor exactly, 1 ZEC reaches the vault.
+        let at_floor = (SWEEP_MINIMUM + SWEEP_RESERVE)
+            .and_then(|total| total + MARGINAL_FEE)
+            .and_then(|total| total + fee)
+            .expect("consts sum");
+        assert_eq!(sweep_payment(at_floor, fee), Some(SWEEP_MINIMUM));
+
+        // One zat short of the floor: no sweep.
+        let below = (at_floor - Zatoshis::const_from_u64(1)).expect("subtracts");
+        assert_eq!(sweep_payment(below, fee), None);
+
+        // The fee alone consumes the total: no sweep.
+        assert_eq!(sweep_payment(fee, fee), None);
     }
 
     #[test]
