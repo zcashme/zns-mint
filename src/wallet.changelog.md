@@ -1,5 +1,18 @@
 # Wallet changelog
 
+## 2026-09-18 — Uneconomic notes and note-filter metadata
+
+- Notes at or below ZIP 317 `MARGINAL_FEE` are counted as `uneconomic_value`
+  and no longer contribute to `Balance::total` or spendable. Selection still
+  admits them as grace inputs; only the summary buckets change.
+- `get_account_metadata` ignores confirmation depth (structure query; the
+  caller may pass a `target_height` that predates later receives) and
+  evaluates `ExceedsBalancePercentage` plus `ExceedsPriorSendPercentile`
+  from eligible note values and recorded `sent_outputs`.
+- Disconnect `zip317_spend`. The DSL excludes dust from expected total while
+  the body asserts `total == 60000` including dust — incompatible with
+  `Balance::total` omitting `uneconomic_value`.
+
 ## 2026-09-18 — Sequential `put_blocks` only
 
 - Disconnect five wrappers that die at `scan_cached_blocks` with

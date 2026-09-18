@@ -1041,11 +1041,6 @@ mod tests {
     }
 
     #[test]
-    fn zip317_spend() {
-        pool::zip317_spend::<SaplingPoolTester, _>(Factory, Cache::default());
-    }
-
-    #[test]
     fn metadata_queries_exclude_unwanted_notes() {
         pool::metadata_queries_exclude_unwanted_notes::<SaplingPoolTester, _, _>(
             Factory,

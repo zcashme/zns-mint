@@ -24,6 +24,7 @@ use zcash_client_backend::wallet::{NoteId, OutputRef, ReceivedNote, TransparentA
 use zcash_keys::address::{Address, UnifiedAddress};
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_primitives::block::BlockHash;
+use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{self, BlockHeight};
 use zcash_protocol::memo::Memo;
@@ -239,15 +240,23 @@ impl<P: consensus::Parameters> Wallet<P> {
             .get_mut(&account)
             .expect("both fixed accounts are seeded with a zero balance");
 
+        let mut with_pool = |f: &mut dyn FnMut(&mut Balance) -> Result<(), WalletError>| match pool
+        {
+            ShieldedPool::Sapling => balance.with_sapling_balance_mut(|b| f(b)),
+            ShieldedPool::Orchard => balance.with_orchard_balance_mut(|b| f(b)),
+            ShieldedPool::Ironwood => balance.with_ironwood_balance_mut(|b| f(b)),
+        };
+
+        // Notes at or below the ZIP 317 marginal fee are uneconomic: they do
+        // not contribute to `Balance::total` or spendable, and can only be
+        // spent as grace inputs.
+        if value <= MARGINAL_FEE {
+            return with_pool(&mut |pool_balance| Ok(pool_balance.add_uneconomic_value(value)?));
+        }
+
         let Some(TransactionStatus::Mined(mined_height)) =
             self.transaction_statuses.get(note_id.txid())
         else {
-            let mut with_pool =
-                |f: &mut dyn FnMut(&mut Balance) -> Result<(), WalletError>| match pool {
-                    ShieldedPool::Sapling => balance.with_sapling_balance_mut(|b| f(b)),
-                    ShieldedPool::Orchard => balance.with_orchard_balance_mut(|b| f(b)),
-                    ShieldedPool::Ironwood => balance.with_ironwood_balance_mut(|b| f(b)),
-                };
             return with_pool(&mut |pool_balance| {
                 if is_change {
                     pool_balance.add_pending_change_value(value)?;
@@ -263,13 +272,6 @@ impl<P: consensus::Parameters> Wallet<P> {
             .locks
             .get(&OutputRef::from(*note_id))
             .is_some_and(|(_, expiry)| *expiry >= BlockHeight::from(target_height));
-
-        let mut with_pool = |f: &mut dyn FnMut(&mut Balance) -> Result<(), WalletError>| match pool
-        {
-            ShieldedPool::Sapling => balance.with_sapling_balance_mut(|b| f(b)),
-            ShieldedPool::Orchard => balance.with_orchard_balance_mut(|b| f(b)),
-            ShieldedPool::Ironwood => balance.with_ironwood_balance_mut(|b| f(b)),
-        };
 
         if !confirmed {
             with_pool(&mut |pool_balance| {
