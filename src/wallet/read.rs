@@ -56,6 +56,10 @@ pub enum WalletError {
     CommitmentTree(shardtree::error::ShardTreeError<Infallible>),
     /// A value aggregation would overflow `MAX_MONEY`.
     Balance(BalanceError),
+    /// `AllFunds(Everything)` was requested but some notes in the spend
+    /// pools are not currently spendable (unconfirmed, locked, or otherwise
+    /// ineligible).
+    UnspendableFunds,
 }
 
 impl From<shardtree::error::ShardTreeError<Infallible>> for WalletError {
@@ -97,6 +101,9 @@ impl std::fmt::Display for WalletError {
             }
             WalletError::CommitmentTree(e) => write!(f, "note commitment tree error: {e}"),
             WalletError::Balance(e) => write!(f, "balance error: {e}"),
+            WalletError::UnspendableFunds => {
+                write!(f, "not all funds in the requested pools are spendable")
+            }
         }
     }
 }

@@ -1,5 +1,12 @@
 # Wallet changelog
 
+## 2026-09-18 — AllFunds(Everything) fails when notes are unspendable
+
+- `select_spendable_notes` returns `UnspendableFunds` when the caller asks
+  for `AllFunds(Everything)` and any unspent note in the requested pools is
+  not eligible (unconfirmed, locked, or otherwise). `MaxSpendable` still
+  skips those notes and proposes the rest.
+
 ## 2026-09-18 — Lock-tier order in note selection
 
 - Eligible notes are ordered by lock tier, then age. `PreferUnlocked` draws

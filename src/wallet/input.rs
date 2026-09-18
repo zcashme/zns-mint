@@ -7,12 +7,14 @@
 //! reporting reuses exactly the same rules.
 
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
 use shardtree::store::ShardStore;
 use zcash_client_backend::data_api::{
     wallet::{input_selection::LockFilter, ConfirmationsPolicy, TargetHeight},
-    AccountMeta, CoinbaseFilter, InputSource, NoteFilter, PoolMeta, ReceivedNotes, TargetValue,
+    AccountMeta, CoinbaseFilter, InputSource, MaxSpendMode, NoteFilter, PoolMeta, ReceivedNotes,
+    TargetValue,
 };
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{
@@ -320,6 +322,73 @@ impl<P: Parameters> Wallet<P> {
         notes
     }
 
+    /// Whether every unspent, spendable-scope note in `sources` is eligible
+    /// under `confirmations_policy` and `lock_filter`. Used by
+    /// `AllFunds(Everything)`: a leftover unconfirmed or locked note would
+    /// make a "spend all" proposal a lie.
+    fn everything_spendable(
+        &self,
+        account: AccountId,
+        sources: &[ShieldedPool],
+        target_height: TargetHeight,
+        confirmations_policy: ConfirmationsPolicy,
+        exclude: &[NoteId],
+        lock_filter: LockFilter<'_>,
+    ) -> bool {
+        for pool in sources {
+            match pool {
+                ShieldedPool::Sapling => {
+                    let eligible: BTreeSet<_> = self
+                        .eligible_sapling(
+                            account,
+                            target_height,
+                            Some(confirmations_policy),
+                            exclude,
+                            lock_filter,
+                        )
+                        .into_iter()
+                        .map(|note| *note.internal_note_id())
+                        .collect();
+                    let leftover = self.sapling_notes.iter().any(|(note_id, output)| {
+                        *output.account_id() == account
+                            && !exclude.contains(note_id)
+                            && output.recipient_key_scope().is_some()
+                            && !self.sapling_note_is_spent(note_id, target_height)
+                            && !eligible.contains(note_id)
+                    });
+                    if leftover {
+                        return false;
+                    }
+                }
+                ShieldedPool::Ironwood => {
+                    let eligible: BTreeSet<_> = self
+                        .eligible_ironwood(
+                            account,
+                            target_height,
+                            Some(confirmations_policy),
+                            exclude,
+                            lock_filter,
+                        )
+                        .into_iter()
+                        .map(|note| *note.internal_note_id())
+                        .collect();
+                    let leftover = self.ironwood_notes.iter().any(|(note_id, output)| {
+                        *output.account_id() == account
+                            && !exclude.contains(note_id)
+                            && output.recipient_key_scope().is_some()
+                            && !self.ironwood_note_is_spent(note_id, target_height)
+                            && !eligible.contains(note_id)
+                    });
+                    if leftover {
+                        return false;
+                    }
+                }
+                ShieldedPool::Orchard => {}
+            }
+        }
+        true
+    }
+
     /// Evaluates `filter` against a note of `value`, returning `None` when
     /// the filter cannot be evaluated from this wallet's data.
     fn note_matches_filter(value: Zatoshis, filter: &NoteFilter) -> Option<bool> {
@@ -471,6 +540,19 @@ impl<P: Parameters> InputSource for Wallet<P> {
         if !self.ufvks.contains_key(&account) {
             return Err(WalletError::AccountUnknown(account));
         }
+        if matches!(
+            target_value,
+            TargetValue::AllFunds(MaxSpendMode::Everything)
+        ) && !self.everything_spendable(
+            account,
+            sources,
+            target_height,
+            confirmations_policy,
+            exclude,
+            lock_filter,
+        ) {
+            return Err(WalletError::UnspendableFunds);
+        }
 
         let mut sapling = Vec::new();
         let mut ironwood = Vec::new();
@@ -491,7 +573,6 @@ impl<P: Parameters> InputSource for Wallet<P> {
                     ) {
                         let take = match target_value {
                             TargetValue::AtLeast(target) => accumulated <= target,
-                            // AllFunds selects every eligible note.
                             TargetValue::AllFunds(_) => true,
                         };
                         let value = note
