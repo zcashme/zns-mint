@@ -259,7 +259,11 @@ async fn main() {
             .current()
             .expect("FATAL: MTP unavailable at the applied tip");
 
-        oracle.accumulate(zns_mint::mint::pricing::fetch_round().await, mtp_now);
+        // The day, from the chain clock: prices fold only while the
+        // tracker can name a day; a gap (deep reorg) skips the round.
+        if let Some(today) = mtp.current_day() {
+            oracle.accumulate(zns_mint::mint::pricing::fetch_round().await, today, mtp_now);
+        }
         let exact_tip = loop {
             match source.exact_tip().await {
                 Ok(tip) => break tip,

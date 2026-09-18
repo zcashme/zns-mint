@@ -315,10 +315,11 @@ impl<P: Parameters + Send + 'static> Boot<P> {
 
         // 6. Price fetch (MTP is now at the tip).
         let mtp_now = mtp.current().expect("MTP complete after sync");
+        let today = mtp.current_day().expect("MTP complete after sync");
         let price = crate::mint::pricing::fetch_round()
             .await
             .expect("FATAL: initial price fetch failed; restart when exchanges are reachable");
-        let oracle = Oracle::new(price, mtp_now);
+        let oracle = Oracle::new(price, today, mtp_now);
         tracing::info!(
             usd_per_zec = %price.round_dp(2),
             zats_per_usd = oracle.current().into_u64(),

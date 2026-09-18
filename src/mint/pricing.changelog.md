@@ -1,5 +1,21 @@
 # Pricing changelog
 
+## The oracle stops computing days (#85)
+
+- The day is not the oracle's to compute: `new` and `accumulate` take
+  `today: i64` from the run loop, which reads `MtpTracker::current_day`
+  (#80). The private `SECONDS_PER_DAY` grid, both `div_euclid` sites,
+  and the midnight-boundary billing are deleted; the rollover is a
+  plain `today > current_day` compare, still monotonic across reorg
+  rewinds. The two-branch rollover body collapses to one flat fold.
+- A day runs to its last observation: the interval crossing the
+  boundary is billed into the new day, so the published average sits
+  one observation (~75 s) behind exact midnight — MTP is the boundary,
+  not UTC.
+- An empty day carries the rate: with nothing accumulated the rollover
+  publishes nothing, so an outage freezes the last published rate
+  rather than drifting to a stale spot.
+
 ## 2026-09-18 — One quote, priced by term (#30)
 
 - `Oracle::quote(name, term)` is the only public registration quote:
