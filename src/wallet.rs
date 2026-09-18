@@ -81,8 +81,8 @@ pub struct Wallet<P: Parameters> {
     /// Interval-aligned checkpoints at or above NU6.3 are kept as durable
     /// anchors, outside the ordinary `MAX_CHECKPOINTS` pruning window.
     anchor_retention_interval: AnchorRetentionInterval,
-    /// Scan floor: the first height this wallet is expected to apply.
-    birthday: BlockHeight,
+    /// Per-account scan floors. Wallet-wide progress uses the earliest.
+    account_birthdays: BTreeMap<AccountId, BlockHeight>,
     /// Exactly account 0 (Treasury) and account 1 (Registry).
     ufvks: BTreeMap<AccountId, UnifiedFullViewingKey>,
 
@@ -154,6 +154,9 @@ impl<P: Parameters> Wallet<P> {
     ) -> Result<Self, TreeError> {
         let ufvks: BTreeMap<AccountId, UnifiedFullViewingKey> = ufvks.into_iter().collect();
         let scanning_keys = ScanningKeys::from_account_ufvks(ufvks.clone());
+        let birthday =
+            BlockHeight::from_u32(u32::from(chain_state.block_height()).saturating_add(1));
+        let account_birthdays = ufvks.keys().map(|&id| (id, birthday)).collect();
         let mut wallet = Self {
             network,
             #[cfg(test)]
@@ -161,9 +164,7 @@ impl<P: Parameters> Wallet<P> {
             ufvks,
             scanning_keys,
             zebra_tip: None,
-            birthday: BlockHeight::from_u32(
-                u32::from(chain_state.block_height()).saturating_add(1),
-            ),
+            account_birthdays,
             anchor_retention_interval: AnchorRetentionInterval::ZIP_318,
             blocks: BTreeMap::new(),
             seed: block_metadata(chain_state),
@@ -222,6 +223,16 @@ impl<P: Parameters> Wallet<P> {
     /// Returns the viewing key of one fixed mint account.
     pub fn ufvk_for(&self, account: AccountId) -> Option<&UnifiedFullViewingKey> {
         self.ufvks.get(&account)
+    }
+
+    /// Scan floor for one account, if the account is present.
+    pub(crate) fn birthday_of(&self, account: AccountId) -> Option<BlockHeight> {
+        self.account_birthdays.get(&account).copied()
+    }
+
+    /// Earliest account birthday; wallet-wide scan and progress floor.
+    pub(crate) fn wallet_birthday(&self) -> Option<BlockHeight> {
+        self.account_birthdays.values().copied().min()
     }
 
     /// Witnesses one received Ironwood note at `tip`.
@@ -397,9 +408,10 @@ pub(crate) mod testing {
                 .is_some();
             if frontier_loaded {
                 self.seed = block_metadata(prior);
-                self.birthday =
+                let birthday =
                     BlockHeight::from_u32(u32::from(prior.block_height()).saturating_add(1));
                 self.ufvks.insert(id, usk.to_unified_full_viewing_key());
+                self.account_birthdays.insert(id, birthday);
                 self.scanning_keys = ScanningKeys::from_account_ufvks(self.ufvks.clone());
             } else {
                 *self = Wallet::new(

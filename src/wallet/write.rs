@@ -2,7 +2,7 @@
 //! [`WalletWrite`] — plus the ZNS Name Note ingestion lane, which the
 //! upstream write surface cannot express (see [`Wallet::store_name_note`]).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::time::SystemTime;
 
@@ -37,7 +37,7 @@ use super::{
     read::{next_height, WalletError},
     Wallet, MAX_CHECKPOINTS,
 };
-use crate::mint::{MINT_BIRTHDAY, REGISTRY_ACCOUNT};
+use crate::mint::REGISTRY_ACCOUNT;
 
 impl<P: Parameters> Wallet<P> {
     /// Returns the account that owns a wallet output, if the reference names
@@ -78,6 +78,22 @@ impl<P: Parameters> Wallet<P> {
                 None => true,
             },
             _ => false,
+        }
+    }
+
+    /// Lowers birthday metadata for acknowledged accounts when `new_birthday`
+    /// is strictly below the current value. Birthdays are never raised.
+    fn lower_account_birthdays(
+        &mut self,
+        reset_account_birthdays: &HashSet<AccountId>,
+        new_birthday: BlockHeight,
+    ) {
+        for account in reset_account_birthdays {
+            if let Some(birthday) = self.account_birthdays.get_mut(account) {
+                if new_birthday < *birthday {
+                    *birthday = new_birthday;
+                }
+            }
         }
     }
 
@@ -636,24 +652,32 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
                 )));
             }
         }
-        // Account birthdays are fixed application identity and are never
-        // lowered; a rewind below the birthday floor can only proceed when no
-        // reset was requested.
-        if !reset_account_birthdays.is_empty()
-            && next_height(chain_state.block_height()) < MINT_BIRTHDAY
+
+        // Height to which acknowledged accounts may have their birthday lowered.
+        let new_birthday = next_height(chain_state.block_height());
+
+        // Empty acknowledgement set: refuse only when every account would need
+        // its birthday lowered to reach the rewind target.
+        if reset_account_birthdays.is_empty()
+            && !self.account_birthdays.is_empty()
+            && self
+                .account_birthdays
+                .values()
+                .all(|&birthday| birthday > new_birthday)
         {
-            let birthdays = self
-                .ufvks
-                .keys()
-                .map(|account| (*account, MINT_BIRTHDAY))
-                .collect();
-            return Err(RewindError::RewindBeyondBirthdays(birthdays));
+            return Err(RewindError::RewindBeyondBirthdays(
+                self.account_birthdays
+                    .iter()
+                    .map(|(account, birthday)| (*account, *birthday))
+                    .collect::<HashMap<_, _>>(),
+            ));
         }
 
         // The known chain tip stays: rewind only drops applied data back to
         // the retained-checkpoint floor (or to the target, if that is shallower).
         let rewind_target = chain_state.block_height();
         let Some(tip) = self.zebra_tip.or_else(|| self.max_applied_height()) else {
+            self.lower_account_birthdays(&reset_account_birthdays, new_birthday);
             return Ok(());
         };
         let prune_floor = BlockHeight::from_u32(
@@ -674,6 +698,8 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
             }
             self.drop_applied_above(data_height);
         }
+
+        self.lower_account_birthdays(&reset_account_birthdays, new_birthday);
         Ok(())
     }
 

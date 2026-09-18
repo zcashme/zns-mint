@@ -303,10 +303,10 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         &self,
         account_id: Self::AccountId,
     ) -> Result<Option<Self::Account>, Self::Error> {
-        Ok(self
-            .ufvks
-            .get(&account_id)
-            .and_then(|ufvk| FixedAccount::from_ufvk(account_id, ufvk.clone(), self.birthday)))
+        Ok(self.ufvks.get(&account_id).and_then(|ufvk| {
+            let birthday = self.birthday_of(account_id)?;
+            FixedAccount::from_ufvk(account_id, ufvk.clone(), birthday)
+        }))
     }
 
     fn get_derived_account(
@@ -351,7 +351,10 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         let queried = ufvk.to_unified_incoming_viewing_key();
         Ok(self.ufvks.iter().find_map(|(id, ufvk)| {
             (ufvk.to_unified_incoming_viewing_key() == queried)
-                .then(|| FixedAccount::from_ufvk(*id, ufvk.clone(), self.birthday))
+                .then(|| {
+                    let birthday = self.birthday_of(*id)?;
+                    FixedAccount::from_ufvk(*id, ufvk.clone(), birthday)
+                })
                 .flatten()
         }))
     }
@@ -382,14 +385,12 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
     }
 
     fn get_account_birthday(&self, account: Self::AccountId) -> Result<BlockHeight, Self::Error> {
-        match self.ufvks.get(&account) {
-            Some(_) => Ok(self.birthday),
-            None => Err(WalletError::AccountUnknown(account)),
-        }
+        self.birthday_of(account)
+            .ok_or(WalletError::AccountUnknown(account))
     }
 
     fn get_wallet_birthday(&self) -> Result<Option<BlockHeight>, Self::Error> {
-        Ok((!self.ufvks.is_empty()).then_some(self.birthday))
+        Ok(self.wallet_birthday())
     }
 
     fn get_wallet_recover_until(&self) -> Result<Option<BlockHeight>, Self::Error> {
@@ -456,13 +457,15 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
             )?;
         }
 
-        // Progress over the block span between the fixed birthday and the
-        // Zebra tip; a display metric, not an authoritative note count.
-        let scanned_span = u64::from(
-            (u32::from(fully_scanned_height) + 1).saturating_sub(u32::from(self.birthday)),
-        );
+        // Progress over the block span between the earliest account birthday
+        // and the Zebra tip; a display metric, not an authoritative note count.
+        let birthday = self
+            .wallet_birthday()
+            .unwrap_or_else(|| next_height(self.seed.block_height()));
+        let scanned_span =
+            u64::from((u32::from(fully_scanned_height) + 1).saturating_sub(u32::from(birthday)));
         let total_span =
-            u64::from(u32::from(chain_tip_height).saturating_sub(u32::from(self.birthday)) + 1);
+            u64::from(u32::from(chain_tip_height).saturating_sub(u32::from(birthday)) + 1);
         let scan = if total_span == 0 {
             Ratio::new(1, 1)
         } else {
@@ -516,9 +519,13 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         let Some(tip) = self.zebra_tip else {
             return Ok(Vec::new());
         };
-        let start = self
-            .max_applied_height()
-            .map_or_else(|| self.birthday, next_height);
+        let start = match self.max_applied_height() {
+            Some(h) => next_height(h),
+            None => match self.wallet_birthday() {
+                Some(b) => b,
+                None => return Ok(Vec::new()),
+            },
+        };
         let end = next_height(tip);
         if start >= end {
             Ok(Vec::new())
@@ -687,10 +694,8 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
     }
 
     fn utxo_query_height(&self, account: Self::AccountId) -> Result<BlockHeight, Self::Error> {
-        match self.ufvks.get(&account) {
-            Some(_) => Ok(self.birthday),
-            None => Err(WalletError::AccountUnknown(account)),
-        }
+        self.birthday_of(account)
+            .ok_or(WalletError::AccountUnknown(account))
     }
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {

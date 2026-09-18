@@ -1,5 +1,14 @@
 # Wallet changelog
 
+## 2026-09-18 — Wallet security findings
+
+### Fixed
+
+- `rewind_to_chain_state`: empty `reset_account_birthdays` errors when every
+  account would need its birthday lowered; acknowledged accounts may have
+  birthday metadata lowered to `chain_state.height + 1`. Birthdays are stored
+  per account.
+
 ## 2026-09-18 — Upstream wallet conformance (issue #69)
 
 ### Fixed
