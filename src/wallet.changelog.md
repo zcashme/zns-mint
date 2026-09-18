@@ -11,6 +11,18 @@
   fails: it expects two history rows, and the unconfirmed 123_456-zat receive
   is a third.
 
+## 2026-09-18 — Block two ordinary-Orchard proposal scenarios
+
+- Disconnect `propose_v5_payment_to_orchard_receiver_is_rejected` and
+  `proposal_records_and_serializes_proposed_version`. Both are hardcoded to
+  `OrchardPoolTester` and fund a single ordinary-Orchard note. This wallet
+  has no ordinary-Orchard received-note table; scan succeeds and the funding
+  assertion is `0` vs `60_000`. Passing them would mean owning and selecting
+  a pool this wallet treats as a compatibility tree only.
+- Recorded as BLOCKED, not connected, with the rest of the ordinary-Orchard
+  funding family. The version-round-trip assertion never runs; the upstream
+  function is not Sapling-retargetable.
+
 ## 2026-09-18 — Conformance suite: scan tip, truncation, locks, retention
 
 - Scanning now raises the known chain tip to the last applied block when no
