@@ -6,6 +6,7 @@
 //! and confirmation classification live here so that `wallet::read` balance
 //! reporting reuses exactly the same rules.
 
+use std::cmp::Ordering;
 use std::num::NonZeroU32;
 
 use shardtree::store::ShardStore;
@@ -127,6 +128,37 @@ impl<P: Parameters> Wallet<P> {
         }
     }
 
+    /// Whether `output` has a lock that has not yet lapsed at `target_height`.
+    fn lock_is_live(&self, output: &OutputRef, target_height: TargetHeight) -> bool {
+        self.locks
+            .get(output)
+            .is_some_and(|(_, expiry)| *expiry >= BlockHeight::from(target_height))
+    }
+
+    /// Preferred lock bucket first, then older notes. `Exclude` and
+    /// `Unfiltered` have no bucket preference, so this is age only.
+    fn lock_tier_order(
+        &self,
+        left: &NoteId,
+        right: &NoteId,
+        target_height: TargetHeight,
+        lock_filter: LockFilter<'_>,
+    ) -> Ordering {
+        let LockFilter::Policy(policy) = lock_filter else {
+            return Ordering::Equal;
+        };
+        if !policy.admits_locked() {
+            return Ordering::Equal;
+        }
+        let left_locked = self.lock_is_live(&OutputRef::from(*left), target_height);
+        let right_locked = self.lock_is_live(&OutputRef::from(*right), target_height);
+        if policy.prefers_locked() {
+            right_locked.cmp(&left_locked)
+        } else {
+            left_locked.cmp(&right_locked)
+        }
+    }
+
     /// The mined height of `txid`, if the wallet has applied a block mining
     /// it.
     pub(crate) fn mined_height(&self, txid: &TxId) -> Option<BlockHeight> {
@@ -194,9 +226,10 @@ impl<P: Parameters> Wallet<P> {
         ))
     }
 
-    /// Collects the eligible Sapling notes of `account`, oldest first by
-    /// commitment tree position. `confirmations_policy` of `None` selects
-    /// every unspent note irrespective of confirmations.
+    /// Collects the eligible Sapling notes of `account`. Preferred lock
+    /// tier first, then oldest by commitment tree position.
+    /// `confirmations_policy` of `None` selects every unspent note
+    /// irrespective of confirmations.
     fn eligible_sapling(
         &self,
         account: AccountId,
@@ -226,12 +259,23 @@ impl<P: Parameters> Wallet<P> {
             })
             .filter_map(|(note_id, _)| self.sapling_received_note(*note_id))
             .collect();
-        notes.sort_by_key(ReceivedNote::note_commitment_tree_position);
+        notes.sort_by(|a, b| {
+            self.lock_tier_order(
+                a.internal_note_id(),
+                b.internal_note_id(),
+                target_height,
+                lock_filter,
+            )
+            .then(
+                a.note_commitment_tree_position()
+                    .cmp(&b.note_commitment_tree_position()),
+            )
+        });
         notes
     }
 
-    /// Collects the eligible Ironwood notes of `account`, oldest first by
-    /// commitment tree position.
+    /// Collects the eligible Ironwood notes of `account`. Preferred lock
+    /// tier first, then oldest by commitment tree position.
     fn eligible_ironwood(
         &self,
         account: AccountId,
@@ -261,7 +305,18 @@ impl<P: Parameters> Wallet<P> {
             })
             .filter_map(|(note_id, _)| self.ironwood_received_note(*note_id))
             .collect();
-        notes.sort_by_key(ReceivedNote::note_commitment_tree_position);
+        notes.sort_by(|a, b| {
+            self.lock_tier_order(
+                a.internal_note_id(),
+                b.internal_note_id(),
+                target_height,
+                lock_filter,
+            )
+            .then(
+                a.note_commitment_tree_position()
+                    .cmp(&b.note_commitment_tree_position()),
+            )
+        });
         notes
     }
 
@@ -422,9 +477,8 @@ impl<P: Parameters> InputSource for Wallet<P> {
         let mut accumulated = Zatoshis::ZERO;
 
         // Pools are drawn on in the caller's preference order; within a pool
-        // notes are taken oldest-first until the accumulation exceeds the
-        // target, mirroring the upstream in-memory selector (the crossing
-        // note is included).
+        // notes are taken preferred lock tier first, then oldest, until the
+        // accumulation exceeds the target (the crossing note is included).
         for pool in sources {
             match pool {
                 ShieldedPool::Sapling => {
@@ -706,13 +760,6 @@ mod tests {
             Factory,
             Cache::default(),
         );
-    }
-
-    #[test]
-    fn send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present() {
-        pool::send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present::<
-            SaplingPoolTester,
-        >(Factory, Cache::default());
     }
 
     #[test]

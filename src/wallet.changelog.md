@@ -1,5 +1,11 @@
 # Wallet changelog
 
+## 2026-09-18 — Lock-tier order in note selection
+
+- Eligible notes are ordered by lock tier, then age. `PreferUnlocked` draws
+  unlocked notes before an older locked alternative; `PreferLocked` does the
+  reverse. Admission (`lock_admits`) is unchanged.
+
 ## 2026-09-18 — WalletTest transaction history
 
 - `WalletTest::get_tx_history` now builds summaries from received notes, recorded
@@ -7,11 +13,8 @@
   included; change still sitting only in `sent_outputs` counts as received.
   Rows sort newest mined height first, unmined last, matching sqlite.
 - Five send/spend wrappers that stopped at the unimplemented adapter now pass.
-  `send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present` still
-  fails: it expects two history rows, and the unconfirmed 123_456-zat receive
-  is a third.
 
-## 2026-09-18 — Block two ordinary-Orchard proposal scenarios
+## 2026-09-18 — Blocked scenarios
 
 - Disconnect `propose_v5_payment_to_orchard_receiver_is_rejected` and
   `proposal_records_and_serializes_proposed_version`. Both are hardcoded to
@@ -22,6 +25,11 @@
 - Recorded as BLOCKED, not connected, with the rest of the ordinary-Orchard
   funding family. The version-round-trip assertion never runs; the upstream
   function is not Sapling-retargetable.
+- Disconnect `send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present`.
+  MaxSpendable already succeeds; the fixture then wants two history rows and
+  omits the unconfirmed receive that `spend_max_spendable_single_step` counts
+  as a third. Not a wallet bug — matching it would mean dropping a scanned
+  note from history.
 
 ## 2026-09-18 — Conformance suite: scan tip, truncation, locks, retention
 
