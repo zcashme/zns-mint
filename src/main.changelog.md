@@ -4,6 +4,20 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-18 — Claim payment gate prices the term (#30)
+
+- The claim lane quotes `oracle.quote(name, *term)`: `N` annuals for
+  `Ny`, three annuals for `forever` — restoring the term-priced gate
+  the run-loop join (`9112558`) flattened to a flat forever quote with
+  the note "Term-as-years in subsequent task". Binding-at-first-sight
+  and dead-and-silent underpayment semantics are unchanged; only the
+  quote follows the term.
+- The upgrade-premium lane asks the same question:
+  `oracle.quote(&echo.name, Term::Forever)` (was `quote_forever`).
+- Before this, a `1y` claim only succeeded at the forever price, and a
+  payment of the intuitive years price died silently as Treasury
+  income.
+
 ## 2026-09-18 — Exact-tip skip is visible; RUST_LOG works
 
 - After `scanned to tip`, a racing block during `fetch_round` made

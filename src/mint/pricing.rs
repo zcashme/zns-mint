@@ -14,7 +14,7 @@ use rust_decimal::Decimal;
 use time::Timestamp;
 use zcash_protocol::value::{Zatoshis, COIN};
 
-use crate::mint::Name;
+use crate::mint::{Name, Term};
 
 /// ZEC spot-price provider
 struct Exchange {
@@ -218,14 +218,18 @@ pub async fn fetch_round() -> Option<Decimal> {
 }
 
 // ===========================================================================
-// Name schedule
+// Name schedule — the product's pricing law, independent of the rate
 // ===========================================================================
 
 /// Annual USD price by name length: the five tiers cover 1–5 character
 /// names and longer names pay the flat minimum. All names are ASCII, so
-/// byte length is character length.
+/// byte length is character length. Repricing names changes this
+/// schedule; it never touches the oracle.
 const ANNUAL_USD: [u64; 5] = [10_000, 2_500, 800, 400, 100];
 const MINIMUM_USD: u64 = 20;
+
+/// Forever registration costs three annual prices.
+const FOREVER_MULTIPLE: u64 = 3;
 
 fn annual_usd(name: &Name) -> u64 {
     let len = name.as_str().len();
@@ -235,9 +239,6 @@ fn annual_usd(name: &Name) -> u64 {
         MINIMUM_USD
     }
 }
-
-/// Forever registration costs three annual prices.
-const FOREVER_MULTIPLE: u64 = 3;
 
 // ===========================================================================
 // Oracle
@@ -353,17 +354,27 @@ impl Oracle {
         self.daily_rate
     }
 
-    /// Zats owed for one year of the name.
-    pub fn quote_annual(&self, name: &Name) -> Zatoshis {
-        let total = annual_usd(name) * self.current().into_u64();
-        Zatoshis::from_u64(total)
-            .expect("schedule ≤ 30,000 USD and rate ≤ 10^8 zats/USD keep this in u64")
-    }
-
-    /// Zats owed for the name's forever registration: three annuals.
-    pub fn quote_forever(&self, name: &Name) -> Zatoshis {
-        let annual = self.quote_annual(name).into_u64();
-        Zatoshis::from_u64(annual * FOREVER_MULTIPLE).expect("three annuals stay in u64")
+    /// The binding registration quote: `N` annuals for an `Ny` term,
+    /// `FOREVER_MULTIPLE` annuals for `forever` — the one pricing question
+    /// the mint asks (issue #30). The schedule supplies the annual USD
+    /// price, the oracle supplies the rate, the term supplies the
+    /// multiple; composition lives here because the rate does. A year is
+    /// `Term::Years(1)`; nothing else computes a price.
+    pub fn quote(&self, name: &Name, term: Term) -> Zatoshis {
+        let multiple = match term {
+            Term::Forever => FOREVER_MULTIPLE,
+            Term::Years(years) => years,
+        };
+        // The tier (USD) at the published rate (zats per USD) is the annual
+        // price; schedule ≤ 30,000 USD and rate ≤ 10^8 zats/USD keep it
+        // inside u64, and the capped term keeps the product in range.
+        let annual = annual_usd(name) * self.current().into_u64();
+        Zatoshis::from_u64(
+            annual
+                .checked_mul(multiple)
+                .expect("registration quote fits u64"),
+        )
+        .expect("registration quote fits the Zcash monetary range")
     }
 }
 
@@ -378,13 +389,60 @@ mod tests {
         assert_eq!(oracle.current().into_u64(), 100_000);
 
         let short = Name::parse("a").unwrap();
-        assert_eq!(oracle.quote_annual(&short).into_u64(), 1_000_000_000);
-        assert_eq!(oracle.quote_forever(&short).into_u64(), 3_000_000_000);
+        // A year is the annual tier price; forever is three of them.
+        assert_eq!(
+            oracle.quote(&short, Term::Years(1)).into_u64(),
+            1_000_000_000
+        );
+        assert_eq!(
+            oracle.quote(&short, Term::Forever).into_u64(),
+            3_000_000_000
+        );
 
         // Six-character names pay the flat minimum tier.
         let long = Name::parse("purple").unwrap();
-        assert_eq!(oracle.quote_annual(&long).into_u64(), 2_000_000);
-        assert_eq!(oracle.quote_forever(&long).into_u64(), 6_000_000);
+        assert_eq!(oracle.quote(&long, Term::Years(1)).into_u64(), 2_000_000);
+        assert_eq!(oracle.quote(&long, Term::Forever).into_u64(), 6_000_000);
+    }
+
+    /// The registration quote follows the term: N annuals for `Ny`, three
+    /// for `forever` — the pricing law the run-loop join flattened to a
+    /// flat forever quote (issue #30). Every tariff tier, priced by term.
+    #[test]
+    fn quote_prices_claims_by_term() {
+        // $1,000/ZEC ⇒ rate 100,000 zats per dollar, from the first round.
+        let oracle = Oracle::new(Decimal::from(1_000), Timestamp::from_seconds(0).unwrap());
+
+        // Every tariff tier: lengths 1–5 pay the annual schedule, longer
+        // names the flat minimum. The one-year quote is the tier's base.
+        for (name, annual) in [
+            ("a", 1_000_000_000u64),
+            ("ab", 250_000_000),
+            ("abc", 80_000_000),
+            ("abcd", 40_000_000),
+            ("abcde", 10_000_000),
+            ("purple", 2_000_000),
+        ] {
+            let name = Name::parse(name).unwrap();
+            assert_eq!(
+                oracle.quote(&name, Term::Years(1)).into_u64(),
+                annual,
+                "{name:?} 1y"
+            );
+            for years in [1u64, 2, 12, 99] {
+                assert_eq!(
+                    oracle.quote(&name, Term::Years(years)).into_u64(),
+                    annual * years,
+                    "{name:?} {years}y"
+                );
+            }
+            // Forever keeps its three-annual multiple, not years-capped.
+            assert_eq!(
+                oracle.quote(&name, Term::Forever).into_u64(),
+                annual * 3,
+                "{name:?} forever"
+            );
+        }
     }
 
     #[test]
