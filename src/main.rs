@@ -24,7 +24,7 @@ use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D
 use zns_mint::mint::registry::NameRecord;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
-    Action, Challenge, Expiry, Request, Term, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
+    Action, Challenge, Expiry, MintInbound, Request, Term, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
     MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{self, CanonicalBlockSource, ChainClient, JsonRpc, TipStream};
@@ -301,30 +301,29 @@ async fn main() {
         // for the next tip. Nothing is re-read.
         let mut index = 0;
         while index < requests.len() {
-            let (request, paid, note_height) = requests.entry(index);
+            let (inbound, paid, note_height) = requests.entry(index);
             let decided = 'lane: {
-                match (request.action, request.otp) {
-                    (Action::Claim, Some(_)) => break 'lane true, // malformed: dead
-                    (Action::Update | Action::Release, Some(otp)) => {
+                match inbound {
+                    MintInbound::Unrecognized(txid) => {
+                        tracing::info!(
+                            txid = %txid,
+                            value_zec = paid.into_u64() as f64 / 1e8,
+                            height = u32::from(note_height),
+                            "treasury received non-request payment"
+                        );
+                        break 'lane true;
+                    }
+                    MintInbound::Echo(echo) => {
                         // The echo lane: an OTP response. Decided in every outcome —
                         // an echo never waits for money; the upgrade premium
                         // declines on shortfall, it does not defer.
-                        let Some(record) = registry.record(&request.name).cloned() else {
+                        let Some(record) = registry.record(&echo.name).cloned() else {
                             break 'lane true; // no record: no mint-issued challenge can match
                         };
                         if record.action == Action::Release {
                             break 'lane true;
                         }
-                        let Some(code) = OtpCode::from_digits(&otp) else {
-                            break 'lane true;
-                        };
-                        let challenge = Challenge {
-                            code,
-                            name: request.name.clone(),
-                            action: request.action,
-                            ua: request.ua.clone(),
-                        };
-                        let Some(sent) = challenges.awaiting(&challenge, mtp_now) else {
+                        let Some(sent) = challenges.awaiting(echo, mtp_now) else {
                             break 'lane true; // no pending challenge: dead
                         };
                         // The upgrade premium: update:forever costs
@@ -333,27 +332,27 @@ async fn main() {
                         // consumes: the challenge stands, and the controller
                         // may retry with the same OTP inside D_OTP,
                         // attaching the full premium.
-                        if request.action == Action::Update
+                        if echo.action == Action::Update
                             && sent.term == Some(Term::Forever)
-                            && paid < oracle.quote_forever(&request.name)
+                            && paid < oracle.quote_forever(&echo.name)
                         {
                             tracing::debug!(
-                                name = %request.name.as_str(),
+                                name = %echo.name.as_str(),
                                 paid = paid.into_u64(),
                                 "upgrade respond underpaid — attempt void, challenge stands"
                             );
                             break 'lane true;
                         }
                         let digits = sent.code.digits();
-                        let authorized = match request.action {
+                        let authorized = match echo.action {
                             Action::Update => Request::Update {
-                                name: request.name.clone(),
-                                ua: request.ua.clone(),
+                                name: echo.name.clone(),
+                                ua: echo.ua.clone(),
                                 term: sent.term,
                             },
                             Action::Release => Request::Release {
-                                name: request.name.clone(),
-                                ua: request.ua.clone(),
+                                name: echo.name.clone(),
+                                ua: echo.ua.clone(),
                             },
                             Action::Claim => unreachable!("claims never carry an OTP"),
                         };
@@ -374,25 +373,18 @@ async fn main() {
                         name_notes.admit(note_height, transition_note);
                         true
                     }
-
-                    (Action::Claim, None) => {
-                        let name = request.name.clone();
-                        let ua = request.ua.clone();
-                        // Parse guarantees a claim term on the wire.
-                        let Some(term) = request.term else {
-                            break 'lane true;
-                        };
+                    MintInbound::Request(Request::Claim { name, ua, term }) => {
                         // One open claim per name: the Registry lags the
                         // mempool by a block; the queue does not. A rival
                         // payment stays Treasury income.
-                        if name_notes.claim_pending(&name) {
+                        if name_notes.claim_pending(name) {
                             tracing::debug!(
                                 name = %name.as_str(),
                                 "claim already pending for this name"
                             );
                             break 'lane true;
                         }
-                        let price = oracle.quote_forever(&name);
+                        let price = oracle.quote_forever(name);
                         // Payment gate: the quote at first sight is binding.
                         // An underpaid claim is dead and silent; a new
                         // payment settles a new evaluation.
@@ -403,8 +395,8 @@ async fn main() {
                             &mut challenges,
                             Request::Claim {
                                 name: name.clone(),
-                                ua,
-                                term,
+                                ua: ua.clone(),
+                                term: *term,
                             },
                             None,
                             note_height,
@@ -420,16 +412,22 @@ async fn main() {
                         name_notes.admit(note_height, claim_note);
                         true
                     }
-
-                    (Action::Update | Action::Release, None) => {
+                    MintInbound::Request(
+                        request @ (Request::Update { .. } | Request::Release { .. }),
+                    ) => {
                         // The relay lane: the mint challenges the controller.
                         // The two ways money can refuse — no fee funds,
                         // node rejection — defer; everything else is
                         // decided.
-                        let name = request.name.clone();
-                        let action = request.action;
-                        let requested_ua = request.ua.clone();
-                        let term = request.term;
+                        let (name, action, requested_ua, term) = match request {
+                            Request::Update { name, ua, term } => {
+                                (name.clone(), Action::Update, ua.clone(), *term)
+                            }
+                            Request::Release { name, ua } => {
+                                (name.clone(), Action::Release, ua.clone(), None)
+                            }
+                            Request::Claim { .. } => unreachable!("claims are routed above"),
+                        };
                         let Some(record) = registry.record(&name).cloned() else {
                             tracing::debug!(
                                 name = %name.as_str(),
