@@ -626,4 +626,20 @@ mod tests {
             Cache::default(),
         );
     }
+
+    #[test]
+    fn locked_proposal_proto_roundtrip() {
+        pool::locking::locked_proposal_proto_roundtrip::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn single_note_selection_honors_lock_tier_preference() {
+        pool::locking::single_note_selection_honors_lock_tier_preference::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
 }

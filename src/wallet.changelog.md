@@ -1,5 +1,37 @@
 # Wallet changelog
 
+## 2026-09-18 — Proposal-lock lifecycle batch connected (issue #69)
+
+- Connect three more unchanged upstream Sapling scenarios as thin wrappers:
+  `proposal_level_note_locking` (`wallet/write.rs`), and
+  `locked_proposal_proto_roundtrip` plus
+  `single_note_selection_honors_lock_tier_preference` (`wallet/input.rs`).
+- What they target, per the bodies read from the resolved 0.24.0 source:
+  - `proposal_level_note_locking`: proposal-acquired locks (`LockRequest`),
+    execution releasing spent-input locks, `LockFailure` on unknown outputs,
+    and the deliberately pinned permissiveness of locking an already-spent
+    note (upstream documents it as a visible contract choice).
+  - `locked_proposal_proto_roundtrip`: serialized-proposal decode must
+    re-fetch its inputs through `InputSource::get_spendable_note` without
+    filtering the proposal's own locked inputs — the seam is
+    `zcash_client_backend` proto decode at `proto.rs:927`.
+  - `single_note_selection_honors_lock_tier_preference`:
+    `PreferUnlocked`/`PreferLocked`/`Exclude` tier ordering in selection; on
+    our wallet it runs through the trait's default `select_single_spendable_note`
+    over our real `select_spendable_notes`, so no adapter work was required.
+- All three fail at the shared funding gate (`data_api/testing.rs:1560`,
+  `with_account_balance` unwrapping a `None` summary — the scenarios never
+  call `update_chain_tip`). Verified individually: same panic location as the
+  other ten. No adapter gaps were hit: none of the three bodies reach the
+  `unimplemented!()` `WalletTest` methods, and upstream's
+  `TestState::create_proposed_transactions` is a thin wrapper over the
+  production function with mock provers, so execution-time inspection is not
+  required.
+- Library run: 53 passed, 13 failed, 0 ignored. Counts: 15 connected /
+  2 passing / 13 failing before target assertions / 0 at target assertions.
+  Out-of-order scan scenarios, transparent locking, and the proptest-based
+  `check_note_locking_model` remain excluded/unwired, unchanged.
+
 ## 2026-09-18 — Locking batch connected without a tip fixture (issue #69)
 
 - Connect four more unchanged upstream Sapling scenarios as thin wrappers:

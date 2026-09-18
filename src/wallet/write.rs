@@ -866,6 +866,11 @@ mod tests {
         );
     }
 
+    #[test]
+    fn proposal_level_note_locking() {
+        pool::locking::proposal_level_note_locking::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
     fn empty_origin() -> ChainState {
         ChainState::new(
             BlockHeight::from_u32(0),
