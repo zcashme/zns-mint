@@ -802,6 +802,8 @@ impl<P: Parameters> Wallet<P> {
 mod tests {
     use super::{Wallet, WalletError};
     use incrementalmerkletree::frontier::Frontier;
+    use std::num::NonZeroU32;
+    use zcash_client_backend::data_api::anchor_retention::AnchorRetentionInterval;
     use zcash_client_backend::data_api::chain::ChainState;
     use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore};
     use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
@@ -932,6 +934,36 @@ mod tests {
             Factory,
             Cache::default(),
             InputTrust::ExternalTrusted,
+        );
+    }
+
+    // The two anchor-retention scenarios require the configurable-retention fixture
+    // boundary that the factory explicitly rejects, so they stop at that assertion —
+    // by design, not by accident. Intervals mirror upstream's own SQLite wrappers.
+    #[test]
+    fn anchor_checkpoints_retained_across_deep_scan_zip_318() {
+        pool::anchor_checkpoints_retained_across_deep_scan::<SaplingPoolTester, _>(
+            Factory,
+            Cache::default(),
+            AnchorRetentionInterval::ZIP_318,
+        );
+    }
+
+    #[test]
+    fn anchor_checkpoints_retained_across_deep_scan_custom_interval() {
+        pool::anchor_checkpoints_retained_across_deep_scan::<SaplingPoolTester, _>(
+            Factory,
+            Cache::default(),
+            AnchorRetentionInterval::custom(NonZeroU32::new(12).expect("nonzero")),
+        );
+    }
+
+    #[test]
+    fn empty_boundary_blocks_are_checkpointed_and_retained() {
+        pool::empty_boundary_blocks_are_checkpointed_and_retained::<SaplingPoolTester, _>(
+            Factory,
+            Cache::default(),
+            AnchorRetentionInterval::custom(NonZeroU32::new(7).expect("nonzero")),
         );
     }
 

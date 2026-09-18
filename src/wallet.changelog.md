@@ -1,5 +1,34 @@
 # Wallet changelog
 
+## 2026-09-18 — Anchor-retention scenarios connected at the retention boundary (issue #69)
+
+- Connected the two NU6.3-network Ironwood tree scenarios as thin wrappers, with the
+  interval arguments mirroring upstream's own SQLite wrappers exactly:
+  `anchor_checkpoints_retained_across_deep_scan` with both `ZIP_318` and
+  `custom(12)`, and `empty_boundary_blocks_are_checkpointed_and_retained` with
+  `custom(7)`.
+- All three stop at the factory's explicit
+  `"custom retention is not supported"` assertion (`wallet.rs` in the testing
+  module): the wallet's tree retention is fixed at `MAX_CHECKPOINTS = 100`, and the
+  factory was designed to reject non-default retention loudly rather than ignore it.
+  No extension was added: the durable-checkpoint seam itself already exists in the
+  scan path (`Marking::Marked` retention flowing through `append_block_commitments`,
+  used in production for name-note witnesses, and the `anchor_retention_interval()`
+  trait default of ZIP_318), so what these scenarios require is a consumer for a
+  configured interval — a wallet capability decision that stays out of this branch.
+  The failure is therefore an honest fixture boundary, not a missing seam.
+- These are the corpus's direct Ironwood-tree assertions (`with_ironwood_tree_mut`):
+  `empty_boundary_blocks_are_checkpointed_and_retained` pins exactly the per-height
+  all-three-trees checkpointing property this wallet implements (blocks with no
+  commitments in any pool must still be checkpointed), and is the first candidate to
+  revisit if configurable anchor retention is ever adopted.
+- Counts: 47 connected / 3 passing / 41 failing before target assertions /
+  4 failing at target assertions / 1 adapter gap / 3 failing at the documented
+  retention fixture boundary. Library run: 54 passed, 45 failed, 0 ignored
+  (44 upstream at the shared gate or their own assertions, 3 at the retention
+  boundary, and the local `get_locked_outputs` diagnostic, counted separately).
+  No pre-existing test regressed.
+
 ## 2026-09-18 — Large-batch connect: truncation/rewind and send/spend corpus (issue #69)
 
 - Connected 29 more unchanged upstream Sapling scenarios as thin wrappers (16 in
