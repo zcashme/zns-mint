@@ -263,7 +263,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     from_state: &zcash_client_backend::data_api::chain::ChainState,
     block: zcash_primitives::block::Block,
     height: BlockHeight,
-    wallet: &mut crate::wallet::Wallet,
+    wallet: &mut crate::wallet::Wallet<P>,
     registry: &mut registry::Registry,
     mtp: &mut mtp::MtpTracker,
     cursor: &mut ChainTip,

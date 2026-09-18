@@ -28,7 +28,7 @@ use crate::wallet::Wallet;
 #[allow(clippy::too_many_arguments)]
 pub fn prepare<P: Parameters>(
     network: &P,
-    wallet: &mut Wallet,
+    wallet: &mut Wallet<P>,
     treasury_keys: &TreasuryKeys,
     registry_keys: &RegistryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
@@ -219,7 +219,7 @@ fn zatoshis(note: &ReceivedNote<NoteId, orchard::note::Note>) -> Zatoshis {
 
 fn predecessor_opening<P: Parameters>(
     network: &P,
-    wallet: &Wallet,
+    wallet: &Wallet<P>,
     note: &ReceivedNote<NoteId, orchard::note::Note>,
 ) -> (
     orchard::note::NoteCommitTrapdoor,

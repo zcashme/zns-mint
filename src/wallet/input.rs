@@ -18,14 +18,14 @@ use zcash_client_backend::wallet::{
     Note, NoteId, OutputRef, ReceivedNote, WalletTransparentOutput,
 };
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
 use zip32::AccountId;
 
 use super::{read::WalletError, Wallet};
 
-impl Wallet {
+impl<P: Parameters> Wallet<P> {
     /// Whether the Sapling note identified by `note_id` is spent as of
     /// `target_height`.
     ///
@@ -338,7 +338,7 @@ impl Wallet {
     }
 }
 
-impl InputSource for Wallet {
+impl<P: Parameters> InputSource for Wallet<P> {
     type Error = WalletError;
     type AccountId = AccountId;
     type NoteRef = NoteId;

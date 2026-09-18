@@ -1,5 +1,25 @@
 # Wallet changelog
 
+## 2026-09-18 — The wallet knows its network
+
+- `Wallet` is generic: `Wallet<P: Parameters>` with a `network: P` field, matching
+  the reference backends (`zcash_client_sqlite::WalletDb<C, P, CL, R>` stores its
+  `params: P` the same way, consulted exactly where the trait surface hands no
+  network to the backend — account-key derivation). `Wallet::new` takes the
+  network as its third argument; boot passes `network.clone()` from
+  `start_with_network`, and `Boot<P>.wallet` is `Wallet<P>`.
+- The field is the single authority for network context inside the wallet; the
+  free data-api functions keep taking caller-supplied `params` and must be
+  passed the same network (one construction site, one params value).
+- No default type parameter: every wallet-receiving app function is already
+  generic over `P` (boot runs mainnet, testnet, and regtest), so a `MainNetwork`
+  default would be unused sugar. One `pub fn network()` getter: the field would
+  otherwise be write-only outside tests (`dead_code` under `-D warnings`), and the
+  identity deserves a real read surface.
+- No behavior change: method bodies are untouched; this is type-level only.
+  The conformance harness's `#[cfg(test)] test_network` side-channel (#78)
+  retires in its rebase onto this.
+
 ## 2026-09-18 — `n == 0` transparent reserve is a no-op
 
 - `create_proposed_transactions` always calls
