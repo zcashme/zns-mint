@@ -842,6 +842,30 @@ mod tests {
         pool::locking::clear_locked_outputs::<SaplingPoolTester>(Factory, Cache::default());
     }
 
+    #[test]
+    fn lock_conflict_and_batch_atomicity() {
+        pool::locking::lock_conflict_and_batch_atomicity::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn lock_expiry_restores_spendability() {
+        pool::locking::lock_expiry_restores_spendability::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn unlock_proposal_inputs_releases_locks() {
+        pool::locking::unlock_proposal_inputs_releases_locks::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
     fn empty_origin() -> ChainState {
         ChainState::new(
             BlockHeight::from_u32(0),

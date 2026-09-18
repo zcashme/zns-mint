@@ -1,5 +1,36 @@
 # Wallet changelog
 
+## 2026-09-18 — Locking batch connected without a tip fixture (issue #69)
+
+- Connect four more unchanged upstream Sapling scenarios as thin wrappers:
+  `lock_conflict_and_batch_atomicity`, `lock_expiry_restores_spendability`, and
+  `unlock_proposal_inputs_releases_locks` in `wallet/write.rs`'s tests module, and
+  `spend_policy_locked_input_policy_reaches_selection` in `wallet/input.rs`'s tests
+  module. Upstream names preserved; no test bodies copied; corpus is the resolved
+  `zcash_client_backend` 0.24.0.
+- Twelve upstream scenarios are now connected. Two pass (unknown-key, no-blocks); the
+  other ten — the six from the initial batch plus these four — fail at upstream's first
+  balance lookup (`data_api/testing.rs:1560` in 0.24.0, `with_account_balance` unwrapping
+  a `None` wallet summary) before reaching any of their intended assertions. The four new
+  failures were verified to panic at that same location: the scenarios generate and scan
+  blocks without ever calling `update_chain_tip`, while `get_wallet_summary` returns
+  `Ok(None)` until a tip is supplied through `WalletWrite::update_chain_tip` — which is
+  both the documented trait contract and the sequence the mint's run loop performs
+  (`main.rs` updates the tip from Zebra before applying blocks). The reference SQLite
+  backend instead derives its tip from scan bookkeeping, which is why the corpus passes
+  unchanged there.
+- No tip fixture was introduced: no production edit, no adapter-side summary
+  fabrication, no cache↔wallet state coupling, and no `should_panic` relabeling. The
+  precondition is documented rather than adapted around. All ten failures are one shared
+  precondition, not ten wallet bugs; none of the lock behaviors the new four target
+  (batch preflight atomicity, inclusive expiry at `target_height`, owner-scoped
+  acquire/release, `LockedInputPolicy` reaching note selection) have been reached, and
+  these tests must not be reported as lock coverage.
+- Full library run: 53 passed, 10 failed, 0 ignored. No pre-existing test regressed.
+- Counts: 12 connected / 2 passing / 10 failing before target assertions / 0 failing at
+  target assertions. Out-of-order scan scenarios and transparent spending remain
+  excluded from the effort as a whole, unchanged from the initial batch.
+
 ## 2026-09-18 — Initial upstream conformance scenarios (issue #69)
 
 - Enable `zcash_client_backend/test-dependencies` only through the dev dependency.
