@@ -54,3 +54,13 @@
   and action-inconsistent empty fields are rejected as noncanonical.
 - Treating UA strings as normalized by this codec is rejected. Network and UA
   receiver validation belongs at the request-policy boundary.
+
+## 2026-09-17 — `cmx` on `DecryptedNameNote`; `PrepareError` deleted (issue #55)
+
+- `DecryptedNameNote` carries its published
+  `cmx: ExtractedNoteCommitment` — set at the ZNS decryption pass,
+  already verified against the recomputed ZNS commitment — so
+  `apply_block` can mark accepted notes at the wallet commit.
+- `assemble::PrepareError` was dead: `prepare` returns
+  `Option<Transaction>` and nothing carries the enum. Deleted rather
+  than made true.

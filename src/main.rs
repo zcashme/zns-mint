@@ -10,23 +10,19 @@
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
-use std::convert::Infallible;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
-use incrementalmerkletree::Position;
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletWrite as _;
-use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
-use zcash_client_backend::scanning::Nullifiers;
 use zcash_protocol::consensus::BlockHeight;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::note::NameNoteQueue;
 use zns_mint::mint::otp::{required_relay_value, OtpCode, OtpQueue, OtpRequest, D_OTP};
-use zns_mint::mint::registry::{NameRecord, ReceivedNameNote};
-use zns_mint::mint::treasury::{self, parse_request, ParsedRequest, RequestQueue};
+use zns_mint::mint::registry::NameRecord;
+use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
     Action, Challenge, Expiry, Request, Term, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
     MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
@@ -188,9 +184,9 @@ async fn main() {
             );
         }
 
-        // Apply every missing canonical block in strict order. All derived
-        // state is prepared first; the wallet commit is the irreversible
-        // boundary; Registry, MTP, and the cursor are installed afterward.
+        // Apply every missing canonical block in strict order: fetch with
+        // retry, verify the terminal block, call `apply_block` — the
+        // application itself is the one body shared with boot.
         while chain_tip.block_height() < best_height {
             let from_height = chain_tip.block_height();
             let next_height = from_height + 1;
@@ -211,16 +207,6 @@ async fn main() {
                     }
                 }
             };
-            assert_eq!(
-                from_state.block_height(),
-                from_height,
-                "FATAL: previous chain-state height mismatch"
-            );
-            assert_eq!(
-                from_state.block_hash(),
-                chain_tip.block_hash(),
-                "FATAL: previous chain state does not describe the applied cursor"
-            );
 
             let block = loop {
                 match rpc.get_block(&network, next_height).await {
@@ -238,11 +224,6 @@ async fn main() {
                     }
                 }
             };
-            assert_eq!(
-                block.header().prev_block,
-                chain_tip.block_hash(),
-                "FATAL: fetched block does not continue the applied cursor"
-            );
             if next_height == best_height {
                 assert_eq!(
                     block.header().hash(),
@@ -251,137 +232,19 @@ async fn main() {
                 );
             }
 
-            let block_time = block.header().time;
-            let candidates = zns_mint::mint::decrypt_name_notes(&network, &block, &registry_keys);
-            let treasury_memos =
-                zns_mint::mint::note::decrypt_treasury_memos(&block, &treasury_keys);
-            let received_name_notes = candidates
-                .iter()
-                .map(|candidate| {
-                    ReceivedNameNote::new(
-                        candidate.txid,
-                        candidate.action_index,
-                        candidate.nullifier,
-                        candidate.payload.clone(),
-                    )
-                })
-                .collect::<Vec<_>>();
-
-            let (header, batches) = decrypt_block(&network, block, wallet.scanning_keys());
-            let nullifiers = Nullifiers::unspent(&wallet)
-                .expect("FATAL: wallet could not expose its unspent nullifiers");
-            let scanned = scan_block(
+            zns_mint::mint::apply_block(
                 &network,
+                &registry_keys,
+                &treasury_keys,
+                &from_state,
+                block,
                 next_height,
-                &header,
-                batches,
-                wallet.scanning_keys(),
-                &nullifiers,
-                Some(&chain_tip),
-                |_| {
-                    Ok::<
-                        Option<(
-                            zip32::AccountId,
-                            Option<transparent::keys::TransparentKeyScope>,
-                        )>,
-                        Infallible,
-                    >(None)
-                },
-            )
-            .expect("FATAL: a canonical block failed deterministic wallet scanning");
-
-            let mut next_mtp = mtp.clone();
-            next_mtp.update(next_height, block_time);
-            let block_mtp = next_mtp
-                .current()
-                .expect("FATAL: MTP unavailable after applying a block");
-
-            let (next_registry, accepted_name_notes) =
-                registry.apply_block(&network, &scanned, &received_name_notes, block_mtp);
-
-            let ironwood_start = scanned
-                .ironwood()
-                .final_tree_size()
-                .checked_sub(
-                    u32::try_from(scanned.ironwood().commitments().len())
-                        .expect("Ironwood block action count fits u32"),
-                )
-                .expect("FATAL: scanner returned an impossible Ironwood tree size");
-            let accepted_name_notes = accepted_name_notes
-                .into_iter()
-                .map(|index| {
-                    let candidate = &candidates[index];
-                    let position = Position::from(
-                        u64::from(ironwood_start)
-                            + u64::try_from(candidate.ordinal).expect("Name Note ordinal fits u64"),
-                    );
-                    (index, position)
-                })
-                .collect::<Vec<_>>();
-            let next_metadata = scanned.to_block_metadata();
-
-            wallet
-                .put_blocks(&from_state, vec![scanned])
-                .expect("FATAL: wallet block commit failed");
-            // Upstream's ScannedBlock drops note plaintexts; the Treasury
-            // lane's memos were decrypted above. Decoded once, here, they
-            // are recorded as the requests they carry — nothing is stored
-            // for later re-reading; the block is the durable source,
-            // refetched on every application. Boot never runs this:
-            // arrivals from history are balance, not instruction.
-            for (txid, _action_index, paid, memo) in treasury_memos {
-                // An echo is the relay memo itself, byte-for-byte — routed
-                // here, not by parse_request: the wire never carries an
-                // OTP on a request. The echo rides the queue in request
-                // shape, its digits in the OTP slot; the queue holds the
-                // order (the requested term), the memo proves identity.
-                if let Some(echo) = Challenge::decode(&network, &memo) {
-                    requests.record(
-                        ParsedRequest {
-                            action: echo.action,
-                            name: echo.name,
-                            ua: echo.ua,
-                            term: None,
-                            otp: Some(echo.code.digits()),
-                        },
-                        paid,
-                        next_height,
-                    );
-                    continue;
-                }
-                match parse_request(&network, &memo) {
-                    Some(request) => requests.record(request, paid, next_height),
-                    None => tracing::info!(
-                        txid = %txid,
-                        value_zec = paid.into_u64() as f64 / 1e8,
-                        height = u32::from(next_height),
-                        "treasury received non-request payment"
-                    ),
-                }
-            }
-            for (index, position) in accepted_name_notes {
-                let candidate = &candidates[index];
-                wallet.store_name_note(
-                    next_height,
-                    position,
-                    candidate.txid,
-                    candidate.action_index,
-                    candidate.note,
-                    candidate.nullifier,
-                    candidate.ephemeral_key.clone(),
-                    candidate.memo,
-                );
-                // The block fulfilled the order.
-                name_notes.fulfill(&candidate.payload);
-            }
-            mtp = next_mtp;
-            registry = next_registry;
-            chain_tip = next_metadata;
-
-            tracing::debug!(
-                height = u32::from(next_height),
-                hash = %chain_tip.block_hash(),
-                "canonical block applied"
+                &mut wallet,
+                &mut registry,
+                &mut mtp,
+                &mut chain_tip,
+                &mut requests,
+                &mut name_notes,
             );
         }
 

@@ -297,3 +297,15 @@ Tracks design-relevant changes to `src/wallet.rs` and `src/wallet/trees.rs`.
 - `store_name_note` moved to `wallet/write.rs` as the ZNS ingestion lane —
   a write, sibling of `put_blocks`.
 - No signature, visibility, or behavior changes.
+
+## 2026-09-17 — `put_blocks_marked`: Name Notes stay witnessable (issue #55)
+
+- `WalletWrite::put_blocks` is now a delegate; the body lives in
+  `put_blocks_marked(from_state, blocks, marks)`. `marks` upgrades
+  matched commitments to `Checkpoint { Marked }` at append — the same
+  retention the scanner assigns to notes it decrypts.
+- Without marks, Name Note commitments enter Ephemeral (the scanner
+  cannot decrypt ZNS-domain outputs), prune with the checkpoints, and
+  a dormant name's update FATALs on a missing witness. Only accepted
+  candidates are marked — foreign ZNS outputs stay Ephemeral, so tree
+  retention stays bounded.

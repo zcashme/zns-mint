@@ -6,7 +6,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::convert::Infallible;
 use std::time::SystemTime;
 
-use incrementalmerkletree::{Hashable, Position};
+use incrementalmerkletree::{Hashable, Marking, Position, Retention};
 use secrecy::SecretVec;
 use shardtree::store::{Checkpoint, ShardStore, TreeState};
 use shardtree::ShardTree;
@@ -201,7 +201,9 @@ where
 }
 
 /// Appends one scanned block's bundle commitments with the scanner-provided
-/// retention markers, then checkpoints the accepted height.
+/// retention markers, then checkpoints the accepted height. `marks` upgrades
+/// those commitments to `Checkpoint { Marked }` — the retention the scanner
+/// itself assigns to notes it decrypts.
 fn append_block_commitments<H, Nf, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     tree: &mut ShardTree<
         shardtree::store::memory::MemoryShardStore<H, BlockHeight>,
@@ -210,6 +212,7 @@ fn append_block_commitments<H, Nf, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     >,
     bundles: &ScannedBundles<H, Nf>,
     height: BlockHeight,
+    marks: &[H],
 ) -> Result<(), WalletError>
 where
     shardtree::store::memory::MemoryShardStore<H, BlockHeight>:
@@ -217,7 +220,15 @@ where
     H: Hashable + PartialEq + Clone,
 {
     for (commitment, retention) in bundles.commitments() {
-        tree.append(commitment.clone(), *retention)?;
+        let retention = if marks.contains(commitment) {
+            Retention::Checkpoint {
+                id: height,
+                marking: Marking::Marked,
+            }
+        } else {
+            *retention
+        };
+        tree.append(commitment.clone(), retention)?;
     }
     ensure_block_checkpoint(tree, height, bundles.final_tree_size())
 }
@@ -305,118 +316,7 @@ impl WalletWrite for Wallet {
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<AccountId>>,
     ) -> Result<(), WalletError> {
-        let Some(first) = blocks.first() else {
-            return Ok(());
-        };
-
-        // Continuity: the batch must start exactly at the block after
-        // `from_state`, heights must be sequential, and `from_state` must be
-        // the wallet's applied tip. All checks run before any mutation.
-        if next_height(from_state.block_height()) != first.height() {
-            return Err(WalletError::ChainDiscontinuity(first.height()));
-        }
-        for pair in blocks.windows(2) {
-            if next_height(pair[0].height()) != pair[1].height() {
-                return Err(WalletError::ChainDiscontinuity(pair[1].height()));
-            }
-        }
-        match self.blocks.last_key_value() {
-            Some((&applied_tip, metadata)) if applied_tip == from_state.block_height() => {
-                if metadata.block_hash() != from_state.block_hash() {
-                    return Err(WalletError::ChainDiscontinuity(applied_tip));
-                }
-            }
-            // Either a gap below our applied tip (stale or replayed state) or
-            // a from-state above it: both would desynchronize note commitment
-            // positions.
-            Some((&applied_tip, _)) => return Err(WalletError::ChainDiscontinuity(applied_tip)),
-            // First batch: `from_state` must be the recorded boot origin.
-            None => {
-                if from_state.block_height() != self.seed.block_height()
-                    || from_state.block_hash() != self.seed.block_hash()
-                {
-                    return Err(WalletError::ChainDiscontinuity(from_state.block_height()));
-                }
-            }
-        }
-
-        // Commitment trees are mutated before the infallible tables: if a
-        // tree operation fails, no wallet state has been applied and
-        // `truncate_to_height` can repair the trees.
-        for block in &blocks {
-            let height = block.height();
-            append_block_commitments(&mut self.sapling_tree, block.sapling(), height)?;
-            append_block_commitments(&mut self.orchard_tree, block.orchard(), height)?;
-            append_block_commitments(&mut self.ironwood_tree, block.ironwood(), height)?;
-        }
-
-        for block in blocks {
-            let height = block.height();
-
-            for wtx in block.transactions() {
-                let txid = wtx.txid();
-                self.transaction_statuses
-                    .insert(txid, TransactionStatus::Mined(height));
-                self.transaction_indices.insert(txid, wtx.block_index());
-
-                for output in wtx.sapling_outputs() {
-                    let note_id = NoteId::new(
-                        txid,
-                        ShieldedPool::Sapling,
-                        // Sapling bundle output counts are bounded far below
-                        // 2^16 by consensus; upstream in-memory wallets make
-                        // the same assumption.
-                        u16::try_from(output.index()).expect("Sapling output index fits in u16"),
-                    );
-                    self.sapling_notes.insert(note_id, output.clone());
-                    if let Some(nf) = output.nf() {
-                        self.sapling_nullifiers.insert(*nf, note_id);
-                    }
-                }
-                for output in wtx.ironwood_outputs() {
-                    let note_id = NoteId::new(
-                        txid,
-                        ShieldedPool::Ironwood,
-                        u16::try_from(output.index()).expect("Ironwood action index fits in u16"),
-                    );
-                    self.ironwood_notes.insert(note_id, output.clone());
-                    if let Some(nf) = output.nf() {
-                        self.ironwood_nullifiers.insert(*nf, note_id);
-                    }
-                }
-                for utxo in wtx.transparent_outputs() {
-                    self.transparent_outputs
-                        .insert(utxo.outpoint().clone(), utxo.clone());
-                }
-            }
-
-            // Spends are recorded from the scanner's matched `WalletSpend`s.
-            // The watch list the scanner matched against came from this
-            // wallet, so every spend of an owned note is present, already
-            // account-tagged. The nullifier map carries only foreign
-            // nullifiers — upstream's gap-scan recovery mechanism, useless
-            // to a wallet that scans contiguously from its birthday — and
-            // owned spends never appear in it. (A note cannot be spent in
-            // the block that creates it, and the mint applies one block per
-            // `put_blocks` call, so same-batch create-and-spend cannot
-            // arise.)
-            for wtx in block.transactions() {
-                let txid = wtx.txid();
-                for spend in wtx.sapling_spends() {
-                    if let Some(note_id) = self.sapling_nullifiers.get(spend.nf()) {
-                        self.sapling_note_spends.insert(*note_id, txid);
-                    }
-                }
-                for spend in wtx.ironwood_spends() {
-                    if let Some(note_id) = self.ironwood_nullifiers.get(spend.nf()) {
-                        self.ironwood_note_spends.insert(*note_id, txid);
-                    }
-                }
-            }
-
-            self.blocks.insert(height, block.to_block_metadata());
-        }
-        Ok(())
+        self.put_blocks_marked(from_state, blocks, &[])
     }
 
     fn put_received_transparent_utxo(
@@ -713,14 +613,138 @@ impl WalletWrite for Wallet {
 }
 
 impl Wallet {
+    /// [`WalletWrite::put_blocks`], with the accepted Name Note commitments
+    /// marked: the scanner cannot decrypt ZNS-domain outputs, so they
+    /// would otherwise enter the Ironwood tree Ephemeral — prunable, and
+    /// then the note has no witness.
+    pub(crate) fn put_blocks_marked(
+        &mut self,
+        from_state: &ChainState,
+        blocks: Vec<ScannedBlock<AccountId>>,
+        marks: &[orchard::tree::MerkleHashOrchard],
+    ) -> Result<(), WalletError> {
+        let Some(first) = blocks.first() else {
+            return Ok(());
+        };
+
+        // Continuity: the batch must start exactly at the block after
+        // `from_state`, heights must be sequential, and `from_state` must be
+        // the wallet's applied tip. All checks run before any mutation.
+        if next_height(from_state.block_height()) != first.height() {
+            return Err(WalletError::ChainDiscontinuity(first.height()));
+        }
+        for pair in blocks.windows(2) {
+            if next_height(pair[0].height()) != pair[1].height() {
+                return Err(WalletError::ChainDiscontinuity(pair[1].height()));
+            }
+        }
+        match self.blocks.last_key_value() {
+            Some((&applied_tip, metadata)) if applied_tip == from_state.block_height() => {
+                if metadata.block_hash() != from_state.block_hash() {
+                    return Err(WalletError::ChainDiscontinuity(applied_tip));
+                }
+            }
+            // Either a gap below our applied tip (stale or replayed state) or
+            // a from-state above it: both would desynchronize note commitment
+            // positions.
+            Some((&applied_tip, _)) => return Err(WalletError::ChainDiscontinuity(applied_tip)),
+            // First batch: `from_state` must be the recorded boot origin.
+            None => {
+                if from_state.block_height() != self.seed.block_height()
+                    || from_state.block_hash() != self.seed.block_hash()
+                {
+                    return Err(WalletError::ChainDiscontinuity(from_state.block_height()));
+                }
+            }
+        }
+
+        // Commitment trees are mutated before the infallible tables: if a
+        // tree operation fails, no wallet state has been applied and
+        // `truncate_to_height` can repair the trees.
+        for block in &blocks {
+            let height = block.height();
+            append_block_commitments(&mut self.sapling_tree, block.sapling(), height, &[])?;
+            append_block_commitments(&mut self.orchard_tree, block.orchard(), height, &[])?;
+            append_block_commitments(&mut self.ironwood_tree, block.ironwood(), height, marks)?;
+        }
+
+        for block in blocks {
+            let height = block.height();
+
+            for wtx in block.transactions() {
+                let txid = wtx.txid();
+                self.transaction_statuses
+                    .insert(txid, TransactionStatus::Mined(height));
+                self.transaction_indices.insert(txid, wtx.block_index());
+
+                for output in wtx.sapling_outputs() {
+                    let note_id = NoteId::new(
+                        txid,
+                        ShieldedPool::Sapling,
+                        // Sapling bundle output counts are bounded far below
+                        // 2^16 by consensus; upstream in-memory wallets make
+                        // the same assumption.
+                        u16::try_from(output.index()).expect("Sapling output index fits in u16"),
+                    );
+                    self.sapling_notes.insert(note_id, output.clone());
+                    if let Some(nf) = output.nf() {
+                        self.sapling_nullifiers.insert(*nf, note_id);
+                    }
+                }
+                for output in wtx.ironwood_outputs() {
+                    let note_id = NoteId::new(
+                        txid,
+                        ShieldedPool::Ironwood,
+                        u16::try_from(output.index()).expect("Ironwood action index fits in u16"),
+                    );
+                    self.ironwood_notes.insert(note_id, output.clone());
+                    if let Some(nf) = output.nf() {
+                        self.ironwood_nullifiers.insert(*nf, note_id);
+                    }
+                }
+                for utxo in wtx.transparent_outputs() {
+                    self.transparent_outputs
+                        .insert(utxo.outpoint().clone(), utxo.clone());
+                }
+            }
+
+            // Spends are recorded from the scanner's matched `WalletSpend`s.
+            // The watch list the scanner matched against came from this
+            // wallet, so every spend of an owned note is present, already
+            // account-tagged. The nullifier map carries only foreign
+            // nullifiers — upstream's gap-scan recovery mechanism, useless
+            // to a wallet that scans contiguously from its birthday — and
+            // owned spends never appear in it. (A note cannot be spent in
+            // the block that creates it, and the mint applies one block per
+            // `put_blocks_marked` call, so same-batch create-and-spend
+            // cannot arise.)
+            for wtx in block.transactions() {
+                let txid = wtx.txid();
+                for spend in wtx.sapling_spends() {
+                    if let Some(note_id) = self.sapling_nullifiers.get(spend.nf()) {
+                        self.sapling_note_spends.insert(*note_id, txid);
+                    }
+                }
+                for spend in wtx.ironwood_spends() {
+                    if let Some(note_id) = self.ironwood_nullifiers.get(spend.nf()) {
+                        self.ironwood_note_spends.insert(*note_id, txid);
+                    }
+                }
+            }
+
+            self.blocks.insert(height, block.to_block_metadata());
+        }
+        Ok(())
+    }
+
     /// Stores one decrypted ZNS Name Note as the Registry account's ordinary
     /// received Ironwood note, at its consensus-derived tree position.
     ///
     /// The standard scanning lane cannot see Name Notes (its domain re-derives
     /// the commitment from rseed and rejects the ZNS-derived cmx), so the
-    /// orchestrator's ZNS pass supplies them here, after `put_blocks` has
-    /// committed the block. The caller derives `position` from that same
-    /// scanned block before moving it into `put_blocks`.
+    /// orchestrator's ZNS pass supplies them here, after `put_blocks_marked`
+    /// has committed the block. The caller derives `position` from that same
+    /// scanned block before moving it into `put_blocks_marked`.
     ///
     /// `nullifier` was derived by the ZNS decryption pass from the same
     /// authenticated `(rcm, psi)` pair that reproduced the action's cmx. The

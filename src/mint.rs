@@ -232,3 +232,285 @@ impl Name {
         &self.0
     }
 }
+
+// ---------------------------------------------------------------------------
+// Block application
+// ---------------------------------------------------------------------------
+
+/// Applies one verified canonical successor to every faculty: scan, clock,
+/// Registry law, wallet commit, Treasury intake, Name Note storage, order
+/// fulfillment, cursor. Never fetches, never broadcasts; `main` passes the
+/// live queues, boot passes scratch ones.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_block<P: Parameters + Send + 'static>(
+    network: &P,
+    registry_keys: &crate::key::RegistryKeys,
+    treasury_keys: &crate::key::TreasuryKeys,
+    from_state: &zcash_client_backend::data_api::chain::ChainState,
+    block: zcash_primitives::block::Block,
+    height: BlockHeight,
+    wallet: &mut crate::wallet::Wallet,
+    registry: &mut registry::Registry,
+    mtp: &mut mtp::MtpTracker,
+    cursor: &mut ChainTip,
+    requests: &mut treasury::RequestQueue,
+    name_notes: &mut note::NameNoteQueue,
+) {
+    use std::collections::BTreeMap;
+    use std::convert::Infallible;
+
+    use incrementalmerkletree::Position;
+    use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
+    use zcash_client_backend::scanning::Nullifiers;
+    use zcash_primitives::transaction::TxId;
+
+    assert_eq!(
+        from_state.block_height(),
+        cursor.block_height(),
+        "FATAL: previous chain-state height mismatch"
+    );
+    assert_eq!(
+        from_state.block_hash(),
+        cursor.block_hash(),
+        "FATAL: previous chain state does not describe the applied cursor"
+    );
+    assert_eq!(
+        block.header().prev_block,
+        cursor.block_hash(),
+        "FATAL: fetched block does not continue the applied cursor"
+    );
+
+    let block_time = block.header().time;
+    let candidates = decrypt_name_notes(network, &block, registry_keys);
+    let treasury_memos = note::decrypt_treasury_memos(&block, treasury_keys);
+
+    let (header, batches) = decrypt_block(network, block, wallet.scanning_keys());
+    let nullifiers =
+        Nullifiers::unspent(wallet).expect("FATAL: wallet could not expose its unspent nullifiers");
+    let scanned = scan_block(
+        network,
+        height,
+        &header,
+        batches,
+        wallet.scanning_keys(),
+        &nullifiers,
+        Some(&*cursor),
+        |_| {
+            Ok::<
+                Option<(
+                    zip32::AccountId,
+                    Option<transparent::keys::TransparentKeyScope>,
+                )>,
+                Infallible,
+            >(None)
+        },
+    )
+    .expect("FATAL: a canonical block failed deterministic wallet scanning");
+
+    let mut next_mtp = mtp.clone();
+    next_mtp.update(height, block_time);
+    let block_mtp = next_mtp
+        .current()
+        .expect("FATAL: MTP unavailable after applying a block");
+
+    // The confirmation pass: the scanner's transactions in canonical
+    // order, the ZNS decryption lane joined on txid — the
+    // authentication boundary — each candidate offered to the Registry.
+    // Sequencing is here; the law is the Registry's.
+    let mut notes_by_tx: BTreeMap<TxId, Vec<usize>> = BTreeMap::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        notes_by_tx.entry(candidate.txid).or_default().push(index);
+    }
+    for notes in notes_by_tx.values_mut() {
+        notes.sort_by_key(|index| candidates[*index].action_index);
+    }
+
+    let mut accepted_name_notes = Vec::new();
+    for wtx in scanned.transactions() {
+        let txid = wtx.txid();
+        let nfs: Vec<orchard::note::Nullifier> = wtx
+            .ironwood_spends()
+            .iter()
+            .map(|spend| *spend.nf())
+            .collect();
+        let registry_outputs: Vec<_> = wtx
+            .ironwood_outputs()
+            .iter()
+            .filter(|output| *output.account_id() == REGISTRY_ACCOUNT)
+            .collect();
+
+        // Ceremony filling: zero-value Registry outputs join the pool in
+        // canonical order while below standing size.
+        for output in &registry_outputs {
+            if output.note().0.value().inner() == 0 {
+                if let Some(nf) = output.nf() {
+                    registry.adopt_anchor(height, *nf);
+                }
+            }
+        }
+
+        let spends_claim_anchor = nfs.iter().any(|nf| registry.anchor_pool().contains(nf));
+        let spends_record = !registry.names_spent_by(&nfs).is_empty();
+        let notes: &[usize] = notes_by_tx.get(&txid).map(Vec::as_slice).unwrap_or(&[]);
+        match notes {
+            [] => {
+                assert!(
+                    !(spends_claim_anchor || spends_record),
+                    "Registry authority was spent without a Name Note successor"
+                );
+            }
+            [index] => {
+                let candidate = &candidates[*index];
+                let accepted = match candidate.payload.action() {
+                    Action::Claim => {
+                        // The successor anchor: a backed claim creates
+                        // exactly one zero-value Registry output.
+                        let successor = if registry_outputs.len() == 1
+                            && registry_outputs[0].note().0.value().inner() == 0
+                        {
+                            registry_outputs[0].nf().copied()
+                        } else {
+                            None
+                        };
+                        registry.accept_claim(
+                            network,
+                            &candidate.payload,
+                            candidate.nullifier,
+                            successor,
+                            &nfs,
+                            height,
+                            block_mtp,
+                        )
+                    }
+                    Action::Update | Action::Release => {
+                        assert!(
+                            registry_outputs.is_empty(),
+                            "update/release must not create a claim anchor"
+                        );
+                        match candidate.payload.action() {
+                            Action::Update => registry.accept_update(
+                                network,
+                                &candidate.payload,
+                                candidate.nullifier,
+                                &nfs,
+                                height,
+                                block_mtp,
+                            ),
+                            Action::Release => registry.accept_release(
+                                network,
+                                &candidate.payload,
+                                candidate.nullifier,
+                                &nfs,
+                                height,
+                                block_mtp,
+                            ),
+                            Action::Claim => unreachable!("claims are routed above"),
+                        }
+                    }
+                };
+                if accepted {
+                    accepted_name_notes.push(*index);
+                }
+            }
+            _ => {
+                if spends_claim_anchor || spends_record {
+                    panic!(
+                        "mint produced multiple Name Notes in one transaction \
+                         — assembly creates exactly one"
+                    );
+                }
+            }
+        }
+    }
+
+    let ironwood_start = scanned
+        .ironwood()
+        .final_tree_size()
+        .checked_sub(
+            u32::try_from(scanned.ironwood().commitments().len())
+                .expect("Ironwood block action count fits u32"),
+        )
+        .expect("FATAL: scanner returned an impossible Ironwood tree size");
+    let accepted_name_notes = accepted_name_notes
+        .into_iter()
+        .map(|index| {
+            let candidate = &candidates[index];
+            let position = Position::from(
+                u64::from(ironwood_start)
+                    + u64::try_from(candidate.ordinal).expect("Name Note ordinal fits u64"),
+            );
+            (index, position)
+        })
+        .collect::<Vec<_>>();
+    let next_metadata = scanned.to_block_metadata();
+
+    // Accepted Name Note commitments are marked at the commit — the
+    // scanner cannot decrypt them, so they would otherwise enter the
+    // tree Ephemeral, prune with the checkpoints, and leave the note
+    // without a witness.
+    let marks: Vec<orchard::tree::MerkleHashOrchard> = accepted_name_notes
+        .iter()
+        .map(|(index, _)| orchard::tree::MerkleHashOrchard::from_cmx(&candidates[*index].cmx))
+        .collect();
+    wallet
+        .put_blocks_marked(from_state, vec![scanned], &marks)
+        .expect("FATAL: wallet block commit failed");
+    // Upstream's ScannedBlock drops note plaintexts; the Treasury
+    // lane's memos were decrypted above. Decoded once, here, they
+    // are recorded as the requests they carry — nothing is stored
+    // for later re-reading; the block is the durable source,
+    // refetched on every application.
+    for (txid, _action_index, paid, memo) in treasury_memos {
+        // An echo is the relay memo itself, byte-for-byte — routed
+        // here, not by parse_request: the wire never carries an
+        // OTP on a request. The echo rides the queue in request
+        // shape, its digits in the OTP slot; the queue holds the
+        // order (the requested term), the memo proves identity.
+        if let Some(echo) = Challenge::decode(network, &memo) {
+            requests.record(
+                treasury::ParsedRequest {
+                    action: echo.action,
+                    name: echo.name,
+                    ua: echo.ua,
+                    term: None,
+                    otp: Some(echo.code.digits()),
+                },
+                paid,
+                height,
+            );
+            continue;
+        }
+        match treasury::parse_request(network, &memo) {
+            Some(request) => requests.record(request, paid, height),
+            None => tracing::info!(
+                txid = %txid,
+                value_zec = paid.into_u64() as f64 / 1e8,
+                height = u32::from(height),
+                "treasury received non-request payment"
+            ),
+        }
+    }
+    for (index, position) in accepted_name_notes {
+        let candidate = &candidates[index];
+        wallet.store_name_note(
+            height,
+            position,
+            candidate.txid,
+            candidate.action_index,
+            candidate.note,
+            candidate.nullifier,
+            candidate.ephemeral_key.clone(),
+            candidate.memo,
+        );
+        // The block fulfilled the order.
+        name_notes.fulfill(&candidate.payload);
+    }
+    *mtp = next_mtp;
+    *cursor = next_metadata;
+
+    tracing::debug!(
+        height = u32::from(cursor.block_height()),
+        hash = %cursor.block_hash(),
+        "canonical block applied"
+    );
+}
