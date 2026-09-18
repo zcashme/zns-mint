@@ -1,5 +1,14 @@
 # Treasury design record
 
+## 2026-09-18 — Sweep payment leaves slack for propose's change action
+
+- `propose_transfer` first prices ZIP-317 with the payment and spends
+  but **no change** (often the 10_000-zat grace fee). Only then does it
+  add the Ironwood change note, which can raise the fee. An exact leftover
+  from the finished-tx fee does not close. Payment subtracts one extra
+  `MARGINAL_FEE`. A failed proposal logs `fee_zats`, `payment_zats`, and
+  `ironwood_n`.
+
 ## 2026-09-18 — Sweep payment is ZIP-317 over the pinned input set (#63)
 
 - `sweep_to_vault` guessed a ZIP-321 amount from `note_count + 3` times
