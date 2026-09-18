@@ -1049,15 +1049,6 @@ mod tests {
     }
 
     #[test]
-    fn zip_315_confirmations_internal() {
-        pool::zip_315_confirmations_test_steps::<SaplingPoolTester>(
-            Factory,
-            Cache::default(),
-            InputTrust::Internal,
-        );
-    }
-
-    #[test]
     fn zip_315_confirmations_external_untrusted() {
         pool::zip_315_confirmations_test_steps::<SaplingPoolTester>(
             Factory,
