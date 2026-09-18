@@ -68,19 +68,14 @@ pub struct OtpRequest {
     pub name: Name,
     pub action: Action,
     pub ua: UnifiedAddress,
+    pub term: Option<Term>,
     pub tip_rcm: NameCommitment,
     pub code: OtpCode,
     pub expires_at: Timestamp,
-    /// Requested extension, or the forever upgrade; `None` carries
-    /// the live period forward.
-    pub term: Option<Term>,
 }
 
 /// Issued challenges, in order, plus a rate-limit ledger for liveness
-/// challenges. The ledger is keyed by the current record's
-/// `(name, rcm_bytes)` — `NameCommitment::to_bytes()` is a canonical
-/// serialization and `[u8; 32]` gives us an `Ord` key — so a fresh update
-/// (new commitment) naturally invalidates the old throttle entry.
+/// challenges.
 #[derive(Clone)]
 pub struct OtpQueue {
     challenges: Vec<OtpRequest>,
@@ -194,28 +189,6 @@ impl OtpQueue {
     pub fn mark_liveness_issued(&mut self, name: Name, tip_rcm: NameCommitment, mtp: Timestamp) {
         self.liveness_issued.insert((name, tip_rcm.to_bytes()), mtp);
     }
-}
-
-/// The echo's fee, relayed.
-pub fn required_relay_value<P: zcash_protocol::consensus::Parameters>(
-    network: &P,
-    target_height: zcash_protocol::consensus::BlockHeight,
-) -> zcash_protocol::value::Zatoshis {
-    use zcash_client_backend::fees::StandardFeeRule;
-    use zcash_primitives::transaction::fees::FeeRule as _;
-
-    StandardFeeRule::Zip317
-        .fee_required(
-            network,
-            target_height,
-            std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
-            std::iter::empty::<usize>(),
-            0,
-            0,
-            0,
-            2,
-        )
-        .expect("ZIP-317 fee for two Ironwood actions is representable")
 }
 
 #[cfg(test)]
