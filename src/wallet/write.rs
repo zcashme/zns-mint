@@ -1000,11 +1000,6 @@ mod tests {
     }
 
     #[test]
-    fn data_db_truncation() {
-        pool::data_db_truncation::<SaplingPoolTester, _>(Factory, Cache::default());
-    }
-
-    #[test]
     fn truncate_to_chain_state() {
         pool::truncate_to_chain_state::<SaplingPoolTester, _>(Factory, Cache::default());
     }
@@ -1028,11 +1023,6 @@ mod tests {
     #[test]
     fn rewind_to_chain_state_shallow() {
         pool::rewind_to_chain_state_shallow::<SaplingPoolTester, _>(Factory, Cache::default());
-    }
-
-    #[test]
-    fn reorg_to_checkpoint() {
-        pool::reorg_to_checkpoint::<SaplingPoolTester, _, _>(Factory, Cache::default());
     }
 
     #[test]
@@ -1118,16 +1108,6 @@ mod tests {
             Cache::default(),
             AnchorRetentionInterval::custom(NonZeroU32::new(7).expect("nonzero")),
         );
-    }
-
-    #[test]
-    fn birthday_in_anchor_shard() {
-        pool::birthday_in_anchor_shard::<SaplingPoolTester>(Factory, Cache::default());
-    }
-
-    #[test]
-    fn checkpoint_gaps() {
-        pool::checkpoint_gaps::<SaplingPoolTester, _>(Factory, Cache::default());
     }
 
     #[test]

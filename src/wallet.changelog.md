@@ -1,5 +1,26 @@
 # Wallet changelog
 
+## 2026-09-18 — Sequential `put_blocks` only
+
+- Disconnect five wrappers that die at `scan_cached_blocks` with
+  `ChainDiscontinuity`. `put_blocks` requires the batch to start at the
+  applied tip; sqlite will take a `from_state` from the compact cache and
+  apply a range with a hole, an overlap, or a later-first order. Production
+  scans one sequential block per call.
+- `spend_fails_on_locked_notes`: an unmined spend must freeze its inputs
+  until ZIP 203 expiry. The fixture mines 41 decoys, scans 40, then applies
+  a block that is not the next height. The expiry assertions never run.
+  `ovk_policy_prevents_recovery_from_chain` already walks a sequential
+  42-block expiry and spends again.
+- `birthday_in_anchor_shard`: scans a later range first, then the skipped
+  prefix.
+- `checkpoint_gaps`: `generate_block_at` jumps ten heights and scans the
+  far block.
+- `data_db_truncation`: after truncate, rescans a range that still includes
+  the applied tip.
+- `reorg_to_checkpoint`: after truncate-retaining-cache, scans two heights
+  ahead of the applied tip.
+
 ## 2026-09-18 — AllFunds(Everything) fails when notes are unspendable
 
 - `select_spendable_notes` returns `UnspendableFunds` when the caller asks

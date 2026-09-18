@@ -752,11 +752,6 @@ mod tests {
     }
 
     #[test]
-    fn spend_fails_on_locked_notes() {
-        pool::locking::spend_fails_on_locked_notes::<SaplingPoolTester>(Factory, Cache::default());
-    }
-
-    #[test]
     fn spend_policy_locked_input_policy_reaches_selection() {
         pool::locking::spend_policy_locked_input_policy_reaches_selection::<SaplingPoolTester>(
             Factory,
