@@ -18,7 +18,8 @@ use zcash_client_backend::{
     data_api::chain::ChainState,
     data_api::locking::LockOwner,
     data_api::{
-        BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus, WalletWrite,
+        anchor_retention::AnchorRetentionInterval, BlockMetadata, SentTransaction,
+        SentTransactionOutput, TransactionStatus, WalletWrite,
     },
     wallet::{
         NoteId, OutputRef, ReceivedNote, WalletIronwoodOutput, WalletSaplingOutput,
@@ -77,6 +78,11 @@ pub struct Wallet<P: Parameters> {
     /// Only upstream conformance fixtures may inject accounts through WalletWrite.
     #[cfg(test)]
     test_network: Option<zcash_protocol::local_consensus::LocalNetwork>,
+    /// Interval-aligned checkpoints at or above NU6.3 are kept as durable
+    /// anchors, outside the ordinary `MAX_CHECKPOINTS` pruning window.
+    anchor_retention_interval: AnchorRetentionInterval,
+    /// Scan floor: the first height this wallet is expected to apply.
+    birthday: BlockHeight,
     /// Exactly account 0 (Treasury) and account 1 (Registry).
     ufvks: BTreeMap<AccountId, UnifiedFullViewingKey>,
 
@@ -155,6 +161,10 @@ impl<P: Parameters> Wallet<P> {
             ufvks,
             scanning_keys,
             zebra_tip: None,
+            birthday: BlockHeight::from_u32(
+                u32::from(chain_state.block_height()).saturating_add(1),
+            ),
+            anchor_retention_interval: AnchorRetentionInterval::ZIP_318,
             blocks: BTreeMap::new(),
             seed: block_metadata(chain_state),
             transactions: BTreeMap::new(),
@@ -309,7 +319,9 @@ pub fn block_metadata(state: &ChainState) -> BlockMetadata {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
+    use incrementalmerkletree::{Hashable, Position};
     use secrecy::{ExposeSecret, SecretVec};
+    use shardtree::store::ShardStore;
     use zcash_client_backend::{
         data_api::{
             anchor_retention::AnchorRetentionInterval,
@@ -318,10 +330,11 @@ pub(crate) mod testing {
             AccountBirthday, OutputOfSentTx, WalletTest,
         },
         proto::compact_formats::CompactBlock,
-        wallet::Note,
+        wallet::{Note, Recipient},
     };
+    use zcash_keys::address::Address;
     use zcash_keys::keys::{transparent::gap_limits::GapLimits, UnifiedSpendingKey};
-    use zcash_protocol::{local_consensus::LocalNetwork, ShieldedPool};
+    use zcash_protocol::{local_consensus::LocalNetwork, PoolType, ShieldedPool};
 
     pub(crate) struct Factory;
 
@@ -338,10 +351,6 @@ pub(crate) mod testing {
             anchor_retention_interval: Option<AnchorRetentionInterval>,
             gap_limits: Option<GapLimits>,
         ) -> Result<Wallet<LocalNetwork>, WalletError> {
-            assert!(
-                anchor_retention_interval.is_none(),
-                "custom retention is not supported"
-            );
             assert!(gap_limits.is_none(), "address gap limits are not supported");
             let mut wallet = Wallet::new(
                 [],
@@ -349,6 +358,9 @@ pub(crate) mod testing {
                 network,
             )?;
             wallet.test_network = Some(network);
+            if let Some(interval) = anchor_retention_interval {
+                wallet.anchor_retention_interval = interval;
+            }
             Ok(wallet)
         }
     }
@@ -370,12 +382,32 @@ pub(crate) mod testing {
             let id = TREASURY_ACCOUNT;
             let usk = UnifiedSpendingKey::from_seed(&network, seed.expose_secret(), id)
                 .expect("valid upstream test seed");
-            *self = Wallet::new(
-                [(id, usk.to_unified_full_viewing_key())],
-                birthday.prior_chain_state(),
-                self.network.clone(),
-            )?;
-            self.test_network = Some(network);
+            let prior = birthday.prior_chain_state();
+            let interval = self.anchor_retention_interval;
+            // The fixture may already have written the birthday frontier and
+            // shard roots; replacing the wallet would discard them.
+            let frontier_loaded = self
+                .sapling_tree
+                .store()
+                .get_checkpoint(&prior.block_height())
+                .ok()
+                .flatten()
+                .is_some();
+            if frontier_loaded {
+                self.seed = block_metadata(prior);
+                self.birthday =
+                    BlockHeight::from_u32(u32::from(prior.block_height()).saturating_add(1));
+                self.ufvks.insert(id, usk.to_unified_full_viewing_key());
+                self.scanning_keys = ScanningKeys::from_account_ufvks(self.ufvks.clone());
+            } else {
+                *self = Wallet::new(
+                    [(id, usk.to_unified_full_viewing_key())],
+                    prior,
+                    self.network.clone(),
+                )?;
+                self.anchor_retention_interval = interval;
+                self.test_network = Some(network);
+            }
             Ok((id, usk))
         }
     }
@@ -433,6 +465,21 @@ pub(crate) mod testing {
         }
     }
 
+    fn checkpoint_history<H, const DEPTH: u8, const SHARD_HEIGHT: u8>(
+        tree: &ShardTree<MemoryShardStore<H, BlockHeight>, DEPTH, SHARD_HEIGHT>,
+    ) -> Result<Vec<(BlockHeight, Option<Position>)>, WalletError>
+    where
+        H: Hashable + Clone + PartialEq,
+    {
+        let count = tree.store().checkpoint_count()?;
+        let mut out = Vec::with_capacity(count);
+        tree.store().for_each_checkpoint(count, |cid, checkpoint| {
+            out.push((*cid, checkpoint.position()));
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
     impl WalletTest for Wallet<LocalNetwork> {
         // Not exercised by this initial batch. Never fabricate an empty result:
         // adding a scenario needing these observations must extend the adapter.
@@ -440,20 +487,72 @@ pub(crate) mod testing {
             unimplemented!("transaction history inspection is outside the initial eight scenarios")
         }
 
-        fn get_sent_note_ids(&self, _: &TxId, _: ShieldedPool) -> Result<Vec<NoteId>, WalletError> {
-            unimplemented!("sent note inspection is outside the initial eight scenarios")
+        fn get_sent_note_ids(
+            &self,
+            txid: &TxId,
+            protocol: ShieldedPool,
+        ) -> Result<Vec<NoteId>, WalletError> {
+            let Some(outputs) = self.sent_outputs.get(txid) else {
+                return Ok(Vec::new());
+            };
+            Ok(outputs
+                .iter()
+                .filter_map(|output| {
+                    let pool = match output.recipient() {
+                        Recipient::External {
+                            output_pool: PoolType::Shielded(pool),
+                            ..
+                        } => *pool,
+                        Recipient::InternalShielded { note, .. } => note.pool(),
+                        _ => return None,
+                    };
+                    (pool == protocol).then(|| {
+                        NoteId::new(
+                            *txid,
+                            protocol,
+                            u16::try_from(output.output_index()).expect("output index fits u16"),
+                        )
+                    })
+                })
+                .collect())
         }
 
-        fn get_sent_outputs(&self, _: &TxId) -> Result<Vec<OutputOfSentTx>, WalletError> {
-            unimplemented!("sent output inspection is outside the initial eight scenarios")
+        fn get_sent_outputs(&self, txid: &TxId) -> Result<Vec<OutputOfSentTx>, WalletError> {
+            let Some(outputs) = self.sent_outputs.get(txid) else {
+                return Ok(Vec::new());
+            };
+            Ok(outputs
+                .iter()
+                .map(|output| {
+                    let external = match output.recipient() {
+                        Recipient::External {
+                            recipient_address, ..
+                        } => Address::try_from_zcash_address(
+                            &self.network,
+                            recipient_address.clone(),
+                        )
+                        .ok(),
+                        Recipient::InternalShielded {
+                            external_address, ..
+                        } => external_address.as_ref().and_then(|addr| {
+                            Address::try_from_zcash_address(&self.network, addr.clone()).ok()
+                        }),
+                        _ => None,
+                    };
+                    OutputOfSentTx::from_parts(output.value(), external, None)
+                })
+                .collect())
         }
 
         fn get_checkpoint_history(
             &self,
-            _: &ShieldedPool,
-        ) -> Result<Vec<(BlockHeight, Option<incrementalmerkletree::Position>)>, WalletError>
-        {
-            unimplemented!("checkpoint history inspection is outside the initial eight scenarios")
+            protocol: &ShieldedPool,
+        ) -> Result<Vec<(BlockHeight, Option<Position>)>, WalletError> {
+            match protocol {
+                ShieldedPool::Sapling => checkpoint_history(&self.sapling_tree),
+                ShieldedPool::Orchard => checkpoint_history(&self.orchard_tree),
+                ShieldedPool::Ironwood => checkpoint_history(&self.ironwood_tree),
+            }
         }
 
         fn get_notes(

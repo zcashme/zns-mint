@@ -21,7 +21,7 @@ use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
-use zip32::AccountId;
+use zip32::{AccountId, Scope};
 
 use super::{read::WalletError, Wallet};
 
@@ -217,7 +217,8 @@ impl<P: Parameters> Wallet<P> {
                     && confirmations_policy.is_none_or(|policy| {
                         self.confirmations_satisfied(
                             note_id.txid(),
-                            output.is_change(),
+                            output.is_change()
+                                || output.recipient_key_scope() == Some(Scope::Internal),
                             target_height,
                             policy,
                         )
@@ -251,7 +252,8 @@ impl<P: Parameters> Wallet<P> {
                     && confirmations_policy.is_none_or(|policy| {
                         self.confirmations_satisfied(
                             note_id.txid(),
-                            output.is_change(),
+                            output.is_change()
+                                || output.recipient_key_scope() == Some(Scope::Internal),
                             target_height,
                             policy,
                         )

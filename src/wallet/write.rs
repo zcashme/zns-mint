@@ -8,10 +8,12 @@ use std::time::SystemTime;
 
 use incrementalmerkletree::{Hashable, Marking, Position, Retention};
 use secrecy::SecretVec;
+use shardtree::store::memory::MemoryShardStore;
 use shardtree::store::{Checkpoint, ShardStore, TreeState};
 use shardtree::ShardTree;
 use transparent::bundle::OutPoint;
 use zcash_client_backend::data_api::{
+    anchor_retention::AnchorRetention,
     chain::ChainState,
     error::RewindError,
     locking::{LockError, LockOwner, OutputLockStore},
@@ -21,19 +23,19 @@ use zcash_client_backend::data_api::{
     WalletWrite,
 };
 use zcash_client_backend::wallet::{
-    NoteId, OutputRef, WalletIronwoodOutput, WalletTransparentOutput,
+    NoteId, OutputRef, Recipient, WalletIronwoodOutput, WalletTransparentOutput,
 };
 use zcash_keys::address::UnifiedAddress;
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_primitives::transaction::{Transaction, TxId};
-use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 use zcash_protocol::memo::Memo;
 use zcash_protocol::{PoolType, ShieldedPool};
 use zip32::{AccountId, DiversifierIndex};
 
 use super::{
     read::{next_height, WalletError},
-    Wallet,
+    Wallet, MAX_CHECKPOINTS,
 };
 use crate::mint::{MINT_BIRTHDAY, REGISTRY_ACCOUNT};
 
@@ -108,6 +110,83 @@ impl<P: Parameters> Wallet<P> {
             _ => None,
         }
     }
+
+    /// Whether every tree can truncate to `height` as a retained checkpoint.
+    fn try_truncate_trees_to(&mut self, height: BlockHeight) -> Result<bool, WalletError> {
+        let present = [
+            self.sapling_tree
+                .store()
+                .get_checkpoint(&height)
+                .ok()
+                .flatten()
+                .is_some(),
+            self.orchard_tree
+                .store()
+                .get_checkpoint(&height)
+                .ok()
+                .flatten()
+                .is_some(),
+            self.ironwood_tree
+                .store()
+                .get_checkpoint(&height)
+                .ok()
+                .flatten()
+                .is_some(),
+        ];
+        if present.iter().any(|have| !have) {
+            return Ok(false);
+        }
+        for result in [
+            self.sapling_tree.truncate_to_checkpoint(&height),
+            self.orchard_tree.truncate_to_checkpoint(&height),
+            self.ironwood_tree.truncate_to_checkpoint(&height),
+        ] {
+            if !result.map_err(WalletError::CommitmentTree)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Drops applied blocks above `height` and un-mines their transactions.
+    fn drop_applied_above(&mut self, height: BlockHeight) {
+        for status in self.transaction_statuses.values_mut() {
+            if let TransactionStatus::Mined(mined) = *status {
+                if mined > height {
+                    *status = TransactionStatus::NotInMainChain;
+                }
+            }
+        }
+        self.blocks.retain(|h, _| *h <= height);
+    }
+
+    /// Replaces the note commitment trees with the supplied frontiers.
+    fn replace_trees_from(&mut self, chain_state: &ChainState) -> Result<(), WalletError> {
+        self.sapling_tree = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+        self.orchard_tree = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+        self.ironwood_tree = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+        self.sapling_tree_shard_end_heights.clear();
+        self.orchard_tree_shard_end_heights.clear();
+        self.ironwood_tree_shard_end_heights.clear();
+        let retention = Retention::Checkpoint {
+            id: chain_state.block_height(),
+            marking: Marking::None,
+        };
+        self.sapling_tree
+            .insert_frontier(chain_state.final_sapling_tree().clone(), retention)?;
+        self.orchard_tree
+            .insert_frontier(chain_state.final_orchard_tree().clone(), retention)?;
+        self.ironwood_tree
+            .insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
+        Ok(())
+    }
+
+    fn retains_anchor_checkpoint(&self, height: BlockHeight) -> bool {
+        let Some(from) = self.network.activation_height(NetworkUpgrade::Nu6_3) else {
+            return false;
+        };
+        AnchorRetention::new(from, self.anchor_retention_interval).retains(height)
+    }
 }
 
 impl<P: Parameters> OutputLockStore for Wallet<P> {
@@ -158,11 +237,15 @@ impl<P: Parameters> OutputLockStore for Wallet<P> {
     }
 
     fn get_locked_outputs(&self, account: Self::AccountId) -> Result<Vec<OutputRef>, Self::Error> {
+        let target = self.zebra_tip.map(next_height);
         Ok(self
             .locks
-            .keys()
-            .copied()
-            .filter(|output| self.output_account(output) == Some(account))
+            .iter()
+            .filter(|(output, (_, expiry))| {
+                self.output_account(output) == Some(account)
+                    && target.is_none_or(|target| *expiry >= BlockHeight::from(target))
+            })
+            .map(|(output, _)| *output)
             .collect())
     }
 }
@@ -423,6 +506,24 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
                     })
                     .collect(),
             );
+            for output in sent.outputs() {
+                let pool = match output.recipient() {
+                    Recipient::External {
+                        output_pool: PoolType::Shielded(pool),
+                        ..
+                    } => *pool,
+                    Recipient::InternalShielded { note, .. } => note.pool(),
+                    _ => continue,
+                };
+                let Ok(index) = u16::try_from(output.output_index()) else {
+                    continue;
+                };
+                if let Some(bytes) = output.memo() {
+                    if let Ok(memo) = Memo::from_bytes(bytes.as_array()) {
+                        self.memos.insert(NoteId::new(txid, pool, index), memo);
+                    }
+                }
+            }
 
             // Record spends of wallet outputs from the raw bundles, then
             // release the locks on every output now recorded as spent: the
@@ -489,6 +590,11 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
             }
         }
         self.blocks.retain(|height, _| *height <= target);
+        if let Some(tip) = self.zebra_tip {
+            if tip > target {
+                self.zebra_tip = Some(target);
+            }
+        }
         Ok(target)
     }
 
@@ -496,15 +602,26 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         let height = chain_state.block_height();
         match self.blocks.get(&height) {
             Some(metadata) if metadata.block_hash() == chain_state.block_hash() => {}
-            // A recorded block at that height with a different hash means the
-            // caller is rewinding onto a fork this wallet never applied.
             Some(_) => return Err(WalletError::ChainDiscontinuity(height)),
-            // A height outside the applied range is either below the scan
-            // floor or above the applied tip; both are safe no-op-ish
-            // truncations because the applied blocks are contiguous.
             None => {}
         }
-        self.truncate_to_height(height).map(|_| ())
+
+        self.zebra_tip = Some(self.zebra_tip.map_or(height, |tip| tip.min(height)));
+
+        let Some(max_applied) = self.max_applied_height() else {
+            return Ok(());
+        };
+        if max_applied <= height {
+            return Ok(());
+        }
+
+        if !self.try_truncate_trees_to(height)? {
+            // The original checkpoint is gone; the supplied frontiers are the
+            // truncation landing.
+            self.replace_trees_from(&chain_state)?;
+        }
+        self.drop_applied_above(height);
+        Ok(())
     }
 
     fn rewind_to_chain_state(
@@ -532,8 +649,32 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
                 .collect();
             return Err(RewindError::RewindBeyondBirthdays(birthdays));
         }
-        self.truncate_to_chain_state(chain_state)
-            .map_err(RewindError::DataSource)
+
+        // The known chain tip stays: rewind only drops applied data back to
+        // the retained-checkpoint floor (or to the target, if that is shallower).
+        let rewind_target = chain_state.block_height();
+        let Some(tip) = self.zebra_tip.or_else(|| self.max_applied_height()) else {
+            return Ok(());
+        };
+        let prune_floor = BlockHeight::from_u32(
+            u32::from(tip).saturating_sub((MAX_CHECKPOINTS as u32).saturating_sub(1)),
+        );
+        let data_height = rewind_target.max(prune_floor);
+        if self
+            .max_applied_height()
+            .is_some_and(|applied| applied > data_height)
+        {
+            if !self
+                .try_truncate_trees_to(data_height)
+                .map_err(RewindError::DataSource)?
+            {
+                return Err(RewindError::DataSource(
+                    WalletError::TruncationTargetUnavailable(data_height),
+                ));
+            }
+            self.drop_applied_above(data_height);
+        }
+        Ok(())
     }
 
     fn reserve_next_n_ephemeral_addresses(
@@ -670,6 +811,11 @@ impl<P: Parameters> Wallet<P> {
             append_block_commitments(&mut self.sapling_tree, block.sapling(), height, &[])?;
             append_block_commitments(&mut self.orchard_tree, block.orchard(), height, &[])?;
             append_block_commitments(&mut self.ironwood_tree, block.ironwood(), height, marks)?;
+            if self.retains_anchor_checkpoint(height) {
+                self.sapling_tree.ensure_retained(height)?;
+                self.orchard_tree.ensure_retained(height)?;
+                self.ironwood_tree.ensure_retained(height)?;
+            }
         }
 
         for block in blocks {
@@ -737,6 +883,13 @@ impl<P: Parameters> Wallet<P> {
             }
 
             self.blocks.insert(height, block.to_block_metadata());
+        }
+
+        // Scanning advances the known chain at least as far as the applied
+        // blocks. A previously supplied tip ahead of that is left in place.
+        if let Some(last) = self.blocks.last_key_value() {
+            let applied = *last.0;
+            self.zebra_tip = Some(self.zebra_tip.map_or(applied, |tip| tip.max(applied)));
         }
         Ok(())
     }

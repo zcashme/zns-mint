@@ -1,5 +1,23 @@
 # Wallet changelog
 
+## 2026-09-18 — Conformance suite: scan tip, truncation, locks, retention
+
+- Scanning now raises the known chain tip to the last applied block when no
+  higher tip has been supplied, so `get_wallet_summary` is available after
+  scan-only operation. A Zebra tip already ahead of the scan is left in place.
+- `truncate_to_chain_state` retracts that tip to the target. When the original
+  checkpoint is gone, the supplied frontiers become the truncation landing,
+  including truncation to the birthday−1 prior state. `rewind_to_chain_state`
+  keeps the known tip and only drops applied data back to the retained
+  checkpoint floor (or to the target, if shallower).
+- `get_locked_outputs` omits locks whose expiry has passed, matching the
+  liveness rule already used by balance and selection.
+- Interval-aligned checkpoints at or above NU6.3 are retained as durable
+  anchors. The test factory accepts a configured interval. Account injection
+  keeps a preloaded birthday frontier instead of replacing the wallet.
+- `WalletTest::get_checkpoint_history` reads the real tree checkpoints.
+
+
 ## 2026-09-18 — Final corpus inventory: five connected, two blocked (issue #69)
 
 - Connected the last five connectable upstream scenarios as thin wrappers:
