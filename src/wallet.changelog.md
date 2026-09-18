@@ -8,11 +8,25 @@
   send-max scenarios do not exist in our build (orchard is enabled), the
   `pczt`-gated pair is excluded, and the multi-step spend-everything trio requires
   `.with_gap_limits` (which the factory rejects) plus ZIP-320 ephemeral transparent
-  addresses — excluded by design. No `IronwoodPoolTester` exists in 0.24.0, so the
-  pool-crossing corpus has no Ironwood-lane scenarios to connect.
+  addresses — excluded by design. (An earlier note here claimed the crossing corpus
+  has no Ironwood-lane scenarios; that was inaccurate — see the corrected Ironwood
+  inventory below: the corpus's Ironwood scenarios exist but are premised on
+  ordinary-Orchard ownership or configurable anchor retention.)
 - Results: 3 passing, 38 failing at the shared missing-summary gate, 4 failing at
   real upstream assertions, 1 failing at a documented adapter gap.
-- Findings at target assertions (first non-gate conformance results of the batch):
+- Findings and applicability notes:
+  - Ironwood coverage in the corpus (corrected from an earlier claim): the corpus DOES
+    contain Ironwood conformance scenarios. `empty_boundary_blocks_are_checkpointed_and_retained`
+    and `anchor_checkpoints_retained_across_deep_scan` run on NU6.3-active test networks and
+    assert Ironwood tree checkpoint retention directly; `orchard_to_ironwood_*`, the five
+    `canonical_crossing_*` scenarios, and `self_migration_keeps_spending_orchard` exercise
+    Ironwood-routed payments, ZIP 318 crossings, and migration. None connect today: the tree-
+    checkpoint pair requires `.with_anchor_retention_interval` (the factory rejects it; wallet
+    retention is fixed at `MAX_CHECKPOINTS = 100`) plus the funding gate; the crossing family
+    funds ordinary-Orchard notes, which this wallet deliberately does not own; the `pczt`
+    pair is feature-gated. The empty-boundary scenario pins exactly this wallet's per-height
+    all-three-trees checkpointing property, and is the first candidate if configurable anchor
+    retention ever becomes supported.
   - `truncate_to_chain_state_below_birthday`: our wallet rejects truncation to the
     birthday−1 prior chain state with `TruncationTargetUnavailable`. Upstream's own
     comment names this exact rejection as the buggy behavior they fixed. Our root
