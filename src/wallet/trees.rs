@@ -10,14 +10,14 @@ use shardtree::{
     ShardTree,
 };
 use zcash_client_backend::data_api::{chain::CommitmentTreeRoot, WalletCommitmentTrees};
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 use super::{
     TreeError, Wallet, ORCHARD_NOTE_COMMITMENT_TREE_DEPTH, ORCHARD_SHARD_HEIGHT,
     SAPLING_NOTE_COMMITMENT_TREE_DEPTH, SAPLING_SHARD_HEIGHT,
 };
 
-impl WalletCommitmentTrees for Wallet {
+impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
     type Error = Infallible;
     type SaplingShardStore<'a> = MemoryShardStore<sapling::Node, BlockHeight>;
 
@@ -196,7 +196,7 @@ impl WalletCommitmentTrees for Wallet {
     }
 }
 
-impl Wallet {
+impl<P: Parameters> Wallet<P> {
     /// The Ironwood witness at `anchor_height` for the note at `position`.
     ///
     /// `Ok(None)` means no witness exists yet at that checkpoint (note not

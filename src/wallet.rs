@@ -29,7 +29,7 @@ use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::block::BlockHash;
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
-    consensus::{BlockHeight, TxIndex},
+    consensus::{BlockHeight, Parameters, TxIndex},
     memo::Memo,
     value::Zatoshis,
 };
@@ -68,7 +68,12 @@ pub(crate) type TreeError = ShardTreeError<Infallible>;
 /// it simply cannot be spent, matching the current design.
 ///
 /// The in-memory wallet for the two fixed mint accounts.
-pub struct Wallet {
+pub struct Wallet<P: Parameters> {
+    /// The consensus parameters of the network this wallet's accounts were
+    /// derived for. The single authority for network context inside the
+    /// wallet; callers of the free data-api functions keep passing their
+    /// own `params` and must pass the same network.
+    network: P,
     /// Exactly account 0 (Treasury) and account 1 (Registry).
     ufvks: BTreeMap<AccountId, UnifiedFullViewingKey>,
 
@@ -131,15 +136,17 @@ pub struct Wallet {
     ironwood_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
 }
 
-impl Wallet {
-    /// Builds the wallet against the origin checkpoint.
+impl<P: Parameters> Wallet<P> {
+    /// Builds the wallet against the origin checkpoint, for `network`.
     pub fn new(
         ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
         chain_state: &ChainState,
+        network: P,
     ) -> Result<Self, TreeError> {
         let ufvks: BTreeMap<AccountId, UnifiedFullViewingKey> = ufvks.into_iter().collect();
         let scanning_keys = ScanningKeys::from_account_ufvks(ufvks.clone());
         let mut wallet = Self {
+            network,
             ufvks,
             scanning_keys,
             zebra_tip: None,
@@ -185,6 +192,11 @@ impl Wallet {
             .ironwood_tree
             .insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
         Ok(wallet)
+    }
+
+    /// The consensus parameters this wallet was constructed for.
+    pub fn network(&self) -> &P {
+        &self.network
     }
 
     /// The wallet's own scanning faculty, born from the same UFVKs.

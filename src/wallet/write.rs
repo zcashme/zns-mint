@@ -26,7 +26,7 @@ use zcash_client_backend::wallet::{
 use zcash_keys::address::UnifiedAddress;
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_primitives::transaction::{Transaction, TxId};
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::memo::Memo;
 use zcash_protocol::{PoolType, ShieldedPool};
 use zip32::{AccountId, DiversifierIndex};
@@ -37,7 +37,7 @@ use super::{
 };
 use crate::mint::{MINT_BIRTHDAY, REGISTRY_ACCOUNT};
 
-impl Wallet {
+impl<P: Parameters> Wallet<P> {
     /// Returns the account that owns a wallet output, if the reference names
     /// a currently retained Sapling, Ironwood, or transparent output.
     fn output_account(&self, output: &OutputRef) -> Option<AccountId> {
@@ -110,7 +110,7 @@ impl Wallet {
     }
 }
 
-impl OutputLockStore for Wallet {
+impl<P: Parameters> OutputLockStore for Wallet<P> {
     type Error = WalletError;
     type AccountId = AccountId;
 
@@ -233,7 +233,7 @@ where
     ensure_block_checkpoint(tree, height, bundles.final_tree_size())
 }
 
-impl WalletWrite for Wallet {
+impl<P: Parameters> WalletWrite for Wallet<P> {
     type UtxoRef = OutPoint;
 
     fn create_account(
@@ -612,7 +612,7 @@ impl WalletWrite for Wallet {
     }
 }
 
-impl Wallet {
+impl<P: Parameters> Wallet<P> {
     /// [`WalletWrite::put_blocks`], with the accepted Name Note commitments
     /// marked: the scanner cannot decrypt ZNS-domain outputs, so they
     /// would otherwise enter the Ironwood tree Ephemeral — prunable, and
@@ -801,7 +801,7 @@ mod tests {
     use zcash_client_backend::data_api::chain::ChainState;
     use zcash_client_backend::data_api::WalletWrite;
     use zcash_primitives::block::BlockHash;
-    use zcash_protocol::consensus::BlockHeight;
+    use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkType, Parameters};
     use zip32::AccountId;
 
     fn empty_origin() -> ChainState {
@@ -817,7 +817,7 @@ mod tests {
     #[test]
     fn reserve_zero_transparent_addresses_is_a_noop() {
         let origin = empty_origin();
-        let mut wallet = Wallet::new([], &origin).expect("empty UFVK set is valid");
+        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
         let account = AccountId::const_from_u32(0);
         assert!(wallet
             .reserve_next_n_ephemeral_addresses(account, 0)
@@ -832,7 +832,7 @@ mod tests {
     #[test]
     fn reserve_nonzero_transparent_addresses_is_fixed_accounts_only() {
         let origin = empty_origin();
-        let mut wallet = Wallet::new([], &origin).expect("empty UFVK set is valid");
+        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
         let account = AccountId::const_from_u32(0);
         assert!(matches!(
             wallet.reserve_next_n_ephemeral_addresses(account, 1),
@@ -842,5 +842,12 @@ mod tests {
             wallet.reserve_next_n_internal_addresses(account, 1),
             Err(WalletError::FixedAccountsOnly)
         ));
+    }
+
+    #[test]
+    fn wallet_knows_its_network() {
+        let origin = empty_origin();
+        let wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
+        assert_eq!(wallet.network().network_type(), NetworkType::Main);
     }
 }

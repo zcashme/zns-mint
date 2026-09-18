@@ -199,7 +199,7 @@ where
     None
 }
 
-impl Wallet {
+impl<P: consensus::Parameters> Wallet<P> {
     /// The highest block height this wallet has applied, if any.
     pub(super) fn max_applied_height(&self) -> Option<BlockHeight> {
         self.blocks.last_key_value().map(|(height, _)| *height)
@@ -263,7 +263,7 @@ impl Wallet {
     }
 }
 
-impl WalletRead for Wallet {
+impl<P: consensus::Parameters> WalletRead for Wallet<P> {
     type Error = WalletError;
     type AccountId = AccountId;
     type Account = FixedAccount;
@@ -336,9 +336,9 @@ impl WalletRead for Wallet {
         Ok(Vec::new())
     }
 
-    fn find_account_for_address<P: consensus::Parameters>(
+    fn find_account_for_address<T: consensus::Parameters>(
         &self,
-        params: &P,
+        params: &T,
         address: &Address,
     ) -> Result<Option<Self::AccountId>, FindAccountForAddressError<Self::Error>> {
         defaults::find_account_for_address(self, params, address)
@@ -710,7 +710,7 @@ impl WalletRead for Wallet {
 // Ironwood note reads beyond the upstream trait surface
 // ---------------------------------------------------------------------------
 
-impl Wallet {
+impl<P: consensus::Parameters> Wallet<P> {
     /// Returns every Sapling note owned by `account` that is selectable at
     /// `tip`: the same selection rule as the Ironwood lane.
     pub fn unspent_sapling_notes(

@@ -151,7 +151,7 @@ fn vault_sweep_fee<P: Parameters>(
 /// are spent. Returns `None` on any failure; retried at the next tip.
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
-    wallet: &mut Wallet,
+    wallet: &mut Wallet<P>,
     treasury_keys: &crate::key::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
@@ -317,7 +317,7 @@ pub fn sweep_to_vault<P: Parameters>(
 #[allow(clippy::too_many_arguments)]
 pub fn challenge<P: Parameters>(
     network: &P,
-    wallet: &mut Wallet,
+    wallet: &mut Wallet<P>,
     treasury_keys: &crate::key::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
@@ -350,8 +350,8 @@ pub fn challenge<P: Parameters>(
     .expect("valid ZIP-321 payment")])
     .expect("valid ZIP-321 request");
 
-    let input_selector = GreedyInputSelector::<Wallet>::new();
-    let change_strategy = SingleOutputChangeStrategy::<Wallet>::new(
+    let input_selector = GreedyInputSelector::<Wallet<P>>::new();
+    let change_strategy = SingleOutputChangeStrategy::<Wallet<P>>::new(
         StandardFeeRule::Zip317,
         None,
         zcash_protocol::ShieldedPool::Ironwood,
@@ -359,10 +359,10 @@ pub fn challenge<P: Parameters>(
     );
 
     let proposal = propose_transfer::<
-        Wallet,
+        Wallet<P>,
         P,
-        GreedyInputSelector<Wallet>,
-        SingleOutputChangeStrategy<Wallet>,
+        GreedyInputSelector<Wallet<P>>,
+        SingleOutputChangeStrategy<Wallet<P>>,
         std::convert::Infallible,
     >(
         wallet,
@@ -380,7 +380,7 @@ pub fn challenge<P: Parameters>(
 
     let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
     let txids = create_proposed_transactions::<
-        Wallet,
+        Wallet<P>,
         P,
         GreedyInputSelectorError,
         StandardFeeRule,

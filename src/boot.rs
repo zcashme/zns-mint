@@ -43,7 +43,7 @@ pub struct Boot<P: Parameters> {
     /// acquired: boot proved that both Zebra transports are live
     pub chain: ChainClient,
     /// produced: trees seeded from the verified origin
-    pub wallet: Wallet,
+    pub wallet: Wallet<P>,
     /// produced: the origin cursor the loop extends
     pub cursor: BlockMetadata,
     /// cannot: derived from the seed — the seed dies before this exists
@@ -156,6 +156,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
                 (REGISTRY_ACCOUNT, registry_keys.fvk()),
             ],
             &origin,
+            network.clone(),
         )
         .expect("FATAL: failed to seed commitment trees from the verified Zebra checkpoint");
         tracing::info!(
