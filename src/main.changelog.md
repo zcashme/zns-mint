@@ -4,6 +4,19 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-18 — The renewal or upgrade fee covers every term (#72)
+
+- The echo lane's gate now covers `Ny` extensions, not just the
+  `forever` upgrade: an update respond that banks or upgrades a term
+  is quoted that term — `N` annuals for `Ny`, three for `forever` —
+  binding at first sight. Before this, `update:3y` was enacted on a
+  valid OTP for any payment.
+- A term-less respond (carry-forward, liveness) asks for no quote
+  and gets no check. A shortfall voids the attempt and the challenge
+  stands; failure never consumes.
+- The claim lane is unchanged — it already had the gate
+  (`paid < oracle.quote(name, *term)`).
+
 ## 2026-09-18 — Claim payment gate prices the term (#30)
 
 - The claim lane quotes `oracle.quote(name, *term)`: `N` annuals for
