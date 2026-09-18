@@ -23,7 +23,8 @@ use crate::mint::{Action, Name, Term, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
 /// A user memo decoded from a Treasury note. Claims always carry a term
-/// (`forever` or `<N>y`); updates carry `none` or `<N>y`. The wire never
+/// (`forever` or `<N>y`); updates carry `none`, `<N>y`, or `forever` —
+/// the upgrade to the forever tier. The wire never
 /// carries an OTP — `otp` is set only by intake, when a relay echo
 /// (`ZNS:otp:…`, routed by `Challenge::decode`) rides the queue in
 /// request shape.
@@ -46,7 +47,8 @@ pub struct ParsedRequest {
 /// - Claim: `ZNS:claim:<term>:<name>:<ua>` — `<term>` is `forever` or
 ///   `<N>y`, N = 1–99.
 /// - Update: `ZNS:update:<term>:<name>:<ua>` — `<term>` is `none`
-///   (expiry carried forward) or `<N>y`.
+///   (expiry carried forward), `<N>y`, or `forever` (the upgrade: a
+///   fixed-term registration converts to no fixed expiration).
 /// - Release: `ZNS:release:<name>:<ua>`
 ///
 /// Requests never carry an OTP — answering is the respond's job: an echo
@@ -70,13 +72,13 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Pars
         _ => return None,
     };
 
-    // The term leads: claims say `forever` or `<N>y`; updates say `none`
-    // or `<N>y` — never `forever`.
+    // The term leads: claims say `forever` or `<N>y`; updates say `none`,
+    // `<N>y`, or `forever` — the upgrade spelling.
     let term = match action {
         Action::Claim => Some(Term::parse(fields.next()?)?),
         Action::Update => match fields.next()? {
             "none" => None,
-            "forever" => return None,
+            "forever" => Some(Term::Forever),
             field => Some(Term::parse(field)?),
         },
         Action::Release => None,
@@ -476,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn claims_say_forever_updates_say_none_or_years() {
+    fn claims_say_forever_updates_say_none_years_or_forever() {
         let network = MainNetwork;
 
         let req =
@@ -487,17 +489,19 @@ mod tests {
             parse_request(&network, &padded(&format!("ZNS:update:3y:alice:{TEST_UA}"))).unwrap();
         assert_eq!(req.term, Some(Term::Years(3)));
 
-        // The verbs' term slots are not interchangeable.
+        // The verbs' term slots are not interchangeable: claims never
+        // say `none`. Updates may also carry the upgrade spelling.
         assert!(parse_request(
             &network,
             &padded(&format!("ZNS:claim:none:alice:{TEST_UA}"))
         )
         .is_none());
-        assert!(parse_request(
+        let req = parse_request(
             &network,
-            &padded(&format!("ZNS:update:forever:alice:{TEST_UA}"))
+            &padded(&format!("ZNS:update:forever:alice:{TEST_UA}")),
         )
-        .is_none());
+        .unwrap();
+        assert_eq!(req.term, Some(Term::Forever));
         assert!(parse_request(&network, &padded(&format!("ZNS:claim::alice:{TEST_UA}"))).is_none());
     }
 

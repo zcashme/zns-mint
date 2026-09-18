@@ -11,6 +11,13 @@
   failure are WARN. Below-threshold idle is DEBUG so a dry Treasury
   does not spam every tip.
 
+
+## 2026-09-17 — update term gains forever — the upgrade spelling (#65)
+
+- `parse_request` accepts `ZNS:update:forever:<name>:<ua>`: a
+  fixed-term registration may buy the forever tier through the
+  ordinary request → relay → respond flow. `none` and `<N>y`
+  unchanged; `claim:none` stays invalid.
 ## 2026-09-17 — Request grammar is term-first; echo is the relay memo
 
 - `parse_request` reads `ZNS:claim:<term>:<name>:<ua>` (`forever` or
