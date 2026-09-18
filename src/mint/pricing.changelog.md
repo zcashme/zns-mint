@@ -15,6 +15,10 @@
 - An empty day carries the rate: with nothing accumulated the rollover
   publishes nothing, so an outage freezes the last published rate
   rather than drifting to a stale spot.
+- `last_ts` keeps `current_day`'s rewind policy: a round arriving with
+  MTP behind the last one bills nothing and moves nothing — the old
+  fold clamped the elapsed seconds to zero but still stamped `last_ts`
+  backward, billing the rewound span a second time on every reorg.
 
 ## 2026-09-18 — One quote, priced by term (#30)
 

@@ -84,11 +84,11 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// can spend the mint's memory.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
-/// The plausible ZEC/USD price band, enforced per venue before the round
-/// aggregates. The same predicate the venue fixtures assert: a print
-/// outside it is a bug or an attack, and either way it poisons the rate.
+/// The plausible ZEC/USD price band, enforced per exchange before the round
+/// aggregates. A value outside it is a bug or an attack, and either way it poisons the rate.
 const MAX_USD_PRICE: u64 = 1_000_000;
 
+/// The HTTP client to fetch pricing from exchanges.
 type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
 
 fn https_client() -> HttpsClient {
@@ -222,13 +222,11 @@ pub async fn fetch_round() -> Option<Decimal> {
 // ===========================================================================
 
 /// Annual USD price by name length: the five tiers cover 1–5 character
-/// names and longer names pay the flat minimum. All names are ASCII, so
-/// byte length is character length. Repricing names changes this
-/// schedule; it never touches the oracle.
+/// names and longer names pay the established minimum.
 const ANNUAL_USD: [u64; 5] = [10_000, 2_500, 800, 400, 100];
 const MINIMUM_USD: u64 = 20;
 
-/// Forever registration costs three annual prices.
+/// Forever registration of names costs three annual prices.
 const FOREVER_MULTIPLE: u64 = 3;
 
 fn annual_usd(name: &Name) -> u64 {
@@ -240,62 +238,50 @@ fn annual_usd(name: &Name) -> u64 {
     }
 }
 
+fn forever_usd(name: &Name) -> u64 {
+    annual_usd(name) * FOREVER_MULTIPLE
+}
+
 // ===========================================================================
 // Oracle
 // ===========================================================================
 
-/// The daily-rate oracle: a fold over pricing rounds. Rounds arrive as
-/// `(price, MTP)` pairs and are accumulated into a time-weighted average
-/// that publishes once per day. The day is not the oracle's to compute:
-/// it arrives as a number from the run loop, which reads the chain
-/// clock (#80, #85).
-///
-/// The rate is never optional. It is set at construction — boot fetches
-/// the first round or the node does not start — and [`accumulate`]
-/// can only replace it, never clear it: a failed round carries the
-/// standing rate forward. Pricing is therefore fail-closed at birth and
-/// fail-open in life; every reader of the rate is total.
-///
-/// [`accumulate`]: Oracle::accumulate
+/// The daily-rate oracle: the zats-per-USD rate, republished daily as
+/// a time-weighted average of that day's pricing rounds.
 pub struct Oracle {
     /// Zats per USD, published daily. Set at construction, never cleared.
     daily_rate: Zatoshis,
-    /// The current pricing day — days since the mint's birthday, handed
-    /// in by the run loop. Stored, not derived from `last_ts`: after a
-    /// reorg rewind the two diverge, and the stored day prevents a
-    /// spurious publish when the scan returns to the present.
+    /// Days passed since the mint's birthday.
     current_day: i64,
-    /// TWAP accumulator: Σ(price × seconds) for the current day so far.
-    /// `Decimal` has ample range for a day's accumulation.
+    /// Accumulated sum of TWAP accumulator: Σ(price × seconds) for the current day so far.
     acc_sum: Decimal,
-    /// TWAP accumulator: Σ(seconds) for the current day so far.
+    /// Accumulated seconds of TWAP accumulator: Σ(seconds) for the current day so far.
     acc_seconds: u64,
-    /// The price of the most recent round, carried forward between rounds
-    /// for time-weighting (the price is assumed constant between rounds).
-    /// USD per ZEC.
+    /// The USD per ZEC price of the most recent round, stored for time-weighting
     last_price: Decimal,
-    /// The Unix timestamp (seconds, MTP) of the most recent round.
+    /// The Unix timestamp (seconds, MTP) of the most recent accumulation round.
     last_ts: i64,
 }
 
-fn to_factor(avg: Decimal) -> Option<Zatoshis> {
-    if avg <= Decimal::ZERO {
+/// ZEC price (USD per ZEC) → rate (zats per USD): 10^8 zats over the
+/// price, rounded up so a quote never lands below its USD tariff.
+fn zats_per_usd(usd_per_zec: Decimal) -> Option<Zatoshis> {
+    if usd_per_zec <= Decimal::ZERO {
         tracing::warn!("pricing publish refused: non-positive daily average");
         return None;
     }
-    let factor = u64::try_from((Decimal::from(COIN) / avg).ceil()).ok()?;
-    Zatoshis::from_u64(factor).ok()
+    u64::try_from((Decimal::from(COIN) / usd_per_zec).ceil())
+        .ok()
+        .and_then(|zats| Zatoshis::from_u64(zats).ok())
 }
 
 impl Oracle {
-    /// Creates the oracle from the first successful pricing round.
-    /// Boot fetches a price or the node does not start; the rate is set
-    /// here and only ever replaced by [`accumulate`](Self::accumulate).
-    /// `today` is days since the mint's birthday, from the chain clock.
+    /// Creates the oracle from the first successful pricing round: the
+    /// spot price is the rate until the first rollover publishes a day.
     pub fn new(initial_price: Decimal, today: i64, now: Timestamp) -> Self {
         let now_secs = now.as_seconds();
         Self {
-            daily_rate: to_factor(initial_price)
+            daily_rate: zats_per_usd(initial_price)
                 .expect("an in-range price always yields a positive rate"),
             current_day: today,
             acc_sum: Decimal::ZERO,
@@ -305,17 +291,13 @@ impl Oracle {
         }
     }
 
-    /// Folds one pricing round into the TWAP: the carried price is
-    /// weighted by elapsed MTP time, and a completed day is published
-    /// as the new daily rate. A failed round (`None`) accumulates
-    /// nothing — and cannot even roll the day over; publication happens
-    /// only on rounds that land.
-    ///
-    /// `price` is the round's ZEC/USD median, in USD per ZEC; `today`
-    /// is days since the mint's birthday, told by the run loop. The
-    /// boundary is wherever that says it is: the day runs to its last
-    /// observation, and the interval crossing it is billed into the
-    /// new day. A day with nothing accumulated carries the rate.
+    /// The current published rate of ZEC in zats per USD.
+    pub fn current(&self) -> Zatoshis {
+        self.daily_rate
+    }
+
+    /// Folds one round into the day's TWAP; the first round of a new day
+    /// publishes the finished one, empty days keep their rate.
     pub fn accumulate(&mut self, price: Option<Decimal>, today: i64, now: Timestamp) {
         let Some(price) = price else {
             return;
@@ -328,10 +310,16 @@ impl Oracle {
 
         let now_secs = now.as_seconds();
 
+        if now_secs < self.last_ts {
+            // A reorg rewound MTP behind the last round: those seconds
+            // are already billed — the round lands when the scan returns.
+            return;
+        }
+
         if today > self.current_day {
             if self.acc_seconds > 0 {
-                if let Some(factor) = to_factor(self.acc_sum / Decimal::from(self.acc_seconds)) {
-                    self.daily_rate = factor;
+                if let Some(rate) = zats_per_usd(self.acc_sum / Decimal::from(self.acc_seconds)) {
+                    self.daily_rate = rate;
                 }
             }
             self.acc_sum = Decimal::ZERO;
@@ -339,7 +327,7 @@ impl Oracle {
             self.current_day = today;
         }
 
-        let elapsed = u64::try_from((now_secs - self.last_ts).max(0)).unwrap_or_default();
+        let elapsed = (now_secs - self.last_ts) as u64;
         self.acc_sum += self.last_price * Decimal::from(elapsed);
         self.acc_seconds += elapsed;
 
@@ -347,30 +335,14 @@ impl Oracle {
         self.last_ts = now_secs;
     }
 
-    /// The published daily conversion: zats per USD. Present from
-    /// construction, never absent.
-    pub fn current(&self) -> Zatoshis {
-        self.daily_rate
-    }
-
-    /// The binding registration quote: `N` annuals for an `Ny` term,
-    /// `FOREVER_MULTIPLE` annuals for `forever` — the one pricing question
-    /// the mint asks (issue #30). The schedule supplies the annual USD
-    /// price, the oracle supplies the rate, the term supplies the
-    /// multiple; composition lives here because the rate does. A year is
-    /// `Term::Years(1)`; nothing else computes a price.
+    /// Calculate a name's registration quote in zats for a given term, using the current published rate.
     pub fn quote(&self, name: &Name, term: Term) -> Zatoshis {
-        let multiple = match term {
-            Term::Forever => FOREVER_MULTIPLE,
-            Term::Years(years) => years,
+        let usd = match term {
+            Term::Forever => forever_usd(name),
+            Term::Years(years) => annual_usd(name) * years,
         };
-        // The tier (USD) at the published rate (zats per USD) is the annual
-        // price; schedule ≤ 30,000 USD and rate ≤ 10^8 zats/USD keep it
-        // inside u64, and the capped term keeps the product in range.
-        let annual = annual_usd(name) * self.current().into_u64();
         Zatoshis::from_u64(
-            annual
-                .checked_mul(multiple)
+            usd.checked_mul(self.current().into_u64())
                 .expect("registration quote fits u64"),
         )
         .expect("registration quote fits the Zcash monetary range")
