@@ -3,14 +3,16 @@
 //! One node, two dialects: gRPC streams announce change, JSON-RPC answers
 //! questions. The files are the conversations — the chain, the mempool,
 //! submission — and this root is what they share: the error policy, the wire
-//! machinery, and the display-order decoding. The node's identity is not on
-//! the wire: it is the SEV-SNP measurement of the image this process lives in.
+//! machinery, and the display-order decoding. The chain file also owns the
+//! tip stream's lifecycle ([`TipSession`]): the orchestrator wakes on it,
+//! but never sees transport state. The node's identity is not on the wire:
+//! it is the SEV-SNP measurement of the image this process lives in.
 
 pub mod chain;
 pub mod mempool;
 pub mod submit;
 
-pub use chain::{tip_height_hash, BlockchainInfo, ChainClient, TipStream};
+pub use chain::{BlockchainInfo, ChainClient, TipSession};
 pub use submit::SubmitOutcome;
 
 use std::{any::type_name, fmt, time::Duration};

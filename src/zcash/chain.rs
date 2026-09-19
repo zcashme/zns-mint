@@ -1,5 +1,8 @@
 //! The best chain: where it is, and what's in it.
 
+use std::time::Duration;
+
+use futures_util::StreamExt as _;
 use incrementalmerkletree::frontier::Frontier;
 use sapling::Node as SaplingNode;
 use serde::Deserialize;
@@ -11,9 +14,16 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zebra_indexer_proto::{BlockHashAndHeight, Empty, ZebraClient};
 
 use super::{
-    not_on_best_chain, JsonRpc, TransportError, CONNECT_TIMEOUT, REQUEST_TIMEOUT, ZEBRA_INDEXER_URL,
+    not_on_best_chain, CanonicalBlockSource, JsonRpc, TransportError, CONNECT_TIMEOUT,
+    REQUEST_TIMEOUT, RETRY_PAUSE, ZEBRA_INDEXER_URL,
 };
 use orchard::tree::MerkleHashOrchard;
+
+/// The interval between HTTP/2 keep-alive pings on the gRPC connection.
+pub(crate) const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// How long an unanswered keep-alive ping may take before the connection
+/// is declared dead.
+pub(crate) const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A client for the node's gRPC announcements about the chain.
 #[derive(Clone)]
@@ -21,17 +31,29 @@ pub struct ChainClient(pub(crate) ZebraClient);
 
 impl ChainClient {
     /// Connects to the indexer's gRPC endpoint.
+    ///
+    /// HTTP/2 keep-alive is the silence detector. A server-streaming call
+    /// is receive-only after the headers — the client never writes — so a
+    /// half-open connection (NAT or firewall death, no RST) otherwise
+    /// hangs the stream's `next()` forever with no error. A keep-alive
+    /// ping every [`KEEP_ALIVE_INTERVAL`], unanswered within
+    /// [`KEEP_ALIVE_TIMEOUT`], tears the connection down and surfaces as
+    /// a stream error: a dead-but-open connection is detected in bounded
+    /// time, while a quiet chain stays quiet — correctly.
     pub(crate) async fn connect() -> Result<Self, tonic::transport::Error> {
         let endpoint = tonic::transport::Endpoint::from_static(ZEBRA_INDEXER_URL)
             .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT);
+            .timeout(REQUEST_TIMEOUT)
+            .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
+            .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
+            .keep_alive_while_idle(true);
 
         let client = ZebraClient::connect(endpoint).await?;
         Ok(Self(client))
     }
 
     /// Change-only tip stream.
-    pub async fn chain_tip_change_stream(&mut self) -> Result<TipStream, TransportError> {
+    pub(crate) async fn chain_tip_change_stream(&mut self) -> Result<TipStream, TransportError> {
         self.0
             .chain_tip_change(Empty {})
             .await
@@ -41,13 +63,151 @@ impl ChainClient {
 }
 
 /// The live gRPC tip stream: one notification per canonical tip change.
-pub type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
+pub(crate) type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
 
 /// A tip announcement, decoded: `(height, hash)` from one message.
-pub fn tip_height_hash(tip: &BlockHashAndHeight) -> (BlockHeight, BlockHash) {
+pub(crate) fn tip_height_hash(tip: &BlockHashAndHeight) -> (BlockHeight, BlockHash) {
     let height = BlockHeight::from_u32(tip.height);
     let hash = block_hash_from_display(&tip.hash).expect("FATAL: invalid tip hash from Zebra");
     (height, hash)
+}
+
+// ============================================================================
+// The tip session — the stream's one owner
+// ============================================================================
+
+/// The owner of the tip stream's lifecycle: open, wait, detect death,
+/// repair.
+///
+/// The session holds only what nothing else holds — the subscription
+/// itself, and the client it rides on. Position stays with the wallet,
+/// truth stays with the node, and the orchestrator never sees transport
+/// state.
+///
+/// A notification is a wake-up, not an answer: [`TipSession::next_tip`]
+/// re-reads the canonical tip from the node before anything acts on it.
+/// Recovery correctness therefore never rests on the stream's delivery
+/// behavior — a fresh subscription happens to deliver the current tip
+/// immediately (Zebra's master tip receiver is born never-seen, and the
+/// cloned watch inherits its staleness), which makes reconnects recover
+/// promptly today, but that stays a welcome optimization, never a
+/// dependency.
+pub struct TipSession {
+    client: ChainClient,
+    source: CanonicalBlockSource,
+    stream: TipStream,
+    pause: Duration,
+}
+
+impl TipSession {
+    /// Subscribes to Zebra's change-only tip stream, retrying until the
+    /// subscription is open.
+    pub async fn open(client: ChainClient) -> Self {
+        let stream = Self::subscribe(client.clone(), RETRY_PAUSE).await;
+        Self {
+            client,
+            source: CanonicalBlockSource::new(),
+            stream,
+            pause: RETRY_PAUSE,
+        }
+    }
+
+    /// Waits for one wake-up, then answers with the canonical tip read
+    /// from the node — never the announcement.
+    ///
+    /// Two ways to wake:
+    /// - a tip notification — the routine path;
+    /// - a stream error or end — the keep-alive or the node surfaced a
+    ///   dead connection; the session repairs and returns immediately
+    ///   with a freshly read tip. A dropped stream is repaired on our
+    ///   clock, not the next block's: pause, reopen, fetch the snapshot,
+    ///   act — never wait for an announcement that a change-only stream
+    ///   may owe us only after the next block.
+    ///
+    /// A quiet chain stays quiet, correctly: nothing wakes until the
+    /// node says something or the connection dies.
+    ///
+    /// A repair may leave the fresh subscription's immediate snapshot
+    /// unconsumed in the buffer; the next call then wakes on that stale
+    /// announcement and re-derives an unchanged tip. Harmless — a pass at
+    /// an unchanged tip is idempotent — and the price of never depending
+    /// on the snapshot's delivery.
+    ///
+    /// `Err` is a fatal verdict about the node's data, not transport
+    /// availability — retryable reads are retried inside.
+    pub async fn next_tip(&mut self) -> Result<(BlockHeight, BlockHash), TransportError> {
+        let announced = match self.stream.next().await {
+            Some(Ok(notification)) => {
+                let announced = tip_height_hash(&notification);
+                tracing::info!(height = u32::from(announced.0), "tip notification received");
+                Some(announced)
+            }
+            Some(Err(error)) => {
+                tracing::warn!(%error, "Zebra tip stream failed; repairing");
+                self.repair().await;
+                None
+            }
+            None => {
+                tracing::warn!("Zebra tip stream ended; repairing");
+                self.repair().await;
+                None
+            }
+        };
+
+        // Truth is self-derived: the announcement may have coalesced
+        // every change since the last wake-up, so the node's answer —
+        // not the stream's promise — is what the mint acts on.
+        let best = self.exact_tip().await?;
+        if let Some((height, hash)) = announced {
+            if best != (height, hash) {
+                tracing::debug!(
+                    announced_height = u32::from(height),
+                    announced_hash = %hash,
+                    best_height = u32::from(best.0),
+                    best_hash = %best.1,
+                    "coalesced Zebra tip notification"
+                );
+            }
+        }
+        Ok(best)
+    }
+
+    /// Re-opens the subscription: pause, reopen. The caller acts on the
+    /// tip it re-reads immediately after — the fresh subscription's
+    /// immediate snapshot, when it comes, is consumed as an ordinary
+    /// wake-up, never awaited as the recovery mechanism.
+    async fn repair(&mut self) {
+        tokio::time::sleep(self.pause).await;
+        self.stream = Self::subscribe(self.client.clone(), self.pause).await;
+    }
+
+    /// Opens the tip stream, retrying until Zebra answers.
+    async fn subscribe(mut client: ChainClient, pause: Duration) -> TipStream {
+        loop {
+            match client.chain_tip_change_stream().await {
+                Ok(stream) => return stream,
+                Err(error) => {
+                    tracing::warn!(%error, "Zebra tip stream unavailable; reconnecting");
+                    tokio::time::sleep(pause).await;
+                }
+            }
+        }
+    }
+
+    /// Reads the exact canonical tip from the node, retrying while the
+    /// node is merely unavailable.
+    async fn exact_tip(&self) -> Result<(BlockHeight, BlockHash), TransportError> {
+        loop {
+            match self.source.exact_tip().await {
+                Ok(tip) => return Ok(tip),
+                Err(error) if error.is_retryable() => {
+                    tracing::warn!(%error, "exact Zebra tip unavailable; retrying");
+                    tokio::time::sleep(self.pause).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
 }
 
 /// Reverses Zebra's display-order bytes into a `BlockHash`.
