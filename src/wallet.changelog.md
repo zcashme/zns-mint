@@ -13,6 +13,9 @@
   spends mined above the surviving tip are cleared so the note is selectable
   again. Locally built spends keep their raw transaction and still block
   until expiry.
+- `TxidNotRecognized` spends consult the retained raw transaction's expiry the
+  same way as `NotInMainChain`, so inputs unlock after the tip passes expiry
+  instead of staying blocked forever.
 
 ## 2026-09-18 — Upstream wallet conformance (issue #69)
 

@@ -61,30 +61,37 @@ impl<P: Parameters> Wallet<P> {
     /// still potentially stands at `target_height`.
     fn spend_confirms_or_blocks(&self, txid: &TxId, target_height: TargetHeight) -> bool {
         use zcash_client_backend::data_api::TransactionStatus;
-        use zcash_protocol::consensus::H0;
 
         match self.transaction_statuses.get(txid) {
             // Every spend recorded by `put_blocks` is mined; a mined spend is
             // confirmed.
             Some(TransactionStatus::Mined(_)) => true,
-            // A spend recorded by `store_transactions_to_be_sent` that has not
-            // been mined blocks re-selection until the spending transaction
-            // expires: an unmined transaction whose expiry height is below the
-            // target can never confirm. Expiry height zero means no expiry.
-            Some(TransactionStatus::NotInMainChain) => self
-                .transactions
-                .get(txid)
-                .map(|tx| {
-                    let expiry = tx.expiry_height();
-                    expiry == H0 || expiry >= BlockHeight::from(target_height)
-                })
-                // No raw transaction retained: the conservative answer is
-                // that the spend still stands.
-                .unwrap_or(true),
-            // A status of TxidNotRecognized, or a missing status, is treated
-            // conservatively: the note stays unselectable.
-            _ => true,
+            // Unmined spends (mempool / reorged / node no longer recognizes the
+            // txid) block re-selection until the retained raw transaction's
+            // expiry height is below the target — then the spend can never
+            // confirm. Expiry height zero means no expiry.
+            Some(TransactionStatus::NotInMainChain | TransactionStatus::TxidNotRecognized) => {
+                self.unmined_spend_still_blocks(txid, target_height)
+            }
+            // Missing status: conservative — keep the note unselectable.
+            None => true,
         }
+    }
+
+    /// Whether an unmined spending transaction still blocks its inputs at
+    /// `target_height`, based on the retained raw transaction's expiry.
+    fn unmined_spend_still_blocks(&self, txid: &TxId, target_height: TargetHeight) -> bool {
+        use zcash_protocol::consensus::H0;
+
+        self.transactions
+            .get(txid)
+            .map(|tx| {
+                let expiry = tx.expiry_height();
+                expiry == H0 || expiry >= BlockHeight::from(target_height)
+            })
+            // No raw transaction retained: the conservative answer is that
+            // the spend still stands.
+            .unwrap_or(true)
     }
 
     /// The number of confirmations required before a note is spendable under
@@ -940,5 +947,87 @@ mod tests {
     #[test]
     fn send_max_spendable_to_transparent() {
         pool::send_max_spendable_to_transparent::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    /// A locally sent spend that the node later marks `TxidNotRecognized`
+    /// must unlock its inputs once the chain tip passes the raw transaction's
+    /// expiry — the same rule as `NotInMainChain`.
+    #[test]
+    fn txid_not_recognized_unlocks_after_expiry() {
+        use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
+        use zcash_client_backend::data_api::testing::pool::ShieldedPoolTester;
+        use zcash_client_backend::data_api::testing::AddressType;
+        use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
+        use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
+        use zcash_client_backend::data_api::{Account, TransactionStatus, WalletRead, WalletWrite};
+        use zcash_client_backend::fees::{standard, DustOutputPolicy, StandardFeeRule};
+        use zcash_keys::address::Address;
+        use zcash_protocol::value::Zatoshis;
+        use zip321::{Payment, TransactionRequest};
+
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let fund = Zatoshis::const_from_u64(60_000);
+        let (h, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, fund);
+        st.scan_cached_blocks(h, 1);
+        st.wallet_mut().update_chain_tip(h).unwrap();
+
+        let account = st.test_account().unwrap().clone();
+        let to_extsk = SaplingPoolTester::sk(&[0xf5; 32]);
+        let to: Address = SaplingPoolTester::sk_default_address(&to_extsk);
+        let request = TransactionRequest::new(vec![Payment::without_memo(
+            to.to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(10_000),
+        )])
+        .unwrap();
+
+        let change_strategy = standard::SingleOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            SaplingPoolTester::SHIELDED_PROTOCOL,
+            DustOutputPolicy::default(),
+        );
+        let input_selector = GreedyInputSelector::new();
+        let proposal = st
+            .propose_transfer(
+                account.id(),
+                &input_selector,
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+        let sent_txid = st.create_proposed_expecting(&proposal, 1)[0];
+
+        assert_eq!(
+            st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+            Zatoshis::ZERO,
+            "inputs stay blocked while the local send is outstanding"
+        );
+
+        st.wallet_mut()
+            .set_transaction_status(sent_txid, TransactionStatus::TxidNotRecognized)
+            .unwrap();
+
+        assert_eq!(
+            st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+            Zatoshis::ZERO,
+            "TxidNotRecognized still blocks before expiry"
+        );
+
+        let expiry = st
+            .wallet()
+            .get_transaction(sent_txid)
+            .unwrap()
+            .expect("local send retains its raw transaction")
+            .expiry_height();
+        st.wallet_mut().update_chain_tip(expiry).unwrap();
+
+        assert_eq!(
+            st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+            fund,
+            "after tip passes expiry, TxidNotRecognized spends unlock"
+        );
     }
 }
