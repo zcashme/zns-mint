@@ -1,5 +1,35 @@
 # Wallet changelog
 
+## 2026-09-19 — `test_network` retired: conformance account injection is a cfg(test) fixture seam
+
+### Changed
+
+- The `#[cfg(test)] test_network: Option<LocalNetwork>` field is deleted.
+  Its only semantic content was "this wallet belongs to the upstream
+  conformance harness" — information the build mode already carries: the
+  harness exists only in test builds, and
+  `UnifiedSpendingKey::from_seed` is generic, so the fixture derives
+  against `&wallet.network` (the stored `LocalNetwork` value was never
+  needed).
+- `WalletWrite::create_account` is now a compile-time seam: test builds
+  install the upstream conformance fixture account through
+  `wallet::testing::create_fixture_account`; production builds compile
+  the branch out entirely (`cfg(test)` / `cfg(not(test))`), preserving
+  the invariant that no seed can cross the wallet boundary in
+  production: no code exists to receive it. The two cfg attributes are
+  adjacent and complementary, so a mismatch is a compile error, not
+  silent drift; and the flag no longer needs manual re-preservation
+  across the fixture's `*self = Wallet::new(...)` replacement — the
+  network travels with the wallet by construction.
+- The injection body moves from an inherent method on `Wallet` into the
+  `#[cfg(test)]` conformance fixture module (`wallet::testing`), as a
+  free function beside the `Factory`, `Cache`, and `WalletTest`
+  adapters: everything the suite expects that production does not have
+  now lives in one cfg(test) module, and the production trait method
+  states the production truth (`FixedAccountsOnly`) with no fixture
+  knowledge.
+- Closes #89.
+
 ## 2026-09-18 — Wallet security findings
 
 ### Fixed
