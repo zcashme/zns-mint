@@ -1,5 +1,26 @@
 # Wallet changelog
 
+## 2026-09-19 — The mint stops reserving inputs through the lock store
+
+### Changed
+
+- `assemble::prepare` no longer locks its selected inputs. The
+  select → prove → record window is a single `&mut Wallet` borrow in a
+  serial order loop, so the reservation guarded a window the borrow
+  checker already seals; after recording, the unmined-spend records
+  are the durable protection — a note stays unselectable until its
+  transaction mines or expires either way. The random, discarded
+  `LockOwner` and the FATAL lock-conflict panic die with the call:
+  they were properties of a redundant reservation, not of the wallet.
+- The wallet's `OutputLockStore` is now purely conformance surface for
+  the upstream corpus (ten locking scenarios): production writes no
+  lock at all. If the intake loop ever parallelizes, reservations
+  must be designed for that shape — a queue around wallet access, or
+  per-flow lock owners — not re-inherited from this protocol.
+- `drop_applied_above` no longer cleans lock orphans: with no
+  production lock writes there is nothing to orphan, and the corpus
+  confirms no connected scenario locks a note and truncates past it.
+
 ## 2026-09-19 — Remove unused ZIP 318 anchor retention (#92)
 
 ### Removed
