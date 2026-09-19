@@ -4,6 +4,21 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-19 — Tip stream lifecycle delegated to the seam (#88)
+
+- `main` no longer owns the tip stream: `TipSession::open(chain)`
+  receives boot's client and the loop wakes on
+  `connection.next_tip()`, which returns the node-read canonical tip
+  (retryable reads retried inside; `Err` is a fatal data verdict and
+  panics with the same FATAL message as before).
+- The notification/exact-tip/coalescing block at the loop head
+  collapsed into one call; stream errors and ends are repaired inside
+  the session and answered with an immediately re-read tip, so a
+  dropped connection costs one pause plus one pass — not a wait for
+  the next block.
+- The post-price `exact_tip` re-check stays in `main`: that is the
+  orchestrator verifying its own pass, not the stream lifecycle.
+
 ## 2026-09-18 — Vault sweep rides the MTP day diff (#82)
 
 - Before catch-up, the loop reads `mtp.current_day()` as `previous_day`.

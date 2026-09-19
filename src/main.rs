@@ -12,7 +12,6 @@
 
 use std::time::Duration;
 
-use futures_util::StreamExt as _;
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletWrite as _;
 use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
@@ -29,7 +28,7 @@ use zns_mint::mint::{
     Action, Challenge, Expiry, MintInbound, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
     MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
-use zns_mint::zcash::{self, CanonicalBlockSource, ChainClient, JsonRpc, TipStream};
+use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession};
 
 const RETRY_PAUSE: Duration = Duration::from_secs(5);
 
@@ -44,7 +43,7 @@ async fn main() {
 
     let Boot {
         network,
-        mut chain,
+        chain,
         mut wallet,
         cursor: mut chain_tip,
         treasury_keys,
@@ -77,45 +76,16 @@ async fn main() {
         "mint awaiting Zebra tips"
     );
 
-    let mut tips = tip_stream(&mut chain).await;
+    // The tip session owns the stream's lifecycle — wake, repair, and
+    // the re-read of the canonical tip that turns every wake-up into the
+    // node's answer, never the announcement's promise. The orchestrator
+    // holds position (the wallet) and never sees transport state.
+    let mut connection = TipSession::open(chain).await;
     loop {
-        let notification = match tips.next().await {
-            Some(Ok(notification)) => notification,
-            Some(Err(error)) => {
-                tracing::warn!(%error, "Zebra tip stream failed; reconnecting");
-                tips = tip_stream(&mut chain).await;
-                continue;
-            }
-            None => {
-                tracing::warn!("Zebra tip stream ended; reconnecting");
-                tips = tip_stream(&mut chain).await;
-                continue;
-            }
+        let (best_height, best_hash) = match connection.next_tip().await {
+            Ok(tip) => tip,
+            Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
         };
-        let (announced_height, announced_hash) = zcash::tip_height_hash(&notification);
-        tracing::info!(
-            height = u32::from(announced_height),
-            "tip notification received"
-        );
-        let (best_height, best_hash) = loop {
-            match source.exact_tip().await {
-                Ok(tip) => break tip,
-                Err(error) if error.is_retryable() => {
-                    tracing::warn!(%error, "exact Zebra tip unavailable; retrying");
-                    tokio::time::sleep(RETRY_PAUSE).await;
-                }
-                Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
-            }
-        };
-        if announced_height != best_height || announced_hash != best_hash {
-            tracing::debug!(
-                announced_height = u32::from(announced_height),
-                announced_hash = %announced_hash,
-                best_height = u32::from(best_height),
-                best_hash = %best_hash,
-                "coalesced Zebra tip notification"
-            );
-        }
         assert!(
             best_height >= MINT_BIRTHDAY - 1,
             "FATAL: Zebra tip is below the mint birthday"
@@ -757,18 +727,5 @@ async fn main() {
             hash = %tip_hash,
             "mint rules applied at canonical tip"
         );
-    }
-}
-
-/// Opens the tip stream, retrying until Zebra answers.
-async fn tip_stream(chain: &mut ChainClient) -> TipStream {
-    loop {
-        match chain.chain_tip_change_stream().await {
-            Ok(tips) => return tips,
-            Err(error) => {
-                tracing::warn!(%error, "Zebra tip stream unavailable; reconnecting");
-                tokio::time::sleep(RETRY_PAUSE).await;
-            }
-        }
     }
 }

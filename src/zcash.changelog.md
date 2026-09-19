@@ -1,5 +1,33 @@
 # Zcash I/O changelog
 
+## 2026-09-19 — TipSession owns the tip stream (#88)
+
+- The tip stream's lifecycle lives in one place now: `TipSession` in
+  `chain.rs` holds only what nothing else holds — the subscription and
+  the client it rides on. `main` wakes on `next_tip` and never sees
+  transport state; the bare `tips` local, the inline reconnect policy,
+  and `main`'s `tip_stream` helper are gone.
+- Truth is self-derived: `next_tip` re-reads the canonical tip via
+  `getblockchaininfo` before answering, so a notification is a wake-up,
+  never an answer. The fresh-subscription immediate-tip delivery
+  (Zebra's never-seen master receiver + the cloned watch's inherited
+  staleness) that made reconnects recover today is documented as an
+  optimization, never a dependency.
+- Recovery is immediate and on our clock: a stream error or end pauses,
+  re-opens the subscription, and returns a freshly read tip — never
+  waiting for an announcement a change-only stream may owe only after the
+  next block. A repair may leave the fresh snapshot unconsumed; the next
+  wake then re-derives an unchanged tip and runs a harmless idempotent
+  pass.
+- Silence is detectable: `ChainClient::connect` configures HTTP/2
+  keep-alive (`KEEP_ALIVE_INTERVAL` 30s, `KEEP_ALIVE_TIMEOUT` 15s,
+  while-idle). A half-open connection — receive-only after the headers,
+  so invisible to the application — now surfaces as a stream error in
+  bounded time instead of an eternal `next()` hang.
+- `chain_tip_change_stream`, `TipStream`, and `tip_height_hash` are now
+  `pub(crate)`: the session is the only consumer of the stream
+  internals; `TipSession` is the exported surface.
+
 ## 2026-09-16 — `JsonRpc::get_subtree_roots` (`z_getsubtreesbyindex`)
 
 - New method, generic over `Node: HashSer`. Boot calls it for `"sapling"`
