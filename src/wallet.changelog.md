@@ -16,6 +16,9 @@
 - `TxidNotRecognized` spends consult the retained raw transaction's expiry the
   same way as `NotInMainChain`, so inputs unlock after the tip passes expiry
   instead of staying blocked forever.
+- `ExceedsPriorSendPercentile` includes notes at the percentile threshold
+  (`>=`), and each percentile node in a Combine/Attempt tree evaluates its
+  own percentile instead of sharing one pre-extracted threshold.
 
 ## 2026-09-18 — Upstream wallet conformance (issue #69)
 

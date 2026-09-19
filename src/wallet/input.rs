@@ -396,18 +396,18 @@ impl<P: Parameters> Wallet<P> {
         true
     }
 
-    /// Evaluates `filter` against a note of `value`, returning `None` when
-    /// the filter cannot be evaluated from this wallet's data.
+    /// Whether `value` satisfies `filter`. `None` means the filter cannot be
+    /// evaluated from this wallet's data.
     ///
     /// `account_balance` is the account's shielded total used by
-    /// [`NoteFilter::ExceedsBalancePercentage`]. `prior_send_threshold` is
-    /// the value at the requested prior-send percentile, when enough send
-    /// history exists to compute one.
+    /// [`NoteFilter::ExceedsBalancePercentage`]. Each
+    /// [`NoteFilter::ExceedsPriorSendPercentile`] node computes its own
+    /// percentile threshold from send history.
     fn note_matches_filter(
+        &self,
         value: Zatoshis,
         filter: &NoteFilter,
         account_balance: Zatoshis,
-        prior_send_threshold: Option<Zatoshis>,
     ) -> Option<bool> {
         match filter {
             NoteFilter::ExceedsMinValue(min) => Some(value > *min),
@@ -415,15 +415,15 @@ impl<P: Parameters> Wallet<P> {
                 let threshold = (u64::from(account_balance) * u64::from(pct.value())) / 100;
                 Some(u64::from(value) >= threshold)
             }
-            NoteFilter::ExceedsPriorSendPercentile(_) => {
-                prior_send_threshold.map(|threshold| value > threshold)
-            }
+            NoteFilter::ExceedsPriorSendPercentile(pct) => self
+                .prior_send_threshold(pct.value())
+                .map(|threshold| value >= threshold),
             // Both conditions are evaluated; one that cannot be evaluated is
             // ignored, and if neither can the combined filter cannot either.
             NoteFilter::Combine(a, b) => {
                 match (
-                    Self::note_matches_filter(value, a, account_balance, prior_send_threshold),
-                    Self::note_matches_filter(value, b, account_balance, prior_send_threshold),
+                    self.note_matches_filter(value, a, account_balance),
+                    self.note_matches_filter(value, b, account_balance),
                 ) {
                     (None, None) => None,
                     (a, b) => Some(a.unwrap_or(true) && b.unwrap_or(true)),
@@ -432,15 +432,9 @@ impl<P: Parameters> Wallet<P> {
             NoteFilter::Attempt {
                 condition,
                 fallback,
-            } => Self::note_matches_filter(value, condition, account_balance, prior_send_threshold)
-                .or_else(|| {
-                    Self::note_matches_filter(
-                        value,
-                        fallback,
-                        account_balance,
-                        prior_send_threshold,
-                    )
-                }),
+            } => self
+                .note_matches_filter(value, condition, account_balance)
+                .or_else(|| self.note_matches_filter(value, fallback, account_balance)),
         }
     }
 
@@ -477,7 +471,6 @@ impl<P: Parameters> Wallet<P> {
         exclude: &[NoteId],
         lock_filter: LockFilter<'_>,
         account_balance: Zatoshis,
-        prior_send_threshold: Option<Zatoshis>,
     ) -> Option<PoolMeta> {
         let values: Vec<Zatoshis> = match pool {
             ShieldedPool::Sapling => self
@@ -502,7 +495,7 @@ impl<P: Parameters> Wallet<P> {
         let mut count = 0usize;
         let mut total = Zatoshis::ZERO;
         for value in values {
-            if Self::note_matches_filter(value, selector, account_balance, prior_send_threshold)? {
+            if self.note_matches_filter(value, selector, account_balance)? {
                 count += 1;
                 total = (total + value)
                     .expect("balance cannot overflow MAX_MONEY; mirrors upstream Balance::total");
@@ -536,19 +529,6 @@ impl<P: Parameters> Wallet<P> {
         sapling.chain(ironwood).fold(Zatoshis::ZERO, |acc, value| {
             (acc + value).expect("balance cannot overflow MAX_MONEY")
         })
-    }
-}
-
-/// Percentile embedded in `filter`, including nested Combine/Attempt clauses.
-fn prior_send_pct(filter: &NoteFilter) -> Option<u8> {
-    match filter {
-        NoteFilter::ExceedsPriorSendPercentile(pct) => Some(pct.value()),
-        NoteFilter::Combine(a, b) => prior_send_pct(a).or_else(|| prior_send_pct(b)),
-        NoteFilter::Attempt {
-            condition,
-            fallback,
-        } => prior_send_pct(condition).or_else(|| prior_send_pct(fallback)),
-        _ => None,
     }
 }
 
@@ -760,8 +740,6 @@ impl<P: Parameters> InputSource for Wallet<P> {
         // receives, so confirmation depth is not applied here.
         let account_balance =
             self.shielded_unspent_total(account, target_height, exclude, lock_filter);
-        let prior_send_threshold =
-            prior_send_pct(selector).and_then(|pct| self.prior_send_threshold(pct));
 
         let sapling_meta = self.pool_meta(
             account,
@@ -771,7 +749,6 @@ impl<P: Parameters> InputSource for Wallet<P> {
             exclude,
             lock_filter,
             account_balance,
-            prior_send_threshold,
         );
         let ironwood_meta = self.pool_meta(
             account,
@@ -781,7 +758,6 @@ impl<P: Parameters> InputSource for Wallet<P> {
             exclude,
             lock_filter,
             account_balance,
-            prior_send_threshold,
         );
         // Ordinary Orchard is not a tracked pool of this wallet.
         Ok(AccountMeta::new(sapling_meta, None, ironwood_meta))
