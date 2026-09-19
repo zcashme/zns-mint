@@ -21,9 +21,7 @@
   the trait requires the method, the axiom forbids the store.
   `output_account`'s transparent arm answers `None` on the same
   principle. The `transparent-inputs` feature stays — it serves the
-  unshield — and its Cargo.toml comment is corrected from the fossil
-  claim ("Treasury accepts transparent payments from users") to the
-  vault-sweep truth.
+  unshield.
 - The send-to-transparent scenarios stay connected and green: they
   exercise the unshield path and read none of the removed state.
 
