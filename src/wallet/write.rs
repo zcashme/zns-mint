@@ -164,8 +164,63 @@ impl<P: Parameters> Wallet<P> {
         Ok(true)
     }
 
-    /// Drops applied blocks above `height` and un-mines their transactions.
+    /// Drops applied blocks above `height` and removes effects that belonged
+    /// only to the abandoned branch.
+    ///
+    /// Received notes (and their nullifiers, memos, and indexes) created above
+    /// `height` are deleted — otherwise they linger as phantom pending value.
+    /// Spend links whose spending transaction was mined above `height` and
+    /// was observed only through scanning (no retained raw transaction) are
+    /// cleared so the note is selectable again; locally built spends keep
+    /// their raw transaction and stay blocked until expiry.
     fn drop_applied_above(&mut self, height: BlockHeight) {
+        let orphaned: HashSet<TxId> = self
+            .transaction_statuses
+            .iter()
+            .filter_map(|(txid, status)| match status {
+                TransactionStatus::Mined(mined) if *mined > height => Some(*txid),
+                _ => None,
+            })
+            .collect();
+
+        self.sapling_notes
+            .retain(|note_id, _| !orphaned.contains(note_id.txid()));
+        self.ironwood_notes
+            .retain(|note_id, _| !orphaned.contains(note_id.txid()));
+        self.sapling_nullifiers
+            .retain(|_, note_id| !orphaned.contains(note_id.txid()));
+        self.ironwood_nullifiers
+            .retain(|_, note_id| !orphaned.contains(note_id.txid()));
+        self.memos
+            .retain(|note_id, _| !orphaned.contains(note_id.txid()));
+        self.transparent_outputs
+            .retain(|outpoint, _| !orphaned.contains(outpoint.txid()));
+        self.transaction_indices
+            .retain(|txid, _| !orphaned.contains(txid));
+
+        // Scanned-only spends have no raw transaction; after un-mining they
+        // would block forever. Locally built spends remain until expiry.
+        let scanned_only_spends: HashSet<TxId> = orphaned
+            .iter()
+            .filter(|txid| !self.transactions.contains_key(*txid))
+            .copied()
+            .collect();
+        self.sapling_note_spends.retain(|note_id, spend_txid| {
+            self.sapling_notes.contains_key(note_id) && !scanned_only_spends.contains(spend_txid)
+        });
+        self.ironwood_note_spends.retain(|note_id, spend_txid| {
+            self.ironwood_notes.contains_key(note_id) && !scanned_only_spends.contains(spend_txid)
+        });
+        self.transparent_output_spends
+            .retain(|outpoint, spend_txid| {
+                self.transparent_outputs.contains_key(outpoint)
+                    && !scanned_only_spends.contains(spend_txid)
+            });
+        self.transparent_spends.retain(|(spend_txid, outpoint)| {
+            self.transparent_outputs.contains_key(outpoint)
+                && !scanned_only_spends.contains(spend_txid)
+        });
+
         for status in self.transaction_statuses.values_mut() {
             if let TransactionStatus::Mined(mined) = *status {
                 if mined > height {
@@ -173,7 +228,26 @@ impl<P: Parameters> Wallet<P> {
                 }
             }
         }
+
+        self.sapling_tree_shard_end_heights
+            .retain(|_, end| *end <= height);
+        self.orchard_tree_shard_end_heights
+            .retain(|_, end| *end <= height);
+        self.ironwood_tree_shard_end_heights
+            .retain(|_, end| *end <= height);
+
         self.blocks.retain(|h, _| *h <= height);
+
+        // Drop locks whose output no longer exists in the wallet.
+        let stale_locks: Vec<_> = self
+            .locks
+            .keys()
+            .filter(|output| self.output_account(output).is_none())
+            .copied()
+            .collect();
+        for output in stale_locks {
+            self.locks.remove(&output);
+        }
     }
 
     /// Replaces the note commitment trees with the supplied frontiers.
@@ -594,18 +668,7 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
             }
         }
 
-        // Un-mine transactions above the truncation point. Notes, memos, and
-        // sent outputs are deliberately retained — memo data is not
-        // recoverable from the chain, and un-mined notes are excluded from
-        // spendability by the status-based eligibility rules.
-        for status in self.transaction_statuses.values_mut() {
-            if let TransactionStatus::Mined(height) = *status {
-                if height > target {
-                    *status = TransactionStatus::NotInMainChain;
-                }
-            }
-        }
-        self.blocks.retain(|height, _| *height <= target);
+        self.drop_applied_above(target);
         if let Some(tip) = self.zebra_tip {
             if tip > target {
                 self.zebra_tip = Some(target);
@@ -1232,6 +1295,89 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "get_locked_outputs must not list a lock whose expiry height has passed"
+        );
+    }
+
+    /// Truncation must drop notes created on the abandoned branch and clear
+    /// scanned-only spends of surviving notes; otherwise balances show phantom
+    /// pending value and reorged spends freeze notes forever.
+    #[test]
+    fn truncate_clears_orphaned_receives_and_scanned_spends() {
+        use zcash_client_backend::data_api::TransactionStatus;
+        use zcash_client_backend::wallet::NoteId;
+        use zcash_primitives::transaction::TxId;
+
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50_000);
+
+        let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h1, 1);
+        let (h2, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h2, 1);
+        st.wallet_mut().update_chain_tip(h2).unwrap();
+
+        let wallet = st.wallet_mut();
+        assert_eq!(wallet.sapling_notes.len(), 2);
+        let note_h1 = wallet
+            .sapling_notes
+            .keys()
+            .copied()
+            .find(|id: &NoteId| {
+                matches!(
+                    wallet.transaction_statuses.get(id.txid()),
+                    Some(TransactionStatus::Mined(h)) if *h == h1
+                )
+            })
+            .expect("note from first scanned block");
+        let note_h2 = wallet
+            .sapling_notes
+            .keys()
+            .copied()
+            .find(|id: &NoteId| {
+                matches!(
+                    wallet.transaction_statuses.get(id.txid()),
+                    Some(TransactionStatus::Mined(h)) if *h == h2
+                )
+            })
+            .expect("note from second scanned block");
+
+        // Scanned-only spend of the surviving note, mined on the abandoned tip.
+        let orphan_spend = TxId::from_bytes([0xab; 32]);
+        wallet.sapling_note_spends.insert(note_h1, orphan_spend);
+        wallet
+            .transaction_statuses
+            .insert(orphan_spend, TransactionStatus::Mined(h2));
+        assert!(!wallet.transactions.contains_key(&orphan_spend));
+
+        WalletWrite::truncate_to_height(wallet, h1).expect("h1 remains a checkpoint");
+
+        assert!(
+            wallet.sapling_notes.contains_key(&note_h1),
+            "note created at or below the truncation height must survive"
+        );
+        assert!(
+            !wallet.sapling_notes.contains_key(&note_h2),
+            "note created only on the abandoned branch must be removed"
+        );
+        assert!(
+            !wallet.sapling_note_spends.contains_key(&note_h1),
+            "scanned-only spend mined above the truncation height must clear"
+        );
+
+        let account_id = st.test_account().unwrap().id();
+        let summary = st
+            .wallet()
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .unwrap()
+            .unwrap();
+        let balance = summary.account_balances().get(&account_id).unwrap();
+        assert_eq!(balance.sapling_balance().spendable_value(), value);
+        assert_eq!(
+            balance.sapling_balance().value_pending_spendability(),
+            Zatoshis::ZERO,
+            "orphaned receive must not linger as pending"
         );
     }
 

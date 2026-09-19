@@ -8,6 +8,11 @@
   account would need its birthday lowered; acknowledged accounts may have
   birthday metadata lowered to `chain_state.height + 1`. Birthdays are stored
   per account.
+- Truncation / reorg cleanup (`drop_applied_above`): notes created only on the
+  abandoned branch are removed (no phantom pending balance); scanned-only
+  spends mined above the surviving tip are cleared so the note is selectable
+  again. Locally built spends keep their raw transaction and still block
+  until expiry.
 
 ## 2026-09-18 — Upstream wallet conformance (issue #69)
 
