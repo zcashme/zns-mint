@@ -19,6 +19,9 @@
 - `ExceedsPriorSendPercentile` includes notes at the percentile threshold
   (`>=`), and each percentile node in a Combine/Attempt tree evaluates its
   own percentile instead of sharing one pre-extracted threshold.
+- Ordinary Orchard is compatibility-tree only: no received-note table. Docs
+  no longer claim such notes are stored unspendable; `put_blocks` returns
+  `UnexpectedOrchardReceive` if a scanned block surfaces one.
 
 ## 2026-09-18 — Upstream wallet conformance (issue #69)
 
@@ -56,8 +59,8 @@
   mint only applies the next height after the tip.
 - Ordinary-Orchard funding
   (`propose_v5_payment_to_orchard_receiver_is_rejected`,
-  `proposal_records_and_serializes_proposed_version`): no owned Orchard
-  note table.
+  `proposal_records_and_serializes_proposed_version`): ordinary Orchard is
+  compatibility-tree only; receives are refused, not stored.
 - `send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present`:
   history length disagrees with a scanned unconfirmed receive we keep.
 - `zip317_spend`: helper keeps dust out of total; body wants dust in.

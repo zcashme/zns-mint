@@ -57,18 +57,16 @@ const MAX_CHECKPOINTS: usize = 100;
 /// failures (`Query`, `Insert`) are reachable, never storage failures.
 pub(crate) type TreeError = ShardTreeError<Infallible>;
 
-/// Every completed shard root, up to the mint's origin checkpoint, for the
-/// two pools the mint spends from: Ironwood (hot path — Registry Name Notes
-/// and Treasury operating pool) and Sapling (cold path — `sweep_sapling_to_vault`
-/// drains any Sapling payments to the Treasury's UA into the transparent vault).
-///
-/// Orchard is deliberately omitted: the mint has no Orchard spend path
-/// (`src/key.rs`'s `usk_clone` comment: *"Sapling-disabled and Ironwood-only"*),
-/// so seeding Orchard shard roots is dead cost. If a user does pay to the
-/// Treasury's Orchard receiver, the wallet still scans and stores the note —
-/// it simply cannot be spent, matching the current design.
-///
 /// The in-memory wallet for the two fixed mint accounts.
+///
+/// Owned shielded pools are Sapling (Treasury cold path —
+/// `sweep_sapling_to_vault`) and Ironwood (Registry Name Notes and Treasury
+/// operating pool). The ordinary Orchard commitment tree is kept only so
+/// scanned blocks can append and checkpoint Orchard commitments in order;
+/// this wallet never persists ordinary-Orchard received notes, nullifiers, or
+/// spends. Under NU6.3 those inbound payments cannot arise; if a scanned
+/// block still surfaces one, `put_blocks` refuses it rather than dropping
+/// value.
 pub struct Wallet<P: Parameters> {
     /// The consensus parameters of the network this wallet's accounts were
     /// derived for. The single authority for network context inside the

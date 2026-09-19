@@ -61,6 +61,10 @@ pub enum WalletError {
     /// pools are not currently spendable (unconfirmed, locked, or otherwise
     /// ineligible).
     UnspendableFunds,
+    /// A scanned block contained an ordinary-Orchard output belonging to a
+    /// mint account. This wallet keeps no Orchard note table; accepting the
+    /// block would make that value invisible.
+    UnexpectedOrchardReceive,
 }
 
 impl From<shardtree::error::ShardTreeError<Infallible>> for WalletError {
@@ -105,6 +109,10 @@ impl std::fmt::Display for WalletError {
             WalletError::UnspendableFunds => {
                 write!(f, "not all funds in the requested pools are spendable")
             }
+            WalletError::UnexpectedOrchardReceive => write!(
+                f,
+                "scanned ordinary-Orchard receive is not stored by this wallet"
+            ),
         }
     }
 }

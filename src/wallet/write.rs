@@ -63,7 +63,8 @@ impl<P: Parameters> Wallet<P> {
                     output.output_index(),
                 ))
                 .and_then(|utxo| utxo.recipient_account().copied()),
-            // Ordinary Orchard deliberately has no received-note table.
+            // Ordinary Orchard deliberately has no received-note table;
+            // `put_blocks_marked` rejects decryptable Orchard outputs.
             PoolType::Shielded(ShieldedPool::Orchard) => None,
         }
     }
@@ -888,6 +889,17 @@ impl<P: Parameters> Wallet<P> {
                     || from_state.block_hash() != self.seed.block_hash()
                 {
                     return Err(WalletError::ChainDiscontinuity(from_state.block_height()));
+                }
+            }
+        }
+
+        // Ordinary Orchard is a compatibility commitment tree only: never
+        // persist received notes. Refuse a decryptable Orchard output rather
+        // than apply the block and lose the value from wallet state.
+        for block in &blocks {
+            for wtx in block.transactions() {
+                if !wtx.orchard_outputs().is_empty() {
+                    return Err(WalletError::UnexpectedOrchardReceive);
                 }
             }
         }

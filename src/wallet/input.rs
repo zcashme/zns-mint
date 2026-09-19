@@ -1,10 +1,12 @@
 //! Upstream `InputSource` implementation.
 //!
 //! Sapling and Ironwood are the only owned shielded input lanes. The ordinary
-//! Orchard pool is maintained as a compatibility commitment tree only and is
-//! never surfaced as wallet inputs. Selection, spendability, lock admission,
-//! and confirmation classification live here so that `wallet::read` balance
-//! reporting reuses exactly the same rules.
+//! Orchard pool is a compatibility commitment tree only: commitments are
+//! appended and checkpointed, but received notes are never persisted or
+//! selected. `put_blocks` refuses a decryptable ordinary-Orchard output
+//! rather than applying an invisible credit. Selection, spendability, lock
+//! admission, and confirmation classification live here so that
+//! `wallet::read` balance reporting reuses exactly the same rules.
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
