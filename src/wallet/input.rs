@@ -1,17 +1,22 @@
 //! Upstream `InputSource` implementation.
 //!
 //! Sapling and Ironwood are the only owned shielded input lanes. The ordinary
-//! Orchard pool is maintained as a compatibility commitment tree only and is
-//! never surfaced as wallet inputs. Selection, spendability, lock admission,
-//! and confirmation classification live here so that `wallet::read` balance
-//! reporting reuses exactly the same rules.
+//! Orchard pool is a compatibility commitment tree only: commitments are
+//! appended and checkpointed, but received notes are never persisted or
+//! selected. `put_blocks` refuses a decryptable ordinary-Orchard output
+//! rather than applying an invisible credit. Selection, spendability, lock
+//! admission, and confirmation classification live here so that
+//! `wallet::read` balance reporting reuses exactly the same rules.
 
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 
 use shardtree::store::ShardStore;
 use zcash_client_backend::data_api::{
     wallet::{input_selection::LockFilter, ConfirmationsPolicy, TargetHeight},
-    AccountMeta, CoinbaseFilter, InputSource, NoteFilter, PoolMeta, ReceivedNotes, TargetValue,
+    AccountMeta, CoinbaseFilter, InputSource, MaxSpendMode, NoteFilter, PoolMeta, ReceivedNotes,
+    TargetValue,
 };
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{
@@ -21,7 +26,7 @@ use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
-use zip32::AccountId;
+use zip32::{AccountId, Scope};
 
 use super::{read::WalletError, Wallet};
 
@@ -58,30 +63,37 @@ impl<P: Parameters> Wallet<P> {
     /// still potentially stands at `target_height`.
     fn spend_confirms_or_blocks(&self, txid: &TxId, target_height: TargetHeight) -> bool {
         use zcash_client_backend::data_api::TransactionStatus;
-        use zcash_protocol::consensus::H0;
 
         match self.transaction_statuses.get(txid) {
             // Every spend recorded by `put_blocks` is mined; a mined spend is
             // confirmed.
             Some(TransactionStatus::Mined(_)) => true,
-            // A spend recorded by `store_transactions_to_be_sent` that has not
-            // been mined blocks re-selection until the spending transaction
-            // expires: an unmined transaction whose expiry height is below the
-            // target can never confirm. Expiry height zero means no expiry.
-            Some(TransactionStatus::NotInMainChain) => self
-                .transactions
-                .get(txid)
-                .map(|tx| {
-                    let expiry = tx.expiry_height();
-                    expiry == H0 || expiry >= BlockHeight::from(target_height)
-                })
-                // No raw transaction retained: the conservative answer is
-                // that the spend still stands.
-                .unwrap_or(true),
-            // A status of TxidNotRecognized, or a missing status, is treated
-            // conservatively: the note stays unselectable.
-            _ => true,
+            // Unmined spends (mempool / reorged / node no longer recognizes the
+            // txid) block re-selection until the retained raw transaction's
+            // expiry height is below the target — then the spend can never
+            // confirm. Expiry height zero means no expiry.
+            Some(TransactionStatus::NotInMainChain | TransactionStatus::TxidNotRecognized) => {
+                self.unmined_spend_still_blocks(txid, target_height)
+            }
+            // Missing status: conservative — keep the note unselectable.
+            None => true,
         }
+    }
+
+    /// Whether an unmined spending transaction still blocks its inputs at
+    /// `target_height`, based on the retained raw transaction's expiry.
+    fn unmined_spend_still_blocks(&self, txid: &TxId, target_height: TargetHeight) -> bool {
+        use zcash_protocol::consensus::H0;
+
+        self.transactions
+            .get(txid)
+            .map(|tx| {
+                let expiry = tx.expiry_height();
+                expiry == H0 || expiry >= BlockHeight::from(target_height)
+            })
+            // No raw transaction retained: the conservative answer is that
+            // the spend still stands.
+            .unwrap_or(true)
     }
 
     /// The number of confirmations required before a note is spendable under
@@ -124,6 +136,37 @@ impl<P: Parameters> Wallet<P> {
                     }
                 }
             }
+        }
+    }
+
+    /// Whether `output` has a lock that has not yet lapsed at `target_height`.
+    fn lock_is_live(&self, output: &OutputRef, target_height: TargetHeight) -> bool {
+        self.locks
+            .get(output)
+            .is_some_and(|(_, expiry)| *expiry >= BlockHeight::from(target_height))
+    }
+
+    /// Preferred lock bucket first, then older notes. `Exclude` and
+    /// `Unfiltered` have no bucket preference, so this is age only.
+    fn lock_tier_order(
+        &self,
+        left: &NoteId,
+        right: &NoteId,
+        target_height: TargetHeight,
+        lock_filter: LockFilter<'_>,
+    ) -> Ordering {
+        let LockFilter::Policy(policy) = lock_filter else {
+            return Ordering::Equal;
+        };
+        if !policy.admits_locked() {
+            return Ordering::Equal;
+        }
+        let left_locked = self.lock_is_live(&OutputRef::from(*left), target_height);
+        let right_locked = self.lock_is_live(&OutputRef::from(*right), target_height);
+        if policy.prefers_locked() {
+            right_locked.cmp(&left_locked)
+        } else {
+            left_locked.cmp(&right_locked)
         }
     }
 
@@ -194,9 +237,10 @@ impl<P: Parameters> Wallet<P> {
         ))
     }
 
-    /// Collects the eligible Sapling notes of `account`, oldest first by
-    /// commitment tree position. `confirmations_policy` of `None` selects
-    /// every unspent note irrespective of confirmations.
+    /// Collects the eligible Sapling notes of `account`. Preferred lock
+    /// tier first, then oldest by commitment tree position.
+    /// `confirmations_policy` of `None` selects every unspent note
+    /// irrespective of confirmations.
     fn eligible_sapling(
         &self,
         account: AccountId,
@@ -217,7 +261,8 @@ impl<P: Parameters> Wallet<P> {
                     && confirmations_policy.is_none_or(|policy| {
                         self.confirmations_satisfied(
                             note_id.txid(),
-                            output.is_change(),
+                            output.is_change()
+                                || output.recipient_key_scope() == Some(Scope::Internal),
                             target_height,
                             policy,
                         )
@@ -225,12 +270,23 @@ impl<P: Parameters> Wallet<P> {
             })
             .filter_map(|(note_id, _)| self.sapling_received_note(*note_id))
             .collect();
-        notes.sort_by_key(ReceivedNote::note_commitment_tree_position);
+        notes.sort_by(|a, b| {
+            self.lock_tier_order(
+                a.internal_note_id(),
+                b.internal_note_id(),
+                target_height,
+                lock_filter,
+            )
+            .then(
+                a.note_commitment_tree_position()
+                    .cmp(&b.note_commitment_tree_position()),
+            )
+        });
         notes
     }
 
-    /// Collects the eligible Ironwood notes of `account`, oldest first by
-    /// commitment tree position.
+    /// Collects the eligible Ironwood notes of `account`. Preferred lock
+    /// tier first, then oldest by commitment tree position.
     fn eligible_ironwood(
         &self,
         account: AccountId,
@@ -251,7 +307,8 @@ impl<P: Parameters> Wallet<P> {
                     && confirmations_policy.is_none_or(|policy| {
                         self.confirmations_satisfied(
                             note_id.txid(),
-                            output.is_change(),
+                            output.is_change()
+                                || output.recipient_key_scope() == Some(Scope::Internal),
                             target_height,
                             policy,
                         )
@@ -259,26 +316,116 @@ impl<P: Parameters> Wallet<P> {
             })
             .filter_map(|(note_id, _)| self.ironwood_received_note(*note_id))
             .collect();
-        notes.sort_by_key(ReceivedNote::note_commitment_tree_position);
+        notes.sort_by(|a, b| {
+            self.lock_tier_order(
+                a.internal_note_id(),
+                b.internal_note_id(),
+                target_height,
+                lock_filter,
+            )
+            .then(
+                a.note_commitment_tree_position()
+                    .cmp(&b.note_commitment_tree_position()),
+            )
+        });
         notes
     }
 
-    /// Evaluates `filter` against a note of `value`, returning `None` when
-    /// the filter cannot be evaluated from this wallet's data.
-    fn note_matches_filter(value: Zatoshis, filter: &NoteFilter) -> Option<bool> {
+    /// Whether every unspent, spendable-scope note in `sources` is eligible
+    /// under `confirmations_policy` and `lock_filter`. Used by
+    /// `AllFunds(Everything)`: a leftover unconfirmed or locked note would
+    /// make a "spend all" proposal a lie.
+    fn everything_spendable(
+        &self,
+        account: AccountId,
+        sources: &[ShieldedPool],
+        target_height: TargetHeight,
+        confirmations_policy: ConfirmationsPolicy,
+        exclude: &[NoteId],
+        lock_filter: LockFilter<'_>,
+    ) -> bool {
+        for pool in sources {
+            match pool {
+                ShieldedPool::Sapling => {
+                    let eligible: BTreeSet<_> = self
+                        .eligible_sapling(
+                            account,
+                            target_height,
+                            Some(confirmations_policy),
+                            exclude,
+                            lock_filter,
+                        )
+                        .into_iter()
+                        .map(|note| *note.internal_note_id())
+                        .collect();
+                    let leftover = self.sapling_notes.iter().any(|(note_id, output)| {
+                        *output.account_id() == account
+                            && !exclude.contains(note_id)
+                            && output.recipient_key_scope().is_some()
+                            && !self.sapling_note_is_spent(note_id, target_height)
+                            && !eligible.contains(note_id)
+                    });
+                    if leftover {
+                        return false;
+                    }
+                }
+                ShieldedPool::Ironwood => {
+                    let eligible: BTreeSet<_> = self
+                        .eligible_ironwood(
+                            account,
+                            target_height,
+                            Some(confirmations_policy),
+                            exclude,
+                            lock_filter,
+                        )
+                        .into_iter()
+                        .map(|note| *note.internal_note_id())
+                        .collect();
+                    let leftover = self.ironwood_notes.iter().any(|(note_id, output)| {
+                        *output.account_id() == account
+                            && !exclude.contains(note_id)
+                            && output.recipient_key_scope().is_some()
+                            && !self.ironwood_note_is_spent(note_id, target_height)
+                            && !eligible.contains(note_id)
+                    });
+                    if leftover {
+                        return false;
+                    }
+                }
+                ShieldedPool::Orchard => {}
+            }
+        }
+        true
+    }
+
+    /// Whether `value` satisfies `filter`. `None` means the filter cannot be
+    /// evaluated from this wallet's data.
+    ///
+    /// `account_balance` is the account's shielded total used by
+    /// [`NoteFilter::ExceedsBalancePercentage`]. Each
+    /// [`NoteFilter::ExceedsPriorSendPercentile`] node computes its own
+    /// percentile threshold from send history.
+    fn note_matches_filter(
+        &self,
+        value: Zatoshis,
+        filter: &NoteFilter,
+        account_balance: Zatoshis,
+    ) -> Option<bool> {
         match filter {
             NoteFilter::ExceedsMinValue(min) => Some(value > *min),
-            // Send-history and balance-distribution filters require data this
-            // wallet does not retain.
-            NoteFilter::ExceedsPriorSendPercentile(_) | NoteFilter::ExceedsBalancePercentage(_) => {
-                None
+            NoteFilter::ExceedsBalancePercentage(pct) => {
+                let threshold = (u64::from(account_balance) * u64::from(pct.value())) / 100;
+                Some(u64::from(value) >= threshold)
             }
+            NoteFilter::ExceedsPriorSendPercentile(pct) => self
+                .prior_send_threshold(pct.value())
+                .map(|threshold| value >= threshold),
             // Both conditions are evaluated; one that cannot be evaluated is
             // ignored, and if neither can the combined filter cannot either.
             NoteFilter::Combine(a, b) => {
                 match (
-                    Self::note_matches_filter(value, a),
-                    Self::note_matches_filter(value, b),
+                    self.note_matches_filter(value, a, account_balance),
+                    self.note_matches_filter(value, b, account_balance),
                 ) {
                     (None, None) => None,
                     (a, b) => Some(a.unwrap_or(true) && b.unwrap_or(true)),
@@ -287,13 +434,35 @@ impl<P: Parameters> Wallet<P> {
             NoteFilter::Attempt {
                 condition,
                 fallback,
-            } => Self::note_matches_filter(value, condition)
-                .or_else(|| Self::note_matches_filter(value, fallback)),
+            } => self
+                .note_matches_filter(value, condition, account_balance)
+                .or_else(|| self.note_matches_filter(value, fallback, account_balance)),
         }
     }
 
-    /// Aggregates the eligible notes of one pool into [`PoolMeta`], returning
+    /// Value at the `pct`-th percentile of previously sent output amounts, if
+    /// any sends have been recorded.
+    fn prior_send_threshold(&self, pct: u8) -> Option<Zatoshis> {
+        let mut values: Vec<u64> = self
+            .sent_outputs
+            .values()
+            .flat_map(|outputs| outputs.iter().map(|o| u64::from(o.value())))
+            .collect();
+        if values.is_empty() {
+            return None;
+        }
+        values.sort_unstable();
+        // Nearest-rank: for 10 sends at the 50th percentile this is the 5th
+        // value (index 4), matching the fixture's 2_500_000 ZAT median.
+        let rank = (values.len() * usize::from(pct) / 100).saturating_sub(1);
+        Zatoshis::from_u64(values[rank.min(values.len() - 1)]).ok()
+    }
+
+    /// Aggregates unspent notes of one pool into [`PoolMeta`], returning
     /// `None` when the selector cannot be evaluated.
+    ///
+    /// Confirmation depth is ignored: metadata is a wallet-structure query
+    /// and the caller may pass a `target_height` that predates later receives.
     #[allow(clippy::too_many_arguments)]
     fn pool_meta(
         &self,
@@ -301,13 +470,13 @@ impl<P: Parameters> Wallet<P> {
         pool: ShieldedPool,
         selector: &NoteFilter,
         target_height: TargetHeight,
-        policy: ConfirmationsPolicy,
         exclude: &[NoteId],
         lock_filter: LockFilter<'_>,
+        account_balance: Zatoshis,
     ) -> Option<PoolMeta> {
         let values: Vec<Zatoshis> = match pool {
             ShieldedPool::Sapling => self
-                .eligible_sapling(account, target_height, Some(policy), exclude, lock_filter)
+                .eligible_sapling(account, target_height, None, exclude, lock_filter)
                 .into_iter()
                 .map(|note| {
                     note.note_value()
@@ -315,7 +484,7 @@ impl<P: Parameters> Wallet<P> {
                 })
                 .collect(),
             ShieldedPool::Ironwood => self
-                .eligible_ironwood(account, target_height, Some(policy), exclude, lock_filter)
+                .eligible_ironwood(account, target_height, None, exclude, lock_filter)
                 .into_iter()
                 .map(|note| {
                     note.note_value()
@@ -328,13 +497,40 @@ impl<P: Parameters> Wallet<P> {
         let mut count = 0usize;
         let mut total = Zatoshis::ZERO;
         for value in values {
-            if Self::note_matches_filter(value, selector)? {
+            if self.note_matches_filter(value, selector, account_balance)? {
                 count += 1;
                 total = (total + value)
                     .expect("balance cannot overflow MAX_MONEY; mirrors upstream Balance::total");
             }
         }
         Some(PoolMeta::new(count, total))
+    }
+
+    /// Sum of unspent Sapling and Ironwood note values for `account`.
+    fn shielded_unspent_total(
+        &self,
+        account: AccountId,
+        target_height: TargetHeight,
+        exclude: &[NoteId],
+        lock_filter: LockFilter<'_>,
+    ) -> Zatoshis {
+        let sapling = self
+            .eligible_sapling(account, target_height, None, exclude, lock_filter)
+            .into_iter()
+            .map(|note| {
+                note.note_value()
+                    .expect("Sapling note values are within valid ZEC bounds by consensus")
+            });
+        let ironwood = self
+            .eligible_ironwood(account, target_height, None, exclude, lock_filter)
+            .into_iter()
+            .map(|note| {
+                note.note_value()
+                    .expect("Ironwood note values are within valid ZEC bounds by consensus")
+            });
+        sapling.chain(ironwood).fold(Zatoshis::ZERO, |acc, value| {
+            (acc + value).expect("balance cannot overflow MAX_MONEY")
+        })
     }
 }
 
@@ -414,15 +610,27 @@ impl<P: Parameters> InputSource for Wallet<P> {
         if !self.ufvks.contains_key(&account) {
             return Err(WalletError::AccountUnknown(account));
         }
+        if matches!(
+            target_value,
+            TargetValue::AllFunds(MaxSpendMode::Everything)
+        ) && !self.everything_spendable(
+            account,
+            sources,
+            target_height,
+            confirmations_policy,
+            exclude,
+            lock_filter,
+        ) {
+            return Err(WalletError::UnspendableFunds);
+        }
 
         let mut sapling = Vec::new();
         let mut ironwood = Vec::new();
         let mut accumulated = Zatoshis::ZERO;
 
         // Pools are drawn on in the caller's preference order; within a pool
-        // notes are taken oldest-first until the accumulation exceeds the
-        // target, mirroring the upstream in-memory selector (the crossing
-        // note is included).
+        // notes are taken preferred lock tier first, then oldest, until the
+        // accumulation exceeds the target (the crossing note is included).
         for pool in sources {
             match pool {
                 ShieldedPool::Sapling => {
@@ -435,7 +643,6 @@ impl<P: Parameters> InputSource for Wallet<P> {
                     ) {
                         let take = match target_value {
                             TargetValue::AtLeast(target) => accumulated <= target,
-                            // AllFunds selects every eligible note.
                             TargetValue::AllFunds(_) => true,
                         };
                         let value = note
@@ -530,28 +737,29 @@ impl<P: Parameters> InputSource for Wallet<P> {
             return Err(WalletError::AccountUnknown(account));
         }
 
-        // Metadata describes spendability structure, so the minimal
-        // symmetrical policy (one confirmation) is used, mirroring
-        // `zcash_client_memory`.
-        let policy = ConfirmationsPolicy::MIN;
+        // Metadata describes note-set structure, not spendability at a tip:
+        // the fixture may query with a `target_height` that predates later
+        // receives, so confirmation depth is not applied here.
+        let account_balance =
+            self.shielded_unspent_total(account, target_height, exclude, lock_filter);
 
         let sapling_meta = self.pool_meta(
             account,
             ShieldedPool::Sapling,
             selector,
             target_height,
-            policy,
             exclude,
             lock_filter,
+            account_balance,
         );
         let ironwood_meta = self.pool_meta(
             account,
             ShieldedPool::Ironwood,
             selector,
             target_height,
-            policy,
             exclude,
             lock_filter,
+            account_balance,
         );
         // Ordinary Orchard is not a tracked pool of this wallet.
         Ok(AccountMeta::new(sapling_meta, None, ironwood_meta))
@@ -595,5 +803,209 @@ impl<P: Parameters> InputSource for Wallet<P> {
         // Transparent support is outbound-only: the mint never spends
         // transparent inputs.
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zcash_client_backend::data_api::testing::{pool, sapling::SaplingPoolTester};
+
+    use crate::wallet::testing::{Cache, Factory};
+
+    #[test]
+    fn create_to_address_fails_on_incorrect_usk() {
+        pool::create_to_address_fails_on_incorrect_usk::<SaplingPoolTester, _>(Factory);
+    }
+
+    #[test]
+    fn proposal_fails_with_no_blocks() {
+        pool::proposal_fails_with_no_blocks::<SaplingPoolTester, _>(Factory);
+    }
+
+    #[test]
+    fn spend_policy_locked_input_policy_reaches_selection() {
+        pool::locking::spend_policy_locked_input_policy_reaches_selection::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn locked_proposal_proto_roundtrip() {
+        pool::locking::locked_proposal_proto_roundtrip::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn single_note_selection_honors_lock_tier_preference() {
+        pool::locking::single_note_selection_honors_lock_tier_preference::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn send_single_step_proposed_transfer() {
+        pool::send_single_step_proposed_transfer::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn spend_max_spendable_single_step_proposed_transfer() {
+        pool::spend_max_spendable_single_step_proposed_transfer::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn spend_everything_single_step_proposed_transfer() {
+        pool::spend_everything_single_step_proposed_transfer::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn spend_all_funds_single_step_proposed_transfer() {
+        pool::spend_all_funds_single_step_proposed_transfer::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn send_with_multiple_change_outputs() {
+        pool::send_with_multiple_change_outputs::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn ovk_policy_prevents_recovery_from_chain() {
+        pool::ovk_policy_prevents_recovery_from_chain::<SaplingPoolTester, _>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn send_max_fee_overflow_is_an_error() {
+        pool::send_max_fee_overflow_is_an_error::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn send_max_fails_when_balance_is_consumed_by_fees() {
+        pool::send_max_fails_when_balance_is_consumed_by_fees::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn spend_everything_proposal_fails_when_unconfirmed_funds_present() {
+        pool::spend_everything_proposal_fails_when_unconfirmed_funds_present::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn spend_succeeds_to_t_addr_zero_change() {
+        pool::spend_succeeds_to_t_addr_zero_change::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    #[test]
+    fn fails_to_send_max_spendable_to_transparent_with_memo() {
+        pool::fails_to_send_max_spendable_to_transparent_with_memo::<SaplingPoolTester>(
+            Factory,
+            Cache::default(),
+        );
+    }
+
+    #[test]
+    fn send_max_spendable_to_transparent() {
+        pool::send_max_spendable_to_transparent::<SaplingPoolTester>(Factory, Cache::default());
+    }
+
+    /// A locally sent spend that the node later marks `TxidNotRecognized`
+    /// must unlock its inputs once the chain tip passes the raw transaction's
+    /// expiry — the same rule as `NotInMainChain`.
+    #[test]
+    fn txid_not_recognized_unlocks_after_expiry() {
+        use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
+        use zcash_client_backend::data_api::testing::pool::ShieldedPoolTester;
+        use zcash_client_backend::data_api::testing::AddressType;
+        use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
+        use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
+        use zcash_client_backend::data_api::{Account, TransactionStatus, WalletRead, WalletWrite};
+        use zcash_client_backend::fees::{standard, DustOutputPolicy, StandardFeeRule};
+        use zcash_keys::address::Address;
+        use zcash_protocol::value::Zatoshis;
+        use zip321::{Payment, TransactionRequest};
+
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let fund = Zatoshis::const_from_u64(60_000);
+        let (h, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, fund);
+        st.scan_cached_blocks(h, 1);
+        st.wallet_mut().update_chain_tip(h).unwrap();
+
+        let account = st.test_account().unwrap().clone();
+        let to_extsk = SaplingPoolTester::sk(&[0xf5; 32]);
+        let to: Address = SaplingPoolTester::sk_default_address(&to_extsk);
+        let request = TransactionRequest::new(vec![Payment::without_memo(
+            to.to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(10_000),
+        )])
+        .unwrap();
+
+        let change_strategy = standard::SingleOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            SaplingPoolTester::SHIELDED_PROTOCOL,
+            DustOutputPolicy::default(),
+        );
+        let input_selector = GreedyInputSelector::new();
+        let proposal = st
+            .propose_transfer(
+                account.id(),
+                &input_selector,
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+        let sent_txid = st.create_proposed_expecting(&proposal, 1)[0];
+
+        assert_eq!(
+            st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+            Zatoshis::ZERO,
+            "inputs stay blocked while the local send is outstanding"
+        );
+
+        st.wallet_mut()
+            .set_transaction_status(sent_txid, TransactionStatus::TxidNotRecognized)
+            .unwrap();
+
+        assert_eq!(
+            st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+            Zatoshis::ZERO,
+            "TxidNotRecognized still blocks before expiry"
+        );
+
+        let expiry = st
+            .wallet()
+            .get_transaction(sent_txid)
+            .unwrap()
+            .expect("local send retains its raw transaction")
+            .expiry_height();
+        st.wallet_mut().update_chain_tip(expiry).unwrap();
+
+        assert_eq!(
+            st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+            fund,
+            "after tip passes expiry, TxidNotRecognized spends unlock"
+        );
     }
 }

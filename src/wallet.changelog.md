@@ -1,5 +1,84 @@
 # Wallet changelog
 
+## 2026-09-18 — Wallet security findings
+
+### Fixed
+
+- `rewind_to_chain_state`: empty `reset_account_birthdays` errors when every
+  account would need its birthday lowered; acknowledged accounts may have
+  birthday metadata lowered to `chain_state.height + 1`. Birthdays are stored
+  per account.
+- Truncation / reorg cleanup (`drop_applied_above`): notes created only on the
+  abandoned branch are removed (no phantom pending balance); scanned-only
+  spends mined above the surviving tip are cleared so the note is selectable
+  again. Locally built spends keep their raw transaction and still block
+  until expiry.
+- `TxidNotRecognized` spends consult the retained raw transaction's expiry the
+  same way as `NotInMainChain`, so inputs unlock after the tip passes expiry
+  instead of staying blocked forever.
+- `ExceedsPriorSendPercentile` includes notes at the percentile threshold
+  (`>=`), and each percentile node in a Combine/Attempt tree evaluates its
+  own percentile instead of sharing one pre-extracted threshold.
+- Ordinary Orchard is compatibility-tree only: no received-note table. Docs
+  no longer claim such notes are stored unspendable; `put_blocks` returns
+  `UnexpectedOrchardReceive` if a scanned block surfaces one.
+- `put_blocks_marked` and three-tree truncation mutate cloned commitment
+  trees and replace the live trees only after the full batch succeeds, so a
+  mid-flight tree error no longer leaves pools partially advanced.
+  `replace_trees_from` (missing-checkpoint truncate fallback) builds and
+  frontiers the three replacements off to the side before swapping them in.
+- `store_name_note` returns `InvalidNameNote` unless the height is applied,
+  the txid is already mined there, the Ironwood tree witnesses the position,
+  and the note id / nullifier do not collide with a different note.
+
+## 2026-09-18 — Upstream wallet conformance (issue #69)
+
+### Fixed
+
+- After scan, the known tip rises to the last applied block when nothing
+  higher was set, so balances work without a separate tip update.
+- Truncation and rewind: tip moves with the target when needed; missing
+  checkpoints land on the supplied frontiers; rewind keeps a tip already
+  ahead.
+- Expired locks drop out of `get_locked_outputs`.
+- Anchor-aligned checkpoints at or above NU6.3 stay retained; the test
+  factory can set the interval; account setup keeps a preloaded frontier.
+- Checkpoint history and transaction history read real wallet state.
+- Note selection: lock-tier preference (unlocked vs locked, then age);
+  `AllFunds(Everything)` errors if any note in the pools is unspendable.
+- Dust (at or below the ZIP 317 marginal fee) is uneconomic — out of total
+  and spendable, still usable as a grace input when selecting.
+- Account metadata: no confirmation filter; balance-percentage and
+  prior-send-percentile filters use note values and sent outputs.
+
+### Connected
+
+- Dev-only upstream test helpers, plus a small factory, block cache, and
+  `WalletTest` adapter (one Treasury account for fixtures).
+- Sapling scenarios as thin wrappers in `input.rs` / `write.rs` (scan,
+  locks, send/spend, truncation/rewind, ZIP 315 external, anchor
+  retention, metadata, and related).
+
+### Disconnected
+
+- Scenarios that need a hole, overlap, or out-of-order `put_blocks`
+  (`spend_fails_on_locked_notes`, `birthday_in_anchor_shard`,
+  `checkpoint_gaps`, `data_db_truncation`, `reorg_to_checkpoint`). This
+  mint only applies the next height after the tip.
+- Ordinary-Orchard funding
+  (`propose_v5_payment_to_orchard_receiver_is_rejected`,
+  `proposal_records_and_serializes_proposed_version`): ordinary Orchard is
+  compatibility-tree only; receives are refused, not stored.
+- `send_max_spendable_proposal_succeeds_when_unconfirmed_funds_present`:
+  history length disagrees with a scanned unconfirmed receive we keep.
+- `zip317_spend`: helper keeps dust out of total; body wants dust in.
+- `zip_315_confirmations_internal`: Internal uses trusted remaining; the
+  fixture expects untrusted unless marked `ExternalTrusted`. External
+  arms stay connected.
+- Huge preloaded-tree scenarios
+  (`stabilized_note_spendable_after_deep_rewind`,
+  `newly_discovered_notes_become_stabilized`): would hang the suite.
+
 ## 2026-09-18 — The wallet knows its network
 
 - `Wallet` is generic: `Wallet<P: Parameters>` with a `network: P` field, matching
@@ -31,6 +110,51 @@
 - Both `reserve_next_n_ephemeral_addresses` and
   `reserve_next_n_internal_addresses` now return `Ok(vec![])` when
   `n == 0`. `n > 0` stays `FixedAccountsOnly`.
+
+## 2026-09-18 — Upstream corpus skip census
+
+Never-connected scenarios surveyed for PR #78 (comment census). Execution
+disconnects after a real run stay under the conformance chapter's
+Disconnected list above; this records the design exclusions that were
+never wired as wrappers.
+
+### Never connected (by design)
+
+- Transparent spending as inputs (`shield_transparent`,
+  `send_max_to_tex_fails_without_transparent_inputs`,
+  `transparent_note_locking`): transparent outputs are observations only.
+- ZIP-320 multi-step / ephemeral transparent (six scenarios): factory
+  rejects gap limits; no ephemeral address support.
+- Account lifecycle (`account_deletion`,
+  `account_deletion_with_internal_transfer`,
+  `external_address_change_spends_detected_in_restore_from_seed`,
+  `wallet_recovery_computes_fees`): `FixedAccountsOnly`.
+- Ordinary-Orchard funding and pool-crossing family (sixteen scenarios,
+  including `orchard_to_ironwood_*`, `canonical_crossing_*`,
+  `fully_funded_*`, `multi_pool_checkpoint*`,
+  `propose_v5_payment_to_orchard_receiver_is_rejected`,
+  `proposal_records_and_serializes_proposed_version`): no ordinary-Orchard
+  note table; receives are refused.
+- `pczt` feature-gated scenarios (twelve): `pczt` not enabled in the
+  mint's test graph.
+- Non-contiguous scanning (`scan_cached_blocks_allows_blocks_out_of_order`,
+  `scan_cached_blocks_detects_spends_out_of_order`,
+  `oldest_note_is_selected_first`, `rewind_after_non_contiguous_scan`):
+  `put_blocks` is sequential-only.
+- Feature-inverse (`send_max_delivers_via_sapling_when_orchard_is_unavailable`,
+  `send_max_to_orchard_only_ua_fails_without_orchard`): we build with
+  `orchard`.
+- Upstream dead / property (`invalid_chain_cache_disconnected`,
+  `check_note_locking_model`): not a live corpus entry here.
+
+### Retry later
+
+- `stabilized_note_spendable_after_deep_rewind`,
+  `newly_discovered_notes_become_stabilized`: retried after the preloaded
+  frontier is kept on account inject; still hang (>2 min, no finish) on the
+  ~131k-leaf initial tree / 65 536-output note block before any assertion.
+  `newly_discovered_*` would also need a second account (`FixedAccountsOnly`).
+  Stay out of the suite.
 
 ## 2026-09-16 — `Wallet::new` seeds pre-birthday shard roots
 

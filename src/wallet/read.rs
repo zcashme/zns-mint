@@ -10,6 +10,7 @@ use secrecy::SecretVec;
 use shardtree::store::ShardStore;
 use zcash_client_backend::data_api::locking::{LockFilter, LockedInputPolicy};
 use zcash_client_backend::data_api::{
+    anchor_retention::AnchorRetentionInterval,
     defaults,
     error::FindAccountForAddressError,
     scanning::{ScanPriority, ScanRange},
@@ -23,14 +24,15 @@ use zcash_client_backend::wallet::{NoteId, OutputRef, ReceivedNote, TransparentA
 use zcash_keys::address::{Address, UnifiedAddress};
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_primitives::block::BlockHash;
+use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{self, BlockHeight};
 use zcash_protocol::memo::Memo;
 use zcash_protocol::value::{BalanceError, Zatoshis};
 use zcash_protocol::{PoolType, ShieldedPool};
-use zip32::AccountId;
+use zip32::{AccountId, Scope};
 
-use crate::mint::{MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 
 use super::Wallet;
 
@@ -55,6 +57,17 @@ pub enum WalletError {
     CommitmentTree(shardtree::error::ShardTreeError<Infallible>),
     /// A value aggregation would overflow `MAX_MONEY`.
     Balance(BalanceError),
+    /// `AllFunds(Everything)` was requested but some notes in the spend
+    /// pools are not currently spendable (unconfirmed, locked, or otherwise
+    /// ineligible).
+    UnspendableFunds,
+    /// A scanned block contained an ordinary-Orchard output belonging to a
+    /// mint account. This wallet keeps no Orchard note table; accepting the
+    /// block would make that value invisible.
+    UnexpectedOrchardReceive,
+    /// `store_name_note` disagreed with applied wallet state (height, tx
+    /// status, tree position, or conflicting note/nullifier identity).
+    InvalidNameNote(&'static str),
 }
 
 impl From<shardtree::error::ShardTreeError<Infallible>> for WalletError {
@@ -96,6 +109,16 @@ impl std::fmt::Display for WalletError {
             }
             WalletError::CommitmentTree(e) => write!(f, "note commitment tree error: {e}"),
             WalletError::Balance(e) => write!(f, "balance error: {e}"),
+            WalletError::UnspendableFunds => {
+                write!(f, "not all funds in the requested pools are spendable")
+            }
+            WalletError::UnexpectedOrchardReceive => write!(
+                f,
+                "scanned ordinary-Orchard receive is not stored by this wallet"
+            ),
+            WalletError::InvalidNameNote(reason) => {
+                write!(f, "invalid Name Note ingestion: {reason}")
+            }
         }
     }
 }
@@ -113,20 +136,24 @@ pub(super) fn next_height(height: BlockHeight) -> BlockHeight {
 /// Upstream provides the `Account` trait but no production record type. This
 /// value is constructed only for an existing UFVK map entry and is never held
 /// by `Wallet`; the database itself remains the fixed account-0/account-1 map.
+#[cfg_attr(test, derive(Clone))]
 pub struct FixedAccount {
     id: AccountId,
     ufvk: UnifiedFullViewingKey,
     source: AccountSource,
+    birthday: BlockHeight,
 }
 
 impl FixedAccount {
-    pub(super) fn from_ufvk(id: AccountId, ufvk: UnifiedFullViewingKey) -> Option<Self> {
+    pub(super) fn from_ufvk(
+        id: AccountId,
+        ufvk: UnifiedFullViewingKey,
+        birthday: BlockHeight,
+    ) -> Option<Self> {
         matches!(id, TREASURY_ACCOUNT | REGISTRY_ACCOUNT).then_some(Self {
             id,
             ufvk,
-            // Boot imports the viewing capability into this disposable
-            // projection. The application retains the corresponding signing
-            // capability outside Wallet.
+            birthday,
             source: AccountSource::Imported {
                 purpose: AccountPurpose::Spending { derivation: None },
                 key_source: None,
@@ -156,7 +183,7 @@ impl UpstreamAccount for FixedAccount {
     }
 
     fn birthday_height(&self) -> BlockHeight {
-        MINT_BIRTHDAY
+        self.birthday
     }
 
     fn source(&self) -> &AccountSource {
@@ -227,10 +254,31 @@ impl<P: consensus::Parameters> Wallet<P> {
             .get_mut(&account)
             .expect("both fixed accounts are seeded with a zero balance");
 
+        let mut with_pool = |f: &mut dyn FnMut(&mut Balance) -> Result<(), WalletError>| match pool
+        {
+            ShieldedPool::Sapling => balance.with_sapling_balance_mut(|b| f(b)),
+            ShieldedPool::Orchard => balance.with_orchard_balance_mut(|b| f(b)),
+            ShieldedPool::Ironwood => balance.with_ironwood_balance_mut(|b| f(b)),
+        };
+
+        // Notes at or below the ZIP 317 marginal fee are uneconomic: they do
+        // not contribute to `Balance::total` or spendable, and can only be
+        // spent as grace inputs.
+        if value <= MARGINAL_FEE {
+            return with_pool(&mut |pool_balance| Ok(pool_balance.add_uneconomic_value(value)?));
+        }
+
         let Some(TransactionStatus::Mined(mined_height)) =
             self.transaction_statuses.get(note_id.txid())
         else {
-            return Ok(());
+            return with_pool(&mut |pool_balance| {
+                if is_change {
+                    pool_balance.add_pending_change_value(value)?;
+                } else {
+                    pool_balance.add_pending_spendable_value(value)?;
+                }
+                Ok(())
+            });
         };
         let required = self.required_confirmations(note_id.txid(), is_change, policy);
         let confirmed = target_height.saturating_sub(u32::from(required)) >= *mined_height;
@@ -238,13 +286,6 @@ impl<P: consensus::Parameters> Wallet<P> {
             .locks
             .get(&OutputRef::from(*note_id))
             .is_some_and(|(_, expiry)| *expiry >= BlockHeight::from(target_height));
-
-        let mut with_pool = |f: &mut dyn FnMut(&mut Balance) -> Result<(), WalletError>| match pool
-        {
-            ShieldedPool::Sapling => balance.with_sapling_balance_mut(|b| f(b)),
-            ShieldedPool::Orchard => balance.with_orchard_balance_mut(|b| f(b)),
-            ShieldedPool::Ironwood => balance.with_ironwood_balance_mut(|b| f(b)),
-        };
 
         if !confirmed {
             with_pool(&mut |pool_balance| {
@@ -276,10 +317,10 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         &self,
         account_id: Self::AccountId,
     ) -> Result<Option<Self::Account>, Self::Error> {
-        Ok(self
-            .ufvks
-            .get(&account_id)
-            .and_then(|ufvk| FixedAccount::from_ufvk(account_id, ufvk.clone())))
+        Ok(self.ufvks.get(&account_id).and_then(|ufvk| {
+            let birthday = self.birthday_of(account_id)?;
+            FixedAccount::from_ufvk(account_id, ufvk.clone(), birthday)
+        }))
     }
 
     fn get_derived_account(
@@ -324,7 +365,10 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         let queried = ufvk.to_unified_incoming_viewing_key();
         Ok(self.ufvks.iter().find_map(|(id, ufvk)| {
             (ufvk.to_unified_incoming_viewing_key() == queried)
-                .then(|| FixedAccount::from_ufvk(*id, ufvk.clone()))
+                .then(|| {
+                    let birthday = self.birthday_of(*id)?;
+                    FixedAccount::from_ufvk(*id, ufvk.clone(), birthday)
+                })
                 .flatten()
         }))
     }
@@ -355,20 +399,22 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
     }
 
     fn get_account_birthday(&self, account: Self::AccountId) -> Result<BlockHeight, Self::Error> {
-        match self.ufvks.get(&account) {
-            Some(_) => Ok(MINT_BIRTHDAY),
-            None => Err(WalletError::AccountUnknown(account)),
-        }
+        self.birthday_of(account)
+            .ok_or(WalletError::AccountUnknown(account))
     }
 
     fn get_wallet_birthday(&self) -> Result<Option<BlockHeight>, Self::Error> {
-        Ok((!self.ufvks.is_empty()).then_some(MINT_BIRTHDAY))
+        Ok(self.wallet_birthday())
     }
 
     fn get_wallet_recover_until(&self) -> Result<Option<BlockHeight>, Self::Error> {
         // The fixed accounts were created at the deployment scan floor, not
         // restored from backup, so there is no recovery horizon.
         Ok(None)
+    }
+
+    fn anchor_retention_interval(&self) -> AnchorRetentionInterval {
+        self.anchor_retention_interval
     }
 
     fn get_wallet_summary(
@@ -400,7 +446,7 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
                 &mut account_balances,
                 *output.account_id(),
                 note_id,
-                output.is_change(),
+                output.is_change() || output.recipient_key_scope() == Some(Scope::Internal),
                 value,
                 ShieldedPool::Sapling,
                 target_height,
@@ -417,7 +463,7 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
                 &mut account_balances,
                 *output.account_id(),
                 note_id,
-                output.is_change(),
+                output.is_change() || output.recipient_key_scope() == Some(Scope::Internal),
                 value,
                 ShieldedPool::Ironwood,
                 target_height,
@@ -425,14 +471,21 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
             )?;
         }
 
-        // Progress over the block span between the fixed birthday and the
-        // Zebra tip; a display metric, not an authoritative note count.
-        let scanned_span = u64::from(
-            (u32::from(fully_scanned_height) + 1).saturating_sub(u32::from(MINT_BIRTHDAY)),
-        );
+        // Progress over the block span between the earliest account birthday
+        // and the Zebra tip; a display metric, not an authoritative note count.
+        let birthday = self
+            .wallet_birthday()
+            .unwrap_or_else(|| next_height(self.seed.block_height()));
+        let scanned_span =
+            u64::from((u32::from(fully_scanned_height) + 1).saturating_sub(u32::from(birthday)));
         let total_span =
-            u64::from(u32::from(chain_tip_height).saturating_sub(u32::from(MINT_BIRTHDAY)) + 1);
-        let progress = Progress::new(Ratio::new(scanned_span.min(total_span), total_span), None);
+            u64::from(u32::from(chain_tip_height).saturating_sub(u32::from(birthday)) + 1);
+        let scan = if total_span == 0 {
+            Ratio::new(1, 1)
+        } else {
+            Ratio::new(scanned_span.min(total_span), total_span)
+        };
+        let progress = Progress::new(scan, Some(Ratio::new(0, 0)));
 
         let summary = WalletSummary::new(
             account_balances,
@@ -480,9 +533,13 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         let Some(tip) = self.zebra_tip else {
             return Ok(Vec::new());
         };
-        let start = self
-            .max_applied_height()
-            .map_or_else(|| MINT_BIRTHDAY, next_height);
+        let start = match self.max_applied_height() {
+            Some(h) => next_height(h),
+            None => match self.wallet_birthday() {
+                Some(b) => b,
+                None => return Ok(Vec::new()),
+            },
+        };
         let end = next_height(tip);
         if start >= end {
             Ok(Vec::new())
@@ -651,12 +708,8 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
     }
 
     fn utxo_query_height(&self, account: Self::AccountId) -> Result<BlockHeight, Self::Error> {
-        match self.ufvks.get(&account) {
-            // No transparent receiver is ever derived, so there is nothing to
-            // observe below the fixed scan floor.
-            Some(_) => Ok(MINT_BIRTHDAY),
-            None => Err(WalletError::AccountUnknown(account)),
-        }
+        self.birthday_of(account)
+            .ok_or(WalletError::AccountUnknown(account))
     }
 
     fn transaction_data_requests(&self) -> Result<Vec<TransactionDataRequest>, Self::Error> {
@@ -668,38 +721,49 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
     fn get_received_outputs(
         &self,
         txid: TxId,
-        _target_height: TargetHeight,
+        target_height: TargetHeight,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Vec<ReceivedTransactionOutput>, Self::Error> {
+        let remaining = |is_change: bool, scope: Option<Scope>| {
+            let required = self.required_confirmations(
+                &txid,
+                is_change || scope == Some(Scope::Internal),
+                confirmations_policy,
+            );
+            match self.mined_height(&txid) {
+                Some(mined) => {
+                    let have = u32::from(BlockHeight::from(target_height))
+                        .saturating_sub(u32::from(mined));
+                    u32::from(required).saturating_sub(have)
+                }
+                None => u32::from(required),
+            }
+        };
         let mut outputs = Vec::new();
         for (note_id, output) in &self.sapling_notes {
             if note_id.txid() != &txid {
                 continue;
             }
-            let confirmations =
-                self.required_confirmations(&txid, output.is_change(), confirmations_policy);
             let value = Zatoshis::try_from(output.note().value().inner())
                 .expect("Sapling note values are within valid ZEC bounds by consensus");
             outputs.push(ReceivedTransactionOutput::from_parts(
                 PoolType::Shielded(ShieldedPool::Sapling),
                 usize::from(note_id.output_index()),
                 value,
-                u32::from(confirmations),
+                remaining(output.is_change(), output.recipient_key_scope()),
             ));
         }
         for (note_id, output) in &self.ironwood_notes {
             if note_id.txid() != &txid {
                 continue;
             }
-            let confirmations =
-                self.required_confirmations(&txid, output.is_change(), confirmations_policy);
             let value = Zatoshis::from_u64(output.note().0.value().inner())
                 .expect("Ironwood note values are within valid ZEC bounds by consensus");
             outputs.push(ReceivedTransactionOutput::from_parts(
                 PoolType::Shielded(ShieldedPool::Ironwood),
                 usize::from(note_id.output_index()),
                 value,
-                u32::from(confirmations),
+                remaining(output.is_change(), output.recipient_key_scope()),
             ));
         }
         Ok(outputs)
