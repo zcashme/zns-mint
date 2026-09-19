@@ -27,6 +27,9 @@
   mid-flight tree error no longer leaves pools partially advanced.
   `replace_trees_from` (missing-checkpoint truncate fallback) builds and
   frontiers the three replacements off to the side before swapping them in.
+- `store_name_note` returns `InvalidNameNote` unless the height is applied,
+  the txid is already mined there, the Ironwood tree witnesses the position,
+  and the note id / nullifier do not collide with a different note.
 
 ## 2026-09-18 — Upstream wallet conformance (issue #69)
 

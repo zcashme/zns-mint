@@ -1079,6 +1079,12 @@ impl<P: Parameters> Wallet<P> {
     /// `nullifier` was derived by the ZNS decryption pass from the same
     /// authenticated `(rcm, psi)` pair that reproduced the action's cmx. The
     /// ordinary rseed-derived nullifier never matches a Name Note spend.
+    ///
+    /// Returns [`WalletError::InvalidNameNote`] when the arguments contradict
+    /// applied state: the height must be an applied block, the txid must
+    /// already be mined at that height, the Ironwood tree must witness
+    /// `position` there, and the note id / nullifier must not collide with a
+    /// different retained note.
     #[allow(clippy::too_many_arguments)]
     pub fn store_name_note(
         &mut self,
@@ -1090,12 +1096,65 @@ impl<P: Parameters> Wallet<P> {
         nullifier: orchard::note::Nullifier,
         ephemeral_key: zcash_note_encryption::EphemeralKeyBytes,
         memo: [u8; 512],
-    ) {
-        let note_id = NoteId::new(
-            txid,
-            ShieldedPool::Ironwood,
-            u16::try_from(action_index).expect("Ironwood action index fits u16"),
+    ) -> Result<(), WalletError> {
+        if !self.blocks.contains_key(&height) {
+            return Err(WalletError::InvalidNameNote(
+                "height is not an applied block",
+            ));
+        }
+        match self.transaction_statuses.get(&txid) {
+            Some(TransactionStatus::Mined(mined)) if *mined == height => {}
+            Some(TransactionStatus::Mined(_)) => {
+                return Err(WalletError::InvalidNameNote(
+                    "txid is mined at a different height",
+                ));
+            }
+            Some(_) => {
+                return Err(WalletError::InvalidNameNote(
+                    "txid is not mined in the main chain",
+                ));
+            }
+            None => {
+                return Err(WalletError::InvalidNameNote(
+                    "txid was not applied with put_blocks",
+                ));
+            }
+        }
+        let output_index = u16::try_from(action_index)
+            .map_err(|_| WalletError::InvalidNameNote("Ironwood action index does not fit u16"))?;
+        let note_id = NoteId::new(txid, ShieldedPool::Ironwood, output_index);
+
+        if let Some(existing) = self.ironwood_notes.get(&note_id) {
+            if existing.note_commitment_tree_position() != position
+                || existing.nf().copied() != Some(nullifier)
+            {
+                return Err(WalletError::InvalidNameNote(
+                    "NoteId already identifies a different Ironwood note",
+                ));
+            }
+        }
+        if let Some(owner) = self.ironwood_nullifiers.get(&nullifier) {
+            if *owner != note_id {
+                return Err(WalletError::InvalidNameNote(
+                    "nullifier already identifies a different Ironwood note",
+                ));
+            }
+        }
+        if self
+            .ironwood_witness(position, height)
+            .map_err(WalletError::CommitmentTree)?
+            .is_none()
+        {
+            return Err(WalletError::InvalidNameNote(
+                "no Ironwood witness at position for this height",
+            ));
+        }
+
+        let memo = Memo::Future(
+            zcash_protocol::memo::MemoBytes::from_bytes(&memo)
+                .map_err(|_| WalletError::InvalidNameNote("memo bytes are not valid MemoBytes"))?,
         );
+
         self.ironwood_notes.insert(
             note_id,
             WalletIronwoodOutput::from_parts(
@@ -1110,17 +1169,8 @@ impl<P: Parameters> Wallet<P> {
             ),
         );
         self.ironwood_nullifiers.insert(nullifier, note_id);
-        self.memos.insert(
-            note_id,
-            Memo::Future(
-                zcash_protocol::memo::MemoBytes::from_bytes(&memo)
-                    .expect("512-byte memo always parses"),
-            ),
-        );
-        self.transaction_statuses.insert(
-            txid,
-            zcash_client_backend::data_api::TransactionStatus::Mined(height),
-        );
+        self.memos.insert(note_id, memo);
+        Ok(())
     }
 }
 

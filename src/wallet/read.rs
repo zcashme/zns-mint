@@ -65,6 +65,9 @@ pub enum WalletError {
     /// mint account. This wallet keeps no Orchard note table; accepting the
     /// block would make that value invisible.
     UnexpectedOrchardReceive,
+    /// `store_name_note` disagreed with applied wallet state (height, tx
+    /// status, tree position, or conflicting note/nullifier identity).
+    InvalidNameNote(&'static str),
 }
 
 impl From<shardtree::error::ShardTreeError<Infallible>> for WalletError {
@@ -113,6 +116,9 @@ impl std::fmt::Display for WalletError {
                 f,
                 "scanned ordinary-Orchard receive is not stored by this wallet"
             ),
+            WalletError::InvalidNameNote(reason) => {
+                write!(f, "invalid Name Note ingestion: {reason}")
+            }
         }
     }
 }

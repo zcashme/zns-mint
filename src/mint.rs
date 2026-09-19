@@ -490,16 +490,18 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     }
     for (index, position) in accepted_name_notes {
         let candidate = &candidates[index];
-        wallet.store_name_note(
-            height,
-            position,
-            candidate.txid,
-            candidate.action_index,
-            candidate.note,
-            candidate.nullifier,
-            candidate.ephemeral_key.clone(),
-            candidate.memo,
-        );
+        wallet
+            .store_name_note(
+                height,
+                position,
+                candidate.txid,
+                candidate.action_index,
+                candidate.note,
+                candidate.nullifier,
+                candidate.ephemeral_key.clone(),
+                candidate.memo,
+            )
+            .expect("FATAL: Name Note disagreed with applied wallet state");
         // The block fulfilled the order.
         name_notes.fulfill(&candidate.payload);
     }
