@@ -186,6 +186,13 @@ async fn main() {
             );
         }
 
+        // MTP still names the previous tip's day. Catch-up may cross a
+        // midnight; `today` after apply is the same local the oracle
+        // gets, and the sweep sees the diff.
+        let previous_day = mtp
+            .current_day()
+            .expect("FATAL: MTP unavailable before catch-up");
+
         // Apply every missing canonical block in strict order: fetch with
         // retry, verify the terminal block, call `apply_block` — the
         // application itself is the one body shared with boot.
@@ -739,6 +746,8 @@ async fn main() {
             &treasury_keys,
             &sapling_spend,
             &sapling_output,
+            today,
+            previous_day,
         ) {
             source.submit(&tx, "vault sweep").await;
         }

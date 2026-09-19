@@ -17,10 +17,7 @@ use zcash_client_backend::data_api::{
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
-use zcash_primitives::transaction::fees::zip317::{
-    FeeError, MARGINAL_FEE, P2PKH_STANDARD_OUTPUT_SIZE,
-};
-use zcash_primitives::transaction::fees::FeeRule as _;
+use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
@@ -93,8 +90,9 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Requ
     })
 }
 
-/// Minimum spendable Treasury balance to trigger a vault sweep (2 ZEC).
-pub const SWEEP_THRESHOLD: Zatoshis = Zatoshis::const_from_u64(200_000_000);
+/// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
+/// actually moves, not on the balance behind it.
+pub const SWEEP_MINIMUM: Zatoshis = Zatoshis::const_from_u64(100_000_000);
 
 /// Amount retained as Treasury change after a sweep (0.01 ZEC): the
 /// operating float that funds the next Name Note's fee.
@@ -105,57 +103,27 @@ pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 pub const VAULT_ADDRESS: transparent::address::TransparentAddress =
     transparent::address::TransparentAddress::PublicKeyHash([0x42; 20]);
 
-/// ZIP-317 fee for a vault sweep of this input set: one P2PKH vault
-/// output, one Ironwood change, DEFAULT Ironwood padding, no Orchard.
-fn vault_sweep_fee<P: Parameters>(
-    network: &P,
-    target_height: BlockHeight,
-    sapling_notes: usize,
-    ironwood_notes: usize,
-) -> Option<Zatoshis> {
-    let sapling_bundle = sapling::builder::BundleType::DEFAULT
-        .num_outputs(sapling_notes, 0)
-        .map_err(|error| tracing::warn!(error, "vault sweep skipped: Sapling bundle shape invalid"))
-        .ok()?;
-    let ironwood_bundle = orchard::builder::BundleType::DEFAULT
-        .num_actions(
-            orchard::bundle::BundleVersion::ironwood_v3().default_flags(),
-            ironwood_notes,
-            1,
-        )
-        .map_err(|error| {
-            tracing::warn!(error, "vault sweep skipped: Ironwood bundle shape invalid")
-        })
-        .ok()?;
-    StandardFeeRule::Zip317
-        .fee_required(
-            network,
-            target_height,
-            [],
-            [P2PKH_STANDARD_OUTPUT_SIZE],
-            sapling_notes,
-            sapling_bundle,
-            0,
-            ironwood_bundle,
-        )
-        .map_err(|error| {
-            tracing::warn!(?error, "vault sweep skipped: ZIP-317 fee not representable")
-        })
-        .ok()
-}
-
 /// One sweep: all Treasury value above the operating float moves to the
-/// vault. ZIP-317 prices the selected notes; the payment is that total
-/// minus the fee, `SWEEP_RESERVE`, and one extra ZIP-317 action so
-/// `propose_transfer` can add Ironwood change. Only Sapling and Ironwood
-/// are spent. Returns `None` on any failure; retried at the next tip.
+/// vault, and only when this tip's catch-up advanced the mint's day and
+/// at least `SWEEP_MINIMUM` moves. The ZIP-321 amount is `total` minus
+/// `SWEEP_RESERVE`; `propose_transfer` prices ZIP-317 and the fee comes
+/// out of the float (leftover is reserve minus fee, not exactly reserve).
+/// Only Sapling and Ironwood are spent. Returns `None` on a same-day
+/// tip or any failure; the next midnight crossing tries again.
+#[allow(clippy::too_many_arguments)]
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
     treasury_keys: &crate::key::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
+    today: i64,
+    previous_day: i64,
 ) -> Option<zcash_primitives::transaction::Transaction> {
+    if today <= previous_day {
+        return None;
+    }
+
     let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
     let Some((target_height, _)) = wallet
         .get_target_and_anchor_heights(NonZeroU32::MIN)
@@ -166,28 +134,6 @@ pub fn sweep_to_vault<P: Parameters>(
         return None;
     };
 
-    let Some(summary) = wallet.get_wallet_summary(policy).ok().flatten() else {
-        tracing::warn!("vault sweep skipped: no wallet summary");
-        return None;
-    };
-    let Some(account) = summary.account_balances().get(&TREASURY_ACCOUNT) else {
-        tracing::warn!("vault sweep skipped: Treasury account missing from summary");
-        return None;
-    };
-    let sapling = account.sapling_balance().spendable_value();
-    let ironwood = account.ironwood_balance().spendable_value();
-    let spendable = (sapling + ironwood).expect("balances sum");
-    if spendable <= SWEEP_THRESHOLD {
-        tracing::debug!(
-            spendable_zats = spendable.into_u64(),
-            threshold_zats = SWEEP_THRESHOLD.into_u64(),
-            "vault sweep skipped: below threshold"
-        );
-        return None;
-    }
-
-    // Fee from the notes this sweep will spend. Leave one extra ZIP-317
-    // action so propose_transfer can add Ironwood change.
     let lock_policy = LockedInputPolicy::Exclude;
     let notes = match wallet.select_spendable_notes(
         TREASURY_ACCOUNT,
@@ -200,7 +146,7 @@ pub fn sweep_to_vault<P: Parameters>(
     ) {
         Ok(notes) if !notes.is_empty() => notes,
         Ok(_) => {
-            tracing::warn!("vault sweep skipped: no spendable notes");
+            tracing::debug!("vault sweep skipped: no spendable notes");
             return None;
         }
         Err(error) => {
@@ -213,35 +159,14 @@ pub fn sweep_to_vault<P: Parameters>(
         return None;
     };
 
-    let ironwood_n = notes.ironwood().len();
-    let fee = vault_sweep_fee(
-        network,
-        BlockHeight::from(target_height),
-        notes.sapling().len(),
-        ironwood_n,
-    )?;
-    let Some(payment) = (total - fee)
-        .and_then(|remaining| remaining - SWEEP_RESERVE)
-        .and_then(|remaining| remaining - MARGINAL_FEE)
-    else {
-        tracing::warn!(
+    let Some(payment) = (total - SWEEP_RESERVE).filter(|p| *p >= SWEEP_MINIMUM) else {
+        tracing::debug!(
             spendable_zats = total.into_u64(),
-            fee_zats = fee.into_u64(),
-            ironwood_n,
-            reserve_zats = SWEEP_RESERVE.into_u64(),
-            "vault sweep skipped: reserve and fee exceed spendable"
+            minimum_zats = SWEEP_MINIMUM.into_u64(),
+            "vault sweep skipped: payment below the minimum"
         );
         return None;
     };
-    if payment.is_zero() {
-        tracing::warn!(
-            spendable_zats = total.into_u64(),
-            fee_zats = fee.into_u64(),
-            ironwood_n,
-            "vault sweep skipped: payment is zero"
-        );
-        return None;
-    }
 
     let Some(request) = zip321::Payment::new(
         zcash_keys::address::Address::Transparent(VAULT_ADDRESS).to_zcash_address(network),
@@ -277,10 +202,7 @@ pub fn sweep_to_vault<P: Parameters>(
     .map_err(|error| {
         tracing::warn!(
             ?error,
-            fee_zats = fee.into_u64(),
             payment_zats = payment.into_u64(),
-            ironwood_n,
-            ironwood_zats = notes.ironwood_value().ok().map(Zatoshis::into_u64),
             spendable_zats = total.into_u64(),
             "vault sweep proposal failed"
         )
@@ -480,21 +402,6 @@ mod tests {
 
     fn h(n: u32) -> BlockHeight {
         BlockHeight::from_u32(n)
-    }
-
-    #[test]
-    fn vault_sweep_fee_matches_the_ceremony_note_shape() {
-        // One Ironwood note, 5.49785 ZEC: 1 P2PKH + padded spend and
-        // change is three ZIP-317 actions.
-        let total = Zatoshis::const_from_u64(549_785_000);
-        let fee = vault_sweep_fee(&MainNetwork, BlockHeight::from_u32(1), 0, 1)
-            .expect("ZIP-317 fee is representable");
-        assert_eq!(fee, Zatoshis::const_from_u64(15_000));
-        let payment = (total - fee)
-            .and_then(|rest| rest - SWEEP_RESERVE)
-            .and_then(|rest| rest - MARGINAL_FEE)
-            .expect("ceremony note covers reserve, fee, and one extra action");
-        assert_eq!(payment, Zatoshis::const_from_u64(548_765_000));
     }
 
     #[test]

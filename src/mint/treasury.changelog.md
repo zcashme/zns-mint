@@ -1,5 +1,31 @@
 # Treasury design record
 
+## Sweep payment is inlined into `sweep_to_vault`
+
+- One caller: `total − SWEEP_RESERVE`, then the 1 ZEC floor, sits at
+  the ZIP-321 site. The helper is gone.
+
+## Sweep payment is total minus the float
+
+- The ZIP-321 amount is `total − SWEEP_RESERVE`, then the 1 ZEC floor.
+  ZIP-317 is `propose_transfer`'s job and comes out of the 0.01 ZEC
+  leftover. Exact reserve after the sweep is not a requirement.
+- `vault_sweep_fee` and the extra `MARGINAL_FEE` slack are gone. A
+  refused proposal skips until the next midnight; no replacement fudge.
+
+## The sweep is a midnight event with a minimum payment (#82)
+
+- `sweep_to_vault` takes this tip's day and the day MTP named before
+  catch-up. A same-day tip returns `None` on one integer compare, no
+  wallet. A catch-up that crosses midnight is the one chance to sweep;
+  a dry crossing waits until the next.
+- The 2 ZEC spendable `SWEEP_THRESHOLD` and its wallet-summary
+  pre-check are gone; the gate is now a floor on what moves:
+  `sweep_payment` returns the vault payment only when at least
+  `SWEEP_MINIMUM` (1 ZEC) reaches the vault, with `SWEEP_RESERVE`
+  still behind as change. Below-minimum and empty-notes idle log at
+  debug so a dry rollover does not warn.
+
 ## 2026-09-18 — Sweep payment leaves slack for propose's change action
 
 - `propose_transfer` first prices ZIP-317 with the payment and spends

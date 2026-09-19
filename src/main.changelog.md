@@ -4,6 +4,14 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-18 — Vault sweep rides the MTP day diff (#82)
+
+- Before catch-up, the loop reads `mtp.current_day()` as `previous_day`.
+  After apply it already computes `today` for the oracle. Both go to
+  `treasury::sweep_to_vault`; the call site is unchanged (`if let Some(tx)`).
+  No run-loop marker. A tip that does not cross midnight is a no-op
+  inside the function.
+
 ## 2026-09-18 — The renewal or upgrade fee covers every term (#72)
 
 - The echo lane's gate now covers `Ny` extensions, not just the
