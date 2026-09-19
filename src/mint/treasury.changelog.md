@@ -1,5 +1,13 @@
 # Treasury design record
 
+## Sweep payment is total minus the float
+
+- `sweep_payment` is `total − SWEEP_RESERVE`, then the 1 ZEC floor.
+  ZIP-317 is `propose_transfer`'s job and comes out of the 0.01 ZEC
+  leftover. Exact reserve after the sweep is not a requirement.
+- `vault_sweep_fee` and the extra `MARGINAL_FEE` slack are gone. A
+  refused proposal skips until the next midnight; no replacement fudge.
+
 ## The sweep is a midnight event with a minimum payment (#82)
 
 - `sweep_to_vault` takes this tip's day and the day MTP named before
