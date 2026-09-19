@@ -76,12 +76,6 @@ pub fn prepare<P: Parameters>(
     let treasury_change =
         (fee_funding - transaction_fee).expect("selection guarantees fee coverage");
 
-    // No input reservation is taken: the select → prove → record window is
-    // a single `&mut Wallet` borrow in a serial order loop, and the
-    // unmined-spend records written by `record_sent` block re-selection
-    // until the transaction mines or expires. The wallet's lock store
-    // remains conformance surface for the upstream corpus only.
-
     let anchor = wallet.anchor_at(tip);
     let authority_note = *authority.note();
     let authority_path = wallet
