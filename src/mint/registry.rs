@@ -165,7 +165,12 @@ impl Registry {
         mtp: Timestamp,
     ) -> Option<NameNote> {
         match request {
-            Request::Claim { name, ua, term } => {
+            Request::Claim {
+                name,
+                ua,
+                term,
+                code: _,
+            } => {
                 match current_record(self, &name) {
                     None => {}
                     Some(

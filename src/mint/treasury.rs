@@ -27,12 +27,16 @@ use crate::wallet::Wallet;
 
 /// Parses a 512-byte memo sent to the Treasury as a ZNS Request.
 ///
-/// Field slots are positional; the term leads, so every human-facing memo
-/// keeps `<ua>` terminal — the NameNote is the one exception, ending in
-/// its chain link:
+/// Field slots are positional; every human-facing memo keeps `<ua>`
+/// terminal — the NameNote is the one exception, ending in its chain
+/// link:
 ///
-/// - Claim: `ZNS:claim:<term>:<name>:<ua>` — `<term>` is `forever` or
-///   `<N>y`, N = 1–99.
+/// - Claim: `ZNS:claim:<term>:<name>:<ua>` or
+///   `ZNS:claim:<code>:<term>:<name>:<ua>` — `<term>` is `forever` or
+///   `<N>y`, N = 1–99. A leading field that parses as a term is the
+///   term (codeless form, byte-identical to the three-slot claim);
+///   otherwise it is the pre-sale access code: 16–63 ASCII alphanumeric
+///   bytes (`a`–`z`, `A`–`Z`, `0`–`9`; never a term spelling).
 /// - Update: `ZNS:update:<term>:<name>:<ua>` — `<term>` is `none`
 ///   (expiry carried forward), `<N>y`, or `forever` (the upgrade: a
 ///   fixed-term registration converts to no fixed expiration).
@@ -59,16 +63,31 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Requ
         _ => return None,
     };
 
-    // The term leads: claims say `forever` or `<N>y`; updates say `none`,
-    // `<N>y`, or `forever` — the upgrade spelling.
-    let term = match action {
-        Action::Claim => Some(Term::parse(fields.next()?)?),
-        Action::Update => match fields.next()? {
-            "none" => None,
-            "forever" => Some(Term::Forever),
-            field => Some(Term::parse(field)?),
-        },
-        Action::Release => None,
+    // Claims may lead with a pre-sale code; the discriminator is whether
+    // the next field is a term. Updates say `none`, `<N>y`, or `forever`.
+    let (claim_code, term) = match action {
+        Action::Claim => {
+            let first = fields.next()?;
+            if first.is_empty() {
+                return None;
+            }
+            if let Some(term) = Term::parse(first) {
+                (None, Some(term))
+            } else {
+                let code = parse_access_code(first)?;
+                let term = Term::parse(fields.next()?)?;
+                (Some(code), Some(term))
+            }
+        }
+        Action::Update => {
+            let term = match fields.next()? {
+                "none" => None,
+                "forever" => Some(Term::Forever),
+                field => Some(Term::parse(field)?),
+            };
+            (None, term)
+        }
+        Action::Release => (None, None),
     };
 
     let name = Name::parse(fields.next()?)?;
@@ -82,12 +101,33 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Requ
     };
 
     Some(match (action, term) {
-        (Action::Claim, Some(term)) => Request::Claim { name, ua, term },
+        (Action::Claim, Some(term)) => Request::Claim {
+            name,
+            ua,
+            term,
+            code: claim_code,
+        },
         (Action::Update, _) => Request::Update { name, ua, term },
         (Action::Release, _) => Request::Release { name, ua },
         // The wire always carries a claim term.
         (Action::Claim, None) => unreachable!("claims always carry a term"),
     })
+}
+
+/// Pre-sale access code: 16–63 ASCII alphanumeric bytes.
+fn parse_access_code(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    if bytes.len() < 16 || bytes.len() > 63 {
+        return None;
+    }
+    if bytes
+        .iter()
+        .all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'))
+    {
+        Some(s.to_string())
+    } else {
+        None
+    }
 }
 
 /// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
@@ -390,6 +430,7 @@ mod tests {
                 name,
                 ua,
                 term: Term::Forever,
+                code: None,
             },
             Action::Update => Request::Update {
                 name,
@@ -465,6 +506,7 @@ mod tests {
             Some(Request::Claim {
                 name,
                 term: Term::Forever,
+                code: None,
                 ..
             }) if name.as_str() == "alice"
         ));
@@ -479,6 +521,58 @@ mod tests {
             parse_request(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))),
             Some(Request::Release { .. })
         ));
+    }
+
+    #[test]
+    fn claim_may_lead_with_a_presale_code() {
+        let network = MainNetwork;
+        const CODE: &str = "a1b2c3d4e5f6g7h8";
+
+        assert!(matches!(
+            parse_request(
+                &network,
+                &padded(&format!("ZNS:claim:{CODE}:forever:alice:{TEST_UA}"))
+            ),
+            Some(Request::Claim {
+                term: Term::Forever,
+                code: Some(ref code),
+                ..
+            }) if code == CODE
+        ));
+        // Codeless three-slot form is unchanged.
+        assert!(matches!(
+            parse_request(
+                &network,
+                &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"))
+            ),
+            Some(Request::Claim {
+                code: None,
+                term: Term::Forever,
+                ..
+            })
+        ));
+        // A term-shaped first field is never taken as a code.
+        assert!(matches!(
+            parse_request(&network, &padded(&format!("ZNS:claim:12y:alice:{TEST_UA}"))),
+            Some(Request::Claim {
+                code: None,
+                term: Term::Years(12),
+                ..
+            })
+        ));
+        // Too short, or non-alphanumeric.
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:claim:004206:forever:alice:{TEST_UA}"))
+        )
+        .is_none());
+        assert!(parse_request(
+            &network,
+            &padded(&format!(
+                "ZNS:claim:a1b2c3d4e5f6g7h-:forever:alice:{TEST_UA}"
+            ))
+        )
+        .is_none());
     }
 
     #[test]

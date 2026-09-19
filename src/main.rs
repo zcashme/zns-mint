@@ -382,7 +382,12 @@ async fn main() {
                         name_notes.admit(note_height, transition_note);
                         true
                     }
-                    MintInbound::Request(Request::Claim { name, ua, term }) => {
+                    MintInbound::Request(Request::Claim {
+                        name,
+                        ua,
+                        term,
+                        code,
+                    }) => {
                         // One open claim per name: the Registry lags the
                         // mempool by a block; the queue does not. A rival
                         // payment stays Treasury income.
@@ -392,6 +397,34 @@ async fn main() {
                                 "claim already pending for this name"
                             );
                             break 'lane true;
+                        }
+                        // Pre-sale gate: read-only table lookup.
+                        // Unavailability defers with the queue; a deny is
+                        // decided. Redemption is the name already live.
+                        let name_live = registry
+                            .record(name)
+                            .is_some_and(|r| r.action != Action::Release);
+                        match zns_mint::mint::presale::decide(
+                            today,
+                            zns_mint::mint::presale::lookup_name(name).await,
+                            code.as_deref(),
+                            name_live,
+                        ) {
+                            zns_mint::mint::presale::Decision::Retry => {
+                                tracing::debug!(
+                                    name = %name.as_str(),
+                                    "pre-sale lookup unavailable; claim waits"
+                                );
+                                break 'lane false;
+                            }
+                            zns_mint::mint::presale::Decision::Deny => {
+                                tracing::debug!(
+                                    name = %name.as_str(),
+                                    "pre-sale claim refused"
+                                );
+                                break 'lane true;
+                            }
+                            zns_mint::mint::presale::Decision::Allow => {}
                         }
                         let price = oracle.quote(name, *term);
                         // Payment gate: the quote at first sight is binding.
@@ -406,6 +439,7 @@ async fn main() {
                                 name: name.clone(),
                                 ua: ua.clone(),
                                 term: *term,
+                                code: code.clone(),
                             },
                             None,
                             note_height,

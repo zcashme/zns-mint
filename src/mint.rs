@@ -3,6 +3,7 @@
 pub mod mtp;
 pub mod note;
 pub mod otp;
+pub mod presale;
 pub mod pricing;
 pub mod registry;
 
@@ -80,15 +81,19 @@ impl Action {
 ///
 /// Built from [`treasury::parse_request`];
 /// memo bytes stay on that parser. Claims carry a term (`forever` or
-/// `<N>y`); updates carry `none` (carried forward), `<N>y`, or
-/// `forever` — the upgrade.
+/// `<N>y`) and an optional leading pre-sale access code; updates carry
+/// `none` (carried forward), `<N>y`, or `forever` — the upgrade.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// Create a new registration; the term slot is never empty.
+    /// `code` is the leading pre-sale slot when present (16–63
+    /// alphanumeric); the codeless wire form stays byte-identical to
+    /// `ZNS:claim:<term>:<name>:<ua>`.
     Claim {
         name: Name,
         ua: UnifiedAddress,
         term: Term,
+        code: Option<String>,
     },
     /// Rebind; `None` carries the expiry forward, `Some(Years)` extends
     /// it, `Some(Forever)` upgrades it to no fixed expiration.
