@@ -1,5 +1,18 @@
 # Mint live-work design record
 
+## 2026-09-19 — Pre-sale access codes gate early claims (#83)
+
+- `mint::presale` looks up each claim name read-only against the external
+  Supabase pre-sale table. Protected names require the matching leading
+  memo code; open names do not. Unavailability returns to the request
+  queue (`Decision::Retry`); wrong or missing codes are decided dead.
+  Redemption is the name already live in the registry — the mint never
+  writes the table.
+- `GENERAL_AVAILABILITY_DAY` closes the window on the day clock; at and
+  after that day codes die worthless and every name is public. The REST
+  URL and anon key are deploy constants (empty until wired: every name
+  is open).
+
 ## 2026-09-15 — Liveness τ+L enforcement (issue #14)
 
 - `CHALLENGE_LEAD` (7 days) and `LIVENESS_RETRY_COOLDOWN` (24 h) are
