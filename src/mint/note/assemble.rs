@@ -2,14 +2,11 @@
 //! against the wallet and stages, proves, signs, and records the
 //! transaction.
 
-use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore as _};
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::fees::StandardFeeRule;
-use zcash_client_backend::wallet::{NoteId, OutputRef, ReceivedNote};
-use zcash_primitives::transaction::builder::{
-    BuildConfig, Builder, BundlePadding, DEFAULT_TX_EXPIRY_DELTA,
-};
+use zcash_client_backend::wallet::{NoteId, ReceivedNote};
+use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
 use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_primitives::transaction::Transaction;
@@ -79,22 +76,11 @@ pub fn prepare<P: Parameters>(
     let treasury_change =
         (fee_funding - transaction_fee).expect("selection guarantees fee coverage");
 
-    // Lock every selected input until the transaction expires.
-    let locked_refs = std::iter::once(OutputRef::from(*authority.internal_note_id()))
-        .chain(
-            candidates
-                .iter()
-                .take(fee_notes.len())
-                .map(|n| OutputRef::from(*n.internal_note_id())),
-        )
-        .collect::<Vec<_>>();
-    wallet
-        .lock_outputs(
-            &locked_refs,
-            LockOwner::random(&mut rand::rngs::OsRng),
-            target_height + DEFAULT_TX_EXPIRY_DELTA,
-        )
-        .expect("FATAL: wallet rejected the input lock");
+    // No input reservation is taken: the select → prove → record window is
+    // a single `&mut Wallet` borrow in a serial order loop, and the
+    // unmined-spend records written by `record_sent` block re-selection
+    // until the transaction mines or expires. The wallet's lock store
+    // remains conformance surface for the upstream corpus only.
 
     let anchor = wallet.anchor_at(tip);
     let authority_note = *authority.note();

@@ -250,17 +250,6 @@ impl<P: Parameters> Wallet<P> {
             .retain(|_, end| *end <= height);
 
         self.blocks.retain(|h, _| *h <= height);
-
-        // Drop locks whose output no longer exists in the wallet.
-        let stale_locks: Vec<_> = self
-            .locks
-            .keys()
-            .filter(|output| self.output_account(output).is_none())
-            .copied()
-            .collect();
-        for output in stale_locks {
-            self.locks.remove(&output);
-        }
     }
 
     /// Replaces the note commitment trees with the supplied frontiers.
