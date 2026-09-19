@@ -111,6 +111,49 @@
   `reserve_next_n_internal_addresses` now return `Ok(vec![])` when
   `n == 0`. `n > 0` stays `FixedAccountsOnly`.
 
+## 2026-09-18 — Upstream corpus skip census
+
+Never-connected scenarios surveyed for PR #78 (comment census). Execution
+disconnects after a real run stay under the conformance chapter's
+Disconnected list above; this records the design exclusions that were
+never wired as wrappers.
+
+### Never connected (by design)
+
+- Transparent spending as inputs (`shield_transparent`,
+  `send_max_to_tex_fails_without_transparent_inputs`,
+  `transparent_note_locking`): transparent outputs are observations only.
+- ZIP-320 multi-step / ephemeral transparent (six scenarios): factory
+  rejects gap limits; no ephemeral address support.
+- Account lifecycle (`account_deletion`,
+  `account_deletion_with_internal_transfer`,
+  `external_address_change_spends_detected_in_restore_from_seed`,
+  `wallet_recovery_computes_fees`): `FixedAccountsOnly`.
+- Ordinary-Orchard funding and pool-crossing family (sixteen scenarios,
+  including `orchard_to_ironwood_*`, `canonical_crossing_*`,
+  `fully_funded_*`, `multi_pool_checkpoint*`,
+  `propose_v5_payment_to_orchard_receiver_is_rejected`,
+  `proposal_records_and_serializes_proposed_version`): no ordinary-Orchard
+  note table; receives are refused.
+- `pczt` feature-gated scenarios (twelve): `pczt` not enabled in the
+  mint's test graph.
+- Non-contiguous scanning (`scan_cached_blocks_allows_blocks_out_of_order`,
+  `scan_cached_blocks_detects_spends_out_of_order`,
+  `oldest_note_is_selected_first`, `rewind_after_non_contiguous_scan`):
+  `put_blocks` is sequential-only.
+- Feature-inverse (`send_max_delivers_via_sapling_when_orchard_is_unavailable`,
+  `send_max_to_orchard_only_ua_fails_without_orchard`): we build with
+  `orchard`.
+- Upstream dead / property (`invalid_chain_cache_disconnected`,
+  `check_note_locking_model`): not a live corpus entry here.
+
+### Retry later
+
+- `stabilized_note_spendable_after_deep_rewind`,
+  `newly_discovered_notes_become_stabilized`: preloaded-frontier hang risk;
+  injection no longer discards the birthday frontier, but they stay out of
+  the suite until proven.
+
 ## 2026-09-16 — `Wallet::new` seeds pre-birthday shard roots
 
 - New `PreBirthdaySubtreeRoots { sapling, ironwood }`. Orchard omitted:
