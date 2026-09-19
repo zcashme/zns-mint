@@ -150,9 +150,11 @@ never wired as wrappers.
 ### Retry later
 
 - `stabilized_note_spendable_after_deep_rewind`,
-  `newly_discovered_notes_become_stabilized`: preloaded-frontier hang risk;
-  injection no longer discards the birthday frontier, but they stay out of
-  the suite until proven.
+  `newly_discovered_notes_become_stabilized`: retried after the preloaded
+  frontier is kept on account inject; still hang (>2 min, no finish) on the
+  ~131k-leaf initial tree / 65 536-output note block before any assertion.
+  `newly_discovered_*` would also need a second account (`FixedAccountsOnly`).
+  Stay out of the suite.
 
 ## 2026-09-16 — `Wallet::new` seeds pre-birthday shard roots
 
