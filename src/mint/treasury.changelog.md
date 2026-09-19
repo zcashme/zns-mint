@@ -1,8 +1,13 @@
 # Treasury design record
 
+## Sweep payment is inlined into `sweep_to_vault`
+
+- One caller: `total − SWEEP_RESERVE`, then the 1 ZEC floor, sits at
+  the ZIP-321 site. The helper is gone.
+
 ## Sweep payment is total minus the float
 
-- `sweep_payment` is `total − SWEEP_RESERVE`, then the 1 ZEC floor.
+- The ZIP-321 amount is `total − SWEEP_RESERVE`, then the 1 ZEC floor.
   ZIP-317 is `propose_transfer`'s job and comes out of the 0.01 ZEC
   leftover. Exact reserve after the sweep is not a requirement.
 - `vault_sweep_fee` and the extra `MARGINAL_FEE` slack are gone. A

@@ -103,14 +103,6 @@ pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 pub const VAULT_ADDRESS: transparent::address::TransparentAddress =
     transparent::address::TransparentAddress::PublicKeyHash([0x42; 20]);
 
-/// The vault payment for a swept total: everything above the 0.01 ZEC
-/// operating float, provided at least `SWEEP_MINIMUM` moves. ZIP-317 is
-/// `propose_transfer`'s job and comes out of the float.
-pub fn sweep_payment(total: Zatoshis) -> Option<Zatoshis> {
-    let payment = (total - SWEEP_RESERVE)?;
-    (payment >= SWEEP_MINIMUM).then_some(payment)
-}
-
 /// One sweep: all Treasury value above the operating float moves to the
 /// vault, and only when this tip's catch-up advanced the mint's day and
 /// at least `SWEEP_MINIMUM` moves. The ZIP-321 amount is `total` minus
@@ -167,7 +159,7 @@ pub fn sweep_to_vault<P: Parameters>(
         return None;
     };
 
-    let Some(payment) = sweep_payment(total) else {
+    let Some(payment) = (total - SWEEP_RESERVE).filter(|p| *p >= SWEEP_MINIMUM) else {
         tracing::debug!(
             spendable_zats = total.into_u64(),
             minimum_zats = SWEEP_MINIMUM.into_u64(),
@@ -410,26 +402,6 @@ mod tests {
 
     fn h(n: u32) -> BlockHeight {
         BlockHeight::from_u32(n)
-    }
-
-    #[test]
-    fn ceremony_note_clears_the_sweep_floor() {
-        // One Ironwood note, 5.49785 ZEC: payment is total minus the
-        // 0.01 float; ZIP-317 is not carved out here.
-        let total = Zatoshis::const_from_u64(549_785_000);
-        let payment = sweep_payment(total).expect("ceremony note clears the minimum");
-        assert_eq!(payment, Zatoshis::const_from_u64(548_785_000));
-    }
-
-    #[test]
-    fn sweep_payment_floors_the_vault_payment() {
-        let at_floor = (SWEEP_MINIMUM + SWEEP_RESERVE).expect("consts sum");
-        assert_eq!(sweep_payment(at_floor), Some(SWEEP_MINIMUM));
-
-        let below = (at_floor - Zatoshis::const_from_u64(1)).expect("subtracts");
-        assert_eq!(sweep_payment(below), None);
-
-        assert_eq!(sweep_payment(SWEEP_RESERVE), None);
     }
 
     #[test]
