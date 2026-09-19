@@ -129,6 +129,9 @@ impl<P: Parameters> Wallet<P> {
     }
 
     /// Whether every tree can truncate to `height` as a retained checkpoint.
+    ///
+    /// Truncation is applied to cloned trees first; the wallet's trees are
+    /// replaced only when all three succeed, so a failure leaves them unchanged.
     fn try_truncate_trees_to(&mut self, height: BlockHeight) -> Result<bool, WalletError> {
         let present = [
             self.sapling_tree
@@ -153,15 +156,25 @@ impl<P: Parameters> Wallet<P> {
         if present.iter().any(|have| !have) {
             return Ok(false);
         }
-        for result in [
-            self.sapling_tree.truncate_to_checkpoint(&height),
-            self.orchard_tree.truncate_to_checkpoint(&height),
-            self.ironwood_tree.truncate_to_checkpoint(&height),
-        ] {
-            if !result.map_err(WalletError::CommitmentTree)? {
-                return Ok(false);
-            }
+
+        let mut sapling = clone_shard_tree(&self.sapling_tree)?;
+        let mut orchard = clone_shard_tree(&self.orchard_tree)?;
+        let mut ironwood = clone_shard_tree(&self.ironwood_tree)?;
+        if !sapling
+            .truncate_to_checkpoint(&height)
+            .map_err(WalletError::CommitmentTree)?
+            || !orchard
+                .truncate_to_checkpoint(&height)
+                .map_err(WalletError::CommitmentTree)?
+            || !ironwood
+                .truncate_to_checkpoint(&height)
+                .map_err(WalletError::CommitmentTree)?
+        {
+            return Ok(false);
         }
+        self.sapling_tree = sapling;
+        self.orchard_tree = orchard;
+        self.ironwood_tree = ironwood;
         Ok(true)
     }
 
@@ -252,23 +265,28 @@ impl<P: Parameters> Wallet<P> {
     }
 
     /// Replaces the note commitment trees with the supplied frontiers.
+    ///
+    /// New trees are built and frontiers inserted off to the side; live
+    /// trees and shard-end indexes are replaced only after all three
+    /// insertions succeed.
     fn replace_trees_from(&mut self, chain_state: &ChainState) -> Result<(), WalletError> {
-        self.sapling_tree = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
-        self.orchard_tree = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
-        self.ironwood_tree = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
-        self.sapling_tree_shard_end_heights.clear();
-        self.orchard_tree_shard_end_heights.clear();
-        self.ironwood_tree_shard_end_heights.clear();
         let retention = Retention::Checkpoint {
             id: chain_state.block_height(),
             marking: Marking::None,
         };
-        self.sapling_tree
-            .insert_frontier(chain_state.final_sapling_tree().clone(), retention)?;
-        self.orchard_tree
-            .insert_frontier(chain_state.final_orchard_tree().clone(), retention)?;
-        self.ironwood_tree
-            .insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
+        let mut sapling = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+        let mut orchard = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+        let mut ironwood = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+        sapling.insert_frontier(chain_state.final_sapling_tree().clone(), retention)?;
+        orchard.insert_frontier(chain_state.final_orchard_tree().clone(), retention)?;
+        ironwood.insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
+
+        self.sapling_tree = sapling;
+        self.orchard_tree = orchard;
+        self.ironwood_tree = ironwood;
+        self.sapling_tree_shard_end_heights.clear();
+        self.orchard_tree_shard_end_heights.clear();
+        self.ironwood_tree_shard_end_heights.clear();
         Ok(())
     }
 
@@ -339,6 +357,58 @@ impl<P: Parameters> OutputLockStore for Wallet<P> {
             .map(|(output, _)| *output)
             .collect())
     }
+}
+
+/// Deep-copies an in-memory note commitment tree via its store API.
+///
+/// `ShardTree` / `MemoryShardStore` are not `Clone`; this rebuilds an
+/// equivalent tree so callers can mutate a candidate and commit only on
+/// success.
+fn clone_shard_tree<H, const DEPTH: u8, const SHARD_HEIGHT: u8>(
+    tree: &ShardTree<MemoryShardStore<H, BlockHeight>, DEPTH, SHARD_HEIGHT>,
+) -> Result<ShardTree<MemoryShardStore<H, BlockHeight>, DEPTH, SHARD_HEIGHT>, WalletError>
+where
+    H: Hashable + Clone + PartialEq,
+{
+    let src = tree.store();
+    let mut dst = MemoryShardStore::empty();
+
+    for root in src
+        .get_shard_roots()
+        .map_err(shardtree::error::ShardTreeError::Storage)?
+    {
+        if let Some(shard) = src
+            .get_shard(root)
+            .map_err(shardtree::error::ShardTreeError::Storage)?
+        {
+            dst.put_shard(shard)
+                .map_err(shardtree::error::ShardTreeError::Storage)?;
+        }
+    }
+
+    dst.put_cap(
+        src.get_cap()
+            .map_err(shardtree::error::ShardTreeError::Storage)?,
+    )
+    .map_err(shardtree::error::ShardTreeError::Storage)?;
+
+    let checkpoint_count = src
+        .checkpoint_count()
+        .map_err(shardtree::error::ShardTreeError::Storage)?;
+    src.for_each_checkpoint(checkpoint_count, |id, checkpoint| {
+        dst.add_checkpoint(*id, checkpoint.clone())
+    })
+    .map_err(shardtree::error::ShardTreeError::Storage)?;
+
+    for id in src
+        .retained_checkpoints()
+        .map_err(shardtree::error::ShardTreeError::Storage)?
+    {
+        dst.add_retained_checkpoint(id)
+            .map_err(shardtree::error::ShardTreeError::Storage)?;
+    }
+
+    Ok(ShardTree::new(dst, MAX_CHECKPOINTS))
 }
 
 /// Ensures a checkpoint exists at `height` for a tree that has just appended
@@ -658,15 +728,11 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
             return Err(WalletError::TruncationTargetUnavailable(max_height));
         };
 
-        // Trees first: on failure the tables remain untouched.
-        for result in [
-            self.sapling_tree.truncate_to_checkpoint(&target),
-            self.orchard_tree.truncate_to_checkpoint(&target),
-            self.ironwood_tree.truncate_to_checkpoint(&target),
-        ] {
-            if !result.map_err(WalletError::CommitmentTree)? {
-                return Err(WalletError::TruncationTargetUnavailable(target));
-            }
+        // Trees first on clones: on failure the live trees and tables stay
+        // untouched. `try_truncate_trees_to` commits all three only after each
+        // truncation succeeds.
+        if !self.try_truncate_trees_to(target)? {
+            return Err(WalletError::TruncationTargetUnavailable(target));
         }
 
         self.drop_applied_above(target);
@@ -904,20 +970,26 @@ impl<P: Parameters> Wallet<P> {
             }
         }
 
-        // Commitment trees are mutated before the infallible tables: if a
-        // tree operation fails, no wallet state has been applied and
-        // `truncate_to_height` can repair the trees.
+        // Append commitments on clones of the three trees. Only after the
+        // full batch succeeds are the live trees replaced, so a mid-batch
+        // tree failure leaves wallet state (including trees) unchanged.
+        let mut sapling_tree = clone_shard_tree(&self.sapling_tree)?;
+        let mut orchard_tree = clone_shard_tree(&self.orchard_tree)?;
+        let mut ironwood_tree = clone_shard_tree(&self.ironwood_tree)?;
         for block in &blocks {
             let height = block.height();
-            append_block_commitments(&mut self.sapling_tree, block.sapling(), height, &[])?;
-            append_block_commitments(&mut self.orchard_tree, block.orchard(), height, &[])?;
-            append_block_commitments(&mut self.ironwood_tree, block.ironwood(), height, marks)?;
+            append_block_commitments(&mut sapling_tree, block.sapling(), height, &[])?;
+            append_block_commitments(&mut orchard_tree, block.orchard(), height, &[])?;
+            append_block_commitments(&mut ironwood_tree, block.ironwood(), height, marks)?;
             if self.retains_anchor_checkpoint(height) {
-                self.sapling_tree.ensure_retained(height)?;
-                self.orchard_tree.ensure_retained(height)?;
-                self.ironwood_tree.ensure_retained(height)?;
+                sapling_tree.ensure_retained(height)?;
+                orchard_tree.ensure_retained(height)?;
+                ironwood_tree.ensure_retained(height)?;
             }
         }
+        self.sapling_tree = sapling_tree;
+        self.orchard_tree = orchard_tree;
+        self.ironwood_tree = ironwood_tree;
 
         for block in blocks {
             let height = block.height();

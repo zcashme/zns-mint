@@ -22,6 +22,11 @@
 - Ordinary Orchard is compatibility-tree only: no received-note table. Docs
   no longer claim such notes are stored unspendable; `put_blocks` returns
   `UnexpectedOrchardReceive` if a scanned block surfaces one.
+- `put_blocks_marked` and three-tree truncation mutate cloned commitment
+  trees and replace the live trees only after the full batch succeeds, so a
+  mid-flight tree error no longer leaves pools partially advanced.
+  `replace_trees_from` (missing-checkpoint truncate fallback) builds and
+  frontiers the three replacements off to the side before swapping them in.
 
 ## 2026-09-18 — Upstream wallet conformance (issue #69)
 
