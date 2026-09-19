@@ -73,9 +73,6 @@ pub struct Wallet<P: Parameters> {
     /// wallet; callers of the free data-api functions keep passing their
     /// own `params` and must pass the same network.
     network: P,
-    /// Only upstream conformance fixtures may inject accounts through WalletWrite.
-    #[cfg(test)]
-    test_network: Option<zcash_protocol::local_consensus::LocalNetwork>,
     /// Interval-aligned checkpoints at or above NU6.3 are kept as durable
     /// anchors, outside the ordinary `MAX_CHECKPOINTS` pruning window.
     anchor_retention_interval: AnchorRetentionInterval,
@@ -157,8 +154,6 @@ impl<P: Parameters> Wallet<P> {
         let account_birthdays = ufvks.keys().map(|&id| (id, birthday)).collect();
         let mut wallet = Self {
             network,
-            #[cfg(test)]
-            test_network: None,
             ufvks,
             scanning_keys,
             zebra_tip: None,
@@ -368,7 +363,6 @@ pub(crate) mod testing {
                 &ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
                 network,
             )?;
-            wallet.test_network = Some(network);
             if let Some(interval) = anchor_retention_interval {
                 wallet.anchor_retention_interval = interval;
             }
@@ -376,52 +370,55 @@ pub(crate) mod testing {
         }
     }
 
-    impl<P: Parameters + Clone> Wallet<P> {
-        pub(super) fn inject_test_account(
-            &mut self,
-            seed: &SecretVec<u8>,
-            birthday: &AccountBirthday,
-        ) -> Result<(AccountId, UnifiedSpendingKey), WalletError> {
-            // These scenarios need only one account. Fail loudly if a new test
-            // requires account lifecycle behavior that the mint does not have.
-            assert!(
-                self.ufvks.is_empty(),
-                "fixture supports one initial account only"
-            );
-            assert!(self.blocks.is_empty());
-            let network = self.test_network.expect("upstream fixture network");
-            let id = TREASURY_ACCOUNT;
-            let usk = UnifiedSpendingKey::from_seed(&network, seed.expose_secret(), id)
-                .expect("valid upstream test seed");
-            let prior = birthday.prior_chain_state();
-            let interval = self.anchor_retention_interval;
-            // The fixture may already have written the birthday frontier and
-            // shard roots; replacing the wallet would discard them.
-            let frontier_loaded = self
-                .sapling_tree
-                .store()
-                .get_checkpoint(&prior.block_height())
-                .ok()
-                .flatten()
-                .is_some();
-            if frontier_loaded {
-                self.seed = block_metadata(prior);
-                let birthday =
-                    BlockHeight::from_u32(u32::from(prior.block_height()).saturating_add(1));
-                self.ufvks.insert(id, usk.to_unified_full_viewing_key());
-                self.account_birthdays.insert(id, birthday);
-                self.scanning_keys = ScanningKeys::from_account_ufvks(self.ufvks.clone());
-            } else {
-                *self = Wallet::new(
-                    [(id, usk.to_unified_full_viewing_key())],
-                    prior,
-                    self.network.clone(),
-                )?;
-                self.anchor_retention_interval = interval;
-                self.test_network = Some(network);
-            }
-            Ok((id, usk))
+    /// Installs the one account upstream's conformance scenarios need,
+    /// translating the harness's seed-based `WalletWrite::create_account`
+    /// call into the mint's fixed-account shape. Test builds only: the
+    /// production trait method compiles this seam out entirely.
+    ///
+    /// The harness's test seed is a fixed public vector of zero bytes
+    /// (`TestBuilder::build`); no secret ever crosses this boundary.
+    pub(super) fn create_fixture_account<P: Parameters + Clone>(
+        wallet: &mut Wallet<P>,
+        seed: &SecretVec<u8>,
+        birthday: &AccountBirthday,
+    ) -> Result<(AccountId, UnifiedSpendingKey), WalletError> {
+        // These scenarios need only one account. Fail loudly if a new test
+        // requires account lifecycle behavior that the mint does not have.
+        assert!(
+            wallet.ufvks.is_empty(),
+            "fixture supports one initial account only"
+        );
+        assert!(wallet.blocks.is_empty());
+        let id = TREASURY_ACCOUNT;
+        let usk = UnifiedSpendingKey::from_seed(&wallet.network, seed.expose_secret(), id)
+            .expect("valid upstream test seed");
+        let prior = birthday.prior_chain_state();
+        let interval = wallet.anchor_retention_interval;
+        // `TestBuilder::build` may already have written the birthday
+        // frontier and shard roots through the public tree API; replacing
+        // the wallet would discard them.
+        let frontier_loaded = wallet
+            .sapling_tree
+            .store()
+            .get_checkpoint(&prior.block_height())
+            .ok()
+            .flatten()
+            .is_some();
+        if frontier_loaded {
+            wallet.seed = block_metadata(prior);
+            let birthday = BlockHeight::from_u32(u32::from(prior.block_height()).saturating_add(1));
+            wallet.ufvks.insert(id, usk.to_unified_full_viewing_key());
+            wallet.account_birthdays.insert(id, birthday);
+            wallet.scanning_keys = ScanningKeys::from_account_ufvks(wallet.ufvks.clone());
+        } else {
+            *wallet = Wallet::new(
+                [(id, usk.to_unified_full_viewing_key())],
+                prior,
+                wallet.network.clone(),
+            )?;
+            wallet.anchor_retention_interval = interval;
         }
+        Ok((id, usk))
     }
 
     #[derive(Default)]

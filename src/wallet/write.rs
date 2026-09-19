@@ -487,13 +487,20 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         _birthday: &AccountBirthday,
         _key_source: Option<&str>,
     ) -> Result<(AccountId, UnifiedSpendingKey), WalletError> {
+        // Production: accounts 0 and 1 are installed once at boot; the
+        // wallet never derives spending keys from a seed. Test builds
+        // install the upstream conformance fixture account through the
+        // cfg(test) seam in `wallet::testing` — a build without `cfg(test)`
+        // compiles this branch out entirely, so no code exists to receive
+        // a seed outside the test suite.
         #[cfg(test)]
-        if self.test_network.is_some() {
-            return self.inject_test_account(_seed, _birthday);
+        {
+            super::testing::create_fixture_account(self, _seed, _birthday)
         }
-        // Accounts 0 and 1 are installed once at boot; the database never
-        // creates spending keys, and no seed crosses this boundary.
-        Err(WalletError::FixedAccountsOnly)
+        #[cfg(not(test))]
+        {
+            Err(WalletError::FixedAccountsOnly)
+        }
     }
 
     fn import_account_hd(
