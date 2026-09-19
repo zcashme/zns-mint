@@ -1,5 +1,32 @@
 # Wallet changelog
 
+## 2026-09-19 — The three transparent wallet fields go: the mint never receives, stores, or spends transparent money
+
+### Changed
+
+- The axiom, ruled and verified: the mint is paid shielded, spends
+  shielded, and touches transparent exactly once per day — the vault
+  sweep unshields to the project vault's transparent address. The
+  treasury never receives transparent funds from users.
+- `transparent_outputs`, `transparent_output_spends`, and
+  `transparent_spends` are deleted. No writer could ever fire
+  (upstream's `ScanningKeys` is structurally shielded-only, the
+  receivers map is empty by policy, `put_received_transparent_utxo`
+  has no caller in this tree or upstream's, and no flow spends
+  transparent inputs) and no reader exists; the maps were empty in
+  every run that has ever passed. The vault unshield consults none of
+  them — it needs the recipient constant, the builder's transparent
+  output support, and the shielded machinery.
+- `put_received_transparent_utxo` now refuses with `FixedAccountsOnly`:
+  the trait requires the method, the axiom forbids the store.
+  `output_account`'s transparent arm answers `None` on the same
+  principle. The `transparent-inputs` feature stays — it serves the
+  unshield — and its Cargo.toml comment is corrected from the fossil
+  claim ("Treasury accepts transparent payments from users") to the
+  vault-sweep truth.
+- The send-to-transparent scenarios stay connected and green: they
+  exercise the unshield path and read none of the removed state.
+
 ## 2026-09-19 — The mint stops reserving inputs through the lock store
 
 ### Changed
