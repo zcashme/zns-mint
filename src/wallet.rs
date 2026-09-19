@@ -18,8 +18,7 @@ use zcash_client_backend::{
     data_api::chain::ChainState,
     data_api::locking::LockOwner,
     data_api::{
-        anchor_retention::AnchorRetentionInterval, BlockMetadata, SentTransaction,
-        SentTransactionOutput, TransactionStatus, WalletWrite,
+        BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus, WalletWrite,
     },
     wallet::{
         NoteId, OutputRef, ReceivedNote, WalletIronwoodOutput, WalletSaplingOutput,
@@ -73,9 +72,6 @@ pub struct Wallet<P: Parameters> {
     /// wallet; callers of the free data-api functions keep passing their
     /// own `params` and must pass the same network.
     network: P,
-    /// Interval-aligned checkpoints at or above NU6.3 are kept as durable
-    /// anchors, outside the ordinary `MAX_CHECKPOINTS` pruning window.
-    anchor_retention_interval: AnchorRetentionInterval,
     /// Per-account scan floors. Wallet-wide progress uses the earliest.
     account_birthdays: BTreeMap<AccountId, BlockHeight>,
     /// Exactly account 0 (Treasury) and account 1 (Registry).
@@ -158,7 +154,6 @@ impl<P: Parameters> Wallet<P> {
             scanning_keys,
             zebra_tip: None,
             account_birthdays,
-            anchor_retention_interval: AnchorRetentionInterval::ZIP_318,
             blocks: BTreeMap::new(),
             seed: block_metadata(chain_state),
             transactions: BTreeMap::new(),
@@ -327,9 +322,9 @@ pub(crate) mod testing {
     use secrecy::{ExposeSecret, SecretVec};
     use shardtree::store::ShardStore;
     use std::collections::BTreeSet;
+    use zcash_client_backend::data_api::anchor_retention::AnchorRetentionInterval;
     use zcash_client_backend::{
         data_api::{
-            anchor_retention::AnchorRetentionInterval,
             chain::{error, BlockSource},
             testing::{CacheInsertionResult, DataStoreFactory, TestCache, TransactionSummary},
             AccountBirthday, OutputOfSentTx, WalletTest,
@@ -358,14 +353,15 @@ pub(crate) mod testing {
             gap_limits: Option<GapLimits>,
         ) -> Result<Wallet<LocalNetwork>, WalletError> {
             assert!(gap_limits.is_none(), "address gap limits are not supported");
-            let mut wallet = Wallet::new(
+            assert!(
+                anchor_retention_interval.is_none(),
+                "anchor retention is not supported: no consumer in this wallet"
+            );
+            let wallet = Wallet::new(
                 [],
                 &ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
                 network,
             )?;
-            if let Some(interval) = anchor_retention_interval {
-                wallet.anchor_retention_interval = interval;
-            }
             Ok(wallet)
         }
     }
@@ -393,7 +389,6 @@ pub(crate) mod testing {
         let usk = UnifiedSpendingKey::from_seed(&wallet.network, seed.expose_secret(), id)
             .expect("valid upstream test seed");
         let prior = birthday.prior_chain_state();
-        let interval = wallet.anchor_retention_interval;
         // `TestBuilder::build` may already have written the birthday
         // frontier and shard roots through the public tree API; replacing
         // the wallet would discard them.
@@ -416,7 +411,6 @@ pub(crate) mod testing {
                 prior,
                 wallet.network.clone(),
             )?;
-            wallet.anchor_retention_interval = interval;
         }
         Ok((id, usk))
     }

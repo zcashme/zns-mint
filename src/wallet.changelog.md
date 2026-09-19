@@ -1,5 +1,29 @@
 # Wallet changelog
 
+## 2026-09-19 — Remove unused ZIP 318 anchor retention (#92)
+
+### Removed
+
+- `anchor_retention_interval` field, the `retains_anchor_checkpoint` gate, and
+  the `ensure_retained` calls in `put_blocks`. The facility kept (or created)
+  checkpoints at 144-block boundaries at or above NU6.3 outside the ordinary
+  `MAX_CHECKPOINTS` pruning window; its only consumer is ZIP 318
+  (Orchard→Ironwood) pool migration hosting, which this wallet cannot provide:
+  it holds no Orchard funds, wires in no migration machinery, and its
+  in-memory architecture cannot carry a multi-day pre-signed migration
+  schedule. Every spend anchors near-tip inside the ordinary pruning window.
+  Trees revert to the ordinary `MAX_CHECKPOINTS` window; no user-visible
+  behavior changes.
+- The `WalletRead::anchor_retention_interval` impl: the upstream trait
+  default (`ZIP_318`) now answers, but the mismatch is inert — only
+  migration machinery reads it, and none is invoked.
+- Three upstream anchor-retention scenarios
+  (`anchor_checkpoints_retained_across_deep_scan` ×2,
+  `empty_boundary_blocks_are_checkpointed_and_retained`) together with the
+  stale comment above them. The fixture keeps the
+  `Option<AnchorRetentionInterval>` parameter the upstream `WalletTest`
+  signature requires, and now asserts `None` like `gap_limits`.
+
 ## 2026-09-19 — `test_network` retired: conformance account injection is a cfg(test) fixture seam
 
 ### Changed

@@ -10,7 +10,6 @@ use secrecy::SecretVec;
 use shardtree::store::ShardStore;
 use zcash_client_backend::data_api::locking::{LockFilter, LockedInputPolicy};
 use zcash_client_backend::data_api::{
-    anchor_retention::AnchorRetentionInterval,
     defaults,
     error::FindAccountForAddressError,
     scanning::{ScanPriority, ScanRange},
@@ -411,10 +410,6 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         // The fixed accounts were created at the deployment scan floor, not
         // restored from backup, so there is no recovery horizon.
         Ok(None)
-    }
-
-    fn anchor_retention_interval(&self) -> AnchorRetentionInterval {
-        self.anchor_retention_interval
     }
 
     fn get_wallet_summary(
