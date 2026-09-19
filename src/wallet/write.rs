@@ -39,8 +39,8 @@ use super::{
 use crate::mint::REGISTRY_ACCOUNT;
 
 impl<P: Parameters> Wallet<P> {
-    /// Returns the account that owns a wallet output, if the reference names
-    /// a currently retained Sapling, Ironwood, or transparent output.
+    /// Returns the account that owns a wallet output, if the reference
+    /// names a currently retained Sapling or Ironwood note.
     fn output_account(&self, output: &OutputRef) -> Option<AccountId> {
         match output.pool() {
             PoolType::Shielded(ShieldedPool::Sapling) => {
@@ -55,13 +55,9 @@ impl<P: Parameters> Wallet<P> {
                     .get(&NoteId::new(*output.txid(), ShieldedPool::Ironwood, index))
                     .map(|note| *note.account_id())
             }
-            PoolType::TRANSPARENT => self
-                .transparent_outputs
-                .get(&OutPoint::new(
-                    (*output.txid()).into(),
-                    output.output_index(),
-                ))
-                .and_then(|utxo| utxo.recipient_account().copied()),
+            // The wallet owns no transparent output, ever: the mint never
+            // receives, stores, or spends transparent money.
+            PoolType::TRANSPARENT => None,
             // Ordinary Orchard deliberately has no received-note table;
             // `put_blocks_marked` rejects decryptable Orchard outputs.
             PoolType::Shielded(ShieldedPool::Orchard) => None,
@@ -206,8 +202,6 @@ impl<P: Parameters> Wallet<P> {
             .retain(|_, note_id| !orphaned.contains(note_id.txid()));
         self.memos
             .retain(|note_id, _| !orphaned.contains(note_id.txid()));
-        self.transparent_outputs
-            .retain(|outpoint, _| !orphaned.contains(outpoint.txid()));
         self.transaction_indices
             .retain(|txid, _| !orphaned.contains(txid));
 
@@ -223,15 +217,6 @@ impl<P: Parameters> Wallet<P> {
         });
         self.ironwood_note_spends.retain(|note_id, spend_txid| {
             self.ironwood_notes.contains_key(note_id) && !scanned_only_spends.contains(spend_txid)
-        });
-        self.transparent_output_spends
-            .retain(|outpoint, spend_txid| {
-                self.transparent_outputs.contains_key(outpoint)
-                    && !scanned_only_spends.contains(spend_txid)
-            });
-        self.transparent_spends.retain(|(spend_txid, outpoint)| {
-            self.transparent_outputs.contains_key(outpoint)
-                && !scanned_only_spends.contains(spend_txid)
         });
 
         for status in self.transaction_statuses.values_mut() {
@@ -557,14 +542,12 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
 
     fn put_received_transparent_utxo(
         &mut self,
-        output: &WalletTransparentOutput<AccountId>,
+        _output: &WalletTransparentOutput<AccountId>,
     ) -> Result<Self::UtxoRef, WalletError> {
-        // Stored as a chain observation only: under the outbound-only
-        // transparent policy it is never surfaced as a spendable input.
-        let outpoint = output.outpoint().clone();
-        self.transparent_outputs
-            .insert(outpoint.clone(), output.clone());
-        Ok(outpoint)
+        // The mint never receives, stores, or spends transparent money;
+        // the only transparent flow is the vault unshield, which spends
+        // shielded notes. Nothing can deliver a UTXO here.
+        Err(WalletError::FixedAccountsOnly)
     }
 
     fn store_decrypted_tx(
@@ -692,16 +675,6 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
                         self.locks.remove(&OutputRef::from(*note_id));
                     }
                 }
-            }
-            for outpoint in sent.utxos_spent() {
-                let outpoint = outpoint.clone();
-                self.locks.remove(&OutputRef::new(
-                    *outpoint.txid(),
-                    PoolType::TRANSPARENT,
-                    outpoint.n(),
-                ));
-                self.transparent_spends.insert((txid, outpoint.clone()));
-                self.transparent_output_spends.insert(outpoint, txid);
             }
         }
         Ok(())
@@ -1007,10 +980,6 @@ impl<P: Parameters> Wallet<P> {
                     if let Some(nf) = output.nf() {
                         self.ironwood_nullifiers.insert(*nf, note_id);
                     }
-                }
-                for utxo in wtx.transparent_outputs() {
-                    self.transparent_outputs
-                        .insert(utxo.outpoint().clone(), utxo.clone());
                 }
             }
 
