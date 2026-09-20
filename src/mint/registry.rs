@@ -1,5 +1,4 @@
-//! Registry: the ZNS name-chain state machine and transition authorization.
-//!
+//! The name-chain state machine and transition authorization.
 
 use crate::mint::otp::OtpQueue;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, UnifiedAddress};
@@ -8,37 +7,19 @@ use time::Timestamp;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
 
-/// Reads the current record of the name chain for `name`.
-pub fn current_record(registry: &Registry, name: &Name) -> Option<NameRecord> {
-    registry.record(name).cloned()
-}
-
 // ---------------------------------------------------------------------------
 // NameRecord — the current state of a name chain
 // ---------------------------------------------------------------------------
 
-/// The current state of a name in the registry.
-///
-/// Each name has a chain of Name Notes on-chain. This struct holds the
-/// most recent confirmed note's derived state: what action created it,
-/// what UA it points to, its cryptographic commitment, and when it was
-/// confirmed. The nullifier is the note's authority identity: an update or
-/// release is accepted only when its transaction spends this exact note.
+/// The current state of one name's chain.
 #[derive(Clone, PartialEq, Eq)]
 pub struct NameRecord {
     pub action: Action,
-    /// The binding UA. A release retains the address it terminated so the
-    /// on-chain transition remains historically complete.
     pub ua: UnifiedAddress,
-    /// The committed expiration (§4.5); absent for the post-release state.
     pub expires_at: Expiry,
     pub commitment: NameCommitment,
-    /// The block height at which this Name Note was confirmed.
     pub confirmed_height: BlockHeight,
-    /// The MTP by which an accepted update must re-prove control of the
-    /// bound address; past it, the Mint releases the name (§4.5.4).
     pub release_deadline: Timestamp,
-    /// The exact nullifier this Name Note reveals when spent.
     pub nullifier: orchard::note::Nullifier,
 }
 
@@ -84,8 +65,7 @@ impl std::fmt::Debug for NameRecord {
 // Registry — name-chain state with reorg undo
 // ---------------------------------------------------------------------------
 
-/// An undo-log entry: records what the record was before a `set_record` so a
-/// reorg can rewind the registry to a prior height.
+/// An undo-log entry: the record before a set_record.
 #[derive(Debug, Clone)]
 pub struct RegistryHistoryRecord {
     pub height: BlockHeight,
@@ -93,17 +73,10 @@ pub struct RegistryHistoryRecord {
     pub prev_record: Option<NameRecord>,
 }
 
-/// The standing size of the anchor lineage pool: the ceremony's root,
-/// conserved one-for-one by every accepted claim (spend one anchor, mint
-/// one successor). Mirrors keygen's NUM_ANCHORS.
+/// Standing size of the anchor lineage pool; mirrors keygen's NUM_ANCHORS.
 pub const ANCHOR_POOL_SIZE: usize = 40;
 
-/// The name-chain state: a map from each canonical ZNS name to the most
-/// recent confirmed record for that name, plus an undo log for reorgs.
-/// The anchor lineage pool lives here too: born as the first
-/// ANCHOR_POOL_SIZE zero-value Registry outputs in chain history (the
-/// ceremony's root — nothing can predate them), extended only by
-/// successors of accepted claims, retired when spent.
+/// Name records, a reorg undo log, and the anchor lineage pool.
 pub struct Registry {
     records: BTreeMap<Name, NameRecord>,
     history: Vec<RegistryHistoryRecord>,
@@ -113,8 +86,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// Creates an empty name map. The height is the reorg
-    /// boundary: a rewind below it discards the Registry.
+    /// Empty state; claim_anchor_height is the reorg boundary.
     pub fn new(claim_anchor_height: BlockHeight) -> Self {
         Self {
             records: BTreeMap::new(),
@@ -125,12 +97,8 @@ impl Registry {
         }
     }
 
-    /// The transition law: is this request lawful against the current
-    /// registry state, and what NameNote does it produce?
-    ///
-    /// `None` means unlawful. Claims keep their payment — retained in full,
-    /// by policy; the payer may re-request. Echoes that fail verification
-    /// are dropped: the name was simply not renewed.
+    /// The transition law: the NameNote a lawful request produces.
+    /// `None` means unlawful; a claim's payment is kept.
     pub fn authorize(
         &self,
         challenges: &mut OtpQueue,
@@ -141,7 +109,7 @@ impl Registry {
     ) -> Option<NameNote> {
         match request {
             Request::Claim { name, ua, term } => {
-                match current_record(self, &name) {
+                match self.record(&name).cloned() {
                     None => {}
                     Some(
                         record @ NameRecord {
@@ -163,7 +131,7 @@ impl Registry {
                 })
             }
             Request::Update { name, ua, term } => {
-                let record = current_record(self, &name)?;
+                let record = self.record(&name).cloned()?;
                 if record.action == Action::Release {
                     return None;
                 }
@@ -183,7 +151,7 @@ impl Registry {
                 })
             }
             Request::Release { name, ua } => {
-                let record = current_record(self, &name)?;
+                let record = self.record(&name).cloned()?;
                 if record.action == Action::Release {
                     return None;
                 }
@@ -203,21 +171,13 @@ impl Registry {
         }
     }
 
-    /// Read the current record of a ZNS name chain.
+    /// The current record of a name.
     pub fn record(&self, name: &Name) -> Option<&NameRecord> {
         self.records.get(name)
     }
 
-    /// Produces the mint's unilateral release when a live registration has
-    /// reached either its purchased expiry or its liveness deadline (§4.5).
-    ///
-    /// Pure and idempotent — the same registry state and MTP always
-    /// yield the same note, so the lifecycle sweep re-derives it each
-    /// tip until the chain confirms it. Which clock fired is
-    /// recomputable by any caller holding the record (`expires_at`
-    /// checked first — when both fire at the same MTP, the purchased
-    /// term is the more specific rule), so it is not carried in the
-    /// return value.
+    /// The unilateral §4.5 release owed when a live name's purchased term
+    /// or liveness deadline has passed. Idempotent per tip.
     pub fn release_due(&self, name: &Name, mtp: Timestamp) -> Option<NameNote> {
         let record = self.record(name)?;
         if record.action == Action::Release {
@@ -233,23 +193,15 @@ impl Registry {
         })
     }
 
-    /// The §4.5 clocks, swept: every live name whose purchased term or
-    /// liveness deadline has passed at `mtp`, paired with the release
-    /// note each is owed. The plural of [`Self::release_due`] — pure
-    /// and idempotent, so the lifecycle sweep drains it each tip until
-    /// the chain confirms each note.
+    /// The plural of release_due: every live name past a §4.5 deadline.
     pub fn releases_due(&self, mtp: Timestamp) -> impl Iterator<Item = (Name, NameNote)> + '_ {
         self.records
             .keys()
             .filter_map(move |name| self.release_due(name, mtp).map(|note| (name.clone(), note)))
     }
 
-    /// Ceremony filling: a zero-value Registry output joins the lineage
-    /// pool while below standing size. The first ANCHOR_POOL_SIZE are the
-    /// ceremony's root — nothing can predate them, so nothing later can
-    /// displace them. Name Notes are invisible to the standard scanner
-    /// and never adopted; post-root successors enter only by induction on
-    /// accepted claims, never by this cap.
+    /// Ceremony filling: a zero-value Registry output joins the
+    /// lineage pool below standing size.
     pub fn adopt_anchor(&mut self, height: BlockHeight, nf: orchard::note::Nullifier) {
         if self.anchor_pool.len() < ANCHOR_POOL_SIZE && self.anchor_pool.insert(nf) {
             self.pool_checkpoints
@@ -257,16 +209,8 @@ impl Registry {
         }
     }
 
-    /// Offers a confirmed claim candidate. `nfs` are the transaction's
-    /// Ironwood spends; `successor` is the nullifier of the transaction's
-    /// single zero-value Registry output (`None` when the outputs lack
-    /// the claim shape).
-    ///
-    /// A claim is backed only when its transaction spent a standing
-    /// anchor — a public UFVK lets anyone construct a valid ZNS output,
-    /// but only the mint can spend an anchor. All invariant checks are
-    /// assertions — only the mint can reach them; if one fires, it is a
-    /// bug in the assembly path.
+    /// Offers a confirmed claim candidate; true when its transaction
+    /// spent a standing anchor.
     #[allow(clippy::too_many_arguments)]
     pub fn accept_claim<P: Parameters>(
         &mut self,
@@ -319,12 +263,8 @@ impl Registry {
         true
     }
 
-    /// Offers a confirmed update candidate. Backed only when the
-    /// transaction spent exactly the current Name Note of this note's
-    /// own name; an unbacked candidate — a correctly formed public
-    /// output that is not mint-authored — has no effect. A backed
-    /// transition always enacts: only the mint can spend the current
-    /// note, and assembly checks liveness before transitioning.
+    /// Offers a confirmed update candidate; true when the transaction
+    /// spent this name's current note.
     pub fn accept_update<P: Parameters>(
         &mut self,
         params: &P,
@@ -350,8 +290,7 @@ impl Registry {
         true
     }
 
-    /// Offers a confirmed release candidate. Same law as
-    /// [`Self::accept_update`].
+    /// Offers a confirmed release candidate; same law as accept_update.
     pub fn accept_release<P: Parameters>(
         &mut self,
         params: &P,
@@ -377,9 +316,8 @@ impl Registry {
         true
     }
 
-    /// The shared law of update and release: the transaction must have
-    /// spent exactly the current Name Note of `note`'s own name.
-    /// Returns the live predecessor, or `None` when unbacked.
+    /// The live predecessor this transaction spent, when it is this
+    /// note's own current note.
     fn predecessor_spent(
         &self,
         note: &NameNote,
@@ -409,7 +347,7 @@ impl Registry {
         )
     }
 
-    /// The names whose current Name Note these nullifiers spend.
+    /// The names whose current notes these nullifiers spend.
     pub fn names_spent_by(&self, nfs: &[orchard::note::Nullifier]) -> Vec<Name> {
         self.records
             .iter()
@@ -427,20 +365,17 @@ impl Registry {
         });
     }
 
-    /// Read-only iterator over all known name records. Used for diagnostics.
+    /// Every known name record; diagnostics only.
     pub fn name_chain(&self) -> impl Iterator<Item = (&Name, &NameRecord)> {
         self.records.iter()
     }
 
-    /// The anchor lineage pool: the ceremony's root, conserved one-for-one
-    /// by every accepted claim. Registration authority is drawn only from
-    /// this set; forged or donated zero-value Registry notes are not in it,
-    /// never count toward genesis, and can never be spent as anchors.
+    /// The anchor lineage pool — the only source of claim authority.
     pub fn anchor_pool(&self) -> &BTreeSet<orchard::note::Nullifier> {
         &self.anchor_pool
     }
 
-    /// Rewinds the registry state back to the specified height (linear undo).
+    /// Rewinds the registry to height.
     pub fn truncate_to_height(&mut self, height: BlockHeight) {
         assert!(
             height >= self.claim_anchor_height,
