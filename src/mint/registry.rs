@@ -233,6 +233,17 @@ impl Registry {
         })
     }
 
+    /// The §4.5 clocks, swept: every live name whose purchased term or
+    /// liveness deadline has passed at `mtp`, paired with the release
+    /// note each is owed. The plural of [`Self::release_due`] — pure
+    /// and idempotent, so the lifecycle sweep drains it each tip until
+    /// the chain confirms each note.
+    pub fn releases_due(&self, mtp: Timestamp) -> impl Iterator<Item = (Name, NameNote)> + '_ {
+        self.records
+            .keys()
+            .filter_map(move |name| self.release_due(name, mtp).map(|note| (name.clone(), note)))
+    }
+
     /// Ceremony filling: a zero-value Registry output joins the lineage
     /// pool while below standing size. The first ANCHOR_POOL_SIZE are the
     /// ceremony's root — nothing can predate them, so nothing later can
@@ -573,6 +584,57 @@ mod tests {
             BlockHeight::from_u32(100),
         );
         assert!(r.release_due(&name, ts(9_999_999_999)).is_none());
+    }
+
+    /// The plural sweep: only names whose clocks have fired, each paired
+    /// with its release note. Live and already-released names are absent.
+    #[test]
+    fn releases_due_yields_only_fired_names() {
+        let mut r = Registry::new(BlockHeight::from_u32(100));
+        for (name, action, expires_at, deadline, seed) in [
+            (
+                "alpha",
+                Action::Claim,
+                Expiry::At(ts(1_500_000_000)),
+                3_000_000_000_i64,
+                1_u8,
+            ),
+            (
+                "bravo",
+                Action::Claim,
+                Expiry::Never,
+                1_500_000_000_i64,
+                2_u8,
+            ),
+            (
+                "delta",
+                Action::Claim,
+                Expiry::Never,
+                3_000_000_000_i64,
+                3_u8,
+            ),
+            (
+                "gamma",
+                Action::Release,
+                Expiry::Never,
+                1_000_000_000_i64,
+                4_u8,
+            ),
+        ] {
+            r.set_record(
+                Name::parse(name).expect("test name parses"),
+                record(action, expires_at, deadline, seed),
+                BlockHeight::from_u32(100),
+            );
+        }
+        // alpha: purchased term up (§4.5.2). bravo: liveness deadline
+        // passed (§4.5.4). delta: live. gamma: already released.
+        // BTreeMap order makes the batch deterministic: alpha, bravo.
+        let due: Vec<String> = r
+            .releases_due(ts(1_500_000_000))
+            .map(|(name, _)| name.as_str().to_owned())
+            .collect();
+        assert_eq!(due, vec!["alpha".to_string(), "bravo".to_string()]);
     }
 
     /// A claim sets `release_deadline = τ + L`. An update at a later block
