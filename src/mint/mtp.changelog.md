@@ -1,5 +1,13 @@
 # Mtp design record
 
+## The day-zero clamp test is gone (#108)
+
+- `a_reorg_below_the_birthday_stays_day_zero` is deleted with its
+  comment: the `whole_days` truncation clamp it pinned is observable
+  only below the birthday MTP, a state the mint cannot reach. Positive-
+  offset truncation stays pinned by
+  `current_day_counts_whole_days_from_the_birthday`.
+
 ## The tracker is the mint's day clock (#80)
 
 - `born(birthday)` registers the birthday block's MTP in a write-once

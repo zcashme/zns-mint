@@ -77,24 +77,18 @@ pub struct RegistryHistoryRecord {
 pub const ANCHOR_POOL_SIZE: usize = 40;
 
 /// Name records, a reorg undo log, and the anchor lineage pool.
+#[derive(Default)]
 pub struct Registry {
     records: BTreeMap<Name, NameRecord>,
     history: Vec<RegistryHistoryRecord>,
-    claim_anchor_height: BlockHeight,
     anchor_pool: BTreeSet<orchard::note::Nullifier>,
     pool_checkpoints: BTreeMap<BlockHeight, BTreeSet<orchard::note::Nullifier>>,
 }
 
 impl Registry {
-    /// Empty state; claim_anchor_height is the reorg boundary.
-    pub fn new(claim_anchor_height: BlockHeight) -> Self {
-        Self {
-            records: BTreeMap::new(),
-            history: Vec::new(),
-            claim_anchor_height,
-            anchor_pool: BTreeSet::new(),
-            pool_checkpoints: BTreeMap::new(),
-        }
+    /// Empty state; boot sync adopts the ceremony's anchor pool.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// The transition law: the NameNote a lawful request produces.
@@ -368,12 +362,9 @@ impl Registry {
         &self.anchor_pool
     }
 
-    /// Rewinds the registry to height.
+    /// Rewinds the registry to height. Callers pass walk-found heights
+    /// at or above the boot origin.
     pub fn truncate_to_height(&mut self, height: BlockHeight) {
-        assert!(
-            height >= self.claim_anchor_height,
-            "FATAL: rewind crossed the boot-created Registry anchor"
-        );
         while let Some(entry) = self.history.last() {
             if entry.height <= height {
                 break;
@@ -454,7 +445,7 @@ mod tests {
     /// with its release note. Live and already-released names are absent.
     #[test]
     fn releases_due_yields_only_fired_names() {
-        let mut r = Registry::new(BlockHeight::from_u32(100));
+        let mut r = Registry::new();
         for (name, action, expires_at, deadline, seed) in [
             (
                 "alpha",

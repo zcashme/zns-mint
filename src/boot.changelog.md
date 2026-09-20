@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-21 — `Registry::new()` no longer takes the checkpoint height (issue #108)
+
+- Boot constructs the empty Registry with no floor; the origin
+  checkpoint height still fetches the treestate and seeds the wallet —
+  it is just no longer copied into Registry state.
+
 ## 2026-09-16 — Seed pre-birthday subtree roots at boot (issue #44)
 
 - New step 3b: `fetch_prebirthday_subtree_roots` pulls Sapling and Ironwood
