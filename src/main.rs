@@ -13,8 +13,8 @@
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
-use zcash_client_backend::data_api::wallet::TargetHeight;
-use zcash_client_backend::data_api::WalletWrite as _;
+use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
+use zcash_client_backend::data_api::{WalletRead as _, WalletWrite as _};
 use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
 use zcash_protocol::consensus::BlockHeight;
 
@@ -293,17 +293,15 @@ async fn main() {
         }
 
         // The three gauges: chain level, money level, price level.
-        let treasury_zats: u64 = wallet
-            .unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip))
-            .iter()
-            .map(|n| n.note().value().inner())
-            .chain(
-                wallet
-                    .unspent_sapling_notes(TREASURY_ACCOUNT, TargetHeight::from(tip))
-                    .iter()
-                    .map(|n| n.note().value().inner()),
-            )
-            .sum();
+        let treasury_zats = wallet
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .expect("FATAL: balance summary failed")
+            .expect("FATAL: Zebra tip not recorded before gauge")
+            .account_balances()
+            .get(&TREASURY_ACCOUNT)
+            .expect("FATAL: treasury account missing from summary")
+            .total()
+            .into_u64();
         zns_mint::metrics::snapshot(tip, treasury_zats, oracle.current().into_u64());
 
         // Treasury requests. Each memo was decoded once, at block
