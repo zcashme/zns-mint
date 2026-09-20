@@ -13,31 +13,6 @@ pub fn current_record(registry: &Registry, name: &Name) -> Option<NameRecord> {
     registry.record(name).cloned()
 }
 
-/// Which §4.5 clock fired to make a unilateral release due.
-///
-/// The mint releases a name for one of two reasons: the purchased term
-/// (§4.5.2) or the liveness deadline `τ + L` (§4.5.4). Both settle to the
-/// same on-chain `NameNote::Release`; the distinction is for operators.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ReleaseReason {
-    /// The purchased registration term has passed (`expires_at ≤ mtp`).
-    Expiry,
-    /// One liveness interval has elapsed since the last accepted
-    /// transition (claim or update) and the controller did not re-prove
-    /// control by `release_deadline`.
-    Liveness,
-}
-
-impl ReleaseReason {
-    /// A short label for logs and metrics.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            ReleaseReason::Expiry => "expiry",
-            ReleaseReason::Liveness => "liveness",
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // NameRecord — the current state of a name chain
 // ---------------------------------------------------------------------------
@@ -236,30 +211,26 @@ impl Registry {
     /// Produces the mint's unilateral release when a live registration has
     /// reached either its purchased expiry or its liveness deadline (§4.5).
     ///
-    /// The second component names which clock fired: `Expiry` for §4.5.2,
-    /// `Liveness` for §4.5.4. When both are due at the same MTP, expiry
-    /// wins — the purchased term is the more specific rule.
-    pub fn release_due(&self, name: &Name, mtp: Timestamp) -> Option<(NameNote, ReleaseReason)> {
+    /// Pure and idempotent — the same registry state and MTP always
+    /// yield the same note, so the lifecycle sweep re-derives it each
+    /// tip until the chain confirms it. Which clock fired is
+    /// recomputable by any caller holding the record (`expires_at`
+    /// checked first — when both fire at the same MTP, the purchased
+    /// term is the more specific rule), so it is not carried in the
+    /// return value.
+    pub fn release_due(&self, name: &Name, mtp: Timestamp) -> Option<NameNote> {
         let record = self.record(name)?;
         if record.action == Action::Release {
             return None;
         }
-        let reason = if record.expires_at.expired(mtp) {
-            ReleaseReason::Expiry
-        } else if mtp >= record.release_deadline {
-            ReleaseReason::Liveness
-        } else {
+        if !record.expires_at.expired(mtp) && mtp < record.release_deadline {
             return None;
-        };
-
-        Some((
-            NameNote::Release {
-                name: name.clone(),
-                ua: record.ua.clone(),
-                prev: record.commitment,
-            },
-            reason,
-        ))
+        }
+        Some(NameNote::Release {
+            name: name.clone(),
+            ua: record.ua.clone(),
+            prev: record.commitment,
+        })
     }
 
     /// Ceremony filling: a zero-value Registry output joins the lineage
@@ -550,13 +521,13 @@ mod tests {
             record(Action::Claim, Expiry::Never, 2_000_000_000, 1),
             BlockHeight::from_u32(100),
         );
-        assert_eq!(r.release_due(&name, ts(1_999_999_999)), None);
+        assert!(r.release_due(&name, ts(1_999_999_999)).is_none());
     }
 
-    /// The purchased term is up but the liveness deadline is not: the mint
-    /// releases with `ReleaseReason::Expiry`.
+    /// The purchased term is up (§4.5.2) but the liveness deadline is
+    /// not: the release is due either way.
     #[test]
-    fn release_due_reports_expiry_when_purchased_term_lapses() {
+    fn release_due_fires_when_purchased_term_lapses() {
         let mut r = Registry::new(BlockHeight::from_u32(100));
         let name = test_name();
         // deadline far in the future — only the expiry clock can fire.
@@ -570,17 +541,16 @@ mod tests {
             ),
             BlockHeight::from_u32(100),
         );
-        let (note, reason) = r
+        let note = r
             .release_due(&name, ts(1_500_000_000))
             .expect("purchased term expired");
-        assert_eq!(reason, ReleaseReason::Expiry);
         assert!(matches!(note, NameNote::Release { .. }));
     }
 
-    /// A Never-expiring name whose liveness deadline has passed: only the
-    /// liveness clock can retire it.
+    /// A Never-expiring name whose liveness deadline has passed (§4.5.4):
+    /// the release is due.
     #[test]
-    fn release_due_reports_liveness_when_deadline_passes() {
+    fn release_due_fires_when_liveness_deadline_passes() {
         let mut r = Registry::new(BlockHeight::from_u32(100));
         let name = test_name();
         r.set_record(
@@ -588,26 +558,7 @@ mod tests {
             record(Action::Claim, Expiry::Never, 1_700_000_000, 1),
             BlockHeight::from_u32(100),
         );
-        let (_, reason) = r
-            .release_due(&name, ts(1_700_000_000))
-            .expect("liveness deadline passed");
-        assert_eq!(reason, ReleaseReason::Liveness);
-    }
-
-    /// The purchased term is the more specific rule: when both clocks
-    /// fire at the same MTP, expiry is reported.
-    #[test]
-    fn release_due_prefers_expiry_when_both_clocks_fire_together() {
-        let mut r = Registry::new(BlockHeight::from_u32(100));
-        let name = test_name();
-        let same = 1_700_000_000_i64;
-        r.set_record(
-            name.clone(),
-            record(Action::Claim, Expiry::At(ts(same)), same, 1),
-            BlockHeight::from_u32(100),
-        );
-        let (_, reason) = r.release_due(&name, ts(same)).expect("both clocks fired");
-        assert_eq!(reason, ReleaseReason::Expiry);
+        assert!(r.release_due(&name, ts(1_700_000_000)).is_some());
     }
 
     /// An already-released record is not releasable again, no matter how
@@ -621,7 +572,7 @@ mod tests {
             record(Action::Release, Expiry::Never, 1_000_000_000, 1),
             BlockHeight::from_u32(100),
         );
-        assert_eq!(r.release_due(&name, ts(9_999_999_999)), None);
+        assert!(r.release_due(&name, ts(9_999_999_999)).is_none());
     }
 
     /// A claim sets `release_deadline = τ + L`. An update at a later block

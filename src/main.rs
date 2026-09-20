@@ -377,6 +377,17 @@ async fn main() {
                             break 'lane true;
                         };
                         challenges = authorized_challenges;
+                        // The seam where a voluntary release exists:
+                        // the OTP that authorized it is consumed here,
+                        // and the resulting note is indistinguishable
+                        // from a unilateral one on chain. This line is
+                        // the only durable record of the cause.
+                        if echo.action == Action::Release {
+                            tracing::info!(
+                                name = %echo.name.as_str(),
+                                "voluntary release authorized"
+                            );
+                        }
                         name_notes.admit(note_height, transition_note);
                         true
                     }
@@ -540,13 +551,20 @@ async fn main() {
                 continue;
             }
 
-            if let Some((release_note, reason)) = registry.release_due(&name, mtp_now) {
+            if let Some(release_note) = registry.release_due(&name, mtp_now) {
                 // The deadline clock authorized a release; `release_due`
                 // re-derives the same note each tip, so admission is
-                // idempotent.
-                tracing::debug!(
+                // idempotent. Which clock fired is derived here, with the
+                // same precedence as the law — when both fire at the same
+                // MTP, the purchased term is the more specific rule.
+                let cause = if record.expires_at.expired(mtp_now) {
+                    "expiry"
+                } else {
+                    "liveness"
+                };
+                tracing::info!(
                     name = %name.as_str(),
-                    reason = reason.as_str(),
+                    cause,
                     "lifecycle release authorized"
                 );
                 name_notes.admit(tip, release_note);
