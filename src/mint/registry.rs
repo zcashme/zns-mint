@@ -1,5 +1,4 @@
-//! Registry: the ZNS name-chain state machine and transition authorization.
-//!
+//! The name-chain state machine and transition authorization.
 
 use crate::mint::otp::OtpQueue;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, UnifiedAddress};
@@ -8,62 +7,19 @@ use time::Timestamp;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
 
-/// Reads the current record of the name chain for `name`.
-pub fn current_record(registry: &Registry, name: &Name) -> Option<NameRecord> {
-    registry.record(name).cloned()
-}
-
-/// Which §4.5 clock fired to make a unilateral release due.
-///
-/// The mint releases a name for one of two reasons: the purchased term
-/// (§4.5.2) or the liveness deadline `τ + L` (§4.5.4). Both settle to the
-/// same on-chain `NameNote::Release`; the distinction is for operators.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ReleaseReason {
-    /// The purchased registration term has passed (`expires_at ≤ mtp`).
-    Expiry,
-    /// One liveness interval has elapsed since the last accepted
-    /// transition (claim or update) and the controller did not re-prove
-    /// control by `release_deadline`.
-    Liveness,
-}
-
-impl ReleaseReason {
-    /// A short label for logs and metrics.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            ReleaseReason::Expiry => "expiry",
-            ReleaseReason::Liveness => "liveness",
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // NameRecord — the current state of a name chain
 // ---------------------------------------------------------------------------
 
-/// The current state of a name in the registry.
-///
-/// Each name has a chain of Name Notes on-chain. This struct holds the
-/// most recent confirmed note's derived state: what action created it,
-/// what UA it points to, its cryptographic commitment, and when it was
-/// confirmed. The nullifier is the note's authority identity: an update or
-/// release is accepted only when its transaction spends this exact note.
+/// The current state of one name's chain.
 #[derive(Clone, PartialEq, Eq)]
 pub struct NameRecord {
     pub action: Action,
-    /// The binding UA. A release retains the address it terminated so the
-    /// on-chain transition remains historically complete.
     pub ua: UnifiedAddress,
-    /// The committed expiration (§4.5); absent for the post-release state.
     pub expires_at: Expiry,
     pub commitment: NameCommitment,
-    /// The block height at which this Name Note was confirmed.
     pub confirmed_height: BlockHeight,
-    /// The MTP by which an accepted update must re-prove control of the
-    /// bound address; past it, the Mint releases the name (§4.5.4).
     pub release_deadline: Timestamp,
-    /// The exact nullifier this Name Note reveals when spent.
     pub nullifier: orchard::note::Nullifier,
 }
 
@@ -109,8 +65,7 @@ impl std::fmt::Debug for NameRecord {
 // Registry — name-chain state with reorg undo
 // ---------------------------------------------------------------------------
 
-/// An undo-log entry: records what the record was before a `set_record` so a
-/// reorg can rewind the registry to a prior height.
+/// An undo-log entry: the record before a set_record.
 #[derive(Debug, Clone)]
 pub struct RegistryHistoryRecord {
     pub height: BlockHeight,
@@ -118,17 +73,10 @@ pub struct RegistryHistoryRecord {
     pub prev_record: Option<NameRecord>,
 }
 
-/// The standing size of the anchor lineage pool: the ceremony's root,
-/// conserved one-for-one by every accepted claim (spend one anchor, mint
-/// one successor). Mirrors keygen's NUM_ANCHORS.
+/// Standing size of the anchor lineage pool; mirrors keygen's NUM_ANCHORS.
 pub const ANCHOR_POOL_SIZE: usize = 40;
 
-/// The name-chain state: a map from each canonical ZNS name to the most
-/// recent confirmed record for that name, plus an undo log for reorgs.
-/// The anchor lineage pool lives here too: born as the first
-/// ANCHOR_POOL_SIZE zero-value Registry outputs in chain history (the
-/// ceremony's root — nothing can predate them), extended only by
-/// successors of accepted claims, retired when spent.
+/// Name records, a reorg undo log, and the anchor lineage pool.
 pub struct Registry {
     records: BTreeMap<Name, NameRecord>,
     history: Vec<RegistryHistoryRecord>,
@@ -138,8 +86,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// Creates an empty name map. The height is the reorg
-    /// boundary: a rewind below it discards the Registry.
+    /// Empty state; claim_anchor_height is the reorg boundary.
     pub fn new(claim_anchor_height: BlockHeight) -> Self {
         Self {
             records: BTreeMap::new(),
@@ -150,12 +97,8 @@ impl Registry {
         }
     }
 
-    /// The transition law: is this request lawful against the current
-    /// registry state, and what NameNote does it produce?
-    ///
-    /// `None` means unlawful. Claims keep their payment — retained in full,
-    /// by policy; the payer may re-request. Echoes that fail verification
-    /// are dropped: the name was simply not renewed.
+    /// The transition law: the NameNote a lawful request produces.
+    /// `None` means unlawful; a claim's payment is kept.
     pub fn authorize(
         &self,
         challenges: &mut OtpQueue,
@@ -166,7 +109,7 @@ impl Registry {
     ) -> Option<NameNote> {
         match request {
             Request::Claim { name, ua, term } => {
-                match current_record(self, &name) {
+                match self.record(&name).cloned() {
                     None => {}
                     Some(
                         record @ NameRecord {
@@ -188,7 +131,7 @@ impl Registry {
                 })
             }
             Request::Update { name, ua, term } => {
-                let record = current_record(self, &name)?;
+                let record = self.record(&name).cloned()?;
                 if record.action == Action::Release {
                     return None;
                 }
@@ -208,7 +151,7 @@ impl Registry {
                 })
             }
             Request::Release { name, ua } => {
-                let record = current_record(self, &name)?;
+                let record = self.record(&name).cloned()?;
                 if record.action == Action::Release {
                     return None;
                 }
@@ -228,46 +171,35 @@ impl Registry {
         }
     }
 
-    /// Read the current record of a ZNS name chain.
+    /// The current record of a name.
     pub fn record(&self, name: &Name) -> Option<&NameRecord> {
         self.records.get(name)
     }
 
-    /// Produces the mint's unilateral release when a live registration has
-    /// reached either its purchased expiry or its liveness deadline (§4.5).
-    ///
-    /// The second component names which clock fired: `Expiry` for §4.5.2,
-    /// `Liveness` for §4.5.4. When both are due at the same MTP, expiry
-    /// wins — the purchased term is the more specific rule.
-    pub fn release_due(&self, name: &Name, mtp: Timestamp) -> Option<(NameNote, ReleaseReason)> {
-        let record = self.record(name)?;
-        if record.action == Action::Release {
-            return None;
-        }
-        let reason = if record.expires_at.expired(mtp) {
-            ReleaseReason::Expiry
-        } else if mtp >= record.release_deadline {
-            ReleaseReason::Liveness
-        } else {
-            return None;
-        };
-
-        Some((
-            NameNote::Release {
-                name: name.clone(),
-                ua: record.ua.clone(),
-                prev: record.commitment,
-            },
-            reason,
-        ))
+    /// The §4.5 clocks, swept: every live name whose purchased term or
+    /// liveness deadline has passed at `mtp`, with the release note it
+    /// is owed. Idempotent per tip.
+    pub fn releases_due(&self, mtp: Timestamp) -> impl Iterator<Item = (Name, NameNote)> + '_ {
+        self.records
+            .iter()
+            .filter(move |(_, record)| {
+                record.action != Action::Release
+                    && (record.expires_at.expired(mtp) || mtp >= record.release_deadline)
+            })
+            .map(move |(name, record)| {
+                (
+                    name.clone(),
+                    NameNote::Release {
+                        name: name.clone(),
+                        ua: record.ua.clone(),
+                        prev: record.commitment,
+                    },
+                )
+            })
     }
 
-    /// Ceremony filling: a zero-value Registry output joins the lineage
-    /// pool while below standing size. The first ANCHOR_POOL_SIZE are the
-    /// ceremony's root — nothing can predate them, so nothing later can
-    /// displace them. Name Notes are invisible to the standard scanner
-    /// and never adopted; post-root successors enter only by induction on
-    /// accepted claims, never by this cap.
+    /// Ceremony filling: a zero-value Registry output joins the
+    /// lineage pool below standing size.
     pub fn adopt_anchor(&mut self, height: BlockHeight, nf: orchard::note::Nullifier) {
         if self.anchor_pool.len() < ANCHOR_POOL_SIZE && self.anchor_pool.insert(nf) {
             self.pool_checkpoints
@@ -275,16 +207,8 @@ impl Registry {
         }
     }
 
-    /// Offers a confirmed claim candidate. `nfs` are the transaction's
-    /// Ironwood spends; `successor` is the nullifier of the transaction's
-    /// single zero-value Registry output (`None` when the outputs lack
-    /// the claim shape).
-    ///
-    /// A claim is backed only when its transaction spent a standing
-    /// anchor — a public UFVK lets anyone construct a valid ZNS output,
-    /// but only the mint can spend an anchor. All invariant checks are
-    /// assertions — only the mint can reach them; if one fires, it is a
-    /// bug in the assembly path.
+    /// Offers a confirmed claim candidate; true when its transaction
+    /// spent a standing anchor.
     #[allow(clippy::too_many_arguments)]
     pub fn accept_claim<P: Parameters>(
         &mut self,
@@ -337,12 +261,8 @@ impl Registry {
         true
     }
 
-    /// Offers a confirmed update candidate. Backed only when the
-    /// transaction spent exactly the current Name Note of this note's
-    /// own name; an unbacked candidate — a correctly formed public
-    /// output that is not mint-authored — has no effect. A backed
-    /// transition always enacts: only the mint can spend the current
-    /// note, and assembly checks liveness before transitioning.
+    /// Offers a confirmed update candidate; true when the transaction
+    /// spent this name's current note.
     pub fn accept_update<P: Parameters>(
         &mut self,
         params: &P,
@@ -368,8 +288,7 @@ impl Registry {
         true
     }
 
-    /// Offers a confirmed release candidate. Same law as
-    /// [`Self::accept_update`].
+    /// Offers a confirmed release candidate; same law as accept_update.
     pub fn accept_release<P: Parameters>(
         &mut self,
         params: &P,
@@ -395,9 +314,8 @@ impl Registry {
         true
     }
 
-    /// The shared law of update and release: the transaction must have
-    /// spent exactly the current Name Note of `note`'s own name.
-    /// Returns the live predecessor, or `None` when unbacked.
+    /// The live predecessor this transaction spent, when it is this
+    /// note's own current note.
     fn predecessor_spent(
         &self,
         note: &NameNote,
@@ -427,7 +345,7 @@ impl Registry {
         )
     }
 
-    /// The names whose current Name Note these nullifiers spend.
+    /// The names whose current notes these nullifiers spend.
     pub fn names_spent_by(&self, nfs: &[orchard::note::Nullifier]) -> Vec<Name> {
         self.records
             .iter()
@@ -445,20 +363,17 @@ impl Registry {
         });
     }
 
-    /// Read-only iterator over all known name records. Used for diagnostics.
+    /// Every known name record; diagnostics only.
     pub fn name_chain(&self) -> impl Iterator<Item = (&Name, &NameRecord)> {
         self.records.iter()
     }
 
-    /// The anchor lineage pool: the ceremony's root, conserved one-for-one
-    /// by every accepted claim. Registration authority is drawn only from
-    /// this set; forged or donated zero-value Registry notes are not in it,
-    /// never count toward genesis, and can never be spent as anchors.
+    /// The anchor lineage pool — the only source of claim authority.
     pub fn anchor_pool(&self) -> &BTreeSet<orchard::note::Nullifier> {
         &self.anchor_pool
     }
 
-    /// Rewinds the registry state back to the specified height (linear undo).
+    /// Rewinds the registry to height.
     pub fn truncate_to_height(&mut self, height: BlockHeight) {
         assert!(
             height >= self.claim_anchor_height,
@@ -540,88 +455,64 @@ mod tests {
         }
     }
 
-    /// A live claim before either clock fires: nothing to do.
+    /// The plural sweep: only names whose clocks have fired, each paired
+    /// with its release note. Live and already-released names are absent.
     #[test]
-    fn release_due_returns_none_while_live() {
+    fn releases_due_yields_only_fired_names() {
         let mut r = Registry::new(BlockHeight::from_u32(100));
-        let name = test_name();
-        r.set_record(
-            name.clone(),
-            record(Action::Claim, Expiry::Never, 2_000_000_000, 1),
-            BlockHeight::from_u32(100),
-        );
-        assert_eq!(r.release_due(&name, ts(1_999_999_999)), None);
-    }
-
-    /// The purchased term is up but the liveness deadline is not: the mint
-    /// releases with `ReleaseReason::Expiry`.
-    #[test]
-    fn release_due_reports_expiry_when_purchased_term_lapses() {
-        let mut r = Registry::new(BlockHeight::from_u32(100));
-        let name = test_name();
-        // deadline far in the future — only the expiry clock can fire.
-        r.set_record(
-            name.clone(),
-            record(
+        for (name, action, expires_at, deadline, seed) in [
+            (
+                "alpha",
                 Action::Claim,
                 Expiry::At(ts(1_500_000_000)),
-                3_000_000_000,
-                1,
+                3_000_000_000_i64,
+                1_u8,
             ),
-            BlockHeight::from_u32(100),
+            (
+                "bravo",
+                Action::Claim,
+                Expiry::Never,
+                1_500_000_000_i64,
+                2_u8,
+            ),
+            (
+                "delta",
+                Action::Claim,
+                Expiry::Never,
+                3_000_000_000_i64,
+                3_u8,
+            ),
+            (
+                "gamma",
+                Action::Release,
+                Expiry::Never,
+                1_000_000_000_i64,
+                4_u8,
+            ),
+        ] {
+            r.set_record(
+                Name::parse(name).expect("test name parses"),
+                record(action, expires_at, deadline, seed),
+                BlockHeight::from_u32(100),
+            );
+        }
+        // alpha: purchased term up (§4.5.2). bravo: liveness deadline
+        // passed (§4.5.4). delta: live. gamma: already released.
+        // BTreeMap order makes the batch deterministic: alpha, bravo.
+        let due: Vec<(String, NameNote)> = r
+            .releases_due(ts(1_500_000_000))
+            .map(|(name, note)| (name.as_str().to_owned(), note))
+            .collect();
+        assert_eq!(
+            due.iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "bravo"]
         );
-        let (note, reason) = r
-            .release_due(&name, ts(1_500_000_000))
-            .expect("purchased term expired");
-        assert_eq!(reason, ReleaseReason::Expiry);
-        assert!(matches!(note, NameNote::Release { .. }));
-    }
-
-    /// A Never-expiring name whose liveness deadline has passed: only the
-    /// liveness clock can retire it.
-    #[test]
-    fn release_due_reports_liveness_when_deadline_passes() {
-        let mut r = Registry::new(BlockHeight::from_u32(100));
-        let name = test_name();
-        r.set_record(
-            name.clone(),
-            record(Action::Claim, Expiry::Never, 1_700_000_000, 1),
-            BlockHeight::from_u32(100),
-        );
-        let (_, reason) = r
-            .release_due(&name, ts(1_700_000_000))
-            .expect("liveness deadline passed");
-        assert_eq!(reason, ReleaseReason::Liveness);
-    }
-
-    /// The purchased term is the more specific rule: when both clocks
-    /// fire at the same MTP, expiry is reported.
-    #[test]
-    fn release_due_prefers_expiry_when_both_clocks_fire_together() {
-        let mut r = Registry::new(BlockHeight::from_u32(100));
-        let name = test_name();
-        let same = 1_700_000_000_i64;
-        r.set_record(
-            name.clone(),
-            record(Action::Claim, Expiry::At(ts(same)), same, 1),
-            BlockHeight::from_u32(100),
-        );
-        let (_, reason) = r.release_due(&name, ts(same)).expect("both clocks fired");
-        assert_eq!(reason, ReleaseReason::Expiry);
-    }
-
-    /// An already-released record is not releasable again, no matter how
-    /// far the tip has moved past its deadlines.
-    #[test]
-    fn release_due_yields_nothing_for_already_released_records() {
-        let mut r = Registry::new(BlockHeight::from_u32(100));
-        let name = test_name();
-        r.set_record(
-            name.clone(),
-            record(Action::Release, Expiry::Never, 1_000_000_000, 1),
-            BlockHeight::from_u32(100),
-        );
-        assert_eq!(r.release_due(&name, ts(9_999_999_999)), None);
+        // Each yielded note is the release bound to its own record.
+        assert!(matches!(due[0].1, NameNote::Release { .. }));
+        assert_eq!(due[0].1.prev_rcm(), Some(commitment(1)));
+        assert_eq!(due[1].1.prev_rcm(), Some(commitment(2)));
     }
 
     /// A claim sets `release_deadline = τ + L`. An update at a later block

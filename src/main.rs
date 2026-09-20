@@ -377,6 +377,17 @@ async fn main() {
                             break 'lane true;
                         };
                         challenges = authorized_challenges;
+                        // The seam where a voluntary release exists:
+                        // the OTP that authorized it is consumed here,
+                        // and the resulting note is indistinguishable
+                        // from a unilateral one on chain. This line is
+                        // the only durable record of the cause.
+                        if echo.action == Action::Release {
+                            tracing::info!(
+                                name = %echo.name.as_str(),
+                                "voluntary release authorized"
+                            );
+                        }
                         name_notes.admit(note_height, transition_note);
                         true
                     }
@@ -528,28 +539,24 @@ async fn main() {
             }
         }
 
-        // Lifecycle. Expiry or a missed liveness deadline releases the
-        // current Name Note without an OTP. During the final OTP window,
-        // the mint challenges the current controller to renew liveness.
+        // Lifecycle releases, §4.5: the registry owns the clocks and
+        // their plural; the sweep drains the batch each tip.
+        // `releases_due` re-derives the same notes per tip, so
+        // admission is idempotent.
+        for (name, release_note) in registry.releases_due(mtp_now) {
+            tracing::info!(name = %name.as_str(), "lifecycle release authorized");
+            name_notes.admit(tip, release_note);
+        }
+
+        // Liveness lead, §4.5.4: during the final OTP window the mint
+        // challenges the current controller to renew liveness. The
+        // snapshot stays — the lead loop needs each record.
         let records = registry
             .name_chain()
             .map(|(name, record)| (name.clone(), record.clone()))
             .collect::<Vec<(zns_mint::mint::Name, NameRecord)>>();
         for (name, record) in records {
             if record.action == Action::Release {
-                continue;
-            }
-
-            if let Some((release_note, reason)) = registry.release_due(&name, mtp_now) {
-                // The deadline clock authorized a release; `release_due`
-                // re-derives the same note each tip, so admission is
-                // idempotent.
-                tracing::debug!(
-                    name = %name.as_str(),
-                    reason = reason.as_str(),
-                    "lifecycle release authorized"
-                );
-                name_notes.admit(tip, release_note);
                 continue;
             }
 
