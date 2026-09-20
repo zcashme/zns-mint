@@ -15,7 +15,7 @@ use zcash_protocol::value::Zatoshis;
 
 use super::NameNote;
 use crate::key::{RegistryKeys, TreasuryKeys};
-use crate::mint::{Action, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
 /// Builds and records a Name Note transaction for any action.
@@ -43,9 +43,10 @@ pub fn prepare<P: Parameters>(
 
     let excluded = [*authority.internal_note_id()];
     let fixed_spends = 1;
-    let fixed_outputs = match note.action() {
-        Action::Claim => 3, // NameNote + successor anchor + change
-        _ => 2,             // NameNote + change
+    let fixed_outputs = if note.action().is_claim() {
+        3 // NameNote + successor anchor + change
+    } else {
+        2 // NameNote + change
     };
 
     // Treasury funding: largest first, so fewest notes fund the fee.
@@ -100,28 +101,21 @@ pub fn prepare<P: Parameters>(
     // Authority spend: claims spend the anchor as an ordinary ironwood
     // spend; updates and releases spend the predecessor as a ZNS spend
     // with its content-derived commitment openings.
-    match note.action() {
-        Action::Claim => {
-            builder
-                .add_ironwood_spend::<FeeError>(
-                    registry_fvk.clone(),
-                    authority_note,
-                    authority_path,
-                )
-                .expect("FATAL: valid Registry claim anchor rejected by the builder");
-        }
-        _ => {
-            let (rcm, psi) = predecessor_opening(network, wallet, &authority);
-            builder
-                .add_zns_spend::<FeeError>(
-                    registry_fvk.clone(),
-                    authority_note,
-                    authority_path,
-                    rcm,
-                    psi,
-                )
-                .expect("FATAL: valid Registry predecessor rejected by the builder");
-        }
+    if note.action().is_claim() {
+        builder
+            .add_ironwood_spend::<FeeError>(registry_fvk.clone(), authority_note, authority_path)
+            .expect("FATAL: valid Registry claim anchor rejected by the builder");
+    } else {
+        let (rcm, psi) = predecessor_opening(network, wallet, &authority);
+        builder
+            .add_zns_spend::<FeeError>(
+                registry_fvk.clone(),
+                authority_note,
+                authority_path,
+                rcm,
+                psi,
+            )
+            .expect("FATAL: valid Registry predecessor rejected by the builder");
     }
 
     // Fee notes.
@@ -150,7 +144,7 @@ pub fn prepare<P: Parameters>(
 
     // Claims also stage a successor anchor: an ordinary zero-value Registry
     // output that authorizes the next claim.
-    if note.action() == Action::Claim {
+    if note.action().is_claim() {
         builder
             .add_ironwood_output::<FeeError>(
                 Some(registry_fvk.to_ovk(orchard::keys::Scope::External)),

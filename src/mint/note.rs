@@ -607,7 +607,7 @@ impl NameNoteQueue {
     pub fn claim_pending(&self, name: &Name) -> bool {
         self.authorized
             .iter()
-            .any(|(n, _)| n.action() == Action::Claim && n.name() == name)
+            .any(|(n, _)| n.action().is_claim() && n.name() == name)
     }
 
     /// Every open decision, in admission order.

@@ -74,6 +74,29 @@ impl Action {
             Action::Release => "release",
         }
     }
+
+    /// True when this action terminates a registration.
+    pub const fn is_release(self) -> bool {
+        matches!(self, Action::Release)
+    }
+
+    /// True when this action creates a fresh registration (spends an
+    /// anchor, not a predecessor).
+    pub const fn is_claim(self) -> bool {
+        matches!(self, Action::Claim)
+    }
+
+    /// True when this action rebinds an existing registration to a new
+    /// address or term.
+    pub const fn is_update(self) -> bool {
+        matches!(self, Action::Update)
+    }
+
+    /// True when this action spends the registration's current note as
+    /// its authority; a claim spends an anchor instead.
+    pub const fn needs_predecessor(self) -> bool {
+        matches!(self, Action::Update | Action::Release)
+    }
 }
 
 /// An authorized transition the loop is about to assemble.
@@ -113,9 +136,10 @@ pub struct Challenge {
 }
 
 impl Challenge {
-    /// Encodes the challenge memo.
+    /// Encodes the challenge memo. Claims are never challenged, so
+    /// [`Action::is_claim`] guards the lane.
     pub fn encode<P: Parameters>(&self, network: &P) -> Option<[u8; 512]> {
-        if self.action == Action::Claim {
+        if self.action.is_claim() {
             return None;
         }
         let verb = self.action.as_str();
@@ -374,51 +398,49 @@ pub fn apply_block<P: Parameters + Send + 'static>(
             }
             [index] => {
                 let candidate = &candidates[*index];
-                let accepted = match candidate.payload.action() {
-                    Action::Claim => {
-                        // The successor anchor: a backed claim creates
-                        // exactly one zero-value Registry output.
-                        let successor = if registry_outputs.len() == 1
-                            && registry_outputs[0].note().0.value().inner() == 0
-                        {
-                            registry_outputs[0].nf().copied()
-                        } else {
-                            None
-                        };
-                        registry.accept_claim(
+                let action = candidate.payload.action();
+                let accepted = if action.is_claim() {
+                    // The successor anchor: a backed claim creates
+                    // exactly one zero-value Registry output.
+                    let successor = if registry_outputs.len() == 1
+                        && registry_outputs[0].note().0.value().inner() == 0
+                    {
+                        registry_outputs[0].nf().copied()
+                    } else {
+                        None
+                    };
+                    registry.accept_claim(
+                        network,
+                        &candidate.payload,
+                        candidate.nullifier,
+                        successor,
+                        &nfs,
+                        height,
+                        block_mtp,
+                    )
+                } else {
+                    assert!(
+                        registry_outputs.is_empty(),
+                        "update/release must not create a claim anchor"
+                    );
+                    match action {
+                        Action::Update => registry.accept_update(
                             network,
                             &candidate.payload,
                             candidate.nullifier,
-                            successor,
                             &nfs,
                             height,
                             block_mtp,
-                        )
-                    }
-                    Action::Update | Action::Release => {
-                        assert!(
-                            registry_outputs.is_empty(),
-                            "update/release must not create a claim anchor"
-                        );
-                        match candidate.payload.action() {
-                            Action::Update => registry.accept_update(
-                                network,
-                                &candidate.payload,
-                                candidate.nullifier,
-                                &nfs,
-                                height,
-                                block_mtp,
-                            ),
-                            Action::Release => registry.accept_release(
-                                network,
-                                &candidate.payload,
-                                candidate.nullifier,
-                                &nfs,
-                                height,
-                                block_mtp,
-                            ),
-                            Action::Claim => unreachable!("claims are routed above"),
-                        }
+                        ),
+                        Action::Release => registry.accept_release(
+                            network,
+                            &candidate.payload,
+                            candidate.nullifier,
+                            &nfs,
+                            height,
+                            block_mtp,
+                        ),
+                        Action::Claim => unreachable!("claims are routed above"),
                     }
                 };
                 if accepted {
