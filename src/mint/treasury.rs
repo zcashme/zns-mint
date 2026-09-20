@@ -52,12 +52,7 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Requ
     if fields.next()? != "ZNS" {
         return None;
     }
-    let action = match fields.next()? {
-        "claim" => Action::Claim,
-        "update" => Action::Update,
-        "release" => Action::Release,
-        _ => return None,
-    };
+    let action = Action::parse(fields.next()?)?;
 
     // The term leads: claims say `forever` or `<N>y`; updates say `none`,
     // `<N>y`, or `forever` — the upgrade spelling.

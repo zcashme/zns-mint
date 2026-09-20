@@ -85,11 +85,7 @@ impl NameNote {
     /// The rcm component of the ZNS note commitment, derived from the
     /// transition tuple with derivation tag `rcm`.
     pub fn rcm<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Scalar {
-        let verb: &[u8] = match self {
-            NameNote::Claim { .. } => b"claim",
-            NameNote::Update { .. } => b"update",
-            NameNote::Release { .. } => b"release",
-        };
+        let verb = self.action().as_str().as_bytes();
         let name = self.name().as_str().as_bytes();
         let ua = self.ua().encode(params);
         let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
@@ -100,11 +96,7 @@ impl NameNote {
     /// The ψ component of the ZNS note commitment, derived from the
     /// transition tuple with derivation tag `psi`.
     pub fn psi<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Base {
-        let verb: &[u8] = match self {
-            NameNote::Claim { .. } => b"claim",
-            NameNote::Update { .. } => b"update",
-            NameNote::Release { .. } => b"release",
-        };
+        let verb = self.action().as_str().as_bytes();
         let name = self.name().as_str().as_bytes();
         let ua = self.ua().encode(params);
         let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
@@ -382,8 +374,8 @@ impl NameNote {
         }
         hex::decode_to_slice(parts[5], &mut prev_rcm_bytes).ok()?;
 
-        let note = match parts[1] {
-            "claim" => {
+        let note = match Action::parse(parts[1])? {
+            Action::Claim => {
                 if prev_rcm_bytes != [0u8; 32] || ua_str.is_empty() {
                     return None;
                 }
@@ -393,7 +385,7 @@ impl NameNote {
                     expires_at,
                 }
             }
-            "update" => {
+            Action::Update => {
                 if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
                     return None;
                 }
@@ -406,7 +398,7 @@ impl NameNote {
             }
             // A release MUST retain the released UA and encode the exact value
             // `none` for its expiry.
-            "release" => {
+            Action::Release => {
                 if ua_str.is_empty() || expires_at != Expiry::Never || prev_rcm_bytes == [0u8; 32] {
                     return None;
                 }
@@ -416,7 +408,6 @@ impl NameNote {
                     prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
                 }
             }
-            _ => return None,
         };
 
         (note.encode(params).as_slice() == memo).then_some(note)

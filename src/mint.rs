@@ -75,6 +75,16 @@ impl Action {
         }
     }
 
+    /// Parses the canonical ASCII verb — the inverse of [`Self::as_str`].
+    pub fn parse(verb: &str) -> Option<Self> {
+        match verb {
+            "claim" => Some(Action::Claim),
+            "update" => Some(Action::Update),
+            "release" => Some(Action::Release),
+            _ => None,
+        }
+    }
+
     /// True when this action terminates a registration.
     pub const fn is_release(self) -> bool {
         matches!(self, Action::Release)
@@ -187,11 +197,8 @@ impl Challenge {
         let code = OtpCode::from_digits(digits.try_into().ok()?)?;
 
         let name = Name::parse(parts[3])?;
-        let action = match parts[4] {
-            "update" => Action::Update,
-            "release" => Action::Release,
-            _ => return None,
-        };
+        // Challenges never claim: parse the verb, then refuse claims.
+        let action = Action::parse(parts[4]).filter(|action| !action.is_claim())?;
 
         let ua = match zcash_keys::address::Address::decode(network, parts[5])? {
             zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
