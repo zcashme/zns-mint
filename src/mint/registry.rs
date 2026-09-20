@@ -111,12 +111,7 @@ impl Registry {
             Request::Claim { name, ua, term } => {
                 match self.record(&name).cloned() {
                     None => {}
-                    Some(
-                        record @ NameRecord {
-                            action: Action::Release,
-                            ..
-                        },
-                    ) => {
+                    Some(record) if record.action.is_release() => {
                         if payment_height <= record.confirmed_height {
                             return None;
                         }
@@ -132,7 +127,7 @@ impl Registry {
             }
             Request::Update { name, ua, term } => {
                 let record = self.record(&name).cloned()?;
-                if record.action == Action::Release {
+                if record.action.is_release() {
                     return None;
                 }
                 if record.expires_at.expired(mtp) {
@@ -152,7 +147,7 @@ impl Registry {
             }
             Request::Release { name, ua } => {
                 let record = self.record(&name).cloned()?;
-                if record.action == Action::Release {
+                if record.action.is_release() {
                     return None;
                 }
                 if record.ua != ua {
@@ -183,7 +178,7 @@ impl Registry {
         self.records
             .iter()
             .filter(move |(_, record)| {
-                record.action != Action::Release
+                !record.action.is_release()
                     && (record.expires_at.expired(mtp) || mtp >= record.release_deadline)
             })
             .map(move |(name, record)| {
@@ -248,7 +243,7 @@ impl Registry {
             .insert(height, self.anchor_pool.clone());
         assert!(
             self.record(note.name())
-                .is_none_or(|r| r.action == Action::Release),
+                .is_none_or(|r| r.action.is_release()),
             "claim attempted to replace live name {:?} — authorize \
              checks availability",
             note.name()
@@ -337,7 +332,7 @@ impl Registry {
         );
         Some(
             self.record(note.name())
-                .filter(|record| record.action != Action::Release)
+                .filter(|record| !record.action.is_release())
                 .expect(
                     "update/release has no live predecessor \
                      — assembly checks liveness before transitioning",

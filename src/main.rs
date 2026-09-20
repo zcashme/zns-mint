@@ -330,7 +330,7 @@ async fn main() {
                         let Some(record) = registry.record(&echo.name).cloned() else {
                             break 'lane true; // no record: no mint-issued challenge can match
                         };
-                        if record.action == Action::Release {
+                        if record.action.is_release() {
                             break 'lane true;
                         }
                         let Some(sent) = challenges.awaiting(echo, mtp_now) else {
@@ -382,7 +382,7 @@ async fn main() {
                         // and the resulting note is indistinguishable
                         // from a unilateral one on chain. This line is
                         // the only durable record of the cause.
-                        if echo.action == Action::Release {
+                        if echo.action.is_release() {
                             tracing::info!(
                                 name = %echo.name.as_str(),
                                 "voluntary release authorized"
@@ -455,10 +455,10 @@ async fn main() {
                             // payer re-requests once the claim lands.
                             break 'lane true;
                         };
-                        if record.action == Action::Release
+                        if record.action.is_release()
                             || record.expires_at.expired(mtp_now)
                             || note_height <= record.confirmed_height
-                            || (action == Action::Release && requested_ua != record.ua)
+                            || (action.is_release() && requested_ua != record.ua)
                             // A forever name has no runway to bank and no
                             // second upgrade to buy; refuse any term at the
                             // relay, before a challenge spends anything.
@@ -556,7 +556,7 @@ async fn main() {
             .map(|(name, record)| (name.clone(), record.clone()))
             .collect::<Vec<(zns_mint::mint::Name, NameRecord)>>();
         for (name, record) in records {
-            if record.action == Action::Release {
+            if record.action.is_release() {
                 continue;
             }
 
@@ -650,60 +650,54 @@ async fn main() {
             // Authority: a claim spends a lineage pool anchor; an update
             // or release spends the predecessor — the record's nullifier
             // matched by commitment.
-            let authority_nf = match note.action() {
-                Action::Claim => {
-                    // The name must still be claimable: free, or released
-                    // after the payment arrived.
-                    let claimable = match registry.record(note.name()) {
-                        None => true,
-                        Some(record) => {
-                            record.action == Action::Release && origin > record.confirmed_height
-                        }
-                    };
-                    if !claimable {
-                        tracing::debug!(
+            let authority_nf = if note.action().is_claim() {
+                // The name must still be claimable: free, or released
+                // after the payment arrived.
+                let claimable = match registry.record(note.name()) {
+                    None => true,
+                    Some(record) => record.action.is_release() && origin > record.confirmed_height,
+                };
+                if !claimable {
+                    tracing::debug!(
+                        name = %note.name().as_str(),
+                        "claim order waits: the name is live on the chain"
+                    );
+                    continue;
+                }
+                match registry.anchor_pool().iter().copied().find(|nf| {
+                    wallet
+                        .unspent_ironwood_note_by_nullifier(
+                            REGISTRY_ACCOUNT,
+                            *nf,
+                            TargetHeight::from(tip),
+                        )
+                        .is_some()
+                }) {
+                    Some(nf) => nf,
+                    None => {
+                        tracing::warn!(
                             name = %note.name().as_str(),
-                            "claim order waits: the name is live on the chain"
+                            "no available claim anchor (all locked or spent)"
                         );
                         continue;
                     }
-                    match registry.anchor_pool().iter().copied().find(|nf| {
-                        wallet
-                            .unspent_ironwood_note_by_nullifier(
-                                REGISTRY_ACCOUNT,
-                                *nf,
-                                TargetHeight::from(tip),
-                            )
-                            .is_some()
-                    }) {
-                        Some(nf) => nf,
-                        None => {
-                            tracing::warn!(
-                                name = %note.name().as_str(),
-                                "no available claim anchor (all locked or spent)"
-                            );
-                            continue;
-                        }
-                    }
                 }
-                Action::Update | Action::Release => {
-                    match registry
-                        .record(note.name())
-                        .filter(|record| {
-                            record.action != Action::Release
-                                && Some(record.commitment) == note.prev_rcm()
-                        })
-                        .map(|record| record.nullifier)
-                    {
-                        Some(nf) => nf,
-                        None => {
-                            tracing::debug!(
-                                name = %note.name().as_str(),
-                                action = note.action().as_str(),
-                                "order waits: its predecessor is no longer current"
-                            );
-                            continue;
-                        }
+            } else {
+                match registry
+                    .record(note.name())
+                    .filter(|record| {
+                        !record.action.is_release() && Some(record.commitment) == note.prev_rcm()
+                    })
+                    .map(|record| record.nullifier)
+                {
+                    Some(nf) => nf,
+                    None => {
+                        tracing::debug!(
+                            name = %note.name().as_str(),
+                            action = note.action().as_str(),
+                            "order waits: its predecessor is no longer current"
+                        );
+                        continue;
                     }
                 }
             };
