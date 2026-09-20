@@ -1,5 +1,8 @@
 //! The best chain: where it is, and what's in it.
 
+use std::time::Duration;
+
+use futures_util::StreamExt as _;
 use incrementalmerkletree::frontier::Frontier;
 use sapling::Node as SaplingNode;
 use serde::Deserialize;
@@ -11,27 +14,45 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zebra_indexer_proto::{BlockHashAndHeight, Empty, ZebraClient};
 
 use super::{
-    not_on_best_chain, JsonRpc, TransportError, CONNECT_TIMEOUT, REQUEST_TIMEOUT, ZEBRA_INDEXER_URL,
+    not_on_best_chain, CanonicalBlockSource, JsonRpc, TransportError, REQUEST_TIMEOUT, RETRY_PAUSE,
 };
 use orchard::tree::MerkleHashOrchard;
+
+/// The indexer's gRPC endpoint.
+#[cfg(not(all(feature = "testnet", not(feature = "regtest"))))]
+const ZEBRA_INDEXER_URL: &str = "http://127.0.0.1:8230";
+#[cfg(all(feature = "testnet", not(feature = "regtest")))]
+const ZEBRA_INDEXER_URL: &str = "http://127.0.0.1:18230";
+
+/// TCP connect timeout for a fresh gRPC connection.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Keep-alive ping interval on the gRPC connection.
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
+/// Unanswered keep-alive pings before the connection is declared dead.
+const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A client for the node's gRPC announcements about the chain.
 #[derive(Clone)]
 pub struct ChainClient(pub(crate) ZebraClient);
 
 impl ChainClient {
-    /// Connects to the indexer's gRPC endpoint.
+    /// Connects to the indexer's gRPC endpoint, keep-alive on: the tip
+    /// stream hangs silently on a dead peer otherwise.
     pub(crate) async fn connect() -> Result<Self, tonic::transport::Error> {
         let endpoint = tonic::transport::Endpoint::from_static(ZEBRA_INDEXER_URL)
             .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT);
+            .timeout(REQUEST_TIMEOUT)
+            .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
+            .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
+            .keep_alive_while_idle(true);
 
         let client = ZebraClient::connect(endpoint).await?;
         Ok(Self(client))
     }
 
     /// Change-only tip stream.
-    pub async fn chain_tip_change_stream(&mut self) -> Result<TipStream, TransportError> {
+    pub(crate) async fn chain_tip_change_stream(&mut self) -> Result<TipStream, TransportError> {
         self.0
             .chain_tip_change(Empty {})
             .await
@@ -41,13 +62,92 @@ impl ChainClient {
 }
 
 /// The live gRPC tip stream: one notification per canonical tip change.
-pub type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
+pub(crate) type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
 
 /// A tip announcement, decoded: `(height, hash)` from one message.
-pub fn tip_height_hash(tip: &BlockHashAndHeight) -> (BlockHeight, BlockHash) {
+pub(crate) fn tip_height_hash(tip: &BlockHashAndHeight) -> (BlockHeight, BlockHash) {
     let height = BlockHeight::from_u32(tip.height);
     let hash = block_hash_from_display(&tip.hash).expect("FATAL: invalid tip hash from Zebra");
     (height, hash)
+}
+
+// ============================================================================
+// The tip session — the stream's one owner
+// ============================================================================
+
+/// The tip stream's one owner: subscription, client, repair.
+pub struct TipSession {
+    client: ChainClient,
+    stream: TipStream,
+}
+
+impl TipSession {
+    /// Subscribes to the change-only tip stream.
+    pub async fn open(client: ChainClient) -> Self {
+        let stream = Self::subscribe(client.clone()).await;
+        Self { client, stream }
+    }
+
+    /// One wake-up, answered with the node's canonical tip; the stream
+    /// is repaired on death. `Err` is a fatal data verdict.
+    pub async fn next_tip(
+        &mut self,
+        source: &CanonicalBlockSource,
+    ) -> Result<(BlockHeight, BlockHash), TransportError> {
+        let announced = match self.stream.next().await {
+            Some(Ok(notification)) => {
+                let announced = tip_height_hash(&notification);
+                tracing::info!(height = u32::from(announced.0), "tip notification received");
+                Some(announced)
+            }
+            Some(Err(error)) => {
+                tracing::warn!(%error, "Zebra tip stream failed; repairing");
+                self.repair().await;
+                None
+            }
+            None => {
+                tracing::warn!("Zebra tip stream ended; repairing");
+                self.repair().await;
+                None
+            }
+        };
+
+        // Truth is self-derived: the announcement may have coalesced
+        // every change since the last wake-up, so the node's answer —
+        // not the stream's promise — is what the mint acts on.
+        let best = source.canonical_tip().await?;
+        if let Some((height, hash)) = announced {
+            if best != (height, hash) {
+                tracing::debug!(
+                    announced_height = u32::from(height),
+                    announced_hash = %hash,
+                    best_height = u32::from(best.0),
+                    best_hash = %best.1,
+                    "coalesced Zebra tip notification"
+                );
+            }
+        }
+        Ok(best)
+    }
+
+    /// Pause, reopen.
+    async fn repair(&mut self) {
+        tokio::time::sleep(RETRY_PAUSE).await;
+        self.stream = Self::subscribe(self.client.clone()).await;
+    }
+
+    /// Opens the tip stream, retrying until Zebra answers.
+    async fn subscribe(mut client: ChainClient) -> TipStream {
+        loop {
+            match client.chain_tip_change_stream().await {
+                Ok(stream) => return stream,
+                Err(error) => {
+                    tracing::warn!(%error, "Zebra tip stream unavailable; reconnecting");
+                    tokio::time::sleep(RETRY_PAUSE).await;
+                }
+            }
+        }
+    }
 }
 
 /// Reverses Zebra's display-order bytes into a `BlockHash`.
@@ -204,6 +304,20 @@ impl super::CanonicalBlockSource {
     /// from different tips cannot be combined.
     pub async fn exact_tip(&self) -> Result<(BlockHeight, BlockHash), TransportError> {
         self.0.get_blockchain_info().await?.canonical_tip()
+    }
+
+    /// The canonical tip, retrying while the node is merely unavailable.
+    pub async fn canonical_tip(&self) -> Result<(BlockHeight, BlockHash), TransportError> {
+        loop {
+            match self.exact_tip().await {
+                Ok(tip) => return Ok(tip),
+                Err(error) if error.is_retryable() => {
+                    tracing::warn!(%error, "exact Zebra tip unavailable; retrying");
+                    tokio::time::sleep(RETRY_PAUSE).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Fetches a full canonical block by height (see [`JsonRpc::get_block`]).
