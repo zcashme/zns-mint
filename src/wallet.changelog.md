@@ -5,9 +5,7 @@
 ### Changed
 
 - `Wallet::new`'s comment rewords the per-pool origin checkpoint from
-  "the reorg floor" to the scan origin — where the wallet's data begins.
-- `block_hash_at` documents the contract the reorg walk's terminator
-  leans on: `Some` exactly on the contiguous span [origin, applied tip].
+  "the reorg floor" to the scan origin.
 
 ## 2026-09-19 — The three transparent wallet fields go: the mint never receives, stores, or spends transparent money
 

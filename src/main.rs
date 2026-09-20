@@ -92,10 +92,7 @@ async fn main() {
 
         // Compare the wallet's own cursor with Zebra at the same height.
         // If they disagree, walk backward until both name the same block;
-        // no state above that common ancestor survives. The walk halts
-        // when it steps below the wallet's data — the origin checkpoint
-        // is the last Some — so a fork the wallet cannot rewind to is a
-        // verdict about the data, not a policy.
+        // no state above that common ancestor survives.
         let mut ancestor = chain_tip.block_height().min(best_height);
         loop {
             let wallet_hash = wallet.block_hash_at(ancestor);

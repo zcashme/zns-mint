@@ -174,8 +174,7 @@ impl<P: Parameters> Wallet<P> {
         };
         // Checkpoint id is birthday − 1: each frontier is the tree state at
         // the start of `MINT_BIRTHDAY`. Empty frontiers are inserted too —
-        // the per-pool origin checkpoint is the scan origin, where the
-        // wallet's data begins.
+        // the per-pool origin checkpoint is the scan origin.
         wallet
             .sapling_tree
             .insert_frontier(chain_state.final_sapling_tree().clone(), retention)?;
@@ -260,8 +259,6 @@ impl<P: Parameters> Wallet<P> {
     }
 
     /// The block hash at `height`: an applied block, or the boot origin.
-    /// `Some` exactly on the contiguous span [origin, applied tip] — the
-    /// reorg walk's terminator relies on this shape.
     pub fn block_hash_at(&self, height: BlockHeight) -> Option<BlockHash> {
         self.blocks
             .get(&height)
