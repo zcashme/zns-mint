@@ -176,28 +176,26 @@ impl Registry {
         self.records.get(name)
     }
 
-    /// The unilateral §4.5 release owed when a live name's purchased term
-    /// or liveness deadline has passed. Idempotent per tip.
-    pub fn release_due(&self, name: &Name, mtp: Timestamp) -> Option<NameNote> {
-        let record = self.record(name)?;
-        if record.action == Action::Release {
-            return None;
-        }
-        if !record.expires_at.expired(mtp) && mtp < record.release_deadline {
-            return None;
-        }
-        Some(NameNote::Release {
-            name: name.clone(),
-            ua: record.ua.clone(),
-            prev: record.commitment,
-        })
-    }
-
-    /// The plural of release_due: every live name past a §4.5 deadline.
+    /// The §4.5 clocks, swept: every live name whose purchased term or
+    /// liveness deadline has passed at `mtp`, with the release note it
+    /// is owed. Idempotent per tip.
     pub fn releases_due(&self, mtp: Timestamp) -> impl Iterator<Item = (Name, NameNote)> + '_ {
         self.records
-            .keys()
-            .filter_map(move |name| self.release_due(name, mtp).map(|note| (name.clone(), note)))
+            .iter()
+            .filter(move |(_, record)| {
+                record.action != Action::Release
+                    && (record.expires_at.expired(mtp) || mtp >= record.release_deadline)
+            })
+            .map(move |(name, record)| {
+                (
+                    name.clone(),
+                    NameNote::Release {
+                        name: name.clone(),
+                        ua: record.ua.clone(),
+                        prev: record.commitment,
+                    },
+                )
+            })
     }
 
     /// Ceremony filling: a zero-value Registry output joins the
@@ -457,70 +455,6 @@ mod tests {
         }
     }
 
-    /// A live claim before either clock fires: nothing to do.
-    #[test]
-    fn release_due_returns_none_while_live() {
-        let mut r = Registry::new(BlockHeight::from_u32(100));
-        let name = test_name();
-        r.set_record(
-            name.clone(),
-            record(Action::Claim, Expiry::Never, 2_000_000_000, 1),
-            BlockHeight::from_u32(100),
-        );
-        assert!(r.release_due(&name, ts(1_999_999_999)).is_none());
-    }
-
-    /// The purchased term is up (§4.5.2) but the liveness deadline is
-    /// not: the release is due either way.
-    #[test]
-    fn release_due_fires_when_purchased_term_lapses() {
-        let mut r = Registry::new(BlockHeight::from_u32(100));
-        let name = test_name();
-        // deadline far in the future — only the expiry clock can fire.
-        r.set_record(
-            name.clone(),
-            record(
-                Action::Claim,
-                Expiry::At(ts(1_500_000_000)),
-                3_000_000_000,
-                1,
-            ),
-            BlockHeight::from_u32(100),
-        );
-        let note = r
-            .release_due(&name, ts(1_500_000_000))
-            .expect("purchased term expired");
-        assert!(matches!(note, NameNote::Release { .. }));
-    }
-
-    /// A Never-expiring name whose liveness deadline has passed (§4.5.4):
-    /// the release is due.
-    #[test]
-    fn release_due_fires_when_liveness_deadline_passes() {
-        let mut r = Registry::new(BlockHeight::from_u32(100));
-        let name = test_name();
-        r.set_record(
-            name.clone(),
-            record(Action::Claim, Expiry::Never, 1_700_000_000, 1),
-            BlockHeight::from_u32(100),
-        );
-        assert!(r.release_due(&name, ts(1_700_000_000)).is_some());
-    }
-
-    /// An already-released record is not releasable again, no matter how
-    /// far the tip has moved past its deadlines.
-    #[test]
-    fn release_due_yields_nothing_for_already_released_records() {
-        let mut r = Registry::new(BlockHeight::from_u32(100));
-        let name = test_name();
-        r.set_record(
-            name.clone(),
-            record(Action::Release, Expiry::Never, 1_000_000_000, 1),
-            BlockHeight::from_u32(100),
-        );
-        assert!(r.release_due(&name, ts(9_999_999_999)).is_none());
-    }
-
     /// The plural sweep: only names whose clocks have fired, each paired
     /// with its release note. Live and already-released names are absent.
     #[test]
@@ -565,11 +499,20 @@ mod tests {
         // alpha: purchased term up (§4.5.2). bravo: liveness deadline
         // passed (§4.5.4). delta: live. gamma: already released.
         // BTreeMap order makes the batch deterministic: alpha, bravo.
-        let due: Vec<String> = r
+        let due: Vec<(String, NameNote)> = r
             .releases_due(ts(1_500_000_000))
-            .map(|(name, _)| name.as_str().to_owned())
+            .map(|(name, note)| (name.as_str().to_owned(), note))
             .collect();
-        assert_eq!(due, vec!["alpha".to_string(), "bravo".to_string()]);
+        assert_eq!(
+            due.iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "bravo"]
+        );
+        // Each yielded note is the release bound to its own record.
+        assert!(matches!(due[0].1, NameNote::Release { .. }));
+        assert_eq!(due[0].1.prev_rcm(), Some(commitment(1)));
+        assert_eq!(due[1].1.prev_rcm(), Some(commitment(2)));
     }
 
     /// A claim sets `release_deadline = τ + L`. An update at a later block
