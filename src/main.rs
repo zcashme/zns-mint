@@ -82,7 +82,7 @@ async fn main() {
     // holds position (the wallet) and never sees transport state.
     let mut connection = TipSession::open(chain).await;
     loop {
-        let (best_height, best_hash) = match connection.next_tip().await {
+        let (best_height, best_hash) = match connection.next_tip(&source).await {
             Ok(tip) => tip,
             Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
         };

@@ -1,5 +1,18 @@
 # Zcash I/O changelog
 
+## 2026-09-20 — Keepalive claims verified against regtest Zebra (#88)
+- The doc comments' keepalive claims are now measured facts, not
+  assertions: wire-level probe against regtest (node frozen mid-stream)
+  — PING every 30s after the last received frame, connection torn down
+  `hyper::Error(Http2, KeepAliveTimedOut)` at ping + 15s, open stream
+  surfaces the death as an `Err` ~35s after its last live frame;
+  without keep-alive, `next()` hangs silent past 60s. Fresh
+  subscriptions deliver the current tip immediately (three runs).
+- Zebra's server runs its own 30s keep-alive: pings are bilateral.
+- Doc comments on `ChainClient::connect`, `TipSession`, and
+  `next_tip` rewritten to the measured facts; keep-alive constants
+  scoped private to `chain.rs` (single consumer).
+
 ## 2026-09-19 — TipSession owns the tip stream (#88)
 
 - The tip stream's lifecycle lives in one place now: `TipSession` in
