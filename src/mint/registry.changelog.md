@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-09-21 — Duplicate claim Name Notes no longer panic (issue #116)
+
+- `accept_claim` still advances the anchor pool when a backed claim
+  confirms. If the name is already live, it returns `false` and leaves
+  the registration untouched instead of asserting.
+
 ## 2026-09-21 — `claim_anchor_height` deleted: the floor was the seed checkpoint all along (issue #108)
 
 - The `claim_anchor_height` field, the `Registry::new` parameter, and

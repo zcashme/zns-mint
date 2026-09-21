@@ -654,7 +654,8 @@ async fn main() {
         // One assembly and submission path for every authorized Name
         // Note. The wallet's spent marks hold a sent order's inputs until
         // its expiry height, so nothing is re-enactable before then.
-        for (note, origin) in name_notes.iter().map(|(n, o)| (n.clone(), o)) {
+        let open: Vec<_> = name_notes.iter().map(|(n, o)| (n.clone(), o)).collect();
+        for (note, origin) in open {
             // Authority: a claim spends a lineage pool anchor; an update
             // or release spends the predecessor — the record's nullifier
             // matched by commitment.
@@ -668,7 +669,17 @@ async fn main() {
                 if !claimable {
                     tracing::debug!(
                         name = %note.name().as_str(),
-                        "claim order waits: the name is live on the chain"
+                        "claim order dropped: the name is live on the chain"
+                    );
+                    name_notes.fulfill(&note);
+                    continue;
+                }
+                // One claim broadcast at a time: a later tip must not
+                // spend a second pool anchor while the first tx is open.
+                if name_notes.in_flight(&note, tip) {
+                    tracing::debug!(
+                        name = %note.name().as_str(),
+                        "claim order already in flight"
                     );
                     continue;
                 }
@@ -737,6 +748,9 @@ async fn main() {
                     action = note.action().as_str(),
                     "NameNote order in flight"
                 );
+                if note.action().is_claim() {
+                    name_notes.mark_in_flight(&note, transaction.expiry_height());
+                }
             } else {
                 tracing::error!(
                     txid = %transaction.txid(),

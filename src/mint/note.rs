@@ -570,40 +570,78 @@ pub fn decrypt_treasury_memos(
 /// the height whose evidence authorized it: a canonical block fulfills
 /// it, a reorg truncates it. Money stays in the wallet, so a restart
 /// empties the queue and the walk re-admits what still stands.
+///
+/// A successful claim broadcast records the transaction's expiry so a
+/// later tip does not spend a second pool anchor for the same order
+/// while the first tx is still open.
 #[derive(Clone, Debug, Default)]
 pub struct NameNoteQueue {
-    authorized: Vec<(NameNote, BlockHeight)>,
+    authorized: Vec<OpenNameNote>,
+}
+
+#[derive(Clone, Debug)]
+struct OpenNameNote {
+    note: NameNote,
+    origin: BlockHeight,
+    /// Set after a successful claim broadcast. While `tip < until`
+    /// (or `until` is zero: no expiry), enactment skips this order.
+    in_flight_until: Option<BlockHeight>,
 }
 
 impl NameNoteQueue {
     /// Records a decision. Idempotent: a note already authorized keeps its
     /// original origin.
     pub fn admit(&mut self, origin: BlockHeight, note: NameNote) {
-        if !self.authorized.iter().any(|(n, _)| *n == note) {
-            self.authorized.push((note, origin));
+        if !self.authorized.iter().any(|o| o.note == note) {
+            self.authorized.push(OpenNameNote {
+                note,
+                origin,
+                in_flight_until: None,
+            });
         }
     }
 
     /// Reorg: drop origins above the common ancestor.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
-        self.authorized.retain(|(_, origin)| *origin <= ancestor);
+        self.authorized.retain(|o| o.origin <= ancestor);
     }
 
     /// The chain carried the note; forget the decision.
     pub fn fulfill(&mut self, note: &NameNote) {
-        self.authorized.retain(|(n, _)| n != note);
+        self.authorized.retain(|o| &o.note != note);
     }
 
     /// The one-open-claim guard.
     pub fn claim_pending(&self, name: &Name) -> bool {
         self.authorized
             .iter()
-            .any(|(n, _)| n.action().is_claim() && n.name() == name)
+            .any(|o| o.note.action().is_claim() && o.note.name() == name)
+    }
+
+    /// True while a prior successful broadcast of this note is still open.
+    pub fn in_flight(&self, note: &NameNote, tip: BlockHeight) -> bool {
+        self.authorized.iter().any(|o| {
+            &o.note == note
+                && o.in_flight_until.is_some_and(|until| {
+                    // Expiry height zero means no expiry — stay in flight
+                    // until fulfill (same rule as wallet spend locks).
+                    until == BlockHeight::from_u32(0) || tip < until
+                })
+        })
+    }
+
+    /// Records a successful claim broadcast; `expiry` is the tx expiry height.
+    pub fn mark_in_flight(&mut self, note: &NameNote, expiry: BlockHeight) {
+        for o in &mut self.authorized {
+            if &o.note == note {
+                o.in_flight_until = Some(expiry);
+            }
+        }
     }
 
     /// Every open decision, in admission order.
     pub fn iter(&self) -> impl Iterator<Item = (&NameNote, BlockHeight)> {
-        self.authorized.iter().map(|(note, origin)| (note, *origin))
+        self.authorized.iter().map(|o| (&o.note, o.origin))
     }
 }
 
@@ -974,5 +1012,28 @@ mod tests {
         assert!(queue.claim_pending(&bob));
         // Other names are unblocked.
         assert!(!queue.claim_pending(&test_name()));
+    }
+
+    #[test]
+    fn queue_claim_stays_in_flight_until_expiry_or_fulfill() {
+        let claim = NameNote::Claim {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+        let h = |n: u32| BlockHeight::from_u32(n);
+        let mut queue = NameNoteQueue::default();
+        queue.admit(h(10), claim.clone());
+        assert!(!queue.in_flight(&claim, h(10)));
+
+        queue.mark_in_flight(&claim, h(50));
+        assert!(queue.in_flight(&claim, h(49)));
+        assert!(!queue.in_flight(&claim, h(50)));
+
+        queue.mark_in_flight(&claim, h(0));
+        assert!(queue.in_flight(&claim, h(99)));
+
+        queue.fulfill(&claim);
+        assert!(!queue.in_flight(&claim, h(10)));
     }
 }

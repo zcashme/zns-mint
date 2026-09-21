@@ -4,6 +4,13 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-21 — Claim enactment: one broadcast until expiry (#116)
+
+- After a successful claim Name Note submit, the order is marked
+  in-flight through the tx expiry so the next tip does not spend
+  another pool anchor. If the name is already live, the open claim
+  order is dropped instead of waiting.
+
 ## 2026-09-21 — The reorg walk halts on the wallet's data bottom (issue #108)
 
 - The ancestor walk's floor panic (`ancestor == MINT_BIRTHDAY − 1`,

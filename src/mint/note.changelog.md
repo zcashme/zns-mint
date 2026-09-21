@@ -1,5 +1,12 @@
 # `mint/note.rs` design record
 
+## 2026-09-21 — One in-flight claim broadcast per open order (#116)
+
+- After a successful claim submit, `NameNoteQueue` records the tx
+  expiry (`mark_in_flight`). Enactment skips that order while
+  `tip < expiry` (expiry `0` means until fulfill), so a later tip does
+  not spend a second pool anchor for the same claim.
+
 ## 2026-09-17 — extend gains the upgrade arm: At + forever → Never (#65)
 
 - `Expiry::extend` maps `(At, Some(Forever))` to `Never`. The arm
