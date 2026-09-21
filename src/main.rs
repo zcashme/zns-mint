@@ -12,23 +12,30 @@
 
 use std::time::Duration;
 
+use orchard::keys::FullViewingKey;
+use sapling::circuit::{OutputParameters, SpendParameters};
+use tokio::sync::mpsc;
 use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
 use zcash_client_backend::data_api::{WalletRead as _, WalletWrite as _};
 use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
+use zcash_protocol::value::Zatoshis;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::assemble;
-use zns_mint::mint::note::NameNoteQueue;
+use zns_mint::key::TreasuryKeys;
+use zns_mint::mint::note::{assemble, decrypt_treasury_tx, NameNoteQueue};
 use zns_mint::mint::otp::{OtpCode, OtpQueue, OtpRequest, D_OTP};
-use zns_mint::mint::pricing::fetch_round;
-use zns_mint::mint::registry::NameRecord;
+use zns_mint::mint::pricing::{fetch_round, Oracle};
+use zns_mint::mint::registry::{NameRecord, Registry};
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
-    Action, Challenge, Expiry, MintInbound, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
-    REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    Action, Challenge, Expiry, MintInbound, Name, Request, Term, UnifiedAddress, CHALLENGE_LEAD,
+    LIVENESS_RETRY_COOLDOWN, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
-use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession};
+use zns_mint::wallet::Wallet;
+use zns_mint::zcash::{
+    CanonicalBlockSource, ChainClient, JsonRpc, MempoolChangeKind, MempoolSession, TipSession,
+};
 
 const RETRY_PAUSE: Duration = Duration::from_secs(5);
 
@@ -81,11 +88,75 @@ async fn main() {
     // the re-read of the canonical tip that turns every wake-up into the
     // node's answer, never the announcement's promise. The orchestrator
     // holds position (the wallet) and never sees transport state.
+    // The mempool quick lane: update and release triggers relayed the
+    // moment the node reports them, before their blocks. One reader task
+    // turns mempool announcements into candidates; the orchestrator alone
+    // decides. Best-effort and forgetful — every decision the block path
+    // re-makes when the trigger confirms.
+    let (quick_tx, mut quick_rx) = mpsc::channel::<(MintInbound, Zatoshis)>(64);
+    tokio::spawn(quick_lane(
+        network,
+        chain.clone(),
+        rpc.clone(),
+        treasury_keys.orchard_fvk(),
+        quick_tx,
+    ));
+
     let mut connection = TipSession::open(chain).await;
     loop {
-        let (best_height, best_hash) = match connection.next_tip(&source).await {
-            Ok(tip) => tip,
-            Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
+        let (best_height, best_hash) = tokio::select! {
+            tip = connection.next_tip(&source) => match tip {
+                Ok(tip) => tip,
+                Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
+            },
+            Some((inbound, paid)) = quick_rx.recv() => {
+                // The quick entrance: evaluate now, forget immediately —
+                // deferral is the drain's concept, not this one's. The
+                // reader forwards everything it decrypts; this match is
+                // where "which lanes are quick" is decided.
+                match inbound {
+                    MintInbound::Request(
+                        request @ (Request::Update { .. } | Request::Release { .. }),
+                    ) => {
+                        let (name, action, requested_ua, term) = match request {
+                            Request::Update { name, ua, term } => {
+                                (name, Action::Update, ua, term)
+                            }
+                            Request::Release { name, ua } => (name, Action::Release, ua, None),
+                            Request::Claim { .. } => unreachable!("routed above"),
+                        };
+                        let mtp_now = mtp
+                            .current()
+                            .expect("FATAL: MTP unavailable at the applied tip");
+                        relay_challenge(
+                            &network,
+                            &mut wallet,
+                            &treasury_keys,
+                            &sapling_spend,
+                            &sapling_output,
+                            &registry,
+                            &mut challenges,
+                            &oracle,
+                            &source,
+                            mtp_now,
+                            &name,
+                            action,
+                            &requested_ua,
+                            term,
+                            paid,
+                            chain_tip.block_height() + 1,
+                            "mempool",
+                        )
+                        .await;
+                    }
+                    // Claims, echoes, and bare payments authorize against
+                    // money that must confirm — the block path owns them.
+                    MintInbound::Request(Request::Claim { .. })
+                    | MintInbound::Echo(_)
+                    | MintInbound::Unrecognized(_) => {}
+                }
+                continue;
+            }
         };
         wallet
             .update_chain_tip(best_height)
@@ -454,106 +525,26 @@ async fn main() {
                             }
                             Request::Claim { .. } => unreachable!("claims are routed above"),
                         };
-                        let Some(record) = registry.record(&name).cloned() else {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                "request for an unregistered name"
-                            );
-                            // Deferral would be attacker-bought memory: the
-                            // payer re-requests once the claim lands.
-                            break 'lane true;
-                        };
-                        if record.action.is_release()
-                            || record.expires_at.expired(mtp_now)
-                            || note_height <= record.confirmed_height
-                            || (action.is_release() && requested_ua != record.ua)
-                            // A forever name has no runway to bank and no
-                            // second upgrade to buy; refuse any term at the
-                            // relay, before a challenge spends anything.
-                            || (record.expires_at == Expiry::Never && term.is_some())
-                            || challenges.pending(
-                                &name,
-                                action,
-                                &requested_ua,
-                                record.commitment,
-                                mtp_now,
-                            )
-                        {
-                            break 'lane true;
-                        }
-                        // The challenge fee (issue #18): the price of
-                        // triggering a controller challenge — $1 at the
-                        // oracle's rate, rounded up to the 100k-zat grid.
-                        // The gate at first sight is binding: an underpaid
-                        // request is dead and silent, and a new payment
-                        // settles a new evaluation. The fee never counts
-                        // toward the echo's term quote; that gate is the
-                        // echo lane's own, in a different transaction.
-                        if paid < oracle.challenge_fee() {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                action = action.as_str(),
-                                paid = paid.into_u64(),
-                                "request underpaid — dead, no challenge"
-                            );
-                            break 'lane true;
-                        }
-
-                        let code = OtpCode::generate();
-                        let challenge = Challenge {
-                            code: code.clone(),
-                            name: name.clone(),
-                            action,
-                            ua: requested_ua.clone(),
-                        };
-                        let Some(memo) = challenge.encode(&network) else {
-                            break 'lane true;
-                        };
-                        let relay_value = MINIMUM_FEE;
-                        let Some(transaction) = treasury::challenge(
+                        relay_challenge(
                             &network,
                             &mut wallet,
                             &treasury_keys,
                             &sapling_spend,
                             &sapling_output,
-                            &record.ua,
-                            memo,
-                            relay_value,
-                        ) else {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                action = action.as_str(),
-                                "controller challenge awaits Treasury funds"
-                            );
-                            break 'lane false; // deferred
-                        };
-
-                        let pending = OtpRequest {
-                            name: name.clone(),
+                            &registry,
+                            &mut challenges,
+                            &oracle,
+                            &source,
+                            mtp_now,
+                            &name,
                             action,
-                            ua: requested_ua,
-                            tip_rcm: record.commitment,
-                            code,
-                            expires_at: mtp_now + time::Duration::seconds(D_OTP),
+                            &requested_ua,
                             term,
-                        };
-                        if source.submit(&transaction, "controller challenge").await {
-                            challenges.issue(pending);
-                            tracing::info!(
-                                txid = %transaction.txid(),
-                                name = %name.as_str(),
-                                action = action.as_str(),
-                                "controller challenged"
-                            );
-                            true
-                        } else {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                action = action.as_str(),
-                                "controller challenge rejected — deferred"
-                            );
-                            false
-                        }
+                            paid,
+                            note_height,
+                            "tip",
+                        )
+                        .await
                     }
                 }
             };
@@ -781,5 +772,187 @@ async fn main() {
             hash = %tip_hash,
             "mint rules applied at canonical tip"
         );
+    }
+}
+
+/// One relay-lane evaluation: the decided-refusal battery, the challenge
+/// fee, and the OTP relay they pay for — the single policy for both
+/// entrances. The block-cadence drain passes the carrying block's height;
+/// the mempool quick path passes the next height, where the trigger lands
+/// if mined now. Returns `true` when decided; `false` defers to the next
+/// tip — a meaning only the drain takes, the quick path forgets either
+/// way and the trigger's block re-enters the drain.
+#[allow(clippy::too_many_arguments)]
+async fn relay_challenge<P: Parameters + Send + 'static>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    treasury_keys: &TreasuryKeys,
+    spend_prover: &SpendParameters,
+    output_prover: &OutputParameters,
+    registry: &Registry,
+    challenges: &mut OtpQueue,
+    oracle: &Oracle,
+    source: &CanonicalBlockSource,
+    mtp_now: time::Timestamp,
+    name: &Name,
+    action: Action,
+    requested_ua: &UnifiedAddress,
+    term: Option<Term>,
+    paid: Zatoshis,
+    trigger_height: BlockHeight,
+    lane: &'static str,
+) -> bool {
+    let Some(record) = registry.record(name).cloned() else {
+        tracing::debug!(
+            lane,
+            name = %name.as_str(),
+            "request for an unregistered name"
+        );
+        // Deferral would be attacker-bought memory: the
+        // payer re-requests once the claim lands.
+        return true;
+    };
+    if record.action.is_release()
+        || record.expires_at.expired(mtp_now)
+        || trigger_height <= record.confirmed_height
+        || (action.is_release() && *requested_ua != record.ua)
+        // A forever name has no runway to bank and no
+        // second upgrade to buy; refuse any term at the
+        // relay, before a challenge spends anything.
+        || (record.expires_at == Expiry::Never && term.is_some())
+        || challenges.pending(name, action, requested_ua, record.commitment, mtp_now)
+    {
+        return true;
+    }
+    // The challenge fee (issue #18): the price of
+    // triggering a controller challenge — $1 at the
+    // oracle's rate, rounded up to the 100k-zat grid.
+    // The gate at first sight is binding: an underpaid
+    // request is dead and silent, and a new payment
+    // settles a new evaluation. The fee never counts
+    // toward the echo's term quote; that gate is the
+    // echo lane's own, in a different transaction.
+    if paid < oracle.challenge_fee() {
+        tracing::debug!(
+            lane,
+            name = %name.as_str(),
+            action = action.as_str(),
+            paid = paid.into_u64(),
+            "request underpaid — dead, no challenge"
+        );
+        return true;
+    }
+
+    let code = OtpCode::generate();
+    let challenge = Challenge {
+        code: code.clone(),
+        name: name.clone(),
+        action,
+        ua: requested_ua.clone(),
+    };
+    let Some(memo) = challenge.encode(network) else {
+        return true;
+    };
+    let relay_value = MINIMUM_FEE;
+    let Some(transaction) = treasury::challenge(
+        network,
+        wallet,
+        treasury_keys,
+        spend_prover,
+        output_prover,
+        &record.ua,
+        memo,
+        relay_value,
+    ) else {
+        tracing::debug!(
+            lane,
+            name = %name.as_str(),
+            action = action.as_str(),
+            "controller challenge awaits Treasury funds"
+        );
+        return false; // deferred
+    };
+
+    let pending = OtpRequest {
+        name: name.clone(),
+        action,
+        ua: requested_ua.clone(),
+        tip_rcm: record.commitment,
+        code,
+        expires_at: mtp_now + time::Duration::seconds(D_OTP),
+        term,
+    };
+    if source.submit(&transaction, "controller challenge").await {
+        challenges.issue(pending);
+        tracing::info!(
+            lane,
+            txid = %transaction.txid(),
+            name = %name.as_str(),
+            action = action.as_str(),
+            "controller challenged"
+        );
+        true
+    } else {
+        tracing::debug!(
+            lane,
+            name = %name.as_str(),
+            action = action.as_str(),
+            "controller challenge rejected — deferred"
+        );
+        false
+    }
+}
+
+/// The mempool quick lane's reader: one task, one conversation — announce,
+/// fetch, decrypt, forward. Intake at mempool cadence: it classifies each
+/// decrypted memo exactly as block application does and forwards the
+/// `MintInbound` it yields — it holds no mint state, decides nothing, and
+/// which lanes are quick is the orchestrator's match, not this filter.
+/// Every transport failure repairs or skips; a skipped trigger rides the
+/// block path. If this task ever dies, the mint silently reverts to block
+/// cadence — the fallback is the supervision.
+async fn quick_lane<P: Parameters + Send + 'static>(
+    network: P,
+    chain: ChainClient,
+    rpc: JsonRpc,
+    treasury_fvk: FullViewingKey,
+    sender: mpsc::Sender<(MintInbound, Zatoshis)>,
+) {
+    // The parser wants a branch id; only pre-v5 transactions consult it,
+    // and an NU6 mempool holds none. A far-future height names the newest
+    // branch the mint knows.
+    let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
+    let mut session = MempoolSession::open(chain).await;
+    loop {
+        let (kind, txid) = session.next().await;
+        if kind != MempoolChangeKind::Added {
+            continue; // Mined and Invalidated are fates the block path owns
+        }
+        // A hit means the mempool or any chain — confirmation is chain
+        // application, not this fetch; a miss races an eviction: skip.
+        let Some(transaction) = rpc
+            .get_raw_transaction(branch_id, txid)
+            .await
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        for (_action_index, paid, memo) in decrypt_treasury_tx(&transaction, &treasury_fvk) {
+            // Classification mirrors intake, byte for byte: an echo is the
+            // relay memo itself and never a request; a memo that parses to
+            // nothing is a payment with no message, named by its txid.
+            let inbound = if let Some(echo) = Challenge::decode(&network, &memo) {
+                MintInbound::Echo(echo)
+            } else {
+                match treasury::parse_request(&network, &memo) {
+                    Some(request) => MintInbound::Request(request),
+                    None => MintInbound::Unrecognized(txid),
+                }
+            };
+            if sender.send((inbound, paid)).await.is_err() {
+                return; // the orchestrator is gone; so are we
+            }
+        }
     }
 }

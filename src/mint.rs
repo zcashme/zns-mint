@@ -507,7 +507,9 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     // lane's memos were decrypted above. Decoded once, here, they
     // are recorded as the requests they carry — nothing is stored
     // for later re-reading; the block is the durable source,
-    // refetched on every application.
+    // refetched on every application. The mempool quick path reads
+    // the same memos earlier and ephemerally; it records nothing —
+    // this pass stays the only intake.
     // Intake classifies; the drain decides. An echo is the relay memo
     // itself, byte-for-byte, routed by Challenge::decode — the wire never
     // carries an OTP on a request. A memo that parses to nothing is a

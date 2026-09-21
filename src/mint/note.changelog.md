@@ -1,5 +1,15 @@
 # `mint/note.rs` design record
 
+## 2026-09-21 — The treasury memo pass speaks per-transaction
+
+- `decrypt_treasury_tx` trial-decrypts one transaction's
+  Treasury-directed actions — the per-transaction core
+  `decrypt_treasury_memos` has always embedded, now callable on a
+  mempool fetch. It takes the orchard viewing key, the reader's
+  whole need: this pass decrypts, it never signs. The block pass
+  is untouched, byte for byte — the quick path reuses the decoder
+  so a trigger classifies identically at either cadence.
+
 ## 2026-09-17 — extend gains the upgrade arm: At + forever → Never (#65)
 
 - `Expiry::extend` maps `(At, Some(Forever))` to `Never`. The arm

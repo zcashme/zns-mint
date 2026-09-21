@@ -4,6 +4,23 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-21 — The relay lane answers at mempool speed
+
+- Update and release triggers relay the moment Zebra reports them in
+  the mempool — the same decided-refusal battery, the same challenge
+  fee, then the OTP challenge, no wait for the trigger's block. The
+  quick path is best-effort and forgets: it never defers and never
+  remembers, and the confirmed trigger still re-enters the drain,
+  where the pending-tuple check absorbs the duplicate in either race
+  order. One reader task (`quick_lane`) is intake at mempool cadence:
+  it classifies each decrypted memo exactly as block application does
+  and forwards the `MintInbound` it yields — the orchestrator's match
+  decides which lanes are quick, and everything else (claims, echoes,
+  bare payments) stays block-cadence, authorizing against money that
+  must confirm. If the reader dies, the mint silently reverts to
+  block cadence — the fallback is the supervision. A challenge that
+  dies unmined leaves its pending to D_OTP; the controller resends.
+
 ## 2026-09-21 — The relay lane's first payment gate (issue #18)
 
 - Update and release requests now pay `Oracle::challenge_fee()` — one

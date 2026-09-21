@@ -1,5 +1,16 @@
 # Zcash I/O changelog
 
+## 2026-09-21 — The mempool session
+
+- `MempoolSession` owns the mempool-change stream as `TipSession`
+  owns the tip's: subscription, repair, nothing else — two fields,
+  the client and the stream. It announces the node's mempool changes
+  and answers nothing; a gap in the stream is a gap in quickness,
+  never in truth: what it misses, the block path decides. The
+  `getrawmempool` re-baseline the stream's doc once promised is
+  deliberately not built — best-effort is the doctrine, and the
+  fallback is the design.
+
 ## 2026-09-20 — Keepalive claims verified against regtest Zebra (#88)
 - The doc comments' keepalive claims are now measured facts, not
   assertions: wire-level probe against regtest (node frozen mid-stream)
