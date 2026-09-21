@@ -1,5 +1,15 @@
 # Treasury design record
 
+## 2026-09-21 — Claim memos may lead with a pre-sale AccessCode (#83)
+
+- Claim wire forms: `ZNS:claim:<term>:<name>:<ua>` (unchanged bytes) or
+  `ZNS:claim:<code>:<term>:<name>:<ua>`. A field that parses as a term is
+  the term; otherwise the leading field is the access code: exactly six
+  ASCII decimal digits, including leading zeroes. `<ua>` stays terminal.
+  `Request::Claim` carries `code: Option<AccessCode>`.
+- Update and release forms are unchanged. Requests still never carry an
+  OTP.
+
 ## Sweep payment is inlined into `sweep_to_vault`
 
 - One caller: `total − SWEEP_RESERVE`, then the 1 ZEC floor, sits at

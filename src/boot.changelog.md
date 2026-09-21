@@ -2,6 +2,14 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-21 — Access-code purpose key on Boot (#83)
+
+- Boot derives an access-code root via
+  `Tee::derive_sealing_key(ZNS/access-code/root/v1)`, then wraps
+  `presale::AccessCodeKey::from_private_key` (HMAC `"access-code-v1"`).
+  The key rides `Boot` into the claim lane; it never enters the wallet
+  or the database.
+
 ## 2026-09-21 — `Registry::new()` no longer takes the checkpoint height (issue #108)
 
 - Boot constructs the empty Registry with no floor; the origin

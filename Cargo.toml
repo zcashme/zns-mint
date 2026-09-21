@@ -9,21 +9,14 @@ publish = false
 default = []
 regtest = ["zcash_protocol/local-consensus"]
 testnet = []
-# Development-only: substitutes the SEV-SNP source of the sealing key and
-# the attestation report so the mint can boot outside a TEE (macOS/Linux
-# without /dev/sev-guest). Capsule AEAD and the report_data derivation
-# stay real production code. Blocked from release builds by a
-# `compile_error!` in `src/lib.rs`. Combine with `regtest` for local e2e.
+# Dev-only FakeTee (release-blocked in lib.rs). Pair with regtest for e2e.
 fake-tee = []
 
 [[bin]]
 name = "zns-mint"
 path = "src/main.rs"
 
-# Dev helper: seals an all-zeros seed with `FakeTee` and writes it to
-# `keys/zns_seed.capsule` so a `fake-tee` mint can boot on macOS/Linux
-# without `/dev/sev-guest`. `required-features` prevents it from compiling
-# under a default (production) build where `FakeTee` is not exported.
+# Writes keys/zns_seed.capsule from an all-zeros seed under FakeTee.
 [[example]]
 name = "write_fake_capsule"
 required-features = ["fake-tee"]
@@ -39,6 +32,7 @@ secrecy = "0.8"
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 hkdf = "0.12"
 sha2 = "0.10"
+hmac = "0.12"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -54,7 +48,6 @@ time = "0.3"
 tonic = "0.14"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
-# Standard HTTPS connector for Hyper, using rustls and webpki roots.
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "webpki-roots"] }
 http-body-util = "0.1"
 http = "1"
@@ -119,8 +112,6 @@ zcash_client_backend = { version = "0.24.0-rc.7", default-features = false, feat
 # first-class dep, not just a transitive one.
 orchard = { version = "0.15.5", default-features = false, features = ["unsafe-zns", "circuit"] }
 shardtree = "0.7.1"
-# Prometheus: metrics facade + exporter.
-# push-gateway (avoids the reqwest/TLS tree entirely).
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener"] }
 

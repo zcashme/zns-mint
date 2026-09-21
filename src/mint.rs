@@ -3,6 +3,7 @@
 pub mod mtp;
 pub mod note;
 pub mod otp;
+pub mod presale;
 pub mod pricing;
 pub mod registry;
 
@@ -22,6 +23,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zip32::AccountId;
 
 use otp::OtpCode;
+use presale::AccessCode;
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
@@ -113,15 +115,19 @@ impl Action {
 ///
 /// Built from [`treasury::parse_request`];
 /// memo bytes stay on that parser. Claims carry a term (`forever` or
-/// `<N>y`); updates carry `none` (carried forward), `<N>y`, or
-/// `forever` — the upgrade.
+/// `<N>y`) and an optional leading pre-sale access code; updates carry
+/// `none` (carried forward), `<N>y`, or `forever` — the upgrade.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// Create a new registration; the term slot is never empty.
+    /// `code` is the leading pre-sale slot when present (exactly six
+    /// ASCII digits); the codeless wire form stays byte-identical to
+    /// `ZNS:claim:<term>:<name>:<ua>`.
     Claim {
         name: Name,
         ua: UnifiedAddress,
         term: Term,
+        code: Option<AccessCode>,
     },
     /// Rebind; `None` carries the expiry forward, `Some(Years)` extends
     /// it, `Some(Forever)` upgrades it to no fixed expiration.

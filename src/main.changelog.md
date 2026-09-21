@@ -36,6 +36,14 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
 - The post-price `exact_tip` re-check stays in `main`: that is the
   orchestrator verifying its own pass, not the stream lifecycle.
 
+## 2026-09-19 — Claim lane gates on pre-sale lookup (#83)
+
+- Before the payment gate, the claim arm calls `presale::lookup_name`
+  and `presale::decide` with the tip's day clock. `Retry` defers the
+  queue entry; `Deny` decides it dead; `Allow` continues to quote and
+  authorize. Memo decode at `apply_block` is unchanged — the code rides
+  `Request::Claim.code`.
+
 ## 2026-09-18 — Vault sweep rides the MTP day diff (#82)
 
 - Before catch-up, the loop reads `mtp.current_day()` as `previous_day`.

@@ -102,7 +102,12 @@ impl Registry {
         mtp: Timestamp,
     ) -> Option<NameNote> {
         match request {
-            Request::Claim { name, ua, term } => {
+            Request::Claim {
+                name,
+                ua,
+                term,
+                code: _,
+            } => {
                 match self.record(&name).cloned() {
                     None => {}
                     Some(record) if record.action.is_release() => {

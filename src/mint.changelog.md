@@ -1,5 +1,17 @@
 # Mint live-work design record
 
+## 2026-09-21 — Pre-sale AccessCode + publishable key (#83)
+
+- `Request::Claim.code` is `Option<AccessCode>` (six-digit, OTP-shaped:
+  redacted `Debug`, `Zeroize`, `ct_eq`). Codes are TEE-derived
+  (access-code-v1 HMAC), not stored in Supabase.
+- `mint::presale` looks up `zn_protected_names` with the project
+  publishable key; protected rows require the matching memo code. Open
+  names skip the code. Unavailability returns `Decision::Retry`.
+  Redemption is the name live in the registry — the mint never writes
+  the table. `GENERAL_AVAILABILITY_DAY` closes the window on the day
+  clock.
+
 ## 2026-09-15 — Liveness τ+L enforcement (issue #14)
 
 - `CHALLENGE_LEAD` (7 days) and `LIVENESS_RETRY_COOLDOWN` (24 h) are
