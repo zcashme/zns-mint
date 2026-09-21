@@ -1,8 +1,13 @@
 //! The name-chain state machine and transition authorization.
 
+mod anchor_pool;
+
+pub use anchor_pool::{AnchorPool, ANCHOR_POOL_SIZE};
+
 use crate::mint::otp::OtpQueue;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, UnifiedAddress};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use time::Timestamp;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
@@ -73,16 +78,12 @@ pub struct RegistryHistoryRecord {
     pub prev_record: Option<NameRecord>,
 }
 
-/// Standing size of the anchor lineage pool; mirrors keygen's NUM_ANCHORS.
-pub const ANCHOR_POOL_SIZE: usize = 40;
-
 /// Name records, a reorg undo log, and the anchor lineage pool.
 #[derive(Default)]
 pub struct Registry {
     records: BTreeMap<Name, NameRecord>,
     history: Vec<RegistryHistoryRecord>,
-    anchor_pool: BTreeSet<orchard::note::Nullifier>,
-    pool_checkpoints: BTreeMap<BlockHeight, BTreeSet<orchard::note::Nullifier>>,
+    anchors: AnchorPool,
 }
 
 impl Registry {
@@ -195,10 +196,7 @@ impl Registry {
     /// Ceremony filling: a zero-value Registry output joins the
     /// lineage pool below standing size.
     pub fn adopt_anchor(&mut self, height: BlockHeight, nf: orchard::note::Nullifier) {
-        if self.anchor_pool.len() < ANCHOR_POOL_SIZE && self.anchor_pool.insert(nf) {
-            self.pool_checkpoints
-                .insert(height, self.anchor_pool.clone());
-        }
+        self.anchors.adopt(height, nf);
     }
 
     /// Offers a confirmed claim candidate; true when its transaction
@@ -220,7 +218,7 @@ impl Registry {
         assert!(matches!(note, NameNote::Claim { .. }));
         let spent: Vec<_> = nfs
             .iter()
-            .filter(|nf| self.anchor_pool.contains(*nf))
+            .filter(|nf| self.anchors.contains(*nf))
             .copied()
             .collect();
         if spent.is_empty() {
@@ -241,10 +239,8 @@ impl Registry {
         );
         // Pool follows the chain either way: a duplicate claim still
         // spent a standing anchor and created a successor.
-        self.anchor_pool.remove(&spent[0]);
-        self.anchor_pool.insert(successor_nf);
-        self.pool_checkpoints
-            .insert(height, self.anchor_pool.clone());
+        let applied = self.anchors.apply_claim(height, spent[0], successor_nf);
+        debug_assert!(applied, "spent nullifier was live per contains() above");
         if self
             .record(note.name())
             .is_some_and(|r| !r.action.is_release())
@@ -325,7 +321,7 @@ impl Registry {
             return None; // unbacked: a public output anyone could have written
         }
         assert!(
-            !nfs.iter().any(|nf| self.anchor_pool.contains(nf)),
+            !nfs.iter().any(|nf| self.anchors.contains(nf)),
             "update/release must not advance the claim-anchor chain"
         );
         assert_eq!(
@@ -369,7 +365,7 @@ impl Registry {
 
     /// The anchor lineage pool — the only source of claim authority.
     pub fn anchor_pool(&self) -> &BTreeSet<orchard::note::Nullifier> {
-        &self.anchor_pool
+        self.anchors.live()
     }
 
     /// Rewinds the registry to height. Callers pass walk-found heights
@@ -389,12 +385,7 @@ impl Registry {
                 }
             }
         }
-        self.pool_checkpoints.retain(|&h, _| h <= height);
-        self.anchor_pool = self
-            .pool_checkpoints
-            .last_key_value()
-            .map(|(_, pool)| pool.clone())
-            .unwrap_or_default();
+        self.anchors.truncate_to(height);
     }
 }
 
