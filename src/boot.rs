@@ -26,10 +26,11 @@ use crate::tee::{self, Tee};
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
-use zcash_client_backend::data_api::wallet::TargetHeight;
+use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::{
     chain::ChainState, BlockMetadata, WalletCommitmentTrees as _,
 };
+use zcash_client_backend::data_api::{WalletRead as _, WalletWrite as _};
 
 // ---------------------------------------------------------------------------
 // Boot life-cycle
@@ -254,7 +255,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         // each block's intake lands in a queue that falls out of scope with
         // the iteration.
         let mut cursor = block_metadata(&origin);
-        let mut registry = Registry::new(checkpoint_height);
+        let mut registry = Registry::new();
         let source = crate::zcash::CanonicalBlockSource::new();
         let (best_height, _best_hash) = source
             .exact_tip()
@@ -311,11 +312,20 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             "FATAL: anchor lineage pool expected {}, found {anchor_count}",
             crate::mint::registry::ANCHOR_POOL_SIZE
         );
-        let treasury_balance: u64 = wallet
-            .unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(best_height))
-            .iter()
-            .map(|n| n.note().value().inner())
-            .sum();
+        // Boot refuses to run with a treasury below MIN_TREASURY_BALANCE.
+        wallet
+            .update_chain_tip(best_height)
+            .expect("FATAL: wallet rejected Zebra's canonical tip");
+        let treasury_balance = wallet
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .expect("FATAL: balance summary failed")
+            .expect("FATAL: Zebra tip not recorded at boot check")
+            .account_balances()
+            .get(&TREASURY_ACCOUNT)
+            .expect("FATAL: treasury account missing from summary")
+            .ironwood_balance()
+            .total()
+            .into_u64();
         assert!(
             treasury_balance >= MIN_TREASURY_BALANCE,
             "FATAL: Treasury balance {treasury_balance} below minimum {MIN_TREASURY_BALANCE}"

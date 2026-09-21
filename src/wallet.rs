@@ -12,7 +12,6 @@ use std::convert::Infallible;
 
 use incrementalmerkletree::{Address, Marking, Retention};
 use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTree};
-use transparent::bundle::OutPoint;
 use zcash_client_backend::scanning::ScanningKeys;
 use zcash_client_backend::{
     data_api::chain::ChainState,
@@ -20,10 +19,7 @@ use zcash_client_backend::{
     data_api::{
         BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus, WalletWrite,
     },
-    wallet::{
-        NoteId, OutputRef, ReceivedNote, WalletIronwoodOutput, WalletSaplingOutput,
-        WalletTransparentOutput,
-    },
+    wallet::{NoteId, OutputRef, ReceivedNote, WalletIronwoodOutput, WalletSaplingOutput},
 };
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::block::BlockHash;
@@ -109,10 +105,6 @@ pub struct Wallet<P: Parameters> {
 
     sent_outputs: BTreeMap<TxId, Vec<SentTransactionOutput<AccountId>>>,
 
-    transparent_outputs: BTreeMap<OutPoint, WalletTransparentOutput<AccountId>>,
-    transparent_output_spends: BTreeMap<OutPoint, TxId>,
-    transparent_spends: BTreeSet<(TxId, OutPoint)>,
-
     /// Advisory locks use upstream `OutputRef` and `LockOwner` values directly.
     locks: BTreeMap<OutputRef, (LockOwner, BlockHeight)>,
 
@@ -168,9 +160,6 @@ impl<P: Parameters> Wallet<P> {
             sapling_nullifiers: BTreeMap::new(),
             ironwood_nullifiers: BTreeMap::new(),
             sent_outputs: BTreeMap::new(),
-            transparent_outputs: BTreeMap::new(),
-            transparent_output_spends: BTreeMap::new(),
-            transparent_spends: BTreeSet::new(),
             locks: BTreeMap::new(),
             sapling_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),
             sapling_tree_shard_end_heights: BTreeMap::new(),
@@ -185,7 +174,7 @@ impl<P: Parameters> Wallet<P> {
         };
         // Checkpoint id is birthday − 1: each frontier is the tree state at
         // the start of `MINT_BIRTHDAY`. Empty frontiers are inserted too —
-        // the per-pool origin checkpoint is the reorg floor.
+        // the per-pool origin checkpoint is the scan origin.
         wallet
             .sapling_tree
             .insert_frontier(chain_state.final_sapling_tree().clone(), retention)?;

@@ -3,14 +3,16 @@
 //! One node, two dialects: gRPC streams announce change, JSON-RPC answers
 //! questions. The files are the conversations — the chain, the mempool,
 //! submission — and this root is what they share: the error policy, the wire
-//! machinery, and the display-order decoding. The node's identity is not on
-//! the wire: it is the SEV-SNP measurement of the image this process lives in.
+//! machinery, and the display-order decoding. The chain file also owns the
+//! tip stream's lifecycle ([`TipSession`]): the orchestrator wakes on it,
+//! but never sees transport state. The node's identity is not on the wire:
+//! it is the SEV-SNP measurement of the image this process lives in.
 
 pub mod chain;
 pub mod mempool;
 pub mod submit;
 
-pub use chain::{tip_height_hash, BlockchainInfo, ChainClient, TipStream};
+pub use chain::{BlockchainInfo, ChainClient, TipSession};
 pub use submit::SubmitOutcome;
 
 use std::{any::type_name, fmt, time::Duration};
@@ -23,18 +25,13 @@ use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
 
 /// The wait between retries of a retryable transport call.
-pub const RETRY_PAUSE: Duration = Duration::from_secs(5);
+pub(crate) const RETRY_PAUSE: Duration = Duration::from_secs(5);
 
-#[cfg(not(all(feature = "testnet", not(feature = "regtest"))))]
-pub(crate) const ZEBRA_INDEXER_URL: &str = "http://127.0.0.1:8230";
 #[cfg(not(all(feature = "testnet", not(feature = "regtest"))))]
 pub(crate) const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:8232";
 #[cfg(all(feature = "testnet", not(feature = "regtest")))]
-pub(crate) const ZEBRA_INDEXER_URL: &str = "http://127.0.0.1:18230";
-#[cfg(all(feature = "testnet", not(feature = "regtest")))]
 pub(crate) const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:18232";
 
-pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ============================================================================

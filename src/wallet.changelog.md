@@ -1,5 +1,81 @@
 # Wallet changelog
 
+## 2026-09-20 — Checkpoint-seam fixes: Name Note marking and store-door ordering
+
+### Fixed
+
+- `append_block_commitments` marks accepted Name Note commitments with
+  plain `Retention::Marked` — the retention the scanner assigns to notes it
+  decrypts mid-block. The previous `Checkpoint { id: height, Marked }`
+  upgrade collided with the scanner's own block-last checkpoint append at
+  the same height: shardtree admits at most one checkpoint-retention append
+  per id, so every accepted claim whose Name Note is not the block's last
+  Ironwood commitment — the standard claim layout (Name Note, successor
+  anchor, Treasury change) — FATALed at the wallet commit with
+  `CommitmentTree(Insert(CheckpointOutOfOrder))`. `Marked` retains the
+  witness without claiming the height's checkpoint slot;
+  `ensure_block_checkpoint` remains the sole per-height checkpoint creator.
+  Closes #110.
+- `ensure_block_checkpoint` rejects out-of-order heights at its store door.
+  Direct `add_checkpoint` bypasses the runtime ordering check that guards
+  `ShardTree::append`, so a non-monotonic caller would insert time-inverted
+  checkpoints silently. Heights arrive monotonically through
+  `put_blocks_marked`'s continuity checks; the check turns that
+  precondition into a loud invariant. Closes #112.
+
+## 2026-09-21 — The origin checkpoint is the scan origin (issue #108)
+
+### Changed
+
+- `Wallet::new`'s comment rewords the per-pool origin checkpoint from
+  "the reorg floor" to the scan origin.
+
+## 2026-09-19 — The three transparent wallet fields go: the mint never receives, stores, or spends transparent money
+
+### Changed
+
+- The axiom, ruled and verified: the mint is paid shielded, spends
+  shielded, and touches transparent exactly once per day — the vault
+  sweep unshields to the project vault's transparent address. The
+  treasury never receives transparent funds from users.
+- `transparent_outputs`, `transparent_output_spends`, and
+  `transparent_spends` are deleted. No writer could ever fire
+  (upstream's `ScanningKeys` is structurally shielded-only, the
+  receivers map is empty by policy, `put_received_transparent_utxo`
+  has no caller in this tree or upstream's, and no flow spends
+  transparent inputs) and no reader exists; the maps were empty in
+  every run that has ever passed. The vault unshield consults none of
+  them — it needs the recipient constant, the builder's transparent
+  output support, and the shielded machinery.
+- `put_received_transparent_utxo` now refuses with `FixedAccountsOnly`:
+  the trait requires the method, the axiom forbids the store.
+  `output_account`'s transparent arm answers `None` on the same
+  principle. The `transparent-inputs` feature stays — it serves the
+  unshield.
+- The send-to-transparent scenarios stay connected and green: they
+  exercise the unshield path and read none of the removed state.
+
+## 2026-09-19 — The mint stops reserving inputs through the lock store
+
+### Changed
+
+- `assemble::prepare` no longer locks its selected inputs. The
+  select → prove → record window is a single `&mut Wallet` borrow in a
+  serial order loop, so the reservation guarded a window the borrow
+  checker already seals; after recording, the unmined-spend records
+  are the durable protection — a note stays unselectable until its
+  transaction mines or expires either way. The random, discarded
+  `LockOwner` and the FATAL lock-conflict panic die with the call:
+  they were properties of a redundant reservation, not of the wallet.
+- The wallet's `OutputLockStore` is now purely conformance surface for
+  the upstream corpus (ten locking scenarios): production writes no
+  lock at all. If the intake loop ever parallelizes, reservations
+  must be designed for that shape — a queue around wallet access, or
+  per-flow lock owners — not re-inherited from this protocol.
+- `drop_applied_above` no longer cleans lock orphans: with no
+  production lock writes there is nothing to orphan, and the corpus
+  confirms no connected scenario locks a note and truncates past it.
+
 ## 2026-09-19 — Remove unused ZIP 318 anchor retention (#92)
 
 ### Removed

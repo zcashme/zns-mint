@@ -39,8 +39,8 @@ use super::{
 use crate::mint::REGISTRY_ACCOUNT;
 
 impl<P: Parameters> Wallet<P> {
-    /// Returns the account that owns a wallet output, if the reference names
-    /// a currently retained Sapling, Ironwood, or transparent output.
+    /// Returns the account that owns a wallet output, if the reference
+    /// names a currently retained Sapling or Ironwood note.
     fn output_account(&self, output: &OutputRef) -> Option<AccountId> {
         match output.pool() {
             PoolType::Shielded(ShieldedPool::Sapling) => {
@@ -55,13 +55,9 @@ impl<P: Parameters> Wallet<P> {
                     .get(&NoteId::new(*output.txid(), ShieldedPool::Ironwood, index))
                     .map(|note| *note.account_id())
             }
-            PoolType::TRANSPARENT => self
-                .transparent_outputs
-                .get(&OutPoint::new(
-                    (*output.txid()).into(),
-                    output.output_index(),
-                ))
-                .and_then(|utxo| utxo.recipient_account().copied()),
+            // The wallet owns no transparent output, ever: the mint never
+            // receives, stores, or spends transparent money.
+            PoolType::TRANSPARENT => None,
             // Ordinary Orchard deliberately has no received-note table;
             // `put_blocks_marked` rejects decryptable Orchard outputs.
             PoolType::Shielded(ShieldedPool::Orchard) => None,
@@ -206,8 +202,6 @@ impl<P: Parameters> Wallet<P> {
             .retain(|_, note_id| !orphaned.contains(note_id.txid()));
         self.memos
             .retain(|note_id, _| !orphaned.contains(note_id.txid()));
-        self.transparent_outputs
-            .retain(|outpoint, _| !orphaned.contains(outpoint.txid()));
         self.transaction_indices
             .retain(|txid, _| !orphaned.contains(txid));
 
@@ -223,15 +217,6 @@ impl<P: Parameters> Wallet<P> {
         });
         self.ironwood_note_spends.retain(|note_id, spend_txid| {
             self.ironwood_notes.contains_key(note_id) && !scanned_only_spends.contains(spend_txid)
-        });
-        self.transparent_output_spends
-            .retain(|outpoint, spend_txid| {
-                self.transparent_outputs.contains_key(outpoint)
-                    && !scanned_only_spends.contains(spend_txid)
-            });
-        self.transparent_spends.retain(|(spend_txid, outpoint)| {
-            self.transparent_outputs.contains_key(outpoint)
-                && !scanned_only_spends.contains(spend_txid)
         });
 
         for status in self.transaction_statuses.values_mut() {
@@ -250,17 +235,6 @@ impl<P: Parameters> Wallet<P> {
             .retain(|_, end| *end <= height);
 
         self.blocks.retain(|h, _| *h <= height);
-
-        // Drop locks whose output no longer exists in the wallet.
-        let stale_locks: Vec<_> = self
-            .locks
-            .keys()
-            .filter(|output| self.output_account(output).is_none())
-            .copied()
-            .collect();
-        for output in stale_locks {
-            self.locks.remove(&output);
-        }
     }
 
     /// Replaces the note commitment trees with the supplied frontiers.
@@ -409,6 +383,12 @@ where
 /// Every accepted height is checkpointed in all three pools — including pools
 /// with no commitments in that block — so anchors remain computable at each
 /// block boundary and reorg truncation is exact.
+///
+/// The store door bypasses the ordering check that guards `ShardTree::append`,
+/// so the height must exceed every existing checkpoint id. Heights arrive
+/// monotonically through `put_blocks_marked`'s continuity checks; anything
+/// else is a chain discontinuity — refused here rather than accepted as a
+/// time-inverted checkpoint.
 fn ensure_block_checkpoint<H, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     tree: &mut ShardTree<
         shardtree::store::memory::MemoryShardStore<H, BlockHeight>,
@@ -424,6 +404,9 @@ where
     H: Hashable + PartialEq + Clone,
 {
     if tree.store().get_checkpoint(&height)?.is_none() {
+        if tree.store().max_checkpoint_id()?.as_ref() >= Some(&height) {
+            return Err(WalletError::ChainDiscontinuity(height));
+        }
         let tree_state = if final_tree_size == 0 {
             TreeState::Empty
         } else {
@@ -438,8 +421,10 @@ where
 
 /// Appends one scanned block's bundle commitments with the scanner-provided
 /// retention markers, then checkpoints the accepted height. `marks` upgrades
-/// those commitments to `Checkpoint { Marked }` — the retention the scanner
-/// itself assigns to notes it decrypts.
+/// those commitments to `Marked` — the retention the scanner assigns to notes
+/// it decrypts mid-block. The height's single checkpoint-retention append
+/// belongs to the block's last commitment; a marked Name Note that is not
+/// last must not claim it.
 fn append_block_commitments<H, Nf, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     tree: &mut ShardTree<
         shardtree::store::memory::MemoryShardStore<H, BlockHeight>,
@@ -457,10 +442,7 @@ where
 {
     for (commitment, retention) in bundles.commitments() {
         let retention = if marks.contains(commitment) {
-            Retention::Checkpoint {
-                id: height,
-                marking: Marking::Marked,
-            }
+            Retention::Marked
         } else {
             *retention
         };
@@ -568,14 +550,12 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
 
     fn put_received_transparent_utxo(
         &mut self,
-        output: &WalletTransparentOutput<AccountId>,
+        _output: &WalletTransparentOutput<AccountId>,
     ) -> Result<Self::UtxoRef, WalletError> {
-        // Stored as a chain observation only: under the outbound-only
-        // transparent policy it is never surfaced as a spendable input.
-        let outpoint = output.outpoint().clone();
-        self.transparent_outputs
-            .insert(outpoint.clone(), output.clone());
-        Ok(outpoint)
+        // The mint never receives, stores, or spends transparent money;
+        // the only transparent flow is the vault unshield, which spends
+        // shielded notes. Nothing can deliver a UTXO here.
+        Err(WalletError::FixedAccountsOnly)
     }
 
     fn store_decrypted_tx(
@@ -703,16 +683,6 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
                         self.locks.remove(&OutputRef::from(*note_id));
                     }
                 }
-            }
-            for outpoint in sent.utxos_spent() {
-                let outpoint = outpoint.clone();
-                self.locks.remove(&OutputRef::new(
-                    *outpoint.txid(),
-                    PoolType::TRANSPARENT,
-                    outpoint.n(),
-                ));
-                self.transparent_spends.insert((txid, outpoint.clone()));
-                self.transparent_output_spends.insert(outpoint, txid);
             }
         }
         Ok(())
@@ -916,7 +886,9 @@ impl<P: Parameters> Wallet<P> {
     /// [`WalletWrite::put_blocks`], with the accepted Name Note commitments
     /// marked: the scanner cannot decrypt ZNS-domain outputs, so they
     /// would otherwise enter the Ironwood tree Ephemeral — prunable, and
-    /// then the note has no witness.
+    /// then the note has no witness. Marking is plain `Retention::Marked`,
+    /// exactly as the scanner retains mid-block decrypted notes; the
+    /// per-height checkpoint is `ensure_block_checkpoint`'s to create.
     pub(crate) fn put_blocks_marked(
         &mut self,
         from_state: &ChainState,
@@ -1018,10 +990,6 @@ impl<P: Parameters> Wallet<P> {
                     if let Some(nf) = output.nf() {
                         self.ironwood_nullifiers.insert(*nf, note_id);
                     }
-                }
-                for utxo in wtx.transparent_outputs() {
-                    self.transparent_outputs
-                        .insert(utxo.outpoint().clone(), utxo.clone());
                 }
             }
 

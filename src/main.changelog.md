@@ -4,6 +4,38 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-21 — The reorg walk halts on the wallet's data bottom (issue #108)
+
+- The ancestor walk's floor panic (`ancestor == MINT_BIRTHDAY − 1`,
+  "canonical fork crossed the mint birthday") is deleted. The walk now
+  halts on data exhaustion: `wallet.block_hash_at(ancestor)` returning
+  `None` panics "no common ancestor within the wallet's applied chain"
+  with the exhaustion height. The check is the loop's first statement —
+  before the RPC and the decrement — and fires one step below the
+  origin, the last `Some`.
+- The tip assert `best_height >= MINT_BIRTHDAY − 1` ("Zebra tip is
+  below the mint birthday") is deleted with it: any tip below the
+  origin makes `min(cursor, best) < origin`, so the exhaustion check
+  evaluates the same predicate on iteration one. The panic's height
+  carries the diagnostic the assert used to.
+- The run loop no longer references `MINT_BIRTHDAY`; the constant is
+  boot-only now (origin treestate fetch, MTP day-zero backfill).
+
+## 2026-09-19 — Tip stream lifecycle delegated to the seam (#88)
+
+- `main` no longer owns the tip stream: `TipSession::open(chain)`
+  receives boot's client and the loop wakes on
+  `connection.next_tip()`, which returns the node-read canonical tip
+  (retryable reads retried inside; `Err` is a fatal data verdict and
+  panics with the same FATAL message as before).
+- The notification/exact-tip/coalescing block at the loop head
+  collapsed into one call; stream errors and ends are repaired inside
+  the session and answered with an immediately re-read tip, so a
+  dropped connection costs one pause plus one pass — not a wait for
+  the next block.
+- The post-price `exact_tip` re-check stays in `main`: that is the
+  orchestrator verifying its own pass, not the stream lifecycle.
+
 ## 2026-09-19 — Claim lane gates on pre-sale lookup (#83)
 
 - Before the payment gate, the claim arm calls `presale::lookup_name`

@@ -12,9 +12,8 @@
 
 use std::time::Duration;
 
-use futures_util::StreamExt as _;
-use zcash_client_backend::data_api::wallet::TargetHeight;
-use zcash_client_backend::data_api::WalletWrite as _;
+use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
+use zcash_client_backend::data_api::{WalletRead as _, WalletWrite as _};
 use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
 use zcash_protocol::consensus::BlockHeight;
 
@@ -27,9 +26,9 @@ use zns_mint::mint::registry::NameRecord;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
     Action, Challenge, Expiry, MintInbound, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
-    MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
-use zns_mint::zcash::{self, CanonicalBlockSource, ChainClient, JsonRpc, TipStream};
+use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession};
 
 const RETRY_PAUSE: Duration = Duration::from_secs(5);
 
@@ -44,7 +43,7 @@ async fn main() {
 
     let Boot {
         network,
-        mut chain,
+        chain,
         mut wallet,
         cursor: mut chain_tip,
         treasury_keys,
@@ -78,49 +77,16 @@ async fn main() {
         "mint awaiting Zebra tips"
     );
 
-    let mut tips = tip_stream(&mut chain).await;
+    // The tip session owns the stream's lifecycle — wake, repair, and
+    // the re-read of the canonical tip that turns every wake-up into the
+    // node's answer, never the announcement's promise. The orchestrator
+    // holds position (the wallet) and never sees transport state.
+    let mut connection = TipSession::open(chain).await;
     loop {
-        let notification = match tips.next().await {
-            Some(Ok(notification)) => notification,
-            Some(Err(error)) => {
-                tracing::warn!(%error, "Zebra tip stream failed; reconnecting");
-                tips = tip_stream(&mut chain).await;
-                continue;
-            }
-            None => {
-                tracing::warn!("Zebra tip stream ended; reconnecting");
-                tips = tip_stream(&mut chain).await;
-                continue;
-            }
+        let (best_height, best_hash) = match connection.next_tip(&source).await {
+            Ok(tip) => tip,
+            Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
         };
-        let (announced_height, announced_hash) = zcash::tip_height_hash(&notification);
-        tracing::info!(
-            height = u32::from(announced_height),
-            "tip notification received"
-        );
-        let (best_height, best_hash) = loop {
-            match source.exact_tip().await {
-                Ok(tip) => break tip,
-                Err(error) if error.is_retryable() => {
-                    tracing::warn!(%error, "exact Zebra tip unavailable; retrying");
-                    tokio::time::sleep(RETRY_PAUSE).await;
-                }
-                Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
-            }
-        };
-        if announced_height != best_height || announced_hash != best_hash {
-            tracing::debug!(
-                announced_height = u32::from(announced_height),
-                announced_hash = %announced_hash,
-                best_height = u32::from(best_height),
-                best_hash = %best_hash,
-                "coalesced Zebra tip notification"
-            );
-        }
-        assert!(
-            best_height >= MINT_BIRTHDAY - 1,
-            "FATAL: Zebra tip is below the mint birthday"
-        );
         wallet
             .update_chain_tip(best_height)
             .expect("FATAL: wallet rejected Zebra's canonical tip");
@@ -130,6 +96,14 @@ async fn main() {
         // no state above that common ancestor survives.
         let mut ancestor = chain_tip.block_height().min(best_height);
         loop {
+            let wallet_hash = wallet.block_hash_at(ancestor);
+            if wallet_hash.is_none() {
+                panic!(
+                    "FATAL: no common ancestor within the wallet's applied chain \
+                     (data exhausted at height {})",
+                    u32::from(ancestor)
+                );
+            }
             let canonical_hash = loop {
                 match rpc.get_block_hash(ancestor).await {
                     Ok(hash) => break hash,
@@ -146,11 +120,8 @@ async fn main() {
                     }
                 }
             };
-            if wallet.block_hash_at(ancestor) == Some(canonical_hash) {
+            if wallet_hash == Some(canonical_hash) {
                 break;
-            }
-            if ancestor == MINT_BIRTHDAY - 1 {
-                panic!("FATAL: canonical fork crossed the mint birthday");
             }
             ancestor = BlockHeight::from_u32(u32::from(ancestor) - 1);
         }
@@ -294,17 +265,15 @@ async fn main() {
         }
 
         // The three gauges: chain level, money level, price level.
-        let treasury_zats: u64 = wallet
-            .unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip))
-            .iter()
-            .map(|n| n.note().value().inner())
-            .chain(
-                wallet
-                    .unspent_sapling_notes(TREASURY_ACCOUNT, TargetHeight::from(tip))
-                    .iter()
-                    .map(|n| n.note().value().inner()),
-            )
-            .sum();
+        let treasury_zats = wallet
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .expect("FATAL: balance summary failed")
+            .expect("FATAL: Zebra tip not recorded before gauge")
+            .account_balances()
+            .get(&TREASURY_ACCOUNT)
+            .expect("FATAL: treasury account missing from summary")
+            .total()
+            .into_u64();
         zns_mint::metrics::snapshot(tip, treasury_zats, oracle.current().into_u64());
 
         // Treasury requests. Each memo was decoded once, at block
@@ -333,7 +302,7 @@ async fn main() {
                         let Some(record) = registry.record(&echo.name).cloned() else {
                             break 'lane true; // no record: no mint-issued challenge can match
                         };
-                        if record.action == Action::Release {
+                        if record.action.is_release() {
                             break 'lane true;
                         }
                         let Some(sent) = challenges.awaiting(echo, mtp_now) else {
@@ -380,6 +349,17 @@ async fn main() {
                             break 'lane true;
                         };
                         challenges = authorized_challenges;
+                        // The seam where a voluntary release exists:
+                        // the OTP that authorized it is consumed here,
+                        // and the resulting note is indistinguishable
+                        // from a unilateral one on chain. This line is
+                        // the only durable record of the cause.
+                        if echo.action.is_release() {
+                            tracing::info!(
+                                name = %echo.name.as_str(),
+                                "voluntary release authorized"
+                            );
+                        }
                         name_notes.admit(note_height, transition_note);
                         true
                     }
@@ -483,10 +463,10 @@ async fn main() {
                             // payer re-requests once the claim lands.
                             break 'lane true;
                         };
-                        if record.action == Action::Release
+                        if record.action.is_release()
                             || record.expires_at.expired(mtp_now)
                             || note_height <= record.confirmed_height
-                            || (action == Action::Release && requested_ua != record.ua)
+                            || (action.is_release() && requested_ua != record.ua)
                             // A forever name has no runway to bank and no
                             // second upgrade to buy; refuse any term at the
                             // relay, before a challenge spends anything.
@@ -567,28 +547,24 @@ async fn main() {
             }
         }
 
-        // Lifecycle. Expiry or a missed liveness deadline releases the
-        // current Name Note without an OTP. During the final OTP window,
-        // the mint challenges the current controller to renew liveness.
+        // Lifecycle releases, §4.5: the registry owns the clocks and
+        // their plural; the sweep drains the batch each tip.
+        // `releases_due` re-derives the same notes per tip, so
+        // admission is idempotent.
+        for (name, release_note) in registry.releases_due(mtp_now) {
+            tracing::info!(name = %name.as_str(), "lifecycle release authorized");
+            name_notes.admit(tip, release_note);
+        }
+
+        // Liveness lead, §4.5.4: during the final OTP window the mint
+        // challenges the current controller to renew liveness. The
+        // snapshot stays — the lead loop needs each record.
         let records = registry
             .name_chain()
             .map(|(name, record)| (name.clone(), record.clone()))
             .collect::<Vec<(zns_mint::mint::Name, NameRecord)>>();
         for (name, record) in records {
-            if record.action == Action::Release {
-                continue;
-            }
-
-            if let Some((release_note, reason)) = registry.release_due(&name, mtp_now) {
-                // The deadline clock authorized a release; `release_due`
-                // re-derives the same note each tip, so admission is
-                // idempotent.
-                tracing::debug!(
-                    name = %name.as_str(),
-                    reason = reason.as_str(),
-                    "lifecycle release authorized"
-                );
-                name_notes.admit(tip, release_note);
+            if record.action.is_release() {
                 continue;
             }
 
@@ -682,60 +658,54 @@ async fn main() {
             // Authority: a claim spends a lineage pool anchor; an update
             // or release spends the predecessor — the record's nullifier
             // matched by commitment.
-            let authority_nf = match note.action() {
-                Action::Claim => {
-                    // The name must still be claimable: free, or released
-                    // after the payment arrived.
-                    let claimable = match registry.record(note.name()) {
-                        None => true,
-                        Some(record) => {
-                            record.action == Action::Release && origin > record.confirmed_height
-                        }
-                    };
-                    if !claimable {
-                        tracing::debug!(
+            let authority_nf = if note.action().is_claim() {
+                // The name must still be claimable: free, or released
+                // after the payment arrived.
+                let claimable = match registry.record(note.name()) {
+                    None => true,
+                    Some(record) => record.action.is_release() && origin > record.confirmed_height,
+                };
+                if !claimable {
+                    tracing::debug!(
+                        name = %note.name().as_str(),
+                        "claim order waits: the name is live on the chain"
+                    );
+                    continue;
+                }
+                match registry.anchor_pool().iter().copied().find(|nf| {
+                    wallet
+                        .unspent_ironwood_note_by_nullifier(
+                            REGISTRY_ACCOUNT,
+                            *nf,
+                            TargetHeight::from(tip),
+                        )
+                        .is_some()
+                }) {
+                    Some(nf) => nf,
+                    None => {
+                        tracing::warn!(
                             name = %note.name().as_str(),
-                            "claim order waits: the name is live on the chain"
+                            "no available claim anchor (all locked or spent)"
                         );
                         continue;
                     }
-                    match registry.anchor_pool().iter().copied().find(|nf| {
-                        wallet
-                            .unspent_ironwood_note_by_nullifier(
-                                REGISTRY_ACCOUNT,
-                                *nf,
-                                TargetHeight::from(tip),
-                            )
-                            .is_some()
-                    }) {
-                        Some(nf) => nf,
-                        None => {
-                            tracing::warn!(
-                                name = %note.name().as_str(),
-                                "no available claim anchor (all locked or spent)"
-                            );
-                            continue;
-                        }
-                    }
                 }
-                Action::Update | Action::Release => {
-                    match registry
-                        .record(note.name())
-                        .filter(|record| {
-                            record.action != Action::Release
-                                && Some(record.commitment) == note.prev_rcm()
-                        })
-                        .map(|record| record.nullifier)
-                    {
-                        Some(nf) => nf,
-                        None => {
-                            tracing::debug!(
-                                name = %note.name().as_str(),
-                                action = note.action().as_str(),
-                                "order waits: its predecessor is no longer current"
-                            );
-                            continue;
-                        }
+            } else {
+                match registry
+                    .record(note.name())
+                    .filter(|record| {
+                        !record.action.is_release() && Some(record.commitment) == note.prev_rcm()
+                    })
+                    .map(|record| record.nullifier)
+                {
+                    Some(nf) => nf,
+                    None => {
+                        tracing::debug!(
+                            name = %note.name().as_str(),
+                            action = note.action().as_str(),
+                            "order waits: its predecessor is no longer current"
+                        );
+                        continue;
                     }
                 }
             };
@@ -794,18 +764,5 @@ async fn main() {
             hash = %tip_hash,
             "mint rules applied at canonical tip"
         );
-    }
-}
-
-/// Opens the tip stream, retrying until Zebra answers.
-async fn tip_stream(chain: &mut ChainClient) -> TipStream {
-    loop {
-        match chain.chain_tip_change_stream().await {
-            Ok(tips) => return tips,
-            Err(error) => {
-                tracing::warn!(%error, "Zebra tip stream unavailable; reconnecting");
-                tokio::time::sleep(RETRY_PAUSE).await;
-            }
-        }
     }
 }
