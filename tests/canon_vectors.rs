@@ -49,10 +49,7 @@ struct Scenario {
 enum Event {
     /// Ceremony filling: a zero-value Registry output joins the pool
     /// below standing size, in canonical scan order.
-    AdoptAnchor {
-        height: u32,
-        nullifier: Hex32,
-    },
+    AdoptAnchor { height: u32, nullifier: Hex32 },
     /// A backed Claim: retires `spent_anchor`, adopts `successor_anchor`,
     /// binds the name.
     Claim {
@@ -440,9 +437,8 @@ fn unbacked_claim() -> Scenario {
     ];
     Scenario {
         name: "unbacked_claim".to_owned(),
-        description:
-            "A commitment-valid Claim that spent no anchor must not enter Registry state."
-                .to_owned(),
+        description: "A commitment-valid Claim that spent no anchor must not enter Registry state."
+            .to_owned(),
         trace: run(&events),
         events,
     }
@@ -532,10 +528,9 @@ fn duplicate_claim() -> Scenario {
     }
     Scenario {
         name: "duplicate_claim".to_owned(),
-        description:
-            "Second backed claim on a live name advances the anchor pool without \
+        description: "Second backed claim on a live name advances the anchor pool without \
              changing the registration."
-                .to_owned(),
+            .to_owned(),
         trace,
         events,
     }
@@ -591,8 +586,7 @@ fn claim_after_release() -> Scenario {
     ];
     Scenario {
         name: "claim_after_release".to_owned(),
-        description: "A new Claim after Release binds the name to the second claimant."
-            .to_owned(),
+        description: "A new Claim after Release binds the name to the second claimant.".to_owned(),
         trace: run(&events),
         events,
     }
