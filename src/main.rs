@@ -20,12 +20,12 @@ use zcash_protocol::consensus::BlockHeight;
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::note::NameNoteQueue;
-use zns_mint::mint::otp::{OtpCode, OtpQueue, OtpRequest, D_OTP};
+use zns_mint::mint::otp::{OtpQueue, OtpRequest};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::registry::NameRecord;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
-    Action, Challenge, Expiry, MintInbound, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
+    Action, Expiry, MintInbound, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
     REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession};
@@ -499,13 +499,14 @@ async fn main() {
                             break 'lane true;
                         }
 
-                        let code = OtpCode::generate();
-                        let challenge = Challenge {
-                            code: code.clone(),
-                            name: name.clone(),
+                        let (challenge, pending) = OtpRequest::pending_challenge(
+                            &name,
                             action,
-                            ua: requested_ua.clone(),
-                        };
+                            &requested_ua,
+                            record.commitment,
+                            term,
+                            mtp_now,
+                        );
                         let Some(memo) = challenge.encode(&network) else {
                             break 'lane true;
                         };
@@ -528,15 +529,6 @@ async fn main() {
                             break 'lane false; // deferred
                         };
 
-                        let pending = OtpRequest {
-                            name: name.clone(),
-                            action,
-                            ua: requested_ua,
-                            tip_rcm: record.commitment,
-                            code,
-                            expires_at: mtp_now + time::Duration::seconds(D_OTP),
-                            term,
-                        };
                         if source.submit(&transaction, "controller challenge").await {
                             challenges.issue(pending);
                             tracing::info!(
@@ -618,13 +610,14 @@ async fn main() {
                 continue;
             }
 
-            let code = OtpCode::generate();
-            let challenge = Challenge {
-                code: code.clone(),
-                name: name.clone(),
-                action: Action::Update,
-                ua: record.ua.clone(),
-            };
+            let (challenge, pending) = OtpRequest::pending_challenge(
+                &name,
+                Action::Update,
+                &record.ua,
+                record.commitment,
+                None,
+                mtp_now,
+            );
             let memo = challenge
                 .encode(&network)
                 .expect("liveness challenges are always encodable");
@@ -646,15 +639,6 @@ async fn main() {
                 continue;
             };
 
-            let pending = OtpRequest {
-                name: name.clone(),
-                action: Action::Update,
-                ua: record.ua.clone(),
-                tip_rcm: record.commitment,
-                code,
-                expires_at: mtp_now + time::Duration::seconds(D_OTP),
-                term: None,
-            };
             let accepted = source.submit(&transaction, "liveness challenge").await;
             if accepted {
                 challenges.issue(pending);
