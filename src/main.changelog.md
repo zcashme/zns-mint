@@ -4,6 +4,18 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-21 — The relay lane's first payment gate (issue #18)
+
+- Update and release requests now pay `Oracle::challenge_fee()` — one
+  dollar at the oracle rate, rounded up to the 100k-zat grid — before
+  the mint spends a relay on the controller. The gate sits with the
+  lane's decided refusals: an underpaid request is dead and silent, a
+  new payment settles a new evaluation; nothing defers, nothing is
+  remembered. The fee is the request's own price and never counts
+  toward the echo lane's term quote, which stays gated in its own
+  transaction. Liveness challenges are mint-originated and carry no
+  requester, so they are untouched.
+
 ## 2026-09-21 — The reorg walk halts on the wallet's data bottom (issue #108)
 
 - The ancestor walk's floor panic (`ancestor == MINT_BIRTHDAY − 1`,
