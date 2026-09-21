@@ -218,7 +218,7 @@ impl Registry {
         assert!(matches!(note, NameNote::Claim { .. }));
         let spent: Vec<_> = nfs
             .iter()
-            .filter(|nf| self.anchors.contains(*nf))
+            .filter(|nf| self.anchors.contains(nf))
             .copied()
             .collect();
         if spent.is_empty() {

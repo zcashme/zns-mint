@@ -44,6 +44,12 @@ impl AnchorPool {
         self.live.len()
     }
 
+    /// Whether no anchor is live — i.e. the pool has not been seeded or
+    /// every seed has been retired without a successor.
+    pub fn is_empty(&self) -> bool {
+        self.live.is_empty()
+    }
+
     /// Whether the pool has reached standing size.
     pub fn is_full(&self) -> bool {
         self.live.len() >= ANCHOR_POOL_SIZE
