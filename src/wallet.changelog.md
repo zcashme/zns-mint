@@ -1,5 +1,19 @@
 # Wallet changelog
 
+## 2026-09-21 — `open_claim_for`: the wallet answers for its open claims (#116)
+
+### Added
+
+- `Wallet::open_claim_for(name, tip) -> Option<TxId>` on the read
+  surface, beside `unspent_ironwood_note_by_nullifier`. It scans the
+  retained sent transactions (`store_transactions_to_be_sent`'s records:
+  raw tx, status, sent-output memos) for one still open — unmined and
+  unexpired at `tip`, the same law as `unmined_spend_still_blocks` —
+  whose memo decodes to a claim Name Note for `name`. The wallet is the
+  only record of the mint's open commitments; the claim lane consults it
+  to bridge the mempool lag while a sent claim cannot be seen in the
+  Registry yet.
+
 ## 2026-09-20 — Checkpoint-seam fixes: Name Note marking and store-door ordering
 
 ### Fixed

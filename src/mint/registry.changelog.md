@@ -2,6 +2,16 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-09-21 — Duplicate confirmed claims are ignored: first confirmed wins (#116)
+
+- `accept_claim` no longer asserts the name is free-or-released. A
+  backed claim that finds the name already live still advances the
+  anchor pool (a duplicate spent a standing anchor and created a
+  successor; the pool follows the chain) and returns `false` — the
+  live registration stands. The mint's restart window (queue and
+  sent-transaction ledger are memory) can produce a duplicate; the
+  Registry must survive what the chain carries.
+
 ## 2026-09-21 — `claim_anchor_height` deleted: the floor was the seed checkpoint all along (issue #108)
 
 - The `claim_anchor_height` field, the `Registry::new` parameter, and

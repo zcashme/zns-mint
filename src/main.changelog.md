@@ -11,6 +11,28 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
   (mint/otp.rs) is the one birth; the pairing is now a tested
   invariant, not a copied one.
 
+## 2026-09-21 — The order drain: one broadcast per decision (#116)
+
+- NameNote enactment is a drain cursor (the RequestQueue shape) over
+  the queue. An order leaves when its send succeeds — the wallet's
+  retained transaction is the record of the open commitment until the
+  chain resolves it — or when the world overtakes it (name live,
+  predecessor no longer current, a release whose own send is still
+  open). Transient waits (anchor locked, fee funds) stay queued. The
+  stale-order leak is gone: "order waits: predecessor no longer
+  current" was always dead, and now resolves.
+- The claim lane's guard stays `claim_pending` alone: with orders
+  resolving at their send, an order is open only until it is sent, and
+  a rival payment that slips past that window simply spends another
+  anchor — the Registry ignores the duplicate, first confirmed wins.
+- A claim that expires unmined no longer auto-retries: the order
+  resolved at its send, the payment is income, and a new payment
+  settles a new evaluation — the restart philosophy, now in-process.
+  A node-rejected send never resolved its order and retries naturally.
+- The walk no longer takes the NameNoteQueue (see mint.changelog.md);
+  a duplicate claim that still lands on chain is ignored, not fatal
+  (see registry.changelog.md).
+
 ## 2026-09-21 — The relay lane's first payment gate (issue #18)
 
 - Update and release requests now pay `Oracle::challenge_fee()` — one

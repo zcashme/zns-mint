@@ -202,7 +202,10 @@ impl Registry {
     }
 
     /// Offers a confirmed claim candidate; true when its transaction
-    /// spent a standing anchor.
+    /// spent a standing anchor and the name was free (or released).
+    /// A duplicate — the mint's restart and reorg worlds — still
+    /// advances the pool; first confirmed wins, the live registration
+    /// stands.
     #[allow(clippy::too_many_arguments)]
     pub fn accept_claim<P: Parameters>(
         &mut self,
@@ -236,17 +239,19 @@ impl Registry {
             "a backed claim creates exactly one zero-value successor anchor — \
              the Registry FVK derives its nullifier",
         );
+        // Pool follows the chain either way: a duplicate claim still
+        // spent a standing anchor and created a successor.
         self.anchor_pool.remove(&spent[0]);
         self.anchor_pool.insert(successor_nf);
         self.pool_checkpoints
             .insert(height, self.anchor_pool.clone());
-        assert!(
-            self.record(note.name())
-                .is_none_or(|r| r.action.is_release()),
-            "claim attempted to replace live name {:?} — authorize \
-             checks availability",
-            note.name()
-        );
+        if self
+            .record(note.name())
+            .is_some_and(|r| !r.action.is_release())
+        {
+            // A late or duplicate claim: first confirmed wins.
+            return false;
+        }
         self.set_record(
             note.name().clone(),
             NameRecord::from_received(params, note, nullifier, height, mtp),
@@ -546,5 +551,60 @@ mod tests {
             ts(tau_update),
         );
         assert_eq!(rec2.release_deadline.as_seconds(), tau_update + l);
+    }
+
+    /// Two backed claims for the same name confirm in order: the first
+    /// registers, the second advances the pool and is ignored — no
+    /// panic, first registration kept (#116).
+    #[test]
+    fn accept_claim_keeps_first_when_a_second_confirms() {
+        let mut r = Registry::new();
+        let h1 = BlockHeight::from_u32(10);
+        let h2 = BlockHeight::from_u32(11);
+        let mtp = ts(1_700_000_000);
+        let a1 = nullifier(1);
+        let a2 = nullifier(2);
+        let succ1 = nullifier(10);
+        let succ2 = nullifier(11);
+        r.adopt_anchor(h1, a1);
+        r.adopt_anchor(h1, a2);
+
+        let claim = NameNote::Claim {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+
+        assert!(r.accept_claim(
+            &MAIN_NETWORK,
+            &claim,
+            nullifier(20),
+            Some(succ1),
+            &[a1],
+            h1,
+            mtp
+        ));
+        let first = r.record(&test_name()).expect("alice registered").clone();
+
+        assert!(!r.accept_claim(
+            &MAIN_NETWORK,
+            &claim,
+            nullifier(21),
+            Some(succ2),
+            &[a2],
+            h2,
+            mtp
+        ));
+        let kept = r.record(&test_name()).expect("alice still registered");
+        assert_eq!(kept.commitment, first.commitment);
+        assert_eq!(kept.nullifier, first.nullifier);
+        assert_eq!(kept.confirmed_height, first.confirmed_height);
+
+        // The pool followed the chain through both: one anchor out, one
+        // successor in, each time.
+        assert!(!r.anchor_pool().contains(&a1));
+        assert!(!r.anchor_pool().contains(&a2));
+        assert!(r.anchor_pool().contains(&succ1));
+        assert!(r.anchor_pool().contains(&succ2));
     }
 }
