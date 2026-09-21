@@ -4,6 +4,20 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-21 — The run loop waits on two things (issue #119)
+
+- Tips and mempool arrivals (`tokio::select!`). An `Added`
+  transaction is fetched, decrypted with the same pass the block
+  path uses, classified as intake classifies — and an update or
+  release trigger that passes the same battery and the challenge
+  fee relays its OTP challenge within seconds, before the
+  trigger's block. Best-effort and forgetful: nothing defers,
+  nothing is remembered, and the confirmed trigger still re-enters
+  the drain, where the pending-tuple check absorbs the duplicate
+  in either race order. Echoes, claims, and bare payments stay
+  block-cadence: they authorize against money that must confirm.
+  The relay arm's policy now lives in `mint::relay`.
+
 ## 2026-09-21 — The relay lane's first payment gate (issue #18)
 
 - Update and release requests now pay `Oracle::challenge_fee()` — one

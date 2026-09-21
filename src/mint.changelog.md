@@ -1,5 +1,15 @@
 # Mint live-work design record
 
+## 2026-09-21 — `mint::relay`: one policy, two entrances
+
+- The drain's relay-lane arm, lifted verbatim into `mint::relay` —
+  the decided-refusal battery, the challenge fee, the OTP relay they
+  pay for. The block-cadence drain passes the carrying block's
+  height; the mempool quick path passes the next height, where the
+  trigger lands if mined now. A `lane` label splits the logs. One
+  policy, two entrances — whichever fires first, the pending-tuple
+  check absorbs the other.
+
 ## 2026-09-21 — Pre-sale AccessCode + publishable key (#83)
 
 - `Request::Claim.code` is `Option<AccessCode>` (six-digit, OTP-shaped:

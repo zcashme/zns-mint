@@ -22,8 +22,10 @@ use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zip32::AccountId;
 
-use otp::OtpCode;
+use otp::{OtpCode, OtpRequest, D_OTP};
 use presale::AccessCode;
+use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
+use zcash_protocol::value::Zatoshis;
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
@@ -507,7 +509,9 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     // lane's memos were decrypted above. Decoded once, here, they
     // are recorded as the requests they carry — nothing is stored
     // for later re-reading; the block is the durable source,
-    // refetched on every application.
+    // refetched on every application. The mempool quick path reads
+    // the same memos earlier and ephemerally; it records nothing —
+    // this pass stays the only intake.
     // Intake classifies; the drain decides. An echo is the relay memo
     // itself, byte-for-byte, routed by Challenge::decode — the wire never
     // carries an OTP on a request. A memo that parses to nothing is a
@@ -548,4 +552,136 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         hash = %cursor.block_hash(),
         "canonical block applied"
     );
+}
+
+/// One relay-lane evaluation: the decided-refusal battery, the challenge
+/// fee, and the OTP relay they pay for — the single policy for both
+/// entrances. The block-cadence drain passes the carrying block's height;
+/// the mempool quick path passes the next height, where the trigger lands
+/// if mined now. Returns `true` when decided; `false` defers to the next
+/// tip — a meaning only the drain takes; the quick path forgets either
+/// way, and the trigger's block re-enters the drain.
+#[allow(clippy::too_many_arguments)]
+pub async fn relay<P: Parameters + Send + 'static>(
+    network: &P,
+    wallet: &mut crate::wallet::Wallet<P>,
+    treasury_keys: &crate::key::TreasuryKeys,
+    spend_prover: &sapling::circuit::SpendParameters,
+    output_prover: &sapling::circuit::OutputParameters,
+    registry: &registry::Registry,
+    challenges: &mut otp::OtpQueue,
+    oracle: &pricing::Oracle,
+    source: &crate::zcash::CanonicalBlockSource,
+    mtp_now: Timestamp,
+    request: &Request,
+    paid: Zatoshis,
+    trigger_height: BlockHeight,
+    lane: &'static str,
+) -> bool {
+    let (name, action, requested_ua, term) = match request {
+        Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
+        Request::Release { name, ua } => (name, Action::Release, ua, None),
+        // A claim never reaches the relay lane: the drain routes claims
+        // above, the quick path drops them at the door.
+        Request::Claim { .. } => return true,
+    };
+    let Some(record) = registry.record(name).cloned() else {
+        tracing::debug!(
+            lane,
+            name = %name.as_str(),
+            "request for an unregistered name"
+        );
+        // Deferral would be attacker-bought memory: the
+        // payer re-requests once the claim lands.
+        return true;
+    };
+    if record.action.is_release()
+        || record.expires_at.expired(mtp_now)
+        || trigger_height <= record.confirmed_height
+        || (action.is_release() && *requested_ua != record.ua)
+        // A forever name has no runway to bank and no
+        // second upgrade to buy; refuse any term at the
+        // relay, before a challenge spends anything.
+        || (record.expires_at == Expiry::Never && term.is_some())
+        || challenges.pending(name, action, requested_ua, record.commitment, mtp_now)
+    {
+        return true;
+    }
+    // The challenge fee (issue #18): the price of
+    // triggering a controller challenge — $1 at the
+    // oracle's rate, rounded up to the 100k-zat grid.
+    // The gate at first sight is binding: an underpaid
+    // request is dead and silent, and a new payment
+    // settles a new evaluation. The fee never counts
+    // toward the echo's term quote; that gate is the
+    // echo lane's own, in a different transaction.
+    if paid < oracle.challenge_fee() {
+        tracing::debug!(
+            lane,
+            name = %name.as_str(),
+            action = action.as_str(),
+            paid = paid.into_u64(),
+            "request underpaid — dead, no challenge"
+        );
+        return true;
+    }
+
+    let code = OtpCode::generate();
+    let challenge = Challenge {
+        code: code.clone(),
+        name: name.clone(),
+        action,
+        ua: requested_ua.clone(),
+    };
+    let Some(memo) = challenge.encode(network) else {
+        return true;
+    };
+    let relay_value = MINIMUM_FEE;
+    let Some(transaction) = treasury::challenge(
+        network,
+        wallet,
+        treasury_keys,
+        spend_prover,
+        output_prover,
+        &record.ua,
+        memo,
+        relay_value,
+    ) else {
+        tracing::debug!(
+            lane,
+            name = %name.as_str(),
+            action = action.as_str(),
+            "controller challenge awaits Treasury funds"
+        );
+        return false; // deferred
+    };
+
+    let pending = OtpRequest {
+        name: name.clone(),
+        action,
+        ua: requested_ua.clone(),
+        tip_rcm: record.commitment,
+        code,
+        expires_at: mtp_now + time::Duration::seconds(D_OTP),
+        term,
+    };
+    if source.submit(&transaction, "controller challenge").await {
+        challenges.issue(pending);
+        tracing::info!(
+            lane,
+            txid = %transaction.txid(),
+            name = %name.as_str(),
+            action = action.as_str(),
+            "controller challenged"
+        );
+        true
+    } else {
+        tracing::debug!(
+            lane,
+            name = %name.as_str(),
+            action = action.as_str(),
+            "controller challenge rejected — deferred"
+        );
+        false
+    }
 }

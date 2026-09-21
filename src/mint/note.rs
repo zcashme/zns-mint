@@ -562,6 +562,39 @@ pub fn decrypt_treasury_memos(
     memos
 }
 
+/// Trial-decrypts one transaction's Ironwood actions sent to the
+/// Treasury's external address, exposing each `(action index, value,
+/// memo)` — the per-transaction core [`decrypt_treasury_memos`] has
+/// always embedded, callable on a mempool fetch. The viewing key is the
+/// reader's whole need: this pass decrypts, it never signs.
+pub fn decrypt_treasury_tx(
+    tx: &zcash_primitives::transaction::Transaction,
+    treasury_fvk: &orchard::keys::FullViewingKey,
+) -> Vec<(usize, zcash_protocol::value::Zatoshis, [u8; 512])> {
+    let ivk = treasury_fvk
+        .to_ivk(orchard::keys::Scope::External)
+        .prepare();
+
+    let mut memos = Vec::new();
+    let Some(bundle) = tx.ironwood_bundle() else {
+        return memos;
+    };
+    if bundle.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3() {
+        return memos;
+    }
+    for (action_index, action) in bundle.actions().iter().enumerate() {
+        let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
+        if let Some((note, _recipient, memo)) =
+            zcash_note_encryption::try_note_decryption(&domain, &ivk, action)
+        {
+            let paid = zcash_protocol::value::Zatoshis::from_u64(note.value().inner())
+                .expect("note values are consensus-bounded");
+            memos.push((action_index, paid, memo));
+        }
+    }
+    memos
+}
+
 // ---------------------------------------------------------------------------
 // NameNoteQueue — authorized Name Notes awaiting the chain
 // ---------------------------------------------------------------------------

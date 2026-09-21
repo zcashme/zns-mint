@@ -13,7 +13,9 @@ pub mod mempool;
 pub mod submit;
 
 pub use chain::{BlockchainInfo, ChainClient, TipSession};
+pub use mempool::MempoolSession;
 pub use submit::SubmitOutcome;
+pub use zebra_indexer_proto::MempoolChangeKind;
 
 use std::{any::type_name, fmt, time::Duration};
 
