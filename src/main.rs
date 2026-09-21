@@ -54,6 +54,7 @@ async fn main() {
         mut mtp,
         mut oracle,
         mut challenges,
+        access_code_key,
         mut registry,
     } = Boot::start().await;
 
@@ -407,8 +408,10 @@ async fn main() {
                         match zns_mint::mint::presale::decide(
                             today,
                             zns_mint::mint::presale::lookup_name(name).await,
-                            code.as_deref(),
+                            code.as_ref(),
                             name_live,
+                            access_code_key.as_bytes(),
+                            name.as_str(),
                         ) {
                             zns_mint::mint::presale::Decision::Retry => {
                                 tracing::debug!(

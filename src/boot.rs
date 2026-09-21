@@ -18,6 +18,7 @@ use crate::capsule;
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::mtp::MtpTracker;
 use crate::mint::otp::OtpQueue;
+use crate::mint::presale::{self, AccessCodeKey};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::{MINT_BIRTHDAY, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
@@ -60,6 +61,8 @@ pub struct Boot<P: Parameters> {
     pub oracle: Oracle,
     /// boot-initialized faculty: born empty, filled by `main`
     pub challenges: OtpQueue,
+    /// TEE-derived access-code key (HMAC purpose key, not the root)
+    pub access_code_key: AccessCodeKey,
     /// produced: scanned and verified during boot sync
     pub registry: Registry,
 }
@@ -112,6 +115,16 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         // `fake-tee` feature = `FakeTee` for off-SNP tests. Capsule AEAD and
         // `report_data` stay real; only the key/report source changes.
         let tee = select_tee();
+
+        // Access-code root from the TEE, then HMAC to the purpose key
+        // (`access-code-v1`). Issuers with that purpose key can recompute
+        // codes offline; the mint never stores codes in Supabase.
+        let access_code_key = {
+            let root = tee
+                .derive_sealing_key(presale::ACCESS_CODE_KEY_CONTEXT)
+                .expect("FATAL: access-code root key unavailable from the TEE");
+            AccessCodeKey::from_private_key(&root)
+        };
 
         // 2. Seed intake + verification: read capsule, unseal with the
         //    TEE-derived sealing key, verify the compiled-in fingerprint,
@@ -371,6 +384,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             mtp,
             oracle,
             challenges,
+            access_code_key,
             registry,
         }
     }

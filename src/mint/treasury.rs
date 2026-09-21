@@ -22,6 +22,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
 
+use crate::mint::presale::AccessCode;
 use crate::mint::{Action, MintInbound, Name, Request, Term, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
@@ -35,8 +36,8 @@ use crate::wallet::Wallet;
 ///   `ZNS:claim:<code>:<term>:<name>:<ua>` — `<term>` is `forever` or
 ///   `<N>y`, N = 1–99. A leading field that parses as a term is the
 ///   term (codeless form, byte-identical to the three-slot claim);
-///   otherwise it is the pre-sale access code: 16–63 ASCII alphanumeric
-///   bytes (`a`–`z`, `A`–`Z`, `0`–`9`; never a term spelling).
+///   otherwise it is the pre-sale access code: exactly six ASCII decimal
+///   digits, including leading zeroes (claim-only; never a term spelling).
 /// - Update: `ZNS:update:<term>:<name>:<ua>` — `<term>` is `none`
 ///   (expiry carried forward), `<N>y`, or `forever` (the upgrade: a
 ///   fixed-term registration converts to no fixed expiration).
@@ -74,7 +75,7 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Requ
             if let Some(term) = Term::parse(first) {
                 (None, Some(term))
             } else {
-                let code = parse_access_code(first)?;
+                let code = AccessCode::parse(first)?;
                 let term = Term::parse(fields.next()?)?;
                 (Some(code), Some(term))
             }
@@ -112,22 +113,6 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Requ
         // The wire always carries a claim term.
         (Action::Claim, None) => unreachable!("claims always carry a term"),
     })
-}
-
-/// Pre-sale access code: 16–63 ASCII alphanumeric bytes.
-fn parse_access_code(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    if bytes.len() < 16 || bytes.len() > 63 {
-        return None;
-    }
-    if bytes
-        .iter()
-        .all(|b| matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'))
-    {
-        Some(s.to_string())
-    } else {
-        None
-    }
 }
 
 /// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
@@ -526,18 +511,18 @@ mod tests {
     #[test]
     fn claim_may_lead_with_a_presale_code() {
         let network = MainNetwork;
-        const CODE: &str = "a1b2c3d4e5f6g7h8";
+        let code = AccessCode::parse("004206").unwrap();
 
         assert!(matches!(
             parse_request(
                 &network,
-                &padded(&format!("ZNS:claim:{CODE}:forever:alice:{TEST_UA}"))
+                &padded(&format!("ZNS:claim:004206:forever:alice:{TEST_UA}"))
             ),
             Some(Request::Claim {
                 term: Term::Forever,
-                code: Some(ref code),
+                code: Some(ref parsed),
                 ..
-            }) if code == CODE
+            }) if parsed == &code
         ));
         // Codeless three-slot form is unchanged.
         assert!(matches!(
@@ -560,17 +545,15 @@ mod tests {
                 ..
             })
         ));
-        // Too short, or non-alphanumeric.
+        // Not exactly six digits.
         assert!(parse_request(
             &network,
-            &padded(&format!("ZNS:claim:004206:forever:alice:{TEST_UA}"))
+            &padded(&format!("ZNS:claim:4206:forever:alice:{TEST_UA}"))
         )
         .is_none());
         assert!(parse_request(
             &network,
-            &padded(&format!(
-                "ZNS:claim:a1b2c3d4e5f6g7h-:forever:alice:{TEST_UA}"
-            ))
+            &padded(&format!("ZNS:claim:a1b2c3:forever:alice:{TEST_UA}"))
         )
         .is_none());
     }

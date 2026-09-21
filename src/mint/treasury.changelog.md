@@ -1,12 +1,12 @@
 # Treasury design record
 
-## 2026-09-19 — Claim memos may lead with a pre-sale access code (#83)
+## 2026-09-21 — Claim memos may lead with a pre-sale AccessCode (#83)
 
 - Claim wire forms: `ZNS:claim:<term>:<name>:<ua>` (unchanged bytes) or
   `ZNS:claim:<code>:<term>:<name>:<ua>`. A field that parses as a term is
-  the term; otherwise the leading field is the access code: 16–63 ASCII
-  alphanumeric (`a`–`z`, `A`–`Z`, `0`–`9`). `<ua>` stays terminal.
-  `Request::Claim` carries `code: Option<String>`.
+  the term; otherwise the leading field is the access code: exactly six
+  ASCII decimal digits, including leading zeroes. `<ua>` stays terminal.
+  `Request::Claim` carries `code: Option<AccessCode>`.
 - Update and release forms are unchanged. Requests still never carry an
   OTP.
 

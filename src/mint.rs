@@ -23,6 +23,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zip32::AccountId;
 
 use otp::OtpCode;
+use presale::AccessCode;
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
@@ -86,14 +87,14 @@ impl Action {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// Create a new registration; the term slot is never empty.
-    /// `code` is the leading pre-sale slot when present (16–63
-    /// alphanumeric); the codeless wire form stays byte-identical to
+    /// `code` is the leading pre-sale slot when present (exactly six
+    /// ASCII digits); the codeless wire form stays byte-identical to
     /// `ZNS:claim:<term>:<name>:<ua>`.
     Claim {
         name: Name,
         ua: UnifiedAddress,
         term: Term,
-        code: Option<String>,
+        code: Option<AccessCode>,
     },
     /// Rebind; `None` carries the expiry forward, `Some(Years)` extends
     /// it, `Some(Forever)` upgrades it to no fixed expiration.

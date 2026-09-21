@@ -1,13 +1,18 @@
 # `mint/presale.rs` design record
 
+## 2026-09-21 — AccessCode + publishable key
+
+- `AccessCode` mirrors `OtpCode`: six digits, redacted `Debug`,
+  `Zeroize` on drop, `from_digits` / `parse`, `ct_eq`. Derive is
+  access-code-v1: TEE root → `HMAC(_, "access-code-v1")` →
+  `HMAC(key, name)` → `u32_be % 1e6`. Spec vector (`alice` → `352582`)
+  is pinned in unit tests.
+- `zn_protected_names` only answers whether `status = protected`
+  (`normalized_name` filter). No code column. PostgREST uses the
+  project publishable key as `apikey`. `zn_waitlist` is unused.
+  Registry `name_live` is redemption; Supabase is never written.
+
 ## 2026-09-19 — Read-only pre-sale table for early claims (#83)
 
-- `lookup_name` GETs the Supabase PostgREST collection filtered by name,
-  `select=code`. Empty URL means every name is open (table not wired).
-  Empty anon key with a wired URL is unavailable (retry). Malformed or
-  multi-row bodies are unavailable.
-- `decide` is pure: before `GENERAL_AVAILABILITY_DAY`, a `Protected`
-  row requires the offered code and a non-live name; `Open` allows;
-  `Unavailable` retries. At and after that day every decision is allow
-  — codes die worthless. The mint never writes the table; redemption is
-  `name_live`.
+- Early-access window closes on `GENERAL_AVAILABILITY_DAY`. Unavailable
+  lookups retry via the request queue; wrong codes are decided dead.
