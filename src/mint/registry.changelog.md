@@ -2,6 +2,21 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-09-21 — `claim_anchor_height` deleted: the floor was the seed checkpoint all along (issue #108)
+
+- The `claim_anchor_height` field, the `Registry::new` parameter, and
+  the "reorg boundary" doc are gone; `new()` is zero-arg over a derived
+  `Default`. The Registry carries no reorg floor.
+- `truncate_to_height`'s assert (`height >= claim_anchor_height`,
+  "rewind crossed the boot-created Registry anchor") is deleted; the
+  precondition — callers pass walk-found heights at or above the boot
+  origin — moves into the method doc. Truncation is a pure history
+  rewind.
+- Supersedes #55's rationale ("claim_anchor_height stays as the reorg
+  floor: it is the boot checkpoint, a joint constraint the wallet seed
+  shares"): the floor was the wallet seed checkpoint all along, and
+  main's walk now terminates on that seed directly.
+
 ## 2026-09-15 — release_due reports which §4.5 clock fired (issue #14)
 
 - `Registry::release_due` now returns `Option<(NameNote, ReleaseReason)>`.

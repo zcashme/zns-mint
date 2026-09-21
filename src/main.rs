@@ -26,7 +26,7 @@ use zns_mint::mint::registry::NameRecord;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
     Action, Challenge, Expiry, MintInbound, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
-    MINT_BIRTHDAY, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession};
 
@@ -86,10 +86,6 @@ async fn main() {
             Ok(tip) => tip,
             Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
         };
-        assert!(
-            best_height >= MINT_BIRTHDAY - 1,
-            "FATAL: Zebra tip is below the mint birthday"
-        );
         wallet
             .update_chain_tip(best_height)
             .expect("FATAL: wallet rejected Zebra's canonical tip");
@@ -99,6 +95,14 @@ async fn main() {
         // no state above that common ancestor survives.
         let mut ancestor = chain_tip.block_height().min(best_height);
         loop {
+            let wallet_hash = wallet.block_hash_at(ancestor);
+            if wallet_hash.is_none() {
+                panic!(
+                    "FATAL: no common ancestor within the wallet's applied chain \
+                     (data exhausted at height {})",
+                    u32::from(ancestor)
+                );
+            }
             let canonical_hash = loop {
                 match rpc.get_block_hash(ancestor).await {
                     Ok(hash) => break hash,
@@ -115,11 +119,8 @@ async fn main() {
                     }
                 }
             };
-            if wallet.block_hash_at(ancestor) == Some(canonical_hash) {
+            if wallet_hash == Some(canonical_hash) {
                 break;
-            }
-            if ancestor == MINT_BIRTHDAY - 1 {
-                panic!("FATAL: canonical fork crossed the mint birthday");
             }
             ancestor = BlockHeight::from_u32(u32::from(ancestor) - 1);
         }

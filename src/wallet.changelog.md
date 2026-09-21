@@ -1,5 +1,12 @@
 # Wallet changelog
 
+## 2026-09-21 — The origin checkpoint is the scan origin (issue #108)
+
+### Changed
+
+- `Wallet::new`'s comment rewords the per-pool origin checkpoint from
+  "the reorg floor" to the scan origin.
+
 ## 2026-09-19 — The three transparent wallet fields go: the mint never receives, stores, or spends transparent money
 
 ### Changed

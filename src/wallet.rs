@@ -174,7 +174,7 @@ impl<P: Parameters> Wallet<P> {
         };
         // Checkpoint id is birthday − 1: each frontier is the tree state at
         // the start of `MINT_BIRTHDAY`. Empty frontiers are inserted too —
-        // the per-pool origin checkpoint is the reorg floor.
+        // the per-pool origin checkpoint is the scan origin.
         wallet
             .sapling_tree
             .insert_frontier(chain_state.final_sapling_tree().clone(), retention)?;

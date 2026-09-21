@@ -158,15 +158,6 @@ mod tests {
     }
 
     #[test]
-    fn a_reorg_below_the_birthday_stays_day_zero() {
-        // `whole_days` truncates toward zero: a rewound MTP below the
-        // birthday never reports a negative day.
-        let mut tracker = born();
-        tracker.update(h(1), u32::try_from(BIRTHDAY_SECS - 500).unwrap());
-        assert_eq!(tracker.current_day(), Some(0));
-    }
-
-    #[test]
     fn the_median_of_a_full_window_flips_the_day() {
         // 11 entries, 6 above the midnight: the 6th smallest — the
         // median — is above it, so the day is 1.

@@ -242,7 +242,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         // each block's intake lands in a queue that falls out of scope with
         // the iteration.
         let mut cursor = block_metadata(&origin);
-        let mut registry = Registry::new(checkpoint_height);
+        let mut registry = Registry::new();
         let source = crate::zcash::CanonicalBlockSource::new();
         let (best_height, _best_hash) = source
             .exact_tip()
