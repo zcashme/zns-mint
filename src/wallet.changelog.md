@@ -23,41 +23,20 @@
   `put_blocks_marked`'s continuity checks; the check turns that
   precondition into a loud invariant. Closes #112.
 
-## 2026-09-20 — Deep truncation fails loudly when it would orphan note witnesses (#111)
+## 2026-09-21 — Preserve note witnesses across deep truncation
 
-### Changed
-
-- `truncate_to_chain_state` now refuses — `TruncationTargetUnavailable`,
-  the same error and doctrine as `truncate_to_height` — when any pool's
-  checkpoint at the target height has aged out of the `MAX_CHECKPOINTS`
-  window AND the wallet retains a note mined at or below the cut (new
-  `notes_mined_at_or_below` guard). A frontier-only rebuild produces a
-  tree with a correct head while discarding every witness below the cut:
-  leaves below the ommer window are never re-inserted, the frontier's own
-  leaf loses its marking and its sibling subtrees, and the notes stay in
-  the tables — selectable, spendable-looking, unwitnessable, detonating
-  only at spend time.
-
-### Kept, narrowed
-
-- `replace_trees_from` survives as the pre-birth reset, reachable only
-  when no note is at or below the cut — there is nothing below to lose,
-  and the supplied (hash-verified) frontiers are then the correct landing
-  state. Its doc comment now states that contract.
-
-### Tests
-
-- `deep_truncation_is_loud_and_window_truncation_preserves_witnesses`:
-  the deep target with a retained note errors with the height named and
-  leaves wallet state untouched; an in-window truncation succeeds and a
-  marked note below the cut keeps its witness at the new tip.
-- Upstream's `truncate_to_chain_state` scenario is `#[ignore]`d as a
-  documented divergence: it requires truncation to a pruned checkpoint to
-  succeed even with a witnessed note below the cut, which is sound for
-  `zcash_client_sqlite` (it rebuilds witness-preservingly from persisted
-  subtree roots and leaf rows) and unsatisfiable for an in-memory wallet
-  armed only with a frontier. The below-birthday variant stays green —
-  no notes below its cut.
+- `truncate_to_chain_state` merges supplied frontiers into copies of the
+  existing trees, restores the target checkpoints, and truncates there.
+  Retained note witnesses survive; older notes no longer cause refusal.
+- Abandoned checkpoint records are removed before insertion so a full window
+  cannot immediately prune the restored checkpoint. Frontier insertion also
+  restores pruned boundaries whose checkpoint records still exist.
+- All pools succeed before live trees, note records, or the reported tip change.
+  When no applied blocks remain, the supplied state becomes the scan origin.
+- The upstream truncation scenario is enabled again. The regression captures
+  real frontiers and checks surviving witnesses against the target root,
+  continued appends and pruning, a shard boundary, and atomic failure when
+  the last pool rejects a conflicting frontier.
 
 ## 2026-09-21 — The origin checkpoint is the scan origin (issue #108)
 

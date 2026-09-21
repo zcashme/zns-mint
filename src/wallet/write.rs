@@ -236,49 +236,6 @@ impl<P: Parameters> Wallet<P> {
 
         self.blocks.retain(|h, _| *h <= height);
     }
-
-    /// True when any retained note was mined at or below `height` — i.e. a
-    /// frontier-only rebuild of the trees would destroy its witness while
-    /// the note stayed selectable.
-    fn notes_mined_at_or_below(&self, height: BlockHeight) -> bool {
-        self.sapling_notes
-            .keys()
-            .chain(self.ironwood_notes.keys())
-            .filter_map(|note_id| self.transaction_statuses.get(note_id.txid()))
-            .any(|status| matches!(status, TransactionStatus::Mined(h) if *h <= height))
-    }
-
-    /// Replaces the note commitment trees with the supplied frontiers —
-    /// the pre-birth reset. Correct only when the wallet holds no note at
-    /// or below the cut (`notes_mined_at_or_below` is false): leaves below
-    /// the frontier's ommer window are not re-inserted and marking is
-    /// stripped, so any note below the cut would remain in the tables
-    /// while losing its witness. With nothing below to lose, the supplied
-    /// frontiers are the correct landing state.
-    ///
-    /// New trees are built and frontiers inserted off to the side; live
-    /// trees and shard-end indexes are replaced only after all three
-    /// insertions succeed.
-    fn replace_trees_from(&mut self, chain_state: &ChainState) -> Result<(), WalletError> {
-        let retention = Retention::Checkpoint {
-            id: chain_state.block_height(),
-            marking: Marking::None,
-        };
-        let mut sapling = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
-        let mut orchard = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
-        let mut ironwood = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
-        sapling.insert_frontier(chain_state.final_sapling_tree().clone(), retention)?;
-        orchard.insert_frontier(chain_state.final_orchard_tree().clone(), retention)?;
-        ironwood.insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
-
-        self.sapling_tree = sapling;
-        self.orchard_tree = orchard;
-        self.ironwood_tree = ironwood;
-        self.sapling_tree_shard_end_heights.clear();
-        self.orchard_tree_shard_end_heights.clear();
-        self.ironwood_tree_shard_end_heights.clear();
-        Ok(())
-    }
 }
 
 impl<P: Parameters> OutputLockStore for Wallet<P> {
@@ -738,28 +695,55 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
             None => {}
         }
 
-        self.zebra_tip = Some(self.zebra_tip.map_or(height, |tip| tip.min(height)));
-
-        let Some(max_applied) = self.max_applied_height() else {
+        let clamped_tip = Some(self.zebra_tip.map_or(height, |tip| tip.min(height)));
+        if self
+            .max_applied_height()
+            .is_none_or(|applied| applied <= height)
+        {
+            self.zebra_tip = clamped_tip;
             return Ok(());
+        }
+
+        // Restore the rollback boundary in retained trees, preserving marked
+        // leaves and their witness paths. Publish only after all pools succeed.
+        let retention = Retention::Checkpoint {
+            id: height,
+            marking: Marking::None,
         };
-        if max_applied <= height {
-            return Ok(());
+        let mut sapling = clone_shard_tree(&self.sapling_tree)?;
+        let mut orchard = clone_shard_tree(&self.orchard_tree)?;
+        let mut ironwood = clone_shard_tree(&self.ironwood_tree)?;
+
+        // Remove abandoned checkpoint records before insertion so a full
+        // window cannot immediately prune the restored checkpoint. Tree
+        // nodes remain available for the frontier merge.
+        sapling
+            .store_mut()
+            .truncate_checkpoints_retaining(&height)?;
+        orchard
+            .store_mut()
+            .truncate_checkpoints_retaining(&height)?;
+        ironwood
+            .store_mut()
+            .truncate_checkpoints_retaining(&height)?;
+        sapling.insert_frontier(chain_state.final_sapling_tree().clone(), retention)?;
+        orchard.insert_frontier(chain_state.final_orchard_tree().clone(), retention)?;
+        ironwood.insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
+        if !sapling.truncate_to_checkpoint(&height)?
+            || !orchard.truncate_to_checkpoint(&height)?
+            || !ironwood.truncate_to_checkpoint(&height)?
+        {
+            return Err(WalletError::TruncationTargetUnavailable(height));
         }
 
-        if !self.try_truncate_trees_to(height)? {
-            // The original checkpoint is gone. If any note was mined at or
-            // below the cut, a frontier-only rebuild would leave it
-            // selectable but unwitnessable (#111) — refuse loudly, the
-            // same doctrine as `truncate_to_height`. With nothing below
-            // the cut to lose, the supplied frontiers are the correct
-            // pre-birth landing state.
-            if self.notes_mined_at_or_below(height) {
-                return Err(WalletError::TruncationTargetUnavailable(height));
-            }
-            self.replace_trees_from(&chain_state)?;
-        }
+        self.sapling_tree = sapling;
+        self.orchard_tree = orchard;
+        self.ironwood_tree = ironwood;
         self.drop_applied_above(height);
+        if self.blocks.is_empty() {
+            self.seed = super::block_metadata(&chain_state);
+        }
+        self.zebra_tip = clamped_tip;
         Ok(())
     }
 
@@ -1206,15 +1190,7 @@ mod tests {
         pool::scan_full_block_detects_outputs::<SaplingPoolTester>(Factory, Cache::default());
     }
 
-    // Documented divergence from upstream's `truncate_to_chain_state`
-    // scenario (zcash_client_backend pool.rs, step 6): upstream requires the
-    // truncation to a pruned checkpoint to SUCCEED with witnessed notes below
-    // the cut, because zcash_client_sqlite rebuilds witness-preservingly from
-    // persisted subtree roots and leaf rows. This in-memory wallet cannot
-    // reconstruct losslessly from a frontier, so it refuses loudly instead
-    // (#111) — pinned by `deep_truncation_is_loud_and_window_truncation_…`.
     #[test]
-    #[ignore = "divergence, see #111: upstream expects frontier-rebuild success; this wallet refuses loudly to keep notes spendable"]
     fn truncate_to_chain_state() {
         pool::truncate_to_chain_state::<SaplingPoolTester, _>(Factory, Cache::default());
     }
@@ -1524,32 +1500,22 @@ mod tests {
         assert_eq!(wallet.network().network_type(), NetworkType::Main);
     }
 
-    // Regression (#111): a deep truncation — target beyond the checkpoint
-    // window — must fail loudly instead of rebuilding the trees from the
-    // supplied frontiers. The old `replace_trees_from` fallback accepted
-    // such truncations silently: leaves below the frontier's ommer window
-    // were never re-inserted, marking was stripped, and every note at or
-    // below the cut remained in the tables while losing its witness —
-    // selectable but unspendable, detonating months later at spend time.
-    //
-    // The companion half pins the healthy path: an in-window truncation
-    // succeeds and marked notes below the cut keep their witnesses.
+    // Both pruned and retained checkpoints must preserve older witnesses.
     #[test]
-    fn deep_truncation_is_loud_and_window_truncation_preserves_witnesses() {
+    fn deep_and_window_truncation_preserve_witnesses() {
         use incrementalmerkletree::{
             frontier::Frontier, Hashable, Level, Marking, Position, Retention,
         };
         use orchard::tree::MerkleHashOrchard;
         use zcash_client_backend::data_api::BlockMetadata;
 
-        // 146 blocks × 2 Ironwood commitments; the block-2 note (position 2)
-        // is `Marked`, the retention decrypted notes and Name Notes carry.
+        // 146 blocks × 2 Ironwood commitments; the block-2 note is marked,
+        // using the retention decrypted notes and Name Notes carry.
         // Each block's last commitment takes the scanner's Checkpoint
         // retention, so 146 checkpoints age anything older than ~100 out
         // of the window.
-        let build = |wallet: &mut Wallet<MainNetwork>| {
-            // A real table row for the block-2 note, so the guard sees what
-            // production would see: a retained note mined at/below the cut.
+        let build = |wallet: &mut Wallet<MainNetwork>, base: u32| {
+            // Keep a real note row below the cut, as production scanning does.
             let sk = orchard::keys::SpendingKey::from_bytes([7u8; 32])
                 .into_option()
                 .expect("any 32 bytes are a spending key");
@@ -1588,7 +1554,7 @@ mod tests {
                     zcash_note_encryption::EphemeralKeyBytes([0u8; 32]),
                     (note, orchard::ValuePool::Ironwood),
                     false,
-                    Position::from(2),
+                    Position::from(u64::from(base) + 2),
                     None,
                     zip32::AccountId::const_from_u32(0),
                     Some(zip32::Scope::External),
@@ -1600,6 +1566,22 @@ mod tests {
                 cm = MerkleHashOrchard::combine(Level::from(0), &cm, &cm);
                 cm
             };
+            let mut targets = Vec::new();
+            let mut frontier = if base == 0 {
+                Frontier::<MerkleHashOrchard, 32>::empty()
+            } else {
+                let position = u64::from(base) - 1;
+                Frontier::from_parts(
+                    Position::from(position),
+                    MerkleHashOrchard::empty_leaf(),
+                    vec![MerkleHashOrchard::empty_leaf(); position.count_ones() as usize],
+                )
+                .unwrap()
+            };
+            wallet
+                .ironwood_tree
+                .insert_frontier(frontier.clone(), Retention::Ephemeral)
+                .unwrap();
             for h in 1..=146u32 {
                 let height = BlockHeight::from_u32(h);
                 for i in 0..2u8 {
@@ -1613,9 +1595,11 @@ mod tests {
                     } else {
                         Retention::Ephemeral
                     };
+                    let commitment = next();
+                    assert!(frontier.append(commitment));
                     wallet
                         .ironwood_tree
-                        .append(next(), retention)
+                        .append(commitment, retention)
                         .expect("per-block retention sequence is upstream-legal");
                 }
                 wallet.blocks.insert(
@@ -1625,7 +1609,7 @@ mod tests {
                         BlockHash([7u8; 32]),
                         Some(0),
                         Some(0),
-                        Some(2 * h),
+                        Some(base + 2 * h),
                     ),
                 );
                 // Mirror production: every applied height is checkpointed
@@ -1635,59 +1619,132 @@ mod tests {
                     .expect("empty-pool checkpoint backfill succeeds");
                 super::ensure_block_checkpoint(&mut wallet.orchard_tree, height, 0)
                     .expect("empty-pool checkpoint backfill succeeds");
+                if h == 45 || h == 100 {
+                    targets.push(ChainState::new(
+                        height,
+                        BlockHash([7u8; 32]),
+                        Frontier::empty(),
+                        Frontier::empty(),
+                        frontier.clone(),
+                    ));
+                }
             }
+            wallet.update_chain_tip(BlockHeight::from_u32(146)).unwrap();
+            targets
         };
 
-        // --- Deep target: checkpoint aged out — must refuse loudly. ---
-        let origin = empty_origin();
-        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
-        build(&mut wallet);
-        let deep = ChainState::new(
-            BlockHeight::from_u32(45),
-            BlockHash([7u8; 32]),
-            Frontier::empty(),
-            Frontier::empty(),
-            Frontier::empty(),
-        );
-        match wallet.truncate_to_chain_state(deep) {
-            Err(WalletError::TruncationTargetUnavailable(h)) => assert_eq!(
-                h,
-                BlockHeight::from_u32(45),
-                "the error names the unavailable target"
-            ),
-            other => panic!(
-                "deep truncation must fail loudly, not silently discard witnesses: {other:?}"
-            ),
+        for scenario in 0..5 {
+            use shardtree::store::{Checkpoint, ShardStore};
+            let target_index = if scenario == 2 { 0 } else { scenario % 2 };
+            let origin = empty_origin();
+            let mut wallet = Wallet::new([], &origin, MainNetwork).expect("valid wallet");
+            // Start just before a shard boundary to exercise cap and shard truncation.
+            let base = if scenario == 4 { (1 << 16) - 4 } else { 0 };
+            let targets = build(&mut wallet, base);
+            let target = targets[target_index].clone();
+            let height = target.block_height();
+            let expected_root = target.final_ironwood_tree().root();
+            if scenario == 2 {
+                // A checkpoint record alone cannot restore a pruned boundary.
+                wallet
+                    .ironwood_tree
+                    .store_mut()
+                    .add_checkpoint(height, Checkpoint::at_position(Position::from(89)))
+                    .unwrap();
+                assert!(matches!(
+                    super::clone_shard_tree(&wallet.ironwood_tree)
+                        .unwrap()
+                        .truncate_to_checkpoint(&height),
+                    Err(shardtree::error::ShardTreeError::Query(
+                        shardtree::error::QueryError::CheckpointPruned
+                    ))
+                ));
+            }
+            if scenario == 3 {
+                // Conflict in the last pool must not publish changes to earlier pools.
+                let (position, _, ommers) = target
+                    .final_ironwood_tree()
+                    .clone()
+                    .take()
+                    .unwrap()
+                    .into_parts();
+                let invalid = ChainState::new(
+                    height,
+                    target.block_hash(),
+                    Frontier::empty(),
+                    Frontier::empty(),
+                    Frontier::from_parts(position, MerkleHashOrchard::empty_leaf(), ommers)
+                        .unwrap(),
+                );
+                let tip = BlockHeight::from_u32(146);
+                let root = wallet.ironwood_tree.root_at_checkpoint_id(&tip).unwrap();
+                assert!(wallet.truncate_to_chain_state(invalid).is_err());
+                assert_eq!(wallet.chain_height().unwrap(), Some(tip));
+                assert_eq!(wallet.max_applied_height(), Some(tip));
+                assert_eq!(wallet.ironwood_notes.len(), 1);
+                assert_eq!(
+                    wallet.sapling_tree.store().max_checkpoint_id().unwrap(),
+                    Some(tip)
+                );
+                assert_eq!(
+                    wallet.orchard_tree.store().max_checkpoint_id().unwrap(),
+                    Some(tip)
+                );
+                assert_eq!(
+                    wallet.ironwood_tree.root_at_checkpoint_id(&tip).unwrap(),
+                    root
+                );
+                assert!(wallet
+                    .ironwood_witness(Position::from(u64::from(base) + 2), tip)
+                    .unwrap()
+                    .is_some());
+                continue;
+            }
+            let mut resumed_frontier = target.final_ironwood_tree().clone();
+            wallet
+                .truncate_to_chain_state(target)
+                .expect("truncate to supplied state");
+            assert_eq!(wallet.chain_height().unwrap(), Some(height));
+            assert_eq!(wallet.max_applied_height(), Some(height));
+            assert_eq!(
+                wallet.ironwood_tree.root_at_checkpoint_id(&height).unwrap(),
+                Some(expected_root)
+            );
+            let witness = wallet
+                .ironwood_witness(Position::from(u64::from(base) + 2), height)
+                .expect("witness is structurally sound")
+                .expect("marked note remains witnessed");
+            let mut marked_leaf = MerkleHashOrchard::empty_leaf();
+            for _ in 0..3 {
+                marked_leaf =
+                    MerkleHashOrchard::combine(Level::from(0), &marked_leaf, &marked_leaf);
+            }
+            assert_eq!(witness.root(marked_leaf), expected_root);
+            assert_eq!(wallet.ironwood_notes.len(), 1);
+            // Extend the replacement branch beyond another full pruning window.
+            for offset in 1..=110u32 {
+                let next_height = height + offset;
+                let commitment =
+                    MerkleHashOrchard::combine(Level::from(0), &marked_leaf, &marked_leaf);
+                assert!(resumed_frontier.append(commitment));
+                wallet
+                    .ironwood_tree
+                    .append(
+                        commitment,
+                        Retention::Checkpoint {
+                            id: next_height,
+                            marking: Marking::None,
+                        },
+                    )
+                    .unwrap();
+                if offset == 1 || offset == 110 {
+                    let witness = wallet
+                        .ironwood_witness(Position::from(u64::from(base) + 2), next_height)
+                        .unwrap()
+                        .expect("witness survives resumed appends and pruning");
+                    assert_eq!(witness.root(marked_leaf), resumed_frontier.root());
+                }
+            }
         }
-        // And nothing was mutated by the refusal:
-        assert!(
-            wallet
-                .ironwood_witness(Position::from(2), BlockHeight::from_u32(146))
-                .expect("witness at tip is structurally sound")
-                .is_some(),
-            "the refused truncation must leave wallet state untouched"
-        );
-
-        // --- In-window target: succeeds, witnesses preserved. ---
-        let origin = empty_origin();
-        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
-        build(&mut wallet);
-        let in_window = ChainState::new(
-            BlockHeight::from_u32(100),
-            BlockHash([7u8; 32]),
-            Frontier::empty(),
-            Frontier::empty(),
-            Frontier::empty(),
-        );
-        wallet
-            .truncate_to_chain_state(in_window)
-            .expect("in-window truncation has its checkpoint and must succeed");
-        assert!(
-            wallet
-                .ironwood_witness(Position::from(2), BlockHeight::from_u32(100))
-                .expect("witness at the new tip is structurally sound")
-                .is_some(),
-            "a marked note below an in-window cut keeps its witness"
-        );
     }
 }
