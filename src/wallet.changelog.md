@@ -1,5 +1,28 @@
 # Wallet changelog
 
+## 2026-09-20 — Checkpoint-seam fixes: Name Note marking and store-door ordering
+
+### Fixed
+
+- `append_block_commitments` marks accepted Name Note commitments with
+  plain `Retention::Marked` — the retention the scanner assigns to notes it
+  decrypts mid-block. The previous `Checkpoint { id: height, Marked }`
+  upgrade collided with the scanner's own block-last checkpoint append at
+  the same height: shardtree admits at most one checkpoint-retention append
+  per id, so every accepted claim whose Name Note is not the block's last
+  Ironwood commitment — the standard claim layout (Name Note, successor
+  anchor, Treasury change) — FATALed at the wallet commit with
+  `CommitmentTree(Insert(CheckpointOutOfOrder))`. `Marked` retains the
+  witness without claiming the height's checkpoint slot;
+  `ensure_block_checkpoint` remains the sole per-height checkpoint creator.
+  Closes #110.
+- `ensure_block_checkpoint` rejects out-of-order heights at its store door.
+  Direct `add_checkpoint` bypasses the runtime ordering check that guards
+  `ShardTree::append`, so a non-monotonic caller would insert time-inverted
+  checkpoints silently. Heights arrive monotonically through
+  `put_blocks_marked`'s continuity checks; the check turns that
+  precondition into a loud invariant. Closes #112.
+
 ## 2026-09-21 — The origin checkpoint is the scan origin (issue #108)
 
 ### Changed
