@@ -23,6 +23,21 @@
   `put_blocks_marked`'s continuity checks; the check turns that
   precondition into a loud invariant. Closes #112.
 
+## 2026-09-21 — Preserve note witnesses across deep truncation
+
+- `truncate_to_chain_state` merges supplied frontiers into copies of the
+  existing trees, restores the target checkpoints, and truncates there.
+  Retained note witnesses survive; older notes no longer cause refusal.
+- Abandoned checkpoint records are removed before insertion so a full window
+  cannot immediately prune the restored checkpoint. Frontier insertion also
+  restores pruned boundaries whose checkpoint records still exist.
+- All pools succeed before live trees, note records, or the reported tip change.
+  When no applied blocks remain, the supplied state becomes the scan origin.
+- The upstream truncation scenario is enabled again. The regression captures
+  real frontiers and checks surviving witnesses against the target root,
+  continued appends and pruning, a shard boundary, and atomic failure when
+  the last pool rejects a conflicting frontier.
+
 ## 2026-09-21 — The origin checkpoint is the scan origin (issue #108)
 
 ### Changed
