@@ -1,5 +1,13 @@
 # Mint live-work design record
 
+## 2026-09-21 — The walk is queue-free: chain application, not orchestration (#116)
+
+- `apply_block` loses its `NameNoteQueue` parameter and its
+  confirmation-time `fulfill` call. The queue has one writer now —
+  `main`'s enactment drain — and the walk applies the chain to the
+  registry, wallet, and Treasury intake only. Boot's never-read
+  `scratch_orders` fixture dies with the parameter.
+
 ## 2026-09-21 — Pre-sale AccessCode + publishable key (#83)
 
 - `Request::Claim.code` is `Option<AccessCode>` (six-digit, OTP-shaped:

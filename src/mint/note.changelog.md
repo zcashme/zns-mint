@@ -1,5 +1,15 @@
 # `mint/note.rs` design record
 
+## 2026-09-21 — Orders resolve at their send; the queue drains (#116)
+
+- `NameNoteQueue` membership now means one thing: a decision awaiting
+  its first broadcast. `fulfill` (the walk's confirmation-time removal)
+  and `iter` are deleted; the queue gains the RequestQueue grammar —
+  `len`/`entry`/`remove` — and `remove` resolves an order when it is
+  enacted or overtaken. A sent order belongs to the wallet: its
+  retained transaction is the record of the open commitment until the
+  chain resolves it.
+
 ## 2026-09-17 — extend gains the upgrade arm: At + forever → Never (#65)
 
 - `Expiry::extend` maps `(At, Some(Forever))` to `Never`. The arm

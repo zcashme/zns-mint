@@ -289,9 +289,9 @@ impl Name {
 // ---------------------------------------------------------------------------
 
 /// Applies one verified canonical successor to every faculty: scan, clock,
-/// Registry law, wallet commit, Treasury intake, Name Note storage, order
-/// fulfillment, cursor. Never fetches, never broadcasts; `main` passes the
-/// live queues, boot passes scratch ones.
+/// Registry law, wallet commit, Treasury intake, Name Note storage, cursor.
+/// Never fetches, never broadcasts; `main` passes the live queues, boot
+/// passes scratch ones.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_block<P: Parameters + Send + 'static>(
     network: &P,
@@ -305,7 +305,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     mtp: &mut mtp::MtpTracker,
     cursor: &mut ChainTip,
     requests: &mut treasury::RequestQueue,
-    name_notes: &mut note::NameNoteQueue,
 ) {
     use std::collections::BTreeMap;
     use std::convert::Infallible;
@@ -537,8 +536,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                 candidate.memo,
             )
             .expect("FATAL: Name Note disagreed with applied wallet state");
-        // The block fulfilled the order.
-        name_notes.fulfill(&candidate.payload);
     }
     *mtp = next_mtp;
     *cursor = next_metadata;

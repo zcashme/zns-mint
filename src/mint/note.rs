@@ -566,10 +566,13 @@ pub fn decrypt_treasury_memos(
 // NameNoteQueue — authorized Name Notes awaiting the chain
 // ---------------------------------------------------------------------------
 
-/// Authorized Name Notes awaiting the chain. Each pair is the note and
-/// the height whose evidence authorized it: a canonical block fulfills
-/// it, a reorg truncates it. Money stays in the wallet, so a restart
-/// empties the queue and the walk re-admits what still stands.
+/// Authorized Name Notes awaiting their first broadcast. Each pair is
+/// the note and the height whose evidence authorized it: the enactment
+/// drain removes an order when it is sent — the wallet's retained
+/// transaction is then the record of the open commitment until the
+/// chain resolves it — or when the world overtakes it; a reorg
+/// truncates it. Money stays in the wallet, so a restart empties the
+/// queue and the walk re-admits what still stands.
 #[derive(Clone, Debug, Default)]
 pub struct NameNoteQueue {
     authorized: Vec<(NameNote, BlockHeight)>,
@@ -584,14 +587,29 @@ impl NameNoteQueue {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.authorized.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.authorized.is_empty()
+    }
+
+    /// The entry at `index`, in admission order — the drain cursor reads.
+    pub fn entry(&self, index: usize) -> (&NameNote, BlockHeight) {
+        let (note, origin) = &self.authorized[index];
+        (note, *origin)
+    }
+
+    /// The order is resolved — enacted, or overtaken by the world. The
+    /// only removal besides reorg truncation.
+    pub fn remove(&mut self, index: usize) {
+        self.authorized.remove(index);
+    }
+
     /// Reorg: drop origins above the common ancestor.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
         self.authorized.retain(|(_, origin)| *origin <= ancestor);
-    }
-
-    /// The chain carried the note; forget the decision.
-    pub fn fulfill(&mut self, note: &NameNote) {
-        self.authorized.retain(|(n, _)| n != note);
     }
 
     /// The one-open-claim guard.
@@ -599,11 +617,6 @@ impl NameNoteQueue {
         self.authorized
             .iter()
             .any(|(n, _)| n.action().is_claim() && n.name() == name)
-    }
-
-    /// Every open decision, in admission order.
-    pub fn iter(&self) -> impl Iterator<Item = (&NameNote, BlockHeight)> {
-        self.authorized.iter().map(|(note, origin)| (note, *origin))
     }
 }
 
@@ -891,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn queue_admit_is_idempotent_and_fulfills() {
+    fn queue_admit_is_idempotent_and_removes() {
         let claim = NameNote::Claim {
             name: test_name(),
             ua: test_ua(),
@@ -905,14 +918,50 @@ mod tests {
         queue.admit(h(10), claim.clone());
         // A re-derived decision keeps its original origin.
         queue.admit(h(12), claim.clone());
-        assert_eq!(queue.iter().count(), 1);
-        assert_eq!(queue.iter().next().map(|(_, origin)| origin), Some(h(10)));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.entry(0).1, h(10));
         assert!(queue.claim_pending(claim.name()));
 
-        // The chain carried it: the queue forgets the decision.
-        queue.fulfill(&claim);
-        assert_eq!(queue.iter().count(), 0);
+        // The drain resolved the order — enacted, or overtaken: the
+        // queue forgets the decision.
+        queue.remove(0);
+        assert!(queue.is_empty());
         assert!(!queue.claim_pending(claim.name()));
+
+        // Re-derivation may re-admit what still stands (releases).
+        queue.admit(h(12), claim);
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn queue_remove_shifts_neighbors() {
+        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
+        let claim = |name: &str| NameNote::Claim {
+            name: Name::parse(name).unwrap(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+        let update = NameNote::Update {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+            prev,
+        };
+        let h = |n: u32| BlockHeight::from_u32(n);
+
+        let mut queue = NameNoteQueue::default();
+        queue.admit(h(100), claim("alice"));
+        queue.admit(h(101), claim("bob"));
+        queue.admit(h(102), update);
+
+        // Removing the entry the cursor resolved shifts its neighbors:
+        // the update lands under the cursor's index, admission order
+        // otherwise intact.
+        queue.remove(1);
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.entry(1).0.action(), Action::Update);
+        assert_eq!(queue.entry(1).1, h(102));
+        assert_eq!(queue.entry(0).0.name().as_str(), "alice");
     }
 
     #[test]
@@ -937,11 +986,8 @@ mod tests {
 
         // A reorg to height 120 orphans only the later decision.
         queue.truncate_to(h(120));
-        assert_eq!(queue.iter().count(), 1);
-        assert_eq!(
-            queue.iter().next().map(|(note, _)| note.action()),
-            Some(Action::Claim)
-        );
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.entry(0).0.action(), Action::Claim);
     }
 
     #[test]

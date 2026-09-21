@@ -225,7 +225,6 @@ async fn main() {
                 &mut mtp,
                 &mut chain_tip,
                 &mut requests,
-                &mut name_notes,
             );
         }
 
@@ -369,9 +368,12 @@ async fn main() {
                         term,
                         code,
                     }) => {
-                        // One open claim per name: the Registry lags the
-                        // mempool by a block; the queue does not. A rival
-                        // payment stays Treasury income.
+                        // One open claim per name at a time: the Registry
+                        // lags the mempool by a block; the queue holds an
+                        // order only until its send. A rival payment that
+                        // slips past both may spend another anchor — any
+                        // duplicate the chain still carries is ignored,
+                        // first confirmed wins.
                         if name_notes.claim_pending(name) {
                             tracing::debug!(
                                 name = %name.as_str(),
@@ -652,10 +654,17 @@ async fn main() {
         }
 
         // --- NameNote enactment ---
-        // One assembly and submission path for every authorized Name
-        // Note. The wallet's spent marks hold a sent order's inputs until
-        // its expiry height, so nothing is re-enactable before then.
-        for (note, origin) in name_notes.iter().map(|(n, o)| (n.clone(), o)) {
+        // The order drain: one broadcast per decision. An order leaves
+        // the queue when it is sent — the wallet's retained transaction
+        // is then the record of the open commitment until the chain
+        // resolves it — or when the world overtakes it. Nothing here
+        // re-enacts a sent order: the wallet answers for it.
+        let mut index = 0;
+        while index < name_notes.len() {
+            let (note, origin) = {
+                let (note, origin) = name_notes.entry(index);
+                (note.clone(), origin)
+            };
             // Authority: a claim spends a lineage pool anchor; an update
             // or release spends the predecessor — the record's nullifier
             // matched by commitment.
@@ -669,8 +678,9 @@ async fn main() {
                 if !claimable {
                     tracing::debug!(
                         name = %note.name().as_str(),
-                        "claim order waits: the name is live on the chain"
+                        "claim order dropped: the name is live on the chain"
                     );
+                    name_notes.remove(index);
                     continue;
                 }
                 match registry.anchor_pool().iter().copied().find(|nf| {
@@ -688,6 +698,7 @@ async fn main() {
                             name = %note.name().as_str(),
                             "no available claim anchor (all locked or spent)"
                         );
+                        index += 1;
                         continue;
                     }
                 }
@@ -704,12 +715,34 @@ async fn main() {
                         tracing::debug!(
                             name = %note.name().as_str(),
                             action = note.action().as_str(),
-                            "order waits: its predecessor is no longer current"
+                            "order dropped: its predecessor is no longer current"
                         );
+                        name_notes.remove(index);
                         continue;
                     }
                 }
             };
+            // A release whose predecessor the wallet will not release is
+            // this order's own open send — re-derivation re-admits
+            // releases every tip they stay due, so the churn self-heals;
+            // an update in the same shape may be racing a sibling, and
+            // stays queued instead.
+            if note.action().is_release()
+                && wallet
+                    .unspent_ironwood_note_by_nullifier(
+                        REGISTRY_ACCOUNT,
+                        authority_nf,
+                        TargetHeight::from(tip),
+                    )
+                    .is_none()
+            {
+                tracing::debug!(
+                    name = %note.name().as_str(),
+                    "release order sent: its transaction is still open"
+                );
+                name_notes.remove(index);
+                continue;
+            }
 
             let Some(transaction) = assemble::prepare(
                 &network,
@@ -728,6 +761,7 @@ async fn main() {
                     action = note.action().as_str(),
                     "NameNote order awaits Treasury fee funds"
                 );
+                index += 1;
                 continue;
             };
 
@@ -736,8 +770,9 @@ async fn main() {
                     txid = %transaction.txid(),
                     name = %note.name().as_str(),
                     action = note.action().as_str(),
-                    "NameNote order in flight"
+                    "NameNote order sent — the wallet holds it until the chain answers"
                 );
+                name_notes.remove(index);
             } else {
                 tracing::error!(
                     txid = %transaction.txid(),
@@ -745,6 +780,7 @@ async fn main() {
                     action = note.action().as_str(),
                     "NameNote submission rejected — inputs stranded until expiry"
                 );
+                index += 1;
             }
         }
 
