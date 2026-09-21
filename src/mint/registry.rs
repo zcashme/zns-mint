@@ -404,9 +404,9 @@ mod tests {
     use crate::mint::NameNote;
     use zcash_protocol::consensus::MAIN_NETWORK;
 
-    /// A valid mainnet ZIP-316 UA with an Orchard receiver (test vector
-    /// shared with the note and treasury tests).
-    const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
+    /// A mainnet UA with every known receiver kind (shared with the
+    /// note and treasury tests).
+    const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
 
     fn test_ua() -> UnifiedAddress {
         match zcash_keys::address::Address::decode(&MAIN_NETWORK, TEST_UA) {

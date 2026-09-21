@@ -23,7 +23,9 @@ use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
 
 use crate::mint::presale::AccessCode;
-use crate::mint::{Action, MintInbound, Name, Request, Term, TREASURY_ACCOUNT};
+use crate::mint::{
+    decode_controller_ua, Action, MintInbound, Name, Request, Term, TREASURY_ACCOUNT,
+};
 use crate::wallet::Wallet;
 
 /// Parses a 512-byte memo sent to the Treasury as a ZNS Request.
@@ -45,7 +47,8 @@ use crate::wallet::Wallet;
 ///
 /// Requests never carry an OTP — answering is the respond's job: an echo
 /// is the relay memo itself (`ZNS:otp:…`, routed by `Challenge::decode`),
-/// never this parser.
+/// never this parser. The controller `<ua>` must decode as a
+/// known-receiver Unified Address ([`decode_controller_ua`]).
 pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Request> {
     let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
     if raw[end..].iter().any(|b| *b != 0) {
@@ -91,10 +94,7 @@ pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Requ
     if ua_str.is_empty() || fields.next().is_some() {
         return None;
     }
-    let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
-        zcash_keys::address::Address::Unified(ua) => ua,
-        _ => return None,
-    };
+    let ua = decode_controller_ua(network, ua_str)?;
 
     Some(match (action, term) {
         (Action::Claim, Some(term)) => Request::Claim {
@@ -397,7 +397,7 @@ mod tests {
     use super::*;
     use zcash_protocol::consensus::MainNetwork;
 
-    const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
+    const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
 
     fn request(action: Action) -> MintInbound {
         let ua = match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
@@ -684,6 +684,68 @@ mod tests {
         assert!(parse_request(
             &network,
             &padded(&format!("ZNS:claim:forever:INVALID:{TEST_UA}"))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn unknown_receiver_ua_is_rejected_at_both_intakes() {
+        use crate::mint::Challenge;
+        use zcash_address::unified::{Address as Ua, Encoding, Receiver};
+
+        let network = MainNetwork;
+        // A valid Unified Address carrying an unknown receiver —
+        // ZIP-316's forward-compatibility channel, unbounded by design.
+        let ua = Ua::try_from_items(vec![
+            Receiver::Orchard([0x07; 43]),
+            Receiver::Unknown {
+                typecode: 5,
+                data: vec![0u8; 32],
+            },
+        ])
+        .expect("ZIP-316 composition rules permit it")
+        .encode(&zcash_protocol::consensus::NetworkType::Main);
+        assert!(matches!(
+            zcash_keys::address::Address::decode(&network, &ua),
+            Some(zcash_keys::address::Address::Unified(_))
+        ));
+
+        // The request intake throws every verb out …
+        assert!(
+            parse_request(&network, &padded(&format!("ZNS:claim:forever:alice:{ua}"))).is_none()
+        );
+        assert!(parse_request(&network, &padded(&format!("ZNS:update:none:alice:{ua}"))).is_none());
+        assert!(parse_request(&network, &padded(&format!("ZNS:release:alice:{ua}"))).is_none());
+        // … and so does the echo intake.
+        let echo = padded(&format!("ZNS:otp:417293:alice:update:{ua}"));
+        assert!(Challenge::decode(&network, &echo).is_none());
+    }
+
+    #[test]
+    fn largest_known_receiver_ua_is_accepted() {
+        let network = MainNetwork;
+        // The corpus vector carries every known receiver kind — the
+        // longest address shape the guard admits, still inside every
+        // memo it is re-embedded into.
+        assert!(TEST_UA.len() > 200);
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"))
+        )
+        .is_some());
+    }
+
+    /// The pre-fix corpus vector: a real Sapling+P2pkh address with no
+    /// Orchard receiver — inside the memo budget, but a controller the
+    /// relay lane could never challenge.
+    const ORCHARDLESS_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
+
+    #[test]
+    fn orchardless_known_receiver_ua_is_rejected() {
+        let network = MainNetwork;
+        assert!(parse_request(
+            &network,
+            &padded(&format!("ZNS:claim:forever:alice:{ORCHARDLESS_UA}"))
         )
         .is_none());
     }

@@ -56,6 +56,23 @@ pub const LIVENESS_RETRY_COOLDOWN: i64 = 24 * 60 * 60;
 /// Minimum Treasury Ironwood balance after boot sync (0.002 ZEC).
 pub const MIN_TREASURY_BALANCE: u64 = 200_000;
 
+/// The longest name the wire accepts.
+pub const MAX_NAME_LEN: usize = 63;
+
+/// Decodes a controller Unified Address — known receivers only, and
+/// the Orchard family among them (relays deliver and echo over it).
+/// The ZIP-316 receiver kinds are fixed-size, so such an address is
+/// bounded by construction: inside every memo it is ever re-embedded
+/// into. Unknown receivers are unbounded by design; refusing them is
+/// the memo budget.
+pub fn decode_controller_ua<P: Parameters>(network: &P, ua_str: &str) -> Option<UnifiedAddress> {
+    let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
+        zcash_keys::address::Address::Unified(ua) => ua,
+        _ => return None,
+    };
+    (ua.unknown().is_empty() && ua.orchard().is_some()).then_some(ua)
+}
+
 /// ZNS action kinds.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Action {
@@ -206,10 +223,7 @@ impl Challenge {
         // Challenges never claim: parse the verb, then refuse claims.
         let action = Action::parse(parts[4]).filter(|action| !action.is_claim())?;
 
-        let ua = match zcash_keys::address::Address::decode(network, parts[5])? {
-            zcash_keys::address::Address::Unified(ua) if ua.orchard().is_some() => ua,
-            _ => return None,
-        };
+        let ua = decode_controller_ua(network, parts[5])?;
 
         Some(Self {
             code,
@@ -269,7 +283,7 @@ impl Name {
     /// Attempts to parse a string into a valid ZNS name.
     pub fn parse(s: &str) -> Option<Self> {
         let bytes = s.as_bytes();
-        if bytes.is_empty() || bytes.len() > 63 {
+        if bytes.is_empty() || bytes.len() > MAX_NAME_LEN {
             return None;
         }
         if bytes.iter().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9')) {

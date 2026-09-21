@@ -108,8 +108,8 @@ impl NameNote {
     ///
     /// Total over valid `NameNote`s — the memo always fits, because every
     /// field is validated at construction: `Name::parse` bounds the name,
-    /// `UnifiedAddress` bounds its ZIP 316 encoding (bech32m: ASCII, no
-    /// colon, no NUL), and the time crate bounds the expiry.
+    /// `decode_controller_ua` bounds the address to known receivers, and
+    /// the time crate bounds the expiry.
     pub fn encode<P: Parameters>(&self, params: &P) -> [u8; 512] {
         let ua_field = self.ua().encode(params);
         let verb = self.action().as_str();
@@ -625,9 +625,10 @@ mod tests {
     use super::*;
     use zcash_protocol::consensus::MAIN_NETWORK;
 
-    /// A valid mainnet ZIP-316 UA with an Orchard receiver (zcash_address
-    /// test vector): parses, round-trips byte-exact, and carries orchard().
-    const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
+    /// A real mainnet UA with every known receiver kind — Orchard,
+    /// Sapling, and P2PKH: parses, round-trips byte-exact, and carries
+    /// orchard().
+    const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
 
     fn test_ua() -> UnifiedAddress {
         match zcash_keys::address::Address::decode(&MAIN_NETWORK, TEST_UA) {
