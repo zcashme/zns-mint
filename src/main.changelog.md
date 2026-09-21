@@ -4,6 +4,13 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-21 — The challenge birth leaves the run loop (#120)
+
+- The relay arm and the liveness loop no longer hand-build the
+  `Challenge`/`OtpRequest` pair — `OtpRequest::pending_challenge`
+  (mint/otp.rs) is the one birth; the pairing is now a tested
+  invariant, not a copied one.
+
 ## 2026-09-21 — The relay lane's first payment gate (issue #18)
 
 - Update and release requests now pay `Oracle::challenge_fee()` — one

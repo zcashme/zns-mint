@@ -74,6 +74,41 @@ pub struct OtpRequest {
     pub expires_at: Timestamp,
 }
 
+impl OtpRequest {
+    /// A challenge and the pending it arms are born together — one code
+    /// in two bodies: the `Challenge` whose memo carries it to the
+    /// controller, and this request, which expires it after D_OTP.
+    /// Encoding stays with the caller: how a lane answers an
+    /// unencodable challenge is lane policy, not birth.
+    pub fn pending_challenge(
+        name: &Name,
+        action: Action,
+        ua: &UnifiedAddress,
+        tip_rcm: NameCommitment,
+        term: Option<Term>,
+        mtp_now: Timestamp,
+    ) -> (Challenge, Self) {
+        let code = OtpCode::generate();
+        (
+            Challenge {
+                code: code.clone(),
+                name: name.clone(),
+                action,
+                ua: ua.clone(),
+            },
+            Self {
+                name: name.clone(),
+                action,
+                ua: ua.clone(),
+                term,
+                tip_rcm,
+                code,
+                expires_at: mtp_now + Duration::seconds(D_OTP),
+            },
+        )
+    }
+}
+
 /// Issued challenges, in order, plus a rate-limit ledger for liveness
 /// challenges.
 #[derive(Clone)]
@@ -206,6 +241,43 @@ mod tests {
         let mut bytes = [0u8; 32];
         bytes[0] = seed;
         NameCommitment::from_bytes(&bytes).unwrap()
+    }
+
+    #[test]
+    fn the_birth_shares_one_code_and_expires_after_d_otp() {
+        let ua = match zcash_keys::address::Address::decode(
+            &zcash_protocol::consensus::MAIN_NETWORK,
+            "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf",
+        ) {
+            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            _ => panic!("vector is a mainnet Unified Address"),
+        };
+        let alice = test_name("alice");
+        let rcm = commitment(1);
+        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
+
+        let (challenge, pending) = OtpRequest::pending_challenge(
+            &alice,
+            Action::Update,
+            &ua,
+            rcm,
+            Some(Term::Years(1)),
+            t0,
+        );
+
+        // One code in two bodies — the invariant the run loop used to
+        // maintain by hand, twice.
+        assert_eq!(challenge.code, pending.code);
+        assert_eq!(challenge.name, pending.name);
+        assert_eq!(challenge.action, pending.action);
+        assert_eq!(challenge.ua, pending.ua);
+        // The pending alone carries the expiry and the term.
+        assert_eq!(
+            pending.expires_at,
+            Timestamp::from_seconds(1_700_000_000 + D_OTP).unwrap()
+        );
+        assert_eq!(pending.term, Some(Term::Years(1)));
+        assert_eq!(pending.tip_rcm, rcm);
     }
 
     #[test]
