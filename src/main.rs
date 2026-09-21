@@ -481,6 +481,23 @@ async fn main() {
                         {
                             break 'lane true;
                         }
+                        // The challenge fee (issue #18): the price of
+                        // triggering a controller challenge — $1 at the
+                        // oracle's rate, rounded up to the 100k-zat grid.
+                        // The gate at first sight is binding: an underpaid
+                        // request is dead and silent, and a new payment
+                        // settles a new evaluation. The fee never counts
+                        // toward the echo's term quote; that gate is the
+                        // echo lane's own, in a different transaction.
+                        if paid < oracle.challenge_fee() {
+                            tracing::debug!(
+                                name = %name.as_str(),
+                                action = action.as_str(),
+                                paid = paid.into_u64(),
+                                "request underpaid — dead, no challenge"
+                            );
+                            break 'lane true;
+                        }
 
                         let code = OtpCode::generate();
                         let challenge = Challenge {

@@ -1,5 +1,17 @@
 # Pricing changelog
 
+## The challenge fee (#18)
+
+- `Oracle::challenge_fee()` prices the trigger of a controller
+  challenge: one dollar at the current published rate, rounded up to
+  the next 100_000-zat increment. At the issue's example rate
+  (120k zats per dollar) the fee is 200_000 zats; the grid floor is
+  100_000 zats. The rate already rounds up so a quote never lands
+  below its USD tariff; the fee grid rounds up on top of it.
+  Anti-spam pricing, not revenue — the drain refuses underpaid relay
+  requests outright, with no queue memory, the claim lane's
+  "dead and silent" precedent.
+
 ## The oracle stops computing days (#85)
 
 - The day is not the oracle's to compute: `new` and `accumulate` take
