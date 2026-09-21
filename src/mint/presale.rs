@@ -283,7 +283,7 @@ mod tests {
         let root = vector_private_key();
         let key = derive_access_code_key(&root);
         assert_eq!(
-            hex::encode(&*key),
+            hex::encode(*key),
             "5e2db6040cd32d2486675a3b3d60b9d4d96e9c8d4a5f862e0dfd7bd6a3f57b91"
         );
         assert_eq!(
