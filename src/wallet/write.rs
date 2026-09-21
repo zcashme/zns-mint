@@ -383,6 +383,12 @@ where
 /// Every accepted height is checkpointed in all three pools — including pools
 /// with no commitments in that block — so anchors remain computable at each
 /// block boundary and reorg truncation is exact.
+///
+/// The store door bypasses the ordering check that guards `ShardTree::append`,
+/// so the height must exceed every existing checkpoint id. Heights arrive
+/// monotonically through `put_blocks_marked`'s continuity checks; anything
+/// else is a chain discontinuity — refused here rather than accepted as a
+/// time-inverted checkpoint.
 fn ensure_block_checkpoint<H, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     tree: &mut ShardTree<
         shardtree::store::memory::MemoryShardStore<H, BlockHeight>,
@@ -398,6 +404,9 @@ where
     H: Hashable + PartialEq + Clone,
 {
     if tree.store().get_checkpoint(&height)?.is_none() {
+        if tree.store().max_checkpoint_id()?.as_ref() >= Some(&height) {
+            return Err(WalletError::ChainDiscontinuity(height));
+        }
         let tree_state = if final_tree_size == 0 {
             TreeState::Empty
         } else {
@@ -412,8 +421,10 @@ where
 
 /// Appends one scanned block's bundle commitments with the scanner-provided
 /// retention markers, then checkpoints the accepted height. `marks` upgrades
-/// those commitments to `Checkpoint { Marked }` — the retention the scanner
-/// itself assigns to notes it decrypts.
+/// those commitments to `Marked` — the retention the scanner assigns to notes
+/// it decrypts mid-block. The height's single checkpoint-retention append
+/// belongs to the block's last commitment; a marked Name Note that is not
+/// last must not claim it.
 fn append_block_commitments<H, Nf, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     tree: &mut ShardTree<
         shardtree::store::memory::MemoryShardStore<H, BlockHeight>,
@@ -431,10 +442,7 @@ where
 {
     for (commitment, retention) in bundles.commitments() {
         let retention = if marks.contains(commitment) {
-            Retention::Checkpoint {
-                id: height,
-                marking: Marking::Marked,
-            }
+            Retention::Marked
         } else {
             *retention
         };
@@ -878,7 +886,9 @@ impl<P: Parameters> Wallet<P> {
     /// [`WalletWrite::put_blocks`], with the accepted Name Note commitments
     /// marked: the scanner cannot decrypt ZNS-domain outputs, so they
     /// would otherwise enter the Ironwood tree Ephemeral — prunable, and
-    /// then the note has no witness.
+    /// then the note has no witness. Marking is plain `Retention::Marked`,
+    /// exactly as the scanner retains mid-block decrypted notes; the
+    /// per-height checkpoint is `ensure_block_checkpoint`'s to create.
     pub(crate) fn put_blocks_marked(
         &mut self,
         from_state: &ChainState,
