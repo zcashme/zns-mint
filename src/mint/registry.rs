@@ -1,7 +1,7 @@
 //! The name-chain state machine and transition authorization.
 
 use crate::mint::otp::OtpQueue;
-use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, UnifiedAddress};
+use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
 use zcash_protocol::consensus::BlockHeight;
@@ -46,6 +46,28 @@ impl NameRecord {
             .expect("liveness deadline fits Timestamp"),
             nullifier,
         }
+    }
+
+    /// Does this record admit a relay trigger? The five refusals: the
+    /// name is released — its last transition was a release; the term
+    /// has expired; the trigger is stale, carried at or before the
+    /// record's last confirmed transition, so it speaks against
+    /// superseded state; a release aimed from another UA; or a term
+    /// offered to a forever name, which has no runway to bank and no
+    /// second upgrade to buy.
+    pub fn admits(
+        &self,
+        action: Action,
+        ua: &UnifiedAddress,
+        term: Option<Term>,
+        trigger_height: BlockHeight,
+        mtp_now: Timestamp,
+    ) -> bool {
+        !self.action.is_release()
+            && !self.expires_at.expired(mtp_now)
+            && trigger_height > self.confirmed_height
+            && !(action.is_release() && *ua != self.ua)
+            && !(self.expires_at == Expiry::Never && term.is_some())
     }
 }
 
@@ -453,6 +475,47 @@ mod tests {
 
     /// The plural sweep: only names whose clocks have fired, each paired
     /// with its release note. Live and already-released names are absent.
+    #[test]
+    fn the_record_admits_its_triggers_and_refuses_the_stale_the_expired_and_the_forever_term() {
+        let ua = test_ua();
+        let now = ts(1_000_000_000);
+        let above = BlockHeight::from_u32(101);
+        let live = record(
+            Action::Claim,
+            Expiry::At(ts(2_000_000_000)),
+            2_000_000_000,
+            1,
+        );
+
+        // A live record admits an update, a term, and a release from
+        // its own UA.
+        assert!(live.admits(Action::Update, &ua, Some(Term::Years(1)), above, now));
+        assert!(live.admits(Action::Release, &ua, None, above, now));
+
+        // Released: the record is a tombstone — nothing is admitted.
+        let released = record(
+            Action::Release,
+            Expiry::At(ts(2_000_000_000)),
+            2_000_000_000,
+            2,
+        );
+        assert!(!released.admits(Action::Update, &ua, None, above, now));
+
+        // Expired: the term has passed.
+        assert!(!live.admits(Action::Update, &ua, None, above, ts(2_000_000_001)));
+
+        // Stale: the trigger rides at or below the last confirmed
+        // transition — it speaks against superseded state.
+        assert!(!live.admits(Action::Update, &ua, None, BlockHeight::from_u32(100), now));
+        assert!(!live.admits(Action::Update, &ua, None, BlockHeight::from_u32(99), now));
+
+        // A forever name refuses any term — no runway to bank, no
+        // second upgrade to buy — and admits the termless otherwise.
+        let forever = record(Action::Claim, Expiry::Never, 2_000_000_000, 3);
+        assert!(!forever.admits(Action::Update, &ua, Some(Term::Years(1)), above, now));
+        assert!(forever.admits(Action::Update, &ua, None, above, now));
+    }
+
     #[test]
     fn releases_due_yields_only_fired_names() {
         let mut r = Registry::new();

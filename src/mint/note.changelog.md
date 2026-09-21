@@ -9,6 +9,15 @@
   enacted or overtaken. A sent order belongs to the wallet: its
   retained transaction is the record of the open commitment until the
   chain resolves it.
+## 2026-09-21 — The treasury memo pass speaks per-transaction
+
+- `decrypt_treasury_tx` trial-decrypts one transaction's
+  Treasury-directed actions — the per-transaction core the block pass
+  now calls for each of its transactions, and the mempool fetch calls
+  on its own. It returns `MemoBytes` and takes the orchard viewing
+  key, the reader's whole need: this pass decrypts, it never signs.
+  One core serves both cadences, so a trigger classifies identically
+  at either.
 
 ## 2026-09-17 — extend gains the upgrade arm: At + forever → Never (#65)
 

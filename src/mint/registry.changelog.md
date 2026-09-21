@@ -11,6 +11,15 @@ Tracks design-relevant changes to `src/registry.rs`.
   live registration stands. The mint's restart window (queue and
   sent-transaction ledger are memory) can produce a duplicate; the
   Registry must survive what the chain carries.
+## 2026-09-21 — The record names its refusals: `NameRecord::admits` (#121)
+
+- The five record facts the relay lane tested inline — released,
+  expired, stale against the last confirmed transition, a release
+  aimed from another UA, a term offered to a forever name — are one
+  predicate on the record that owns them, in the #105 lineage (name
+  the concept, retire the inline chain). Present tense by house
+  custom: the record admits or it does not, and the lane never asks
+  why.
 
 ## 2026-09-21 — `claim_anchor_height` deleted: the floor was the seed checkpoint all along (issue #108)
 
