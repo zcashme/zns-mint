@@ -20,6 +20,7 @@ pub use zcash_keys::address::UnifiedAddress;
 
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::memo::{Memo, MemoBytes};
 use zip32::AccountId;
 
 use otp::OtpCode;
@@ -59,26 +60,13 @@ pub const MIN_TREASURY_BALANCE: u64 = 200_000;
 /// The longest name the wire accepts.
 pub const MAX_NAME_LEN: usize = 63;
 
-/// Decodes a controller UA: known receivers only, and the Orchard
-/// family among them — relays deliver and echo over it. Fixed-size
-/// receivers keep such an address inside every memo budget; unknown
-/// receivers are unbounded by design, so they are refused.
+/// Decodes a controller UA: known receivers only, Orchard among them.
 fn decode_controller_ua<P: Parameters>(network: &P, ua_str: &str) -> Option<UnifiedAddress> {
     let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
         zcash_keys::address::Address::Unified(ua) => ua,
         _ => return None,
     };
     (ua.unknown().is_empty() && ua.orchard().is_some()).then_some(ua)
-}
-
-/// The memo shape every grammar starts from: NUL-terminated,
-/// zero-only tail, valid UTF-8.
-fn memo_text(memo: &[u8; 512]) -> Option<&str> {
-    let end = memo.iter().position(|b| *b == 0).unwrap_or(memo.len());
-    if memo[end..].iter().any(|b| *b != 0) {
-        return None;
-    }
-    std::str::from_utf8(&memo[..end]).ok()
 }
 
 /// ZNS action kinds.
@@ -168,17 +156,17 @@ pub enum Request {
 }
 
 impl Request {
-    /// Parses a Treasury request memo. The three forms, `<ua>` terminal:
+    /// Parses a request memo:
     ///
-    /// - `ZNS:claim:<term>:<name>:<ua>` — optionally led by a six-digit
-    ///   pre-sale code: `ZNS:claim:<code>:<term>:<name>:<ua>`
-    /// - `ZNS:update:<term>:<name>:<ua>` — `none`, `<N>y`, or `forever`
+    /// - `ZNS:claim:<term>:<name>:<ua>`, optionally led by a six-digit
+    ///   pre-sale code
+    /// - `ZNS:update:<none | <N>y | forever>:<name>:<ua>`
     /// - `ZNS:release:<name>:<ua>`
-    ///
-    /// Requests never carry an OTP; the controller `<ua>` must pass
-    /// `decode_controller_ua`.
-    fn decode<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Request> {
-        let text = memo_text(raw)?;
+    fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Option<Request> {
+        let text = match Memo::try_from(memo).ok()? {
+            Memo::Text(text) => text,
+            _ => return None,
+        };
 
         let mut fields = text.split(':');
         if fields.next()? != "ZNS" {
@@ -245,9 +233,8 @@ pub struct Challenge {
 }
 
 impl Challenge {
-    /// Encodes the challenge memo. Claims are never challenged, so
-    /// [`Action::is_claim`] guards the lane.
-    pub fn encode<P: Parameters>(&self, network: &P) -> Option<[u8; 512]> {
+    /// Encodes the challenge memo; claims are never challenged.
+    pub fn encode<P: Parameters>(&self, network: &P) -> Option<MemoBytes> {
         if self.action.is_claim() {
             return None;
         }
@@ -271,14 +258,15 @@ impl Challenge {
             memo[offset..end].copy_from_slice(field);
             offset = end;
         }
-        Some(memo)
+        Some(MemoBytes::from_bytes(&memo).expect("the encoded challenge fits a memo"))
     }
 
-    /// Decodes a relay sentence. The verb is `update` or `release` —
-    /// challenges never claim — and the UA must carry an Orchard-family
-    /// receiver.
-    fn decode<P: Parameters>(network: &P, memo: &[u8; 512]) -> Option<Self> {
-        let text = memo_text(memo)?;
+    /// Decodes a relay sentence; claims never appear.
+    fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Option<Self> {
+        let text = match Memo::try_from(memo).ok()? {
+            Memo::Text(text) => text,
+            _ => return None,
+        };
 
         let parts: Vec<&str> = text.split(':').collect();
         if parts.len() != 6 || parts[0] != "ZNS" || parts[1] != "otp" {
@@ -320,14 +308,9 @@ pub enum MintInbound {
 }
 
 impl MintInbound {
-    /// Classifies one decrypted Treasury memo — the single intake.
-    ///
-    /// Memos carry no type tag, so the grammars are tried in turn and
-    /// the leading verb discriminates; they are disjoint, so the order
-    /// is cosmetic. A memo no grammar admits is a bare payment: it
-    /// rides the queue as `Unrecognized`, named by its txid. Decoded
-    /// once, at block application; nothing re-parses.
-    pub fn decode<P: Parameters>(network: &P, txid: TxId, memo: &[u8; 512]) -> Self {
+    /// Classifies one Treasury memo: echo, request, or unrecognized
+    /// payment — the single intake.
+    pub fn decode<P: Parameters>(network: &P, txid: TxId, memo: &MemoBytes) -> Self {
         if let Some(echo) = Challenge::decode(network, memo) {
             Self::Echo(echo)
         } else if let Some(request) = Request::decode(network, memo) {
@@ -650,10 +633,10 @@ mod tests {
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
 
-    fn padded(s: &str) -> [u8; 512] {
+    fn padded(s: &str) -> MemoBytes {
         let mut m = [0u8; 512];
         m[..s.len()].copy_from_slice(s.as_bytes());
-        m
+        MemoBytes::from_bytes(&m).expect("a 512-byte memo fits")
     }
 
     fn txid() -> TxId {
@@ -826,8 +809,12 @@ mod tests {
     #[test]
     fn rejects_nonzero_tail_after_the_first_nul() {
         let network = MainNetwork;
-        let mut memo = padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"));
-        memo[400] = 1; // inside the zero tail
+        let s = format!("ZNS:claim:forever:alice:{TEST_UA}");
+        let mut m = [0u8; 512];
+        m[..s.len()].copy_from_slice(s.as_bytes());
+        m[400] = 1; // garbage inside the zero tail
+        let memo = MemoBytes::from_bytes(&m).expect("a 512-byte memo fits");
+        // The tail lands inside the terminal UA field — nothing parses.
         assert!(Request::decode(&network, &memo).is_none());
         assert!(Challenge::decode(&network, &memo).is_none());
         assert!(matches!(
@@ -984,19 +971,22 @@ mod tests {
         };
 
         for _ in 0..4096 {
-            let mut memo = [0u8; 512];
-            for chunk in memo.chunks_mut(8) {
+            let mut m = [0u8; 512];
+            for chunk in m.chunks_mut(8) {
                 chunk.copy_from_slice(&next().to_le_bytes()[..chunk.len()]);
             }
+            let memo = MemoBytes::from_bytes(&m).expect("a 512-byte memo fits");
             let _ = MintInbound::decode(&network, txid, &memo);
         }
 
         // Every single-byte mutation of a valid memo stays total too.
         let base = padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"));
-        for index in 0..base.len() {
-            let mut mutated = base;
-            mutated[index] ^= 0xFF;
-            let _ = MintInbound::decode(&network, txid, &mutated);
+        let mut m = *base.as_array();
+        for index in 0..m.len() {
+            m[index] ^= 0xFF;
+            let memo = MemoBytes::from_bytes(&m).expect("a 512-byte memo fits");
+            let _ = MintInbound::decode(&network, txid, &memo);
+            m[index] ^= 0xFF;
         }
     }
 }

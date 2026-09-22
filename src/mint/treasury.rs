@@ -181,7 +181,7 @@ pub fn challenge<P: Parameters>(
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
     controller: &zcash_keys::address::UnifiedAddress,
-    memo: [u8; 512],
+    memo: zcash_protocol::memo::MemoBytes,
     relay_value: Zatoshis,
 ) -> Option<zcash_primitives::transaction::Transaction> {
     use zcash_client_backend::data_api::wallet::input_selection::{
@@ -198,10 +198,7 @@ pub fn challenge<P: Parameters>(
     let request = zip321::TransactionRequest::new(vec![zip321::Payment::new(
         zcash_keys::address::Address::Unified(controller.clone()).to_zcash_address(network),
         Some(relay_value),
-        Some(
-            zcash_protocol::memo::MemoBytes::from_bytes(&memo)
-                .expect("a 512-byte protocol memo is valid"),
-        ),
+        Some(memo),
         None,
         None,
         vec![],

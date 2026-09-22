@@ -12,6 +12,11 @@
   classification loop and its cross-module call into `treasury.rs`
   are gone. `treasury.rs` keeps wallet ops only: sweep, challenge
   builder, queue.
+- The Treasury lane carries `zcash_protocol::memo::MemoBytes` end to
+  end — decryption, the door, `Challenge::encode`, and the relay
+  builder — and the grammars lean on upstream's
+  `Memo::try_from`/`TextMemo` for the ZIP-302 text rules instead of a
+  hand-rolled NUL/UTF-8 prelude.
 - Grammar tests move into `mint.rs`; the door gains totality,
   disjointness, and roundtrip tests.
 
