@@ -27,9 +27,7 @@ use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
-use zcash_client_backend::data_api::{
-    chain::ChainState, BlockMetadata, WalletCommitmentTrees as _,
-};
+use zcash_client_backend::data_api::{chain::ChainState, WalletCommitmentTrees as _};
 use zcash_client_backend::data_api::{WalletRead as _, WalletWrite as _};
 
 // ---------------------------------------------------------------------------
@@ -46,8 +44,6 @@ pub struct Boot<P: Parameters> {
     pub chain: ChainClient,
     /// produced: trees seeded from the verified origin
     pub wallet: Wallet<P>,
-    /// produced: the origin cursor the loop extends
-    pub cursor: BlockMetadata,
     /// cannot: derived from the seed — the seed dies before this exists
     pub treasury_keys: TreasuryKeys,
     /// cannot: derived from the seed
@@ -150,12 +146,10 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         tracing::info!("boot: keys derived (treasury=acct0, registry=acct1); seed wiped");
 
         // 3a. Origin checkpoint: fetch tree state from Zebra. The wallet is
-        // born from it (trees seeded) and the cursor derives from it.
-        //
-        // `ChainState` (frontiers) seeds the rightmost, still-incomplete
-        // shard of each pool; the cursor carries `BlockMetadata` (height,
-        // hash, tree sizes) — the upstream continuity value `scan_block`'s
-        // `prior_metadata` and every `to_block_metadata()` call produce.
+        // born from it: trees seeded from the frontiers, and the origin
+        // `BlockMetadata` (height, hash, tree sizes — the upstream continuity
+        // value `scan_block`'s `prior_metadata` consumes) stored as the
+        // wallet's seed, which is its applied tip before the first block.
         // Sizes derive from the frontiers (`Frontier::tree_size`),
         // mirroring upstream's `ScannedBlock::to_block_metadata`.
         let rpc = zcash::JsonRpc::new();
@@ -254,7 +248,6 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         // queues: arrivals from history are balance, not instruction, so
         // each block's intake lands in a queue that falls out of scope with
         // the iteration.
-        let mut cursor = block_metadata(&origin);
         let mut registry = Registry::new();
         let source = crate::zcash::CanonicalBlockSource::new();
         let (best_height, _best_hash) = source
@@ -266,36 +259,34 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             to = u32::from(best_height),
             "boot: syncing to chain tip"
         );
-        while cursor.block_height() < best_height {
-            let from_height = cursor.block_height();
-            let next_height = from_height + 1;
-
-            let from_state = rpc
-                .chain_state_at(from_height)
-                .await
-                .expect("FATAL: chain state unavailable during boot sync");
+        while wallet.tip().block_height() < best_height {
+            let next_height = wallet.tip().block_height() + 1;
             let block = rpc
                 .get_block(&network, next_height)
                 .await
                 .expect("FATAL: block unavailable during boot sync");
+            if block.header().prev_block != wallet.tip().block_hash() {
+                panic!(
+                    "FATAL: boot sync diverged from Zebra's best chain — \
+                     restart resyncs from the verified origin"
+                );
+            }
 
             let mut scratch_requests = crate::mint::treasury::RequestQueue::default();
             crate::mint::apply_block(
                 &network,
                 &registry_keys,
                 &treasury_keys,
-                &from_state,
                 block,
                 next_height,
                 &mut wallet,
                 &mut registry,
                 &mut mtp,
-                &mut cursor,
                 &mut scratch_requests,
             );
         }
         tracing::info!(
-            height = u32::from(cursor.block_height()),
+            height = u32::from(wallet.tip().block_height()),
             "boot: synced to chain tip"
         );
 
@@ -377,13 +368,12 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         tracing::info!(
             network = NETWORK_LABEL,
             "boot: complete at tip {}",
-            u32::from(cursor.block_height())
+            u32::from(wallet.tip().block_height())
         );
 
         Boot {
             network,
             chain: chain_client,
-            cursor,
             wallet,
             treasury_keys,
             registry_keys,
@@ -397,8 +387,6 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         }
     }
 }
-
-use crate::wallet::block_metadata;
 
 #[cfg(feature = "regtest")]
 fn regtest_network() -> LocalNetwork {

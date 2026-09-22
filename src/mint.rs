@@ -365,21 +365,20 @@ impl Name {
 // ---------------------------------------------------------------------------
 
 /// Applies one verified canonical successor to every faculty: scan, clock,
-/// Registry law, wallet commit, Treasury decode, Name Note storage, cursor.
-/// Never fetches, never broadcasts; `main` passes the live queues, boot
-/// passes scratch ones.
+/// Registry law, wallet commit, Treasury decode, Name Note storage. The
+/// wallet's own applied tip is the position record — there is no cursor
+/// parameter. Never fetches, never broadcasts; the run loop passes the live
+/// queues, boot passes scratch ones.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_block<P: Parameters + Send + 'static>(
     network: &P,
     registry_keys: &crate::key::RegistryKeys,
     treasury_keys: &crate::key::TreasuryKeys,
-    from_state: &zcash_client_backend::data_api::chain::ChainState,
     block: zcash_primitives::block::Block,
     height: BlockHeight,
     wallet: &mut crate::wallet::Wallet<P>,
     registry: &mut registry::Registry,
     mtp: &mut mtp::MtpTracker,
-    cursor: &mut ChainTip,
     requests: &mut treasury::RequestQueue,
 ) {
     use std::collections::BTreeMap;
@@ -389,21 +388,15 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
     use zcash_client_backend::scanning::Nullifiers;
 
-    assert_eq!(
-        from_state.block_height(),
-        cursor.block_height(),
-        "FATAL: previous chain-state height mismatch"
-    );
-    assert_eq!(
-        from_state.block_hash(),
-        cursor.block_hash(),
-        "FATAL: previous chain state does not describe the applied cursor"
-    );
+    // The one continuity invariant: the block must extend the wallet's own
+    // applied tip. The caller verifies this before calling (issue #139);
+    // the assert stays as the unreachable-invariant belt over that braces.
     assert_eq!(
         block.header().prev_block,
-        cursor.block_hash(),
-        "FATAL: fetched block does not continue the applied cursor"
+        wallet.tip().block_hash(),
+        "FATAL: fetched block does not continue the wallet's applied tip"
     );
+    let prior_metadata = wallet.tip();
 
     let block_time = block.header().time;
     let candidates = decrypt_name_notes(network, &block, registry_keys);
@@ -419,7 +412,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         batches,
         wallet.scanning_keys(),
         &nullifiers,
-        Some(&*cursor),
+        Some(&prior_metadata),
         |_| {
             Ok::<
                 Option<(
@@ -565,7 +558,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
             (index, position)
         })
         .collect::<Vec<_>>();
-    let next_metadata = scanned.to_block_metadata();
 
     // Accepted Name Note commitments are marked at the commit — the
     // scanner cannot decrypt them, so they would otherwise enter the
@@ -575,7 +567,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .iter()
         .map(|(index, _)| orchard::tree::MerkleHashOrchard::from_cmx(&candidates[*index].cmx))
         .collect();
-    if let Err(error) = wallet.put_blocks_marked(from_state, vec![scanned], &marks) {
+    if let Err(error) = wallet.put_blocks_marked(vec![scanned], &marks) {
         match error {
             crate::wallet::WalletError::UnexpectedOrchardReceive => {
                 panic!("FATAL: ordinary-Orchard receive — consensus violation or key compromise")
@@ -605,11 +597,10 @@ pub fn apply_block<P: Parameters + Send + 'static>(
             .expect("FATAL: Name Note disagreed with applied wallet state");
     }
     *mtp = next_mtp;
-    *cursor = next_metadata;
 
     tracing::debug!(
-        height = u32::from(cursor.block_height()),
-        hash = %cursor.block_hash(),
+        height = u32::from(wallet.tip().block_height()),
+        hash = %wallet.tip().block_hash(),
         "canonical block applied"
     );
 }

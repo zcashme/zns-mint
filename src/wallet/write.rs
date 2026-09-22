@@ -519,7 +519,15 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<AccountId>>,
     ) -> Result<(), WalletError> {
-        self.put_blocks_marked(from_state, blocks, &[])
+        // The upstream trait contract: `from_state` must describe the
+        // wallet's own applied tip — the wallet validates linkage against
+        // itself, never against a node-fetched oracle of its own position.
+        if from_state.block_height() != self.tip().block_height()
+            || from_state.block_hash() != self.tip().block_hash()
+        {
+            return Err(WalletError::ChainDiscontinuity(from_state.block_height()));
+        }
+        self.put_blocks_marked(blocks, &[])
     }
 
     fn put_received_transparent_utxo(
@@ -899,7 +907,6 @@ impl<P: Parameters> Wallet<P> {
     /// per-height checkpoint is `ensure_block_checkpoint`'s to create.
     pub(crate) fn put_blocks_marked(
         &mut self,
-        from_state: &ChainState,
         blocks: Vec<ScannedBlock<AccountId>>,
         marks: &[orchard::tree::MerkleHashOrchard],
     ) -> Result<(), WalletError> {
@@ -907,34 +914,15 @@ impl<P: Parameters> Wallet<P> {
             return Ok(());
         };
 
-        // Continuity: the batch must start exactly at the block after
-        // `from_state`, heights must be sequential, and `from_state` must be
-        // the wallet's applied tip. All checks run before any mutation.
-        if next_height(from_state.block_height()) != first.height() {
+        // Continuity: the batch must start exactly at the block after the
+        // wallet's own applied tip (the seed before the first block), and
+        // heights must be sequential. All checks run before any mutation.
+        if next_height(self.tip().block_height()) != first.height() {
             return Err(WalletError::ChainDiscontinuity(first.height()));
         }
         for pair in blocks.windows(2) {
             if next_height(pair[0].height()) != pair[1].height() {
                 return Err(WalletError::ChainDiscontinuity(pair[1].height()));
-            }
-        }
-        match self.blocks.last_key_value() {
-            Some((&applied_tip, metadata)) if applied_tip == from_state.block_height() => {
-                if metadata.block_hash() != from_state.block_hash() {
-                    return Err(WalletError::ChainDiscontinuity(applied_tip));
-                }
-            }
-            // Either a gap below our applied tip (stale or replayed state) or
-            // a from-state above it: both would desynchronize note commitment
-            // positions.
-            Some((&applied_tip, _)) => return Err(WalletError::ChainDiscontinuity(applied_tip)),
-            // First batch: `from_state` must be the recorded boot origin.
-            None => {
-                if from_state.block_height() != self.seed.block_height()
-                    || from_state.block_hash() != self.seed.block_hash()
-                {
-                    return Err(WalletError::ChainDiscontinuity(from_state.block_height()));
-                }
             }
         }
 

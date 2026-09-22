@@ -28,7 +28,7 @@ use zns_mint::mint::{
     Action, Expiry, MintInbound, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
     REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
-use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession};
+use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession, TransportError};
 
 const RETRY_PAUSE: Duration = Duration::from_secs(5);
 
@@ -45,7 +45,6 @@ async fn main() {
         network,
         chain,
         mut wallet,
-        cursor: mut chain_tip,
         treasury_keys,
         registry_keys,
         sapling_spend,
@@ -72,8 +71,8 @@ async fn main() {
 
     zns_mint::metrics::install();
     tracing::info!(
-        height = u32::from(chain_tip.block_height()),
-        hash = %chain_tip.block_hash(),
+        height = u32::from(wallet.tip().block_height()),
+        hash = %wallet.tip().block_hash(),
         "mint awaiting Zebra tips"
     );
 
@@ -82,8 +81,8 @@ async fn main() {
     // node's answer, never the announcement's promise. The orchestrator
     // holds position (the wallet) and never sees transport state.
     let mut connection = TipSession::open(chain).await;
-    loop {
-        let (best_height, best_hash) = match connection.next_tip(&source).await {
+    'run: loop {
+        let (best_height, _) = match connection.next_tip(&source).await {
             Ok(tip) => tip,
             Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
         };
@@ -94,7 +93,7 @@ async fn main() {
         // Compare the wallet's own cursor with Zebra at the same height.
         // If they disagree, walk backward until both name the same block;
         // no state above that common ancestor survives.
-        let mut ancestor = chain_tip.block_height().min(best_height);
+        let mut ancestor = wallet.tip().block_height().min(best_height);
         loop {
             let wallet_hash = wallet.block_hash_at(ancestor);
             if wallet_hash.is_none() {
@@ -126,9 +125,9 @@ async fn main() {
             ancestor = BlockHeight::from_u32(u32::from(ancestor) - 1);
         }
 
-        if ancestor < chain_tip.block_height() {
+        if ancestor < wallet.tip().block_height() {
             registry.truncate_to_height(ancestor);
-            chain_tip = wallet
+            let rewound_to = wallet
                 .truncate_to(ancestor)
                 .expect("FATAL: wallet could not rewind to the common ancestor");
 
@@ -153,7 +152,7 @@ async fn main() {
             requests.truncate_to(ancestor);
             tracing::warn!(
                 height = u32::from(ancestor),
-                hash = %chain_tip.block_hash(),
+                hash = %rewound_to.block_hash(),
                 "mint rewound to canonical ancestor"
             );
         }
@@ -165,33 +164,19 @@ async fn main() {
             .current_day()
             .expect("FATAL: MTP unavailable before catch-up");
 
-        // Apply every missing canonical block in strict order: fetch with
-        // retry, verify the terminal block, call `apply_block` — the
-        // application itself is the one body shared with boot.
-        while chain_tip.block_height() < best_height {
-            let from_height = chain_tip.block_height();
-            let next_height = from_height + 1;
-
-            let from_state = loop {
-                match rpc.chain_state_at(from_height).await {
-                    Ok(state) => break state,
-                    Err(error) if error.is_retryable() => {
-                        tracing::warn!(
-                            %error,
-                            height = u32::from(from_height),
-                            "previous chain state unavailable; retrying"
-                        );
-                        tokio::time::sleep(RETRY_PAUSE).await;
-                    }
-                    Err(error) => {
-                        panic!("FATAL: Zebra returned an invalid previous chain state: {error}")
-                    }
-                }
-            };
+        // Apply every missing canonical block, driven by the wallet's own
+        // applied tip: each fetched block must extend it, or the chain moved
+        // under the fetch — `continue 'run` falls back to the walk above,
+        // which reconciles and re-enters. `best_height` is an advisory stop
+        // bound, never an asserted promise; a height Zebra cannot serve is
+        // the same fall-back, not a verdict.
+        while wallet.tip().block_height() < best_height {
+            let next_height = wallet.tip().block_height() + 1;
 
             let block = loop {
                 match rpc.get_block(&network, next_height).await {
-                    Ok(block) => break block,
+                    Ok(block) => break Some(block),
+                    Err(TransportError::NotOnBestChain) => break None,
                     Err(error) if error.is_retryable() => {
                         tracing::warn!(
                             %error,
@@ -205,34 +190,35 @@ async fn main() {
                     }
                 }
             };
-            if next_height == best_height {
-                assert_eq!(
-                    block.header().hash(),
-                    best_hash,
-                    "FATAL: fetched terminal block does not match Zebra's exact tip"
+            let Some(block) = block else { continue 'run };
+
+            if block.header().prev_block != wallet.tip().block_hash() {
+                tracing::warn!(
+                    height = u32::from(next_height),
+                    "fetched block does not extend the applied tip; reconciling"
                 );
+                continue 'run;
             }
 
             zns_mint::mint::apply_block(
                 &network,
                 &registry_keys,
                 &treasury_keys,
-                &from_state,
                 block,
                 next_height,
                 &mut wallet,
                 &mut registry,
                 &mut mtp,
-                &mut chain_tip,
                 &mut requests,
             );
         }
 
-        assert_eq!(chain_tip.block_height(), best_height);
-        assert_eq!(chain_tip.block_hash(), best_hash);
-        tracing::info!(height = u32::from(best_height), "scanned to tip");
-        let tip = chain_tip.block_height();
-        let tip_hash = chain_tip.block_hash();
+        tracing::info!(
+            height = u32::from(wallet.tip().block_height()),
+            "scanned to tip"
+        );
+        let tip = wallet.tip().block_height();
+        let tip_hash = wallet.tip().block_hash();
         let target_height = tip + 1;
         let mtp_now = mtp
             .current()
