@@ -57,7 +57,7 @@ pub const LIVENESS_RETRY_COOLDOWN: i64 = 24 * 60 * 60;
 /// Minimum Treasury Ironwood balance after boot sync (0.002 ZEC).
 pub const MIN_TREASURY_BALANCE: u64 = 200_000;
 
-/// The longest name the wire accepts.
+/// The longest name a memo accepts.
 pub const MAX_NAME_LEN: usize = 63;
 
 /// Decodes a controller UA: known receivers only, Orchard among them.
@@ -134,7 +134,7 @@ impl Action {
 pub enum Request {
     /// Create a new registration; the term slot is never empty.
     /// `code` is the leading pre-sale slot when present (exactly six
-    /// ASCII digits); the codeless wire form stays byte-identical to
+    /// ASCII digits); the codeless form stays byte-identical to
     /// `ZNS:claim:<term>:<name>:<ua>`.
     Claim {
         name: Name,
@@ -158,8 +158,8 @@ pub enum Request {
 impl Request {
     /// Parses a request memo:
     ///
-    /// - `ZNS:claim:<term>:<name>:<ua>`, optionally led by a six-digit
-    ///   pre-sale code
+    /// - `ZNS:claim:<term>:<name>:<ua>`, or with a six-digit pre-sale
+    ///   code leading: `ZNS:claim:<code>:<term>:<name>:<ua>`
     /// - `ZNS:update:<none | <N>y | forever>:<name>:<ua>`
     /// - `ZNS:release:<name>:<ua>`
     fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Option<Request> {
@@ -217,7 +217,7 @@ impl Request {
             },
             (Action::Update, _) => Request::Update { name, ua, term },
             (Action::Release, _) => Request::Release { name, ua },
-            // The wire always carries a claim term.
+            // A claim always carries a term.
             (Action::Claim, None) => unreachable!("claims always carry a term"),
         })
     }
@@ -295,7 +295,7 @@ impl Challenge {
 }
 
 /// What a user said to the Treasury, in the shape each consumer takes.
-/// Intake classifies once, at block application; the drain decides.
+/// Classified once, at block application; the drain decides.
 #[derive(Clone, Debug)]
 pub enum MintInbound {
     /// A request — what `authorize` takes.
@@ -309,7 +309,7 @@ pub enum MintInbound {
 
 impl MintInbound {
     /// Classifies one Treasury memo: echo, request, or unrecognized
-    /// payment — the single intake.
+    /// payment. Called once per memo, at block application.
     pub fn decode<P: Parameters>(network: &P, txid: TxId, memo: &MemoBytes) -> Self {
         if let Some(echo) = Challenge::decode(network, memo) {
             Self::Echo(echo)
@@ -377,7 +377,7 @@ impl Name {
 // ---------------------------------------------------------------------------
 
 /// Applies one verified canonical successor to every faculty: scan, clock,
-/// Registry law, wallet commit, Treasury intake, Name Note storage, cursor.
+/// Registry law, wallet commit, Treasury decode, Name Note storage, cursor.
 /// Never fetches, never broadcasts; `main` passes the live queues, boot
 /// passes scratch ones.
 #[allow(clippy::too_many_arguments)]
@@ -590,9 +590,9 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     wallet
         .put_blocks_marked(from_state, vec![scanned], &marks)
         .expect("FATAL: wallet block commit failed");
-    // Upstream's ScannedBlock drops note plaintexts, so the Treasury
-    // lane's memos decode once, here — the block stays the durable
-    // source. Intake classifies; the drain decides.
+    // The scanner drops note plaintexts, so Treasury memos decode
+    // here, once per block, into the queue; the block remains the
+    // durable record. Decisions belong to the drain.
     for (txid, _action_index, paid, memo) in treasury_memos {
         requests.record(MintInbound::decode(network, txid, &memo), paid, height);
     }
@@ -759,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_receiver_ua_is_rejected_at_the_door() {
+    fn unknown_receiver_ua_is_rejected() {
         let network = MainNetwork;
         // A valid UA carrying an unknown receiver — ZIP-316's
         // forward-compatibility channel, unbounded by design.
@@ -773,7 +773,7 @@ mod tests {
         .expect("ZIP-316 composition rules permit it")
         .encode(&zcash_protocol::consensus::NetworkType::Main);
 
-        // The door throws every verb out — requests and echoes alike.
+        // No verb parses — requests and echoes alike.
         for memo in [
             format!("ZNS:claim:forever:alice:{ua}"),
             format!("ZNS:update:none:alice:{ua}"),
@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn the_door_classifies_each_kind() {
+    fn decode_classifies_each_kind() {
         let network = MainNetwork;
         let txid = txid();
 
@@ -839,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn challenge_roundtrips_through_the_wire() {
+    fn challenge_roundtrips() {
         let network = MainNetwork;
         let ua = test_ua();
 

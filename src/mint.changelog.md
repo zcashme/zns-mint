@@ -1,27 +1,27 @@
 # Mint live-work design record
 
-## 2026-09-22 — Treasury memos classify behind one door (#133)
+## 2026-09-22 — Treasury memos decode once, at block application (#133)
 
-- `MintInbound::decode(network, txid, &memo)` in `mint.rs` is the
-  single intake: each decrypted Treasury memo classifies once, at
-  block application. `treasury::parse_request` moves in as
-  `Request::decode` beside the enum it produces; `Challenge::decode`
-  and the controller-UA guard sit beside it, private now. The
-  duplicated NUL/UTF-8 preludes collapse into one `memo_text`.
-- `apply_block` records the door's verdict per memo — the
+- `MintInbound::decode(network, txid, &memo)` in `mint.rs` classifies
+  each decrypted Treasury memo — echo, request, unrecognized payment —
+  exactly once, when the block is applied. `treasury::parse_request`
+  moves in as `Request::decode` beside the enum it produces;
+  `Challenge::decode` and the controller-UA guard sit beside it,
+  private now.
+- The Treasury lane carries `zcash_protocol::memo::MemoBytes` end to
+  end — decryption, `MintInbound::decode`, `Challenge::encode`, and
+  the relay builder — and the grammars lean on upstream's
+  `Memo::try_from`/`TextMemo` for the ZIP-302 text rules instead of a
+  hand-rolled prelude.
+- `apply_block` records the classification per memo; the
   classification loop and its cross-module call into `treasury.rs`
   are gone. `treasury.rs` keeps wallet ops only: sweep, challenge
   builder, queue.
-- The Treasury lane carries `zcash_protocol::memo::MemoBytes` end to
-  end — decryption, the door, `Challenge::encode`, and the relay
-  builder — and the grammars lean on upstream's
-  `Memo::try_from`/`TextMemo` for the ZIP-302 text rules instead of a
-  hand-rolled NUL/UTF-8 prelude.
 - Grammar tests move into `mint.rs`, trimmed to one test per
   mechanism: term strictness stays at `Term::parse`'s own unit,
-  OTP-shape exclusions are subsumed by the door, and the suite keeps
-  the forms, the pre-sale code discrimination, the UA-guard
-  regression vectors, the door, and the roundtrip.
+  OTP-shape exclusions are subsumed by `MintInbound::decode`, and the
+  suite keeps the forms, the pre-sale code discrimination, the
+  UA-guard regression vectors, the classification, and the roundtrip.
 
 ## 2026-09-21 — The walk is queue-free: chain application, not orchestration (#116)
 
