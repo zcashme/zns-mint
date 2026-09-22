@@ -515,17 +515,9 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .collect();
     if let Err(error) = wallet.put_blocks_marked(from_state, vec![scanned], &marks) {
         match error {
-            // The tripwire is consensus-excluded at NU6.3 (the ordinary
-            // Orchard pool mandates enableCrossAddress = 0), so firing it
-            // means a consensus break or a key compromise — name the chain
-            // data so the halt is diagnosable.
-            crate::wallet::WalletError::UnexpectedOrchardReceive { txid, action } => panic!(
-                "FATAL: ordinary-Orchard receive at height {}, tx {}, action {} — \
-                 consensus violation or key compromise",
-                u32::from(height),
-                txid,
-                action
-            ),
+            crate::wallet::WalletError::UnexpectedOrchardReceive => {
+                panic!("FATAL: ordinary-Orchard receive — consensus violation or key compromise")
+            }
             error => panic!("FATAL: wallet block commit failed: {error}"),
         }
     }

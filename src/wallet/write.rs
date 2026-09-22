@@ -943,11 +943,8 @@ impl<P: Parameters> Wallet<P> {
         // than apply the block and lose the value from wallet state.
         for block in &blocks {
             for wtx in block.transactions() {
-                if let Some(output) = wtx.orchard_outputs().first() {
-                    return Err(WalletError::UnexpectedOrchardReceive {
-                        txid: wtx.txid(),
-                        action: output.index(),
-                    });
+                if !wtx.orchard_outputs().is_empty() {
+                    return Err(WalletError::UnexpectedOrchardReceive);
                 }
             }
         }
