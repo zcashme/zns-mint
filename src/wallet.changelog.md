@@ -612,3 +612,28 @@ Tracks design-relevant changes to `src/wallet.rs` and `src/wallet/trees.rs`.
   a dormant name's update FATALs on a missing witness. Only accepted
   candidates are marked — foreign ZNS outputs stay Ephemeral, so tree
   retention stays bounded.
+
+## 2026-09-22 — The wallet owns two chain positions
+
+### Fixed
+
+- `rewind_to_chain_state` floors on the trees' own retention
+  (`retained_floor`: the deepest checkpoint every tree retains, alignment
+  asserted, `CheckpointMisalignment` named and refused) instead of
+  `zebra_tip − window` arithmetic. Whenever the known chain ran ahead of
+  the applied position — every catch-up's normal state — the old floor
+  landed above the wallet's own height and the function returned `Ok`
+  having rewound nothing. Upstream rewinds by height alone (its scenarios
+  pass zero-hash chain states); hash validation stays in
+  `truncate_to_chain_state`, the tool that receives real frontiers.
+- `Wallet::tip()` — the wallet's applied position:
+  `blocks.last_key_value().unwrap_or(seed)`, always defined. Lock
+  liveness, lock listing, spend targets, and balance expiry read it;
+  their `None`-tip fallback arms and the lock readers' mutual
+  disagreement die with it.
+- Chain knowledge (`zebra_tip`) moves only through `update_chain_tip`,
+  the one writer: scanning advances it to the applied tip, adopting a
+  chain state sets it to the adopted height. Truncation no longer clamps
+  it, scanning no longer ratchets it behind the writer's back, and rewind
+  never touches it — `chain_height` survives rewinds per the upstream
+  scan-queue contract. A far-ahead tip no longer defeats rewind.

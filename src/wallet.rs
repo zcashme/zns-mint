@@ -77,7 +77,14 @@ pub struct Wallet<P: Parameters> {
     /// what the wallet stores, by construction.
     scanning_keys: ScanningKeys<AccountId, (AccountId, zip32::Scope)>,
 
-    /// The Zebra consensus tip last supplied through `WalletWrite::update_chain_tip`.
+    /// The chain tip as the wallet knows it — upstream's own concept.
+    /// Written only through [`WalletWrite::update_chain_tip`], the one
+    /// writer: scanning advances it to the applied tip, adopting a chain
+    /// state sets it to the adopted height, and an external sync driver
+    /// may supply it. Truncation and rewind never edit it behind the
+    /// writer's back; the caller corrects knowledge after reorgs. It may
+    /// lead the wallet's applied position ([`Wallet::tip`]) — that is the
+    /// rescan obligation, not a lie about what has been verified.
     zebra_tip: Option<BlockHeight>,
 
     /// Canonical Zebra blocks this in-memory projection has applied.
@@ -272,6 +279,18 @@ impl<P: Parameters> Wallet<P> {
             .get(&height)
             .cloned()
             .or_else(|| (height == self.seed.block_height()).then_some(self.seed))
+    }
+
+    /// The wallet's position: the highest applied block, or the boot origin
+    /// before the first block is applied. Always defined — the seed is the
+    /// floor of the wallet's existence. The one truth for "where am I";
+    /// the node's position ([`Wallet::zebra_tip`]) answers only where the
+    /// node is.
+    pub fn tip(&self) -> BlockMetadata {
+        self.blocks
+            .last_key_value()
+            .map(|(_, metadata)| *metadata)
+            .unwrap_or(self.seed)
     }
 
     /// Truncates the wallet to `max_height` and returns the
@@ -576,7 +595,7 @@ pub(crate) mod testing {
             let expired_unmined = mined_height.is_none()
                 && expiry_height
                     .filter(|height| u32::from(*height) > 0)
-                    .is_some_and(|expiry| self.zebra_tip.is_some_and(|tip| expiry <= tip));
+                    .is_some_and(|expiry| expiry <= self.tip().block_height());
             let fee_paid = has_sent_outputs
                 .then(|| spent - sent_output_value)
                 .flatten();

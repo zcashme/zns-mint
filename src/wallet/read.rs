@@ -52,6 +52,9 @@ pub enum WalletError {
     /// Truncation was requested to a height below every checkpoint retained by
     /// all three note commitment trees.
     TruncationTargetUnavailable(BlockHeight),
+    /// The three note commitment trees' retained checkpoints disagree — a
+    /// commit-discipline failure, refused rather than searched around.
+    CheckpointMisalignment,
     /// A note commitment tree operation failed.
     CommitmentTree(shardtree::error::ShardTreeError<Infallible>),
     /// A value aggregation would overflow `MAX_MONEY`.
@@ -105,6 +108,9 @@ impl std::fmt::Display for WalletError {
             }
             WalletError::TruncationTargetUnavailable(height) => {
                 write!(f, "no retained checkpoint at or below height {height}")
+            }
+            WalletError::CheckpointMisalignment => {
+                write!(f, "the three trees' retained checkpoints disagree")
             }
             WalletError::CommitmentTree(e) => write!(f, "note commitment tree error: {e}"),
             WalletError::Balance(e) => write!(f, "balance error: {e}"),
@@ -416,7 +422,11 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         &self,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Option<WalletSummary<Self::AccountId>>, Self::Error> {
-        let Some(chain_tip_height) = self.zebra_tip else {
+        // Upstream counts confirmations against the chain tip. A tip the
+        // node has not yet supplied falls back to the wallet's applied
+        // position — a scan-only wallet still has a summary; a wallet with
+        // nothing applied and no supplied tip reports none.
+        let Some(chain_tip_height) = self.zebra_tip.or_else(|| self.max_applied_height()) else {
             return Ok(None);
         };
         let target_height = TargetHeight::from(next_height(chain_tip_height));
@@ -495,6 +505,10 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
     }
 
     fn chain_height(&self) -> Result<Option<BlockHeight>, Self::Error> {
+        // The chain as far as the wallet knows — upstream's chain tip,
+        // maintained through the one writer. Not the applied position:
+        // knowledge may lead what has been verified (the rescan
+        // obligation), and survives truncation by contract.
         Ok(self.zebra_tip)
     }
 
@@ -552,19 +566,21 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         &self,
         min_confirmations: NonZeroU32,
     ) -> Result<Option<(TargetHeight, BlockHeight)>, Self::Error> {
-        let Some(tip) = self.zebra_tip else {
+        // The wallet builds and judges proposals against its own position:
+        // heights it has not applied cannot witness anything. The node's
+        // observation is never consulted here.
+        let Some(position) = self.max_applied_height() else {
             return Ok(None);
         };
-        let target = next_height(tip);
+        let target = next_height(position);
         // The anchor must have at least `min_confirmations` blocks on top of
         // it, relative to the next block.
         let bound =
             BlockHeight::from_u32(u32::from(target).saturating_sub(u32::from(min_confirmations)));
-        let start = self.max_applied_height().unwrap_or(bound);
         // The mint only ever spends Sapling and Ironwood, so the ordinary
         // Orchard compatibility tree does not constrain the anchor.
-        let sapling = max_checkpoint_at_or_below(self.sapling_tree.store(), start, bound);
-        let ironwood = max_checkpoint_at_or_below(self.ironwood_tree.store(), start, bound);
+        let sapling = max_checkpoint_at_or_below(self.sapling_tree.store(), bound, bound);
+        let ironwood = max_checkpoint_at_or_below(self.ironwood_tree.store(), bound, bound);
         let anchor = match (sapling, ironwood) {
             (Some(s), Some(i)) => Some(s.min(i)),
             (a, b) => a.or(b),
