@@ -19,7 +19,7 @@ use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::FeeError;
-use zcash_primitives::transaction::Transaction;
+use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
@@ -265,13 +265,20 @@ pub fn challenge<P: Parameters>(
 /// them.
 #[derive(Clone, Debug, Default)]
 pub struct RequestQueue {
-    requests: Vec<(MintInbound, Zatoshis, BlockHeight)>,
+    requests: Vec<(TxId, MintInbound, Zatoshis, BlockHeight)>,
 }
 
 impl RequestQueue {
-    /// An arrival, decoded once at block application.
-    pub fn record(&mut self, inbound: MintInbound, paid: Zatoshis, height: BlockHeight) {
-        self.requests.push((inbound, paid, height));
+    /// An arrival, decoded once at block application. The txid rides
+    /// beside the entry, so every lane keeps its provenance.
+    pub fn record(
+        &mut self,
+        txid: TxId,
+        inbound: MintInbound,
+        paid: Zatoshis,
+        height: BlockHeight,
+    ) {
+        self.requests.push((txid, inbound, paid, height));
     }
 
     pub fn len(&self) -> usize {
@@ -283,9 +290,9 @@ impl RequestQueue {
     }
 
     /// The entry at `index`, in block order — the drain cursor reads.
-    pub fn entry(&self, index: usize) -> (&MintInbound, Zatoshis, BlockHeight) {
-        let (inbound, paid, height) = &self.requests[index];
-        (inbound, *paid, *height)
+    pub fn entry(&self, index: usize) -> (&TxId, &MintInbound, Zatoshis, BlockHeight) {
+        let (txid, inbound, paid, height) = &self.requests[index];
+        (txid, inbound, *paid, *height)
     }
 
     /// The entry is decided. The only removal besides reorg truncation.
@@ -295,7 +302,8 @@ impl RequestQueue {
 
     /// Reorg: entries whose block was orphaned fall with it.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
-        self.requests.retain(|(_, _, height)| *height <= ancestor);
+        self.requests
+            .retain(|(_, _, _, height)| *height <= ancestor);
     }
 }
 
@@ -333,49 +341,56 @@ mod tests {
         BlockHeight::from_u32(n)
     }
 
+    fn t(n: u8) -> TxId {
+        TxId::from_bytes([n; 32])
+    }
+
     #[test]
     fn queue_records_in_block_order() {
         let mut queue = RequestQueue::default();
         assert_eq!(queue.len(), 0);
 
-        queue.record(request(Action::Claim), Zatoshis::ZERO, h(100));
-        queue.record(request(Action::Update), Zatoshis::ZERO, h(101));
+        queue.record(t(1), request(Action::Claim), Zatoshis::ZERO, h(100));
+        queue.record(t(2), request(Action::Update), Zatoshis::ZERO, h(101));
 
         assert_eq!(queue.len(), 2);
-        assert_eq!(queue.entry(0).2, h(100));
-        assert_eq!(queue.entry(1).2, h(101));
+        assert_eq!(*queue.entry(0).0, t(1));
+        assert_eq!(*queue.entry(1).0, t(2));
+        assert_eq!(queue.entry(0).3, h(100));
+        assert_eq!(queue.entry(1).3, h(101));
     }
 
     #[test]
     fn queue_remove_shifts_neighbors() {
         let mut queue = RequestQueue::default();
-        queue.record(request(Action::Claim), Zatoshis::ZERO, h(100));
-        queue.record(request(Action::Update), Zatoshis::ZERO, h(101));
-        queue.record(request(Action::Release), Zatoshis::ZERO, h(102));
+        queue.record(t(1), request(Action::Claim), Zatoshis::ZERO, h(100));
+        queue.record(t(2), request(Action::Update), Zatoshis::ZERO, h(101));
+        queue.record(t(3), request(Action::Release), Zatoshis::ZERO, h(102));
 
         queue.remove(1);
         assert_eq!(queue.len(), 2);
         // The entry after the removed one shifted into its place.
         assert!(matches!(
-            queue.entry(1).0,
+            queue.entry(1).1,
             MintInbound::Request(Request::Release { .. })
         ));
-        assert_eq!(queue.entry(1).2, h(102));
+        assert_eq!(*queue.entry(1).0, t(3));
+        assert_eq!(queue.entry(1).3, h(102));
     }
 
     #[test]
     fn queue_truncate_drops_only_orphaned_heights() {
         let mut queue = RequestQueue::default();
-        queue.record(request(Action::Claim), Zatoshis::ZERO, h(100));
-        queue.record(request(Action::Update), Zatoshis::ZERO, h(150));
-        queue.record(request(Action::Release), Zatoshis::ZERO, h(200));
+        queue.record(t(1), request(Action::Claim), Zatoshis::ZERO, h(100));
+        queue.record(t(2), request(Action::Update), Zatoshis::ZERO, h(150));
+        queue.record(t(3), request(Action::Release), Zatoshis::ZERO, h(200));
 
         queue.truncate_to(h(120));
         assert_eq!(queue.len(), 1);
         assert!(matches!(
-            queue.entry(0).0,
+            queue.entry(0).1,
             MintInbound::Request(Request::Claim { .. })
         ));
-        assert_eq!(queue.entry(0).2, h(100));
+        assert_eq!(queue.entry(0).3, h(100));
     }
 }

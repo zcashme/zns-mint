@@ -1,5 +1,14 @@
 # Mint live-work design record
 
+## 2026-09-22 — The queue carries the txid for every lane (#137)
+
+- `RequestQueue` entries are `(TxId, MintInbound, Zatoshis,
+  BlockHeight)` and `MintInbound::Unrecognized` goes unit: the txid
+  rides beside every entry, not inside one variant, and
+  `MintInbound::decode` is purely memo → classification. Echo and
+  Request keep the provenance the old shape discarded; the drain's
+  `Unrecognized` log is unchanged.
+
 ## 2026-09-22 — Treasury memos decode once, at block application (#133)
 
 - `MintInbound::decode(network, txid, &memo)` in `mint.rs` classifies

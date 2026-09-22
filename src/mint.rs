@@ -291,20 +291,20 @@ pub enum MintInbound {
     /// An OTP respond — the relay memo returned; what `awaiting` takes.
     Echo(Challenge),
     /// A payment with no parseable message: the drain logs it once and
-    /// the sweep keeps the value; the txid names it in the log.
-    Unrecognized(TxId),
+    /// the sweep keeps the value; the queue names it by its txid.
+    Unrecognized,
 }
 
 impl MintInbound {
     /// Classifies one Treasury memo: echo, request, or unrecognized
     /// payment. Called once per memo, at block application.
-    pub fn decode<P: Parameters>(network: &P, txid: TxId, memo: &MemoBytes) -> Self {
+    pub fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Self {
         if let Some(echo) = Challenge::decode(network, memo) {
             Self::Echo(echo)
         } else if let Some(request) = Request::decode(network, memo) {
             Self::Request(request)
         } else {
-            Self::Unrecognized(txid)
+            Self::Unrecognized
         }
     }
 }
@@ -587,7 +587,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     // here, once per block, into the queue; the block remains the
     // durable record. Decisions belong to the drain.
     for (txid, _action_index, paid, memo) in treasury_memos {
-        requests.record(MintInbound::decode(network, txid, &memo), paid, height);
+        requests.record(txid, MintInbound::decode(network, &memo), paid, height);
     }
     for (index, position) in accepted_name_notes {
         let candidate = &candidates[index];
@@ -630,10 +630,6 @@ mod tests {
         let mut m = [0u8; 512];
         m[..s.len()].copy_from_slice(s.as_bytes());
         MemoBytes::from_bytes(&m).expect("a 512-byte memo fits")
-    }
-
-    fn txid() -> TxId {
-        TxId::from_bytes([0xAB; 32])
     }
 
     fn test_ua() -> UnifiedAddress {
@@ -746,8 +742,8 @@ mod tests {
         assert!(Request::decode(&network, &memo).is_none());
         assert!(Challenge::decode(&network, &memo).is_none());
         assert!(matches!(
-            MintInbound::decode(&network, txid(), &memo),
-            MintInbound::Unrecognized(_)
+            MintInbound::decode(&network, &memo),
+            MintInbound::Unrecognized
         ));
     }
 
@@ -774,8 +770,8 @@ mod tests {
             format!("ZNS:otp:417293:alice:update:{ua}"),
         ] {
             assert!(matches!(
-                MintInbound::decode(&network, txid(), &padded(&memo)),
-                MintInbound::Unrecognized(_)
+                MintInbound::decode(&network, &padded(&memo)),
+                MintInbound::Unrecognized
             ));
         }
     }
@@ -811,23 +807,22 @@ mod tests {
     #[test]
     fn decode_classifies_each_kind() {
         let network = MainNetwork;
-        let txid = txid();
 
         let echo = padded(&format!("ZNS:otp:417293:alice:update:{TEST_UA}"));
         assert!(matches!(
-            MintInbound::decode(&network, txid, &echo),
+            MintInbound::decode(&network, &echo),
             MintInbound::Echo(_)
         ));
         let request = padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"));
         assert!(matches!(
-            MintInbound::decode(&network, txid, &request),
+            MintInbound::decode(&network, &request),
             MintInbound::Request(_)
         ));
-        // A bare payment: the txid names it in the log.
+        // A bare payment: the queue names it by its txid.
         let garbage = padded("hello world");
         assert!(matches!(
-            MintInbound::decode(&network, txid, &garbage),
-            MintInbound::Unrecognized(named) if named == txid
+            MintInbound::decode(&network, &garbage),
+            MintInbound::Unrecognized
         ));
     }
 
