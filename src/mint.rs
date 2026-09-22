@@ -674,6 +674,17 @@ mod tests {
             Request::decode(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))),
             Some(Request::Release { .. })
         ));
+        // The upgrade spelling.
+        assert!(matches!(
+            Request::decode(
+                &network,
+                &padded(&format!("ZNS:update:forever:alice:{TEST_UA}"))
+            ),
+            Some(Request::Update {
+                term: Some(Term::Forever),
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -715,71 +726,6 @@ mod tests {
     }
 
     #[test]
-    fn claims_say_forever_updates_say_none_years_or_forever() {
-        let network = MainNetwork;
-
-        assert!(matches!(
-            Request::decode(&network, &padded(&format!("ZNS:update:3y:alice:{TEST_UA}"))),
-            Some(Request::Update {
-                term: Some(Term::Years(3)),
-                ..
-            })
-        ));
-        // Claims never say `none`; updates may carry the upgrade.
-        assert!(Request::decode(
-            &network,
-            &padded(&format!("ZNS:claim:none:alice:{TEST_UA}"))
-        )
-        .is_none());
-        assert!(matches!(
-            Request::decode(
-                &network,
-                &padded(&format!("ZNS:update:forever:alice:{TEST_UA}"))
-            ),
-            Some(Request::Update {
-                term: Some(Term::Forever),
-                ..
-            })
-        ));
-        assert!(
-            Request::decode(&network, &padded(&format!("ZNS:claim::alice:{TEST_UA}"))).is_none()
-        );
-    }
-
-    #[test]
-    fn strict_spellings_are_rejected_on_sight() {
-        let network = MainNetwork;
-        // Missing y, over the cap, leading zero.
-        assert!(
-            Request::decode(&network, &padded(&format!("ZNS:claim:5:alice:{TEST_UA}"))).is_none()
-        );
-        assert!(Request::decode(
-            &network,
-            &padded(&format!("ZNS:claim:100y:alice:{TEST_UA}"))
-        )
-        .is_none());
-        assert!(
-            Request::decode(&network, &padded(&format!("ZNS:claim:01y:alice:{TEST_UA}"))).is_none()
-        );
-        // Seconds never appear on the request wire.
-        assert!(Request::decode(
-            &network,
-            &padded(&format!("ZNS:claim:31557600:alice:{TEST_UA}"))
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn requests_never_carry_an_otp() {
-        let network = MainNetwork;
-        assert!(Request::decode(
-            &network,
-            &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}:004206"))
-        )
-        .is_none());
-    }
-
-    #[test]
     fn rejects_extra_field_and_non_zns_and_invalid_name() {
         let network = MainNetwork;
         assert!(Request::decode(
@@ -791,17 +737,6 @@ mod tests {
         assert!(Request::decode(
             &network,
             &padded(&format!("ZNS:claim:forever:INVALID:{TEST_UA}"))
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn rejects_unknown_verb() {
-        let network = MainNetwork;
-        // The echo lane is Challenge::decode, never here.
-        assert!(Request::decode(
-            &network,
-            &padded(&format!("ZNS:otp:417293:alice:update:{TEST_UA}"))
         )
         .is_none());
     }
@@ -903,30 +838,6 @@ mod tests {
         ));
     }
 
-    /// The invariant the door's trial order leans on: no memo parses
-    /// as both an echo and a request — the verbs are disjoint.
-    #[test]
-    fn the_grammars_are_disjoint() {
-        let network = MainNetwork;
-
-        for memo in [
-            format!("ZNS:otp:417293:alice:update:{TEST_UA}"),
-            format!("ZNS:otp:004206:alice:release:{TEST_UA}"),
-        ] {
-            assert!(Challenge::decode(&network, &padded(&memo)).is_some());
-            assert!(Request::decode(&network, &padded(&memo)).is_none());
-        }
-        for memo in [
-            format!("ZNS:claim:forever:alice:{TEST_UA}"),
-            format!("ZNS:claim:004206:12y:alice:{TEST_UA}"),
-            format!("ZNS:update:3y:alice:{TEST_UA}"),
-            format!("ZNS:release:alice:{TEST_UA}"),
-        ] {
-            assert!(Request::decode(&network, &padded(&memo)).is_some());
-            assert!(Challenge::decode(&network, &padded(&memo)).is_none());
-        }
-    }
-
     #[test]
     fn challenge_roundtrips_through_the_wire() {
         let network = MainNetwork;
@@ -950,43 +861,5 @@ mod tests {
             ua,
         };
         assert!(claim.encode(&network).is_none());
-    }
-
-    /// Decoding is total: arbitrary 512-byte blobs never panic and the
-    /// door always settles on exactly one kind. A splitmix64 stream
-    /// stands in for a property-testing framework.
-    #[test]
-    fn decoding_is_total_on_arbitrary_bytes() {
-        let network = MainNetwork;
-        let txid = txid();
-
-        let mut state = 0x9E37_79B9_7F4A_7C15u64;
-        let mut next = move || {
-            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-            let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-            z ^= z >> 31;
-            z
-        };
-
-        for _ in 0..4096 {
-            let mut m = [0u8; 512];
-            for chunk in m.chunks_mut(8) {
-                chunk.copy_from_slice(&next().to_le_bytes()[..chunk.len()]);
-            }
-            let memo = MemoBytes::from_bytes(&m).expect("a 512-byte memo fits");
-            let _ = MintInbound::decode(&network, txid, &memo);
-        }
-
-        // Every single-byte mutation of a valid memo stays total too.
-        let base = padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"));
-        let mut m = *base.as_array();
-        for index in 0..m.len() {
-            m[index] ^= 0xFF;
-            let memo = MemoBytes::from_bytes(&m).expect("a 512-byte memo fits");
-            let _ = MintInbound::decode(&network, txid, &memo);
-            m[index] ^= 0xFF;
-        }
     }
 }

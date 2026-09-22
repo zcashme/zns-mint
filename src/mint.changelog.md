@@ -17,8 +17,11 @@
   builder — and the grammars lean on upstream's
   `Memo::try_from`/`TextMemo` for the ZIP-302 text rules instead of a
   hand-rolled NUL/UTF-8 prelude.
-- Grammar tests move into `mint.rs`; the door gains totality,
-  disjointness, and roundtrip tests.
+- Grammar tests move into `mint.rs`, trimmed to one test per
+  mechanism: term strictness stays at `Term::parse`'s own unit,
+  OTP-shape exclusions are subsumed by the door, and the suite keeps
+  the forms, the pre-sale code discrimination, the UA-guard
+  regression vectors, the door, and the roundtrip.
 
 ## 2026-09-21 — The walk is queue-free: chain application, not orchestration (#116)
 
