@@ -185,7 +185,8 @@ impl JsonRpc {
             .map_err(|_| TransportError::BadNodeData("getblockhash height"))?;
         let hash_hex: String = self
             .send_request("getblockhash", [index])
-            .await?
+            .await
+            .map_err(not_on_best_chain)?
             .ok_or(TransportError::BadNodeData("getblockhash returned null"))?;
 
         let display_bytes =
