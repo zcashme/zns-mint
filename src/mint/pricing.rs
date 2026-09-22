@@ -78,6 +78,10 @@ const EXCHANGES: [Exchange; 9] = [
 /// two-source mean is ever taken.
 const TRUSTED: &str = "gemini";
 
+/// A day publishes only when at least this share of its fetch attempts
+/// landed a price.
+const MIN_DAY_SUCCESS_PERCENT: u64 = 50;
+
 /// Timeout duration for one source end-to-end (connect + request + body).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -321,7 +325,8 @@ impl Oracle {
 
         if today > self.current_day {
             if self.acc_seconds > 0
-                && (self.rounds_seen as u64).saturating_mul(2) >= u64::from(self.rounds_attempted)
+                && u64::from(self.rounds_seen).saturating_mul(100)
+                    >= u64::from(self.rounds_attempted).saturating_mul(MIN_DAY_SUCCESS_PERCENT)
             {
                 if let Some(rate) = zats_per_usd(self.acc_sum / Decimal::from(self.acc_seconds)) {
                     self.daily_rate = rate;
