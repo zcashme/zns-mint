@@ -29,7 +29,7 @@ use zns_mint::mint::{
     relay, watch_mempool, Action, MintInbound, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
     REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
-use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession, RETRY_PAUSE};
+use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
 async fn main() {
@@ -95,7 +95,7 @@ async fn main() {
     ));
 
     let mut connection = TipSession::open(chain).await;
-    loop {
+    'run: loop {
         let (best_height, best_hash) = tokio::select! {
             tip = connection.next_tip(&source) => match tip {
                 Ok(tip) => tip,
@@ -168,6 +168,13 @@ async fn main() {
                         );
                         tokio::time::sleep(RETRY_PAUSE).await;
                     }
+                    Err(TransportError::NotOnBestChain) => {
+                        tracing::warn!(
+                            height = u32::from(ancestor),
+                            "ancestor left the best chain mid-walk; re-converging"
+                        );
+                        continue 'run;
+                    }
                     Err(error) => {
                         panic!("FATAL: Zebra returned an invalid ancestor hash: {error}")
                     }
@@ -236,6 +243,13 @@ async fn main() {
                         );
                         tokio::time::sleep(RETRY_PAUSE).await;
                     }
+                    Err(TransportError::NotOnBestChain) => {
+                        tracing::warn!(
+                            height = u32::from(from_height),
+                            "the chain moved under the tree-state fetch; re-converging"
+                        );
+                        continue 'run;
+                    }
                     Err(error) => {
                         panic!("FATAL: Zebra returned an invalid previous chain state: {error}")
                     }
@@ -253,17 +267,32 @@ async fn main() {
                         );
                         tokio::time::sleep(RETRY_PAUSE).await;
                     }
+                    Err(TransportError::NotOnBestChain) => {
+                        tracing::warn!(
+                            height = u32::from(next_height),
+                            "the chain moved under the block fetch; re-converging"
+                        );
+                        continue 'run;
+                    }
                     Err(error) => {
                         panic!("FATAL: Zebra returned an invalid canonical block: {error}")
                     }
                 }
             };
-            if next_height == best_height {
-                assert_eq!(
-                    block.header().hash(),
-                    best_hash,
-                    "FATAL: fetched terminal block does not match Zebra's exact tip"
+            // The chain is allowed to move under the fetches; a block that
+            // does not extend the applied position means it did. Nothing
+            // has been mutated this iteration, so the cycle is discarded
+            // whole — and the reorg's own tip notification is already
+            // queued in the change-only stream, making the next wake
+            // immediate. The reconcile walk above re-derives everything;
+            // the tip photograph that opened this cycle stays advisory,
+            // never asserted.
+            if block.header().prev_block != chain_tip.block_hash() {
+                tracing::warn!(
+                    height = u32::from(next_height),
+                    "fetched block does not extend the applied chain; re-converging"
                 );
+                continue 'run;
             }
 
             zns_mint::mint::apply_block(
@@ -281,9 +310,10 @@ async fn main() {
             );
         }
 
-        assert_eq!(chain_tip.block_height(), best_height);
-        assert_eq!(chain_tip.block_hash(), best_hash);
-        tracing::info!(height = u32::from(best_height), "scanned to tip");
+        tracing::info!(
+            height = u32::from(chain_tip.block_height()),
+            "scanned to tip"
+        );
         let tip = chain_tip.block_height();
         let tip_hash = chain_tip.block_hash();
         let target_height = tip + 1;
