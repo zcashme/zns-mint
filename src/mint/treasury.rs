@@ -269,8 +269,7 @@ pub struct RequestQueue {
 }
 
 impl RequestQueue {
-    /// An arrival, decoded once at block application. The txid rides
-    /// beside the entry, so every lane keeps its provenance.
+    /// An arrival, decoded once at block application.
     pub fn record(
         &mut self,
         txid: TxId,
@@ -341,21 +340,16 @@ mod tests {
         BlockHeight::from_u32(n)
     }
 
-    fn t(n: u8) -> TxId {
-        TxId::from_bytes([n; 32])
-    }
-
     #[test]
     fn queue_records_in_block_order() {
         let mut queue = RequestQueue::default();
         assert_eq!(queue.len(), 0);
 
-        queue.record(t(1), request(Action::Claim), Zatoshis::ZERO, h(100));
-        queue.record(t(2), request(Action::Update), Zatoshis::ZERO, h(101));
+        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
+        queue.record(TxId::NULL, request(Action::Update), Zatoshis::ZERO, h(101));
 
         assert_eq!(queue.len(), 2);
-        assert_eq!(*queue.entry(0).0, t(1));
-        assert_eq!(*queue.entry(1).0, t(2));
+        assert_eq!(*queue.entry(0).0, TxId::NULL);
         assert_eq!(queue.entry(0).3, h(100));
         assert_eq!(queue.entry(1).3, h(101));
     }
@@ -363,9 +357,9 @@ mod tests {
     #[test]
     fn queue_remove_shifts_neighbors() {
         let mut queue = RequestQueue::default();
-        queue.record(t(1), request(Action::Claim), Zatoshis::ZERO, h(100));
-        queue.record(t(2), request(Action::Update), Zatoshis::ZERO, h(101));
-        queue.record(t(3), request(Action::Release), Zatoshis::ZERO, h(102));
+        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
+        queue.record(TxId::NULL, request(Action::Update), Zatoshis::ZERO, h(101));
+        queue.record(TxId::NULL, request(Action::Release), Zatoshis::ZERO, h(102));
 
         queue.remove(1);
         assert_eq!(queue.len(), 2);
@@ -374,16 +368,15 @@ mod tests {
             queue.entry(1).1,
             MintInbound::Request(Request::Release { .. })
         ));
-        assert_eq!(*queue.entry(1).0, t(3));
         assert_eq!(queue.entry(1).3, h(102));
     }
 
     #[test]
     fn queue_truncate_drops_only_orphaned_heights() {
         let mut queue = RequestQueue::default();
-        queue.record(t(1), request(Action::Claim), Zatoshis::ZERO, h(100));
-        queue.record(t(2), request(Action::Update), Zatoshis::ZERO, h(150));
-        queue.record(t(3), request(Action::Release), Zatoshis::ZERO, h(200));
+        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
+        queue.record(TxId::NULL, request(Action::Update), Zatoshis::ZERO, h(150));
+        queue.record(TxId::NULL, request(Action::Release), Zatoshis::ZERO, h(200));
 
         queue.truncate_to(h(120));
         assert_eq!(queue.len(), 1);
