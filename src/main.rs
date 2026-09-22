@@ -10,8 +10,6 @@
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
-use std::time::Duration;
-
 use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
 use zcash_client_backend::data_api::{WalletRead as _, WalletWrite as _};
 use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
@@ -31,9 +29,7 @@ use zns_mint::mint::{
     relay, watch_mempool, Action, MintInbound, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
     REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
-use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession};
-
-const RETRY_PAUSE: Duration = Duration::from_secs(5);
+use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession, RETRY_PAUSE};
 
 #[tokio::main]
 async fn main() {
@@ -299,15 +295,9 @@ async fn main() {
             .current_day()
             .expect("FATAL: MTP unavailable at the applied tip");
         oracle.accumulate(fetch_round().await, today, mtp_now);
-        let exact_tip = loop {
-            match source.exact_tip().await {
-                Ok(tip) => break tip,
-                Err(error) if error.is_retryable() => {
-                    tracing::warn!(%error, "post-price tip check unavailable; retrying");
-                    tokio::time::sleep(RETRY_PAUSE).await;
-                }
-                Err(error) => panic!("FATAL: Zebra returned an invalid tip: {error}"),
-            }
+        let exact_tip = match source.canonical_tip().await {
+            Ok(tip) => tip,
+            Err(error) => panic!("FATAL: Zebra returned an invalid tip: {error}"),
         };
         if exact_tip != (tip, tip_hash) {
             tracing::warn!(
