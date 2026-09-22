@@ -486,16 +486,8 @@ pub fn apply_block<P: Parameters + Send + 'static>(
             }
         }
 
-        let spends_claim_anchor = nfs.iter().any(|nf| registry.anchor_pool().contains(nf));
-        let spends_record = !registry.names_spent_by(&nfs).is_empty();
         let notes: &[usize] = notes_by_tx.get(&txid).map(Vec::as_slice).unwrap_or(&[]);
         match notes {
-            [] => {
-                assert!(
-                    !(spends_claim_anchor || spends_record),
-                    "Registry authority was spent without a Name Note successor"
-                );
-            }
             [index] => {
                 let candidate = &candidates[*index];
                 let action = candidate.payload.action();
@@ -519,10 +511,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                         block_mtp,
                     )
                 } else {
-                    assert!(
-                        registry_outputs.is_empty(),
-                        "update/release must not create a claim anchor"
-                    );
                     match action {
                         Action::Update => registry.accept_update(
                             network,
@@ -547,14 +535,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                     accepted_name_notes.push(*index);
                 }
             }
-            _ => {
-                if spends_claim_anchor || spends_record {
-                    panic!(
-                        "mint produced multiple Name Notes in one transaction \
-                         — assembly creates exactly one"
-                    );
-                }
-            }
+            _ => registry.follow_spends(&nfs, height),
         }
     }
 

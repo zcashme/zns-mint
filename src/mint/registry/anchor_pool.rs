@@ -54,24 +54,6 @@ impl AnchorPool {
         }
     }
 
-    /// Atomic claim transition: retire `spent`, adopt `successor`,
-    /// checkpoint the resulting pool at `height`. Returns `true` when
-    /// `spent` was live — the well-formed case. When `spent` was not
-    /// live the pool is untouched and `false` is returned, so the
-    /// caller can reject the transition without corrupting state.
-    pub fn apply_claim(
-        &mut self,
-        height: BlockHeight,
-        spent: Nullifier,
-        successor: Nullifier,
-    ) -> bool {
-        if !self.live.contains(&spent) {
-            return false;
-        }
-        self.retire_spent(&[spent], Some(successor), height);
-        true
-    }
-
     /// The pool following the chain: every live anchor in `nfs` retires,
     /// an optional created successor joins — past standing size, since
     /// chain facts do not queue — and the pool checkpoints at `height`
@@ -157,28 +139,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_claim_retires_spent_and_adopts_successor() {
-        let mut pool = AnchorPool::default();
-        pool.adopt(h(10), nullifier(1));
-        pool.adopt(h(10), nullifier(2));
-
-        assert!(pool.apply_claim(h(11), nullifier(1), nullifier(100)));
-        assert!(!pool.contains(&nullifier(1)));
-        assert!(pool.contains(&nullifier(2)));
-        assert!(pool.contains(&nullifier(100)));
-    }
-
-    #[test]
-    fn apply_claim_rejects_unknown_spent_without_mutation() {
-        let mut pool = AnchorPool::default();
-        pool.adopt(h(10), nullifier(1));
-        let before = pool.live().clone();
-
-        assert!(!pool.apply_claim(h(11), nullifier(9), nullifier(100)));
-        assert_eq!(pool.live(), &before);
-    }
-
-    #[test]
     fn retire_spent_retires_every_spent_anchor_and_checkpoints() {
         let mut pool = AnchorPool::default();
         pool.adopt(h(10), nullifier(1));
@@ -224,8 +184,8 @@ mod tests {
         let mut pool = AnchorPool::default();
         pool.adopt(h(10), nullifier(1));
         pool.adopt(h(10), nullifier(2));
-        assert!(pool.apply_claim(h(11), nullifier(1), nullifier(100)));
-        assert!(pool.apply_claim(h(12), nullifier(2), nullifier(200)));
+        assert!(pool.retire_spent(&[nullifier(1)], Some(nullifier(100)), h(11)));
+        assert!(pool.retire_spent(&[nullifier(2)], Some(nullifier(200)), h(12)));
 
         // Rewind to h(11): the h(12) transition is undone.
         pool.truncate_to(h(11));

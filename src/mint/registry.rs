@@ -30,6 +30,12 @@ pub struct NameRecord {
 }
 
 impl NameRecord {
+    /// The §4.5 clocks, fired: the term lapsed or the liveness
+    /// deadline reached at `mtp`.
+    pub fn is_release_due(&self, mtp: Timestamp) -> bool {
+        self.expires_at.expired(mtp) || mtp >= self.release_deadline
+    }
+
     fn from_received<P: Parameters>(
         params: &P,
         note: &NameNote,
@@ -153,7 +159,7 @@ impl Registry {
                 if record.action.is_release() {
                     return None;
                 }
-                if record.expires_at.expired(mtp) {
+                if record.is_release_due(mtp) {
                     return None;
                 }
                 let otp = otp?;
@@ -200,10 +206,7 @@ impl Registry {
     pub fn releases_due(&self, mtp: Timestamp) -> impl Iterator<Item = (Name, NameNote)> + '_ {
         self.records
             .iter()
-            .filter(move |(_, record)| {
-                !record.action.is_release()
-                    && (record.expires_at.expired(mtp) || mtp >= record.release_deadline)
-            })
+            .filter(move |(_, record)| !record.action.is_release() && record.is_release_due(mtp))
             .map(move |(name, record)| {
                 (
                     name.clone(),
@@ -244,26 +247,19 @@ impl Registry {
             .filter(|nf| self.anchors.contains(nf))
             .copied()
             .collect();
-        if spent.is_empty() {
-            return false; // unbacked: a public output anyone could have written
+        // Facts first: the pool follows every spent standing anchor
+        // and adopts the created successor — whatever the rest of the
+        // transaction turns out to be. An unbacked claim retires
+        // nothing and adopts nothing: both are no-ops.
+        self.anchors.retire_spent(nfs, successor, height);
+
+        // The law: a well-formed claim spends exactly one anchor,
+        // spends no Name Note, creates a zero-value successor, and
+        // finds the name free (or released).
+        if successor.is_none() || spent.len() != 1 || !self.names_spent_by(nfs).is_empty() {
+            self.mark_released(nfs, height);
+            return false;
         }
-        assert!(
-            self.names_spent_by(nfs).is_empty(),
-            "claim transaction spent a record — assembly never \
-             spends a Name Note when claiming"
-        );
-        assert!(
-            spent.len() == 1,
-            "a claim spends exactly one anchor — assembly never batches"
-        );
-        let successor_nf = successor.expect(
-            "a backed claim creates exactly one zero-value successor anchor — \
-             the Registry FVK derives its nullifier",
-        );
-        // Pool follows the chain either way: a duplicate claim still
-        // spent a standing anchor and created a successor.
-        let applied = self.anchors.apply_claim(height, spent[0], successor_nf);
-        assert!(applied, "spent nullifier was live per contains() above");
         if self
             .record(note.name())
             .is_some_and(|r| !r.action.is_release())
@@ -280,7 +276,9 @@ impl Registry {
     }
 
     /// Offers a confirmed update candidate; true when the transaction
-    /// spent this name's current note.
+    /// spent this name's current note and both clocks still allow a
+    /// renewal at block MTP. A well-formed spend after expiry or
+    /// liveness marks the name released and returns false.
     pub fn accept_update<P: Parameters>(
         &mut self,
         params: &P,
@@ -292,21 +290,32 @@ impl Registry {
     ) -> bool {
         assert!(matches!(note, NameNote::Update { .. }));
         let Some(record) = self.predecessor_spent(note, nfs) else {
+            // Unbacked, or malformed (an anchor, extra names, an
+            // already released record): the pool and the records
+            // still follow what the chain spent.
+            self.follow_spends(nfs, height);
             return false;
         };
-        assert!(
-            note.prev_rcm() == Some(record.commitment),
-            "predecessor mismatch — assembly reads commitment from the same registry"
-        );
+        if note.prev_rcm() != Some(record.commitment) {
+            // The predecessor was spent whatever the note claims.
+            self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
+            return false;
+        }
+        let name = note.name().clone();
+        if record.is_release_due(mtp) {
+            self.release_predecessor(params, name, &record, nullifier, height, mtp);
+            return false;
+        }
         self.set_record(
-            note.name().clone(),
+            name,
             NameRecord::from_received(params, note, nullifier, height, mtp),
             height,
         );
         true
     }
 
-    /// Offers a confirmed release candidate; same law as accept_update.
+    /// Offers a confirmed release candidate; true when the transaction
+    /// spent this name's current note. Releases stay legal after either clock.
     pub fn accept_release<P: Parameters>(
         &mut self,
         params: &P,
@@ -318,12 +327,16 @@ impl Registry {
     ) -> bool {
         assert!(matches!(note, NameNote::Release { .. }));
         let Some(record) = self.predecessor_spent(note, nfs) else {
+            // Malformed: the pool and the records still follow what
+            // the chain spent.
+            self.follow_spends(nfs, height);
             return false;
         };
-        assert!(
-            note.prev_rcm() == Some(record.commitment),
-            "predecessor mismatch — assembly reads commitment from the same registry"
-        );
+        if note.prev_rcm() != Some(record.commitment) {
+            // The predecessor was spent whatever the note claims.
+            self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
+            return false;
+        }
         self.set_record(
             note.name().clone(),
             NameRecord::from_received(params, note, nullifier, height, mtp),
@@ -332,44 +345,84 @@ impl Registry {
         true
     }
 
+    /// The name's live note was spent but no renewal lands: the name
+    /// is released, bound to the successor nullifier it received.
+    fn release_predecessor<P: Parameters>(
+        &mut self,
+        params: &P,
+        name: Name,
+        record: &NameRecord,
+        nullifier: orchard::note::Nullifier,
+        height: BlockHeight,
+        mtp: Timestamp,
+    ) {
+        let release = NameNote::Release {
+            name: name.clone(),
+            ua: record.ua.clone(),
+            prev: record.commitment,
+        };
+        self.set_record(
+            name,
+            NameRecord::from_received(params, &release, nullifier, height, mtp),
+            height,
+        );
+    }
+
     /// The live predecessor this transaction spent, when it is this
-    /// note's own current note.
+    /// note's own current note. Malformed spends (extra names, an
+    /// anchor, a released record) return `None`.
     fn predecessor_spent(
         &self,
         note: &NameNote,
         nfs: &[orchard::note::Nullifier],
-    ) -> Option<&NameRecord> {
+    ) -> Option<NameRecord> {
         let spent = self.names_spent_by(nfs);
         if spent.is_empty() {
             return None; // unbacked: a public output anyone could have written
         }
-        assert!(
-            !nfs.iter().any(|nf| self.anchors.contains(nf)),
-            "update/release must not advance the claim-anchor chain"
-        );
-        assert_eq!(
-            spent.as_slice(),
-            [note.name().clone()],
-            "update/release did not spend the exact current Name Note \
-             — assembly spends the exact current note"
-        );
-        Some(
-            self.record(note.name())
-                .filter(|record| !record.action.is_release())
-                .expect(
-                    "update/release has no live predecessor \
-                     — assembly checks liveness before transitioning",
-                ),
-        )
+        if nfs.iter().any(|nf| self.anchors.contains(nf)) {
+            return None;
+        }
+        if spent.as_slice() != [note.name().clone()] {
+            return None;
+        }
+        self.record(note.name())
+            .filter(|record| !record.action.is_release())
+            .cloned()
     }
 
     /// The names whose current notes these nullifiers spend.
-    pub fn names_spent_by(&self, nfs: &[orchard::note::Nullifier]) -> Vec<Name> {
+    fn names_spent_by(&self, nfs: &[orchard::note::Nullifier]) -> Vec<Name> {
         self.records
             .iter()
             .filter(|(_, record)| nfs.contains(&record.nullifier))
             .map(|(name, _)| name.clone())
             .collect()
+    }
+
+    /// A Registry spend landed without a single usable Name Note.
+    /// The pool follows the spent anchors; spent live names are
+    /// marked released.
+    pub fn follow_spends(&mut self, nfs: &[orchard::note::Nullifier], height: BlockHeight) {
+        self.anchors.retire_spent(nfs, None, height);
+        self.mark_released(nfs, height);
+    }
+
+    /// Marks every live name released whose current note these
+    /// nullifiers spent. A no-op when the spend touched no Name Note.
+    fn mark_released(&mut self, nfs: &[orchard::note::Nullifier], height: BlockHeight) {
+        for name in self.names_spent_by(nfs) {
+            let Some(record) = self.record(&name).cloned() else {
+                continue;
+            };
+            if record.action.is_release() {
+                continue;
+            }
+            let mut tomb = record;
+            tomb.action = Action::Release;
+            tomb.confirmed_height = height;
+            self.set_record(name, tomb, height);
+        }
     }
 
     fn set_record(&mut self, name: Name, record: NameRecord, height: BlockHeight) {
@@ -484,7 +537,7 @@ mod tests {
         assert!(live.admits(Action::Update, &ua, Some(Term::Years(1)), above, now));
         assert!(live.admits(Action::Release, &ua, None, above, now));
 
-        // Released: the record is a tombstone — nothing is admitted.
+        // Released: the name is already released — nothing is admitted.
         let released = record(
             Action::Release,
             Expiry::At(ts(2_000_000_000)),
@@ -661,5 +714,241 @@ mod tests {
         assert!(!r.anchor_pool().contains(&a2));
         assert!(r.anchor_pool().contains(&succ1));
         assert!(r.anchor_pool().contains(&succ2));
+    }
+
+    #[test]
+    fn accept_claim_rejects_malformed_without_panic() {
+        let mut r = Registry::new();
+        let h = BlockHeight::from_u32(10);
+        let mtp = ts(1_700_000_000);
+        let a1 = nullifier(1);
+        let a2 = nullifier(2);
+        let succ = nullifier(10);
+        r.adopt_anchor(h, a1);
+        r.adopt_anchor(h, a2);
+        let claim = NameNote::Claim {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+
+        // No successor: retire the spent anchor, do not register.
+        assert!(!r.accept_claim(&MAIN_NETWORK, &claim, nullifier(20), None, &[a1], h, mtp));
+        assert!(!r.anchor_pool().contains(&a1));
+        assert!(r.record(&test_name()).is_none());
+
+        // Two anchors: retire both, keep the successor, do not register.
+        r.adopt_anchor(h, a1);
+        assert!(!r.accept_claim(
+            &MAIN_NETWORK,
+            &claim,
+            nullifier(21),
+            Some(succ),
+            &[a2, a1],
+            h,
+            mtp
+        ));
+        assert!(!r.anchor_pool().contains(&a2));
+        assert!(r.anchor_pool().contains(&succ));
+        assert!(r.record(&test_name()).is_none());
+    }
+
+    #[test]
+    fn accept_claim_that_spends_a_record_marks_it_released() {
+        let mut r = live_alice(Expiry::Never, 3_000_000_000);
+        let h = BlockHeight::from_u32(101);
+        let mtp = ts(1_700_000_000);
+        let anchor = nullifier(9);
+        let succ = nullifier(10);
+        r.adopt_anchor(h, anchor);
+        let claim = NameNote::Claim {
+            name: Name::parse("bob").unwrap(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+
+        assert!(!r.accept_claim(
+            &MAIN_NETWORK,
+            &claim,
+            nullifier(21),
+            Some(succ),
+            &[anchor, nullifier(1)],
+            h,
+            mtp
+        ));
+        let alice = r.record(&test_name()).expect("alice marked released");
+        assert_eq!(alice.action, Action::Release);
+        assert_eq!(alice.nullifier, nullifier(1));
+        assert!(r.record(&Name::parse("bob").unwrap()).is_none());
+        assert!(!r.anchor_pool().contains(&anchor));
+        assert!(r.anchor_pool().contains(&succ));
+    }
+
+    #[test]
+    fn follow_spends_retires_anchors_and_marks_names_released() {
+        let mut r = live_alice(Expiry::Never, 3_000_000_000);
+        let h = BlockHeight::from_u32(101);
+        let anchor = nullifier(9);
+        r.adopt_anchor(h, anchor);
+
+        r.follow_spends(&[anchor, nullifier(1)], h);
+
+        assert!(!r.anchor_pool().contains(&anchor));
+        let alice = r.record(&test_name()).expect("alice marked released");
+        assert_eq!(alice.action, Action::Release);
+        assert_eq!(alice.nullifier, nullifier(1));
+    }
+
+    fn live_alice(expires_at: Expiry, deadline: i64) -> Registry {
+        let mut r = Registry::new();
+        r.set_record(
+            test_name(),
+            record(Action::Claim, expires_at, deadline, 1),
+            BlockHeight::from_u32(100),
+        );
+        r
+    }
+
+    fn update_for_alice(expires_at: Expiry, prev: u8) -> NameNote {
+        NameNote::Update {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at,
+            prev: commitment(prev),
+        }
+    }
+
+    #[test]
+    fn accept_update_renews_while_both_clocks_are_live() {
+        let mut r = live_alice(Expiry::At(ts(2_000_000_000)), 2_000_000_000);
+        let note = update_for_alice(Expiry::At(ts(2_100_000_000)), 1);
+        let succ = nullifier(20);
+        assert!(r.accept_update(
+            &MAIN_NETWORK,
+            &note,
+            succ,
+            &[nullifier(1)],
+            BlockHeight::from_u32(101),
+            ts(1_000_000_000),
+        ));
+        let rec = r.record(&test_name()).expect("alice still bound");
+        assert_eq!(rec.action, Action::Update);
+        assert_eq!(rec.nullifier, succ);
+    }
+
+    #[test]
+    fn accept_update_after_expiry_marks_released() {
+        let mut r = live_alice(Expiry::At(ts(1_000_000_000)), 3_000_000_000);
+        let note = update_for_alice(Expiry::At(ts(2_000_000_000)), 1);
+        let succ = nullifier(20);
+        assert!(!r.accept_update(
+            &MAIN_NETWORK,
+            &note,
+            succ,
+            &[nullifier(1)],
+            BlockHeight::from_u32(101),
+            ts(1_000_000_000),
+        ));
+        let rec = r.record(&test_name()).expect("alice marked released");
+        assert_eq!(rec.action, Action::Release);
+        assert_eq!(rec.nullifier, succ);
+    }
+
+    #[test]
+    fn accept_update_after_liveness_marks_released() {
+        let mut r = live_alice(Expiry::Never, 1_000_000_000);
+        let note = update_for_alice(Expiry::Never, 1);
+        let succ = nullifier(20);
+        assert!(!r.accept_update(
+            &MAIN_NETWORK,
+            &note,
+            succ,
+            &[nullifier(1)],
+            BlockHeight::from_u32(101),
+            ts(1_000_000_000),
+        ));
+        let rec = r.record(&test_name()).expect("alice marked released");
+        assert_eq!(rec.action, Action::Release);
+        assert_eq!(rec.nullifier, succ);
+    }
+
+    #[test]
+    fn accept_update_with_anchor_spend_follows_the_pool() {
+        let mut r = live_alice(Expiry::Never, 3_000_000_000);
+        r.set_record(
+            Name::parse("bob").unwrap(),
+            record(Action::Claim, Expiry::Never, 3_000_000_000, 2),
+            BlockHeight::from_u32(100),
+        );
+        r.adopt_anchor(BlockHeight::from_u32(100), nullifier(9));
+        let note = update_for_alice(Expiry::Never, 1);
+        let height = BlockHeight::from_u32(101);
+        let mtp = ts(1_000_000_000);
+
+        // Well-formed update that also spends a claim anchor: rejected,
+        // and the chain facts still land — alice's note was consumed,
+        // so she is marked released, and the anchor retires.
+        assert!(!r.accept_update(
+            &MAIN_NETWORK,
+            &note,
+            nullifier(20),
+            &[nullifier(1), nullifier(9)],
+            height,
+            mtp,
+        ));
+        let alice = r.record(&test_name()).expect("alice marked released");
+        assert_eq!(alice.action, Action::Release);
+        assert_eq!(alice.nullifier, nullifier(1));
+        assert!(!r.anchor_pool().contains(&nullifier(9)));
+        assert_eq!(
+            r.record(&Name::parse("bob").unwrap())
+                .expect("bob unchanged")
+                .nullifier,
+            nullifier(2)
+        );
+    }
+
+    #[test]
+    fn accept_update_prev_rcm_mismatch_marks_released() {
+        let mut r = live_alice(Expiry::Never, 3_000_000_000);
+        let wrong_prev = update_for_alice(Expiry::Never, 99);
+        let height = BlockHeight::from_u32(101);
+        let mtp = ts(1_000_000_000);
+
+        // Alice's note was spent whatever the payload claims: the name
+        // is released, bound to the successor nullifier it received.
+        assert!(!r.accept_update(
+            &MAIN_NETWORK,
+            &wrong_prev,
+            nullifier(20),
+            &[nullifier(1)],
+            height,
+            mtp,
+        ));
+        let alice = r.record(&test_name()).expect("alice marked released");
+        assert_eq!(alice.action, Action::Release);
+        assert_eq!(alice.nullifier, nullifier(20));
+    }
+
+    #[test]
+    fn accept_release_stays_legal_after_both_clocks() {
+        let mut r = live_alice(Expiry::At(ts(1_000_000_000)), 1_000_000_000);
+        let note = NameNote::Release {
+            name: test_name(),
+            ua: test_ua(),
+            prev: commitment(1),
+        };
+        let succ = nullifier(20);
+        assert!(r.accept_release(
+            &MAIN_NETWORK,
+            &note,
+            succ,
+            &[nullifier(1)],
+            BlockHeight::from_u32(101),
+            ts(1_000_000_000),
+        ));
+        let rec = r.record(&test_name()).expect("alice released");
+        assert_eq!(rec.action, Action::Release);
+        assert_eq!(rec.nullifier, succ);
     }
 }
