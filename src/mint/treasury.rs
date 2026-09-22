@@ -1,4 +1,5 @@
-//! Treasury wallet view and Treasury policy for the mint.
+//! Treasury wallet view and Treasury policy for the mint: the vault
+//! sweep, the challenge relay builder, and the request queue.
 //!
 
 use std::convert::Infallible;
@@ -18,97 +19,14 @@ use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::FeeError;
+use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
 
-use crate::mint::presale::AccessCode;
-use crate::mint::{
-    decode_controller_ua, Action, MintInbound, Name, Request, Term, TREASURY_ACCOUNT,
-};
+use crate::mint::{MintInbound, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
-
-/// Parses a 512-byte memo sent to the Treasury as a ZNS Request.
-///
-/// Field slots are positional; every human-facing memo keeps `<ua>`
-/// terminal — the NameNote is the one exception, ending in its chain
-/// link:
-///
-/// - Claim: `ZNS:claim:<term>:<name>:<ua>` or
-///   `ZNS:claim:<code>:<term>:<name>:<ua>` — `<term>` is `forever` or
-///   `<N>y`, N = 1–99. A leading field that parses as a term is the
-///   term (codeless form, byte-identical to the three-slot claim);
-///   otherwise it is the pre-sale access code: exactly six ASCII decimal
-///   digits, including leading zeroes (claim-only; never a term spelling).
-/// - Update: `ZNS:update:<term>:<name>:<ua>` — `<term>` is `none`
-///   (expiry carried forward), `<N>y`, or `forever` (the upgrade: a
-///   fixed-term registration converts to no fixed expiration).
-/// - Release: `ZNS:release:<name>:<ua>`
-///
-/// Requests never carry an OTP — answering is the respond's job: an echo
-/// is the relay memo itself (`ZNS:otp:…`, routed by `Challenge::decode`),
-/// never this parser. The controller `<ua>` must decode as a
-/// known-receiver Unified Address ([`decode_controller_ua`]).
-pub fn parse_request<P: Parameters>(network: &P, raw: &[u8; 512]) -> Option<Request> {
-    let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
-    if raw[end..].iter().any(|b| *b != 0) {
-        return None;
-    }
-    let text = core::str::from_utf8(&raw[..end]).ok()?;
-
-    let mut fields = text.split(':');
-    if fields.next()? != "ZNS" {
-        return None;
-    }
-    let action = Action::parse(fields.next()?)?;
-
-    // Claims may lead with a pre-sale code; the discriminator is whether
-    // the next field is a term. Updates say `none`, `<N>y`, or `forever`.
-    let (claim_code, term) = match action {
-        Action::Claim => {
-            let first = fields.next()?;
-            if first.is_empty() {
-                return None;
-            }
-            if let Some(term) = Term::parse(first) {
-                (None, Some(term))
-            } else {
-                let code = AccessCode::parse(first)?;
-                let term = Term::parse(fields.next()?)?;
-                (Some(code), Some(term))
-            }
-        }
-        Action::Update => {
-            let term = match fields.next()? {
-                "none" => None,
-                "forever" => Some(Term::Forever),
-                field => Some(Term::parse(field)?),
-            };
-            (None, term)
-        }
-        Action::Release => (None, None),
-    };
-
-    let name = Name::parse(fields.next()?)?;
-    let ua_str = fields.next()?;
-    if ua_str.is_empty() || fields.next().is_some() {
-        return None;
-    }
-    let ua = decode_controller_ua(network, ua_str)?;
-
-    Some(match (action, term) {
-        (Action::Claim, Some(term)) => Request::Claim {
-            name,
-            ua,
-            term,
-            code: claim_code,
-        },
-        (Action::Update, _) => Request::Update { name, ua, term },
-        (Action::Release, _) => Request::Release { name, ua },
-        // The wire always carries a claim term.
-        (Action::Claim, None) => unreachable!("claims always carry a term"),
-    })
-}
 
 /// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
 /// actually moves, not on the balance behind it.
@@ -139,7 +57,7 @@ pub fn sweep_to_vault<P: Parameters>(
     output_prover: &sapling::circuit::OutputParameters,
     today: i64,
     previous_day: i64,
-) -> Option<zcash_primitives::transaction::Transaction> {
+) -> Option<Transaction> {
     if today <= previous_day {
         return None;
     }
@@ -264,39 +182,28 @@ pub fn challenge<P: Parameters>(
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
     controller: &zcash_keys::address::UnifiedAddress,
-    memo: [u8; 512],
+    memo: MemoBytes,
     relay_value: Zatoshis,
-) -> Option<zcash_primitives::transaction::Transaction> {
-    use zcash_client_backend::data_api::wallet::input_selection::{
-        GreedyInputSelector, SpendPolicy,
-    };
-    use zcash_client_backend::data_api::wallet::{
-        create_proposed_transactions, propose_transfer, ConfirmationsPolicy, SpendingKeys,
-    };
-    use zcash_client_backend::data_api::WalletRead as _;
-    use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
-    use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
-    use zcash_client_backend::wallet::OvkPolicy;
-
-    let request = zip321::TransactionRequest::new(vec![zip321::Payment::new(
+) -> Option<Transaction> {
+    let Some(request) = zip321::Payment::new(
         zcash_keys::address::Address::Unified(controller.clone()).to_zcash_address(network),
         Some(relay_value),
-        Some(
-            zcash_protocol::memo::MemoBytes::from_bytes(&memo)
-                .expect("a 512-byte protocol memo is valid"),
-        ),
+        Some(memo),
         None,
         None,
         vec![],
     )
-    .expect("valid ZIP-321 payment")])
-    .expect("valid ZIP-321 request");
+    .ok()
+    .and_then(|pay| zip321::TransactionRequest::new(vec![pay]).ok()) else {
+        tracing::warn!("challenge relay skipped: ZIP-321 request invalid");
+        return None;
+    };
 
     let input_selector = GreedyInputSelector::<Wallet<P>>::new();
     let change_strategy = SingleOutputChangeStrategy::<Wallet<P>>::new(
         StandardFeeRule::Zip317,
         None,
-        zcash_protocol::ShieldedPool::Ironwood,
+        ShieldedPool::Ironwood,
         DustOutputPolicy::default(),
     );
 
@@ -305,7 +212,7 @@ pub fn challenge<P: Parameters>(
         P,
         GreedyInputSelector<Wallet<P>>,
         SingleOutputChangeStrategy<Wallet<P>>,
-        std::convert::Infallible,
+        Infallible,
     >(
         wallet,
         network,
@@ -313,7 +220,7 @@ pub fn challenge<P: Parameters>(
         &input_selector,
         &change_strategy,
         request,
-        ConfirmationsPolicy::new_symmetrical(std::num::NonZeroU32::MIN, false),
+        ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false),
         &SpendPolicy::default(),
         None,
         None,
@@ -326,7 +233,7 @@ pub fn challenge<P: Parameters>(
         P,
         GreedyInputSelectorError,
         StandardFeeRule,
-        zcash_primitives::transaction::fees::zip317::FeeError,
+        FeeError,
         NoteId,
     >(
         wallet,
@@ -395,6 +302,7 @@ impl RequestQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mint::{Action, Name, Request, Term};
     use zcash_protocol::consensus::MainNetwork;
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
@@ -469,284 +377,5 @@ mod tests {
             MintInbound::Request(Request::Claim { .. })
         ));
         assert_eq!(queue.entry(0).2, h(100));
-    }
-
-    fn padded(s: &str) -> [u8; 512] {
-        let mut m = [0u8; 512];
-        m[..s.len()].copy_from_slice(s.as_bytes());
-        m
-    }
-
-    #[test]
-    fn accepts_exactly_the_three_request_forms() {
-        let network = MainNetwork;
-
-        assert!(matches!(
-            parse_request(&network, &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"))),
-            Some(Request::Claim {
-                name,
-                term: Term::Forever,
-                code: None,
-                ..
-            }) if name.as_str() == "alice"
-        ));
-        assert!(matches!(
-            parse_request(
-                &network,
-                &padded(&format!("ZNS:update:none:alice:{TEST_UA}"))
-            ),
-            Some(Request::Update { term: None, .. })
-        ));
-        assert!(matches!(
-            parse_request(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))),
-            Some(Request::Release { .. })
-        ));
-    }
-
-    #[test]
-    fn claim_may_lead_with_a_presale_code() {
-        let network = MainNetwork;
-        let code = AccessCode::parse("004206").unwrap();
-
-        assert!(matches!(
-            parse_request(
-                &network,
-                &padded(&format!("ZNS:claim:004206:forever:alice:{TEST_UA}"))
-            ),
-            Some(Request::Claim {
-                term: Term::Forever,
-                code: Some(ref parsed),
-                ..
-            }) if parsed == &code
-        ));
-        // Codeless three-slot form is unchanged.
-        assert!(matches!(
-            parse_request(
-                &network,
-                &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"))
-            ),
-            Some(Request::Claim {
-                code: None,
-                term: Term::Forever,
-                ..
-            })
-        ));
-        // A term-shaped first field is never taken as a code.
-        assert!(matches!(
-            parse_request(&network, &padded(&format!("ZNS:claim:12y:alice:{TEST_UA}"))),
-            Some(Request::Claim {
-                code: None,
-                term: Term::Years(12),
-                ..
-            })
-        ));
-        // Not exactly six digits.
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:4206:forever:alice:{TEST_UA}"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:a1b2c3:forever:alice:{TEST_UA}"))
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn claims_say_forever_updates_say_none_years_or_forever() {
-        let network = MainNetwork;
-
-        assert!(matches!(
-            parse_request(&network, &padded(&format!("ZNS:claim:12y:alice:{TEST_UA}"))),
-            Some(Request::Claim {
-                term: Term::Years(12),
-                ..
-            })
-        ));
-        assert!(matches!(
-            parse_request(&network, &padded(&format!("ZNS:update:3y:alice:{TEST_UA}"))),
-            Some(Request::Update {
-                term: Some(Term::Years(3)),
-                ..
-            })
-        ));
-
-        // The verbs' term slots are not interchangeable: claims never
-        // say `none`. Updates may also carry the upgrade spelling.
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:none:alice:{TEST_UA}"))
-        )
-        .is_none());
-        assert!(matches!(
-            parse_request(
-                &network,
-                &padded(&format!("ZNS:update:forever:alice:{TEST_UA}"))
-            ),
-            Some(Request::Update {
-                term: Some(Term::Forever),
-                ..
-            })
-        ));
-        assert!(parse_request(&network, &padded(&format!("ZNS:claim::alice:{TEST_UA}"))).is_none());
-    }
-
-    #[test]
-    fn strict_spellings_are_rejected_on_sight() {
-        let network = MainNetwork;
-        // Missing y, over the cap, leading zero.
-        assert!(
-            parse_request(&network, &padded(&format!("ZNS:claim:5:alice:{TEST_UA}"))).is_none()
-        );
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:100y:alice:{TEST_UA}"))
-        )
-        .is_none());
-        assert!(
-            parse_request(&network, &padded(&format!("ZNS:claim:01y:alice:{TEST_UA}"))).is_none()
-        );
-        // Seconds never appear on the request wire.
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:31557600:alice:{TEST_UA}"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:update:31557600:alice:{TEST_UA}"))
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn requests_never_carry_an_otp() {
-        let network = MainNetwork;
-        // The respond spellings are gone; the echo is the relay memo.
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:update:none:alice:{TEST_UA}:004206"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:release:alice:{TEST_UA}:004206"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}:004206"))
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn rejects_extra_field() {
-        let network = MainNetwork;
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:release:alice:{TEST_UA}:004206"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}:extra"))
-        )
-        .is_none());
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:update:none:alice:{TEST_UA}:more"))
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn rejects_unknown_verb() {
-        let network = MainNetwork;
-        // The echo lane is routed by Challenge::decode, never here.
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:otp:417293:alice:update:{TEST_UA}"))
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn rejects_non_zns() {
-        let network = MainNetwork;
-        assert!(parse_request(&network, &padded("hello world")).is_none());
-    }
-
-    #[test]
-    fn rejects_invalid_name() {
-        let network = MainNetwork;
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:forever:INVALID:{TEST_UA}"))
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn unknown_receiver_ua_is_rejected_at_both_intakes() {
-        use crate::mint::Challenge;
-        use zcash_address::unified::{Address as Ua, Encoding, Receiver};
-
-        let network = MainNetwork;
-        // A valid Unified Address carrying an unknown receiver —
-        // ZIP-316's forward-compatibility channel, unbounded by design.
-        let ua = Ua::try_from_items(vec![
-            Receiver::Orchard([0x07; 43]),
-            Receiver::Unknown {
-                typecode: 5,
-                data: vec![0u8; 32],
-            },
-        ])
-        .expect("ZIP-316 composition rules permit it")
-        .encode(&zcash_protocol::consensus::NetworkType::Main);
-        assert!(matches!(
-            zcash_keys::address::Address::decode(&network, &ua),
-            Some(zcash_keys::address::Address::Unified(_))
-        ));
-
-        // The request intake throws every verb out …
-        assert!(
-            parse_request(&network, &padded(&format!("ZNS:claim:forever:alice:{ua}"))).is_none()
-        );
-        assert!(parse_request(&network, &padded(&format!("ZNS:update:none:alice:{ua}"))).is_none());
-        assert!(parse_request(&network, &padded(&format!("ZNS:release:alice:{ua}"))).is_none());
-        // … and so does the echo intake.
-        let echo = padded(&format!("ZNS:otp:417293:alice:update:{ua}"));
-        assert!(Challenge::decode(&network, &echo).is_none());
-    }
-
-    #[test]
-    fn largest_known_receiver_ua_is_accepted() {
-        let network = MainNetwork;
-        // The corpus vector carries every known receiver kind — the
-        // longest address shape the guard admits, still inside every
-        // memo it is re-embedded into.
-        assert!(TEST_UA.len() > 200);
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"))
-        )
-        .is_some());
-    }
-
-    /// The pre-fix corpus vector: a real Sapling+P2pkh address with no
-    /// Orchard receiver — inside the memo budget, but a controller the
-    /// relay lane could never challenge.
-    const ORCHARDLESS_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
-
-    #[test]
-    fn orchardless_known_receiver_ua_is_rejected() {
-        let network = MainNetwork;
-        assert!(parse_request(
-            &network,
-            &padded(&format!("ZNS:claim:forever:alice:{ORCHARDLESS_UA}"))
-        )
-        .is_none());
     }
 }

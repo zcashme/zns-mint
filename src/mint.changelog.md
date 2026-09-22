@@ -1,5 +1,28 @@
 # Mint live-work design record
 
+## 2026-09-22 — Treasury memos decode once, at block application (#133)
+
+- `MintInbound::decode(network, txid, &memo)` in `mint.rs` classifies
+  each decrypted Treasury memo — echo, request, unrecognized payment —
+  exactly once, when the block is applied. `treasury::parse_request`
+  moves in as `Request::decode` beside the enum it produces;
+  `Challenge::decode` and the controller-UA guard sit beside it,
+  private now.
+- The Treasury lane carries `zcash_protocol::memo::MemoBytes` end to
+  end — decryption, `MintInbound::decode`, `Challenge::encode`, and
+  the relay builder — and the grammars lean on upstream's
+  `Memo::try_from`/`TextMemo` for the ZIP-302 text rules instead of a
+  hand-rolled prelude.
+- `apply_block` records the classification per memo; the
+  classification loop and its cross-module call into `treasury.rs`
+  are gone. `treasury.rs` keeps wallet ops only: sweep, challenge
+  builder, queue.
+- Grammar tests move into `mint.rs`, trimmed to one test per
+  mechanism: term strictness stays at `Term::parse`'s own unit,
+  OTP-shape exclusions are subsumed by `MintInbound::decode`, and the
+  suite keeps the forms, the pre-sale code discrimination, the
+  UA-guard regression vectors, the classification, and the roundtrip.
+
 ## 2026-09-21 — The walk is queue-free: chain application, not orchestration (#116)
 
 - `apply_block` loses its `NameNoteQueue` parameter and its

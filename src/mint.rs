@@ -20,6 +20,7 @@ pub use zcash_keys::address::UnifiedAddress;
 
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::memo::{Memo, MemoBytes};
 use zip32::AccountId;
 
 use otp::OtpCode;
@@ -56,16 +57,11 @@ pub const LIVENESS_RETRY_COOLDOWN: i64 = 24 * 60 * 60;
 /// Minimum Treasury Ironwood balance after boot sync (0.002 ZEC).
 pub const MIN_TREASURY_BALANCE: u64 = 200_000;
 
-/// The longest name the wire accepts.
+/// The longest name a memo accepts.
 pub const MAX_NAME_LEN: usize = 63;
 
-/// Decodes a controller Unified Address — known receivers only, and
-/// the Orchard family among them (relays deliver and echo over it).
-/// The ZIP-316 receiver kinds are fixed-size, so such an address is
-/// bounded by construction: inside every memo it is ever re-embedded
-/// into. Unknown receivers are unbounded by design; refusing them is
-/// the memo budget.
-pub fn decode_controller_ua<P: Parameters>(network: &P, ua_str: &str) -> Option<UnifiedAddress> {
+/// Decodes a controller UA: known receivers only, Orchard among them.
+fn decode_controller_ua<P: Parameters>(network: &P, ua_str: &str) -> Option<UnifiedAddress> {
     let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
         zcash_keys::address::Address::Unified(ua) => ua,
         _ => return None,
@@ -130,15 +126,15 @@ impl Action {
 
 /// An authorized transition the loop is about to assemble.
 ///
-/// Built from [`treasury::parse_request`];
-/// memo bytes stay on that parser. Claims carry a term (`forever` or
-/// `<N>y`) and an optional leading pre-sale access code; updates carry
-/// `none` (carried forward), `<N>y`, or `forever` — the upgrade.
+/// Built by the Treasury memo grammar (`Request::decode`); memo bytes
+/// stay on that parser. Claims carry a term (`forever` or `<N>y`) and
+/// an optional leading pre-sale access code; updates carry `none`
+/// (carried forward), `<N>y`, or `forever` — the upgrade.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// Create a new registration; the term slot is never empty.
     /// `code` is the leading pre-sale slot when present (exactly six
-    /// ASCII digits); the codeless wire form stays byte-identical to
+    /// ASCII digits); the codeless form stays byte-identical to
     /// `ZNS:claim:<term>:<name>:<ua>`.
     Claim {
         name: Name,
@@ -159,6 +155,74 @@ pub enum Request {
     },
 }
 
+impl Request {
+    /// Parses a request memo:
+    ///
+    /// - `ZNS:claim:<term>:<name>:<ua>`, or with a six-digit pre-sale
+    ///   code leading: `ZNS:claim:<code>:<term>:<name>:<ua>`
+    /// - `ZNS:update:<none | <N>y | forever>:<name>:<ua>`
+    /// - `ZNS:release:<name>:<ua>`
+    fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Option<Request> {
+        let text = match Memo::try_from(memo).ok()? {
+            Memo::Text(text) => text,
+            _ => return None,
+        };
+
+        let mut fields = text.split(':');
+        if fields.next()? != "ZNS" {
+            return None;
+        }
+        let action = Action::parse(fields.next()?)?;
+
+        // Claims may lead with a pre-sale code; the discriminator is whether
+        // the next field is a term. Updates say `none`, `<N>y`, or `forever`.
+        let (claim_code, term) = match action {
+            Action::Claim => {
+                let first = fields.next()?;
+                if first.is_empty() {
+                    return None;
+                }
+                if let Some(term) = Term::parse(first) {
+                    (None, Some(term))
+                } else {
+                    let code = AccessCode::parse(first)?;
+                    let term = Term::parse(fields.next()?)?;
+                    (Some(code), Some(term))
+                }
+            }
+            Action::Update => {
+                let term = match fields.next()? {
+                    "none" => None,
+                    "forever" => Some(Term::Forever),
+                    field => Some(Term::parse(field)?),
+                };
+                (None, term)
+            }
+            Action::Release => (None, None),
+        };
+
+        let name = Name::parse(fields.next()?)?;
+        let ua_str = fields.next()?;
+        if ua_str.is_empty() || fields.next().is_some() {
+            return None;
+        }
+        let ua = decode_controller_ua(network, ua_str)?;
+
+        Some(match (action, term) {
+            (Action::Claim, Some(term)) => Request::Claim {
+                name,
+                ua,
+                term,
+                code: claim_code,
+            },
+            (Action::Update, _) => Request::Update { name, ua, term },
+            (Action::Release, _) => Request::Release { name, ua },
+            // A claim always carries a term.
+            (Action::Claim, None) => unreachable!("claims always carry a term"),
+        })
+    }
+}
+
 /// A mint-issued challenge to a wallet, proving that the wallet controls a name via shielded-memos.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Challenge {
@@ -169,44 +233,28 @@ pub struct Challenge {
 }
 
 impl Challenge {
-    /// Encodes the challenge memo. Claims are never challenged, so
-    /// [`Action::is_claim`] guards the lane.
-    pub fn encode<P: Parameters>(&self, network: &P) -> Option<[u8; 512]> {
+    /// Encodes the challenge memo; claims are never challenged.
+    pub fn encode<P: Parameters>(&self, network: &P) -> Option<MemoBytes> {
         if self.action.is_claim() {
             return None;
         }
-        let verb = self.action.as_str();
-
-        let ua_field = self.ua.encode(network);
-        let otp_digits = self.code.digits();
-        let mut memo = [0u8; 512];
-        let mut offset = 0usize;
-        for field in [
-            b"ZNS:otp:".as_slice(),
-            otp_digits.as_slice(),
-            b":".as_slice(),
-            self.name.as_str().as_bytes(),
-            b":".as_slice(),
-            verb.as_bytes(),
-            b":".as_slice(),
-            ua_field.as_bytes(),
-        ] {
-            let end = offset + field.len();
-            memo[offset..end].copy_from_slice(field);
-            offset = end;
-        }
-        Some(memo)
+        let otp: String = self.code.digits().into_iter().map(|b| b as char).collect();
+        let text = format!(
+            "ZNS:otp:{otp}:{}:{}:{}",
+            self.name.as_str(),
+            self.action.as_str(),
+            self.ua.encode(network),
+        );
+        // `from_bytes` pads; the UA guard bounds the length.
+        MemoBytes::from_bytes(text.as_bytes()).ok()
     }
 
-    /// Decodes a relay sentence. The verb is `update` or `release` —
-    /// challenges never claim — and the UA must carry an Orchard-family
-    /// receiver.
-    pub fn decode<P: Parameters>(network: &P, memo: &[u8; 512]) -> Option<Self> {
-        let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
-        if memo[end..].iter().any(|&b| b != 0) {
-            return None;
-        }
-        let text = std::str::from_utf8(&memo[..end]).ok()?;
+    /// Decodes a relay sentence; claims never appear.
+    fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Option<Self> {
+        let text = match Memo::try_from(memo).ok()? {
+            Memo::Text(text) => text,
+            _ => return None,
+        };
 
         let parts: Vec<&str> = text.split(':').collect();
         if parts.len() != 6 || parts[0] != "ZNS" || parts[1] != "otp" {
@@ -235,7 +283,7 @@ impl Challenge {
 }
 
 /// What a user said to the Treasury, in the shape each consumer takes.
-/// Intake classifies once, at block application; the drain decides.
+/// Classified once, at block application; the drain decides.
 #[derive(Clone, Debug)]
 pub enum MintInbound {
     /// A request — what `authorize` takes.
@@ -245,6 +293,20 @@ pub enum MintInbound {
     /// A payment with no parseable message: the drain logs it once and
     /// the sweep keeps the value; the txid names it in the log.
     Unrecognized(TxId),
+}
+
+impl MintInbound {
+    /// Classifies one Treasury memo: echo, request, or unrecognized
+    /// payment. Called once per memo, at block application.
+    pub fn decode<P: Parameters>(network: &P, txid: TxId, memo: &MemoBytes) -> Self {
+        if let Some(echo) = Challenge::decode(network, memo) {
+            Self::Echo(echo)
+        } else if let Some(request) = Request::decode(network, memo) {
+            Self::Request(request)
+        } else {
+            Self::Unrecognized(txid)
+        }
+    }
 }
 
 /// A ZNS name-chain commitment — the trapdoor that links consecutive Name Notes.
@@ -303,7 +365,7 @@ impl Name {
 // ---------------------------------------------------------------------------
 
 /// Applies one verified canonical successor to every faculty: scan, clock,
-/// Registry law, wallet commit, Treasury intake, Name Note storage, cursor.
+/// Registry law, wallet commit, Treasury decode, Name Note storage, cursor.
 /// Never fetches, never broadcasts; `main` passes the live queues, boot
 /// passes scratch ones.
 #[allow(clippy::too_many_arguments)]
@@ -521,25 +583,11 @@ pub fn apply_block<P: Parameters + Send + 'static>(
             error => panic!("FATAL: wallet block commit failed: {error}"),
         }
     }
-    // Upstream's ScannedBlock drops note plaintexts; the Treasury
-    // lane's memos were decrypted above. Decoded once, here, they
-    // are recorded as the requests they carry — nothing is stored
-    // for later re-reading; the block is the durable source,
-    // refetched on every application.
-    // Intake classifies; the drain decides. An echo is the relay memo
-    // itself, byte-for-byte, routed by Challenge::decode — the wire never
-    // carries an OTP on a request. A memo that parses to nothing is a
-    // payment with no message; it rides the queue like anything else.
+    // The scanner drops note plaintexts, so Treasury memos decode
+    // here, once per block, into the queue; the block remains the
+    // durable record. Decisions belong to the drain.
     for (txid, _action_index, paid, memo) in treasury_memos {
-        let inbound = if let Some(echo) = Challenge::decode(network, &memo) {
-            MintInbound::Echo(echo)
-        } else {
-            match treasury::parse_request(network, &memo) {
-                Some(request) => MintInbound::Request(request),
-                None => MintInbound::Unrecognized(txid),
-            }
-        };
-        requests.record(inbound, paid, height);
+        requests.record(MintInbound::decode(network, txid, &memo), paid, height);
     }
     for (index, position) in accepted_name_notes {
         let candidate = &candidates[index];
@@ -564,4 +612,247 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         hash = %cursor.block_hash(),
         "canonical block applied"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests — the Treasury memo grammars
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zcash_address::unified::{Address as Ua, Encoding, Receiver};
+    use zcash_protocol::consensus::MainNetwork;
+
+    const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
+
+    fn padded(s: &str) -> MemoBytes {
+        let mut m = [0u8; 512];
+        m[..s.len()].copy_from_slice(s.as_bytes());
+        MemoBytes::from_bytes(&m).expect("a 512-byte memo fits")
+    }
+
+    fn txid() -> TxId {
+        TxId::from_bytes([0xAB; 32])
+    }
+
+    fn test_ua() -> UnifiedAddress {
+        match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
+            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            _ => panic!("vector is a mainnet Unified Address"),
+        }
+    }
+
+    #[test]
+    fn accepts_exactly_the_three_request_forms() {
+        let network = MainNetwork;
+
+        assert!(matches!(
+            Request::decode(&network, &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"))),
+            Some(Request::Claim {
+                name,
+                term: Term::Forever,
+                code: None,
+                ..
+            }) if name.as_str() == "alice"
+        ));
+        assert!(matches!(
+            Request::decode(
+                &network,
+                &padded(&format!("ZNS:update:none:alice:{TEST_UA}"))
+            ),
+            Some(Request::Update { term: None, .. })
+        ));
+        assert!(matches!(
+            Request::decode(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))),
+            Some(Request::Release { .. })
+        ));
+        // The upgrade spelling.
+        assert!(matches!(
+            Request::decode(
+                &network,
+                &padded(&format!("ZNS:update:forever:alice:{TEST_UA}"))
+            ),
+            Some(Request::Update {
+                term: Some(Term::Forever),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn claim_may_lead_with_a_presale_code() {
+        let network = MainNetwork;
+        let code = AccessCode::parse("004206").unwrap();
+
+        assert!(matches!(
+            Request::decode(
+                &network,
+                &padded(&format!("ZNS:claim:004206:forever:alice:{TEST_UA}"))
+            ),
+            Some(Request::Claim {
+                term: Term::Forever,
+                code: Some(ref parsed),
+                ..
+            }) if parsed == &code
+        ));
+        // A term-shaped first field is never taken as a code.
+        assert!(matches!(
+            Request::decode(&network, &padded(&format!("ZNS:claim:12y:alice:{TEST_UA}"))),
+            Some(Request::Claim {
+                code: None,
+                term: Term::Years(12),
+                ..
+            })
+        ));
+        // Not exactly six digits.
+        assert!(Request::decode(
+            &network,
+            &padded(&format!("ZNS:claim:4206:forever:alice:{TEST_UA}"))
+        )
+        .is_none());
+        assert!(Request::decode(
+            &network,
+            &padded(&format!("ZNS:claim:a1b2c3:forever:alice:{TEST_UA}"))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn rejects_extra_field_and_non_zns_and_invalid_name() {
+        let network = MainNetwork;
+        assert!(Request::decode(
+            &network,
+            &padded(&format!("ZNS:release:alice:{TEST_UA}:004206"))
+        )
+        .is_none());
+        assert!(Request::decode(&network, &padded("hello world")).is_none());
+        assert!(Request::decode(
+            &network,
+            &padded(&format!("ZNS:claim:forever:INVALID:{TEST_UA}"))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn rejects_nonzero_tail_after_the_first_nul() {
+        let network = MainNetwork;
+        let s = format!("ZNS:claim:forever:alice:{TEST_UA}");
+        let mut m = [0u8; 512];
+        m[..s.len()].copy_from_slice(s.as_bytes());
+        m[400] = 1; // garbage inside the zero tail
+        let memo = MemoBytes::from_bytes(&m).expect("a 512-byte memo fits");
+        // The tail lands inside the terminal UA field — nothing parses.
+        assert!(Request::decode(&network, &memo).is_none());
+        assert!(Challenge::decode(&network, &memo).is_none());
+        assert!(matches!(
+            MintInbound::decode(&network, txid(), &memo),
+            MintInbound::Unrecognized(_)
+        ));
+    }
+
+    #[test]
+    fn unknown_receiver_ua_is_rejected() {
+        let network = MainNetwork;
+        // A valid UA carrying an unknown receiver — ZIP-316's
+        // forward-compatibility channel, unbounded by design.
+        let ua = Ua::try_from_items(vec![
+            Receiver::Orchard([0x07; 43]),
+            Receiver::Unknown {
+                typecode: 5,
+                data: vec![0u8; 32],
+            },
+        ])
+        .expect("ZIP-316 composition rules permit it")
+        .encode(&zcash_protocol::consensus::NetworkType::Main);
+
+        // No verb parses — requests and echoes alike.
+        for memo in [
+            format!("ZNS:claim:forever:alice:{ua}"),
+            format!("ZNS:update:none:alice:{ua}"),
+            format!("ZNS:release:alice:{ua}"),
+            format!("ZNS:otp:417293:alice:update:{ua}"),
+        ] {
+            assert!(matches!(
+                MintInbound::decode(&network, txid(), &padded(&memo)),
+                MintInbound::Unrecognized(_)
+            ));
+        }
+    }
+
+    /// The pre-fix corpus vector: a real Sapling+P2pkh address with no
+    /// Orchard receiver — inside the memo budget, but a controller the
+    /// relay lane could never challenge.
+    const ORCHARDLESS_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
+
+    #[test]
+    fn orchardless_known_receiver_ua_is_rejected() {
+        let network = MainNetwork;
+        assert!(Request::decode(
+            &network,
+            &padded(&format!("ZNS:claim:forever:alice:{ORCHARDLESS_UA}"))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn largest_known_receiver_ua_is_accepted() {
+        let network = MainNetwork;
+        // The corpus vector carries every known receiver kind — the
+        // longest address shape the guard admits.
+        assert!(TEST_UA.len() > 200);
+        assert!(Request::decode(
+            &network,
+            &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"))
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn decode_classifies_each_kind() {
+        let network = MainNetwork;
+        let txid = txid();
+
+        let echo = padded(&format!("ZNS:otp:417293:alice:update:{TEST_UA}"));
+        assert!(matches!(
+            MintInbound::decode(&network, txid, &echo),
+            MintInbound::Echo(_)
+        ));
+        let request = padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"));
+        assert!(matches!(
+            MintInbound::decode(&network, txid, &request),
+            MintInbound::Request(_)
+        ));
+        // A bare payment: the txid names it in the log.
+        let garbage = padded("hello world");
+        assert!(matches!(
+            MintInbound::decode(&network, txid, &garbage),
+            MintInbound::Unrecognized(named) if named == txid
+        ));
+    }
+
+    #[test]
+    fn challenge_roundtrips() {
+        let network = MainNetwork;
+        let ua = test_ua();
+
+        for action in [Action::Update, Action::Release] {
+            let challenge = Challenge {
+                code: OtpCode::for_test(*b"417293"),
+                name: Name::parse("alice").unwrap(),
+                action,
+                ua: ua.clone(),
+            };
+            let memo = challenge.encode(&network).expect("non-claims encode");
+            assert_eq!(Challenge::decode(&network, &memo), Some(challenge));
+        }
+        // Claims are never challenged: encode refuses.
+        let claim = Challenge {
+            code: OtpCode::for_test(*b"417293"),
+            name: Name::parse("alice").unwrap(),
+            action: Action::Claim,
+            ua,
+        };
+        assert!(claim.encode(&network).is_none());
+    }
 }

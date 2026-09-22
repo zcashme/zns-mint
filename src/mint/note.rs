@@ -533,7 +533,7 @@ pub fn decrypt_treasury_memos(
     zcash_primitives::transaction::TxId,
     usize,
     zcash_protocol::value::Zatoshis,
-    [u8; 512],
+    zcash_protocol::memo::MemoBytes,
 )> {
     let ivk = treasury_keys
         .orchard_fvk()
@@ -555,6 +555,8 @@ pub fn decrypt_treasury_memos(
             {
                 let paid = zcash_protocol::value::Zatoshis::from_u64(note.value().inner())
                     .expect("note values are consensus-bounded");
+                let memo = zcash_protocol::memo::MemoBytes::from_bytes(&memo)
+                    .expect("a decrypted memo is 512 bytes");
                 memos.push((tx.txid(), action_index, paid, memo));
             }
         }
