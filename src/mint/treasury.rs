@@ -20,7 +20,9 @@ use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::FeeError;
+use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
 
@@ -56,7 +58,7 @@ pub fn sweep_to_vault<P: Parameters>(
     output_prover: &sapling::circuit::OutputParameters,
     today: i64,
     previous_day: i64,
-) -> Option<zcash_primitives::transaction::Transaction> {
+) -> Option<Transaction> {
     if today <= previous_day {
         return None;
     }
@@ -181,20 +183,9 @@ pub fn challenge<P: Parameters>(
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
     controller: &zcash_keys::address::UnifiedAddress,
-    memo: zcash_protocol::memo::MemoBytes,
+    memo: MemoBytes,
     relay_value: Zatoshis,
-) -> Option<zcash_primitives::transaction::Transaction> {
-    use zcash_client_backend::data_api::wallet::input_selection::{
-        GreedyInputSelector, SpendPolicy,
-    };
-    use zcash_client_backend::data_api::wallet::{
-        create_proposed_transactions, propose_transfer, ConfirmationsPolicy, SpendingKeys,
-    };
-    use zcash_client_backend::data_api::WalletRead as _;
-    use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
-    use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
-    use zcash_client_backend::wallet::OvkPolicy;
-
+) -> Option<Transaction> {
     let request = zip321::TransactionRequest::new(vec![zip321::Payment::new(
         zcash_keys::address::Address::Unified(controller.clone()).to_zcash_address(network),
         Some(relay_value),
@@ -210,7 +201,7 @@ pub fn challenge<P: Parameters>(
     let change_strategy = SingleOutputChangeStrategy::<Wallet<P>>::new(
         StandardFeeRule::Zip317,
         None,
-        zcash_protocol::ShieldedPool::Ironwood,
+        ShieldedPool::Ironwood,
         DustOutputPolicy::default(),
     );
 
@@ -219,7 +210,7 @@ pub fn challenge<P: Parameters>(
         P,
         GreedyInputSelector<Wallet<P>>,
         SingleOutputChangeStrategy<Wallet<P>>,
-        std::convert::Infallible,
+        Infallible,
     >(
         wallet,
         network,
@@ -227,7 +218,7 @@ pub fn challenge<P: Parameters>(
         &input_selector,
         &change_strategy,
         request,
-        ConfirmationsPolicy::new_symmetrical(std::num::NonZeroU32::MIN, false),
+        ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false),
         &SpendPolicy::default(),
         None,
         None,
@@ -240,7 +231,7 @@ pub fn challenge<P: Parameters>(
         P,
         GreedyInputSelectorError,
         StandardFeeRule,
-        zcash_primitives::transaction::fees::zip317::FeeError,
+        FeeError,
         NoteId,
     >(
         wallet,
