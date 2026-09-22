@@ -96,7 +96,7 @@ async fn main() {
 
     let mut connection = TipSession::open(chain).await;
     'run: loop {
-        let (best_height, best_hash) = tokio::select! {
+        let (best_height, _) = tokio::select! {
             tip = connection.next_tip(&source) => match tip {
                 Ok(tip) => tip,
                 Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),

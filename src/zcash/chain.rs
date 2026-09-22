@@ -713,7 +713,7 @@ mod tests {
         hex::encode(bytes)
     }
 
-    fn treestate(ironwood: Option<String>, sapling: Option<String>) -> TreeStateResponse {
+    fn treestate(ironwood: Option<String>) -> TreeStateResponse {
         TreeStateResponse {
             height: 1000,
             hash: hex::encode([0u8; 32]),
@@ -739,8 +739,7 @@ mod tests {
     fn treestate_absent_ironwood_is_the_empty_frontier() {
         // The activation−1 answer: the key is omitted, and "absent" and
         // "empty" are the same value to every consumer.
-        let state =
-            chain_state_from_rpc_response(treestate(None, None)).expect("a valid treestate");
+        let state = chain_state_from_rpc_response(treestate(None)).expect("a valid treestate");
         assert_eq!(state.block_height(), BlockHeight::from_u32(1000));
         assert_eq!(state.block_hash(), BlockHash([0u8; 32]));
         assert_eq!(*state.final_ironwood_tree(), Frontier::empty());
@@ -748,7 +747,7 @@ mod tests {
 
     #[test]
     fn treestate_garbage_ironwood_hex_is_a_bad_checkpoint() {
-        let garbage = treestate(Some("zz".to_string()), None);
+        let garbage = treestate(Some("zz".to_string()));
         assert!(matches!(
             chain_state_from_rpc_response(garbage),
             Err(TransportError::BadCheckpoint(_))
@@ -757,7 +756,7 @@ mod tests {
 
     #[test]
     fn treestate_malformed_hash_is_bad_node_data() {
-        let mut garbage = treestate(None, None);
+        let mut garbage = treestate(None);
         garbage.hash = "not-hex!".to_string();
         assert!(matches!(
             chain_state_from_rpc_response(garbage),
@@ -767,7 +766,7 @@ mod tests {
 
     #[test]
     fn treestate_missing_sapling_state_is_bad_node_data() {
-        let mut garbage = treestate(None, None);
+        let mut garbage = treestate(None);
         garbage.sapling.commitments.final_state = None;
         assert!(matches!(
             chain_state_from_rpc_response(garbage),

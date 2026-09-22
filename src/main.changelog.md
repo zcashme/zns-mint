@@ -4,6 +4,18 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-22 — The chain moving mid-catch-up re-converges, never kills (audit H7)
+
+- The run loop is `'run`-labeled, and every race arm — the ancestor
+  walk's `-8`, the tree-state and block fetches', a fetched block that
+  no longer extends the applied position — warns and restarts the
+  cycle: nothing was mutated before the detection, the reorg's own tip
+  notification is already queued in the change-only stream (the next
+  wake is immediate), and the reconcile walk re-derives everything.
+  The terminal and post-loop photograph asserts die with it: the tip
+  that opened the cycle is advisory, never a promise. Verdicts stay
+  fatal; races stopped being them.
+
 ## 2026-09-21 — The challenge birth leaves the run loop (#120)
 
 - The relay arm and the liveness loop no longer hand-build the
