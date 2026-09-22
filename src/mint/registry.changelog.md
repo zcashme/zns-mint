@@ -2,6 +2,25 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-09-21 — The anchor pool goes mint-private; the canon vectors carry the law (#127)
+
+- The anchor lineage pool's live set and its height-checkpointed rewind
+  history move from `Registry`'s fields into the private
+  `registry/anchor_pool` module — no behavioural change; the three pool
+  operations are verbatim moves. The cross-repo contract is the canon
+  fixture, not the type: `AnchorPool` is crate-private, its API narrows
+  to what production uses, and `ANCHOR_POOL_SIZE` stays exported.
+- `tests/canon_vectors.rs` + `tests/fixtures/canon-vectors-v1.json`:
+  the admission law as a byte-fixed event→snapshot artifact — seven
+  scenarios (ceremony fill, backed claim, unbacked claim, duplicate
+  claim, claim-after-release, update-then-release, reorg) pin per-event
+  Registry state, including real `zns_rcm` commitments. Claim events
+  carry an explicit `expect: accepted|rejected`, so the DSL itself
+  expresses the duplicate-claim rule: rejected for the record, advanced
+  for the pool. `cargo test` drift-checks the fixture against the
+  emitter; regenerate with `CANON_VECTORS_REGEN=1 cargo test --test
+  canon_vectors`.
+
 ## 2026-09-21 — Duplicate confirmed claims are ignored: first confirmed wins (#116)
 
 - `accept_claim` no longer asserts the name is free-or-released. A
