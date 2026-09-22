@@ -65,10 +65,16 @@ impl ChainClient {
 pub(crate) type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
 
 /// A tip announcement, decoded: `(height, hash)` from one message.
-pub(crate) fn tip_height_hash(tip: &BlockHashAndHeight) -> (BlockHeight, BlockHash) {
-    let height = BlockHeight::from_u32(tip.height);
-    let hash = block_hash_from_display(&tip.hash).expect("FATAL: invalid tip hash from Zebra");
-    (height, hash)
+/// A malformed hash is bad node data — the typed verdict, never a panic.
+pub(crate) fn tip_height_hash(
+    tip: &BlockHashAndHeight,
+) -> Result<(BlockHeight, BlockHash), TransportError> {
+    let bytes = tip
+        .hash_display_order()
+        .ok_or(TransportError::BadNodeData("tip hash length"))?;
+    let hash =
+        block_hash_from_display(bytes).ok_or(TransportError::BadNodeData("tip hash length"))?;
+    Ok((BlockHeight::from_u32(tip.height), hash))
 }
 
 // ============================================================================
@@ -96,7 +102,7 @@ impl TipSession {
     ) -> Result<(BlockHeight, BlockHash), TransportError> {
         let announced = match self.stream.next().await {
             Some(Ok(notification)) => {
-                let announced = tip_height_hash(&notification);
+                let announced = tip_height_hash(&notification)?;
                 tracing::info!(height = u32::from(announced.0), "tip notification received");
                 Some(announced)
             }
