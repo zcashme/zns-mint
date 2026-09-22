@@ -513,9 +513,14 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .iter()
         .map(|(index, _)| orchard::tree::MerkleHashOrchard::from_cmx(&candidates[*index].cmx))
         .collect();
-    wallet
-        .put_blocks_marked(from_state, vec![scanned], &marks)
-        .expect("FATAL: wallet block commit failed");
+    if let Err(error) = wallet.put_blocks_marked(from_state, vec![scanned], &marks) {
+        match error {
+            crate::wallet::WalletError::UnexpectedOrchardReceive => {
+                panic!("FATAL: ordinary-Orchard receive — consensus violation or key compromise")
+            }
+            error => panic!("FATAL: wallet block commit failed: {error}"),
+        }
+    }
     // Upstream's ScannedBlock drops note plaintexts; the Treasury
     // lane's memos were decrypted above. Decoded once, here, they
     // are recorded as the requests they carry — nothing is stored
