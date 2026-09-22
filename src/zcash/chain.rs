@@ -65,10 +65,16 @@ impl ChainClient {
 pub(crate) type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
 
 /// A tip announcement, decoded: `(height, hash)` from one message.
-pub(crate) fn tip_height_hash(tip: &BlockHashAndHeight) -> (BlockHeight, BlockHash) {
-    let height = BlockHeight::from_u32(tip.height);
-    let hash = block_hash_from_display(&tip.hash).expect("FATAL: invalid tip hash from Zebra");
-    (height, hash)
+/// A malformed hash is bad node data — the typed verdict, never a panic.
+pub(crate) fn tip_height_hash(
+    tip: &BlockHashAndHeight,
+) -> Result<(BlockHeight, BlockHash), TransportError> {
+    let bytes = tip
+        .hash_display_order()
+        .ok_or(TransportError::BadNodeData("tip hash length"))?;
+    let hash =
+        block_hash_from_display(bytes).ok_or(TransportError::BadNodeData("tip hash length"))?;
+    Ok((BlockHeight::from_u32(tip.height), hash))
 }
 
 // ============================================================================
@@ -96,7 +102,7 @@ impl TipSession {
     ) -> Result<(BlockHeight, BlockHash), TransportError> {
         let announced = match self.stream.next().await {
             Some(Ok(notification)) => {
-                let announced = tip_height_hash(&notification);
+                let announced = tip_height_hash(&notification)?;
                 tracing::info!(height = u32::from(announced.0), "tip notification received");
                 Some(announced)
             }
@@ -179,7 +185,8 @@ impl JsonRpc {
             .map_err(|_| TransportError::BadNodeData("getblockhash height"))?;
         let hash_hex: String = self
             .send_request("getblockhash", [index])
-            .await?
+            .await
+            .map_err(not_on_best_chain)?
             .ok_or(TransportError::BadNodeData("getblockhash returned null"))?;
 
         let display_bytes =
@@ -327,6 +334,24 @@ impl super::CanonicalBlockSource {
         height: BlockHeight,
     ) -> Result<Block, TransportError> {
         self.0.get_block(network, height).await
+    }
+
+    /// A best-chain block hash by height (see [`JsonRpc::get_block_hash`]).
+    pub async fn get_block_hash(&self, height: BlockHeight) -> Result<BlockHash, TransportError> {
+        self.0.get_block_hash(height).await
+    }
+
+    /// The shielded tree state at a height (see [`JsonRpc::chain_state_at`]).
+    pub async fn chain_state_at(&self, height: BlockHeight) -> Result<ChainState, TransportError> {
+        self.0.chain_state_at(height).await
+    }
+
+    /// A block header's `(hash, height, time)` (see [`JsonRpc::get_block_header`]).
+    pub async fn get_block_header(
+        &self,
+        height: BlockHeight,
+    ) -> Result<(BlockHash, BlockHeight, Timestamp), TransportError> {
+        self.0.get_block_header(height).await
     }
 }
 
@@ -671,5 +696,81 @@ mod tests {
             expected,
             "display-order reversal must not round-trip to the HashSer node"
         );
+    }
+    /// A commitment tree's hex, as `finalState` carries it — built with
+    /// the upstream writer so the fixtures exercise our reader against
+    /// the real encoding.
+    fn tree_hex<Node>() -> String
+    where
+        Node: HashSer + incrementalmerkletree::Hashable + Clone,
+    {
+        let mut bytes = Vec::new();
+        zcash_primitives::merkle_tree::write_commitment_tree::<Node, _, 32>(
+            &incrementalmerkletree::frontier::CommitmentTree::<Node, 32>::empty(),
+            &mut bytes,
+        )
+        .expect("an empty tree serializes");
+        hex::encode(bytes)
+    }
+
+    fn treestate(ironwood: Option<String>) -> TreeStateResponse {
+        TreeStateResponse {
+            height: 1000,
+            hash: hex::encode([0u8; 32]),
+            sapling: ShieldedTreeState {
+                commitments: TreeCommitments {
+                    final_state: Some(tree_hex::<SaplingNode>()),
+                },
+            },
+            orchard: ShieldedTreeState {
+                commitments: TreeCommitments {
+                    final_state: Some(tree_hex::<MerkleHashOrchard>()),
+                },
+            },
+            ironwood: ironwood.map(|final_state| ShieldedTreeState {
+                commitments: TreeCommitments {
+                    final_state: Some(final_state),
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn treestate_absent_ironwood_is_the_empty_frontier() {
+        // The activation−1 answer: the key is omitted, and "absent" and
+        // "empty" are the same value to every consumer.
+        let state = chain_state_from_rpc_response(treestate(None)).expect("a valid treestate");
+        assert_eq!(state.block_height(), BlockHeight::from_u32(1000));
+        assert_eq!(state.block_hash(), BlockHash([0u8; 32]));
+        assert_eq!(*state.final_ironwood_tree(), Frontier::empty());
+    }
+
+    #[test]
+    fn treestate_garbage_ironwood_hex_is_a_bad_checkpoint() {
+        let garbage = treestate(Some("zz".to_string()));
+        assert!(matches!(
+            chain_state_from_rpc_response(garbage),
+            Err(TransportError::BadCheckpoint(_))
+        ));
+    }
+
+    #[test]
+    fn treestate_malformed_hash_is_bad_node_data() {
+        let mut garbage = treestate(None);
+        garbage.hash = "not-hex!".to_string();
+        assert!(matches!(
+            chain_state_from_rpc_response(garbage),
+            Err(TransportError::BadNodeData(_))
+        ));
+    }
+
+    #[test]
+    fn treestate_missing_sapling_state_is_bad_node_data() {
+        let mut garbage = treestate(None);
+        garbage.sapling.commitments.final_state = None;
+        assert!(matches!(
+            chain_state_from_rpc_response(garbage),
+            Err(TransportError::BadNodeData(_))
+        ));
     }
 }

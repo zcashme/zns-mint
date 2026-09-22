@@ -1,6 +1,6 @@
 //! Submission: "carry this" — one honest attempt, the node's answer.
 
-use zcash_primitives::transaction::Transaction;
+use zcash_primitives::transaction::{Transaction, TxId};
 
 use super::RETRY_PAUSE;
 
@@ -77,13 +77,17 @@ impl super::CanonicalBlockSource {
         // Serializing a completed Transaction into a Vec cannot fail; the
         // io::Result exists for streaming writers.
         tx.write(&mut tx_bytes)
-            .map_err(|_| TransportError::BadNodeData("transaction serialization failed"))?;
+            .expect("serializing a completed transaction cannot fail");
 
         match self.0.send(&hex::encode(tx_bytes)).await {
-            Ok(returned_txid) => {
-                debug_assert_eq!(returned_txid, tx.txid().to_string());
-                Ok(SubmitOutcome::Accepted)
-            }
+            Ok(returned_txid) => match TxId::from_hex(&returned_txid) {
+                Some(txid) if txid == tx.txid() => Ok(SubmitOutcome::Accepted),
+                // A success envelope that names another transaction — or
+                // no transaction at all — is a node verdict, not ours.
+                _ => Ok(SubmitOutcome::Rejected(TransportError::BadNodeData(
+                    "sendrawtransaction named a different transaction",
+                ))),
+            },
             Err(TransportError::Rpc(ref rpc)) if rpc.is_tx_already_in_chain() => {
                 Ok(SubmitOutcome::Mined)
             }

@@ -20,14 +20,15 @@ pub use zebra_indexer_proto::MempoolChangeKind;
 use std::{any::type_name, fmt, time::Duration};
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::Request;
 use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
 use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
+use zcash_protocol::constants::MAX_BLOCK_BYTES;
 
 /// The wait between retries of a retryable transport call.
-pub(crate) const RETRY_PAUSE: Duration = Duration::from_secs(5);
+pub const RETRY_PAUSE: Duration = Duration::from_secs(5);
 
 #[cfg(not(all(feature = "testnet", not(feature = "regtest"))))]
 pub(crate) const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:8232";
@@ -35,6 +36,11 @@ pub(crate) const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:8232";
 pub(crate) const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:18232";
 
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A consensus-max block hex-encodes to `2 × MAX_BLOCK_BYTES`; the cap
+/// doubles that for headroom. Over the cap is bad node data, not
+/// transport — the pricing lane's discipline, transplanted.
+pub(crate) const MAX_RESPONSE_BYTES: usize = 4 * MAX_BLOCK_BYTES;
 
 // ============================================================================
 // The JSON-RPC dialect — one type, impls in every conversation file
@@ -93,7 +99,10 @@ impl JsonRpc {
         Ok(response.result)
     }
 
-    /// One connection, one POST, one collected body.
+    /// One connection, one POST, one collected body — bounded by
+    /// consensus and covered by one deadline, headers through the last
+    /// byte. A stalled body times out; an oversized one is bad node
+    /// data, not transport.
     async fn round_trip(&self, body: String) -> Result<(http::StatusCode, Bytes), TransportError> {
         // The request is entirely static, so building it cannot fail.
         let request = Request::builder()
@@ -103,12 +112,23 @@ impl JsonRpc {
             .body(Full::new(Bytes::from(body)))
             .expect("building the static request cannot fail");
 
-        let response = tokio::time::timeout(REQUEST_TIMEOUT, self.client.request(request))
-            .await
-            .map_err(|_| TransportError::Timeout)??;
-
-        let status = response.status();
-        let body = response.into_body().collect().await?.to_bytes();
+        let (status, body) = tokio::time::timeout(REQUEST_TIMEOUT, async {
+            let response = self.client.request(request).await?;
+            let status = response.status();
+            let bytes = Limited::new(response.into_body(), MAX_RESPONSE_BYTES)
+                .collect()
+                .await
+                .map_err(|error| match error.downcast::<hyper::Error>() {
+                    Ok(error) => TransportError::Hyper(*error),
+                    // The length-limit error is the only other thing
+                    // this body can produce.
+                    Err(_) => TransportError::BadNodeData("response exceeds the size cap"),
+                })?
+                .to_bytes();
+            Ok::<_, TransportError>((status, bytes))
+        })
+        .await
+        .map_err(|_| TransportError::Timeout)??;
 
         Ok((status, body))
     }
@@ -125,7 +145,9 @@ impl Default for JsonRpc {
 // ============================================================================
 
 /// The orchestrator's view of the node: canonical reads and the one place a
-/// transaction is ever broadcast.
+/// transaction is ever broadcast. The run loop holds no other handle;
+/// raw-transaction reads stay deliberately outside this charter (the
+/// mempool reader's, not the orchestrator's).
 #[derive(Clone)]
 pub struct CanonicalBlockSource(pub(crate) JsonRpc);
 

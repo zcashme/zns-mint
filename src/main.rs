@@ -10,8 +10,6 @@
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
-use std::time::Duration;
-
 use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
 use zcash_client_backend::data_api::{WalletRead as _, WalletWrite as _};
 use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
@@ -31,9 +29,7 @@ use zns_mint::mint::{
     relay, watch_mempool, Action, MintInbound, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
     REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
-use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession};
-
-const RETRY_PAUSE: Duration = Duration::from_secs(5);
+use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
 async fn main() {
@@ -99,8 +95,8 @@ async fn main() {
     ));
 
     let mut connection = TipSession::open(chain).await;
-    loop {
-        let (best_height, best_hash) = tokio::select! {
+    'run: loop {
+        let (best_height, _) = tokio::select! {
             tip = connection.next_tip(&source) => match tip {
                 Ok(tip) => tip,
                 Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
@@ -162,7 +158,7 @@ async fn main() {
                 );
             }
             let canonical_hash = loop {
-                match rpc.get_block_hash(ancestor).await {
+                match source.get_block_hash(ancestor).await {
                     Ok(hash) => break hash,
                     Err(error) if error.is_retryable() => {
                         tracing::warn!(
@@ -171,6 +167,13 @@ async fn main() {
                             "ancestor hash unavailable; retrying"
                         );
                         tokio::time::sleep(RETRY_PAUSE).await;
+                    }
+                    Err(TransportError::NotOnBestChain) => {
+                        tracing::warn!(
+                            height = u32::from(ancestor),
+                            "ancestor left the best chain mid-walk; re-converging"
+                        );
+                        continue 'run;
                     }
                     Err(error) => {
                         panic!("FATAL: Zebra returned an invalid ancestor hash: {error}")
@@ -194,9 +197,9 @@ async fn main() {
             // mix histories after a deep reorg.
             mtp = zns_mint::mint::mtp::MtpTracker::default();
             mtp.backfill(ancestor, |height| {
-                let rpc = rpc.clone();
+                let source = source.clone();
                 async move {
-                    let (_, _, timestamp) = rpc.get_block_header(height).await?;
+                    let (_, _, timestamp) = source.get_block_header(height).await?;
                     Ok::<_, zns_mint::zcash::TransportError>(
                         u32::try_from(timestamp.as_seconds())
                             .expect("Zcash header timestamps fit u32"),
@@ -230,7 +233,7 @@ async fn main() {
             let next_height = from_height + 1;
 
             let from_state = loop {
-                match rpc.chain_state_at(from_height).await {
+                match source.chain_state_at(from_height).await {
                     Ok(state) => break state,
                     Err(error) if error.is_retryable() => {
                         tracing::warn!(
@@ -240,6 +243,13 @@ async fn main() {
                         );
                         tokio::time::sleep(RETRY_PAUSE).await;
                     }
+                    Err(TransportError::NotOnBestChain) => {
+                        tracing::warn!(
+                            height = u32::from(from_height),
+                            "the chain moved under the tree-state fetch; re-converging"
+                        );
+                        continue 'run;
+                    }
                     Err(error) => {
                         panic!("FATAL: Zebra returned an invalid previous chain state: {error}")
                     }
@@ -247,7 +257,7 @@ async fn main() {
             };
 
             let block = loop {
-                match rpc.get_block(&network, next_height).await {
+                match source.get_block(&network, next_height).await {
                     Ok(block) => break block,
                     Err(error) if error.is_retryable() => {
                         tracing::warn!(
@@ -257,17 +267,27 @@ async fn main() {
                         );
                         tokio::time::sleep(RETRY_PAUSE).await;
                     }
+                    Err(TransportError::NotOnBestChain) => {
+                        tracing::warn!(
+                            height = u32::from(next_height),
+                            "the chain moved under the block fetch; re-converging"
+                        );
+                        continue 'run;
+                    }
                     Err(error) => {
                         panic!("FATAL: Zebra returned an invalid canonical block: {error}")
                     }
                 }
             };
-            if next_height == best_height {
-                assert_eq!(
-                    block.header().hash(),
-                    best_hash,
-                    "FATAL: fetched terminal block does not match Zebra's exact tip"
+            // The chain may move under the fetches; a non-extending block
+            // discards the cycle — the reorg's own queued tip notification
+            // wakes the reconcile walk.
+            if block.header().prev_block != chain_tip.block_hash() {
+                tracing::warn!(
+                    height = u32::from(next_height),
+                    "fetched block does not extend the applied chain; re-converging"
                 );
+                continue 'run;
             }
 
             zns_mint::mint::apply_block(
@@ -285,9 +305,10 @@ async fn main() {
             );
         }
 
-        assert_eq!(chain_tip.block_height(), best_height);
-        assert_eq!(chain_tip.block_hash(), best_hash);
-        tracing::info!(height = u32::from(best_height), "scanned to tip");
+        tracing::info!(
+            height = u32::from(chain_tip.block_height()),
+            "scanned to tip"
+        );
         let tip = chain_tip.block_height();
         let tip_hash = chain_tip.block_hash();
         let target_height = tip + 1;
@@ -299,15 +320,22 @@ async fn main() {
             .current_day()
             .expect("FATAL: MTP unavailable at the applied tip");
         oracle.accumulate(fetch_round().await, today, mtp_now);
-        let exact_tip = loop {
-            match source.exact_tip().await {
-                Ok(tip) => break tip,
-                Err(error) if error.is_retryable() => {
-                    tracing::warn!(%error, "post-price tip check unavailable; retrying");
-                    tokio::time::sleep(RETRY_PAUSE).await;
-                }
-                Err(error) => panic!("FATAL: Zebra returned an invalid tip: {error}"),
+        // Transient → skip rules to next tip (like the tip-mismatch
+        // branch below); race → re-converge; bad data → fatal.
+        let exact_tip = match source.canonical_tip().await {
+            Ok(tip) => tip,
+            Err(error) if error.is_retryable() => {
+                tracing::warn!(
+                    %error,
+                    "post-catch-up tip unavailable; skipping rules until next notification"
+                );
+                continue;
             }
+            Err(TransportError::NotOnBestChain) => {
+                tracing::warn!("tip lane returned NotOnBestChain; re-converging");
+                continue 'run;
+            }
+            Err(error) => panic!("FATAL: Zebra returned an invalid tip: {error}"),
         };
         if exact_tip != (tip, tip_hash) {
             tracing::warn!(
