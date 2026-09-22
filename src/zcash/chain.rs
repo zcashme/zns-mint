@@ -697,4 +697,81 @@ mod tests {
             "display-order reversal must not round-trip to the HashSer node"
         );
     }
+    /// A commitment tree's hex, as `finalState` carries it — built with
+    /// the upstream writer so the fixtures exercise our reader against
+    /// the real encoding.
+    fn tree_hex<Node>() -> String
+    where
+        Node: HashSer + incrementalmerkletree::Hashable + Clone,
+    {
+        let mut bytes = Vec::new();
+        zcash_primitives::merkle_tree::write_commitment_tree::<Node, _, 32>(
+            &incrementalmerkletree::frontier::CommitmentTree::<Node, 32>::empty(),
+            &mut bytes,
+        )
+        .expect("an empty tree serializes");
+        hex::encode(bytes)
+    }
+
+    fn treestate(ironwood: Option<String>, sapling: Option<String>) -> TreeStateResponse {
+        TreeStateResponse {
+            height: 1000,
+            hash: hex::encode([0u8; 32]),
+            sapling: ShieldedTreeState {
+                commitments: TreeCommitments {
+                    final_state: Some(tree_hex::<SaplingNode>()),
+                },
+            },
+            orchard: ShieldedTreeState {
+                commitments: TreeCommitments {
+                    final_state: Some(tree_hex::<MerkleHashOrchard>()),
+                },
+            },
+            ironwood: ironwood.map(|final_state| ShieldedTreeState {
+                commitments: TreeCommitments {
+                    final_state: Some(final_state),
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn treestate_absent_ironwood_is_the_empty_frontier() {
+        // The activation−1 answer: the key is omitted, and "absent" and
+        // "empty" are the same value to every consumer.
+        let state =
+            chain_state_from_rpc_response(treestate(None, None)).expect("a valid treestate");
+        assert_eq!(state.block_height(), BlockHeight::from_u32(1000));
+        assert_eq!(state.block_hash(), BlockHash([0u8; 32]));
+        assert_eq!(*state.final_ironwood_tree(), Frontier::empty());
+    }
+
+    #[test]
+    fn treestate_garbage_ironwood_hex_is_a_bad_checkpoint() {
+        let garbage = treestate(Some("zz".to_string()), None);
+        assert!(matches!(
+            chain_state_from_rpc_response(garbage),
+            Err(TransportError::BadCheckpoint(_))
+        ));
+    }
+
+    #[test]
+    fn treestate_malformed_hash_is_bad_node_data() {
+        let mut garbage = treestate(None, None);
+        garbage.hash = "not-hex!".to_string();
+        assert!(matches!(
+            chain_state_from_rpc_response(garbage),
+            Err(TransportError::BadNodeData(_))
+        ));
+    }
+
+    #[test]
+    fn treestate_missing_sapling_state_is_bad_node_data() {
+        let mut garbage = treestate(None, None);
+        garbage.sapling.commitments.final_state = None;
+        assert!(matches!(
+            chain_state_from_rpc_response(garbage),
+            Err(TransportError::BadNodeData(_))
+        ));
+    }
 }
