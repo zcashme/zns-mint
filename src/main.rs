@@ -320,8 +320,21 @@ async fn main() {
             .current_day()
             .expect("FATAL: MTP unavailable at the applied tip");
         oracle.accumulate(fetch_round().await, today, mtp_now);
+        // Transient → skip rules to next tip (like the tip-mismatch
+        // branch below); race → re-converge; bad data → fatal.
         let exact_tip = match source.canonical_tip().await {
             Ok(tip) => tip,
+            Err(error) if error.is_retryable() => {
+                tracing::warn!(
+                    %error,
+                    "post-catch-up tip unavailable; skipping rules until next notification"
+                );
+                continue;
+            }
+            Err(TransportError::NotOnBestChain) => {
+                tracing::warn!("tip lane returned NotOnBestChain; re-converging");
+                continue 'run;
+            }
             Err(error) => panic!("FATAL: Zebra returned an invalid tip: {error}"),
         };
         if exact_tip != (tip, tip_hash) {
