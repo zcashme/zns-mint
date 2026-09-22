@@ -1070,3 +1070,12 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
   boot now treats NU6.3/Ironwood activation as an invariant and fails before
   activation; the explicit `pre-nu63-activation` feature gates the development
   exception and empty-Ironwood-tree seeding path.
+
+## 2026-09-22 — The node's tip is never pushed into the wallet
+
+- The run loop no longer supplies Zebra's `best_height` through
+  `update_chain_tip`. The node's position lives in the loop's own local,
+  where it is fetched and used; the wallet maintains its chain knowledge
+  itself (scanning and chain-state adoption, through the one writer), so
+  confirmations and summaries are counted against what the wallet has
+  actually verified.

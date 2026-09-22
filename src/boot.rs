@@ -30,7 +30,7 @@ use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::{
     chain::ChainState, BlockMetadata, WalletCommitmentTrees as _,
 };
-use zcash_client_backend::data_api::{WalletRead as _, WalletWrite as _};
+use zcash_client_backend::data_api::WalletRead as _;
 
 // ---------------------------------------------------------------------------
 // Boot life-cycle
@@ -311,13 +311,12 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             crate::mint::registry::ANCHOR_POOL_SIZE
         );
         // Boot refuses to run with a treasury below MIN_TREASURY_BALANCE.
-        wallet
-            .update_chain_tip(best_height)
-            .expect("FATAL: wallet rejected Zebra's canonical tip");
+        // The wallet's chain knowledge exists from seeding and boot sync —
+        // the node's tip is never pushed into the wallet.
         let treasury_balance = wallet
             .get_wallet_summary(ConfirmationsPolicy::MIN)
             .expect("FATAL: balance summary failed")
-            .expect("FATAL: Zebra tip not recorded at boot check")
+            .expect("FATAL: chain knowledge missing at boot balance check")
             .account_balances()
             .get(&TREASURY_ACCOUNT)
             .expect("FATAL: treasury account missing from summary")

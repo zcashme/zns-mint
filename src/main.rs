@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
-use zcash_client_backend::data_api::{WalletRead as _, WalletWrite as _};
+use zcash_client_backend::data_api::WalletRead as _;
 use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
@@ -144,9 +144,6 @@ async fn main() {
                 continue;
             }
         };
-        wallet
-            .update_chain_tip(best_height)
-            .expect("FATAL: wallet rejected Zebra's canonical tip");
 
         // Compare the wallet's own cursor with Zebra at the same height.
         // If they disagree, walk backward until both name the same block;
