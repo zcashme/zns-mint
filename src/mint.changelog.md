@@ -1,5 +1,20 @@
 # Mint live-work design record
 
+## 2026-09-22 — Treasury memos classify behind one door (#133)
+
+- `MintInbound::decode(network, txid, &memo)` in `mint.rs` is the
+  single intake: each decrypted Treasury memo classifies once, at
+  block application. `treasury::parse_request` moves in as
+  `Request::decode` beside the enum it produces; `Challenge::decode`
+  and the controller-UA guard sit beside it, private now. The
+  duplicated NUL/UTF-8 preludes collapse into one `memo_text`.
+- `apply_block` records the door's verdict per memo — the
+  classification loop and its cross-module call into `treasury.rs`
+  are gone. `treasury.rs` keeps wallet ops only: sweep, challenge
+  builder, queue.
+- Grammar tests move into `mint.rs`; the door gains totality,
+  disjointness, and roundtrip tests.
+
 ## 2026-09-21 — The walk is queue-free: chain application, not orchestration (#116)
 
 - `apply_block` loses its `NameNoteQueue` parameter and its
