@@ -30,6 +30,18 @@
   `main`'s enactment drain — and the walk applies the chain to the
   registry, wallet, and Treasury intake only. Boot's never-read
   `scratch_orders` fixture dies with the parameter.
+## 2026-09-21 — The relay lane, extracted: two entrances, one policy (#121)
+
+- `relay` is the relay-lane body lifted verbatim from the run loop:
+  the decided-refusal battery, the challenge fee, and the OTP
+  challenge they pay for, parameterized by the trigger's height and
+  a lane label. `NameRecord::admits` names the record's five
+  refusals where its data lives (registry.rs); its second caller
+  arrives in the same diff. `watch_mempool` is the quick path's
+  reader — announce, fetch, decrypt, forward; it classifies exactly
+  as `apply_block` does and decides nothing. The block pass stays
+  the only intake: the reader records nothing, and a gap in the
+  stream is a gap in quickness, never in truth.
 
 ## 2026-09-21 — Pre-sale AccessCode + publishable key (#83)
 

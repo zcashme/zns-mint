@@ -32,6 +32,20 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
 - The walk no longer takes the NameNoteQueue (see mint.changelog.md);
   a duplicate claim that still lands on chain is ignored, not fatal
   (see registry.changelog.md).
+## 2026-09-21 — The relay lane answers at mempool speed (#121)
+
+- Update and release triggers relay the moment Zebra reports them
+  in the mempool — no wait for the trigger's block. One reader task
+  (`watch_mempool`) turns mempool announcements into `MintInbound`
+  candidates on a bounded channel; the orchestrator's `select!`
+  match decides which lanes are quick, and `mint::relay` is the one
+  policy both entrances call — the drain with the carrying block's
+  height, the quick path with the next. Best-effort and forgetful:
+  the quick path never defers and never remembers, the confirmed
+  trigger still re-enters the drain, and the pending-tuple check
+  absorbs the duplicate in either race order. Claims, echoes, and
+  bare payments stay block-cadence; the run loop stays one
+  function.
 
 ## 2026-09-21 — The relay lane's first payment gate (issue #18)
 

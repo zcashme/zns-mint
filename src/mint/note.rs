@@ -535,30 +535,49 @@ pub fn decrypt_treasury_memos(
     zcash_protocol::value::Zatoshis,
     zcash_protocol::memo::MemoBytes,
 )> {
-    let ivk = treasury_keys
-        .orchard_fvk()
+    let mut memos = Vec::new();
+    for tx in block.vtx() {
+        for (action_index, paid, memo) in decrypt_treasury_tx(tx, &treasury_keys.orchard_fvk()) {
+            memos.push((tx.txid(), action_index, paid, memo));
+        }
+    }
+    memos
+}
+
+/// Trial-decrypts one transaction's Ironwood actions sent to the
+/// Treasury's external address, exposing each `(action index, value,
+/// memo)` — the per-transaction core [`decrypt_treasury_memos`] has
+/// always embedded, callable on a mempool fetch. The viewing key is the
+/// reader's whole need: this pass decrypts, it never signs.
+pub fn decrypt_treasury_tx(
+    tx: &zcash_primitives::transaction::Transaction,
+    treasury_fvk: &orchard::keys::FullViewingKey,
+) -> Vec<(
+    usize,
+    zcash_protocol::value::Zatoshis,
+    zcash_protocol::memo::MemoBytes,
+)> {
+    let ivk = treasury_fvk
         .to_ivk(orchard::keys::Scope::External)
         .prepare();
 
     let mut memos = Vec::new();
-    for tx in block.vtx() {
-        let Some(bundle) = tx.ironwood_bundle() else {
-            continue;
-        };
-        if bundle.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3() {
-            continue;
-        }
-        for (action_index, action) in bundle.actions().iter().enumerate() {
-            let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
-            if let Some((note, _recipient, memo)) =
-                zcash_note_encryption::try_note_decryption(&domain, &ivk, action)
-            {
-                let paid = zcash_protocol::value::Zatoshis::from_u64(note.value().inner())
-                    .expect("note values are consensus-bounded");
-                let memo = zcash_protocol::memo::MemoBytes::from_bytes(&memo)
-                    .expect("a decrypted memo is 512 bytes");
-                memos.push((tx.txid(), action_index, paid, memo));
-            }
+    let Some(bundle) = tx.ironwood_bundle() else {
+        return memos;
+    };
+    if bundle.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3() {
+        return memos;
+    }
+    for (action_index, action) in bundle.actions().iter().enumerate() {
+        let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
+        if let Some((note, _recipient, memo)) =
+            zcash_note_encryption::try_note_decryption(&domain, &ivk, action)
+        {
+            let paid = zcash_protocol::value::Zatoshis::from_u64(note.value().inner())
+                .expect("note values are consensus-bounded");
+            let memo = zcash_protocol::memo::MemoBytes::from_bytes(&memo)
+                .expect("a decrypted memo is 512 bytes");
+            memos.push((action_index, paid, memo));
         }
     }
     memos
