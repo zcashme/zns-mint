@@ -383,7 +383,7 @@ mod tests {
         let old_rcm = commitment(1);
         let new_rcm = commitment(2);
         let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
-        let shared = OtpCode::for_test([b'1', b'2', b'3', b'4', b'5', b'6']);
+        let shared = OtpCode::for_test(*b"123456");
 
         q.issue(OtpRequest {
             name: alice.clone(),
