@@ -388,8 +388,7 @@ async fn main() {
                             .record(name)
                             .is_some_and(|r| r.action != Action::Release);
                         match zns_mint::mint::presale::decide(
-                            today,
-                            zns_mint::mint::presale::lookup_name(name).await,
+                            zns_mint::mint::presale::lookup_name(name, mtp_now).await,
                             code.as_ref(),
                             name_live,
                             access_code_key.as_bytes(),
