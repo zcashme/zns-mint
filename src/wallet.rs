@@ -274,6 +274,16 @@ impl<P: Parameters> Wallet<P> {
             .or_else(|| (height == self.seed.block_height()).then_some(self.seed))
     }
 
+    /// The tip of the wallet's applied chain: the wallet's own position,
+    /// which may lag the node's tip. Before the first applied block this is
+    /// the boot origin (`seed`).
+    pub fn tip(&self) -> BlockMetadata {
+        self.blocks
+            .last_key_value()
+            .map(|(_, metadata)| *metadata)
+            .unwrap_or(self.seed)
+    }
+
     /// Truncates the wallet to `max_height` and returns the
     /// [`BlockMetadata`] at that height — the new chain tip after reorg.
     pub fn truncate_to(&mut self, max_height: BlockHeight) -> Result<BlockMetadata, WalletError> {
@@ -749,5 +759,80 @@ pub(crate) mod testing {
                 _ => unimplemented!("this batch covers Sapling only"),
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tip() — the wallet's applied-chain position (issue #139)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tip_tests {
+    use super::*;
+    use incrementalmerkletree::frontier::Frontier;
+    use zcash_client_backend::data_api::chain::ChainState;
+    use zcash_primitives::block::BlockHash;
+    use zcash_protocol::consensus::MainNetwork;
+
+    fn origin() -> ChainState {
+        ChainState::new(
+            BlockHeight::from_u32(0),
+            BlockHash([0; 32]),
+            Frontier::empty(),
+            Frontier::empty(),
+            Frontier::empty(),
+        )
+    }
+
+    fn at(height: u32) -> BlockMetadata {
+        BlockMetadata::from_parts(
+            BlockHeight::from_u32(height),
+            BlockHash([height as u8; 32]),
+            Some(0),
+            Some(0),
+            Some(0),
+        )
+    }
+
+    /// Before the first applied block the tip is the boot origin (seed) —
+    /// the boot path's edge, exercised before attestation is written.
+    #[test]
+    fn tip_is_the_boot_seed_before_any_block_is_applied() {
+        let origin = origin();
+        let wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
+        let tip = wallet.tip();
+        assert_eq!(
+            (tip.block_height(), tip.block_hash()),
+            (origin.block_height(), origin.block_hash())
+        );
+    }
+
+    /// With blocks applied, the tip is the highest one, not the seed.
+    #[test]
+    fn tip_is_the_highest_applied_block() {
+        let origin = origin();
+        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
+        wallet.blocks.insert(BlockHeight::from_u32(5), at(5));
+        wallet.blocks.insert(BlockHeight::from_u32(7), at(7));
+        let tip = wallet.tip();
+        assert_eq!(
+            (tip.block_height(), tip.block_hash()),
+            (BlockHeight::from_u32(7), BlockHash([7; 32]))
+        );
+    }
+
+    /// A reorg that truncates below every applied block returns the wallet
+    /// to the seed tip.
+    #[test]
+    fn tip_falls_back_to_the_seed_after_full_truncation() {
+        let origin = origin();
+        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
+        wallet.blocks.insert(BlockHeight::from_u32(5), at(5));
+        wallet.blocks.clear();
+        let tip = wallet.tip();
+        assert_eq!(
+            (tip.block_height(), tip.block_hash()),
+            (origin.block_height(), origin.block_hash())
+        );
     }
 }
