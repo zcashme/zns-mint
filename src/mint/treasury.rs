@@ -185,7 +185,7 @@ pub fn challenge<P: Parameters>(
     memo: MemoBytes,
     relay_value: Zatoshis,
 ) -> Option<Transaction> {
-    let request = zip321::TransactionRequest::new(vec![zip321::Payment::new(
+    let Some(request) = zip321::Payment::new(
         zcash_keys::address::Address::Unified(controller.clone()).to_zcash_address(network),
         Some(relay_value),
         Some(memo),
@@ -193,8 +193,11 @@ pub fn challenge<P: Parameters>(
         None,
         vec![],
     )
-    .expect("valid ZIP-321 payment")])
-    .expect("valid ZIP-321 request");
+    .ok()
+    .and_then(|pay| zip321::TransactionRequest::new(vec![pay]).ok()) else {
+        tracing::warn!("challenge relay skipped: ZIP-321 request invalid");
+        return None;
+    };
 
     let input_selector = GreedyInputSelector::<Wallet<P>>::new();
     let change_strategy = SingleOutputChangeStrategy::<Wallet<P>>::new(

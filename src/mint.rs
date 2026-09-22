@@ -238,27 +238,15 @@ impl Challenge {
         if self.action.is_claim() {
             return None;
         }
-        let verb = self.action.as_str();
-
-        let ua_field = self.ua.encode(network);
-        let otp_digits = self.code.digits();
-        let mut memo = [0u8; 512];
-        let mut offset = 0usize;
-        for field in [
-            b"ZNS:otp:".as_slice(),
-            otp_digits.as_slice(),
-            b":".as_slice(),
-            self.name.as_str().as_bytes(),
-            b":".as_slice(),
-            verb.as_bytes(),
-            b":".as_slice(),
-            ua_field.as_bytes(),
-        ] {
-            let end = offset + field.len();
-            memo[offset..end].copy_from_slice(field);
-            offset = end;
-        }
-        Some(MemoBytes::from_bytes(&memo).expect("the encoded challenge fits a memo"))
+        let otp: String = self.code.digits().into_iter().map(|b| b as char).collect();
+        let text = format!(
+            "ZNS:otp:{otp}:{}:{}:{}",
+            self.name.as_str(),
+            self.action.as_str(),
+            self.ua.encode(network),
+        );
+        // `from_bytes` pads; the UA guard bounds the length.
+        MemoBytes::from_bytes(text.as_bytes()).ok()
     }
 
     /// Decodes a relay sentence; claims never appear.
