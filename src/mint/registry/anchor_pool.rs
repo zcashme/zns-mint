@@ -1,11 +1,13 @@
 //! Claim-anchor lineage pool: the height-checkpointed set of nullifiers
 //! that currently confer claim authority.
 //!
-//! Portable by design: no wallet, no TEE, no `AccountId`. The pool is a
-//! pure function of chain history — the ceremony's zero-value Registry
+//! Mint-internal: how the Registry stores its anchor state is its own
+//! affair — the cross-repo contract is the canon fixture
+//! (`tests/fixtures/canon-vectors-v1.json`), the same rules as events
+//! and snapshots, not this type. The pool stays a pure function of
+//! chain history either way: the ceremony's zero-value Registry
 //! outputs, adopted in canonical scan order, retired one-for-one by
-//! confirmed claims. Every consumer of canonical chain data must
-//! reproduce these updates identically or diverge from consensus.
+//! confirmed claims.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,11 +26,6 @@ pub struct AnchorPool {
 }
 
 impl AnchorPool {
-    /// Empty pool.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Whether `nf` is a live claim-anchor nullifier.
     pub fn contains(&self, nf: &Nullifier) -> bool {
         self.live.contains(nf)
@@ -37,17 +34,6 @@ impl AnchorPool {
     /// The live set of claim-anchor nullifiers.
     pub fn live(&self) -> &BTreeSet<Nullifier> {
         &self.live
-    }
-
-    /// Number of live claim-anchor nullifiers.
-    pub fn len(&self) -> usize {
-        self.live.len()
-    }
-
-    /// Whether no anchor is live — i.e. the pool has not been seeded or
-    /// every seed has been retired without a successor.
-    pub fn is_empty(&self) -> bool {
-        self.live.is_empty()
     }
 
     /// Whether the pool has reached standing size.
@@ -117,22 +103,22 @@ mod tests {
 
     #[test]
     fn adopt_fills_up_to_standing_size_and_then_ignores() {
-        let mut pool = AnchorPool::new();
+        let mut pool = AnchorPool::default();
         for i in 0..ANCHOR_POOL_SIZE {
             pool.adopt(h(i as u32 + 1), nullifier(i as u8 + 1));
         }
-        assert_eq!(pool.len(), ANCHOR_POOL_SIZE);
+        assert_eq!(pool.live().len(), ANCHOR_POOL_SIZE);
         assert!(pool.is_full());
 
         // Extras past standing size do not enter.
         pool.adopt(h(500), nullifier(u8::MAX));
-        assert_eq!(pool.len(), ANCHOR_POOL_SIZE);
+        assert_eq!(pool.live().len(), ANCHOR_POOL_SIZE);
         assert!(!pool.contains(&nullifier(u8::MAX)));
     }
 
     #[test]
     fn adopt_ignores_duplicates_and_does_not_checkpoint() {
-        let mut pool = AnchorPool::new();
+        let mut pool = AnchorPool::default();
         pool.adopt(h(10), nullifier(1));
         let before = pool.live().clone();
 
@@ -148,7 +134,7 @@ mod tests {
 
     #[test]
     fn apply_claim_retires_spent_and_adopts_successor() {
-        let mut pool = AnchorPool::new();
+        let mut pool = AnchorPool::default();
         pool.adopt(h(10), nullifier(1));
         pool.adopt(h(10), nullifier(2));
 
@@ -160,7 +146,7 @@ mod tests {
 
     #[test]
     fn apply_claim_rejects_unknown_spent_without_mutation() {
-        let mut pool = AnchorPool::new();
+        let mut pool = AnchorPool::default();
         pool.adopt(h(10), nullifier(1));
         let before = pool.live().clone();
 
@@ -170,7 +156,7 @@ mod tests {
 
     #[test]
     fn truncate_to_restores_prior_checkpoint() {
-        let mut pool = AnchorPool::new();
+        let mut pool = AnchorPool::default();
         pool.adopt(h(10), nullifier(1));
         pool.adopt(h(10), nullifier(2));
         assert!(pool.apply_claim(h(11), nullifier(1), nullifier(100)));
@@ -192,6 +178,6 @@ mod tests {
 
         // Rewind before adoption: pool empties.
         pool.truncate_to(h(0));
-        assert_eq!(pool.len(), 0);
+        assert_eq!(pool.live().len(), 0);
     }
 }

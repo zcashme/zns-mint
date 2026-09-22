@@ -2,12 +2,13 @@
 
 mod anchor_pool;
 
-pub use anchor_pool::{AnchorPool, ANCHOR_POOL_SIZE};
+use anchor_pool::AnchorPool;
+
+pub use anchor_pool::ANCHOR_POOL_SIZE;
 
 use crate::mint::otp::OtpQueue;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, UnifiedAddress};
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
@@ -240,7 +241,7 @@ impl Registry {
         // Pool follows the chain either way: a duplicate claim still
         // spent a standing anchor and created a successor.
         let applied = self.anchors.apply_claim(height, spent[0], successor_nf);
-        debug_assert!(applied, "spent nullifier was live per contains() above");
+        assert!(applied, "spent nullifier was live per contains() above");
         if self
             .record(note.name())
             .is_some_and(|r| !r.action.is_release())
