@@ -61,6 +61,9 @@ async fn main() {
     // reconstructing it loses nothing.
     let rpc = JsonRpc::new();
     let source = CanonicalBlockSource::new();
+    // The gRPC handle: blocks and reorg-walk hashes; the tip session
+    // keeps its own clone.
+    let mut chain = chain;
 
     // Authorized Name Notes awaiting the chain: the lanes admit, the
     // enactment phase builds and broadcasts.
@@ -81,7 +84,7 @@ async fn main() {
     // the re-read of the canonical tip that turns every wake-up into the
     // node's answer, never the announcement's promise. The orchestrator
     // holds position (the wallet) and never sees transport state.
-    let mut connection = TipSession::open(chain).await;
+    let mut connection = TipSession::open(chain.clone()).await;
     loop {
         let (best_height, best_hash) = match connection.next_tip(&source).await {
             Ok(tip) => tip,
@@ -105,7 +108,7 @@ async fn main() {
                 );
             }
             let canonical_hash = loop {
-                match rpc.get_block_hash(ancestor).await {
+                match chain.get_block_hash(ancestor).await {
                     Ok(hash) => break hash,
                     Err(error) if error.is_retryable() => {
                         tracing::warn!(
@@ -190,7 +193,7 @@ async fn main() {
             };
 
             let block = loop {
-                match rpc.get_block(&network, next_height).await {
+                match chain.get_block(&network, next_height).await {
                     Ok(block) => break block,
                     Err(error) if error.is_retryable() => {
                         tracing::warn!(

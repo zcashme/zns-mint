@@ -11,7 +11,7 @@ use zcash_client_backend::data_api::chain::{ChainState, CommitmentTreeRoot};
 use zcash_primitives::block::{Block, BlockHash};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
-use zebra_indexer_proto::{BlockHashAndHeight, Empty, ZebraClient};
+use zebra_indexer_proto::{BlockAndHash, BlockHashAndHeight, BlockRequest, Empty, ZebraClient};
 
 use super::{
     not_on_best_chain, CanonicalBlockSource, JsonRpc, TransportError, REQUEST_TIMEOUT, RETRY_PAUSE,
@@ -49,6 +49,47 @@ impl ChainClient {
 
         let client = ZebraClient::connect(endpoint).await?;
         Ok(Self(client))
+    }
+
+    /// A best-chain block by height — raw bytes from the Indexer gRPC,
+    /// no hex detour.
+    pub async fn get_block<P: Parameters>(
+        &mut self,
+        network: &P,
+        height: BlockHeight,
+    ) -> Result<Block, TransportError> {
+        let fetched = self.fetch(height).await?;
+        let block = Block::read(&fetched.data[..], network)
+            .map_err(|_| TransportError::BadNodeData("indexer getblock parse"))?;
+        if block.claimed_height() != height {
+            return Err(TransportError::BadNodeData(
+                "indexer getblock returned the wrong height",
+            ));
+        }
+        Ok(block)
+    }
+
+    /// A best-chain block hash by height, for reorg walks — the hash
+    /// comes from the wire, not a parsed header, so genesis answers
+    /// where [`Block::read`] refuses it. The Indexer serves whole
+    /// blocks; the walk pays one fetch per step.
+    pub async fn get_block_hash(
+        &mut self,
+        height: BlockHeight,
+    ) -> Result<BlockHash, TransportError> {
+        let fetched = self.fetch(height).await?;
+        block_hash_from_display(&fetched.hash)
+            .ok_or(TransportError::BadNodeData("indexer block hash length"))
+    }
+
+    /// One `Indexer.GetBlock` by height.
+    async fn fetch(&mut self, height: BlockHeight) -> Result<BlockAndHash, TransportError> {
+        Ok(self
+            .0
+            .get_block(block_request_at_height(height))
+            .await
+            .map_err(TransportError::from)?
+            .into_inner())
     }
 
     /// Change-only tip stream.
@@ -162,6 +203,14 @@ pub(crate) fn block_hash_from_display(bytes: &[u8]) -> Option<BlockHash> {
     }
 }
 
+/// A height on the `BlockRequest` wire: exactly four big-endian
+/// bytes — 32 bytes would name a hash instead.
+fn block_request_at_height(height: BlockHeight) -> BlockRequest {
+    BlockRequest {
+        hash_or_height: u32::from(height).to_be_bytes().to_vec(),
+    }
+}
+
 impl JsonRpc {
     /// Fetches blockchain state info, used for boot-time cross-validation.
     pub async fn get_blockchain_info(&self) -> Result<BlockchainInfo, TransportError> {
@@ -170,22 +219,6 @@ impl JsonRpc {
             .ok_or(TransportError::BadNodeData(
                 "getblockchaininfo returned null",
             ))
-    }
-
-    /// Fetches a best-chain block hash by height, for reorg walks — the
-    /// genesis block is fetched this way because [`Block::read`] rejects it.
-    pub async fn get_block_hash(&self, height: BlockHeight) -> Result<BlockHash, TransportError> {
-        let index = i32::try_from(u32::from(height))
-            .map_err(|_| TransportError::BadNodeData("getblockhash height"))?;
-        let hash_hex: String = self
-            .send_request("getblockhash", [index])
-            .await?
-            .ok_or(TransportError::BadNodeData("getblockhash returned null"))?;
-
-        let display_bytes =
-            hex::decode(hash_hex).map_err(|_| TransportError::BadNodeData("getblockhash hex"))?;
-        block_hash_from_display(&display_bytes)
-            .ok_or(TransportError::BadNodeData("getblockhash length"))
     }
 
     /// Fetches the shielded tree state for a block, as the upstream
@@ -271,31 +304,6 @@ impl JsonRpc {
 
         Ok((hash, BlockHeight::from_u32(response.height), time))
     }
-
-    /// Fetches a full block by height and parses it under the compiled
-    /// consensus parameters — best-chain membership remains Zebra's word.
-    pub async fn get_block<P: Parameters>(
-        &self,
-        network: &P,
-        height: BlockHeight,
-    ) -> Result<Block, TransportError> {
-        let hex_str: String = self
-            .send_request("getblock", (u32::from(height).to_string(), 0))
-            .await
-            .map_err(not_on_best_chain)?
-            .ok_or(TransportError::BadNodeData("getblock returned null"))?;
-
-        let bytes =
-            hex::decode(hex_str).map_err(|_| TransportError::BadNodeData("getblock hex"))?;
-        let block = Block::read(&bytes[..], network)
-            .map_err(|_| TransportError::BadNodeData("getblock parse"))?;
-        if block.claimed_height() != height {
-            return Err(TransportError::BadNodeData(
-                "getblock returned the wrong height",
-            ));
-        }
-        Ok(block)
-    }
 }
 
 impl super::CanonicalBlockSource {
@@ -318,15 +326,6 @@ impl super::CanonicalBlockSource {
                 Err(error) => return Err(error),
             }
         }
-    }
-
-    /// Fetches a full canonical block by height (see [`JsonRpc::get_block`]).
-    pub async fn get_block<P: Parameters>(
-        &self,
-        network: &P,
-        height: BlockHeight,
-    ) -> Result<Block, TransportError> {
-        self.0.get_block(network, height).await
     }
 }
 
@@ -671,5 +670,19 @@ mod tests {
             expected,
             "display-order reversal must not round-trip to the HashSer node"
         );
+    }
+    #[test]
+    fn block_requests_name_heights_as_four_big_endian_bytes() {
+        // The protocol reads 32 bytes as a hash; four bytes must name a
+        // height, or the fetch silently means something else.
+        for (height, wire) in [
+            (BlockHeight::from_u32(0), vec![0, 0, 0, 0]),
+            (BlockHeight::from_u32(1), vec![0, 0, 0, 1]),
+            (BlockHeight::from_u32(1000), vec![0, 0, 3, 232]),
+            (BlockHeight::from_u32(u32::MAX), vec![255, 255, 255, 255]),
+        ] {
+            let request = block_request_at_height(height);
+            assert_eq!(request.hash_or_height, wire);
+        }
     }
 }

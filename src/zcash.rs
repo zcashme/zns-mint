@@ -223,6 +223,15 @@ impl TransportError {
         matches!(
             self,
             Self::Client(_) | Self::Hyper(_) | Self::Timeout | Self::HttpStatus(500..=599)
-        ) || matches!(self, Self::Tonic(status) if matches!(status.code(), tonic::Code::Unavailable))
+        ) || matches!(
+            self,
+            Self::Tonic(status) if matches!(
+                status.code(),
+                // The crate's own protocol notes: a stream or connection
+                // that ends is a retry, not a verdict. The deadline is the
+                // endpoint's REQUEST_TIMEOUT firing.
+                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+            )
+        )
     }
 }

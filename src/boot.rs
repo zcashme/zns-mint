@@ -110,7 +110,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         tracing::info!("boot: starting");
 
         // 1. Liveness + connect: confirm both Zebra transports, get chain client.
-        let (chain_client, _tip_height) = connect_zebra().await;
+        let (mut chain_client, _tip_height) = connect_zebra().await;
 
         // 1b. TEE handshake: pick the enclave seam. Production = `RealSnpTee`;
         // `fake-tee` feature = `FakeTee` for off-SNP tests. Capsule AEAD and
@@ -274,7 +274,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
                 .chain_state_at(from_height)
                 .await
                 .expect("FATAL: chain state unavailable during boot sync");
-            let block = rpc
+            let block = chain_client
                 .get_block(&network, next_height)
                 .await
                 .expect("FATAL: block unavailable during boot sync");

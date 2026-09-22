@@ -1,5 +1,24 @@
 # Zcash I/O changelog
 
+## 2026-09-22 — Full blocks and reorg-walk hashes over the Indexer gRPC
+
+- `getblock` and `getblockhash` leave the JSON-RPC transport: boot and
+  catch-up fetch canonical blocks via `Indexer.GetBlock` — raw bytes, no
+  hex detour, half the wire — and the reorg ancestor walk reads its
+  hashes from the same call's wire field (genesis included, where
+  `Block::read` refuses). `JsonRpc::get_block`, `JsonRpc::get_block_hash`,
+  and the caller-less `CanonicalBlockSource::get_block` are deleted.
+- The walk now pays one block fetch per step — it fetches hashes by
+  buying whole blocks, rare-path trade for the Indexer having no
+  hash-only call.
+- Transient gRPC statuses join `is_retryable`: `unavailable` (a stream
+  or connection that ends, per the crate's protocol notes) and
+  `deadline-exceeded` (the endpoint's `REQUEST_TIMEOUT` firing).
+- Remaining on JSON-RPC until Zebra serves a CompactTxStreamer
+  listener: tip-at-connect, tree state, subtree roots, MTP headers,
+  broadcast, raw-tx fetches.
+
+
 ## 2026-09-20 — Keepalive claims verified against regtest Zebra (#88)
 - The doc comments' keepalive claims are now measured facts, not
   assertions: wire-level probe against regtest (node frozen mid-stream)
