@@ -617,20 +617,37 @@ Tracks design-relevant changes to `src/wallet.rs` and `src/wallet/trees.rs`.
 
 ### Fixed
 
-- `rewind_to_chain_state` floors on the trees' own retention
-  (`retained_floor`: the deepest checkpoint every tree retains, alignment
-  asserted, `CheckpointMisalignment` named and refused) instead of
-  `zebra_tip − window` arithmetic. Whenever the known chain ran ahead of
-  the applied position — every catch-up's normal state — the old floor
-  landed above the wallet's own height and the function returned `Ok`
-  having rewound nothing. Upstream rewinds by height alone (its scenarios
-  pass zero-hash chain states); hash validation stays in
-  `truncate_to_chain_state`, the tool that receives real frontiers.
+- `rewind_to_chain_state` floors on the trees' own retention — the
+  oldest retained checkpoint, read from one store. All three trees
+  retain identical checkpoint sets by the commit discipline that
+  mutates them together (`ensure_block_checkpoint` checkpoints all
+  three at the same height; every truncation runs through the
+  all-three-or-nothing helpers), so the floor is one read, not three
+  probes plus an alignment assertion — `CheckpointMisalignment` is
+  gone. This replaces `zebra_tip − window` arithmetic, which — whenever
+  the known chain ran ahead of the applied position, every catch-up's
+  normal state — landed the floor above the wallet's own height and
+  returned `Ok` having rewound nothing. Upstream rewinds by height
+  alone (its scenarios pass zero-hash chain states); hash validation
+  stays in `truncate_to_chain_state`, the tool that receives real
+  frontiers.
+- Truncation below the trees' retention window refuses loudly
+  (`TruncationTargetUnavailable`): the checkpoint at the target is
+  pruned and the request cannot be honored in memory. Flooring the
+  request instead would keep the orphaned blocks between target and
+  floor applied. For an always-on wallet with no persistence, restart
+  is the recovery — boot rescans from the birthday.
+- `get_wallet_summary` falls back to the applied position when no tip
+  has been supplied — a scan-only wallet still reports balances. When a
+  tip IS supplied, confirmations count against it: upstream's
+  conformance suite pins that contract, and this service never pushes
+  the node's tip, so in production knowledge tracks the applied
+  position.
 - `Wallet::tip()` — the wallet's applied position:
   `blocks.last_key_value().unwrap_or(seed)`, always defined. Lock
-  liveness, lock listing, spend targets, and balance expiry read it;
-  their `None`-tip fallback arms and the lock readers' mutual
-  disagreement die with it.
+  liveness, lock listing, spend targets, balance expiry, and now
+  balance summaries read it; their `None`-tip fallback arms and the
+  lock readers' mutual disagreement die with it.
 - Chain knowledge (`zebra_tip`) moves only through `update_chain_tip`,
   the one writer: scanning advances it to the applied tip, adopting a
   chain state sets it to the adopted height. Truncation no longer clamps

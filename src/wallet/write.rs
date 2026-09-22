@@ -92,87 +92,32 @@ impl<P: Parameters> Wallet<P> {
         }
     }
 
-    /// The deepest height all three trees can still truncate to: the largest
-    /// of the three trees' oldest retained checkpoints. This is the honest
-    /// rewind floor — retention bounds rewinding, not the node's position.
+    /// The deepest height the trees can still truncate to: the oldest
+    /// retained checkpoint. This is the honest rewind floor — retention
+    /// bounds rewinding, not any tip.
     ///
-    /// The three trees' checkpoint sets are identical by the commit
-    /// discipline that mutates them together; a floor one tree cannot
-    /// honor is a commit-discipline failure, refused rather than searched
-    /// around.
-    fn retained_floor(&self) -> Result<BlockHeight, WalletError> {
+    /// The three trees retain identical checkpoint sets by the commit
+    /// discipline that mutates them together (`ensure_block_checkpoint`
+    /// checkpoints all three at the same height; every truncation goes
+    /// through the all-three-or-nothing helpers), so one store's answer
+    /// is the floor. `None` only before the first applied block, where
+    /// nothing is retained and the seed is the floor of the wallet's
+    /// existence.
+    fn retained_floor(&self) -> Option<BlockHeight> {
         // The store error type is `Infallible`; `.ok()` cannot lose one.
-        let [Some(a), Some(b), Some(c)] = [
-            self.sapling_tree.store().min_checkpoint_id().ok().flatten(),
-            self.orchard_tree.store().min_checkpoint_id().ok().flatten(),
-            self.ironwood_tree
-                .store()
-                .min_checkpoint_id()
-                .ok()
-                .flatten(),
-        ] else {
-            // A tree with no retained checkpoints is a commit-discipline
-            // failure, not a floor.
-            return Err(WalletError::CheckpointMisalignment);
-        };
-        let floor = a.max(b).max(c);
-        // The alignment invariant, asserted where it is relied on: every
-        // tree retains the deepest of the three oldest checkpoints.
-        let present = [
-            self.sapling_tree
-                .store()
-                .get_checkpoint(&floor)
-                .ok()
-                .flatten()
-                .is_some(),
-            self.orchard_tree
-                .store()
-                .get_checkpoint(&floor)
-                .ok()
-                .flatten()
-                .is_some(),
-            self.ironwood_tree
-                .store()
-                .get_checkpoint(&floor)
-                .ok()
-                .flatten()
-                .is_some(),
-        ];
-        if present == [true, true, true] {
-            Ok(floor)
-        } else {
-            Err(WalletError::CheckpointMisalignment)
-        }
+        self.sapling_tree.store().min_checkpoint_id().ok().flatten()
     }
 
-    /// The largest height at or below `max_height` that every one of the
-    /// three trees has retained as a checkpoint and that the wallet has
-    /// applied (or, before any block is applied, the boot seed checkpoint
-    /// common to all three trees).
+    /// The deepest applied block at or below `max_height` — the candidate
+    /// whose checkpoint `truncate_to_height` verifies against every tree.
+    /// Checkpoints exist only at applied heights and are pruned from the
+    /// old end, so below the retention window no candidate survives; the
+    /// caller refuses rather than keep orphaned state.
     fn common_truncation_height(&self, max_height: BlockHeight) -> Option<BlockHeight> {
-        let applied = self
-            .blocks
+        self.blocks
             .range(..=max_height)
             .next_back()
-            .map(|(height, _)| *height);
-        if applied.is_some() {
-            return applied;
-        }
-        // No applied block qualifies. The boot seed checkpoint remains
-        // truncatable when all three trees agree on the same floor.
-        let floors = [
-            self.sapling_tree.store().min_checkpoint_id().ok().flatten(),
-            self.orchard_tree.store().min_checkpoint_id().ok().flatten(),
-            self.ironwood_tree
-                .store()
-                .min_checkpoint_id()
-                .ok()
-                .flatten(),
-        ];
-        match floors {
-            [Some(a), Some(b), Some(c)] if a == b && b == c && a <= max_height => Some(a),
-            _ => None,
-        }
+            .map(|(height, _)| *height)
     }
 
     /// Whether every tree can truncate to `height` as a retained checkpoint.
@@ -849,10 +794,14 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
 
         // Retention bounds rewinding — the upstream deep-rewind contract:
         // applied data drops back to the retained-checkpoint floor, or to
-        // the target if that is shallower. The floor is read from the
-        // trees' own retention, never derived from any tip.
-        let data_height =
-            rewind_target.max(self.retained_floor().map_err(RewindError::DataSource)?);
+        // the target if that is shallower. The floor is the trees' own
+        // oldest retained checkpoint — one read, never a tip. Nothing
+        // retained (before the first applied block): birthdays only.
+        let Some(floor) = self.retained_floor() else {
+            self.lower_account_birthdays(&reset_account_birthdays, new_birthday);
+            return Ok(());
+        };
+        let data_height = rewind_target.max(floor);
 
         if !self
             .try_truncate_trees_to(data_height)
@@ -1203,7 +1152,7 @@ impl<P: Parameters> Wallet<P> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Wallet, WalletError};
+    use super::{Wallet, WalletError, MAX_CHECKPOINTS};
     use incrementalmerkletree::frontier::Frontier;
     use zcash_client_backend::data_api::chain::ChainState;
     use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore};
@@ -1966,5 +1915,30 @@ mod tests {
             1
         );
         assert_eq!(st.wallet().get_locked_outputs(account_id).unwrap().len(), 1);
+    }
+
+    /// Truncation below the trees' retention window refuses loudly: the
+    /// checkpoint at the target is pruned and the wallet cannot honor the
+    /// request in memory. Flooring the request instead would keep the
+    /// orphaned blocks between target and floor applied — worse than the
+    /// error. For an always-on wallet with no persistence, restart is the
+    /// recovery: boot rescans from the birthday.
+    #[test]
+    fn truncate_below_the_retention_window_refuses() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50_000);
+        let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h1, 1);
+        // Outlive the retention window: the checkpoint at h1 is pruned.
+        for _ in 0..(MAX_CHECKPOINTS as u32) {
+            let (h, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+            st.scan_cached_blocks(h, 1);
+        }
+        match st.wallet_mut().truncate_to_height(h1) {
+            Err(WalletError::TruncationTargetUnavailable(height)) => assert_eq!(height, h1),
+            other => panic!("expected TruncationTargetUnavailable at {h1}, got {other:?}"),
+        }
     }
 }

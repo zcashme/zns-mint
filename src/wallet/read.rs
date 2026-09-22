@@ -52,9 +52,6 @@ pub enum WalletError {
     /// Truncation was requested to a height below every checkpoint retained by
     /// all three note commitment trees.
     TruncationTargetUnavailable(BlockHeight),
-    /// The three note commitment trees' retained checkpoints disagree — a
-    /// commit-discipline failure, refused rather than searched around.
-    CheckpointMisalignment,
     /// A note commitment tree operation failed.
     CommitmentTree(shardtree::error::ShardTreeError<Infallible>),
     /// A value aggregation would overflow `MAX_MONEY`.
@@ -108,9 +105,6 @@ impl std::fmt::Display for WalletError {
             }
             WalletError::TruncationTargetUnavailable(height) => {
                 write!(f, "no retained checkpoint at or below height {height}")
-            }
-            WalletError::CheckpointMisalignment => {
-                write!(f, "the three trees' retained checkpoints disagree")
             }
             WalletError::CommitmentTree(e) => write!(f, "note commitment tree error: {e}"),
             WalletError::Balance(e) => write!(f, "balance error: {e}"),
@@ -422,10 +416,14 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         &self,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Option<WalletSummary<Self::AccountId>>, Self::Error> {
-        // Upstream counts confirmations against the chain tip. A tip the
-        // node has not yet supplied falls back to the wallet's applied
-        // position — a scan-only wallet still has a summary; a wallet with
-        // nothing applied and no supplied tip reports none.
+        // Upstream counts confirmations against the chain tip, and its
+        // conformance suite pins that: a summary must be absent when the
+        // wallet has neither supplied knowledge nor applied blocks, and a
+        // supplied tip drives confirmation counting even while ahead of
+        // the applied position. In this service the node's tip is never
+        // pushed, so knowledge tracks the applied position in practice;
+        // the fallback covers a wallet that has applied blocks but never
+        // been told a tip.
         let Some(chain_tip_height) = self.zebra_tip.or_else(|| self.max_applied_height()) else {
             return Ok(None);
         };
