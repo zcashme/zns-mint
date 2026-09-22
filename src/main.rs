@@ -279,14 +279,9 @@ async fn main() {
                     }
                 }
             };
-            // The chain is allowed to move under the fetches; a block that
-            // does not extend the applied position means it did. Nothing
-            // has been mutated this iteration, so the cycle is discarded
-            // whole — and the reorg's own tip notification is already
-            // queued in the change-only stream, making the next wake
-            // immediate. The reconcile walk above re-derives everything;
-            // the tip photograph that opened this cycle stays advisory,
-            // never asserted.
+            // The chain may move under the fetches; a non-extending block
+            // discards the cycle — the reorg's own queued tip notification
+            // wakes the reconcile walk.
             if block.header().prev_block != chain_tip.block_hash() {
                 tracing::warn!(
                     height = u32::from(next_height),
