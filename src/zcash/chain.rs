@@ -328,6 +328,24 @@ impl super::CanonicalBlockSource {
     ) -> Result<Block, TransportError> {
         self.0.get_block(network, height).await
     }
+
+    /// A best-chain block hash by height (see [`JsonRpc::get_block_hash`]).
+    pub async fn get_block_hash(&self, height: BlockHeight) -> Result<BlockHash, TransportError> {
+        self.0.get_block_hash(height).await
+    }
+
+    /// The shielded tree state at a height (see [`JsonRpc::chain_state_at`]).
+    pub async fn chain_state_at(&self, height: BlockHeight) -> Result<ChainState, TransportError> {
+        self.0.chain_state_at(height).await
+    }
+
+    /// A block header's `(hash, height, time)` (see [`JsonRpc::get_block_header`]).
+    pub async fn get_block_header(
+        &self,
+        height: BlockHeight,
+    ) -> Result<(BlockHash, BlockHeight, Timestamp), TransportError> {
+        self.0.get_block_header(height).await
+    }
 }
 
 // ============================================================================

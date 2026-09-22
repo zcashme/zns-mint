@@ -162,7 +162,7 @@ async fn main() {
                 );
             }
             let canonical_hash = loop {
-                match rpc.get_block_hash(ancestor).await {
+                match source.get_block_hash(ancestor).await {
                     Ok(hash) => break hash,
                     Err(error) if error.is_retryable() => {
                         tracing::warn!(
@@ -194,9 +194,9 @@ async fn main() {
             // mix histories after a deep reorg.
             mtp = zns_mint::mint::mtp::MtpTracker::default();
             mtp.backfill(ancestor, |height| {
-                let rpc = rpc.clone();
+                let source = source.clone();
                 async move {
-                    let (_, _, timestamp) = rpc.get_block_header(height).await?;
+                    let (_, _, timestamp) = source.get_block_header(height).await?;
                     Ok::<_, zns_mint::zcash::TransportError>(
                         u32::try_from(timestamp.as_seconds())
                             .expect("Zcash header timestamps fit u32"),
@@ -230,7 +230,7 @@ async fn main() {
             let next_height = from_height + 1;
 
             let from_state = loop {
-                match rpc.chain_state_at(from_height).await {
+                match source.chain_state_at(from_height).await {
                     Ok(state) => break state,
                     Err(error) if error.is_retryable() => {
                         tracing::warn!(
@@ -247,7 +247,7 @@ async fn main() {
             };
 
             let block = loop {
-                match rpc.get_block(&network, next_height).await {
+                match source.get_block(&network, next_height).await {
                     Ok(block) => break block,
                     Err(error) if error.is_retryable() => {
                         tracing::warn!(

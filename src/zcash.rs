@@ -125,7 +125,9 @@ impl Default for JsonRpc {
 // ============================================================================
 
 /// The orchestrator's view of the node: canonical reads and the one place a
-/// transaction is ever broadcast.
+/// transaction is ever broadcast. The run loop holds no other handle;
+/// raw-transaction reads stay deliberately outside this charter (the
+/// mempool reader's, not the orchestrator's).
 #[derive(Clone)]
 pub struct CanonicalBlockSource(pub(crate) JsonRpc);
 
