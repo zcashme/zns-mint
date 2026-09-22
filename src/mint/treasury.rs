@@ -1,6 +1,5 @@
 //! Treasury wallet view and Treasury policy for the mint: the vault
-//! sweep, the challenge relay builder, and the request queue. The
-//! memo grammars live in `mint`.
+//! sweep, the challenge relay builder, and the request queue.
 //!
 
 use std::convert::Infallible;
