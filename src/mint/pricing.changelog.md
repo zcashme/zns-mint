@@ -1,11 +1,15 @@
 # Pricing changelog
 
-## 2026-09-22 — Quorum-gated median; no trusted anchor
+## 2026-09-22 — Median at N ≥ 3, Gemini alone below, no mean
 
-- `aggregate` requires `MIN_QUORUM = 3` survivors and returns their
-  median; sub-quorum rounds carry.
-- `TRUSTED = "gemini"` and the 2-quote unauthenticated mean are gone —
-  one malicious quote out of two moved the price 50%.
+- `aggregate` returns the median of survivors at N ≥ 3, and Gemini's
+  own quote (unaveraged) at N ∈ {1, 2} if Gemini is a survivor —
+  otherwise `None` and the last published rate stays in effect.
+- A day publishes its TWAP only when at least half of that day's
+  fetch attempts landed a price; thinner days keep yesterday's rate.
+- The 2-quote unauthenticated mean is deleted: one honest + one
+  malicious quote produced a 50%-corrupted price with no divergence
+  bound.
 
 ## The challenge fee (#18)
 
