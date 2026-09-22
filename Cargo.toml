@@ -66,7 +66,7 @@ incrementalmerkletree = "0.8.2"
 blake2b_simd = "1"
 pasta_curves = "0.5"
 
-zcash_note_encryption = "0.4"
+zcash_note_encryption = "0.5"
 
 # CSPRNG for Orchard spend-auth + binding nonces in the signer. Already a
 # transitive dep (orchard); pulled direct with default features so `OsRng` is
