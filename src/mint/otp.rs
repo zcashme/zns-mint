@@ -154,8 +154,16 @@ impl OtpQueue {
         })
     }
 
-    /// The pending challenge this return matches.
-    pub fn awaiting(&mut self, returned: &Challenge, mtp: Timestamp) -> Option<OtpRequest> {
+    /// The pending challenge this return matches at `tip_rcm`. Without
+    /// the commitment binding a six-digit code collision across two
+    /// live challenges could let `awaiting` return one pending while
+    /// `accept` binds the other.
+    pub fn awaiting(
+        &mut self,
+        returned: &Challenge,
+        tip_rcm: NameCommitment,
+        mtp: Timestamp,
+    ) -> Option<OtpRequest> {
         self.challenges.retain(|request| mtp < request.expires_at);
         self.challenges
             .iter()
@@ -163,6 +171,7 @@ impl OtpQueue {
                 request.name == returned.name
                     && request.action == returned.action
                     && request.ua == returned.ua
+                    && request.tip_rcm == tip_rcm
                     && bool::from(request.code.0.ct_eq(&returned.code.0))
             })
             .cloned()
@@ -354,5 +363,69 @@ mod tests {
             _ => panic!("test UA"),
         };
         assert!(!q.pending(&alice, Action::Update, &ua, rcm, t0));
+    }
+
+    fn mainnet_ua() -> UnifiedAddress {
+        let s = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
+        match zcash_keys::address::Address::decode(&zcash_protocol::consensus::MAIN_NETWORK, s) {
+            Some(zcash_keys::address::Address::Unified(u)) => u,
+            _ => panic!("test UA"),
+        }
+    }
+
+    /// Two challenges share a code across a commitment change:
+    /// `awaiting` must resolve by `tip_rcm`, not just by code.
+    #[test]
+    fn awaiting_scopes_by_tip_rcm() {
+        let mut q = OtpQueue::new();
+        let alice = test_name("alice");
+        let ua = mainnet_ua();
+        let old_rcm = commitment(1);
+        let new_rcm = commitment(2);
+        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
+        let shared = OtpCode::for_test(*b"123456");
+
+        q.issue(OtpRequest {
+            name: alice.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            term: Some(Term::Years(1)),
+            tip_rcm: old_rcm,
+            code: shared.clone(),
+            expires_at: t0 + Duration::seconds(D_OTP),
+        });
+        q.issue(OtpRequest {
+            name: alice.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            term: Some(Term::Years(5)),
+            tip_rcm: new_rcm,
+            code: shared.clone(),
+            expires_at: t0 + Duration::seconds(D_OTP),
+        });
+
+        let echo = Challenge {
+            code: shared.clone(),
+            name: alice.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+        };
+
+        // The echo picked up at the new tip resolves to the new-tip
+        // pending — its term is Years(5), not Years(1).
+        let matched = q.awaiting(&echo, new_rcm, t0).expect("new-tip pending");
+        assert_eq!(matched.term, Some(Term::Years(5)));
+        assert_eq!(matched.tip_rcm, new_rcm);
+
+        // And re-scoping to the old commitment resolves to the old
+        // pending, not the new one — the two are strictly separated.
+        let matched = q.awaiting(&echo, old_rcm, t0).expect("old-tip pending");
+        assert_eq!(matched.term, Some(Term::Years(1)));
+        assert_eq!(matched.tip_rcm, old_rcm);
+
+        // A commitment that never issued a challenge finds nothing,
+        // even though the code and other fields all match a live entry.
+        let stale = commitment(3);
+        assert!(q.awaiting(&echo, stale, t0).is_none());
     }
 }

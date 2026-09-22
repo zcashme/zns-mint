@@ -361,7 +361,8 @@ async fn main() {
                         if record.action.is_release() {
                             break 'lane true;
                         }
-                        let Some(sent) = challenges.awaiting(echo, mtp_now) else {
+                        let Some(sent) = challenges.awaiting(echo, record.commitment, mtp_now)
+                        else {
                             break 'lane true; // no pending challenge: dead
                         };
                         // The renewal or upgrade fee, binding at first
