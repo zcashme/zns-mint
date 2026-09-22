@@ -73,8 +73,10 @@ const EXCHANGES: [Exchange; 9] = [
     },
 ];
 
-/// The trusted anchor venue: NYDFS-regulated Gemini.
-const TRUSTED: &str = "gemini";
+/// Minimum surviving venue quotes required to publish a round. At
+/// `N ≥ 3` the median has an honest neighbour on each side, so no
+/// single quote can move it. Below the quorum the day carries.
+const MIN_QUORUM: usize = 3;
 
 /// Timeout duration for one source end-to-end (connect + request + body).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -169,21 +171,17 @@ async fn fetch_last(client: &HttpsClient, exchange: &Exchange) -> Option<Decimal
 // ===========================================================================
 
 fn aggregate(quotes: Vec<(&'static str, Decimal)>) -> Option<Decimal> {
-    match quotes.len() {
-        0 => None,
-        1 => (quotes[0].0 == TRUSTED).then(|| quotes[0].1),
-        2 => Some((quotes[0].1 + quotes[1].1) / Decimal::TWO),
-        _ => {
-            let mut rates: Vec<Decimal> = quotes.into_iter().map(|(_, rate)| rate).collect();
-            rates.sort_unstable();
-            let mid = rates.len() / 2;
-            Some(if rates.len() % 2 == 1 {
-                rates[mid]
-            } else {
-                (rates[mid - 1] + rates[mid]) / Decimal::TWO
-            })
-        }
+    if quotes.len() < MIN_QUORUM {
+        return None;
     }
+    let mut rates: Vec<Decimal> = quotes.into_iter().map(|(_, rate)| rate).collect();
+    rates.sort_unstable();
+    let mid = rates.len() / 2;
+    Some(if rates.len() % 2 == 1 {
+        rates[mid]
+    } else {
+        (rates[mid - 1] + rates[mid]) / Decimal::TWO
+    })
 }
 
 pub async fn fetch_round() -> Option<Decimal> {
@@ -568,5 +566,52 @@ mod tests {
             Timestamp::from_seconds(172_800).unwrap(),
         );
         assert_eq!(oracle.current().into_u64(), 100_000);
+    }
+
+    #[test]
+    fn aggregate_needs_quorum() {
+        assert_eq!(aggregate(vec![]), None);
+        assert_eq!(aggregate(vec![("gemini", Decimal::from(1_000))]), None);
+        assert_eq!(
+            aggregate(vec![
+                ("gemini", Decimal::from(1_000)),
+                ("binance", Decimal::from(1_000)),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn aggregate_odd_quorum_picks_middle() {
+        let q = vec![
+            ("a", Decimal::from(900)),
+            ("b", Decimal::from(1_000)),
+            ("c", Decimal::from(1_100)),
+        ];
+        assert_eq!(aggregate(q), Some(Decimal::from(1_000)));
+    }
+
+    #[test]
+    fn aggregate_even_quorum_averages_middle_pair() {
+        let q = vec![
+            ("a", Decimal::from(900)),
+            ("b", Decimal::from(1_000)),
+            ("c", Decimal::from(1_100)),
+            ("d", Decimal::from(1_200)),
+        ];
+        // (1_000 + 1_100) / 2 = 1_050
+        assert_eq!(aggregate(q), Some(Decimal::from(1_050)));
+    }
+
+    /// One outlier sorts to min or max; the median is honest
+    /// regardless of insertion order.
+    #[test]
+    fn aggregate_bounds_single_outlier() {
+        let q = vec![
+            ("a", Decimal::from(1_000)),
+            ("b", Decimal::from(1_010)),
+            ("attacker", Decimal::from(999_999)),
+        ];
+        assert_eq!(aggregate(q), Some(Decimal::from(1_010)));
     }
 }

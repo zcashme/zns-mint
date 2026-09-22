@@ -1,5 +1,12 @@
 # Pricing changelog
 
+## 2026-09-22 — Quorum-gated median; no trusted anchor
+
+- `aggregate` requires `MIN_QUORUM = 3` survivors and returns their
+  median; sub-quorum rounds carry.
+- `TRUSTED = "gemini"` and the 2-quote unauthenticated mean are gone —
+  one malicious quote out of two moved the price 50%.
+
 ## The challenge fee (#18)
 
 - `Oracle::challenge_fee()` prices the trigger of a controller
