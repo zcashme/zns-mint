@@ -27,10 +27,10 @@ use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
+use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::data_api::{
     chain::ChainState, BlockMetadata, WalletCommitmentTrees as _,
 };
-use zcash_client_backend::data_api::WalletRead as _;
 
 // ---------------------------------------------------------------------------
 // Boot life-cycle
