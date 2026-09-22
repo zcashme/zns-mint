@@ -587,9 +587,14 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .iter()
         .map(|(index, _)| orchard::tree::MerkleHashOrchard::from_cmx(&candidates[*index].cmx))
         .collect();
-    wallet
-        .put_blocks_marked(from_state, vec![scanned], &marks)
-        .expect("FATAL: wallet block commit failed");
+    if let Err(error) = wallet.put_blocks_marked(from_state, vec![scanned], &marks) {
+        match error {
+            crate::wallet::WalletError::UnexpectedOrchardReceive => {
+                panic!("FATAL: ordinary-Orchard receive — consensus violation or key compromise")
+            }
+            error => panic!("FATAL: wallet block commit failed: {error}"),
+        }
+    }
     // The scanner drops note plaintexts, so Treasury memos decode
     // here, once per block, into the queue; the block remains the
     // durable record. Decisions belong to the drain.
