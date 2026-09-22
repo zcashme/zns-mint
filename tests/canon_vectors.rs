@@ -51,7 +51,9 @@ enum Event {
     /// below standing size, in canonical scan order.
     AdoptAnchor { height: u32, nullifier: Hex32 },
     /// A backed Claim: retires `spent_anchor`, adopts `successor_anchor`,
-    /// binds the name.
+    /// binds the name. `expect` says whether the record transition lands;
+    /// a rejected claim (a duplicate on a live name) still advances the
+    /// pool.
     Claim {
         height: u32,
         mtp_secs: i64,
@@ -63,6 +65,7 @@ enum Event {
         successor_anchor: Hex32,
         /// The NameNote's own nullifier.
         nullifier: Hex32,
+        expect: Expectation,
     },
     /// Attacker-shaped Claim: no live anchor spent. Mint drops the
     /// candidate; every consumer must reject without state change.
@@ -125,6 +128,15 @@ struct RecordSnapshot {
 /// Lowercase 32-byte hex string.
 type Hex32 = String;
 
+/// Whether the Mint admits the transition. A rejected claim can still
+/// advance the anchor pool — rejection is about the record, not the chain.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Expectation {
+    Accepted,
+    Rejected,
+}
+
 // ---------------------------------------------------------------------------
 // Executor
 // ---------------------------------------------------------------------------
@@ -157,6 +169,7 @@ fn apply(registry: &mut Registry, event: &Event) {
             spent_anchor,
             successor_anchor,
             nullifier,
+            expect,
         } => {
             let note = NameNote::Claim {
                 name: parse_name(name),
@@ -172,7 +185,12 @@ fn apply(registry: &mut Registry, event: &Event) {
                 BlockHeight::from_u32(*height),
                 ts(*mtp_secs),
             );
-            assert!(ok, "backed claim was rejected: {name}");
+            match *expect {
+                Expectation::Accepted => assert!(ok, "backed claim was rejected: {name}"),
+                Expectation::Rejected => {
+                    assert!(!ok, "rejected claim overwrote the record: {name}")
+                }
+            }
         }
         Event::UnbackedClaim {
             height,
@@ -316,9 +334,9 @@ fn record_snapshot(record: &zns_mint::mint::registry::NameRecord) -> RecordSnaps
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// A valid mainnet ZIP-316 UA with an Orchard receiver — shared with the
-/// note and treasury tests.
-const TEST_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
+/// A real mainnet UA with every known receiver kind — Orchard, Sapling,
+/// and P2PKH.
+const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
 
 fn parse_ua(s: &str) -> UnifiedAddress {
     match Address::decode(&MainNetwork, s) {
@@ -369,7 +387,7 @@ fn hex32_from_seed(seed: u8) -> Hex32 {
 /// Scans a small ceremony of five zero-value Registry outputs. Verifies
 /// that adoption is in canonical scan order and that the pool never
 /// exceeds standing size (kept small here — the full `ANCHOR_POOL_SIZE`
-/// case is exercised in `AnchorPool`'s unit tests).
+/// case is exercised in the anchor pool's unit tests).
 fn ceremony_fill() -> Scenario {
     let events: Vec<Event> = (1..=5)
         .map(|i| Event::AdoptAnchor {
@@ -406,6 +424,7 @@ fn backed_claim() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n1,
+            expect: Expectation::Accepted,
         },
     ];
     Scenario {
@@ -471,10 +490,11 @@ fn duplicate_claim() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n1,
+            expect: Expectation::Accepted,
         },
-        // Second backed claim for the same live name: `accept_claim`
-        // returns false but still retires the anchor and adopts the
-        // successor. The registration itself is unchanged.
+        // Second backed claim for the same live name: rejected for the
+        // record, accepted for the pool — the anchor is still retired
+        // and the successor adopted.
         Event::Claim {
             height: 120,
             mtp_secs: 1_700_100_000,
@@ -484,54 +504,15 @@ fn duplicate_claim() -> Scenario {
             spent_anchor: a2,
             successor_anchor: s2,
             nullifier: n2,
+            expect: Expectation::Rejected,
         },
     ];
-    // The second Claim's `accept_claim` returns false; adjust the run
-    // helper's assert path by tolerating the duplicate here.
-    let mut registry = Registry::new();
-    let mut trace = Vec::with_capacity(events.len());
-    for (i, event) in events.iter().enumerate() {
-        if i == 3 {
-            // Second claim: expected to return false but advance the pool.
-            let Event::Claim {
-                height,
-                mtp_secs,
-                name,
-                ua,
-                expires_at_secs,
-                spent_anchor,
-                successor_anchor,
-                nullifier,
-            } = event
-            else {
-                unreachable!()
-            };
-            let note = NameNote::Claim {
-                name: parse_name(name),
-                ua: parse_ua(ua),
-                expires_at: expiry(*expires_at_secs),
-            };
-            let accepted = registry.accept_claim(
-                &MainNetwork,
-                &note,
-                nf(nullifier),
-                Some(nf(successor_anchor)),
-                &[nf(spent_anchor)],
-                BlockHeight::from_u32(*height),
-                ts(*mtp_secs),
-            );
-            assert!(!accepted, "duplicate claim must not overwrite the record");
-        } else {
-            apply(&mut registry, event);
-        }
-        trace.push(snapshot(&registry, i));
-    }
     Scenario {
         name: "duplicate_claim".to_owned(),
         description: "Second backed claim on a live name advances the anchor pool without \
              changing the registration."
             .to_owned(),
-        trace,
+        trace: run(&events),
         events,
     }
 }
@@ -564,6 +545,7 @@ fn claim_after_release() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n1.clone(),
+            expect: Expectation::Accepted,
         },
         Event::Release {
             height: 200,
@@ -582,6 +564,7 @@ fn claim_after_release() -> Scenario {
             spent_anchor: a2,
             successor_anchor: s2,
             nullifier: n2,
+            expect: Expectation::Accepted,
         },
     ];
     Scenario {
@@ -614,6 +597,7 @@ fn update_then_release() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n_claim.clone(),
+            expect: Expectation::Accepted,
         },
         Event::Update {
             height: 200,
@@ -663,6 +647,7 @@ fn reorg() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n_claim.clone(),
+            expect: Expectation::Accepted,
         },
         Event::Update {
             height: 200,
