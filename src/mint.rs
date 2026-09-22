@@ -513,9 +513,22 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .iter()
         .map(|(index, _)| orchard::tree::MerkleHashOrchard::from_cmx(&candidates[*index].cmx))
         .collect();
-    wallet
-        .put_blocks_marked(from_state, vec![scanned], &marks)
-        .expect("FATAL: wallet block commit failed");
+    if let Err(error) = wallet.put_blocks_marked(from_state, vec![scanned], &marks) {
+        match error {
+            // The tripwire is consensus-excluded at NU6.3 (the ordinary
+            // Orchard pool mandates enableCrossAddress = 0), so firing it
+            // means a consensus break or a key compromise — name the chain
+            // data so the halt is diagnosable.
+            crate::wallet::WalletError::UnexpectedOrchardReceive { txid, action } => panic!(
+                "FATAL: ordinary-Orchard receive at height {}, tx {}, action {} — \
+                 consensus violation or key compromise",
+                u32::from(height),
+                txid,
+                action
+            ),
+            error => panic!("FATAL: wallet block commit failed: {error}"),
+        }
+    }
     // Upstream's ScannedBlock drops note plaintexts; the Treasury
     // lane's memos were decrypted above. Decoded once, here, they
     // are recorded as the requests they carry — nothing is stored
