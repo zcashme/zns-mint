@@ -1,5 +1,11 @@
 # Zcash I/O changelog
 
+## 2026-09-23 — A malformed tip announcement does not abort
+
+- `next_tip` drops a notification whose hash is not 32 bytes and
+  continues with `canonical_tip`. The run loop still panics on a bad
+  canonical tip, rather than on a bad announcement.
+
 ## 2026-09-23 — Ironwood treestate is mandatory (#155)
 
 - The response's `ironwood` section is a required field, enforced at
