@@ -12,6 +12,14 @@ use crate::mint::{Action, Challenge, Name, NameCommitment, Term, UnifiedAddress}
 /// Thirty minutes; §5.3: D_OTP.
 pub const D_OTP: i64 = 1800;
 
+/// Lifecycle of an issued challenge — explicit state instead of implicit
+/// presence/absence in the queue. See #157.
+pub enum ChallengeStatus {
+    Relayed,
+    AwaitingResponse,
+    Closed,
+}
+
 /// A six-digit one-time passcode.
 #[derive(Clone, PartialEq, Eq, Zeroize)]
 #[zeroize(drop)]
