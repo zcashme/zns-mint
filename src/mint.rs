@@ -688,7 +688,7 @@ pub async fn relay<P: Parameters + Send + 'static>(
     }
 
     let (challenge, pending) =
-        OtpRequest::pending_challenge(name, action, requested_ua, record.commitment, term, mtp_now);
+        OtpRequest::initiate_challenge(name, action, requested_ua, record.commitment, term, mtp_now);
     let Some(memo) = challenge.encode(network) else {
         return true;
     };

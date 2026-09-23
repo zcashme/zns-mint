@@ -72,7 +72,7 @@ impl OtpRequest {
     /// controller, and this request, which expires it after D_OTP.
     /// Encoding stays with the caller: how a lane answers an
     /// unencodable challenge is lane policy, not birth.
-    pub fn pending_challenge(
+    pub fn initiate_challenge(
         name: &Name,
         action: Action,
         ua: &UnifiedAddress,
@@ -235,7 +235,7 @@ mod tests {
         let rcm = commitment(1);
         let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
 
-        let (challenge, pending) = OtpRequest::pending_challenge(
+        let (challenge, pending) = OtpRequest::initiate_challenge(
             &alice,
             Action::Update,
             &ua,

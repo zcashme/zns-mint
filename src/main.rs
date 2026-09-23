@@ -604,7 +604,7 @@ async fn main() {
                 continue;
             }
 
-            let (challenge, pending) = OtpRequest::pending_challenge(
+            let (challenge, pending) = OtpRequest::initiate_challenge(
                 &name,
                 Action::Update,
                 &record.ua,
