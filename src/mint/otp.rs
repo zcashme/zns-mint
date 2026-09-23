@@ -61,12 +61,8 @@ impl OtpCode {
 /// An issued, pending challenge.
 #[derive(Clone)]
 pub struct OtpRequest {
-    pub name: Name,
-    pub action: Action,
-    pub ua: UnifiedAddress,
-    pub term: Option<Term>,
+    pub challenge: Challenge,
     pub tip_rcm: NameCommitment,
-    pub code: OtpCode,
     pub expires_at: Timestamp,
 }
 
@@ -94,12 +90,14 @@ impl OtpRequest {
                 ua: ua.clone(),
             },
             Self {
-                name: name.clone(),
-                action,
-                ua: ua.clone(),
-                term,
+                challenge: Challenge {
+                    code: code.clone(),
+                    name: name.clone(),
+                    action,
+                    term,
+                    ua: ua.clone(),
+                },
                 tip_rcm,
-                code,
                 expires_at: mtp_now + Duration::seconds(D_OTP),
             },
         )
@@ -142,9 +140,9 @@ impl OtpQueue {
     ) -> bool {
         self.challenges.retain(|request| mtp < request.expires_at);
         self.challenges.iter().any(|request| {
-            request.name == *name
-                && request.action == action
-                && request.ua == *ua
+            request.challenge.name == *name
+                && request.challenge.action == action
+                && request.challenge.ua == *ua
                 && request.tip_rcm == tip_rcm
         })
     }
@@ -163,11 +161,11 @@ impl OtpQueue {
         self.challenges
             .iter()
             .find(|request| {
-                request.name == returned.name
-                    && request.action == returned.action
-                    && request.ua == returned.ua
+                request.challenge.name == returned.name
+                    && request.challenge.action == returned.action
+                    && request.challenge.ua == returned.ua
                     && request.tip_rcm == tip_rcm
-                    && bool::from(request.code.0.ct_eq(&returned.code.0))
+                    && bool::from(request.challenge.code.0.ct_eq(&returned.code.0))
             })
             .cloned()
     }
@@ -189,12 +187,12 @@ impl OtpQueue {
         };
         for i in 0..self.challenges.len() {
             let req = &self.challenges[i];
-            if req.name == *name
-                && req.action == action
-                && &req.ua == ua
+            if req.challenge.name == *name
+                && req.challenge.action == action
+                && &req.challenge.ua == ua
                 && req.tip_rcm == tip_rcm
                 && mtp < req.expires_at
-                && bool::from(req.code.0.ct_eq(&provided_code.0))
+                && bool::from(req.challenge.code.0.ct_eq(&provided_code.0))
             {
                 self.challenges.remove(i);
                 return true;
@@ -247,16 +245,16 @@ mod tests {
 
         // One code in two bodies — the invariant the run loop used to
         // maintain by hand, twice.
-        assert_eq!(challenge.code, pending.code);
-        assert_eq!(challenge.name, pending.name);
-        assert_eq!(challenge.action, pending.action);
-        assert_eq!(challenge.ua, pending.ua);
-        // The pending alone carries the expiry and the term.
+        assert_eq!(challenge.code, pending.challenge.code);
+        assert_eq!(challenge.name, pending.challenge.name);
+        assert_eq!(challenge.action, pending.challenge.action);
+        assert_eq!(challenge.ua, pending.challenge.ua);
+        // The pending alone carries the expiry and the term (now embedded in challenge).
         assert_eq!(
             pending.expires_at,
             Timestamp::from_seconds(1_700_000_000 + D_OTP).unwrap()
         );
-        assert_eq!(pending.term, Some(Term::Years(1)));
+        assert_eq!(pending.challenge.term, Some(Term::Years(1)));
         assert_eq!(pending.tip_rcm, rcm);
     }
 
