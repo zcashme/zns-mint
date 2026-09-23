@@ -140,3 +140,9 @@ Tracks design-relevant changes to `src/boot.rs`.
 - The three continuity asserts moved inside `apply_block`; boot gets
   them and now fails fast on a forked checkpoint or a Zebra reorg
   mid-sync.
+
+## 2026-09-22 — The node's tip is never pushed into the wallet
+
+- Boot no longer supplies Zebra's `best_height` through
+  `update_chain_tip`; the boot balance check reads the wallet's own
+  chain knowledge, which exists from seeding and boot sync.

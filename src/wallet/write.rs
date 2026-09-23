@@ -64,15 +64,12 @@ impl<P: Parameters> Wallet<P> {
         }
     }
 
-    /// True when a foreign lock remains active at the most recently supplied
-    /// Zebra tip. Without a known tip, an existing foreign lock is retained
-    /// conservatively.
+    /// True when a foreign lock outlives the wallet's position.
     fn is_foreign_lock_active(&self, output: &OutputRef, owner: LockOwner) -> bool {
         match self.locks.get(output) {
-            Some((existing_owner, expiry)) if *existing_owner != owner => match self.zebra_tip {
-                Some(tip) => *expiry > tip,
-                None => true,
-            },
+            Some((existing_owner, expiry)) if *existing_owner != owner => {
+                *expiry > self.tip().block_height()
+            }
             _ => false,
         }
     }
@@ -93,34 +90,21 @@ impl<P: Parameters> Wallet<P> {
         }
     }
 
-    /// The largest height at or below `max_height` that every one of the
-    /// three trees has retained as a checkpoint and that the wallet has
-    /// applied (or, before any block is applied, the boot seed checkpoint
-    /// common to all three trees).
+    /// The oldest retained checkpoint — the deepest height the trees can
+    /// still truncate to, identical across the three trees by the commit
+    /// discipline. `None` before the first applied block.
+    fn retained_floor(&self) -> Option<BlockHeight> {
+        // The store error type is `Infallible`; `.ok()` cannot lose one.
+        self.sapling_tree.store().min_checkpoint_id().ok().flatten()
+    }
+
+    /// The deepest applied block at or below `max_height` — the candidate
+    /// `try_truncate_trees_to` verifies against the trees.
     fn common_truncation_height(&self, max_height: BlockHeight) -> Option<BlockHeight> {
-        let applied = self
-            .blocks
+        self.blocks
             .range(..=max_height)
             .next_back()
-            .map(|(height, _)| *height);
-        if applied.is_some() {
-            return applied;
-        }
-        // No applied block qualifies. The boot seed checkpoint remains
-        // truncatable when all three trees agree on the same floor.
-        let floors = [
-            self.sapling_tree.store().min_checkpoint_id().ok().flatten(),
-            self.orchard_tree.store().min_checkpoint_id().ok().flatten(),
-            self.ironwood_tree
-                .store()
-                .min_checkpoint_id()
-                .ok()
-                .flatten(),
-        ];
-        match floors {
-            [Some(a), Some(b), Some(c)] if a == b && b == c && a <= max_height => Some(a),
-            _ => None,
-        }
+            .map(|(height, _)| *height)
     }
 
     /// Whether every tree can truncate to `height` as a retained checkpoint.
@@ -286,13 +270,12 @@ impl<P: Parameters> OutputLockStore for Wallet<P> {
     }
 
     fn get_locked_outputs(&self, account: Self::AccountId) -> Result<Vec<OutputRef>, Self::Error> {
-        let target = self.zebra_tip.map(next_height);
+        let target = next_height(self.tip().block_height());
         Ok(self
             .locks
             .iter()
             .filter(|(output, (_, expiry))| {
-                self.output_account(output) == Some(account)
-                    && target.is_none_or(|target| *expiry >= target)
+                self.output_account(output) == Some(account) && *expiry >= target
             })
             .map(|(output, _)| *output)
             .collect())
@@ -499,8 +482,8 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
     }
 
     fn update_chain_tip(&mut self, tip_height: BlockHeight) -> Result<(), WalletError> {
-        // The Zebra consensus tip is chain state, recorded exactly as
-        // supplied; reorg handling is the caller's truncate/rescan loop.
+        // The one writer for chain knowledge: scanning and chain-state
+        // adoption call it. Reorg correction is the caller's loop.
         self.zebra_tip = Some(tip_height);
         Ok(())
     }
@@ -679,11 +662,6 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         }
 
         self.drop_applied_above(target);
-        if let Some(tip) = self.zebra_tip {
-            if tip > target {
-                self.zebra_tip = Some(target);
-            }
-        }
         Ok(target)
     }
 
@@ -695,12 +673,9 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
             None => {}
         }
 
-        let clamped_tip = Some(self.zebra_tip.map_or(height, |tip| tip.min(height)));
-        if self
-            .max_applied_height()
-            .is_none_or(|applied| applied <= height)
-        {
-            self.zebra_tip = clamped_tip;
+        if self.blocks.is_empty() || self.tip().block_height() <= height {
+            // Adoption is knowledge — through the one writer.
+            self.update_chain_tip(height)?;
             return Ok(());
         }
 
@@ -743,7 +718,8 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         if self.blocks.is_empty() {
             self.seed = super::block_metadata(&chain_state);
         }
-        self.zebra_tip = clamped_tip;
+        // Adoption is knowledge — through the one writer.
+        self.update_chain_tip(height)?;
         Ok(())
     }
 
@@ -780,31 +756,33 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
             ));
         }
 
-        // The known chain tip stays: rewind only drops applied data back to
-        // the retained-checkpoint floor (or to the target, if that is shallower).
+        // Upstream rewinds by height alone; hash validation belongs to
+        // `truncate_to_chain_state`.
         let rewind_target = chain_state.block_height();
-        let Some(tip) = self.zebra_tip.or_else(|| self.max_applied_height()) else {
+
+        // Nothing applied above the target: birthdays only.
+        if self.tip().block_height() <= rewind_target {
+            self.lower_account_birthdays(&reset_account_birthdays, new_birthday);
+            return Ok(());
+        }
+
+        // Retention bounds rewinding: the floor is the trees' oldest
+        // retained checkpoint, never a tip.
+        let Some(floor) = self.retained_floor() else {
             self.lower_account_birthdays(&reset_account_birthdays, new_birthday);
             return Ok(());
         };
-        let prune_floor = BlockHeight::from_u32(
-            u32::from(tip).saturating_sub((MAX_CHECKPOINTS as u32).saturating_sub(1)),
-        );
-        let data_height = rewind_target.max(prune_floor);
-        if self
-            .max_applied_height()
-            .is_some_and(|applied| applied > data_height)
+        let data_height = rewind_target.max(floor);
+
+        if !self
+            .try_truncate_trees_to(data_height)
+            .map_err(RewindError::DataSource)?
         {
-            if !self
-                .try_truncate_trees_to(data_height)
-                .map_err(RewindError::DataSource)?
-            {
-                return Err(RewindError::DataSource(
-                    WalletError::TruncationTargetUnavailable(data_height),
-                ));
-            }
-            self.drop_applied_above(data_height);
+            return Err(RewindError::DataSource(
+                WalletError::TruncationTargetUnavailable(data_height),
+            ));
         }
+        self.drop_applied_above(data_height);
 
         self.lower_account_birthdays(&reset_account_birthdays, new_birthday);
         Ok(())
@@ -1028,11 +1006,9 @@ impl<P: Parameters> Wallet<P> {
             self.blocks.insert(height, block.to_block_metadata());
         }
 
-        // Scanning advances the known chain at least as far as the applied
-        // blocks. A previously supplied tip ahead of that is left in place.
-        if let Some(last) = self.blocks.last_key_value() {
-            let applied = *last.0;
-            self.zebra_tip = Some(self.zebra_tip.map_or(applied, |tip| tip.max(applied)));
+        // Scanning verified this far: knowledge follows, through the writer.
+        if let Some((&applied, _)) = self.blocks.last_key_value() {
+            self.update_chain_tip(applied)?;
         }
         Ok(())
     }
@@ -1146,7 +1122,7 @@ impl<P: Parameters> Wallet<P> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Wallet, WalletError};
+    use super::{Wallet, WalletError, MAX_CHECKPOINTS};
     use incrementalmerkletree::frontier::Frontier;
     use zcash_client_backend::data_api::chain::ChainState;
     use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore};
@@ -1680,7 +1656,7 @@ mod tests {
                 let root = wallet.ironwood_tree.root_at_checkpoint_id(&tip).unwrap();
                 assert!(wallet.truncate_to_chain_state(invalid).is_err());
                 assert_eq!(wallet.chain_height().unwrap(), Some(tip));
-                assert_eq!(wallet.max_applied_height(), Some(tip));
+                assert_eq!(wallet.tip().block_height(), tip);
                 assert_eq!(wallet.ironwood_notes.len(), 1);
                 assert_eq!(
                     wallet.sapling_tree.store().max_checkpoint_id().unwrap(),
@@ -1705,7 +1681,7 @@ mod tests {
                 .truncate_to_chain_state(target)
                 .expect("truncate to supplied state");
             assert_eq!(wallet.chain_height().unwrap(), Some(height));
-            assert_eq!(wallet.max_applied_height(), Some(height));
+            assert_eq!(wallet.tip().block_height(), height);
             assert_eq!(
                 wallet.ironwood_tree.root_at_checkpoint_id(&height).unwrap(),
                 Some(expected_root)
@@ -1745,6 +1721,184 @@ mod tests {
                     assert_eq!(witness.root(marked_leaf), resumed_frontier.root());
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Position ownership: the wallet's own chain position
+    // ------------------------------------------------------------------
+
+    /// A chain state to seed a bare wallet from, mirroring `Factory`.
+    fn origin() -> ChainState {
+        ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32]))
+    }
+
+    /// Applied-block metadata at `height`, for direct `blocks` insertion.
+    fn at(height: u32) -> zcash_client_backend::data_api::BlockMetadata {
+        zcash_client_backend::data_api::BlockMetadata::from_parts(
+            BlockHeight::from_u32(height),
+            BlockHash([height as u8; 32]),
+            Some(0),
+            Some(0),
+            Some(0),
+        )
+    }
+
+    /// The wallet's position is the boot origin before any block is applied.
+    #[test]
+    fn tip_is_the_boot_seed_before_any_block_is_applied() {
+        let origin = origin();
+        let wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
+        assert_eq!(
+            (wallet.tip().block_height(), wallet.tip().block_hash()),
+            (origin.block_height(), origin.block_hash())
+        );
+    }
+
+    /// With blocks applied, the position is the highest one, not the seed.
+    #[test]
+    fn tip_is_the_highest_applied_block() {
+        let origin = origin();
+        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
+        wallet.blocks.insert(BlockHeight::from_u32(5), at(5));
+        wallet.blocks.insert(BlockHeight::from_u32(7), at(7));
+        assert_eq!(
+            (wallet.tip().block_height(), wallet.tip().block_hash()),
+            (BlockHeight::from_u32(7), at(7).block_hash())
+        );
+    }
+
+    /// After a full truncation the position falls back to the seed.
+    #[test]
+    fn tip_falls_back_to_the_seed_after_full_truncation() {
+        let origin = origin();
+        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
+        wallet.blocks.insert(BlockHeight::from_u32(5), at(5));
+        wallet.blocks.clear();
+        assert_eq!(wallet.tip().block_height(), origin.block_height());
+    }
+
+    /// Scanning advances knowledge through the writer; truncation never
+    /// lowers it.
+    #[test]
+    fn chain_knowledge_moves_only_through_the_writer() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50_000);
+        let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h1, 1);
+        // Scanning verified this far — knowledge advanced through the writer.
+        assert_eq!(st.wallet().zebra_tip, Some(h1));
+        let (h2, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h2, 1);
+        assert_eq!(st.wallet().zebra_tip, Some(h2));
+        // Truncation does not lower knowledge: no clamp behind the writer.
+        st.wallet_mut().truncate_to_height(h1).unwrap();
+        assert_eq!(st.wallet().zebra_tip, Some(h2));
+    }
+
+    /// A far-ahead node tip must not defeat rewind: the floor is
+    /// retention, never the tip.
+    #[test]
+    fn rewind_truncates_despite_a_far_ahead_node_tip() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50_000);
+        let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h1, 1);
+        let (h2, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h2, 1);
+        let (h3, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h3, 1);
+
+        // An external driver supplies a tip far beyond every applied
+        // height — every catch-up's normal state, and the condition under
+        // which the tip-derived floor used to swallow rewinds whole.
+        let ahead = BlockHeight::from_u32(u32::from(h3) + 10_000);
+        st.wallet_mut().update_chain_tip(ahead).unwrap();
+
+        // The claimed ancestor: the wallet's own block at h1, with its hash.
+        let h1_hash = st
+            .wallet()
+            .block_metadata_at(h1)
+            .expect("h1 is applied")
+            .block_hash();
+        st.wallet_mut()
+            .rewind_to_chain_state(
+                ChainState::empty(h1, h1_hash),
+                std::collections::HashSet::new(),
+            )
+            .expect("lag must not defeat the rewind");
+
+        // Truncated to the claimed ancestor, despite the known chain
+        // extending far above every applied height — and the knowledge
+        // itself is untouched by the rewind, per the upstream contract.
+        assert_eq!(st.wallet().tip().block_height(), h1);
+        assert_eq!(st.wallet().sapling_notes.len(), 1);
+        assert_eq!(st.wallet().zebra_tip, Some(ahead));
+    }
+
+    /// Both lock readers answer from the position — no node tip needed.
+    #[test]
+    fn lock_readers_agree_without_any_node_tip() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50_000);
+        let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h1, 1);
+        // No `update_chain_tip`: the node observation stays None.
+        let account_id = st.test_account().unwrap().id();
+        let output_ref = st.sole_note_ref();
+        let owner = LockOwner::new([1; 32]);
+
+        // A lock expiring at the wallet's own position is lapsed from
+        // birth: the listing agrees with balance and selection, which
+        // already judged by the applied position.
+        let position = st.wallet().tip().block_height();
+        assert_eq!(
+            st.wallet_mut()
+                .lock_outputs(&[output_ref], owner, position)
+                .unwrap(),
+            1
+        );
+        assert!(st
+            .wallet()
+            .get_locked_outputs(account_id)
+            .unwrap()
+            .is_empty());
+
+        // A lock expiring above the position stays listed.
+        let above = BlockHeight::from_u32(u32::from(position) + 10);
+        assert_eq!(
+            st.wallet_mut()
+                .lock_outputs(&[output_ref], owner, above)
+                .unwrap(),
+            1
+        );
+        assert_eq!(st.wallet().get_locked_outputs(account_id).unwrap().len(), 1);
+    }
+
+    /// Below the retention window the checkpoint is gone: refuse rather
+    /// than keep orphaned state — restart is the recovery.
+    #[test]
+    fn truncate_below_the_retention_window_refuses() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50_000);
+        let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h1, 1);
+        // Outlive the retention window: the checkpoint at h1 is pruned.
+        for _ in 0..(MAX_CHECKPOINTS as u32) {
+            let (h, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+            st.scan_cached_blocks(h, 1);
+        }
+        match st.wallet_mut().truncate_to_height(h1) {
+            Err(WalletError::TruncationTargetUnavailable(height)) => assert_eq!(height, h1),
+            other => panic!("expected TruncationTargetUnavailable at {h1}, got {other:?}"),
         }
     }
 }

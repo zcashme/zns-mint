@@ -77,7 +77,8 @@ pub struct Wallet<P: Parameters> {
     /// what the wallet stores, by construction.
     scanning_keys: ScanningKeys<AccountId, (AccountId, zip32::Scope)>,
 
-    /// The Zebra consensus tip last supplied through `WalletWrite::update_chain_tip`.
+    /// The chain tip as last supplied through [`WalletWrite::update_chain_tip`];
+    /// never read by a decision — [`Wallet::tip`] owns those.
     zebra_tip: Option<BlockHeight>,
 
     /// Canonical Zebra blocks this in-memory projection has applied.
@@ -272,6 +273,39 @@ impl<P: Parameters> Wallet<P> {
             .get(&height)
             .cloned()
             .or_else(|| (height == self.seed.block_height()).then_some(self.seed))
+    }
+
+    /// The wallet's position: the highest applied block, or the boot
+    /// origin before the first block is applied. Always defined.
+    pub fn tip(&self) -> BlockMetadata {
+        self.blocks
+            .last_key_value()
+            .map(|(_, metadata)| *metadata)
+            .unwrap_or(self.seed)
+    }
+
+    /// The sync comparison against a caller-supplied network tip —
+    /// compared and dropped, never stored.
+    pub fn sync_status(&self, network_tip: BlockHeight) -> (bool, u32) {
+        let position = self.tip().block_height();
+        (
+            position == network_tip,
+            u32::from(network_tip.saturating_sub(u32::from(position))),
+        )
+    }
+
+    /// True when `txid` is known, unmined, and past expiry at
+    /// `network_tip`. Unknown `txid`: false.
+    pub fn expired_unmined_at(&self, txid: TxId, network_tip: BlockHeight) -> bool {
+        let expiry = self.transactions.get(&txid).map(|tx| tx.expiry_height());
+        let unmined = !matches!(
+            self.transaction_statuses.get(&txid),
+            Some(TransactionStatus::Mined(_))
+        );
+        unmined
+            && expiry
+                .filter(|height| u32::from(*height) > 0)
+                .is_some_and(|expiry| expiry <= network_tip)
     }
 
     /// Truncates the wallet to `max_height` and returns the
@@ -576,7 +610,7 @@ pub(crate) mod testing {
             let expired_unmined = mined_height.is_none()
                 && expiry_height
                     .filter(|height| u32::from(*height) > 0)
-                    .is_some_and(|expiry| self.zebra_tip.is_some_and(|tip| expiry <= tip));
+                    .is_some_and(|expiry| expiry <= self.tip().block_height());
             let fee_paid = has_sent_outputs
                 .then(|| spent - sent_output_value)
                 .flatten();
