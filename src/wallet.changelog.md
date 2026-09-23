@@ -659,6 +659,12 @@ Tracks design-relevant changes to `src/wallet.rs` and `src/wallet/trees.rs`.
   are composed at the trait boundary from it and the applied prefix. A
   second, height-only view of the same concept invited the wallet to
   reason about itself from partial facts.
+- `Wallet::sync_status(network_tip)` and
+  `Wallet::expired_unmined_at(txid, network_tip)` — the sync comparison
+  and the expiry judgment, offered to callers that hold both tips. The
+  node's tip is an argument on each: compared and dropped, never
+  stored; decisions still read `tip()` alone. Metrics are the intended
+  consumer of the former, expiry reconciliation of the latter.
 - The wallet never self-assesses sync. The summary's scan progress is
   always complete relative to its own position (scanning is one linear
   prefix; the tip is its end — a theorem, not a tracked state), and

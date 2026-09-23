@@ -288,6 +288,40 @@ impl<P: Parameters> Wallet<P> {
             .unwrap_or(self.seed)
     }
 
+    /// The sync comparison, computed for the caller that holds both tips:
+    /// whether the wallet's verified position names the supplied network
+    /// tip's height, and how far it trails if not. The node's tip is the
+    /// caller's knowledge — supplied as an argument, compared, dropped;
+    /// the wallet never stores it, and no decision path sees it. Height
+    /// equality only — hash continuity below the tip is the caller's
+    /// ancestor walk.
+    pub fn sync_status(&self, network_tip: BlockHeight) -> (bool, u32) {
+        let position = self.tip().block_height();
+        (
+            position == network_tip,
+            network_tip.saturating_sub(position),
+        )
+    }
+
+    /// Whether the transaction named `txid` is known, unmined, and past
+    /// its expiry height at the network tip the caller supplies — dead,
+    /// provably, against a chain the wallet never stores. Judged at the
+    /// caller's tip rather than the applied position; an unknown `txid`
+    /// is not expired. The intended consumer is expiry reconciliation —
+    /// releasing what a dead transaction held — and the safe trigger is
+    /// the caller's own verified judgment that the tip is canonical.
+    pub fn expired_unmined_at(&self, txid: TxId, network_tip: BlockHeight) -> bool {
+        let expiry = self.transactions.get(&txid).map(|tx| tx.expiry_height());
+        let unmined = !matches!(
+            self.transaction_statuses.get(&txid),
+            Some(TransactionStatus::Mined(_))
+        );
+        unmined
+            && expiry
+                .filter(|height| u32::from(*height) > 0)
+                .is_some_and(|expiry| expiry <= network_tip)
+    }
+
     /// Truncates the wallet to `max_height` and returns the
     /// [`BlockMetadata`] at that height — the new chain tip after reorg.
     pub fn truncate_to(&mut self, max_height: BlockHeight) -> Result<BlockMetadata, WalletError> {
