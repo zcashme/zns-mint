@@ -690,10 +690,7 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
             None => {}
         }
 
-        if self
-            .max_applied_height()
-            .is_none_or(|applied| applied <= height)
-        {
+        if self.blocks.is_empty() || self.tip().block_height() <= height {
             // Adopting the chain state means knowing the chain extends
             // to it — through the one writer.
             self.update_chain_tip(height)?;
@@ -1686,7 +1683,7 @@ mod tests {
                 let root = wallet.ironwood_tree.root_at_checkpoint_id(&tip).unwrap();
                 assert!(wallet.truncate_to_chain_state(invalid).is_err());
                 assert_eq!(wallet.chain_height().unwrap(), Some(tip));
-                assert_eq!(wallet.max_applied_height(), Some(tip));
+                assert_eq!(wallet.tip().block_height(), tip);
                 assert_eq!(wallet.ironwood_notes.len(), 1);
                 assert_eq!(
                     wallet.sapling_tree.store().max_checkpoint_id().unwrap(),
@@ -1711,7 +1708,7 @@ mod tests {
                 .truncate_to_chain_state(target)
                 .expect("truncate to supplied state");
             assert_eq!(wallet.chain_height().unwrap(), Some(height));
-            assert_eq!(wallet.max_applied_height(), Some(height));
+            assert_eq!(wallet.tip().block_height(), height);
             assert_eq!(
                 wallet.ironwood_tree.root_at_checkpoint_id(&height).unwrap(),
                 Some(expected_root)

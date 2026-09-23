@@ -12,7 +12,7 @@ use zcash_client_backend::data_api::locking::{LockFilter, LockedInputPolicy};
 use zcash_client_backend::data_api::{
     defaults,
     error::FindAccountForAddressError,
-    scanning::{ScanPriority, ScanRange},
+    scanning::ScanRange,
     wallet::{ConfirmationsPolicy, TargetHeight},
     Account as UpstreamAccount, AccountBalance, AccountPurpose, AccountSource, AddressInfo,
     Balance, BlockMetadata, NullifierQuery, Progress, Ratio, ReceivedTransactionOutput,
@@ -226,11 +226,6 @@ where
 }
 
 impl<P: consensus::Parameters> Wallet<P> {
-    /// The highest block height this wallet has applied, if any.
-    pub(super) fn max_applied_height(&self) -> Option<BlockHeight> {
-        self.blocks.last_key_value().map(|(height, _)| *height)
-    }
-
     /// Folds one unspent note into its account's per-pool balance.
     ///
     /// Confirmation and trust classification is delegated to `wallet::input`
@@ -416,22 +411,25 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         &self,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Option<WalletSummary<Self::AccountId>>, Self::Error> {
-        // Upstream counts confirmations against the chain tip, and its
-        // conformance suite pins that: a summary must be absent when the
-        // wallet has neither supplied knowledge nor applied blocks, and a
-        // supplied tip drives confirmation counting even while ahead of
-        // the applied position. In this service the node's tip is never
-        // pushed, so knowledge tracks the applied position in practice;
-        // the fallback covers a wallet that has applied blocks but never
-        // been told a tip.
-        let Some(chain_tip_height) = self.zebra_tip.or_else(|| self.max_applied_height()) else {
-            return Ok(None);
+        // The summary's reference height is the wallet's chain knowledge —
+        // upstream's concept, and upstream's conformance suite pins both
+        // its use (a supplied tip drives confirmation counting) and the
+        // absence rule (no knowledge and nothing applied: no summary). In
+        // this service the node's tip is never supplied, so knowledge only
+        // ever mirrors the applied position; the position stands in for it
+        // until the first block is applied.
+        let chain_tip_height = match self.zebra_tip {
+            Some(tip) => tip,
+            None if !self.blocks.is_empty() => self.tip().block_height(),
+            None => return Ok(None),
         };
         let target_height = TargetHeight::from(next_height(chain_tip_height));
 
-        let fully_scanned_height = self
-            .max_applied_height()
-            .unwrap_or_else(|| self.seed.block_height());
+        // Everything at or below the wallet's position is applied, and
+        // nothing beyond it exists here — scanning is one linear prefix,
+        // so the fully scanned height IS the position. A theorem of the
+        // wallet's construction, not a tracked state.
+        let fully_scanned_height = self.tip().block_height();
 
         let mut account_balances = self
             .ufvks
@@ -474,19 +472,24 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
             )?;
         }
 
-        // Progress over the block span between the earliest account birthday
-        // and the Zebra tip; a display metric, not an authoritative note count.
+        // Scan progress across the span the wallet knows. Everything at
+        // or below the position is applied, so progress is complete
+        // unless a supplied tip runs ahead of it — embeddings that push
+        // tips do; this service never does. Upstream's conformance suite
+        // pins the literal, unreduced block counts (one block scanned is
+        // `1/1`, two are `2/2`), so the ratio is expressed over the span,
+        // never simplified.
         let birthday = self
             .wallet_birthday()
             .unwrap_or_else(|| next_height(self.seed.block_height()));
-        let scanned_span =
-            u64::from((u32::from(fully_scanned_height) + 1).saturating_sub(u32::from(birthday)));
-        let total_span =
+        let scanned_blocks =
+            u64::from(u32::from(fully_scanned_height).saturating_sub(u32::from(birthday)) + 1);
+        let known_blocks =
             u64::from(u32::from(chain_tip_height).saturating_sub(u32::from(birthday)) + 1);
-        let scan = if total_span == 0 {
+        let scan = if known_blocks == 0 {
             Ratio::new(1, 1)
         } else {
-            Ratio::new(scanned_span.min(total_span), total_span)
+            Ratio::new(scanned_blocks.min(known_blocks), known_blocks)
         };
         let progress = Progress::new(scan, Some(Ratio::new(0, 0)));
 
@@ -537,40 +540,25 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
     }
 
     fn suggest_scan_ranges(&self) -> Result<Vec<ScanRange>, Self::Error> {
-        let Some(tip) = self.zebra_tip else {
-            return Ok(Vec::new());
-        };
-        let start = match self.max_applied_height() {
-            Some(h) => next_height(h),
-            None => match self.wallet_birthday() {
-                Some(b) => b,
-                None => return Ok(Vec::new()),
-            },
-        };
-        let end = next_height(tip);
-        if start >= end {
-            Ok(Vec::new())
-        } else {
-            // One linear catch-up range: the mint rescans everything between
-            // its applied tip and the Zebra tip, in order.
-            Ok(vec![ScanRange::from_parts(
-                start..end,
-                ScanPriority::ChainTip,
-            )])
-        }
+        // The wallet never expresses a sync gap: it does not hold the
+        // network tip, and catch-up is the caller's comparison. Upstream's
+        // sync driver consults this; against this wallet — whose knowledge
+        // only ever mirrors the applied position — there is never a range
+        // to suggest.
+        Ok(Vec::new())
     }
 
     fn get_target_and_anchor_heights(
         &self,
         min_confirmations: NonZeroU32,
     ) -> Result<Option<(TargetHeight, BlockHeight)>, Self::Error> {
-        // The wallet builds and judges proposals against its own position:
-        // heights it has not applied cannot witness anything. The node's
-        // observation is never consulted here.
-        let Some(position) = self.max_applied_height() else {
+        // Proposals anchor at heights the wallet can actually witness: its
+        // own position, never the node's. Before the first applied block no
+        // checkpoint exists, so no anchor can either.
+        if self.blocks.is_empty() {
             return Ok(None);
-        };
-        let target = next_height(position);
+        }
+        let target = next_height(self.tip().block_height());
         // The anchor must have at least `min_confirmations` blocks on top of
         // it, relative to the next block.
         let bound =

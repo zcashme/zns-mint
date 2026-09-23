@@ -654,3 +654,15 @@ Tracks design-relevant changes to `src/wallet.rs` and `src/wallet/trees.rs`.
   it, scanning no longer ratchets it behind the writer's back, and rewind
   never touches it — `chain_height` survives rewinds per the upstream
   scan-queue contract. A far-ahead tip no longer defeats rewind.
+- `max_applied_height` is gone. The wallet holds one position — `tip`,
+  the fully applied block in full — and upstream's Option-shaped answers
+  are composed at the trait boundary from it and the applied prefix. A
+  second, height-only view of the same concept invited the wallet to
+  reason about itself from partial facts.
+- The wallet never self-assesses sync. The summary's scan progress is
+  always complete relative to its own position (scanning is one linear
+  prefix; the tip is its end — a theorem, not a tracked state), and
+  `suggest_scan_ranges` never suggests a range: naming a gap would
+  require holding the network tip, which the wallet declines to do.
+  Whether the wallet trails the network is a comparison only the run
+  loop makes — it holds both tips.

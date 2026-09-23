@@ -77,17 +77,9 @@ pub struct Wallet<P: Parameters> {
     /// what the wallet stores, by construction.
     scanning_keys: ScanningKeys<AccountId, (AccountId, zip32::Scope)>,
 
-    /// The chain tip as the wallet knows it — upstream's own concept,
-    /// written only through [`WalletWrite::update_chain_tip`], the one
-    /// writer. This service never stores the node's tip: scanning
-    /// realigns knowledge to the applied position on every batch, and
-    /// adopting a chain state sets it to the adopted height. After a
-    /// truncation it may briefly name the abandoned branch — the catch-up
-    /// loop realigns it within one applied block — so no decision reads
-    /// it: decisions consult [`Wallet::tip`]. It exists for the upstream
-    /// contracts that read chain knowledge (`chain_height`,
-    /// `suggest_scan_ranges`) and for conformance drivers that supply a
-    /// tip externally.
+    /// The chain tip as last supplied through [`WalletWrite::update_chain_tip`],
+    /// the one writer. Never read by a decision — [`Wallet::tip`] owns those.
+    /// Kept for upstream's `chain_height` and `suggest_scan_ranges` contracts.
     zebra_tip: Option<BlockHeight>,
 
     /// Canonical Zebra blocks this in-memory projection has applied.

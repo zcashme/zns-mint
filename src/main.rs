@@ -321,7 +321,7 @@ async fn main() {
         let treasury_zats = wallet
             .get_wallet_summary(ConfirmationsPolicy::MIN)
             .expect("FATAL: balance summary failed")
-            .expect("FATAL: Zebra tip not recorded before gauge")
+            .expect("FATAL: chain knowledge missing before gauge")
             .account_balances()
             .get(&TREASURY_ACCOUNT)
             .expect("FATAL: treasury account missing from summary")
