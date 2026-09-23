@@ -629,8 +629,8 @@ impl<P: Parameters> InputSource for Wallet<P> {
         let mut accumulated = Zatoshis::ZERO;
 
         // Pools are drawn on in the caller's preference order; within a pool
-        // notes are taken preferred lock tier first, then oldest, until the
-        // accumulation exceeds the target (the crossing note is included).
+        // notes are taken preferred lock tier first, then oldest, while the
+        // total is still short of the target. The note that meets it is included.
         for pool in sources {
             match pool {
                 ShieldedPool::Sapling => {
@@ -642,7 +642,7 @@ impl<P: Parameters> InputSource for Wallet<P> {
                         lock_filter,
                     ) {
                         let take = match target_value {
-                            TargetValue::AtLeast(target) => accumulated <= target,
+                            TargetValue::AtLeast(target) => accumulated < target,
                             TargetValue::AllFunds(_) => true,
                         };
                         let value = note
@@ -666,7 +666,7 @@ impl<P: Parameters> InputSource for Wallet<P> {
                         lock_filter,
                     ) {
                         let take = match target_value {
-                            TargetValue::AtLeast(target) => accumulated <= target,
+                            TargetValue::AtLeast(target) => accumulated < target,
                             TargetValue::AllFunds(_) => true,
                         };
                         let value = note.note_value().expect(
@@ -808,7 +808,21 @@ impl<P: Parameters> InputSource for Wallet<P> {
 
 #[cfg(test)]
 mod tests {
-    use zcash_client_backend::data_api::testing::{pool, sapling::SaplingPoolTester};
+    use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
+    use zcash_client_backend::data_api::testing::pool::ShieldedPoolTester;
+    use zcash_client_backend::data_api::testing::{pool, sapling::SaplingPoolTester, AddressType};
+    use zcash_client_backend::data_api::wallet::input_selection::{
+        GreedyInputSelector, LockFilter, LockedInputPolicy,
+    };
+    use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
+    use zcash_client_backend::data_api::{
+        Account, InputSource, TargetValue, TransactionStatus, WalletRead, WalletWrite,
+    };
+    use zcash_client_backend::fees::{standard, DustOutputPolicy, StandardFeeRule};
+    use zcash_keys::address::Address;
+    use zcash_protocol::value::Zatoshis;
+    use zcash_protocol::ShieldedPool;
+    use zip321::{Payment, TransactionRequest};
 
     use crate::wallet::testing::{Cache, Factory};
 
@@ -932,17 +946,6 @@ mod tests {
     /// expiry — the same rule as `NotInMainChain`.
     #[test]
     fn txid_not_recognized_unlocks_after_expiry() {
-        use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
-        use zcash_client_backend::data_api::testing::pool::ShieldedPoolTester;
-        use zcash_client_backend::data_api::testing::AddressType;
-        use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
-        use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
-        use zcash_client_backend::data_api::{Account, TransactionStatus, WalletRead, WalletWrite};
-        use zcash_client_backend::fees::{standard, DustOutputPolicy, StandardFeeRule};
-        use zcash_keys::address::Address;
-        use zcash_protocol::value::Zatoshis;
-        use zip321::{Payment, TransactionRequest};
-
         let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
             .build::<SaplingPoolTester>();
         let fvk = SaplingPoolTester::test_account_fvk(&st);
@@ -1007,5 +1010,57 @@ mod tests {
             fund,
             "after tip passes expiry, TxidNotRecognized spends unlock"
         );
+    }
+
+    /// An exact total is enough. A later eligible note stays unselected.
+    #[test]
+    fn at_least_stops_when_the_total_meets_the_target() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let fund = Zatoshis::const_from_u64(50_000);
+        for _ in 0..3 {
+            let (height, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, fund);
+            st.scan_cached_blocks(height, 1);
+        }
+        let account = st.test_account().expect("test account").id();
+        let (target_height, _) = st
+            .wallet()
+            .get_target_and_anchor_heights(std::num::NonZeroU32::MIN)
+            .expect("anchor heights")
+            .expect("a scanned tip has a target");
+        let policy = ConfirmationsPolicy::MIN;
+        let lock = LockedInputPolicy::Exclude;
+
+        let exact = st
+            .wallet()
+            .select_spendable_notes(
+                account,
+                TargetValue::AtLeast(fund),
+                &[ShieldedPool::Sapling],
+                target_height,
+                policy,
+                &[],
+                LockFilter::Policy(&lock),
+            )
+            .expect("select one note");
+        assert_eq!(exact.sapling().len(), 1);
+        assert_eq!(exact.total_value().expect("one note"), fund);
+
+        let two = Zatoshis::const_from_u64(100_000);
+        let meeting = st
+            .wallet()
+            .select_spendable_notes(
+                account,
+                TargetValue::AtLeast(two),
+                &[ShieldedPool::Sapling],
+                target_height,
+                policy,
+                &[],
+                LockFilter::Policy(&lock),
+            )
+            .expect("select two notes");
+        assert_eq!(meeting.sapling().len(), 2);
+        assert_eq!(meeting.total_value().expect("two notes"), two);
     }
 }

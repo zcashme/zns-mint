@@ -1,5 +1,10 @@
 # Wallet changelog
 
+## 2026-09-23 — At-least selection stops on an exact total
+
+- `select_spendable_notes` takes another note only while the total is
+  still short of the target. An exact match does not pull one more.
+
 ## 2026-09-23 — `truncate_to` returns the height it committed
 
 - The metadata is for the block `truncate_to_height` rewound to, which
