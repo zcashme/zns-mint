@@ -299,7 +299,7 @@ impl<P: Parameters> Wallet<P> {
         let position = self.tip().block_height();
         (
             position == network_tip,
-            network_tip.saturating_sub(position),
+            u32::from(network_tip.saturating_sub(u32::from(position))),
         )
     }
 
