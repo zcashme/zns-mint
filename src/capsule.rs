@@ -7,6 +7,10 @@
 //! seam so integration tests can substitute [`crate::tee::FakeTee`] without
 //! forking the crypto.
 
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
+
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand::RngCore;
@@ -27,6 +31,16 @@ pub const NONCE_LEN: usize = 24;
 /// The ZIP-32 seed length in bytes.
 pub const SEED_LEN: usize = 32;
 
+/// Poly1305 tag appended to the seed.
+const TAG_LEN: usize = 16;
+
+/// Ciphertext is the seed plus its tag.
+pub const CIPHERTEXT_LEN: usize = SEED_LEN + TAG_LEN;
+
+/// On-disk size: magic, fingerprint, nonce, ciphertext, and the two
+/// postcard length bytes. A longer file is not a capsule.
+pub const CAPSULE_LEN: usize = MAGIC.len() + 32 + 1 + NONCE_LEN + 1 + CIPHERTEXT_LEN;
+
 /// The context string passed to [`Tee::derive_sealing_key`] for capsule
 /// AEAD. A single well-known context today; extra contexts are cheap to add.
 pub const CAPSULE_KEY_CONTEXT: &[u8] = b"ZNS_SEED/capsule/v1";
@@ -39,6 +53,15 @@ pub enum CapsuleError {
 
     #[error("capsule nonce length {actual} != expected {expected}")]
     BadNonce { actual: usize, expected: usize },
+
+    #[error("capsule length {actual} != expected {expected}")]
+    BadLength { actual: usize, expected: usize },
+
+    #[error("capsule ciphertext length {actual} != expected {expected}")]
+    BadCiphertext { actual: usize, expected: usize },
+
+    #[error("capsule file unreadable: {0}")]
+    Read(#[from] std::io::Error),
 
     #[error("capsule parse failed: {0}")]
     Parse(String),
@@ -68,9 +91,52 @@ pub struct Capsule {
     pub ciphertext: Vec<u8>,
 }
 
+/// Reads at most one byte past [`CAPSULE_LEN`]. A different length is
+/// refused before the bytes are parsed.
+pub fn read_capsule_file(path: impl AsRef<Path>) -> Result<Vec<u8>, CapsuleError> {
+    let file = File::open(path)?;
+    let mut limited = file.take((CAPSULE_LEN + 1) as u64);
+    let mut buf = Vec::with_capacity(CAPSULE_LEN + 1);
+    limited.read_to_end(&mut buf)?;
+    if buf.len() != CAPSULE_LEN {
+        return Err(CapsuleError::BadLength {
+            actual: buf.len(),
+            expected: CAPSULE_LEN,
+        });
+    }
+    Ok(buf)
+}
+
 /// Deserialises a capsule from its on-disk bytes (postcard).
+/// The blob and both variable fields must be the fixed lengths.
 pub fn parse_capsule(blob: &[u8]) -> Result<Capsule, CapsuleError> {
-    postcard::from_bytes(blob).map_err(|e| CapsuleError::Parse(e.to_string()))
+    if blob.len() != CAPSULE_LEN {
+        return Err(CapsuleError::BadLength {
+            actual: blob.len(),
+            expected: CAPSULE_LEN,
+        });
+    }
+    let capsule: Capsule =
+        postcard::from_bytes(blob).map_err(|e| CapsuleError::Parse(e.to_string()))?;
+    fixed_fields(&capsule)?;
+    Ok(capsule)
+}
+
+/// Nonce and ciphertext are fixed sizes. Checked before decryption.
+fn fixed_fields(capsule: &Capsule) -> Result<(), CapsuleError> {
+    if capsule.nonce.len() != NONCE_LEN {
+        return Err(CapsuleError::BadNonce {
+            actual: capsule.nonce.len(),
+            expected: NONCE_LEN,
+        });
+    }
+    if capsule.ciphertext.len() != CIPHERTEXT_LEN {
+        return Err(CapsuleError::BadCiphertext {
+            actual: capsule.ciphertext.len(),
+            expected: CIPHERTEXT_LEN,
+        });
+    }
+    Ok(())
 }
 
 /// Serialises a capsule to its on-disk bytes (postcard).
@@ -130,10 +196,10 @@ where
 
 /// Unseals a capsule with the TEE's sealing key.
 ///
-/// Verifies (in order): the magic, the nonce length, the AEAD tag with
-/// AAD = `magic || fingerprint`, the decrypted seed length, and the
-/// fingerprint the seed derives to. The returned [`Secret`] wipes on
-/// drop.
+/// Verifies (in order): the magic, the nonce and ciphertext lengths,
+/// the AEAD tag with AAD = `magic || fingerprint`, the decrypted seed
+/// length, and the fingerprint the seed derives to. The returned
+/// [`Secret`] wipes on drop.
 pub fn unseal_seed<T: Tee + ?Sized>(
     tee: &T,
     capsule: &Capsule,
@@ -141,12 +207,7 @@ pub fn unseal_seed<T: Tee + ?Sized>(
     if capsule.magic != MAGIC {
         return Err(CapsuleError::BadMagic);
     }
-    if capsule.nonce.len() != NONCE_LEN {
-        return Err(CapsuleError::BadNonce {
-            actual: capsule.nonce.len(),
-            expected: NONCE_LEN,
-        });
-    }
+    fixed_fields(capsule)?;
 
     let mut raw_key = tee.derive_sealing_key(CAPSULE_KEY_CONTEXT)?;
     let cipher =
@@ -279,5 +340,70 @@ mod tests {
         assert_eq!(parsed, capsule);
         let out = unseal_seed(&tee, &parsed).expect("unseal");
         assert_eq!(out.expose_secret(), seed.expose_secret());
+    }
+}
+
+#[cfg(test)]
+mod bounds {
+    use super::*;
+    use std::io::Write;
+
+    fn envelope() -> Capsule {
+        Capsule {
+            magic: MAGIC,
+            fingerprint: [1u8; 32],
+            nonce: vec![2u8; NONCE_LEN],
+            ciphertext: vec![3u8; CIPHERTEXT_LEN],
+        }
+    }
+
+    #[test]
+    fn a_capsule_serialises_to_the_fixed_length() {
+        let bytes = serialize_capsule(&envelope()).expect("serialize");
+        assert_eq!(bytes.len(), CAPSULE_LEN);
+        assert_eq!(parse_capsule(&bytes).expect("parse"), envelope());
+    }
+
+    #[test]
+    fn parse_rejects_the_wrong_file_length() {
+        let bytes = serialize_capsule(&envelope()).expect("serialize");
+        assert!(matches!(
+            parse_capsule(&bytes[..bytes.len() - 1]),
+            Err(CapsuleError::BadLength { .. })
+        ));
+        let mut long = bytes.clone();
+        long.push(0);
+        assert!(matches!(
+            parse_capsule(&long),
+            Err(CapsuleError::BadLength { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_a_short_ciphertext_inside_a_fixed_blob() {
+        let mut bytes = serialize_capsule(&envelope()).expect("serialize");
+        // Ciphertext length byte sits after magic, fingerprint, and nonce.
+        let len_at = MAGIC.len() + 32 + 1 + NONCE_LEN;
+        bytes[len_at] = (CIPHERTEXT_LEN - 1) as u8;
+        assert!(matches!(
+            parse_capsule(&bytes),
+            Err(CapsuleError::BadCiphertext { .. })
+        ));
+    }
+
+    #[test]
+    fn read_rejects_an_oversized_file() {
+        let path = std::env::temp_dir().join(format!("zns-capsule-bound-{}", std::process::id()));
+        let mut file = std::fs::File::create(&path).expect("temp file");
+        file.write_all(&[0u8; CAPSULE_LEN + 8]).expect("write");
+        drop(file);
+        assert!(matches!(
+            read_capsule_file(&path),
+            Err(CapsuleError::BadLength {
+                actual: n,
+                ..
+            }) if n == CAPSULE_LEN + 1
+        ));
+        let _ = std::fs::remove_file(&path);
     }
 }

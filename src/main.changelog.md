@@ -4,6 +4,30 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-23 — Boot step 3 is one step (#158)
+
+- Boot fetches the origin checkpoint and both subtree-root batches,
+  then one `Wallet::new`. The run loop receives that wallet; the
+  `put_*_subtree_roots` calls are gone. Detail is in
+  `boot.changelog.md`.
+  
+## 2026-09-23 — The echo lane no longer clones the OTP queue
+
+- `authorize` refuses an illegal extension before consuming the OTP,
+  so the echo lane passes the live queue.
+
+## 2026-09-22 — The chain moving mid-catch-up re-converges, never kills (audit H7)
+
+- The run loop is `'run`-labeled, and every race arm — the ancestor
+  walk's `-8`, the tree-state and block fetches', a fetched block that
+  no longer extends the applied position — warns and restarts the
+  cycle: nothing was mutated before the detection, the reorg's own tip
+  notification is already queued in the change-only stream (the next
+  wake is immediate), and the reconcile walk re-derives everything.
+  The terminal and post-loop photograph asserts die with it: the tip
+  that opened the cycle is advisory, never a promise. Verdicts stay
+  fatal; races stopped being them.
+
 ## 2026-09-21 — The challenge birth leaves the run loop (#120)
 
 - The relay arm and the liveness loop no longer hand-build the
@@ -32,6 +56,21 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
 - The walk no longer takes the NameNoteQueue (see mint.changelog.md);
   a duplicate claim that still lands on chain is ignored, not fatal
   (see registry.changelog.md).
+  
+## 2026-09-21 — The relay lane answers at mempool speed (#121)
+
+- Update and release triggers relay the moment Zebra reports them
+  in the mempool — no wait for the trigger's block. One reader task
+  (`watch_mempool`) turns mempool announcements into `MintInbound`
+  candidates on a bounded channel; the orchestrator's `select!`
+  match decides which lanes are quick, and `mint::relay` is the one
+  policy both entrances call — the drain with the carrying block's
+  height, the quick path with the next. Best-effort and forgetful:
+  the quick path never defers and never remembers, the confirmed
+  trigger still re-enters the drain, and the pending-tuple check
+  absorbs the duplicate in either race order. Claims, echoes, and
+  bare payments stay block-cadence; the run loop stays one
+  function.
 
 ## 2026-09-21 — The relay lane's first payment gate (issue #18)
 
@@ -1056,3 +1095,12 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
   boot now treats NU6.3/Ironwood activation as an invariant and fails before
   activation; the explicit `pre-nu63-activation` feature gates the development
   exception and empty-Ironwood-tree seeding path.
+
+## 2026-09-22 — The node's tip is never pushed into the wallet
+
+- The run loop no longer supplies Zebra's `best_height` through
+  `update_chain_tip`. The node's position lives in the loop's own local,
+  where it is fetched and used; the wallet maintains its chain knowledge
+  itself (scanning and chain-state adoption, through the one writer), so
+  confirmations and summaries are counted against what the wallet has
+  actually verified.

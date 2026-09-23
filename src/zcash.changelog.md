@@ -1,5 +1,55 @@
 # Zcash I/O changelog
 
+## 2026-09-23 — A malformed tip announcement does not abort
+
+- `next_tip` drops a notification whose hash is not 32 bytes and
+  continues with `canonical_tip`. The run loop still panics on a bad
+  canonical tip, rather than on a bad announcement.
+
+## 2026-09-23 — Ironwood treestate is mandatory (#155)
+
+- The response's `ironwood` section is a required field, enforced at
+  the type: a `z_gettreestate` without it does not parse, and a missing
+  `finalState` is `BadNodeData` — the same lane as Sapling and Orchard.
+  NU6.3 is always active; the pre-NU6.3 fallback ("absent and empty
+  are the same value") is gone.
+
+## 2026-09-22 — The node conversation bounded, typed, and honest (audit H7/H8)
+
+- `round_trip` covers the whole exchange — headers through the last
+  body byte — under one `REQUEST_TIMEOUT`, and bounds the body by
+  consensus: `4 × MAX_BLOCK_BYTES` (a consensus-max block hex-encodes
+  to two). A stalled body times out; an oversized one is `BadNodeData` —
+  the pricing lane's discipline, transplanted.
+- The tip lane decodes through the crate's typed accessor
+  (`hash_display_order`): a malformed tip hash is a typed verdict, never
+  a panic. The mempool doc keeps its word — the re-baseline it once
+  promised is recorded as deliberately not built.
+- `getblockhash` maps the `-8` race like its siblings. The canonical
+  reads ride the facade — the charter is real, the run loop holds one
+  node handle, raw-tx stays the reader's. The post-price tip check
+  borrows `canonical_tip` instead of copying it; `RETRY_PAUSE` crosses
+  the module boundary once.
+- Submission's acceptance is verified in production: the returned
+  identifier parses through `TxId::from_hex` and must name the sent
+  transaction; the impossible serialization expects.
+- Tree-state fixtures lock the parser's claims: absent Ironwood is the
+  empty frontier (the activation−1 answer), garbage hex is a
+  `BadCheckpoint`, a malformed hash or missing Sapling state is bad
+  node data.
+
+
+## 2026-09-21 — The mempool session
+
+- `MempoolSession` owns the mempool-change stream as `TipSession`
+  owns the tip's: subscription, repair, nothing else — two fields,
+  the client and the stream. It announces the node's mempool changes
+  and answers nothing; a gap in the stream is a gap in quickness,
+  never in truth: what it misses, the block path decides. The
+  `getrawmempool` re-baseline the stream's doc once promised is
+  deliberately not built — best-effort is the doctrine, and the
+  fallback is the design.
+
 ## 2026-09-20 — Keepalive claims verified against regtest Zebra (#88)
 - The doc comments' keepalive claims are now measured facts, not
   assertions: wire-level probe against regtest (node frozen mid-stream)

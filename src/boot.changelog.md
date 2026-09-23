@@ -2,6 +2,18 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-23 — Boot step 3 is one step (#158)
+
+- Fetch the origin checkpoint and both subtree-root batches, then one
+  `Wallet::new`. The `put_*_subtree_roots` calls were removed.
+
+## 2026-09-23 — Regtest consensus: every NU6.x active at genesis (#155)
+
+- `regtest_network()` mirrors the harness zebrad config with NU6.1/2/3
+  at height 1 — NU6.3 is always active, even on regtest. The boot test
+  asserts Nu6.3 active from genesis; the birthday (origin 3, first
+  observed 4) is unchanged.
+
 ## 2026-09-21 — Access-code purpose key on Boot (#83)
 
 - Boot derives an access-code root via
@@ -140,3 +152,9 @@ Tracks design-relevant changes to `src/boot.rs`.
 - The three continuity asserts moved inside `apply_block`; boot gets
   them and now fails fast on a forked checkpoint or a Zebra reorg
   mid-sync.
+
+## 2026-09-22 — The node's tip is never pushed into the wallet
+
+- Boot no longer supplies Zebra's `best_height` through
+  `update_chain_tip`; the boot balance check reads the wallet's own
+  chain knowledge, which exists from seeding and boot sync.

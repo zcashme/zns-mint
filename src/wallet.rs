@@ -14,7 +14,7 @@ use incrementalmerkletree::{Address, Marking, Retention};
 use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTree};
 use zcash_client_backend::scanning::ScanningKeys;
 use zcash_client_backend::{
-    data_api::chain::ChainState,
+    data_api::chain::{ChainState, CommitmentTreeRoot},
     data_api::locking::LockOwner,
     data_api::{
         BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus, WalletWrite,
@@ -77,7 +77,8 @@ pub struct Wallet<P: Parameters> {
     /// what the wallet stores, by construction.
     scanning_keys: ScanningKeys<AccountId, (AccountId, zip32::Scope)>,
 
-    /// The Zebra consensus tip last supplied through `WalletWrite::update_chain_tip`.
+    /// The chain tip as last supplied through [`WalletWrite::update_chain_tip`];
+    /// never read by a decision — [`Wallet::tip`] owns those.
     zebra_tip: Option<BlockHeight>,
 
     /// Canonical Zebra blocks this in-memory projection has applied.
@@ -129,10 +130,13 @@ pub struct Wallet<P: Parameters> {
 }
 
 impl<P: Parameters> Wallet<P> {
-    /// Builds the wallet against the origin checkpoint, for `network`.
+    /// Born complete: the origin frontiers plus every completed
+    /// subtree root behind them, or nothing.
     pub fn new(
         ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
         chain_state: &ChainState,
+        sapling_roots: &[CommitmentTreeRoot<sapling::Node>],
+        ironwood_roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
         network: P,
     ) -> Result<Self, TreeError> {
         let ufvks: BTreeMap<AccountId, UnifiedFullViewingKey> = ufvks.into_iter().collect();
@@ -184,6 +188,23 @@ impl<P: Parameters> Wallet<P> {
         wallet
             .ironwood_tree
             .insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
+
+        // Completed shard roots behind the frontiers. A conflicting root
+        // drops the local, so a partial batch is never returned.
+        for (root, index) in sapling_roots.iter().zip(0u64..) {
+            let addr = Address::from_parts(SAPLING_SHARD_HEIGHT.into(), index);
+            wallet.sapling_tree.insert(addr, *root.root_hash())?;
+            wallet
+                .sapling_tree_shard_end_heights
+                .insert(addr, root.subtree_end_height());
+        }
+        for (root, index) in ironwood_roots.iter().zip(0u64..) {
+            let addr = Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index);
+            wallet.ironwood_tree.insert(addr, *root.root_hash())?;
+            wallet
+                .ironwood_tree_shard_end_heights
+                .insert(addr, root.subtree_end_height());
+        }
         Ok(wallet)
     }
 
@@ -274,12 +295,46 @@ impl<P: Parameters> Wallet<P> {
             .or_else(|| (height == self.seed.block_height()).then_some(self.seed))
     }
 
-    /// Truncates the wallet to `max_height` and returns the
-    /// [`BlockMetadata`] at that height — the new chain tip after reorg.
+    /// The wallet's position: the highest applied block, or the boot
+    /// origin before the first block is applied. Always defined.
+    pub fn tip(&self) -> BlockMetadata {
+        self.blocks
+            .last_key_value()
+            .map(|(_, metadata)| *metadata)
+            .unwrap_or(self.seed)
+    }
+
+    /// The sync comparison against a caller-supplied network tip —
+    /// compared and dropped, never stored.
+    pub fn sync_status(&self, network_tip: BlockHeight) -> (bool, u32) {
+        let position = self.tip().block_height();
+        (
+            position == network_tip,
+            u32::from(network_tip.saturating_sub(u32::from(position))),
+        )
+    }
+
+    /// True when `txid` is known, unmined, and past expiry at
+    /// `network_tip`. Unknown `txid`: false.
+    pub fn expired_unmined_at(&self, txid: TxId, network_tip: BlockHeight) -> bool {
+        let expiry = self.transactions.get(&txid).map(|tx| tx.expiry_height());
+        let unmined = !matches!(
+            self.transaction_statuses.get(&txid),
+            Some(TransactionStatus::Mined(_))
+        );
+        unmined
+            && expiry
+                .filter(|height| u32::from(*height) > 0)
+                .is_some_and(|expiry| expiry <= network_tip)
+    }
+
+    /// Rewinds to the applied block at or below `max_height` and returns
+    /// that block's metadata. The committed height can be lower than the
+    /// request.
     pub fn truncate_to(&mut self, max_height: BlockHeight) -> Result<BlockMetadata, WalletError> {
-        WalletWrite::truncate_to_height(self, max_height)?;
-        self.block_metadata_at(max_height)
-            .ok_or(WalletError::TruncationTargetUnavailable(max_height))
+        let height = WalletWrite::truncate_to_height(self, max_height)?;
+        self.block_metadata_at(height)
+            .ok_or(WalletError::TruncationTargetUnavailable(height))
     }
 }
 
@@ -349,6 +404,8 @@ pub(crate) mod testing {
             let wallet = Wallet::new(
                 [],
                 &ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
+                &[],
+                &[],
                 network,
             )?;
             Ok(wallet)
@@ -398,6 +455,8 @@ pub(crate) mod testing {
             *wallet = Wallet::new(
                 [(id, usk.to_unified_full_viewing_key())],
                 prior,
+                &[],
+                &[],
                 wallet.network.clone(),
             )?;
         }
@@ -576,7 +635,7 @@ pub(crate) mod testing {
             let expired_unmined = mined_height.is_none()
                 && expiry_height
                     .filter(|height| u32::from(*height) > 0)
-                    .is_some_and(|expiry| self.zebra_tip.is_some_and(|tip| expiry <= tip));
+                    .is_some_and(|expiry| expiry <= self.tip().block_height());
             let fee_paid = has_sent_outputs
                 .then(|| spent - sent_output_value)
                 .flatten();

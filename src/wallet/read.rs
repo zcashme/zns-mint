@@ -12,7 +12,7 @@ use zcash_client_backend::data_api::locking::{LockFilter, LockedInputPolicy};
 use zcash_client_backend::data_api::{
     defaults,
     error::FindAccountForAddressError,
-    scanning::{ScanPriority, ScanRange},
+    scanning::ScanRange,
     wallet::{ConfirmationsPolicy, TargetHeight},
     Account as UpstreamAccount, AccountBalance, AccountPurpose, AccountSource, AddressInfo,
     Balance, BlockMetadata, NullifierQuery, Progress, Ratio, ReceivedTransactionOutput,
@@ -226,11 +226,6 @@ where
 }
 
 impl<P: consensus::Parameters> Wallet<P> {
-    /// The highest block height this wallet has applied, if any.
-    pub(super) fn max_applied_height(&self) -> Option<BlockHeight> {
-        self.blocks.last_key_value().map(|(height, _)| *height)
-    }
-
     /// Folds one unspent note into its account's per-pool balance.
     ///
     /// Confirmation and trust classification is delegated to `wallet::input`
@@ -416,14 +411,19 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         &self,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Option<WalletSummary<Self::AccountId>>, Self::Error> {
-        let Some(chain_tip_height) = self.zebra_tip else {
-            return Ok(None);
+        // Reference height: chain knowledge, falling back to the applied
+        // position. Upstream's suite pins the fallback and the
+        // None-absence rule.
+        let chain_tip_height = match self.zebra_tip {
+            Some(tip) => tip,
+            None if !self.blocks.is_empty() => self.tip().block_height(),
+            None => return Ok(None),
         };
         let target_height = TargetHeight::from(next_height(chain_tip_height));
 
-        let fully_scanned_height = self
-            .max_applied_height()
-            .unwrap_or_else(|| self.seed.block_height());
+        // Scanning is one linear prefix: the fully scanned height IS the
+        // position.
+        let fully_scanned_height = self.tip().block_height();
 
         let mut account_balances = self
             .ufvks
@@ -466,19 +466,19 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
             )?;
         }
 
-        // Progress over the block span between the earliest account birthday
-        // and the Zebra tip; a display metric, not an authoritative note count.
+        // Literal, unreduced counts — upstream's suite pins `1/1`, `2/2`.
+        // Always complete here: knowledge only ever mirrors the position.
         let birthday = self
             .wallet_birthday()
             .unwrap_or_else(|| next_height(self.seed.block_height()));
-        let scanned_span =
-            u64::from((u32::from(fully_scanned_height) + 1).saturating_sub(u32::from(birthday)));
-        let total_span =
+        let scanned_blocks =
+            u64::from(u32::from(fully_scanned_height).saturating_sub(u32::from(birthday)) + 1);
+        let known_blocks =
             u64::from(u32::from(chain_tip_height).saturating_sub(u32::from(birthday)) + 1);
-        let scan = if total_span == 0 {
+        let scan = if known_blocks == 0 {
             Ratio::new(1, 1)
         } else {
-            Ratio::new(scanned_span.min(total_span), total_span)
+            Ratio::new(scanned_blocks.min(known_blocks), known_blocks)
         };
         let progress = Progress::new(scan, Some(Ratio::new(0, 0)));
 
@@ -495,6 +495,7 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
     }
 
     fn chain_height(&self) -> Result<Option<BlockHeight>, Self::Error> {
+        // Upstream's chain knowledge — not the applied position.
         Ok(self.zebra_tip)
     }
 
@@ -525,46 +526,29 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
     }
 
     fn suggest_scan_ranges(&self) -> Result<Vec<ScanRange>, Self::Error> {
-        let Some(tip) = self.zebra_tip else {
-            return Ok(Vec::new());
-        };
-        let start = match self.max_applied_height() {
-            Some(h) => next_height(h),
-            None => match self.wallet_birthday() {
-                Some(b) => b,
-                None => return Ok(Vec::new()),
-            },
-        };
-        let end = next_height(tip);
-        if start >= end {
-            Ok(Vec::new())
-        } else {
-            // One linear catch-up range: the mint rescans everything between
-            // its applied tip and the Zebra tip, in order.
-            Ok(vec![ScanRange::from_parts(
-                start..end,
-                ScanPriority::ChainTip,
-            )])
-        }
+        // No network tip held: no gap to express.
+        Ok(Vec::new())
     }
 
     fn get_target_and_anchor_heights(
         &self,
         min_confirmations: NonZeroU32,
     ) -> Result<Option<(TargetHeight, BlockHeight)>, Self::Error> {
-        let Some(tip) = self.zebra_tip else {
+        // Proposals anchor at heights the wallet can actually witness: its
+        // own position, never the node's. Before the first applied block no
+        // checkpoint exists, so no anchor can either.
+        if self.blocks.is_empty() {
             return Ok(None);
-        };
-        let target = next_height(tip);
+        }
+        let target = next_height(self.tip().block_height());
         // The anchor must have at least `min_confirmations` blocks on top of
         // it, relative to the next block.
         let bound =
             BlockHeight::from_u32(u32::from(target).saturating_sub(u32::from(min_confirmations)));
-        let start = self.max_applied_height().unwrap_or(bound);
         // The mint only ever spends Sapling and Ironwood, so the ordinary
         // Orchard compatibility tree does not constrain the anchor.
-        let sapling = max_checkpoint_at_or_below(self.sapling_tree.store(), start, bound);
-        let ironwood = max_checkpoint_at_or_below(self.ironwood_tree.store(), start, bound);
+        let sapling = max_checkpoint_at_or_below(self.sapling_tree.store(), bound, bound);
+        let ironwood = max_checkpoint_at_or_below(self.ironwood_tree.store(), bound, bound);
         let anchor = match (sapling, ironwood) {
             (Some(s), Some(i)) => Some(s.min(i)),
             (a, b) => a.or(b),

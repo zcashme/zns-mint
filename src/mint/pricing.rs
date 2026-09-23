@@ -73,8 +73,14 @@ const EXCHANGES: [Exchange; 9] = [
     },
 ];
 
-/// The trusted anchor venue: NYDFS-regulated Gemini.
+/// The trusted anchor venue: NYDFS-regulated Gemini. Below the
+/// median quorum (N < 3), only Gemini's own quote publishes; no
+/// two-source mean is ever taken.
 const TRUSTED: &str = "gemini";
+
+/// A day publishes only when at least this share of its fetch attempts
+/// landed a price.
+const MIN_DAY_SUCCESS_PERCENT: u64 = 50;
 
 /// Timeout duration for one source end-to-end (connect + request + body).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -171,8 +177,12 @@ async fn fetch_last(client: &HttpsClient, exchange: &Exchange) -> Option<Decimal
 fn aggregate(quotes: Vec<(&'static str, Decimal)>) -> Option<Decimal> {
     match quotes.len() {
         0 => None,
-        1 => (quotes[0].0 == TRUSTED).then(|| quotes[0].1),
-        2 => Some((quotes[0].1 + quotes[1].1) / Decimal::TWO),
+        // Below the median quorum, Gemini's own quote publishes alone
+        // if present; the two-source mean is deliberately never taken.
+        1 | 2 => quotes
+            .iter()
+            .find(|(name, _)| *name == TRUSTED)
+            .map(|(_, rate)| *rate),
         _ => {
             let mut rates: Vec<Decimal> = quotes.into_iter().map(|(_, rate)| rate).collect();
             rates.sort_unstable();
@@ -261,6 +271,10 @@ pub struct Oracle {
     last_price: Decimal,
     /// The Unix timestamp (seconds, MTP) of the most recent accumulation round.
     last_ts: i64,
+    /// Fetch attempts counted toward the current day, success or fail.
+    rounds_attempted: u32,
+    /// Attempts that produced a usable price.
+    rounds_seen: u32,
 }
 
 /// ZEC price (USD per ZEC) → rate (zats per USD): 10^8 zats over the
@@ -288,6 +302,8 @@ impl Oracle {
             acc_seconds: 0,
             last_price: initial_price,
             last_ts: now_secs,
+            rounds_attempted: 0,
+            rounds_seen: 0,
         }
     }
 
@@ -296,18 +312,9 @@ impl Oracle {
         self.daily_rate
     }
 
-    /// Folds one round into the day's TWAP; the first round of a new day
-    /// publishes the finished one, empty days keep their rate.
+    /// Folds one round into the day's TWAP. A new day publishes only when
+    /// at least half of that day's fetches landed; thinner days keep their rate.
     pub fn accumulate(&mut self, price: Option<Decimal>, today: i64, now: Timestamp) {
-        let Some(price) = price else {
-            return;
-        };
-
-        if price <= Decimal::ZERO {
-            tracing::warn!(price = %price, "pricing observation dropped: non-positive");
-            return;
-        }
-
         let now_secs = now.as_seconds();
 
         if now_secs < self.last_ts {
@@ -317,14 +324,30 @@ impl Oracle {
         }
 
         if today > self.current_day {
-            if self.acc_seconds > 0 {
+            if self.acc_seconds > 0
+                && u64::from(self.rounds_seen).saturating_mul(100)
+                    >= u64::from(self.rounds_attempted).saturating_mul(MIN_DAY_SUCCESS_PERCENT)
+            {
                 if let Some(rate) = zats_per_usd(self.acc_sum / Decimal::from(self.acc_seconds)) {
                     self.daily_rate = rate;
                 }
             }
             self.acc_sum = Decimal::ZERO;
             self.acc_seconds = 0;
+            self.rounds_attempted = 0;
+            self.rounds_seen = 0;
             self.current_day = today;
+        }
+
+        self.rounds_attempted = self.rounds_attempted.saturating_add(1);
+
+        let Some(price) = price else {
+            return;
+        };
+
+        if price <= Decimal::ZERO {
+            tracing::warn!(price = %price, "pricing observation dropped: non-positive");
+            return;
         }
 
         let elapsed = (now_secs - self.last_ts) as u64;
@@ -333,6 +356,7 @@ impl Oracle {
 
         self.last_price = price;
         self.last_ts = now_secs;
+        self.rounds_seen = self.rounds_seen.saturating_add(1);
     }
 
     /// Calculate a name's registration quote in zats for a given term, using the current published rate.
@@ -534,6 +558,59 @@ mod tests {
     }
 
     #[test]
+    fn a_thin_day_keeps_yesterdays_rate() {
+        let mut oracle = Oracle::new(Decimal::from(800), 0, Timestamp::from_seconds(0).unwrap());
+        // Close day 0 at 800 and open day 1 weighting 900.
+        oracle.accumulate(
+            Some(Decimal::from(900)),
+            0,
+            Timestamp::from_seconds(43_200).unwrap(),
+        );
+        oracle.accumulate(
+            Some(Decimal::from(900)),
+            1,
+            Timestamp::from_seconds(86_400).unwrap(),
+        );
+        assert_eq!(oracle.current().into_u64(), 125_000);
+
+        // Day 1: one success and two misses (1/3). Rollover refuses the
+        // 900 TWAP and yesterday's 800 rate stands.
+        oracle.accumulate(None, 1, Timestamp::from_seconds(86_401).unwrap());
+        oracle.accumulate(None, 1, Timestamp::from_seconds(86_402).unwrap());
+        oracle.accumulate(
+            Some(Decimal::from(800)),
+            2,
+            Timestamp::from_seconds(172_800).unwrap(),
+        );
+        assert_eq!(oracle.current().into_u64(), 125_000);
+    }
+
+    #[test]
+    fn a_half_successful_day_publishes() {
+        let mut oracle = Oracle::new(Decimal::from(800), 0, Timestamp::from_seconds(0).unwrap());
+        oracle.accumulate(
+            Some(Decimal::from(900)),
+            0,
+            Timestamp::from_seconds(43_200).unwrap(),
+        );
+        oracle.accumulate(
+            Some(Decimal::from(900)),
+            1,
+            Timestamp::from_seconds(86_400).unwrap(),
+        );
+        assert_eq!(oracle.current().into_u64(), 125_000);
+
+        // Day 1: one success and one miss (1/2). Rollover publishes 900.
+        oracle.accumulate(None, 1, Timestamp::from_seconds(86_401).unwrap());
+        oracle.accumulate(
+            Some(Decimal::from(800)),
+            2,
+            Timestamp::from_seconds(172_800).unwrap(),
+        );
+        assert_eq!(oracle.current().into_u64(), 111_112);
+    }
+
+    #[test]
     fn reorg_rewind_never_publishes() {
         let mut oracle = Oracle::new(Decimal::from(1_000), 0, Timestamp::from_seconds(0).unwrap());
         oracle.accumulate(
@@ -568,5 +645,74 @@ mod tests {
             Timestamp::from_seconds(172_800).unwrap(),
         );
         assert_eq!(oracle.current().into_u64(), 100_000);
+    }
+
+    #[test]
+    fn aggregate_empty_is_none() {
+        assert_eq!(aggregate(vec![]), None);
+    }
+
+    #[test]
+    fn aggregate_below_quorum_without_gemini_is_none() {
+        assert_eq!(aggregate(vec![("binance", Decimal::from(1_000))]), None);
+        assert_eq!(
+            aggregate(vec![
+                ("binance", Decimal::from(1_000)),
+                ("kucoin", Decimal::from(1_000)),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn aggregate_below_quorum_takes_gemini_alone() {
+        // N = 1: Gemini publishes on its own.
+        assert_eq!(
+            aggregate(vec![("gemini", Decimal::from(1_000))]),
+            Some(Decimal::from(1_000))
+        );
+
+        // N = 2 with Gemini: Gemini's quote — not the mean.
+        assert_eq!(
+            aggregate(vec![
+                ("gemini", Decimal::from(1_000)),
+                ("binance", Decimal::from(2_000)),
+            ]),
+            Some(Decimal::from(1_000))
+        );
+    }
+
+    #[test]
+    fn aggregate_odd_quorum_picks_middle() {
+        let q = vec![
+            ("a", Decimal::from(900)),
+            ("b", Decimal::from(1_000)),
+            ("c", Decimal::from(1_100)),
+        ];
+        assert_eq!(aggregate(q), Some(Decimal::from(1_000)));
+    }
+
+    #[test]
+    fn aggregate_even_quorum_averages_middle_pair() {
+        let q = vec![
+            ("a", Decimal::from(900)),
+            ("b", Decimal::from(1_000)),
+            ("c", Decimal::from(1_100)),
+            ("d", Decimal::from(1_200)),
+        ];
+        // (1_000 + 1_100) / 2 = 1_050
+        assert_eq!(aggregate(q), Some(Decimal::from(1_050)));
+    }
+
+    /// One outlier sorts to min or max; the median is honest
+    /// regardless of insertion order.
+    #[test]
+    fn aggregate_bounds_single_outlier() {
+        let q = vec![
+            ("a", Decimal::from(1_000)),
+            ("b", Decimal::from(1_010)),
+            ("attacker", Decimal::from(999_999)),
+        ];
+        assert_eq!(aggregate(q), Some(Decimal::from(1_010)));
     }
 }

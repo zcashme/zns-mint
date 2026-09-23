@@ -18,13 +18,25 @@ pub use time::Timestamp;
 
 pub use zcash_keys::address::UnifiedAddress;
 
+use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
 use zcash_primitives::transaction::TxId;
-use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
 use zcash_protocol::memo::{Memo, MemoBytes};
+use zcash_protocol::value::Zatoshis;
 use zip32::AccountId;
 
-use otp::OtpCode;
+use orchard::keys::FullViewingKey;
+use sapling::circuit::{OutputParameters, SpendParameters};
+use tokio::sync::mpsc;
+
+use crate::key::TreasuryKeys;
+use crate::wallet::Wallet;
+use crate::zcash::{CanonicalBlockSource, ChainClient, JsonRpc, MempoolChangeKind, MempoolSession};
+
+use otp::{OtpCode, OtpQueue, OtpRequest};
 use presale::AccessCode;
+use pricing::Oracle;
+use registry::Registry;
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
@@ -474,16 +486,8 @@ pub fn apply_block<P: Parameters + Send + 'static>(
             }
         }
 
-        let spends_claim_anchor = nfs.iter().any(|nf| registry.anchor_pool().contains(nf));
-        let spends_record = !registry.names_spent_by(&nfs).is_empty();
         let notes: &[usize] = notes_by_tx.get(&txid).map(Vec::as_slice).unwrap_or(&[]);
         match notes {
-            [] => {
-                assert!(
-                    !(spends_claim_anchor || spends_record),
-                    "Registry authority was spent without a Name Note successor"
-                );
-            }
             [index] => {
                 let candidate = &candidates[*index];
                 let action = candidate.payload.action();
@@ -507,10 +511,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                         block_mtp,
                     )
                 } else {
-                    assert!(
-                        registry_outputs.is_empty(),
-                        "update/release must not create a claim anchor"
-                    );
                     match action {
                         Action::Update => registry.accept_update(
                             network,
@@ -535,14 +535,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                     accepted_name_notes.push(*index);
                 }
             }
-            _ => {
-                if spends_claim_anchor || spends_record {
-                    panic!(
-                        "mint produced multiple Name Notes in one transaction \
-                         — assembly creates exactly one"
-                    );
-                }
-            }
+            _ => registry.follow_spends(&nfs, height),
         }
     }
 
@@ -585,7 +578,9 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     }
     // The scanner drops note plaintexts, so Treasury memos decode
     // here, once per block, into the queue; the block remains the
-    // durable record. Decisions belong to the drain.
+    // durable record. Decisions belong to the drain. The mempool
+    // quick path reads the same memos earlier and ephemerally; it
+    // records nothing — this pass stays the only intake.
     for (txid, _action_index, paid, memo) in treasury_memos {
         requests.record(txid, MintInbound::decode(network, &memo), paid, height);
     }
@@ -612,6 +607,168 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         hash = %cursor.block_hash(),
         "canonical block applied"
     );
+}
+
+// ===========================================================================
+// The relay lane — two entrances, one policy
+// ===========================================================================
+
+/// One relay-lane evaluation: the decided-refusal battery, the challenge
+/// fee, and the OTP challenge they pay for — the single policy for both
+/// entrances. The block-cadence drain passes the carrying block's height;
+/// the mempool quick path passes the next height, where the trigger lands
+/// if mined now. Returns `true` when decided; `false` defers to the next
+/// tip — a meaning only the drain takes: the quick path forgets either
+/// way, and the trigger's block re-enters the drain, where the
+/// pending-tuple check absorbs the duplicate.
+#[allow(clippy::too_many_arguments)]
+pub async fn relay<P: Parameters + Send + 'static>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    treasury_keys: &TreasuryKeys,
+    spend_prover: &SpendParameters,
+    output_prover: &OutputParameters,
+    registry: &Registry,
+    challenges: &mut OtpQueue,
+    oracle: &Oracle,
+    source: &CanonicalBlockSource,
+    mtp_now: Timestamp,
+    request: &Request,
+    paid: Zatoshis,
+    trigger_height: BlockHeight,
+    lane: &'static str,
+) -> bool {
+    let (name, action, requested_ua, term) = match request {
+        Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
+        Request::Release { name, ua } => (name, Action::Release, ua, None),
+        // Claims never reach the relay lane: the drain routes them to
+        // the claim lane, the quick match drops them at the door.
+        Request::Claim { .. } => return true,
+    };
+    let Some(record) = registry.record(name).cloned() else {
+        tracing::debug!(
+            lane,
+            name = %name.as_str(),
+            "request for an unregistered name"
+        );
+        // Deferral would be attacker-bought memory: the payer
+        // re-requests once the claim lands.
+        return true;
+    };
+    if !record.admits(action, requested_ua, term, trigger_height, mtp_now)
+        || challenges.pending(name, action, requested_ua, record.commitment, mtp_now)
+    {
+        return true;
+    }
+    // The challenge fee (issue #18): the price of triggering a
+    // controller challenge — $1 at the oracle's rate, rounded up
+    // to the 100k-zat grid. The gate at first sight is binding: an
+    // underpaid request is dead and silent, and a new payment
+    // settles a new evaluation. The fee never counts toward the
+    // echo's term quote; that gate is the echo lane's own, in a
+    // different transaction.
+    if paid < oracle.challenge_fee() {
+        tracing::debug!(
+            lane,
+            name = %name.as_str(),
+            action = action.as_str(),
+            paid = paid.into_u64(),
+            "request underpaid — dead, no challenge"
+        );
+        return true;
+    }
+
+    let (challenge, pending) =
+        OtpRequest::pending_challenge(name, action, requested_ua, record.commitment, term, mtp_now);
+    let Some(memo) = challenge.encode(network) else {
+        return true;
+    };
+    let relay_value = MINIMUM_FEE;
+    let Some(transaction) = treasury::challenge(
+        network,
+        wallet,
+        treasury_keys,
+        spend_prover,
+        output_prover,
+        &record.ua,
+        memo,
+        relay_value,
+    ) else {
+        tracing::debug!(
+            lane,
+            name = %name.as_str(),
+            action = action.as_str(),
+            "controller challenge awaits Treasury funds"
+        );
+        return false; // deferred
+    };
+
+    if source.submit(&transaction, "controller challenge").await {
+        challenges.issue(pending);
+        tracing::info!(
+            lane,
+            txid = %transaction.txid(),
+            name = %name.as_str(),
+            action = action.as_str(),
+            "controller challenged"
+        );
+        true
+    } else {
+        tracing::debug!(
+            lane,
+            name = %name.as_str(),
+            action = action.as_str(),
+            "controller challenge rejected — deferred"
+        );
+        false
+    }
+}
+
+/// The mempool quick lane's reader: one task, one conversation —
+/// announce, fetch, decrypt, forward. Intake at mempool cadence: it
+/// classifies each decrypted memo exactly as block application does
+/// and forwards the `MintInbound` it yields — it holds no mint state,
+/// decides nothing, and which lanes are quick is the orchestrator's
+/// match, not this filter. Every transport failure repairs or skips; a
+/// skipped trigger rides the block path. If this task ever dies, the
+/// mint silently reverts to block cadence — the fallback is the
+/// supervision.
+pub async fn watch_mempool<P: Parameters + Send + 'static>(
+    network: P,
+    chain: ChainClient,
+    rpc: JsonRpc,
+    treasury_fvk: FullViewingKey,
+    sender: mpsc::Sender<(MintInbound, Zatoshis)>,
+) {
+    // The parser wants a branch id; only pre-v5 transactions consult
+    // it, and an NU6 mempool holds none. A far-future height names the
+    // newest branch the mint knows.
+    let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
+    let mut session = MempoolSession::open(chain).await;
+    loop {
+        let (kind, txid) = session.next().await;
+        if kind != MempoolChangeKind::Added {
+            continue; // Mined and Invalidated are fates the block path owns
+        }
+        // A hit means the mempool or any chain — confirmation is chain
+        // application, not this fetch; a miss races an eviction: skip.
+        let Some(transaction) = rpc
+            .get_raw_transaction(branch_id, txid)
+            .await
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        for (_action_index, paid, memo) in note::decrypt_treasury_tx(&transaction, &treasury_fvk) {
+            // Intake's own door: the reader and block application
+            // classify through one call.
+            let inbound = MintInbound::decode(&network, txid, &memo);
+            if sender.send((inbound, paid)).await.is_err() {
+                return; // the orchestrator is gone; so are we
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

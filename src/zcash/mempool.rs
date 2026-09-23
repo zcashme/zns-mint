@@ -1,5 +1,7 @@
 //! The mempool: what is pending, where our broadcasts stand.
 
+use std::pin::Pin;
+
 use futures_util::{Stream, StreamExt};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::BranchId;
@@ -16,8 +18,9 @@ impl ChainClient {
     /// conflict or by expiry at the new tip. The mined id equals the `TxId`
     /// for every transaction version the mint builds; the auth digest is
     /// discarded. Reorgs emit nothing for transactions that were in abandoned
-    /// blocks. Stream endings — silent or errored — mean reconnect, then
-    /// re-baseline with [`JsonRpc::get_raw_mempool`].
+    /// blocks. Stream endings — silent or errored — mean reconnect; what a
+    /// gap missed, the block path decides — the re-baseline the doc once
+    /// promised is deliberately not built (best-effort is the doctrine).
     pub async fn mempool_events(
         &mut self,
     ) -> Result<impl Stream<Item = Result<(MempoolChangeKind, TxId), TransportError>>, TransportError>
@@ -94,5 +97,67 @@ impl JsonRpc {
             .iter()
             .map(|hex| TxId::from_hex(hex).ok_or(TransportError::BadNodeData("getrawmempool txid")))
             .collect()
+    }
+}
+
+// ===========================================================================
+// The mempool session — the stream's one owner
+// ===========================================================================
+
+/// The live gRPC mempool-change stream, boxed so the session can own it.
+pub(crate) type MempoolStream =
+    Pin<Box<dyn Stream<Item = Result<(MempoolChangeKind, TxId), TransportError>> + Send>>;
+
+/// The mempool stream's one owner: subscription, repair — the mempool's
+/// twin of [`TipSession`](super::chain::TipSession). It announces the
+/// node's mempool changes and answers nothing else; a gap in the stream
+/// is a gap in quickness, never in truth: what it misses, the block path
+/// decides.
+pub struct MempoolSession {
+    client: ChainClient,
+    stream: MempoolStream,
+}
+
+impl MempoolSession {
+    /// Subscribes to the mempool-change stream.
+    pub async fn open(client: ChainClient) -> Self {
+        let stream = Self::subscribe(client.clone()).await;
+        Self { client, stream }
+    }
+
+    /// One mempool change, decoded; the stream is repaired on death.
+    pub async fn next(&mut self) -> (MempoolChangeKind, TxId) {
+        loop {
+            match self.stream.next().await {
+                Some(Ok(event)) => return event,
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "Zebra mempool stream failed; repairing");
+                    self.repair().await;
+                }
+                None => {
+                    tracing::warn!("Zebra mempool stream ended; repairing");
+                    self.repair().await;
+                }
+            }
+        }
+    }
+
+    /// Pause, reopen.
+    async fn repair(&mut self) {
+        tokio::time::sleep(super::RETRY_PAUSE).await;
+        self.stream = Self::subscribe(self.client.clone()).await;
+    }
+
+    /// Opens the mempool stream, retrying until Zebra answers.
+    async fn subscribe(mut client: ChainClient) -> MempoolStream {
+        loop {
+            match client.mempool_events().await {
+                Ok(stream) => return Box::pin(stream),
+                Err(error) => {
+                    tracing::warn!(%error, "Zebra mempool stream unavailable; reconnecting");
+                    tokio::time::sleep(super::RETRY_PAUSE).await;
+                }
+            }
+        }
     }
 }
