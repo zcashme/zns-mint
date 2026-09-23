@@ -408,7 +408,14 @@ async fn main() {
                         // consumes — the challenge stands, retryable with
                         // the same OTP inside D_OTP.
                         if let Some(term) = sent.term {
-                            if paid < oracle.quote(&echo.name, term) {
+                            let Some(price) = oracle.quote(&echo.name, term) else {
+                                tracing::debug!(
+                                    name = %echo.name.as_str(),
+                                    "update quote does not fit — attempt void, challenge stands"
+                                );
+                                break 'lane true;
+                            };
+                            if paid < price {
                                 tracing::debug!(
                                     name = %echo.name.as_str(),
                                     paid = paid.into_u64(),
@@ -501,10 +508,13 @@ async fn main() {
                             }
                             zns_mint::mint::presale::Decision::Allow => {}
                         }
-                        let price = oracle.quote(name, *term);
                         // Payment gate: the quote at first sight is binding.
-                        // An underpaid claim is dead and silent; a new
-                        // payment settles a new evaluation.
+                        // An underpaid claim, or one whose quote does not
+                        // fit, is dead and silent; a new payment settles
+                        // a new evaluation.
+                        let Some(price) = oracle.quote(name, *term) else {
+                            break 'lane true;
+                        };
                         if paid < price {
                             break 'lane true;
                         }

@@ -1,5 +1,10 @@
 # Pricing changelog
 
+## 2026-09-24 — A quote that does not fit is None
+
+- `quote` returns `None` when the zat product does not fit. The drain
+  refuses that the way it refuses an underpayment.
+
 ## 2026-09-23 — Challenge fee grid step is a checked multiply
 
 - `challenge_fee` rounds one dollar up to the 100_000-zat grid with
