@@ -1070,15 +1070,8 @@ impl<P: Parameters> Wallet<P> {
             .map_err(|_| WalletError::InvalidNameNote("Ironwood action index does not fit u16"))?;
         let note_id = NoteId::new(txid, ShieldedPool::Ironwood, output_index);
 
-        if let Some(existing) = self.ironwood_notes.get(&note_id) {
-            if existing.note_commitment_tree_position() != position
-                || existing.nf().copied() != Some(nullifier)
-            {
-                return Err(WalletError::InvalidNameNote(
-                    "NoteId already identifies a different Ironwood note",
-                ));
-            }
-        }
+        // Nullifier collision: a different NoteId with the same nullifier
+        // means the nullifier was derived from a different note — refused.
         if let Some(owner) = self.ironwood_nullifiers.get(&nullifier) {
             if *owner != note_id {
                 return Err(WalletError::InvalidNameNote(
@@ -1086,14 +1079,60 @@ impl<P: Parameters> Wallet<P> {
                 ));
             }
         }
-        if self
+        // Binding check (committed fields): the note's commitment must match
+        // the tree leaf at position; the root from the path + note must equal
+        // the Ironwood anchor at this height.
+        let path = self
             .ironwood_witness(position, height)
             .map_err(WalletError::CommitmentTree)?
-            .is_none()
-        {
-            return Err(WalletError::InvalidNameNote(
+            .ok_or(WalletError::InvalidNameNote(
                 "no Ironwood witness at position for this height",
+            ))?;
+        let note_cmx: orchard::note::NoteCommitment = note.commitment();
+        let leaf = orchard::tree::MerkleHashOrchard::from_cmx(&(note_cmx.into()));
+        let computed_root = path.root(leaf);
+        let anchor = self
+            .ironwood_anchor(height)
+            .map_err(WalletError::CommitmentTree)?
+            .ok_or(WalletError::InvalidNameNote(
+                "no Ironwood anchor at height for binding check",
+            ))?;
+        if computed_root.to_bytes() != anchor.to_bytes() {
+            return Err(WalletError::InvalidNameNote(
+                "note commitment does not match tree root at height",
             ));
+        }
+
+        // Byte-identical retry (uncommitted fields): if the NoteId exists,
+        // every stored field must match byte-for-byte; any divergence is a
+        // refusal, not a silent overwrite.
+        if let Some(existing) = self.ironwood_notes.get(&note_id) {
+            if existing.note_commitment_tree_position() != position
+                || existing.nf().copied() != Some(nullifier)
+                || existing.note().0 != note
+                || existing.ephemeral_key().as_ref() != ephemeral_key.as_ref()
+                || existing.note().1 != orchard::ValuePool::Ironwood
+                || existing.account_id() != &REGISTRY_ACCOUNT
+                || existing.recipient_key_scope() != Some(zip32::Scope::External)
+            {
+                return Err(WalletError::InvalidNameNote(
+                    "NoteId exists with divergent fields",
+                ));
+            }
+            // Compare memo byte-for-byte via PartialEq on Memo.
+            let existing_memo = self.memos.get(&note_id);
+            let new_memo = Memo::Future(
+                zcash_protocol::memo::MemoBytes::from_bytes(&memo).map_err(|_| {
+                    WalletError::InvalidNameNote("memo bytes are not valid MemoBytes")
+                })?,
+            );
+            if existing_memo != Some(&new_memo) {
+                return Err(WalletError::InvalidNameNote(
+                    "NoteId exists with divergent memo",
+                ));
+            }
+            // Idempotent no-op: byte-identical retry succeeds without mutation.
+            return Ok(());
         }
 
         let memo = Memo::Future(
