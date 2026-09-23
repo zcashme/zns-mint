@@ -43,7 +43,7 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
     ) -> Result<(), ShardTreeError<Self::Error>> {
         // All or nothing: a failed batch restores the saved tree; the
         // end-height map fills only on full success.
-        let saved = clone_shard_tree(&self.sapling_tree)?;
+        let saved_tree = clone_shard_tree(&self.sapling_tree)?;
         if let Err(error) = self.with_sapling_tree_mut(|tree| {
             for (root, index) in roots.iter().zip(start_index..) {
                 tree.insert(
@@ -53,7 +53,7 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
             }
             Ok::<_, ShardTreeError<Self::Error>>(())
         }) {
-            self.sapling_tree = saved;
+            self.sapling_tree = saved_tree;
             return Err(error);
         }
 
@@ -108,7 +108,7 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
     ) -> Result<(), ShardTreeError<Self::Error>> {
         // All or nothing: a failed batch restores the saved tree; the
         // end-height map fills only on full success.
-        let saved = clone_shard_tree(&self.orchard_tree)?;
+        let saved_tree = clone_shard_tree(&self.orchard_tree)?;
         if let Err(error) = self.with_orchard_tree_mut(|tree| {
             for (root, index) in roots.iter().zip(start_index..) {
                 tree.insert(
@@ -171,7 +171,7 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
     ) -> Result<(), ShardTreeError<Self::Error>> {
         // All or nothing: a failed batch restores the saved tree; the
         // end-height map fills only on full success.
-        let saved = clone_shard_tree(&self.ironwood_tree)?;
+        let saved_tree = clone_shard_tree(&self.ironwood_tree)?;
         if let Err(error) = self.with_ironwood_tree_mut(|tree| {
             for (root, index) in roots.iter().zip(start_index..) {
                 tree.insert(
@@ -181,7 +181,7 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
             }
             Ok::<_, ShardTreeError<Self::Error>>(())
         }) {
-            self.ironwood_tree = saved;
+            self.ironwood_tree = saved_tree;
             return Err(error);
         }
 
