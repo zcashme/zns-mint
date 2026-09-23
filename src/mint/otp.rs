@@ -1,7 +1,5 @@
 //! OTP auth for locked names.
 //!
-use std::collections::BTreeMap;
-
 use rand::Rng;
 use subtle::ConstantTimeEq;
 use time::{Duration, Timestamp};
@@ -122,7 +120,6 @@ impl OtpRequest {
 #[derive(Clone)]
 pub struct OtpQueue {
     challenges: Vec<OtpRequest>,
-    liveness_issued: BTreeMap<(Name, [u8; 32]), Timestamp>,
 }
 
 impl Default for OtpQueue {
@@ -135,7 +132,6 @@ impl OtpQueue {
     pub fn new() -> Self {
         Self {
             challenges: Vec::new(),
-            liveness_issued: BTreeMap::new(),
         }
     }
 
@@ -216,31 +212,7 @@ impl OtpQueue {
         false
     }
 
-    /// True while a liveness challenge issued for this current record is
-    /// still inside its cooldown window. Prunes elapsed entries.
-    ///
-    /// Independent of `pending`: the OTP code's own TTL is `D_OTP`, but the
-    /// rate limit on issuing a *new* code lives here.
-    pub fn liveness_recently_issued(
-        &mut self,
-        name: &Name,
-        tip_rcm: NameCommitment,
-        mtp: Timestamp,
-        cooldown: Duration,
-    ) -> bool {
-        self.liveness_issued
-            .retain(|_, last| mtp - *last < cooldown);
-        self.liveness_issued
-            .contains_key(&(name.clone(), tip_rcm.to_bytes()))
-    }
 
-    /// Records a liveness challenge issuance for rate-limiting. The key is
-    /// the current record's `(name, rcm)`; a subsequent accepted update
-    /// (new commitment) leaves the old entry stale, and it lapses on the
-    /// next `liveness_recently_issued` prune.
-    pub fn mark_liveness_issued(&mut self, name: Name, tip_rcm: NameCommitment, mtp: Timestamp) {
-        self.liveness_issued.insert((name, tip_rcm.to_bytes()), mtp);
-    }
 }
 
 #[cfg(test)]
