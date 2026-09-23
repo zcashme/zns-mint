@@ -360,16 +360,13 @@ impl Oracle {
     }
 
     /// Calculate a name's registration quote in zats for a given term, using the current published rate.
-    pub fn quote(&self, name: &Name, term: Term) -> Zatoshis {
+    pub fn quote(&self, name: &Name, term: Term) -> Option<Zatoshis> {
         let usd = match term {
             Term::Forever => forever_usd(name),
             Term::Years(years) => annual_usd(name) * years,
         };
-        Zatoshis::from_u64(
-            usd.checked_mul(self.current().into_u64())
-                .expect("registration quote fits u64"),
-        )
-        .expect("registration quote fits the Zcash monetary range")
+        let zats = usd.checked_mul(self.current().into_u64())?;
+        Zatoshis::from_u64(zats).ok()
     }
 
     /// The challenge fee (issue #18): the minimum payment that triggers a
