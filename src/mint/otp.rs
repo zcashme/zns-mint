@@ -108,7 +108,7 @@ impl OtpRequest {
 /// challenges.
 #[derive(Clone)]
 pub struct OtpQueue {
-    challenges: Vec<OtpRequest>,
+    challenges: Vec<(OtpRequest, ChallengeStatus)>,
 }
 
 impl Default for OtpQueue {
@@ -126,7 +126,7 @@ impl OtpQueue {
 
     /// Issues a challenge, no checks.
     pub fn issue(&mut self, req: OtpRequest) {
-        self.challenges.push(req);
+        self.challenges.push((req, ChallengeStatus::Relayed));
     }
 
     /// A challenge already issued?
@@ -138,9 +138,12 @@ impl OtpQueue {
         tip_rcm: NameCommitment,
         mtp: Timestamp,
     ) -> bool {
-        self.challenges.retain(|request| mtp < request.expires_at);
-        self.challenges.iter().any(|request| {
-            request.challenge.name == *name
+        self.challenges.retain(|(request, status)| {
+            *status != ChallengeStatus::Closed && mtp < request.expires_at
+        });
+        self.challenges.iter().any(|(request, status)| {
+            (*status == ChallengeStatus::Relayed || *status == ChallengeStatus::AwaitingResponse)
+                && request.challenge.name == *name
                 && request.challenge.action == action
                 && request.challenge.ua == *ua
                 && request.tip_rcm == tip_rcm
@@ -157,17 +160,20 @@ impl OtpQueue {
         tip_rcm: NameCommitment,
         mtp: Timestamp,
     ) -> Option<OtpRequest> {
-        self.challenges.retain(|request| mtp < request.expires_at);
+        self.challenges.retain(|(request, status)| {
+            *status != ChallengeStatus::Closed && mtp < request.expires_at
+        });
         self.challenges
             .iter()
-            .find(|request| {
-                request.challenge.name == returned.name
+            .find(|(request, status)| {
+                *status != ChallengeStatus::Closed
+                    && request.challenge.name == returned.name
                     && request.challenge.action == returned.action
                     && request.challenge.ua == returned.ua
                     && request.tip_rcm == tip_rcm
                     && bool::from(request.challenge.code.0.ct_eq(&returned.code.0))
             })
-            .cloned()
+            .map(|(request, _)| request.clone())
     }
 
     /// Accepts a returned OTP once.
@@ -180,13 +186,13 @@ impl OtpQueue {
         provided: &[u8; 6],
         mtp: Timestamp,
     ) -> bool {
-        // Expired entries never match.
-        self.challenges.retain(|req| mtp < req.expires_at);
+        // Expired or closed entries never match.
+        self.challenges.retain(|(req, status)| *status != ChallengeStatus::Closed && mtp < req.expires_at);
         let Some(provided_code) = OtpCode::from_digits(provided) else {
             return false;
         };
         for i in 0..self.challenges.len() {
-            let req = &self.challenges[i];
+            let (req, status) = &self.challenges[i];
             if req.challenge.name == *name
                 && req.challenge.action == action
                 && &req.challenge.ua == ua
@@ -194,7 +200,7 @@ impl OtpQueue {
                 && mtp < req.expires_at
                 && bool::from(req.challenge.code.0.ct_eq(&provided_code.0))
             {
-                self.challenges.remove(i);
+                self.challenges[i].1 = ChallengeStatus::Closed;
                 return true;
             }
         }
