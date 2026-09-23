@@ -417,12 +417,8 @@ async fn main() {
                             },
                             Action::Claim => unreachable!("claims never carry an OTP"),
                         };
-                        // The clone preserves the challenge if authorize
-                        // declines after consuming it — a term whose
-                        // extension overflows.
-                        let mut authorized_challenges = challenges.clone();
                         let Some(transition_note) = registry.authorize(
-                            &mut authorized_challenges,
+                            &mut challenges,
                             authorized,
                             Some(&digits),
                             note_height,
@@ -430,7 +426,6 @@ async fn main() {
                         ) else {
                             break 'lane true;
                         };
-                        challenges = authorized_challenges;
                         // The seam where a voluntary release exists:
                         // the OTP that authorized it is consumed here,
                         // and the resulting note is indistinguishable

@@ -10,6 +10,11 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
   then one `Wallet::new`. The run loop receives that wallet; the
   `put_*_subtree_roots` calls are gone. Detail is in
   `boot.changelog.md`.
+  
+## 2026-09-23 — The echo lane no longer clones the OTP queue
+
+- `authorize` refuses an illegal extension before consuming the OTP,
+  so the echo lane passes the live queue.
 
 ## 2026-09-22 — The chain moving mid-catch-up re-converges, never kills (audit H7)
 
@@ -51,6 +56,7 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
 - The walk no longer takes the NameNoteQueue (see mint.changelog.md);
   a duplicate claim that still lands on chain is ignored, not fatal
   (see registry.changelog.md).
+  
 ## 2026-09-21 — The relay lane answers at mempool speed (#121)
 
 - Update and release triggers relay the moment Zebra reports them

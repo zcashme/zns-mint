@@ -95,17 +95,23 @@ impl TipSession {
     }
 
     /// One wake-up, answered with the node's canonical tip; the stream
-    /// is repaired on death. `Err` is a fatal data verdict.
+    /// is repaired on death. A malformed announcement is dropped.
+    /// `Err` is the canonical tip's data verdict.
     pub async fn next_tip(
         &mut self,
         source: &CanonicalBlockSource,
     ) -> Result<(BlockHeight, BlockHash), TransportError> {
         let announced = match self.stream.next().await {
-            Some(Ok(notification)) => {
-                let announced = tip_height_hash(&notification)?;
-                tracing::info!(height = u32::from(announced.0), "tip notification received");
-                Some(announced)
-            }
+            Some(Ok(notification)) => match tip_height_hash(&notification) {
+                Ok(announced) => {
+                    tracing::info!(height = u32::from(announced.0), "tip notification received");
+                    Some(announced)
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Zebra tip announcement malformed; using canonical tip");
+                    None
+                }
+            },
             Some(Err(error)) => {
                 tracing::warn!(%error, "Zebra tip stream failed; repairing");
                 self.repair().await;
@@ -529,6 +535,28 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tip_height_hash_rejects_a_short_hash() {
+        let tip = BlockHashAndHeight {
+            hash: vec![0u8; 31],
+            height: 1,
+        };
+        assert!(matches!(
+            tip_height_hash(&tip),
+            Err(TransportError::BadNodeData(_))
+        ));
+    }
+
+    #[test]
+    fn tip_height_hash_accepts_32_bytes() {
+        let mut hash = vec![0u8; 32];
+        hash[0] = 0xab;
+        let tip = BlockHashAndHeight { hash, height: 7 };
+        let (height, block_hash) = tip_height_hash(&tip).expect("32-byte hash");
+        assert_eq!(height, BlockHeight::from_u32(7));
+        assert_eq!(block_hash.0[31], 0xab);
+    }
 
     /// A minimal `z_getsubtreesbyindex` fixture: shape matches Zebra's
     /// live reply (`pool`, `start_index`, `subtrees[{root, end_height}]`).
