@@ -2,11 +2,11 @@
 
 ## 2026-09-23 — Ironwood treestate is mandatory (#155)
 
-- NU6.3 is always active: a `z_gettreestate` response without a valid
-  Ironwood `finalState` is `BadNodeData` — a broken or hostile node —
-  never a silent `Frontier::empty()`. The pre-NU6.3 fallback and its
-  "absent and empty are the same value" contract are gone; the test
-  suite pins rejection instead.
+- The response's `ironwood` section is a required field, enforced at
+  the type: a `z_gettreestate` without it does not parse, and a missing
+  `finalState` is `BadNodeData` — the same lane as Sapling and Orchard.
+  NU6.3 is always active; the pre-NU6.3 fallback ("absent and empty
+  are the same value") is gone.
 
 ## 2026-09-22 — The node conversation bounded, typed, and honest (audit H7/H8)
 

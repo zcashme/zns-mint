@@ -22,7 +22,9 @@ pub fn resolve_bin(env_var: &str) -> Option<PathBuf> {
 
 // =============================== zebrad (Regtest validator) ===============================
 
-const NU6_X_ACTIVATION_HEIGHT: u32 = 1;
+/// NU6.1/6.2 ride along so the family activates in order; the harness's
+/// interest is NU6.3 — always active, from genesis.
+const NU6_3_ACTIVATION_HEIGHT: u32 = 1;
 const LOCKBOX_DISBURSEMENT_ADDR: &str = "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v";
 const LOCKBOX_DISBURSEMENT_ZATS: u64 = 1;
 
@@ -195,7 +197,7 @@ impl Drop for Zebrad {
 }
 
 fn zebrad_toml(net_port: u16, rpc_port: u16, indexer_port: u16, miner_address: &str, cache_dir: &str) -> String {
-    let nu6_x = NU6_X_ACTIVATION_HEIGHT;
+    let nu6_3 = NU6_3_ACTIVATION_HEIGHT;
     let lockbox_addr = LOCKBOX_DISBURSEMENT_ADDR;
     let lockbox_amount = LOCKBOX_DISBURSEMENT_ZATS;
     format!(
@@ -209,9 +211,9 @@ disable_pow = true
 [network.testnet_parameters.activation_heights]
 NU5 = 1
 NU6 = 1
-"NU6.1" = {nu6_x}
-"NU6.2" = {nu6_x}
-"NU6.3" = {nu6_x}
+"NU6.1" = {nu6_3}
+"NU6.2" = {nu6_3}
+"NU6.3" = {nu6_3}
 
 [[network.testnet_parameters.funding_streams]]
 [network.testnet_parameters.funding_streams.height_range]

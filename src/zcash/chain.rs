@@ -454,7 +454,7 @@ struct TreeStateResponse {
     hash: String,
     sapling: ShieldedTreeState,
     orchard: ShieldedTreeState,
-    ironwood: Option<ShieldedTreeState>,
+    ironwood: ShieldedTreeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -468,9 +468,9 @@ struct TreeCommitments {
     final_state: Option<String>,
 }
 
-/// `z_gettreestate` parsed into the upstream [`ChainState`]. NU6.3 is
-/// always active — every pool's treestate is mandatory, and a missing
-/// Ironwood section is a broken or hostile node, not a chain state.
+/// `z_gettreestate` parsed into the upstream [`ChainState`]; every
+/// pool's treestate is mandatory — a missing section is a malformed
+/// response, rejected at the type.
 fn chain_state_from_rpc_response(
     response: TreeStateResponse,
 ) -> Result<ChainState, TransportError> {
@@ -490,14 +490,9 @@ fn chain_state_from_rpc_response(
 
     let ironwood_final_state = response
         .ironwood
-        .ok_or(TransportError::BadNodeData(
-            "missing Ironwood treestate — NU6.3 is always active",
-        ))?
         .commitments
         .final_state
-        .ok_or(TransportError::BadNodeData(
-            "missing Ironwood finalState — NU6.3 is always active",
-        ))?;
+        .ok_or(TransportError::BadNodeData("missing Ironwood finalState"))?;
     let ironwood_tree = decode_tree::<MerkleHashOrchard>(&ironwood_final_state, "Ironwood")?;
 
     let expected_hash_bytes =
@@ -717,7 +712,7 @@ mod tests {
         hex::encode(bytes)
     }
 
-    fn treestate(ironwood: Option<String>) -> TreeStateResponse {
+    fn treestate(ironwood: String) -> TreeStateResponse {
         TreeStateResponse {
             height: 1000,
             hash: hex::encode([0u8; 32]),
@@ -731,29 +726,17 @@ mod tests {
                     final_state: Some(tree_hex::<MerkleHashOrchard>()),
                 },
             },
-            ironwood: ironwood.map(|final_state| ShieldedTreeState {
+            ironwood: ShieldedTreeState {
                 commitments: TreeCommitments {
-                    final_state: Some(final_state),
+                    final_state: Some(ironwood),
                 },
-            }),
+            },
         }
     }
 
     #[test]
-    fn treestate_absent_ironwood_is_rejected() {
-        // NU6.3 is always active: a node that omits the Ironwood
-        // treestate is broken or hostile, never a chain state.
-        assert!(matches!(
-            chain_state_from_rpc_response(treestate(None)),
-            Err(TransportError::BadNodeData(
-                "missing Ironwood treestate — NU6.3 is always active"
-            ))
-        ));
-    }
-
-    #[test]
     fn treestate_garbage_ironwood_hex_is_a_bad_checkpoint() {
-        let garbage = treestate(Some("zz".to_string()));
+        let garbage = treestate("zz".to_string());
         assert!(matches!(
             chain_state_from_rpc_response(garbage),
             Err(TransportError::BadCheckpoint(_))
@@ -762,7 +745,7 @@ mod tests {
 
     #[test]
     fn treestate_malformed_hash_is_bad_node_data() {
-        let mut garbage = treestate(None);
+        let mut garbage = treestate(tree_hex::<MerkleHashOrchard>());
         garbage.hash = "not-hex!".to_string();
         assert!(matches!(
             chain_state_from_rpc_response(garbage),
@@ -772,7 +755,7 @@ mod tests {
 
     #[test]
     fn treestate_missing_sapling_state_is_bad_node_data() {
-        let mut garbage = treestate(None);
+        let mut garbage = treestate(tree_hex::<MerkleHashOrchard>());
         garbage.sapling.commitments.final_state = None;
         assert!(matches!(
             chain_state_from_rpc_response(garbage),

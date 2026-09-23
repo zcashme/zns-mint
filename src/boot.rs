@@ -711,9 +711,6 @@ mod tests {
         ] {
             assert_eq!(network.activation_height(upgrade), Some(one));
         }
-        // NU6.3 is always active — even at genesis.
-        assert!(network.is_nu_active(NetworkUpgrade::Nu6_3, BlockHeight::from_u32(1)));
-        assert!(network.is_nu_active(NetworkUpgrade::Nu6_3, BlockHeight::from_u32(3)));
         // The regtest birthday mirrors the harness: origin at 3, first
         // observed block at 4.
         assert_eq!(MINT_BIRTHDAY, four);
