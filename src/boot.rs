@@ -147,10 +147,8 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         };
         tracing::info!("boot: keys derived (treasury=acct0, registry=acct1); seed wiped");
 
-        // 3. Born complete: acquire the wallet's birth inputs — the origin
-        // checkpoint's frontiers and every completed subtree root behind
-        // them — then one total construction. The wallet asks; boot
-        // fetches.
+        // 3. Born complete: fetch the origin checkpoint and both
+        // subtree-root batches, then one `Wallet::new`.
         let rpc = zcash::JsonRpc::new();
         let origin = origin_checkpoint(&rpc).await;
         let checkpoint_height = origin.block_height();

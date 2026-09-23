@@ -189,9 +189,8 @@ impl<P: Parameters> Wallet<P> {
             .ironwood_tree
             .insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
 
-        // Every completed shard root behind the frontiers — witness paths
-        // cross shard boundaries through these. A conflicting root drops
-        // the whole local; the frontier-only wallet is unconstructible.
+        // Completed shard roots behind the frontiers. A conflicting root
+        // drops the local, so a partial batch is never returned.
         for (root, index) in sapling_roots.iter().zip(0u64..) {
             let addr = Address::from_parts(SAPLING_SHARD_HEIGHT.into(), index);
             wallet.sapling_tree.insert(addr, *root.root_hash())?;
