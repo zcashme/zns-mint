@@ -395,7 +395,7 @@ async fn main() {
                         // consumes — the challenge stands, retryable with
                         // the same OTP inside D_OTP.
                         if let Some(term) = sent.term {
-                            if paid < oracle.quote(&echo.name, term) {
+                            if paid < oracle.quote(&echo.name, term).expect("quote available") {
                                 tracing::debug!(
                                     name = %echo.name.as_str(),
                                     paid = paid.into_u64(),
@@ -488,7 +488,7 @@ async fn main() {
                             }
                             zns_mint::mint::presale::Decision::Allow => {}
                         }
-                        let price = oracle.quote(name, *term);
+                        let price = oracle.quote(name, *term).expect("quote available");
                         // Payment gate: the quote at first sight is binding.
                         // An underpaid claim is dead and silent; a new
                         // payment settles a new evaluation.
