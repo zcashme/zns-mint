@@ -600,7 +600,6 @@ async fn main() {
                     record.commitment,
                     mtp_now,
                 )
-                || challenges.liveness_recently_issued(&name, record.commitment, mtp_now, cooldown)
             {
                 continue;
             }
