@@ -81,22 +81,17 @@ impl OtpRequest {
         mtp_now: Timestamp,
     ) -> (Challenge, Self) {
         let code = OtpCode::generate();
+        let challenge = Challenge {
+            code: code.clone(),
+            name: name.clone(),
+            action,
+            term,
+            ua: ua.clone(),
+        };
         (
-            Challenge {
-                code: code.clone(),
-                name: name.clone(),
-                action,
-                term,
-                ua: ua.clone(),
-            },
+            challenge.clone(),
             Self {
-                challenge: Challenge {
-                    code: code.clone(),
-                    name: name.clone(),
-                    action,
-                    term,
-                    ua: ua.clone(),
-                },
+                challenge,
                 tip_rcm,
                 expires_at: mtp_now + Duration::seconds(D_OTP),
             },
