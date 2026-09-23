@@ -154,21 +154,21 @@ impl OtpQueue {
         returned: &Challenge,
         tip_rcm: NameCommitment,
         mtp: Timestamp,
-    ) -> Option<OtpRequest> {
+    ) -> Option<(OtpRequest, ChallengeStatus)> {
         self.challenges.retain(|(request, status)| {
             *status != ChallengeStatus::Closed && mtp < request.expires_at
         });
         self.challenges
             .iter()
             .find(|(request, status)| {
-                *status != ChallengeStatus::Closed
+                (*status == ChallengeStatus::Relayed || *status == ChallengeStatus::AwaitingResponse)
                     && request.challenge.name == returned.name
                     && request.challenge.action == returned.action
                     && request.challenge.ua == returned.ua
                     && request.tip_rcm == tip_rcm
                     && bool::from(request.challenge.code.0.ct_eq(&returned.code.0))
             })
-            .map(|(request, _)| request.clone())
+            .map(|entry| (entry.0.clone(), entry.1))
     }
 
     /// Accepts a returned OTP once.
@@ -186,18 +186,17 @@ impl OtpQueue {
         let Some(provided_code) = OtpCode::from_digits(provided) else {
             return false;
         };
-        for i in 0..self.challenges.len() {
-            let (req, status) = &self.challenges[i];
-            if req.challenge.name == *name
+        if let Some(pos) = self.challenges.iter().position(|(req, status)| {
+            *status == ChallengeStatus::Relayed || *status == ChallengeStatus::AwaitingResponse
+                && req.challenge.name == *name
                 && req.challenge.action == action
                 && &req.challenge.ua == ua
                 && req.tip_rcm == tip_rcm
                 && mtp < req.expires_at
                 && bool::from(req.challenge.code.0.ct_eq(&provided_code.0))
-            {
-                self.challenges[i].1 = ChallengeStatus::Closed;
-                return true;
-            }
+        }) {
+            self.challenges[pos].1 = ChallengeStatus::Closed;
+            return true;
         }
         false
     }
