@@ -94,8 +94,7 @@ impl<P: Parameters> Wallet<P> {
     /// still truncate to, identical across the three trees by the commit
     /// discipline. `None` before the first applied block.
     fn retained_floor(&self) -> Option<BlockHeight> {
-        // The store error type is `Infallible`; `.ok()` cannot lose one.
-        self.sapling_tree.store().min_checkpoint_id().ok().flatten()
+        super::from_infallible(self.sapling_tree.store().min_checkpoint_id())
     }
 
     /// The deepest applied block at or below `max_height` — the candidate
@@ -113,24 +112,9 @@ impl<P: Parameters> Wallet<P> {
     /// replaced only when all three succeed, so a failure leaves them unchanged.
     fn try_truncate_trees_to(&mut self, height: BlockHeight) -> Result<bool, WalletError> {
         let present = [
-            self.sapling_tree
-                .store()
-                .get_checkpoint(&height)
-                .ok()
-                .flatten()
-                .is_some(),
-            self.orchard_tree
-                .store()
-                .get_checkpoint(&height)
-                .ok()
-                .flatten()
-                .is_some(),
-            self.ironwood_tree
-                .store()
-                .get_checkpoint(&height)
-                .ok()
-                .flatten()
-                .is_some(),
+            super::from_infallible(self.sapling_tree.store().get_checkpoint(&height)).is_some(),
+            super::from_infallible(self.orchard_tree.store().get_checkpoint(&height)).is_some(),
+            super::from_infallible(self.ironwood_tree.store().get_checkpoint(&height)).is_some(),
         ];
         if present.iter().any(|have| !have) {
             return Ok(false);
@@ -160,12 +144,11 @@ impl<P: Parameters> Wallet<P> {
     /// Drops applied blocks above `height` and removes effects that belonged
     /// only to the abandoned branch.
     ///
-    /// Received notes (and their nullifiers, memos, and indexes) created above
-    /// `height` are deleted — otherwise they linger as phantom pending value.
-    /// Spend links whose spending transaction was mined above `height` and
-    /// was observed only through scanning (no retained raw transaction) are
-    /// cleared so the note is selectable again; locally built spends keep
-    /// their raw transaction and stay blocked until expiry.
+    /// Received notes created above `height` are deleted, along with their
+    /// nullifiers, memos, indexes, and locks. Scanned-only spends of
+    /// surviving notes are cleared so the note is selectable again; a
+    /// locally built spend keeps its raw transaction, sent outputs, and
+    /// trust mark, and stays blocked until expiry.
     fn drop_applied_above(&mut self, height: BlockHeight) {
         let orphaned: HashSet<TxId> = self
             .transaction_statuses
@@ -188,6 +171,10 @@ impl<P: Parameters> Wallet<P> {
             .retain(|note_id, _| !orphaned.contains(note_id.txid()));
         self.transaction_indices
             .retain(|txid, _| !orphaned.contains(txid));
+        // Sent rows exist for locally built transactions. A scanned
+        // transaction has none; drop a stray row with the orphaned txid.
+        self.sent_outputs
+            .retain(|txid, _| self.transactions.contains_key(txid) || !orphaned.contains(txid));
 
         // Scanned-only spends have no raw transaction; after un-mining they
         // would block forever. Locally built spends remain until expiry.
@@ -219,6 +206,17 @@ impl<P: Parameters> Wallet<P> {
             .retain(|_, end| *end <= height);
 
         self.blocks.retain(|h, _| *h <= height);
+
+        // A lock whose note was deleted can no longer be acquired or listed.
+        let stale_locks: Vec<_> = self
+            .locks
+            .keys()
+            .copied()
+            .filter(|output| self.output_account(output).is_none())
+            .collect();
+        for output in stale_locks {
+            self.locks.remove(&output);
+        }
     }
 }
 
@@ -1391,7 +1389,7 @@ mod tests {
     #[test]
     fn truncate_clears_orphaned_receives_and_scanned_spends() {
         use zcash_client_backend::data_api::TransactionStatus;
-        use zcash_client_backend::wallet::NoteId;
+        use zcash_client_backend::wallet::{NoteId, OutputRef};
         use zcash_primitives::transaction::TxId;
 
         let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
@@ -1437,6 +1435,15 @@ mod tests {
             .transaction_statuses
             .insert(orphan_spend, TransactionStatus::Mined(h2));
         assert!(!wallet.transactions.contains_key(&orphan_spend));
+        wallet.sent_outputs.insert(orphan_spend, Vec::new());
+        let orphan_lock = OutputRef::from(note_h2);
+        let kept_lock = OutputRef::from(note_h1);
+        wallet
+            .locks
+            .insert(orphan_lock, (LockOwner::new([2; 32]), h2));
+        wallet
+            .locks
+            .insert(kept_lock, (LockOwner::new([3; 32]), h2));
 
         WalletWrite::truncate_to_height(wallet, h1).expect("h1 remains a checkpoint");
 
@@ -1451,6 +1458,18 @@ mod tests {
         assert!(
             !wallet.sapling_note_spends.contains_key(&note_h1),
             "scanned-only spend mined above the truncation height must clear"
+        );
+        assert!(
+            !wallet.sent_outputs.contains_key(&orphan_spend),
+            "scanned-only sent row mined above the truncation height must clear"
+        );
+        assert!(
+            !wallet.locks.contains_key(&orphan_lock),
+            "lock on a deleted note must clear"
+        );
+        assert!(
+            wallet.locks.contains_key(&kept_lock),
+            "lock on a surviving note must stay"
         );
 
         let account_id = st.test_account().unwrap().id();

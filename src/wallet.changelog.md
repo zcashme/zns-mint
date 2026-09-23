@@ -1,5 +1,14 @@
 # Wallet changelog
 
+## 2026-09-23 — Truncation drops rows that no longer name a note
+
+- `drop_applied_above` removes locks whose note was deleted, and
+  sent-output rows for scanned transactions mined above the cut.
+  A locally built spend keeps its raw transaction, sent outputs, and
+  trust mark.
+- Shard-store reads no longer map `Infallible` through `.ok()`. A
+  store error is not a missing checkpoint.
+
 ## 2026-09-23 — `truncate_to` returns the height it committed
 
 - The metadata is for the block `truncate_to_height` rewound to, which

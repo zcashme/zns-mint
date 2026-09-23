@@ -378,7 +378,12 @@ impl Oracle {
     /// not revenue: the drain refuses underpaid relay requests outright.
     pub fn challenge_fee(&self) -> Zatoshis {
         const GRID: u64 = 100_000;
-        let zats = self.current().into_u64().div_ceil(GRID) * GRID;
+        let rate = self.current().into_u64();
+        // Checked so the grid step cannot wrap.
+        let zats = rate
+            .div_ceil(GRID)
+            .checked_mul(GRID)
+            .expect("challenge fee fits u64");
         Zatoshis::from_u64(zats).expect("challenge fee fits the Zcash monetary range")
     }
 }

@@ -211,10 +211,10 @@ pub(super) fn max_checkpoint_at_or_below<H, S>(
 where
     S: ShardStore<H = H, CheckpointId = BlockHeight, Error = Infallible>,
 {
-    let floor = store.min_checkpoint_id().ok().flatten()?;
+    let floor = super::from_infallible(store.min_checkpoint_id())?;
     let mut height = start.min(bound);
     while height >= floor {
-        if store.get_checkpoint(&height).ok().flatten().is_some() {
+        if super::from_infallible(store.get_checkpoint(&height)).is_some() {
             return Some(height);
         }
         if height == floor {

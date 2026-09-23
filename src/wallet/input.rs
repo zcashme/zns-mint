@@ -594,7 +594,7 @@ impl<P: Parameters> InputSource for Wallet<P> {
             // anchors are computable to the same extent.
             ShieldedPool::Orchard => self.orchard_tree.store().get_checkpoint(&height),
         };
-        Ok(checkpoint.ok().flatten().is_some())
+        Ok(super::from_infallible(checkpoint).is_some())
     }
 
     fn select_spendable_notes(

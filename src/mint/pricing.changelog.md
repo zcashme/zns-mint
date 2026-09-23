@@ -1,5 +1,11 @@
 # Pricing changelog
 
+## 2026-09-23 — Challenge fee grid step is a checked multiply
+
+- `challenge_fee` rounds one dollar up to the 100_000-zat grid with
+  `checked_mul`. An in-range rate yields the same fee. A product that
+  does not fit `u64` fails closed instead of wrapping.
+
 ## 2026-09-22 — Median at N ≥ 3, Gemini alone below, no mean
 
 - `aggregate` returns the median of survivors at N ≥ 3, and Gemini's
