@@ -1,5 +1,17 @@
 # Wallet changelog
 
+## 2026-09-23 — A wallet is born complete (#158)
+
+- `Wallet::new` asks for the origin `ChainState` and the pre-birthday
+  Sapling and Ironwood subtree-root batches, and seeds frontiers, roots,
+  and the shard end-height maps in one construction. A conflicting root
+  drops the whole local — the frontier-only wallet and the
+  tree-ahead-of-map divergence are unconstructible.
+- `put_*_subtree_roots` stay three own bodies (no helper), each honest
+  now: save the tree, run the batch, restore on `Err`; the end-height
+  map fills only on full success. `clone_shard_tree` becomes `pub(super)`
+  with a `TreeError` error. The mint no longer calls them; construction
+  does.
 ## 2026-09-21 — `open_claim_for`: the wallet answers for its open claims (#116)
 
 ### Added

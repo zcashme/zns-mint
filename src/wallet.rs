@@ -14,7 +14,7 @@ use incrementalmerkletree::{Address, Marking, Retention};
 use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTree};
 use zcash_client_backend::scanning::ScanningKeys;
 use zcash_client_backend::{
-    data_api::chain::ChainState,
+    data_api::chain::{ChainState, CommitmentTreeRoot},
     data_api::locking::LockOwner,
     data_api::{
         BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus, WalletWrite,
@@ -130,10 +130,13 @@ pub struct Wallet<P: Parameters> {
 }
 
 impl<P: Parameters> Wallet<P> {
-    /// Builds the wallet against the origin checkpoint, for `network`.
+    /// Born complete: the origin frontiers plus every completed
+    /// subtree root behind them, or nothing.
     pub fn new(
         ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
         chain_state: &ChainState,
+        sapling_roots: &[CommitmentTreeRoot<sapling::Node>],
+        ironwood_roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
         network: P,
     ) -> Result<Self, TreeError> {
         let ufvks: BTreeMap<AccountId, UnifiedFullViewingKey> = ufvks.into_iter().collect();
@@ -185,6 +188,24 @@ impl<P: Parameters> Wallet<P> {
         wallet
             .ironwood_tree
             .insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
+
+        // Every completed shard root behind the frontiers — witness paths
+        // cross shard boundaries through these. A conflicting root drops
+        // the whole local; the frontier-only wallet is unconstructible.
+        for (root, index) in sapling_roots.iter().zip(0u64..) {
+            let addr = Address::from_parts(SAPLING_SHARD_HEIGHT.into(), index);
+            wallet.sapling_tree.insert(addr, *root.root_hash())?;
+            wallet
+                .sapling_tree_shard_end_heights
+                .insert(addr, root.subtree_end_height());
+        }
+        for (root, index) in ironwood_roots.iter().zip(0u64..) {
+            let addr = Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index);
+            wallet.ironwood_tree.insert(addr, *root.root_hash())?;
+            wallet
+                .ironwood_tree_shard_end_heights
+                .insert(addr, root.subtree_end_height());
+        }
         Ok(wallet)
     }
 
@@ -383,6 +404,8 @@ pub(crate) mod testing {
             let wallet = Wallet::new(
                 [],
                 &ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
+                &[],
+                &[],
                 network,
             )?;
             Ok(wallet)
@@ -432,6 +455,8 @@ pub(crate) mod testing {
             *wallet = Wallet::new(
                 [(id, usk.to_unified_full_viewing_key())],
                 prior,
+                &[],
+                &[],
                 wallet.network.clone(),
             )?;
         }

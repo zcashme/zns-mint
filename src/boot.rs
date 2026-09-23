@@ -28,9 +28,7 @@ use crate::zcash::{self, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_client_backend::data_api::{
-    chain::ChainState, BlockMetadata, WalletCommitmentTrees as _,
-};
+use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata};
 
 // ---------------------------------------------------------------------------
 // Boot life-cycle
@@ -149,64 +147,38 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         };
         tracing::info!("boot: keys derived (treasury=acct0, registry=acct1); seed wiped");
 
-        // 3a. Origin checkpoint: fetch tree state from Zebra. The wallet is
-        // born from it (trees seeded) and the cursor derives from it.
-        //
-        // `ChainState` (frontiers) seeds the rightmost, still-incomplete
-        // shard of each pool; the cursor carries `BlockMetadata` (height,
-        // hash, tree sizes) — the upstream continuity value `scan_block`'s
-        // `prior_metadata` and every `to_block_metadata()` call produce.
-        // Sizes derive from the frontiers (`Frontier::tree_size`),
-        // mirroring upstream's `ScannedBlock::to_block_metadata`.
+        // 3. Born complete: acquire the wallet's birth inputs — the origin
+        // checkpoint's frontiers and every completed subtree root behind
+        // them — then one total construction. The wallet asks; boot
+        // fetches.
         let rpc = zcash::JsonRpc::new();
         let origin = origin_checkpoint(&rpc).await;
         let checkpoint_height = origin.block_height();
-
-        // 3b. Wallet initialization: origin frontier bootstraps the
-        // rightmost partial shard of each pool.
+        let sapling_roots = rpc
+            .get_subtree_roots::<sapling::Node>("sapling", 0)
+            .await
+            .expect("FATAL: Sapling subtree roots unavailable from Zebra");
+        let ironwood_roots = rpc
+            .get_subtree_roots::<orchard::tree::MerkleHashOrchard>("ironwood", 0)
+            .await
+            .expect("FATAL: Ironwood subtree roots unavailable from Zebra");
         let mut wallet = Wallet::new(
             [
                 (TREASURY_ACCOUNT, treasury_keys.fvk()),
                 (REGISTRY_ACCOUNT, registry_keys.fvk()),
             ],
             &origin,
+            &sapling_roots,
+            &ironwood_roots,
             network.clone(),
         )
         .expect("FATAL: failed to seed commitment trees from the verified Zebra checkpoint");
         tracing::info!(
-            "boot: wallet initialized with trees seeded from origin checkpoint at height {}",
-            u32::from(checkpoint_height)
+            height = u32::from(checkpoint_height),
+            sapling_roots = sapling_roots.len(),
+            ironwood_roots = ironwood_roots.len(),
+            "boot: wallet born complete from the origin checkpoint"
         );
-
-        // 3c. Pre-birthday subtree roots: every completed shard root
-        // for the two pools the mint spends from. Without these, witness
-        // computation for post-birthday notes fails as soon as the auth
-        // path crosses a completed sibling shard.
-        {
-            let sapling_roots = rpc
-                .get_subtree_roots::<sapling::Node>("sapling", 0)
-                .await
-                .expect("FATAL: Sapling subtree roots unavailable from Zebra");
-            wallet
-                .put_sapling_subtree_roots(0, &sapling_roots)
-                .expect("FATAL: Sapling subtree root insertion failed");
-            tracing::info!(
-                "boot: {} Sapling subtree roots inserted",
-                sapling_roots.len()
-            );
-
-            let ironwood_roots = rpc
-                .get_subtree_roots::<orchard::tree::MerkleHashOrchard>("ironwood", 0)
-                .await
-                .expect("FATAL: Ironwood subtree roots unavailable from Zebra");
-            wallet
-                .put_ironwood_subtree_roots(0, &ironwood_roots)
-                .expect("FATAL: Ironwood subtree root insertion failed");
-            tracing::info!(
-                "boot: {} Ironwood subtree roots inserted",
-                ironwood_roots.len()
-            );
-        }
 
         // 3d. The mint's birthday: a throwaway window ending at the
         // birthday block, whose median is the birthday block's MTP —

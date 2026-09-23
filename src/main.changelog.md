@@ -1,5 +1,12 @@
 # main.changelog.md
 
+## 2026-09-23 — Boot step 3 is one step (#158)
+
+- The 3a/3b/3c sequence folds: fetch the origin checkpoint and both
+  subtree-root batches, then one total `Wallet::new`. The two
+  `put_*_subtree_roots` calls, their insertion FATALs, and the ordering
+  comments are gone. The wallet asks; boot fetches.
+
 Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).

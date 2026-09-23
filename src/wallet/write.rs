@@ -34,7 +34,7 @@ use zip32::{AccountId, DiversifierIndex};
 
 use super::{
     read::{next_height, WalletError},
-    Wallet, MAX_CHECKPOINTS,
+    TreeError, Wallet, MAX_CHECKPOINTS,
 };
 use crate::mint::REGISTRY_ACCOUNT;
 
@@ -287,9 +287,9 @@ impl<P: Parameters> OutputLockStore for Wallet<P> {
 /// `ShardTree` / `MemoryShardStore` are not `Clone`; this rebuilds an
 /// equivalent tree so callers can mutate a candidate and commit only on
 /// success.
-fn clone_shard_tree<H, const DEPTH: u8, const SHARD_HEIGHT: u8>(
+pub(super) fn clone_shard_tree<H, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     tree: &ShardTree<MemoryShardStore<H, BlockHeight>, DEPTH, SHARD_HEIGHT>,
-) -> Result<ShardTree<MemoryShardStore<H, BlockHeight>, DEPTH, SHARD_HEIGHT>, WalletError>
+) -> Result<ShardTree<MemoryShardStore<H, BlockHeight>, DEPTH, SHARD_HEIGHT>, TreeError>
 where
     H: Hashable + Clone + PartialEq,
 {
@@ -1442,7 +1442,8 @@ mod tests {
     #[test]
     fn reserve_zero_transparent_addresses_is_a_noop() {
         let origin = empty_origin();
-        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
+        let mut wallet =
+            Wallet::new([], &origin, &[], &[], MainNetwork).expect("empty UFVK set is valid");
         let account = AccountId::const_from_u32(0);
         assert!(wallet
             .reserve_next_n_ephemeral_addresses(account, 0)
@@ -1457,7 +1458,8 @@ mod tests {
     #[test]
     fn reserve_nonzero_transparent_addresses_is_fixed_accounts_only() {
         let origin = empty_origin();
-        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
+        let mut wallet =
+            Wallet::new([], &origin, &[], &[], MainNetwork).expect("empty UFVK set is valid");
         let account = AccountId::const_from_u32(0);
         assert!(matches!(
             wallet.reserve_next_n_ephemeral_addresses(account, 1),
@@ -1472,7 +1474,8 @@ mod tests {
     #[test]
     fn wallet_knows_its_network() {
         let origin = empty_origin();
-        let wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
+        let wallet =
+            Wallet::new([], &origin, &[], &[], MainNetwork).expect("empty UFVK set is valid");
         assert_eq!(wallet.network().network_type(), NetworkType::Main);
     }
 
@@ -1613,7 +1616,7 @@ mod tests {
             use shardtree::store::{Checkpoint, ShardStore};
             let target_index = if scenario == 2 { 0 } else { scenario % 2 };
             let origin = empty_origin();
-            let mut wallet = Wallet::new([], &origin, MainNetwork).expect("valid wallet");
+            let mut wallet = Wallet::new([], &origin, &[], &[], MainNetwork).expect("valid wallet");
             // Start just before a shard boundary to exercise cap and shard truncation.
             let base = if scenario == 4 { (1 << 16) - 4 } else { 0 };
             let targets = build(&mut wallet, base);
@@ -1748,7 +1751,8 @@ mod tests {
     #[test]
     fn tip_is_the_boot_seed_before_any_block_is_applied() {
         let origin = origin();
-        let wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
+        let wallet =
+            Wallet::new([], &origin, &[], &[], MainNetwork).expect("empty UFVK set is valid");
         assert_eq!(
             (wallet.tip().block_height(), wallet.tip().block_hash()),
             (origin.block_height(), origin.block_hash())
@@ -1759,7 +1763,8 @@ mod tests {
     #[test]
     fn tip_is_the_highest_applied_block() {
         let origin = origin();
-        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
+        let mut wallet =
+            Wallet::new([], &origin, &[], &[], MainNetwork).expect("empty UFVK set is valid");
         wallet.blocks.insert(BlockHeight::from_u32(5), at(5));
         wallet.blocks.insert(BlockHeight::from_u32(7), at(7));
         assert_eq!(
@@ -1772,7 +1777,8 @@ mod tests {
     #[test]
     fn tip_falls_back_to_the_seed_after_full_truncation() {
         let origin = origin();
-        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
+        let mut wallet =
+            Wallet::new([], &origin, &[], &[], MainNetwork).expect("empty UFVK set is valid");
         wallet.blocks.insert(BlockHeight::from_u32(5), at(5));
         wallet.blocks.clear();
         assert_eq!(wallet.tip().block_height(), origin.block_height());
