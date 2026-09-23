@@ -97,8 +97,10 @@ impl<P: Parameters> Wallet<P> {
         super::from_infallible(self.sapling_tree.store().min_checkpoint_id())
     }
 
-    /// The deepest applied block at or below `max_height` — the candidate
-    /// `try_truncate_trees_to` verifies against the trees.
+    /// The deepest applied block at or below `max_height`.
+    ///
+    /// `None` when every applied block sits above `max_height`. The boot
+    /// origin is a checkpoint, not an applied block, so it is not here.
     fn common_truncation_height(&self, max_height: BlockHeight) -> Option<BlockHeight> {
         self.blocks
             .range(..=max_height)
@@ -217,6 +219,18 @@ impl<P: Parameters> Wallet<P> {
         for output in stale_locks {
             self.locks.remove(&output);
         }
+    }
+
+    /// Rewinds to the boot-origin checkpoint when `max_height` reaches it
+    /// and the checkpoint is still retained. A pruned origin, or a request
+    /// below the origin, is [`WalletError::TruncationTargetUnavailable`].
+    fn truncate_to_origin(&mut self, max_height: BlockHeight) -> Result<BlockHeight, WalletError> {
+        let origin = self.seed.block_height();
+        if max_height >= origin && self.try_truncate_trees_to(origin)? {
+            self.drop_applied_above(origin);
+            return Ok(origin);
+        }
+        Err(WalletError::TruncationTargetUnavailable(max_height))
     }
 }
 
@@ -649,7 +663,8 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
                 // Nothing has been applied; there is nothing to truncate.
                 return Ok(max_height);
             }
-            return Err(WalletError::TruncationTargetUnavailable(max_height));
+
+            return self.truncate_to_origin(max_height);
         };
 
         // Trees first on clones: on failure the live trees and tables stay
@@ -1860,6 +1875,33 @@ mod tests {
         // Truncation does not lower knowledge: no clamp behind the writer.
         st.wallet_mut().truncate_to_height(h1).unwrap();
         assert_eq!(st.wallet().zebra_tip, Some(h2));
+    }
+
+    /// A request at the boot origin, with blocks applied above it, rewinds
+    /// to that checkpoint and clears the applied chain.
+    #[test]
+    fn truncate_to_the_boot_origin_clears_applied_blocks() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let origin = st.wallet().seed.block_height();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50_000);
+        let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h1, 1);
+        assert!(st.wallet().tip().block_height() > origin);
+        assert!(!st.wallet().sapling_notes.is_empty());
+
+        let metadata = st
+            .wallet_mut()
+            .truncate_to(origin)
+            .expect("origin checkpoint is retained");
+        assert_eq!(metadata.block_height(), origin);
+        assert_eq!(st.wallet().tip().block_height(), origin);
+        assert!(st.wallet().blocks.is_empty());
+        assert!(
+            st.wallet().sapling_notes.is_empty(),
+            "notes mined above the origin must be dropped"
+        );
     }
 
     /// A request above the applied tip commits the tip and returns it.

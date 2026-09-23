@@ -180,20 +180,33 @@ async fn main() {
             if wallet_hash == Some(canonical_hash) {
                 break;
             }
-            ancestor = BlockHeight::from_u32(u32::from(ancestor) - 1);
+            // Height 0 has no predecessor. Subtracting would wrap; the walk
+            // has already exhausted the chain.
+            let Some(prev) = u32::from(ancestor).checked_sub(1) else {
+                panic!(
+                    "FATAL: no common ancestor within the wallet's applied chain \
+                     (data exhausted at height {})",
+                    u32::from(ancestor)
+                );
+            };
+            ancestor = BlockHeight::from_u32(prev);
         }
 
         if ancestor < chain_tip.block_height() {
-            registry.truncate_to_height(ancestor);
+            // The wallet commits first. A refusal leaves the other faculties
+            // where they were. They then follow the height that committed,
+            // which can be the boot origin below the requested ancestor.
             chain_tip = wallet
                 .truncate_to(ancestor)
                 .expect("FATAL: wallet could not rewind to the common ancestor");
+            let rewound = chain_tip.block_height();
+            registry.truncate_to_height(rewound);
 
-            // Rebuild the entire MTP window at the ancestor. Retaining a
+            // Rebuild the entire MTP window at the committed height. Retaining a
             // partial old window and appending the same heights again would
             // mix histories after a deep reorg.
             mtp = zns_mint::mint::mtp::MtpTracker::default();
-            mtp.backfill(ancestor, |height| {
+            mtp.backfill(rewound, |height| {
                 let source = source.clone();
                 async move {
                     let (_, _, timestamp) = source.get_block_header(height).await?;
@@ -206,10 +219,10 @@ async fn main() {
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
-            name_notes.truncate_to(ancestor);
-            requests.truncate_to(ancestor);
+            name_notes.truncate_to(rewound);
+            requests.truncate_to(rewound);
             tracing::warn!(
-                height = u32::from(ancestor),
+                height = u32::from(rewound),
                 hash = %chain_tip.block_hash(),
                 "mint rewound to canonical ancestor"
             );
