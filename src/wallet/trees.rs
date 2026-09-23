@@ -118,7 +118,7 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
             }
             Ok::<_, ShardTreeError<Self::Error>>(())
         }) {
-            self.orchard_tree = saved;
+            self.orchard_tree = saved_tree;
             return Err(error);
         }
 
