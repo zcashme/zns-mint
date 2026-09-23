@@ -4,6 +4,19 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-24 — An unpriced claim or update is refused
+
+- A registration quote that does not fit is decided like an
+  underpayment. The claim stays silent. The update voids the attempt
+  and leaves the challenge standing.
+
+## 2026-09-23 — Reorg rewind commits the wallet first
+
+- The wallet rewind runs before the Registry, MTP, challenges, name
+  notes, and request queue. Those follow the height the wallet
+  committed, including the boot origin. A refusal leaves them
+  unmoved. The ancestor walk stops at height 0.
+
 ## 2026-09-23 — Boot step 3 is one step (#158)
 
 - Boot fetches the origin checkpoint and both subtree-root batches,

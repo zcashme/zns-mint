@@ -359,7 +359,8 @@ impl Oracle {
         self.rounds_seen = self.rounds_seen.saturating_add(1);
     }
 
-    /// Calculate a name's registration quote in zats for a given term, using the current published rate.
+    /// Registration quote in zats at the published rate. `None` when the
+    /// product does not fit a zat amount.
     pub fn quote(&self, name: &Name, term: Term) -> Option<Zatoshis> {
         let usd = match term {
             Term::Forever => forever_usd(name),
@@ -388,6 +389,10 @@ impl Oracle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quoted(oracle: &Oracle, name: &Name, term: Term) -> u64 {
+        oracle.quote(name, term).expect("quote fits").into_u64()
+    }
 
     #[test]
     fn challenge_fee_rounds_one_dollar_up_to_the_grid() {
@@ -422,19 +427,13 @@ mod tests {
 
         let short = Name::parse("a").unwrap();
         // A year is the annual tier price; forever is three of them.
-        assert_eq!(
-            oracle.quote(&short, Term::Years(1)).into_u64(),
-            1_000_000_000
-        );
-        assert_eq!(
-            oracle.quote(&short, Term::Forever).into_u64(),
-            3_000_000_000
-        );
+        assert_eq!(quoted(&oracle, &short, Term::Years(1)), 1_000_000_000);
+        assert_eq!(quoted(&oracle, &short, Term::Forever), 3_000_000_000);
 
         // Six-character names pay the flat minimum tier.
         let long = Name::parse("purple").unwrap();
-        assert_eq!(oracle.quote(&long, Term::Years(1)).into_u64(), 2_000_000);
-        assert_eq!(oracle.quote(&long, Term::Forever).into_u64(), 6_000_000);
+        assert_eq!(quoted(&oracle, &long, Term::Years(1)), 2_000_000);
+        assert_eq!(quoted(&oracle, &long, Term::Forever), 6_000_000);
     }
 
     /// The registration quote follows the term: N annuals for `Ny`, three
@@ -457,20 +456,20 @@ mod tests {
         ] {
             let name = Name::parse(name).unwrap();
             assert_eq!(
-                oracle.quote(&name, Term::Years(1)).into_u64(),
+                quoted(&oracle, &name, Term::Years(1)),
                 annual,
                 "{name:?} 1y"
             );
             for years in [1u64, 2, 12, 99] {
                 assert_eq!(
-                    oracle.quote(&name, Term::Years(years)).into_u64(),
+                    quoted(&oracle, &name, Term::Years(years)),
                     annual * years,
                     "{name:?} {years}y"
                 );
             }
             // Forever keeps its three-annual multiple, not years-capped.
             assert_eq!(
-                oracle.quote(&name, Term::Forever).into_u64(),
+                quoted(&oracle, &name, Term::Forever),
                 annual * 3,
                 "{name:?} forever"
             );
