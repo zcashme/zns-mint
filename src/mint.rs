@@ -241,6 +241,7 @@ pub struct Challenge {
     pub code: OtpCode,
     pub name: Name,
     pub action: Action,
+    pub term: Option<Term>,
     pub ua: UnifiedAddress,
 }
 
@@ -251,10 +252,16 @@ impl Challenge {
             return None;
         }
         let otp: String = self.code.digits().into_iter().map(|b| b as char).collect();
+        let term_str = match self.term {
+            None => "none".to_string(),
+            Some(Term::Forever) => "forever".to_string(),
+            Some(Term::Years(n)) => format!("{}y", n),
+        };
         let text = format!(
-            "ZNS:otp:{otp}:{}:{}:{}",
+            "ZNS:otp:{otp}:{}:{}:{}:{}",
             self.name.as_str(),
             self.action.as_str(),
+            term_str,
             self.ua.encode(network),
         );
         // `from_bytes` pads; the UA guard bounds the length.
@@ -269,7 +276,7 @@ impl Challenge {
         };
 
         let parts: Vec<&str> = text.split(':').collect();
-        if parts.len() != 6 || parts[0] != "ZNS" || parts[1] != "otp" {
+        if parts.len() != 7 || parts[0] != "ZNS" || parts[1] != "otp" {
             return None;
         }
 
@@ -282,13 +289,15 @@ impl Challenge {
         let name = Name::parse(parts[3])?;
         // Challenges never claim: parse the verb, then refuse claims.
         let action = Action::parse(parts[4]).filter(|action| !action.is_claim())?;
+        let term = Term::parse(parts[5]);
 
-        let ua = decode_controller_ua(network, parts[5])?;
+        let ua = decode_controller_ua(network, parts[6])?;
 
         Some(Self {
             code,
             name,
             action,
+            term,
             ua,
         })
     }
@@ -998,6 +1007,7 @@ mod tests {
                 code: OtpCode::for_test(*b"417293"),
                 name: Name::parse("alice").unwrap(),
                 action,
+                term: None,
                 ua: ua.clone(),
             };
             let memo = challenge.encode(&network).expect("non-claims encode");
@@ -1008,6 +1018,7 @@ mod tests {
             code: OtpCode::for_test(*b"417293"),
             name: Name::parse("alice").unwrap(),
             action: Action::Claim,
+            term: None,
             ua,
         };
         assert!(claim.encode(&network).is_none());

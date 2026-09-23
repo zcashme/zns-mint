@@ -90,6 +90,7 @@ impl OtpRequest {
                 code: code.clone(),
                 name: name.clone(),
                 action,
+                term,
                 ua: ua.clone(),
             },
             Self {
