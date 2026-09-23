@@ -1,5 +1,13 @@
 # Mint live-work design record
 
+## 2026-09-22 — Malformed Registry spends no longer panic replay
+
+- `apply_block` rejects a Registry spend with no Name Note, or with
+  more than one, via `Registry::follow_spends` — on every path, unconditionally, since
+  it no-ops when nothing Registry-owned was spent — instead of
+  `assert!`/`panic!`. An update/release that also created a claim
+  anchor is offered to `accept_*` rather than aborted.
+
 ## 2026-09-22 — Treasury memos decode once, at block application (#133)
 
 - `MintInbound::decode(network, txid, &memo)` in `mint.rs` classifies
