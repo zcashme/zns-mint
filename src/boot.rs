@@ -316,7 +316,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         );
 
         // The challenge memory: empty by construction, filled by the run
-        // loop as liveness challenges and update/release relays are issued.
+        // loop as update/release relays are issued.
         let challenges = OtpQueue::new();
 
         // 7. Sapling proving parameters. Loading and hash verification happen
