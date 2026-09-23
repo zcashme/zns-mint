@@ -1,5 +1,13 @@
 # Zcash I/O changelog
 
+## 2026-09-23 — Ironwood treestate is mandatory (#155)
+
+- The response's `ironwood` section is a required field, enforced at
+  the type: a `z_gettreestate` without it does not parse, and a missing
+  `finalState` is `BadNodeData` — the same lane as Sapling and Orchard.
+  NU6.3 is always active; the pre-NU6.3 fallback ("absent and empty
+  are the same value") is gone.
+
 ## 2026-09-22 — The node conversation bounded, typed, and honest (audit H7/H8)
 
 - `round_trip` covers the whole exchange — headers through the last

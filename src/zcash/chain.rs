@@ -454,7 +454,7 @@ struct TreeStateResponse {
     hash: String,
     sapling: ShieldedTreeState,
     orchard: ShieldedTreeState,
-    ironwood: Option<ShieldedTreeState>,
+    ironwood: ShieldedTreeState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -468,8 +468,9 @@ struct TreeCommitments {
     final_state: Option<String>,
 }
 
-/// `z_gettreestate` parsed into the upstream [`ChainState`]; an absent
-/// Ironwood section (pre-NU6.3) and an empty tree are the same value.
+/// `z_gettreestate` parsed into the upstream [`ChainState`]; every
+/// pool's treestate is mandatory — a missing section is a malformed
+/// response, rejected at the type.
 fn chain_state_from_rpc_response(
     response: TreeStateResponse,
 ) -> Result<ChainState, TransportError> {
@@ -487,14 +488,12 @@ fn chain_state_from_rpc_response(
         .ok_or(TransportError::BadNodeData("missing Orchard finalState"))?;
     let orchard_tree = decode_tree::<MerkleHashOrchard>(&orchard_final_state, "Orchard")?;
 
-    // Zebra omits the `ironwood` key entirely before NU6.3 activation.
-    let ironwood_tree = match response
+    let ironwood_final_state = response
         .ironwood
-        .and_then(|state| state.commitments.final_state)
-    {
-        Some(hex) if !hex.is_empty() => decode_tree::<MerkleHashOrchard>(&hex, "Ironwood")?,
-        _ => Frontier::empty(),
-    };
+        .commitments
+        .final_state
+        .ok_or(TransportError::BadNodeData("missing Ironwood finalState"))?;
+    let ironwood_tree = decode_tree::<MerkleHashOrchard>(&ironwood_final_state, "Ironwood")?;
 
     let expected_hash_bytes =
         hex::decode(&response.hash).map_err(|_| TransportError::BadNodeData("invalid hash hex"))?;
@@ -713,7 +712,7 @@ mod tests {
         hex::encode(bytes)
     }
 
-    fn treestate(ironwood: Option<String>) -> TreeStateResponse {
+    fn treestate(ironwood: String) -> TreeStateResponse {
         TreeStateResponse {
             height: 1000,
             hash: hex::encode([0u8; 32]),
@@ -727,27 +726,17 @@ mod tests {
                     final_state: Some(tree_hex::<MerkleHashOrchard>()),
                 },
             },
-            ironwood: ironwood.map(|final_state| ShieldedTreeState {
+            ironwood: ShieldedTreeState {
                 commitments: TreeCommitments {
-                    final_state: Some(final_state),
+                    final_state: Some(ironwood),
                 },
-            }),
+            },
         }
     }
 
     #[test]
-    fn treestate_absent_ironwood_is_the_empty_frontier() {
-        // The activation−1 answer: the key is omitted, and "absent" and
-        // "empty" are the same value to every consumer.
-        let state = chain_state_from_rpc_response(treestate(None)).expect("a valid treestate");
-        assert_eq!(state.block_height(), BlockHeight::from_u32(1000));
-        assert_eq!(state.block_hash(), BlockHash([0u8; 32]));
-        assert_eq!(*state.final_ironwood_tree(), Frontier::empty());
-    }
-
-    #[test]
     fn treestate_garbage_ironwood_hex_is_a_bad_checkpoint() {
-        let garbage = treestate(Some("zz".to_string()));
+        let garbage = treestate("zz".to_string());
         assert!(matches!(
             chain_state_from_rpc_response(garbage),
             Err(TransportError::BadCheckpoint(_))
@@ -756,7 +745,7 @@ mod tests {
 
     #[test]
     fn treestate_malformed_hash_is_bad_node_data() {
-        let mut garbage = treestate(None);
+        let mut garbage = treestate(tree_hex::<MerkleHashOrchard>());
         garbage.hash = "not-hex!".to_string();
         assert!(matches!(
             chain_state_from_rpc_response(garbage),
@@ -766,7 +755,7 @@ mod tests {
 
     #[test]
     fn treestate_missing_sapling_state_is_bad_node_data() {
-        let mut garbage = treestate(None);
+        let mut garbage = treestate(tree_hex::<MerkleHashOrchard>());
         garbage.sapling.commitments.final_state = None;
         assert!(matches!(
             chain_state_from_rpc_response(garbage),

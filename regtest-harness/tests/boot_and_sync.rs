@@ -24,7 +24,7 @@ async fn test_boot_and_sync() -> Result<()> {
     println!("4. Starting zallet daemon...");
     zallet.start_daemon().await?;
 
-    println!("5. Mining through NU6.3 activation...");
+    println!("5. Mining chain blocks to a working tip...");
     zebrad.generate_blocks(4).await?;
 
     println!("6. Starting zns-mint...");
@@ -33,7 +33,7 @@ async fn test_boot_and_sync() -> Result<()> {
 
     println!("7. Mining blocks to mature coinbase...");
     // Mine 110 blocks. Coinbase maturity is 100 blocks, so this gives zallet 10 spendable coinbases.
-    // This also triggers NU6.3 activation (at block 4).
+    // NU6.3 is active from genesis; these blocks only advance the tip.
     zebrad.generate_blocks(110).await?;
 
     println!("8. Waiting for zallet to sync the blocks...");

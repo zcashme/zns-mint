@@ -48,7 +48,7 @@ async fn test_claim_e2e_matches_vector_keys() -> Result<()> {
     println!("4. Starting zallet daemon...");
     zallet.start_daemon().await?;
 
-    println!("5. Mining through NU6.3 activation...");
+    println!("5. Mining chain blocks to a working tip...");
     zebrad.generate_blocks(4).await?;
 
     println!("6. Starting zns-mint...");
@@ -116,7 +116,6 @@ async fn test_claim_e2e_matches_vector_keys() -> Result<()> {
     // ------------------------------------------------------------------
     println!("10. Deriving Treasury UA and submitting claim request...");
     let one = zcash_protocol::consensus::BlockHeight::from_u32(1);
-    let four = zcash_protocol::consensus::BlockHeight::from_u32(4);
     let network = zcash_protocol::local_consensus::LocalNetwork {
         overwinter: Some(one),
         sapling: Some(one),
@@ -125,9 +124,9 @@ async fn test_claim_e2e_matches_vector_keys() -> Result<()> {
         canopy: Some(one),
         nu5: Some(one),
         nu6: Some(one),
-        nu6_1: Some(four),
-        nu6_2: Some(four),
-        nu6_3: Some(four),
+        nu6_1: Some(one),
+        nu6_2: Some(one),
+        nu6_3: Some(one),
     };
     let seed = [0u8; 32];
     let treasury_usk = zcash_keys::keys::UnifiedSpendingKey::from_seed(
