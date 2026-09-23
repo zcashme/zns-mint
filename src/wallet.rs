@@ -77,9 +77,8 @@ pub struct Wallet<P: Parameters> {
     /// what the wallet stores, by construction.
     scanning_keys: ScanningKeys<AccountId, (AccountId, zip32::Scope)>,
 
-    /// The chain tip as last supplied through [`WalletWrite::update_chain_tip`],
-    /// the one writer. Never read by a decision — [`Wallet::tip`] owns those.
-    /// Kept for upstream's `chain_height` and `suggest_scan_ranges` contracts.
+    /// The chain tip as last supplied through [`WalletWrite::update_chain_tip`];
+    /// never read by a decision — [`Wallet::tip`] owns those.
     zebra_tip: Option<BlockHeight>,
 
     /// Canonical Zebra blocks this in-memory projection has applied.
@@ -276,11 +275,8 @@ impl<P: Parameters> Wallet<P> {
             .or_else(|| (height == self.seed.block_height()).then_some(self.seed))
     }
 
-    /// The wallet's position: the highest applied block, or the boot origin
-    /// before the first block is applied. Always defined — the seed is the
-    /// floor of the wallet's existence. The one truth for "where am I";
-    /// the node's position ([`Wallet::zebra_tip`]) answers only where the
-    /// node is.
+    /// The wallet's position: the highest applied block, or the boot
+    /// origin before the first block is applied. Always defined.
     pub fn tip(&self) -> BlockMetadata {
         self.blocks
             .last_key_value()
@@ -288,13 +284,8 @@ impl<P: Parameters> Wallet<P> {
             .unwrap_or(self.seed)
     }
 
-    /// The sync comparison, computed for the caller that holds both tips:
-    /// whether the wallet's verified position names the supplied network
-    /// tip's height, and how far it trails if not. The node's tip is the
-    /// caller's knowledge — supplied as an argument, compared, dropped;
-    /// the wallet never stores it, and no decision path sees it. Height
-    /// equality only — hash continuity below the tip is the caller's
-    /// ancestor walk.
+    /// The sync comparison against a caller-supplied network tip —
+    /// compared and dropped, never stored.
     pub fn sync_status(&self, network_tip: BlockHeight) -> (bool, u32) {
         let position = self.tip().block_height();
         (
@@ -303,13 +294,8 @@ impl<P: Parameters> Wallet<P> {
         )
     }
 
-    /// Whether the transaction named `txid` is known, unmined, and past
-    /// its expiry height at the network tip the caller supplies — dead,
-    /// provably, against a chain the wallet never stores. Judged at the
-    /// caller's tip rather than the applied position; an unknown `txid`
-    /// is not expired. The intended consumer is expiry reconciliation —
-    /// releasing what a dead transaction held — and the safe trigger is
-    /// the caller's own verified judgment that the tip is canonical.
+    /// True when `txid` is known, unmined, and past expiry at
+    /// `network_tip`. Unknown `txid`: false.
     pub fn expired_unmined_at(&self, txid: TxId, network_tip: BlockHeight) -> bool {
         let expiry = self.transactions.get(&txid).map(|tx| tx.expiry_height());
         let unmined = !matches!(

@@ -311,8 +311,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             crate::mint::registry::ANCHOR_POOL_SIZE
         );
         // Boot refuses to run with a treasury below MIN_TREASURY_BALANCE.
-        // The wallet's chain knowledge exists from seeding and boot sync —
-        // the node's tip is never pushed into the wallet.
+        // The node's tip is never pushed into the wallet.
         let treasury_balance = wallet
             .get_wallet_summary(ConfirmationsPolicy::MIN)
             .expect("FATAL: balance summary failed")

@@ -411,13 +411,9 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         &self,
         confirmations_policy: ConfirmationsPolicy,
     ) -> Result<Option<WalletSummary<Self::AccountId>>, Self::Error> {
-        // The summary's reference height is the wallet's chain knowledge —
-        // upstream's concept, and upstream's conformance suite pins both
-        // its use (a supplied tip drives confirmation counting) and the
-        // absence rule (no knowledge and nothing applied: no summary). In
-        // this service the node's tip is never supplied, so knowledge only
-        // ever mirrors the applied position; the position stands in for it
-        // until the first block is applied.
+        // Reference height: chain knowledge, falling back to the applied
+        // position. Upstream's suite pins the fallback and the
+        // None-absence rule.
         let chain_tip_height = match self.zebra_tip {
             Some(tip) => tip,
             None if !self.blocks.is_empty() => self.tip().block_height(),
@@ -425,10 +421,8 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         };
         let target_height = TargetHeight::from(next_height(chain_tip_height));
 
-        // Everything at or below the wallet's position is applied, and
-        // nothing beyond it exists here — scanning is one linear prefix,
-        // so the fully scanned height IS the position. A theorem of the
-        // wallet's construction, not a tracked state.
+        // Scanning is one linear prefix: the fully scanned height IS the
+        // position.
         let fully_scanned_height = self.tip().block_height();
 
         let mut account_balances = self
@@ -472,13 +466,8 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
             )?;
         }
 
-        // Scan progress across the span the wallet knows. Everything at
-        // or below the position is applied, so progress is complete
-        // unless a supplied tip runs ahead of it — embeddings that push
-        // tips do; this service never does. Upstream's conformance suite
-        // pins the literal, unreduced block counts (one block scanned is
-        // `1/1`, two are `2/2`), so the ratio is expressed over the span,
-        // never simplified.
+        // Literal, unreduced counts — upstream's suite pins `1/1`, `2/2`.
+        // Always complete here: knowledge only ever mirrors the position.
         let birthday = self
             .wallet_birthday()
             .unwrap_or_else(|| next_height(self.seed.block_height()));
@@ -506,10 +495,7 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
     }
 
     fn chain_height(&self) -> Result<Option<BlockHeight>, Self::Error> {
-        // The chain as far as the wallet knows — upstream's chain tip,
-        // maintained through the one writer. Not the applied position:
-        // knowledge may lead what has been verified (the rescan
-        // obligation), and survives truncation by contract.
+        // Upstream's chain knowledge — not the applied position.
         Ok(self.zebra_tip)
     }
 
@@ -540,11 +526,7 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
     }
 
     fn suggest_scan_ranges(&self) -> Result<Vec<ScanRange>, Self::Error> {
-        // The wallet never expresses a sync gap: it does not hold the
-        // network tip, and catch-up is the caller's comparison. Upstream's
-        // sync driver consults this; against this wallet — whose knowledge
-        // only ever mirrors the applied position — there is never a range
-        // to suggest.
+        // No network tip held: no gap to express.
         Ok(Vec::new())
     }
 

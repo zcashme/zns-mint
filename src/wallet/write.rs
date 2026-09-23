@@ -64,9 +64,7 @@ impl<P: Parameters> Wallet<P> {
         }
     }
 
-    /// True when a foreign lock remains active at the wallet's own
-    /// position. Lock expiries are mint-set; liveness is decided where the
-    /// mint can act — never by where the node is.
+    /// True when a foreign lock outlives the wallet's position.
     fn is_foreign_lock_active(&self, output: &OutputRef, owner: LockOwner) -> bool {
         match self.locks.get(output) {
             Some((existing_owner, expiry)) if *existing_owner != owner => {
@@ -92,27 +90,16 @@ impl<P: Parameters> Wallet<P> {
         }
     }
 
-    /// The deepest height the trees can still truncate to: the oldest
-    /// retained checkpoint. This is the honest rewind floor — retention
-    /// bounds rewinding, not any tip.
-    ///
-    /// The three trees retain identical checkpoint sets by the commit
-    /// discipline that mutates them together (`ensure_block_checkpoint`
-    /// checkpoints all three at the same height; every truncation goes
-    /// through the all-three-or-nothing helpers), so one store's answer
-    /// is the floor. `None` only before the first applied block, where
-    /// nothing is retained and the seed is the floor of the wallet's
-    /// existence.
+    /// The oldest retained checkpoint — the deepest height the trees can
+    /// still truncate to, identical across the three trees by the commit
+    /// discipline. `None` before the first applied block.
     fn retained_floor(&self) -> Option<BlockHeight> {
         // The store error type is `Infallible`; `.ok()` cannot lose one.
         self.sapling_tree.store().min_checkpoint_id().ok().flatten()
     }
 
     /// The deepest applied block at or below `max_height` — the candidate
-    /// whose checkpoint `truncate_to_height` verifies against every tree.
-    /// Checkpoints exist only at applied heights and are pruned from the
-    /// old end, so below the retention window no candidate survives; the
-    /// caller refuses rather than keep orphaned state.
+    /// `try_truncate_trees_to` verifies against the trees.
     fn common_truncation_height(&self, max_height: BlockHeight) -> Option<BlockHeight> {
         self.blocks
             .range(..=max_height)
@@ -495,12 +482,8 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
     }
 
     fn update_chain_tip(&mut self, tip_height: BlockHeight) -> Result<(), WalletError> {
-        // The one writer for the wallet's chain knowledge. Scanning calls
-        // it with the applied tip; adopting a chain state calls it with
-        // the adopted height; an external sync driver may supply the
-        // node's position. Reorg handling stays the caller's
-        // truncate/rescan loop — the wallet never edits knowledge
-        // behind this writer.
+        // The one writer for chain knowledge: scanning and chain-state
+        // adoption call it. Reorg correction is the caller's loop.
         self.zebra_tip = Some(tip_height);
         Ok(())
     }
@@ -691,8 +674,7 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         }
 
         if self.blocks.is_empty() || self.tip().block_height() <= height {
-            // Adopting the chain state means knowing the chain extends
-            // to it — through the one writer.
+            // Adoption is knowledge — through the one writer.
             self.update_chain_tip(height)?;
             return Ok(());
         }
@@ -736,8 +718,7 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         if self.blocks.is_empty() {
             self.seed = super::block_metadata(&chain_state);
         }
-        // Adopting the chain state means knowing the chain extends to it
-        // — through the one writer.
+        // Adoption is knowledge — through the one writer.
         self.update_chain_tip(height)?;
         Ok(())
     }
@@ -775,25 +756,18 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
             ));
         }
 
-        // Upstream rewinds by height alone: callers may supply a chain
-        // state they cannot authenticate (upstream's own scenarios pass
-        // synthetic hashes and empty frontiers). Hash validation belongs
-        // to `truncate_to_chain_state`, where the caller supplies real
-        // frontiers and a real hash.
+        // Upstream rewinds by height alone; hash validation belongs to
+        // `truncate_to_chain_state`.
         let rewind_target = chain_state.block_height();
 
-        // Nothing to rewind: the fork is above the wallet's position, or
-        // the rewind has already happened. Birthdays only.
+        // Nothing applied above the target: birthdays only.
         if self.tip().block_height() <= rewind_target {
             self.lower_account_birthdays(&reset_account_birthdays, new_birthday);
             return Ok(());
         }
 
-        // Retention bounds rewinding — the upstream deep-rewind contract:
-        // applied data drops back to the retained-checkpoint floor, or to
-        // the target if that is shallower. The floor is the trees' own
-        // oldest retained checkpoint — one read, never a tip. Nothing
-        // retained (before the first applied block): birthdays only.
+        // Retention bounds rewinding: the floor is the trees' oldest
+        // retained checkpoint, never a tip.
         let Some(floor) = self.retained_floor() else {
             self.lower_account_birthdays(&reset_account_birthdays, new_birthday);
             return Ok(());
@@ -1032,8 +1006,7 @@ impl<P: Parameters> Wallet<P> {
             self.blocks.insert(height, block.to_block_metadata());
         }
 
-        // Scanning verified the chain this far: the wallet's chain
-        // knowledge advances to the applied tip — through the one writer.
+        // Scanning verified this far: knowledge follows, through the writer.
         if let Some((&applied, _)) = self.blocks.last_key_value() {
             self.update_chain_tip(applied)?;
         }
@@ -1805,11 +1778,8 @@ mod tests {
         assert_eq!(wallet.tip().block_height(), origin.block_height());
     }
 
-    /// The chain-knowledge tip has one writer: `update_chain_tip`.
-    /// Scanning advances knowledge through it — adopting what scanning
-    /// verified is the writer's job — and truncation never lowers it
-    /// behind the writer's back: the caller corrects knowledge through
-    /// the same writer after a reorg.
+    /// Scanning advances knowledge through the writer; truncation never
+    /// lowers it.
     #[test]
     fn chain_knowledge_moves_only_through_the_writer() {
         let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
@@ -1828,9 +1798,8 @@ mod tests {
         assert_eq!(st.wallet().zebra_tip, Some(h2));
     }
 
-    /// A node tip far ahead of the applied chain must not defeat rewind:
-    /// the floor is read from the trees' own retention, never derived from
-    /// the node's position.
+    /// A far-ahead node tip must not defeat rewind: the floor is
+    /// retention, never the tip.
     #[test]
     fn rewind_truncates_despite_a_far_ahead_node_tip() {
         let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
@@ -1871,9 +1840,7 @@ mod tests {
         assert_eq!(st.wallet().zebra_tip, Some(ahead));
     }
 
-    /// Lock liveness is decidable in every state — including before the node
-    /// has ever supplied a tip: both lock readers answer from the wallet's
-    /// own position, and they agree.
+    /// Both lock readers answer from the position — no node tip needed.
     #[test]
     fn lock_readers_agree_without_any_node_tip() {
         let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
@@ -1914,12 +1881,8 @@ mod tests {
         assert_eq!(st.wallet().get_locked_outputs(account_id).unwrap().len(), 1);
     }
 
-    /// Truncation below the trees' retention window refuses loudly: the
-    /// checkpoint at the target is pruned and the wallet cannot honor the
-    /// request in memory. Flooring the request instead would keep the
-    /// orphaned blocks between target and floor applied — worse than the
-    /// error. For an always-on wallet with no persistence, restart is the
-    /// recovery: boot rescans from the birthday.
+    /// Below the retention window the checkpoint is gone: refuse rather
+    /// than keep orphaned state — restart is the recovery.
     #[test]
     fn truncate_below_the_retention_window_refuses() {
         let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
