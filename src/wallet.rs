@@ -33,6 +33,15 @@ use zip32::AccountId;
 
 use crate::mint::TREASURY_ACCOUNT;
 
+/// The shard store's error type is [`Infallible`]. Callers use this so a
+/// store failure is not read as a missing checkpoint.
+fn from_infallible<T>(result: Result<T, Infallible>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(error) => match error {},
+    }
+}
+
 /// Depth of the Sapling note commitment tree,
 const SAPLING_NOTE_COMMITMENT_TREE_DEPTH: u8 = 32;
 
@@ -438,13 +447,13 @@ pub(crate) mod testing {
         // `TestBuilder::build` may already have written the birthday
         // frontier and shard roots through the public tree API; replacing
         // the wallet would discard them.
-        let frontier_loaded = wallet
-            .sapling_tree
-            .store()
-            .get_checkpoint(&prior.block_height())
-            .ok()
-            .flatten()
-            .is_some();
+        let frontier_loaded = super::from_infallible(
+            wallet
+                .sapling_tree
+                .store()
+                .get_checkpoint(&prior.block_height()),
+        )
+        .is_some();
         if frontier_loaded {
             wallet.seed = block_metadata(prior);
             let birthday = BlockHeight::from_u32(u32::from(prior.block_height()).saturating_add(1));
