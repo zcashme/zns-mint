@@ -5,14 +5,13 @@
 //! `main` is then a pure run loop: it follows Zebra's canonical chain,
 //! scans each new block, enforces the Registry transition law, services
 //! Treasury memos (paid claims, update and release requests, OTP echoes),
-//! runs the lifecycle (expiry releases and liveness challenges), and
+//! runs the lifecycle (expiry releases), and
 //! sweeps the Treasury. The mint authors no genesis state: the anchor
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
 use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 
@@ -21,13 +20,11 @@ use tokio::sync::mpsc;
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::note::NameNoteQueue;
-use zns_mint::mint::otp::{OtpQueue, OtpRequest};
+use zns_mint::mint::otp::OtpQueue;
 use zns_mint::mint::pricing::fetch_round;
-use zns_mint::mint::registry::NameRecord;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
-    relay, watch_mempool, Action, MintInbound, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
-    REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    relay, watch_mempool, Action, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession, TransportError, RETRY_PAUSE};
 
@@ -581,92 +578,6 @@ async fn main() {
         for (name, release_note) in registry.releases_due(mtp_now) {
             tracing::info!(name = %name.as_str(), "lifecycle release authorized");
             name_notes.admit(tip, release_note);
-        }
-
-        // Liveness lead, §4.5.4: during the final OTP window the mint
-        // challenges the current controller to renew liveness. The
-        // snapshot stays — the lead loop needs each record.
-        let records = registry
-            .name_chain()
-            .map(|(name, record)| (name.clone(), record.clone()))
-            .collect::<Vec<(zns_mint::mint::Name, NameRecord)>>();
-        for (name, record) in records {
-            if record.action.is_release() {
-                continue;
-            }
-
-            // Liveness lead: while `mtp_now` is within CHALLENGE_LEAD of the
-            // deadline, ask the current controller to prove control. Skip if
-            // an OTP is still in play OR the same record was challenged
-            // inside its cooldown. Both are anti-spam bounds; without them a
-            // 7-day lead would issue up to ~336 challenges per name.
-            //
-            // Liveness is a mint-originated Relay, not a WP §5 Request →
-            // Relay → Respond authorization: the mint hasn't been asked
-            // anything, it is reminding the controller a deadline is near.
-            // Liveness is only *satisfied* when a fresh update Name Note
-            // lands (a real §5 flow the controller initiates), which resets
-            // `release_deadline` via `NameRecord::from_received`.
-            //
-            // The `liveness_issued` ledger lives in `OtpQueue`, which resets
-            // on restart and on any reorg (both call `OtpQueue::new()`), so
-            // a re-challenge inside the cooldown can occur after either.
-            // Harmless — an extra reminder to a live controller — but worth
-            // knowing when reading the logs.
-            let due_in = record.release_deadline.as_seconds() - mtp_now.as_seconds();
-            let cooldown = time::Duration::seconds(LIVENESS_RETRY_COOLDOWN);
-            if due_in > CHALLENGE_LEAD
-                || challenges.pending(
-                    &name,
-                    Action::Update,
-                    &record.ua,
-                    record.commitment,
-                    mtp_now,
-                )
-                || challenges.liveness_recently_issued(&name, record.commitment, mtp_now, cooldown)
-            {
-                continue;
-            }
-
-            let (challenge, pending) = OtpRequest::pending_challenge(
-                &name,
-                Action::Update,
-                &record.ua,
-                record.commitment,
-                None,
-                mtp_now,
-            );
-            let memo = challenge
-                .encode(&network)
-                .expect("liveness challenges are always encodable");
-            let relay_value = MINIMUM_FEE;
-            let Some(transaction) = treasury::challenge(
-                &network,
-                &mut wallet,
-                &treasury_keys,
-                &sapling_spend,
-                &sapling_output,
-                &record.ua,
-                memo,
-                relay_value,
-            ) else {
-                tracing::debug!(
-                    name = %name.as_str(),
-                    "liveness challenge awaits Treasury funds"
-                );
-                continue;
-            };
-
-            let accepted = source.submit(&transaction, "liveness challenge").await;
-            if accepted {
-                challenges.issue(pending);
-                challenges.mark_liveness_issued(name.clone(), record.commitment, mtp_now);
-                tracing::info!(
-                    txid = %transaction.txid(),
-                    name = %name.as_str(),
-                    "liveness challenge submitted"
-                );
-            }
         }
 
         // --- NameNote enactment ---

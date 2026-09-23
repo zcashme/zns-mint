@@ -1,5 +1,11 @@
 # main.changelog.md
 
+## 2026-09-24 — Remove the seven-day liveness reminder (#174)
+
+- The mint no longer sends automatic OTP challenges as a liveness
+  reminder before a name's release deadline. Liveness deadlines,
+  updates, and expiry enforcement are unchanged.
+
 Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).

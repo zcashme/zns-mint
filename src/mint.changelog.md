@@ -1,5 +1,13 @@
 # Mint live-work design record
 
+## 2026-09-24 — Remove automatic liveness reminders (#174)
+
+- `OtpQueue` now tracks only active OTP challenges. The separate
+  liveness reminder cooldown ledger is removed along with the automatic
+  reminder path; ordinary update OTP challenges remain unchanged.
+- The one-year `LIVENESS_INTERVAL`, `release_deadline` calculation, and
+  release enforcement remain in place.
+
 ## 2026-09-22 — Malformed Registry spends no longer panic replay
 
 - `apply_block` rejects a Registry spend with no Name Note, or with
