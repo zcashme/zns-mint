@@ -100,11 +100,19 @@ pub fn sweep_to_vault<P: Parameters>(
     };
 
     let Some(payment) = (total - SWEEP_RESERVE).filter(|p| *p >= SWEEP_MINIMUM) else {
-        tracing::debug!(
-            spendable_zats = total.into_u64(),
-            minimum_zats = SWEEP_MINIMUM.into_u64(),
-            "vault sweep skipped: payment below the minimum"
-        );
+        if total < SWEEP_RESERVE {
+            tracing::info!(
+                spendable_zats = total.into_u64(),
+                float_zats = SWEEP_RESERVE.into_u64(),
+                "vault sweep skipped: spendable below the float"
+            );
+        } else {
+            tracing::debug!(
+                spendable_zats = total.into_u64(),
+                minimum_zats = SWEEP_MINIMUM.into_u64(),
+                "vault sweep skipped: payment below the minimum"
+            );
+        }
         return None;
     };
 
@@ -162,6 +170,8 @@ pub fn sweep_to_vault<P: Parameters>(
     )
     .map_err(|error| tracing::warn!(?error, "vault sweep build failed"))
     .ok()?;
+
+    tracing::info!(txid = %txids.first(), "vault sweep built");
 
     // The build stored the tx and marked its inputs spent; a miss here is
     // the wallet contradicting itself, not a skip. Stop; restart rescans.

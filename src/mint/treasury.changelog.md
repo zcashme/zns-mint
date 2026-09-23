@@ -16,6 +16,11 @@
 - The call site is unchanged (`if let Some(tx)`): after a successful
   build, `Some` is now the only non-panicking outcome, so submission
   always follows a successful build.
+- Same PR: the built sweep's txid logs at `info` the moment the build
+  stores it — the breadcrumb before submission or any FATAL. The
+  payment skip is split: spendable below the float (`info`, the float
+  itself is short) vs. below `SWEEP_MINIMUM` (`debug`, a normal dry
+  rollover).
 
 ## 2026-09-21 — Claim memos may lead with a pre-sale AccessCode (#83)
 
