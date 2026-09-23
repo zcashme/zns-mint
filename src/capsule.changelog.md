@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/capsule.rs`.
 
+## 2026-09-23 — Capsule bytes are bounded before they are parsed
+
+- `read_capsule_file` reads at most `CAPSULE_LEN + 1` bytes. Parse
+  accepts only that exact length, and the nonce and ciphertext must
+  be 24 and 48 bytes before decryption.
+
 ## 2026-09-15 — Split from boot; TEE-parameterised seal / unseal
 
 - `capsule::{seal_seed, unseal_seed}` replace the inlined

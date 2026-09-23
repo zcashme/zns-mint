@@ -133,7 +133,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         //    Secret's Drop wipes it.
         let (treasury_keys, registry_keys) = {
             tracing::info!("boot: reading seed capsule from keys/zns_seed.capsule");
-            let blob = std::fs::read("keys/zns_seed.capsule").expect(
+            let blob = capsule::read_capsule_file("keys/zns_seed.capsule").expect(
                 "FATAL: failed to read keys/zns_seed.capsule. The mint cannot boot without the sealed seed.",
             );
             let capsule =
