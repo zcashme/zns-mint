@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-09-22 — One pool transition law: `retire_spent`
+- `AnchorPool::retire_spent` is the pool following the chain: every
+  spent anchor retires, an optional created successor joins (past
+  standing size — chain facts do not queue), and the pool checkpoints
+  on change. `apply_claim` becomes its well-formed wrapper; the
+  late-update fix (#152) builds its malformed-spend path on this op.
 ## 2026-09-21 — The anchor pool goes mint-private; the canon vectors carry the law (#127)
 
 - The anchor lineage pool's live set and its height-checkpointed rewind

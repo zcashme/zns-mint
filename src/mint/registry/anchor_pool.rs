@@ -65,12 +65,36 @@ impl AnchorPool {
         spent: Nullifier,
         successor: Nullifier,
     ) -> bool {
-        if !self.live.remove(&spent) {
+        if !self.live.contains(&spent) {
             return false;
         }
-        self.live.insert(successor);
-        self.checkpoints.insert(height, self.live.clone());
+        self.retire_spent(&[spent], Some(successor), height);
         true
+    }
+
+    /// The pool following the chain: every live anchor in `nfs` retires,
+    /// an optional created successor joins — past standing size, since
+    /// chain facts do not queue — and the pool checkpoints at `height`
+    /// when anything changed. Revealed nullifiers are facts even when
+    /// the rest of the transaction was malformed. Returns `true` when
+    /// the pool changed.
+    pub fn retire_spent(
+        &mut self,
+        nfs: &[Nullifier],
+        successor: Option<Nullifier>,
+        height: BlockHeight,
+    ) -> bool {
+        let mut changed = false;
+        for nf in nfs {
+            changed |= self.live.remove(nf);
+        }
+        if let Some(nf) = successor {
+            changed |= self.live.insert(nf);
+        }
+        if changed {
+            self.checkpoints.insert(height, self.live.clone());
+        }
+        changed
     }
 
     /// Rewinds to the pool state at `height`, discarding every
@@ -152,6 +176,47 @@ mod tests {
 
         assert!(!pool.apply_claim(h(11), nullifier(9), nullifier(100)));
         assert_eq!(pool.live(), &before);
+    }
+
+    #[test]
+    fn retire_spent_retires_every_spent_anchor_and_checkpoints() {
+        let mut pool = AnchorPool::default();
+        pool.adopt(h(10), nullifier(1));
+        pool.adopt(h(10), nullifier(2));
+        pool.adopt(h(10), nullifier(3));
+        // A malformed multi-spend retires every spent anchor.
+        assert!(pool.retire_spent(&[nullifier(1), nullifier(2)], None, h(11)));
+        assert!(!pool.contains(&nullifier(1)));
+        assert!(!pool.contains(&nullifier(2)));
+        assert!(pool.contains(&nullifier(3)));
+        // The retirement checkpointed at h(11): rewinding restores both.
+        pool.truncate_to(h(10));
+        assert!(pool.contains(&nullifier(1)));
+        assert!(pool.contains(&nullifier(2)));
+    }
+
+    #[test]
+    fn retire_spent_adopts_successor_and_skips_empty_changes() {
+        let mut pool = AnchorPool::default();
+        pool.adopt(h(10), nullifier(1));
+        assert!(pool.retire_spent(&[nullifier(1)], Some(nullifier(100)), h(11)));
+        assert!(!pool.contains(&nullifier(1)));
+        assert!(pool.contains(&nullifier(100)));
+        // Nothing live spent and no successor: no change, no checkpoint.
+        assert!(!pool.retire_spent(&[nullifier(9)], None, h(12)));
+        pool.truncate_to(h(11));
+        assert!(pool.contains(&nullifier(100)));
+    }
+
+    #[test]
+    fn retire_spent_successor_joins_past_standing_size() {
+        let mut pool = AnchorPool::default();
+        for i in 0..ANCHOR_POOL_SIZE {
+            pool.adopt(h(10), nullifier(i as u8 + 1));
+        }
+        assert!(pool.retire_spent(&[nullifier(1)], Some(nullifier(200)), h(11)));
+        assert!(pool.contains(&nullifier(200)));
+        assert_eq!(pool.live().len(), ANCHOR_POOL_SIZE);
     }
 
     #[test]
