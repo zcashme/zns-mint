@@ -402,9 +402,8 @@ use crate::wallet::block_metadata;
 fn regtest_network() -> LocalNetwork {
     // Matches `regtest-harness/src/lib.rs:zebrad_toml`. Zebra defaults every
     // unconfigured pre-NU5 activation to 1 on regtest; the harness explicitly
-    // configures NU5/NU6 at 1 and NU6.1/2/3 at 4.
+    // configures every NU6.x at 1 — NU6.3 is always active, from genesis.
     let one = BlockHeight::from_u32(1);
-    let four = BlockHeight::from_u32(4);
     LocalNetwork {
         overwinter: Some(one),
         sapling: Some(one),
@@ -413,9 +412,9 @@ fn regtest_network() -> LocalNetwork {
         canopy: Some(one),
         nu5: Some(one),
         nu6: Some(one),
-        nu6_1: Some(four),
-        nu6_2: Some(four),
-        nu6_3: Some(four),
+        nu6_1: Some(one),
+        nu6_2: Some(one),
+        nu6_3: Some(one),
     }
 }
 
@@ -710,10 +709,11 @@ mod tests {
             NetworkUpgrade::Nu6_2,
             NetworkUpgrade::Nu6_3,
         ] {
-            assert_eq!(network.activation_height(upgrade), Some(four));
+            assert_eq!(network.activation_height(upgrade), Some(one));
         }
-        assert!(!network.is_nu_active(NetworkUpgrade::Nu6_3, BlockHeight::from_u32(3)));
-        assert!(network.is_nu_active(NetworkUpgrade::Nu6_3, four));
+        // NU6.3 is always active — even at genesis.
+        assert!(network.is_nu_active(NetworkUpgrade::Nu6_3, BlockHeight::from_u32(1)));
+        assert!(network.is_nu_active(NetworkUpgrade::Nu6_3, BlockHeight::from_u32(3)));
         // The regtest birthday mirrors the harness: origin at 3, first
         // observed block at 4.
         assert_eq!(MINT_BIRTHDAY, four);

@@ -22,7 +22,7 @@ pub fn resolve_bin(env_var: &str) -> Option<PathBuf> {
 
 // =============================== zebrad (Regtest validator) ===============================
 
-const NU6_2_ACTIVATION_HEIGHT: u32 = 4;
+const NU6_X_ACTIVATION_HEIGHT: u32 = 1;
 const LOCKBOX_DISBURSEMENT_ADDR: &str = "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v";
 const LOCKBOX_DISBURSEMENT_ZATS: u64 = 1;
 
@@ -195,7 +195,7 @@ impl Drop for Zebrad {
 }
 
 fn zebrad_toml(net_port: u16, rpc_port: u16, indexer_port: u16, miner_address: &str, cache_dir: &str) -> String {
-    let nu6_2 = NU6_2_ACTIVATION_HEIGHT;
+    let nu6_x = NU6_X_ACTIVATION_HEIGHT;
     let lockbox_addr = LOCKBOX_DISBURSEMENT_ADDR;
     let lockbox_amount = LOCKBOX_DISBURSEMENT_ZATS;
     format!(
@@ -209,9 +209,9 @@ disable_pow = true
 [network.testnet_parameters.activation_heights]
 NU5 = 1
 NU6 = 1
-"NU6.1" = {nu6_2}
-"NU6.2" = {nu6_2}
-"NU6.3" = {nu6_2}
+"NU6.1" = {nu6_x}
+"NU6.2" = {nu6_x}
+"NU6.3" = {nu6_x}
 
 [[network.testnet_parameters.funding_streams]]
 [network.testnet_parameters.funding_streams.height_range]
@@ -330,8 +330,8 @@ fn zallet_bin() -> PathBuf {
 /// Generates a `zallet.toml` for regtest mode using the `zebra` backend
 /// (read-state-service: zebrad's gRPC indexer for the tip stream plus the
 /// zebrad state dir opened as a read-only RocksDB secondary). Nuparams
-/// match the harness's zebrad config: NU5/NU6 at height 1, NU6.1/6.2/6.3
-/// at height 4. The zaino backend (JSON-RPC only, `validator_address`
+/// match the harness's zebrad config: every NU6.x at height 1 — NU6.3 is
+/// always active, from genesis. The zaino backend (JSON-RPC only, `validator_address`
 /// under `[indexer]`) is the alternative when `zallet-zaino` is installed.
 fn zallet_toml(zebra_rpc_port: u16, zallet_rpc_port: u16, indexer_port: u16, zebra_state_path: &str) -> String {
     format!(

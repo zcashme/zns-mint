@@ -2,6 +2,13 @@
 
 Tracks design-relevant changes to `regtest-harness/src/lib.rs`.
 
+## 2026-09-23 — Every NU6.x activates at genesis (#155)
+
+- `zebrad_toml` configures NU6.1/6.2/6.3 at height 1 (was 4): NU6.3 is
+  always active, even on regtest. The e2e flows mine to a working tip
+  and to mature coinbase; activation is no longer a milestone the
+  harness stages.
+
 ## 2026-07-30 — Boot-proven regtest consensus parameters
 
 - The harness builds the mint only with the development-only regtest boot

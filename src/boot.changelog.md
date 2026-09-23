@@ -2,6 +2,13 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-23 — Regtest consensus: every NU6.x active at genesis (#155)
+
+- `regtest_network()` mirrors the harness zebrad config with NU6.1/2/3
+  at height 1 — NU6.3 is always active, even on regtest. The boot test
+  asserts Nu6.3 active from genesis; the birthday (origin 3, first
+  observed 4) is unchanged.
+
 ## 2026-09-21 — Access-code purpose key on Boot (#83)
 
 - Boot derives an access-code root via

@@ -468,8 +468,9 @@ struct TreeCommitments {
     final_state: Option<String>,
 }
 
-/// `z_gettreestate` parsed into the upstream [`ChainState`]; an absent
-/// Ironwood section (pre-NU6.3) and an empty tree are the same value.
+/// `z_gettreestate` parsed into the upstream [`ChainState`]. NU6.3 is
+/// always active — every pool's treestate is mandatory, and a missing
+/// Ironwood section is a broken or hostile node, not a chain state.
 fn chain_state_from_rpc_response(
     response: TreeStateResponse,
 ) -> Result<ChainState, TransportError> {
@@ -487,14 +488,17 @@ fn chain_state_from_rpc_response(
         .ok_or(TransportError::BadNodeData("missing Orchard finalState"))?;
     let orchard_tree = decode_tree::<MerkleHashOrchard>(&orchard_final_state, "Orchard")?;
 
-    // Zebra omits the `ironwood` key entirely before NU6.3 activation.
-    let ironwood_tree = match response
+    let ironwood_final_state = response
         .ironwood
-        .and_then(|state| state.commitments.final_state)
-    {
-        Some(hex) if !hex.is_empty() => decode_tree::<MerkleHashOrchard>(&hex, "Ironwood")?,
-        _ => Frontier::empty(),
-    };
+        .ok_or(TransportError::BadNodeData(
+            "missing Ironwood treestate — NU6.3 is always active",
+        ))?
+        .commitments
+        .final_state
+        .ok_or(TransportError::BadNodeData(
+            "missing Ironwood finalState — NU6.3 is always active",
+        ))?;
+    let ironwood_tree = decode_tree::<MerkleHashOrchard>(&ironwood_final_state, "Ironwood")?;
 
     let expected_hash_bytes =
         hex::decode(&response.hash).map_err(|_| TransportError::BadNodeData("invalid hash hex"))?;
@@ -736,13 +740,15 @@ mod tests {
     }
 
     #[test]
-    fn treestate_absent_ironwood_is_the_empty_frontier() {
-        // The activation−1 answer: the key is omitted, and "absent" and
-        // "empty" are the same value to every consumer.
-        let state = chain_state_from_rpc_response(treestate(None)).expect("a valid treestate");
-        assert_eq!(state.block_height(), BlockHeight::from_u32(1000));
-        assert_eq!(state.block_hash(), BlockHash([0u8; 32]));
-        assert_eq!(*state.final_ironwood_tree(), Frontier::empty());
+    fn treestate_absent_ironwood_is_rejected() {
+        // NU6.3 is always active: a node that omits the Ironwood
+        // treestate is broken or hostile, never a chain state.
+        assert!(matches!(
+            chain_state_from_rpc_response(treestate(None)),
+            Err(TransportError::BadNodeData(
+                "missing Ironwood treestate — NU6.3 is always active"
+            ))
+        ));
     }
 
     #[test]
