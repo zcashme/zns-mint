@@ -47,7 +47,9 @@ pub const VAULT_ADDRESS: transparent::address::TransparentAddress =
 /// `SWEEP_RESERVE`; `propose_transfer` prices ZIP-317 and the fee comes
 /// out of the float (leftover is reserve minus fee, not exactly reserve).
 /// Only Sapling and Ironwood are spent. Returns `None` on a same-day
-/// tip or any failure; the next midnight crossing tries again.
+/// tip or any failure before the build; the next midnight crossing
+/// tries again. A read-back miss after a successful build is FATAL —
+/// the wallet has already marked the inputs spent.
 #[allow(clippy::too_many_arguments)]
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
@@ -161,13 +163,14 @@ pub fn sweep_to_vault<P: Parameters>(
     .map_err(|error| tracing::warn!(?error, "vault sweep build failed"))
     .ok()?;
 
-    match wallet.get_transaction(*txids.first()).ok().flatten() {
-        Some(tx) => Some(tx),
-        None => {
-            tracing::warn!("vault sweep skipped: built tx missing from wallet");
-            None
-        }
-    }
+    // The build stored the tx and marked its inputs spent; a miss here is
+    // the wallet contradicting itself, not a skip. Stop; restart rescans.
+    Some(
+        wallet
+            .get_transaction(*txids.first())
+            .expect("FATAL: vault sweep lookup failed after build")
+            .expect("FATAL: built vault sweep tx missing from wallet"),
+    )
 }
 
 /// Proposes, builds, and records a Treasury payment carrying an OTP challenge
