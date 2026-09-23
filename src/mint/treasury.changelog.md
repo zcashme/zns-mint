@@ -1,5 +1,27 @@
 # Treasury design record
 
+## 2026-09-22 — A built sweep that cannot be read back is FATAL
+
+- `create_proposed_transactions` mutates the wallet before it returns
+  `Ok`: `store_transactions_to_be_sent` retains the raw transaction and
+  marks every sweep input spent (releasing their locks) at that moment.
+  A read-back miss after `Ok` therefore cannot be "no sweep happened" —
+  the inputs are already blocked until expiry, and the consumed day diff
+  would strand them until the next midnight.
+- The warn-and-`None` path after the build is gone. `sweep_to_vault`
+  now ends like `challenge`: `get_transaction` is unwrapped with two
+  distinct `FATAL` expects (wallet read error vs. record missing). A
+  state-integrity violation stops the mint; the in-memory wallet is
+  rebuilt by rescanning on restart, which a silent skip could never do.
+- The call site is unchanged (`if let Some(tx)`): after a successful
+  build, `Some` is now the only non-panicking outcome, so submission
+  always follows a successful build.
+- Same PR: the built sweep's txid logs at `info` the moment the build
+  stores it — the breadcrumb before submission or any FATAL. The
+  payment skip is split: spendable below the float (`info`, the float
+  itself is short) vs. below `SWEEP_MINIMUM` (`debug`, a normal dry
+  rollover).
+
 ## 2026-09-21 — Claim memos may lead with a pre-sale AccessCode (#83)
 
 - Claim wire forms: `ZNS:claim:<term>:<name>:<ua>` (unchanged bytes) or
