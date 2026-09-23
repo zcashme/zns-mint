@@ -2,6 +2,11 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-23 — Boot step 3 is one step (#158)
+
+- Fetch the origin checkpoint and both subtree-root batches, then one
+  `Wallet::new`. The `put_*_subtree_roots` calls were removed.
+
 ## 2026-09-23 — Regtest consensus: every NU6.x active at genesis (#155)
 
 - `regtest_network()` mirrors the harness zebrad config with NU6.1/2/3

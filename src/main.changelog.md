@@ -4,6 +4,13 @@ Tracks when context for `src/main.rs` has been defined.
 
 Detailed rules live in `main.rs.context.md`. This file only records the definition of context (keep it short).
 
+## 2026-09-23 — Boot step 3 is one step (#158)
+
+- Boot fetches the origin checkpoint and both subtree-root batches,
+  then one `Wallet::new`. The run loop receives that wallet; the
+  `put_*_subtree_roots` calls are gone. Detail is in
+  `boot.changelog.md`.
+  
 ## 2026-09-23 — The echo lane no longer clones the OTP queue
 
 - `authorize` refuses an illegal extension before consuming the OTP,
@@ -49,6 +56,7 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
 - The walk no longer takes the NameNoteQueue (see mint.changelog.md);
   a duplicate claim that still lands on chain is ignored, not fatal
   (see registry.changelog.md).
+  
 ## 2026-09-21 — The relay lane answers at mempool speed (#121)
 
 - Update and release triggers relay the moment Zebra reports them
