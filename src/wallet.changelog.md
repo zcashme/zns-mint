@@ -1,5 +1,11 @@
 # Wallet changelog
 
+## 2026-09-23 — `truncate_to` returns the height it committed
+
+- The metadata is for the block `truncate_to_height` rewound to, which
+  can sit below the requested height. A request above the applied tip
+  returns that tip instead of failing after the rewind.
+
 ## 2026-09-23 — A wallet is born complete (#158)
 
 - `Wallet::new` takes the origin `ChainState` and the pre-birthday

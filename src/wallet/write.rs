@@ -1804,6 +1804,24 @@ mod tests {
         assert_eq!(st.wallet().zebra_tip, Some(h2));
     }
 
+    /// A request above the applied tip commits the tip and returns it.
+    #[test]
+    fn truncate_to_above_the_tip_returns_the_tip() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50_000);
+        let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h1, 1);
+        let above = BlockHeight::from_u32(u32::from(h1) + 10);
+        let metadata = st
+            .wallet_mut()
+            .truncate_to(above)
+            .expect("tip is committed");
+        assert_eq!(metadata.block_height(), h1);
+        assert_eq!(st.wallet().tip().block_height(), h1);
+    }
+
     /// A far-ahead node tip must not defeat rewind: the floor is
     /// retention, never the tip.
     #[test]

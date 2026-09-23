@@ -328,12 +328,13 @@ impl<P: Parameters> Wallet<P> {
                 .is_some_and(|expiry| expiry <= network_tip)
     }
 
-    /// Truncates the wallet to `max_height` and returns the
-    /// [`BlockMetadata`] at that height — the new chain tip after reorg.
+    /// Rewinds to the applied block at or below `max_height` and returns
+    /// that block's metadata. The committed height can be lower than the
+    /// request.
     pub fn truncate_to(&mut self, max_height: BlockHeight) -> Result<BlockMetadata, WalletError> {
-        WalletWrite::truncate_to_height(self, max_height)?;
-        self.block_metadata_at(max_height)
-            .ok_or(WalletError::TruncationTargetUnavailable(max_height))
+        let height = WalletWrite::truncate_to_height(self, max_height)?;
+        self.block_metadata_at(height)
+            .ok_or(WalletError::TruncationTargetUnavailable(height))
     }
 }
 
