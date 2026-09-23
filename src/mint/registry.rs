@@ -163,10 +163,10 @@ impl Registry {
                     return None;
                 }
                 let otp = otp?;
+                let expires_at = record.expires_at.extend(term, mtp)?;
                 if !challenges.accept(&name, Action::Update, &ua, record.commitment, otp, mtp) {
                     return None;
                 }
-                let expires_at = record.expires_at.extend(term, mtp)?;
                 Some(NameNote::Update {
                     name,
                     ua,
@@ -516,6 +516,46 @@ mod tests {
             release_deadline: ts(release_deadline),
             nullifier: nullifier(seed),
         }
+    }
+
+    #[test]
+    fn authorize_refuses_an_illegal_extension_without_consuming_the_otp() {
+        use crate::mint::otp::{OtpCode, OtpRequest, D_OTP};
+
+        let mut r = Registry::new();
+        let mtp = ts(1_700_000_000);
+        r.set_record(
+            test_name(),
+            record(Action::Claim, Expiry::Never, 3_000_000_000, 1),
+            BlockHeight::from_u32(100),
+        );
+        let ua = test_ua();
+        let code = OtpCode::for_test(*b"123456");
+        let digits = code.expose_for_test();
+        let mut challenges = OtpQueue::new();
+        challenges.issue(OtpRequest {
+            name: test_name(),
+            action: Action::Update,
+            ua: ua.clone(),
+            term: Some(Term::Years(1)),
+            tip_rcm: commitment(1),
+            code,
+            expires_at: ts(1_700_000_000 + D_OTP),
+        });
+        assert!(r
+            .authorize(
+                &mut challenges,
+                Request::Update {
+                    name: test_name(),
+                    ua: ua.clone(),
+                    term: Some(Term::Years(1)),
+                },
+                Some(&digits),
+                BlockHeight::from_u32(101),
+                mtp,
+            )
+            .is_none());
+        assert!(challenges.pending(&test_name(), Action::Update, &ua, commitment(1), mtp));
     }
 
     /// The plural sweep: only names whose clocks have fired, each paired

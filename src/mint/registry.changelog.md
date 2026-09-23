@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-09-23 — A refused update extension leaves the OTP
+
+- `authorize` computes `expires_at.extend` before `challenges.accept`.
+  An illegal or overflowing term returns `None` with the challenge
+  still pending.
+
 ## 2026-09-22 — Confirm-time clocks; malformed spends return false
 
 - `accept_update` re-checks expiry and liveness at block MTP. A
