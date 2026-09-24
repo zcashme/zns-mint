@@ -132,7 +132,7 @@ async fn main() {
                     // money that must confirm — the block path owns them.
                     MintInbound::Request(Request::Claim { .. })
                     | MintInbound::Echo(_)
-                    | MintInbound::Unrecognized(_) => {}
+                    | MintInbound::Unrecognized => {}
                 }
                 continue;
             }

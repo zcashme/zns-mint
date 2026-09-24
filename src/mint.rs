@@ -753,7 +753,7 @@ pub async fn watch_mempool<P: Parameters + Send + 'static>(
         for (_action_index, paid, memo) in note::decrypt_treasury_tx(&transaction, &treasury_fvk) {
             // Intake's own door: the reader and block application
             // classify through one call.
-            let inbound = MintInbound::decode(&network, txid, &memo);
+            let inbound = MintInbound::decode(&network, &memo);
             if sender.send((inbound, paid)).await.is_err() {
                 return; // the orchestrator is gone; so are we
             }
