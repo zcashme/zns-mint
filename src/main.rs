@@ -374,10 +374,10 @@ async fn main() {
         // for the next tip. Nothing is re-read.
         let mut index = 0;
         while index < requests.len() {
-            let (inbound, paid, note_height) = requests.entry(index);
+            let (txid, inbound, paid, note_height) = requests.entry(index);
             let decided = 'lane: {
                 match inbound {
-                    MintInbound::Unrecognized(txid) => {
+                    MintInbound::Unrecognized => {
                         tracing::info!(
                             txid = %txid,
                             value_zec = paid.into_u64() as f64 / 1e8,
