@@ -750,16 +750,16 @@ async fn main() {
             }
         }
 
-        if let Some(tx) = treasury::sweep_to_vault(
-            &network,
-            &mut wallet,
-            &treasury_keys,
-            &sapling_spend,
-            &sapling_output,
-            today,
-            previous_day,
-        ) {
-            source.submit(&tx, "vault sweep").await;
+        if today > previous_day {
+            if let Some(tx) = treasury::sweep_to_vault(
+                &network,
+                &mut wallet,
+                &treasury_keys,
+                &sapling_spend,
+                &sapling_output,
+            ) {
+                source.submit(&tx, "vault sweep").await;
+            }
         }
 
         tracing::debug!(
