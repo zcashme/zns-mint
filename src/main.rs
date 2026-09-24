@@ -10,20 +10,18 @@
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
-use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
+use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_protocol::value::Zatoshis;
 
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::{assemble, NameNoteQueue};
+use zns_mint::mint::note::NameNoteQueue;
 use zns_mint::mint::otp::OtpQueue;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
-use zns_mint::mint::{
-    relay, watch_mempool, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
-};
+use zns_mint::mint::{relay, watch_mempool, MintInbound, Request, TREASURY_ACCOUNT};
 use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession};
 
 #[tokio::main]
@@ -96,9 +94,9 @@ async fn main() {
             },
             Some((inbound, paid)) = quick_rx.recv() => {
                 // The quick entrance: evaluate now, forget immediately —
-                // deferral is the drain's concept, not this one's. The
-                // reader forwards everything it decrypts; this match is
-                // where "which lanes are quick" is decided.
+                // deferral belongs to the tip's answering, not this
+                // entrance. The reader forwards everything it decrypts;
+                // this match is where "which lanes are quick" is decided.
                 match inbound {
                     MintInbound::Request(
                         request @ (Request::Update { .. } | Request::Release { .. }),
@@ -157,7 +155,6 @@ async fn main() {
 
         let tip = chain_tip.block_height();
         let tip_hash = chain_tip.block_hash();
-        let target_height = tip + 1;
         let mtp_now = mtp
             .current()
             .expect("FATAL: MTP unavailable at the applied tip");
@@ -246,136 +243,20 @@ async fn main() {
             name_notes.admit(tip, release_note);
         }
 
-        // --- NameNote enactment ---
-        // The order drain: one broadcast per decision. An order leaves
-        // the queue when it is sent — the wallet's retained transaction
-        // is then the record of the open commitment until the chain
-        // resolves it — or when the world overtakes it. Nothing here
-        // re-enacts a sent order: the wallet answers for it.
-        let mut index = 0;
-        while index < name_notes.len() {
-            let (note, origin) = {
-                let (note, origin) = name_notes.entry(index);
-                (note.clone(), origin)
-            };
-            // Authority: a claim spends a lineage pool anchor; an update
-            // or release spends the predecessor — the record's nullifier
-            // matched by commitment.
-            let authority_nf = if note.action().is_claim() {
-                // The name must still be claimable: free, or released
-                // after the payment arrived.
-                let claimable = match registry.record(note.name()) {
-                    None => true,
-                    Some(record) => record.action.is_release() && origin > record.confirmed_height,
-                };
-                if !claimable {
-                    tracing::debug!(
-                        name = %note.name().as_str(),
-                        "claim order dropped: the name is live on the chain"
-                    );
-                    name_notes.remove(index);
-                    continue;
-                }
-                match registry.anchor_pool().iter().copied().find(|nf| {
-                    wallet
-                        .unspent_ironwood_note_by_nullifier(
-                            REGISTRY_ACCOUNT,
-                            *nf,
-                            TargetHeight::from(tip),
-                        )
-                        .is_some()
-                }) {
-                    Some(nf) => nf,
-                    None => {
-                        tracing::warn!(
-                            name = %note.name().as_str(),
-                            "no available claim anchor (all locked or spent)"
-                        );
-                        index += 1;
-                        continue;
-                    }
-                }
-            } else {
-                match registry
-                    .record(note.name())
-                    .filter(|record| {
-                        !record.action.is_release() && Some(record.commitment) == note.prev_rcm()
-                    })
-                    .map(|record| record.nullifier)
-                {
-                    Some(nf) => nf,
-                    None => {
-                        tracing::debug!(
-                            name = %note.name().as_str(),
-                            action = note.action().as_str(),
-                            "order dropped: its predecessor is no longer current"
-                        );
-                        name_notes.remove(index);
-                        continue;
-                    }
-                }
-            };
-            // A release whose predecessor the wallet will not release is
-            // this order's own open send — re-derivation re-admits
-            // releases every tip they stay due, so the churn self-heals;
-            // an update in the same shape may be racing a sibling, and
-            // stays queued instead.
-            if note.action().is_release()
-                && wallet
-                    .unspent_ironwood_note_by_nullifier(
-                        REGISTRY_ACCOUNT,
-                        authority_nf,
-                        TargetHeight::from(tip),
-                    )
-                    .is_none()
-            {
-                tracing::debug!(
-                    name = %note.name().as_str(),
-                    "release order sent: its transaction is still open"
-                );
-                name_notes.remove(index);
-                continue;
-            }
-
-            let Some(transaction) = assemble::prepare(
-                &network,
-                &mut wallet,
-                &treasury_keys,
-                &registry_keys,
-                &sapling_spend,
-                &sapling_output,
-                note.clone(),
-                authority_nf,
-                tip,
-                target_height,
-            ) else {
-                tracing::debug!(
-                    name = %note.name().as_str(),
-                    action = note.action().as_str(),
-                    "NameNote order awaits Treasury fee funds"
-                );
-                index += 1;
-                continue;
-            };
-
-            if source.submit(&transaction, "NameNote").await {
-                tracing::info!(
-                    txid = %transaction.txid(),
-                    name = %note.name().as_str(),
-                    action = note.action().as_str(),
-                    "NameNote order sent — the wallet holds it until the chain answers"
-                );
-                name_notes.remove(index);
-            } else {
-                tracing::error!(
-                    txid = %transaction.txid(),
-                    name = %note.name().as_str(),
-                    action = note.action().as_str(),
-                    "NameNote submission rejected — inputs stranded until expiry"
-                );
-                index += 1;
-            }
-        }
+        // Enactment — the wallet's half of the bridge.
+        zns_mint::mint::note::enact(
+            &network,
+            &mut wallet,
+            &registry,
+            &registry_keys,
+            &treasury_keys,
+            &sapling_spend,
+            &sapling_output,
+            &source,
+            &mut name_notes,
+            tip,
+        )
+        .await;
 
         if let Some(tx) = treasury::sweep_to_vault(
             &network,

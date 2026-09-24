@@ -3,6 +3,7 @@
 //!
 
 use time::Timestamp;
+use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_keys::address::UnifiedAddress;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
@@ -608,24 +609,14 @@ impl NameNoteQueue {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.authorized.len()
+    /// Hands over every order; the queue empties.
+    pub fn take(&mut self) -> Vec<(NameNote, BlockHeight)> {
+        std::mem::take(&mut self.authorized)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.authorized.is_empty()
-    }
-
-    /// The entry at `index`, in admission order — the drain cursor reads.
-    pub fn entry(&self, index: usize) -> (&NameNote, BlockHeight) {
-        let (note, origin) = &self.authorized[index];
-        (note, *origin)
-    }
-
-    /// The order is resolved — enacted, or overtaken by the world. The
-    /// only removal besides reorg truncation.
-    pub fn remove(&mut self, index: usize) {
-        self.authorized.remove(index);
+    /// Holds the orders still awaiting their send — order preserved.
+    pub fn requeue(&mut self, unsent: Vec<(NameNote, BlockHeight)>) {
+        self.authorized = unsent;
     }
 
     /// Reorg: drop origins above the common ancestor.
@@ -639,6 +630,140 @@ impl NameNoteQueue {
             .iter()
             .any(|(n, _)| n.action().is_claim() && n.name() == name)
     }
+}
+/// Enactment, the wallet's half of the bridge: one broadcast per
+/// authorized note. An order leaves when sent — the wallet's retained
+/// transaction is the record of the open commitment — or when the world
+/// overtakes it; nothing re-enacts a sent order.
+#[allow(clippy::too_many_arguments)]
+pub async fn enact<P: Parameters + Send + 'static>(
+    network: &P,
+    wallet: &mut crate::wallet::Wallet<P>,
+    registry: &crate::mint::registry::Registry,
+    registry_keys: &crate::key::RegistryKeys,
+    treasury_keys: &crate::key::TreasuryKeys,
+    spend_prover: &sapling::circuit::SpendParameters,
+    output_prover: &sapling::circuit::OutputParameters,
+    source: &crate::zcash::CanonicalBlockSource,
+    name_notes: &mut NameNoteQueue,
+    tip: BlockHeight,
+) {
+    let mut unsent = Vec::new();
+    'note: for (note, origin) in name_notes.take() {
+        // Authority: a claim spends a lineage pool anchor; an update or
+        // release spends the predecessor — the record's nullifier
+        // matched by commitment.
+        let authority_nf = if note.action().is_claim() {
+            // The name must still be claimable: free, or released after
+            // the payment arrived.
+            let claimable = match registry.record(note.name()) {
+                None => true,
+                Some(record) => record.action.is_release() && origin > record.confirmed_height,
+            };
+            if !claimable {
+                tracing::debug!(
+                    name = %note.name().as_str(),
+                    "claim order dropped: the name is live on the chain"
+                );
+                continue 'note;
+            }
+            match registry.anchor_pool().iter().copied().find(|nf| {
+                wallet
+                    .unspent_ironwood_note_by_nullifier(
+                        crate::mint::REGISTRY_ACCOUNT,
+                        *nf,
+                        TargetHeight::from(tip),
+                    )
+                    .is_some()
+            }) {
+                Some(nf) => nf,
+                None => {
+                    tracing::warn!(
+                        name = %note.name().as_str(),
+                        "no available claim anchor (all locked or spent)"
+                    );
+                    unsent.push((note, origin));
+                    continue 'note;
+                }
+            }
+        } else {
+            match registry
+                .record(note.name())
+                .filter(|record| {
+                    !record.action.is_release() && Some(record.commitment) == note.prev_rcm()
+                })
+                .map(|record| record.nullifier)
+            {
+                Some(nf) => nf,
+                None => {
+                    tracing::debug!(
+                        name = %note.name().as_str(),
+                        action = note.action().as_str(),
+                        "order dropped: its predecessor is no longer current"
+                    );
+                    continue 'note;
+                }
+            }
+        };
+        // A release whose predecessor the wallet will not release is
+        // this order's own open send — re-derivation re-admits releases
+        // every tip they stay due, so the churn self-heals; an update in
+        // the same shape may be racing a sibling, and stays queued.
+        if note.action().is_release()
+            && wallet
+                .unspent_ironwood_note_by_nullifier(
+                    crate::mint::REGISTRY_ACCOUNT,
+                    authority_nf,
+                    TargetHeight::from(tip),
+                )
+                .is_none()
+        {
+            tracing::debug!(
+                name = %note.name().as_str(),
+                "release order sent: its transaction is still open"
+            );
+            continue 'note;
+        }
+
+        let Some(transaction) = assemble::prepare(
+            network,
+            wallet,
+            treasury_keys,
+            registry_keys,
+            spend_prover,
+            output_prover,
+            note.clone(),
+            authority_nf,
+            tip,
+            tip + 1,
+        ) else {
+            tracing::debug!(
+                name = %note.name().as_str(),
+                action = note.action().as_str(),
+                "NameNote order awaits Treasury fee funds"
+            );
+            unsent.push((note, origin));
+            continue 'note;
+        };
+
+        if source.submit(&transaction, "NameNote").await {
+            tracing::info!(
+                txid = %transaction.txid(),
+                name = %note.name().as_str(),
+                action = note.action().as_str(),
+                "NameNote order sent — the wallet holds it until the chain answers"
+            );
+        } else {
+            tracing::error!(
+                txid = %transaction.txid(),
+                name = %note.name().as_str(),
+                action = note.action().as_str(),
+                "NameNote submission rejected — inputs stranded until expiry"
+            );
+            unsent.push((note, origin));
+        }
+    }
+    name_notes.requeue(unsent);
 }
 
 #[cfg(test)]
@@ -940,19 +1065,18 @@ mod tests {
         queue.admit(h(10), claim.clone());
         // A re-derived decision keeps its original origin.
         queue.admit(h(12), claim.clone());
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue.entry(0).1, h(10));
         assert!(queue.claim_pending(claim.name()));
+        let orders = queue.take();
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].1, h(10));
 
-        // The drain resolved the order — enacted, or overtaken: the
-        // queue forgets the decision.
-        queue.remove(0);
-        assert!(queue.is_empty());
+        // The order resolved — enacted, or overtaken: taking it is
+        // forgetting it.
         assert!(!queue.claim_pending(claim.name()));
 
         // Re-derivation may re-admit what still stands (releases).
         queue.admit(h(12), claim);
-        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.take().len(), 1);
     }
 
     #[test]
@@ -976,14 +1100,12 @@ mod tests {
         queue.admit(h(101), claim("bob"));
         queue.admit(h(102), update);
 
-        // Removing the entry the cursor resolved shifts its neighbors:
-        // the update lands under the cursor's index, admission order
-        // otherwise intact.
-        queue.remove(1);
-        assert_eq!(queue.len(), 2);
-        assert_eq!(queue.entry(1).0.action(), Action::Update);
-        assert_eq!(queue.entry(1).1, h(102));
-        assert_eq!(queue.entry(0).0.name().as_str(), "alice");
+        // Answering by take and requeue: the resolved order leaves,
+        // the rest keep their admission order.
+        let mut orders = queue.take();
+        orders.remove(1);
+        queue.requeue(orders);
+        assert_eq!(queue.take().len(), 2);
     }
 
     #[test]
@@ -1008,8 +1130,9 @@ mod tests {
 
         // A reorg to height 120 orphans only the later decision.
         queue.truncate_to(h(120));
-        assert_eq!(queue.len(), 1);
-        assert_eq!(queue.entry(0).0.action(), Action::Claim);
+        let orders = queue.take();
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].0.action(), Action::Claim);
     }
 
     #[test]

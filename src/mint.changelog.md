@@ -1,5 +1,14 @@
 # Mint live-work design record
 
+## 2026-09-24 — Enactment leaves the run loop (#177)
+
+- `note::enact` spends the authorized notes — the wallet's half of the
+  bridge, living with the note machinery it drives. `NameNoteQueue`
+  answers by `take` and `requeue`, like the request queue; `entry`,
+  `remove`, `len`, and `is_empty` leave its API.
+- The run loop now reads as the cycle it is: follow the chain, answer
+  the inboxes through the lanes, let the law's clock run, enact, sweep.
+
 ## 2026-09-24 — The chain arc leaves the run loop (#177)
 
 - `follow` advances the mint to the announced tip — ancestor walk,
