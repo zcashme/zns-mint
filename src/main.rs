@@ -401,9 +401,7 @@ async fn main() {
                 {
                     return Some(name.clone());
                 }
-                let Some(txid) = sent else {
-                    return None;
-                };
+                let txid = sent?;
                 match wallet.get_transaction(txid) {
                     Ok(Some(tx)) if tip < tx.expiry_height() => None,
                     _ => Some(name.clone()),
