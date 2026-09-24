@@ -1,5 +1,13 @@
 # main.changelog.md
 
+## 2026-09-24 — A claim follows the earliest payment
+
+- The first request transaction for a name owns that claim until the
+  name is live or the sent Name Note can no longer be mined. A later
+  payment does not start a second note, and nothing is returned.
+- A release note already created is the one that stands. A later OTP
+  response or lifecycle release does not replace it.
+
 ## 2026-09-24 — The run loop gates vault sweeps by day (#186)
 
 - `main` compares the day before catch-up with the day after it and calls

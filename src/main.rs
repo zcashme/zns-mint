@@ -18,8 +18,8 @@ use zcash_protocol::value::Zatoshis;
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::NameNoteQueue;
 use zns_mint::mint::note::{assemble, decrypt_treasury_tx};
+use zns_mint::mint::note::{NameNoteQueue, OpenClaims};
 use zns_mint::mint::otp::{OtpQueue, OtpRequest};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
@@ -64,6 +64,7 @@ async fn main() {
     // Authorized Name Notes awaiting the chain: the lanes admit, the
     // enactment phase builds and broadcasts.
     let mut name_notes = NameNoteQueue::default();
+    let mut open_claims = OpenClaims::default();
     // Treasury requests decoded once at block application: what each memo
     // said, what it paid, the block that carried it. The drain at each tip
     // decides entries; a reorg truncates them.
@@ -219,6 +220,7 @@ async fn main() {
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
             name_notes.truncate_to(rewound);
+            open_claims.truncate_to(rewound);
             requests.truncate_to(rewound);
             echoes.retain(|(_, _, height)| *height <= rewound);
             tracing::warn!(
@@ -388,6 +390,30 @@ async fn main() {
             .into_u64();
         zns_mint::metrics::snapshot(tip, treasury_zats, oracle.current().into_u64());
 
+        // A mined claim, or a sent Name Note that can no longer be mined,
+        // frees the name for a later payment. No payment is returned.
+        let settled: Vec<_> = open_claims
+            .outstanding()
+            .filter_map(|(name, sent)| {
+                if registry
+                    .record(name)
+                    .is_some_and(|record| !record.action.is_release())
+                {
+                    return Some(name.clone());
+                }
+                let Some(txid) = sent else {
+                    return None;
+                };
+                match wallet.get_transaction(txid) {
+                    Ok(Some(tx)) if tip < tx.expiry_height() => None,
+                    _ => Some(name.clone()),
+                }
+            })
+            .collect();
+        for name in settled {
+            open_claims.clear(&name);
+        }
+
         // Treasury requests. Each memo was decoded once, at block
         // application; the drain decides each entry exactly once. A
         // decided entry leaves the queue; a deferred relay — Treasury
@@ -404,16 +430,13 @@ async fn main() {
                         term,
                         code,
                     } => {
-                        // One open claim per name at a time: the Registry
-                        // lags the mempool by a block; the queue holds an
-                        // order only until its send. A rival payment that
-                        // slips past both may spend another anchor — any
-                        // duplicate the chain still carries is ignored,
-                        // first confirmed wins.
-                        if name_notes.claim_pending(name) {
+                        // The earliest payment owns the name until its claim
+                        // is mined or that spend expires. A later payment
+                        // does not start a second Name Note.
+                        if open_claims.held_by_other(name, *txid) {
                             tracing::debug!(
                                 name = %name.as_str(),
-                                "claim already pending for this name"
+                                "earlier claim payment still owns this name"
                             );
                             break 'lane true;
                         }
@@ -475,6 +498,7 @@ async fn main() {
                             break 'lane true;
                         };
                         // Enactment below resolves the anchor and broadcasts.
+                        open_claims.hold(name.clone(), *txid, note_height);
                         name_notes.admit(note_height, claim_note);
                         true
                     }
@@ -575,6 +599,15 @@ async fn main() {
                         break 'lane true;
                     }
                 }
+                // A release note already created stands. This OTP does
+                // not replace it, and it is not consumed.
+                if echo.action.is_release() && name_notes.release_pending(&echo.name) {
+                    tracing::debug!(
+                        name = %echo.name.as_str(),
+                        "release already created; OTP response does not replace it"
+                    );
+                    break 'lane true;
+                }
                 let digits = sent.code.digits();
                 let authorized = match echo.action {
                     Action::Update => Request::Update {
@@ -618,6 +651,9 @@ async fn main() {
         // `releases_due` re-derives the same notes per tip, so
         // admission is idempotent.
         for (name, release_note) in registry.releases_due(mtp_now) {
+            if name_notes.release_pending(&name) {
+                continue;
+            }
             tracing::info!(name = %name.as_str(), "lifecycle release authorized");
             name_notes.admit(tip, release_note);
         }
@@ -741,6 +777,9 @@ async fn main() {
                     action = note.action().as_str(),
                     "NameNote order sent — the wallet holds it until the chain answers"
                 );
+                if note.action().is_claim() {
+                    open_claims.mark_sent(note.name(), transaction.txid());
+                }
                 name_notes.remove(index);
             } else {
                 tracing::error!(

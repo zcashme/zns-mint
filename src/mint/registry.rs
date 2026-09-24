@@ -227,9 +227,9 @@ impl Registry {
 
     /// Offers a confirmed claim candidate; true when its transaction
     /// spent a standing anchor and the name was free (or released).
-    /// A duplicate — the mint's restart and reorg worlds — still
-    /// advances the pool; first confirmed wins, the live registration
-    /// stands.
+    /// The caller offers transactions in block order, so the earlier
+    /// vtx wins inside one block. A later claim leaves the live
+    /// registration in place. The loser's anchor was already spent.
     #[allow(clippy::too_many_arguments)]
     pub fn accept_claim<P: Parameters>(
         &mut self,

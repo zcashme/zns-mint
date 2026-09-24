@@ -1,5 +1,13 @@
 # `mint/note.rs` design record
 
+## 2026-09-24 — The earliest claim payment owns the name
+
+- `OpenClaims` records that payment until the run loop clears it.
+  A different payment does not replace it. A reorg drops a payment
+  above the ancestor.
+- `release_pending` is the created release note. A later one is not
+  admitted over it.
+
 ## 2026-09-21 — Orders resolve at their send; the queue drains (#116)
 
 - `NameNoteQueue` membership now means one thing: a decision awaiting

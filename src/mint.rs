@@ -435,9 +435,9 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .current()
         .expect("FATAL: MTP unavailable after applying a block");
 
-    // The confirmation pass: the scanner's transactions in canonical
-    // order, the ZNS decryption lane joined on txid — the
-    // authentication boundary — each candidate offered to the Registry.
+    // The confirmation pass: the scanner's transactions in block order.
+    // Two claims for one name in the same block: the lower vtx is
+    // offered first and wins. The loser's payment is not returned.
     // Sequencing is here; the law is the Registry's.
     let mut notes_by_tx: BTreeMap<TxId, Vec<usize>> = BTreeMap::new();
     for (index, candidate) in candidates.iter().enumerate() {

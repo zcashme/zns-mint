@@ -2,8 +2,11 @@
 //! derivation.
 //!
 
+use std::collections::BTreeMap;
+
 use time::Timestamp;
 use zcash_keys::address::UnifiedAddress;
+use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 pub mod assemble;
@@ -420,7 +423,6 @@ impl NameNote {
 
 use subtle::ConstantTimeEq as _;
 use zcash_primitives::block::Block;
-use zcash_primitives::transaction::TxId;
 
 /// One decrypted Name Note from the ZNS scan pass, with the facts the wallet
 /// store and the Registry evidence need.
@@ -633,11 +635,77 @@ impl NameNoteQueue {
         self.authorized.retain(|(_, origin)| *origin <= ancestor);
     }
 
-    /// The one-open-claim guard.
+    /// The one-open-claim guard, for a note that has not been broadcast yet.
     pub fn claim_pending(&self, name: &Name) -> bool {
         self.authorized
             .iter()
             .any(|(n, _)| n.action().is_claim() && n.name() == name)
+    }
+
+    /// A release note already created for `name`. A later request or OTP
+    /// does not replace it; creation order is the race.
+    pub fn release_pending(&self, name: &Name) -> bool {
+        self.authorized
+            .iter()
+            .any(|(n, _)| n.action().is_release() && n.name() == name)
+    }
+}
+
+/// The payment that owns a name's open claim. The earliest request
+/// transaction holds the name until that claim is mined or its spend
+/// can no longer be mined. A later payment does not start a second note.
+#[derive(Clone, Debug, Default)]
+pub struct OpenClaims {
+    by_name: BTreeMap<Name, OpenClaim>,
+}
+
+#[derive(Clone, Debug)]
+struct OpenClaim {
+    request: TxId,
+    height: BlockHeight,
+    sent: Option<TxId>,
+}
+
+impl OpenClaims {
+    /// Whether some other payment already owns `name`.
+    pub fn held_by_other(&self, name: &Name, request: TxId) -> bool {
+        self.by_name
+            .get(name)
+            .is_some_and(|open| open.request != request)
+    }
+
+    /// `request` owns `name`. The same payment may hold again; a different
+    /// one does not replace it.
+    pub fn hold(&mut self, name: Name, request: TxId, height: BlockHeight) {
+        if self.held_by_other(&name, request) {
+            return;
+        }
+        self.by_name.entry(name).or_insert(OpenClaim {
+            request,
+            height,
+            sent: None,
+        });
+    }
+
+    /// The Name Note transaction broadcast for this claim.
+    pub fn mark_sent(&mut self, name: &Name, sent: TxId) {
+        if let Some(open) = self.by_name.get_mut(name) {
+            open.sent = Some(sent);
+        }
+    }
+
+    /// Names still owned, with the Name Note transaction once it has been sent.
+    pub fn outstanding(&self) -> impl Iterator<Item = (&Name, Option<TxId>)> {
+        self.by_name.iter().map(|(name, open)| (name, open.sent))
+    }
+
+    pub fn clear(&mut self, name: &Name) {
+        self.by_name.remove(name);
+    }
+
+    /// Reorg: a payment above the ancestor no longer owns the name.
+    pub fn truncate_to(&mut self, ancestor: BlockHeight) {
+        self.by_name.retain(|_, open| open.height <= ancestor);
     }
 }
 
@@ -953,6 +1021,42 @@ mod tests {
         // Re-derivation may re-admit what still stands (releases).
         queue.admit(h(12), claim);
         assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn earliest_claim_payment_owns_the_name() {
+        let name = test_name();
+        let h = |n: u32| BlockHeight::from_u32(n);
+        let tx = |b: u8| TxId::from_bytes([b; 32]);
+        let mut open = OpenClaims::default();
+
+        assert!(!open.held_by_other(&name, tx(1)));
+        open.hold(name.clone(), tx(1), h(10));
+        assert!(open.held_by_other(&name, tx(2)));
+        assert!(!open.held_by_other(&name, tx(1)));
+
+        open.hold(name.clone(), tx(2), h(11));
+        assert_eq!(open.outstanding().next().unwrap().1, None);
+        open.mark_sent(&name, tx(9));
+        assert_eq!(open.outstanding().next().unwrap().1, Some(tx(9)));
+
+        open.truncate_to(h(9));
+        assert!(open.outstanding().next().is_none());
+    }
+
+    #[test]
+    fn a_later_release_does_not_replace_the_created_note() {
+        let release = NameNote::Release {
+            name: test_name(),
+            ua: test_ua(),
+            prev: NameCommitment::from_bytes(&[1u8; 32]).unwrap(),
+        };
+        let mut queue = NameNoteQueue::default();
+        assert!(!queue.release_pending(release.name()));
+        queue.admit(BlockHeight::from_u32(10), release.clone());
+        assert!(queue.release_pending(release.name()));
+        queue.remove(0);
+        assert!(!queue.release_pending(release.name()));
     }
 
     #[test]
