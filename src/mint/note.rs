@@ -9,6 +9,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 pub mod assemble;
 
 use crate::key::RegistryKeys;
+use crate::mint::registry::Registry;
 use crate::mint::{Action, Name, NameCommitment, LIVENESS_INTERVAL};
 
 /// A Name transition (§3.2), typed so every action carries exactly its
@@ -584,60 +585,92 @@ pub fn decrypt_treasury_tx(
 }
 
 // ---------------------------------------------------------------------------
-// NameNoteQueue — authorized Name Notes awaiting the chain
+// NameNoteQueue — Name Notes through canonical resolution
 // ---------------------------------------------------------------------------
 
-/// Authorized Name Notes awaiting their first broadcast. Each pair is
-/// the note and the height whose evidence authorized it: the enactment
-/// drain removes an order when it is sent — the wallet's retained
-/// transaction is then the record of the open commitment until the
-/// chain resolves it — or when the world overtakes it; a reorg
-/// truncates it. Money stays in the wallet, so a restart empties the
-/// queue and the walk re-admits what still stands.
+/// State of an authorized Name Note order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameNoteState {
+    Authorized,
+    Submitted,
+    Seen,
+}
+
+/// Name Notes remain tracked from authorization through canonical
+/// confirmation. Reorgs rewind seen orders; orphaned authorizations are
+/// removed by their origin height.
 #[derive(Clone, Debug, Default)]
 pub struct NameNoteQueue {
-    authorized: Vec<(NameNote, BlockHeight)>,
+    orders: Vec<(NameNote, BlockHeight, NameNoteState)>,
 }
 
 impl NameNoteQueue {
     /// Records a decision. Idempotent: a note already authorized keeps its
     /// original origin.
     pub fn admit(&mut self, origin: BlockHeight, note: NameNote) {
-        if !self.authorized.iter().any(|(n, _)| *n == note) {
-            self.authorized.push((note, origin));
+        if !self.orders.iter().any(|(n, _, _)| *n == note) {
+            self.orders.push((note, origin, NameNoteState::Authorized));
         }
     }
 
     pub fn len(&self) -> usize {
-        self.authorized.len()
+        self.orders.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.authorized.is_empty()
+        self.orders.is_empty()
     }
 
-    /// The entry at `index`, in admission order — the drain cursor reads.
-    pub fn entry(&self, index: usize) -> (&NameNote, BlockHeight) {
-        let (note, origin) = &self.authorized[index];
-        (note, *origin)
+    /// The entry at `index`, in admission order.
+    pub fn entry(&self, index: usize) -> (&NameNote, BlockHeight, NameNoteState) {
+        let (note, origin, state) = &self.orders[index];
+        (note, *origin, *state)
     }
 
-    /// The order is resolved — enacted, or overtaken by the world. The
-    /// only removal besides reorg truncation.
     pub fn remove(&mut self, index: usize) {
-        self.authorized.remove(index);
+        self.orders.remove(index);
+    }
+
+    pub fn set_state(&mut self, index: usize, state: NameNoteState) {
+        self.orders[index].2 = state;
+    }
+
+    /// Derive `Seen` from the Registry's current canonical record. This keeps
+    /// block application independent of the order tracker and recovers an
+    /// observation when the registry already contains the transition.
+    pub fn reconcile_seen<P: Parameters>(&mut self, network: &P, registry: &Registry) {
+        for (note, _, state) in &mut self.orders {
+            let commitment = NameCommitment::from_inner(
+                orchard::note::NoteCommitTrapdoor::from_inner(note.rcm(network)),
+            );
+            if registry
+                .record(note.name())
+                .is_some_and(|record| record.commitment == commitment)
+            {
+                *state = NameNoteState::Seen;
+            }
+        }
+    }
+
+    /// Reorg: seen notes above the common ancestor must be enacted again.
+    pub fn rewind_seen(&mut self) {
+        for (_, _, state) in &mut self.orders {
+            if *state == NameNoteState::Seen {
+                *state = NameNoteState::Authorized;
+            }
+        }
     }
 
     /// Reorg: drop origins above the common ancestor.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
-        self.authorized.retain(|(_, origin)| *origin <= ancestor);
+        self.orders.retain(|(_, origin, _)| *origin <= ancestor);
     }
 
     /// The one-open-claim guard.
     pub fn claim_pending(&self, name: &Name) -> bool {
-        self.authorized
-            .iter()
-            .any(|(n, _)| n.action().is_claim() && n.name() == name)
+        self.orders.iter().any(|(n, _, state)| {
+            *state != NameNoteState::Seen && n.action().is_claim() && n.name() == name
+        })
     }
 }
 
@@ -942,15 +975,22 @@ mod tests {
         queue.admit(h(12), claim.clone());
         assert_eq!(queue.len(), 1);
         assert_eq!(queue.entry(0).1, h(10));
+        assert_eq!(queue.entry(0).2, NameNoteState::Authorized);
         assert!(queue.claim_pending(claim.name()));
 
-        // The drain resolved the order — enacted, or overtaken: the
-        // queue forgets the decision.
+        queue.set_state(0, NameNoteState::Submitted);
+        queue.admit(h(12), claim.clone());
+        assert_eq!(queue.entry(0).2, NameNoteState::Submitted);
+        queue.set_state(0, NameNoteState::Seen);
+        assert!(!queue.claim_pending(claim.name()));
+        queue.rewind_seen();
+        assert_eq!(queue.entry(0).2, NameNoteState::Authorized);
+        assert!(queue.claim_pending(claim.name()));
+
         queue.remove(0);
         assert!(queue.is_empty());
         assert!(!queue.claim_pending(claim.name()));
 
-        // Re-derivation may re-admit what still stands (releases).
         queue.admit(h(12), claim);
         assert_eq!(queue.len(), 1);
     }
