@@ -1,5 +1,13 @@
 # main.changelog.md
 
+## 2026-09-24 — Admit OTP requests by transaction across mempool and block paths (#183)
+
+- The mempool stream carries Zebra's change kind and txid to the run loop.
+  Eligible requests enter `OtpQueue` once by txid; invalidation retires an
+  unsent request, and block confirmation reuses the same entry. Requested
+  challenges retry during later tip passes.
+- `relay` now only submits an already admitted OTP challenge.
+
 ## 2026-09-24 — Remove the seven-day liveness reminder (#174)
 
 - The mint no longer sends automatic OTP challenges as a liveness

@@ -506,6 +506,10 @@ mod tests {
         Timestamp::from_seconds(secs).unwrap()
     }
 
+    fn test_txid() -> zcash_primitives::transaction::TxId {
+        zcash_primitives::transaction::TxId::from_bytes([0; 32])
+    }
+
     fn record(action: Action, expires_at: Expiry, release_deadline: i64, seed: u8) -> NameRecord {
         NameRecord {
             action,
@@ -533,15 +537,19 @@ mod tests {
         let code = OtpCode::for_test(*b"123456");
         let digits = code.expose_for_test();
         let mut challenges = OtpQueue::new();
-        challenges.issue(OtpRequest {
-            name: test_name(),
-            action: Action::Update,
-            ua: ua.clone(),
-            term: Some(Term::Years(1)),
-            tip_rcm: commitment(1),
-            code,
-            expires_at: ts(1_700_000_000 + D_OTP),
-        });
+        challenges.admit_request(
+            OtpRequest {
+                name: test_name(),
+                action: Action::Update,
+                ua: ua.clone(),
+                term: Some(Term::Years(1)),
+                tip_rcm: commitment(1),
+                code,
+                expires_at: ts(1_700_000_000 + D_OTP),
+            },
+            test_txid(),
+            mtp,
+        );
         assert!(r
             .authorize(
                 &mut challenges,
