@@ -12,22 +12,24 @@
 
 use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, BranchId};
 use zcash_protocol::value::Zatoshis;
 
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::assemble;
 use zns_mint::mint::note::NameNoteQueue;
-use zns_mint::mint::otp::OtpQueue;
+use zns_mint::mint::note::{assemble, decrypt_treasury_tx};
+use zns_mint::mint::otp::{OtpQueue, OtpRequest};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
     relay, watch_mempool, Action, Challenge, MintInbound, Request, REGISTRY_ACCOUNT,
     TREASURY_ACCOUNT,
 };
-use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession, TransportError, RETRY_PAUSE};
+use zns_mint::zcash::{
+    CanonicalBlockSource, JsonRpc, MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE,
+};
 
 #[tokio::main]
 async fn main() {
@@ -79,19 +81,10 @@ async fn main() {
     // the re-read of the canonical tip that turns every wake-up into the
     // node's answer, never the announcement's promise. The orchestrator
     // holds position (the wallet) and never sees transport state.
-    // The mempool quick lane: update and release triggers relayed the
-    // moment the node reports them, before their blocks. One reader
-    // task turns mempool announcements into candidates; the orchestrator
-    // alone decides. Best-effort and forgetful — every decision the
-    // block path re-makes when the trigger confirms.
-    let (quick_tx, mut quick_rx) = mpsc::channel::<(MintInbound, Zatoshis)>(64);
-    tokio::spawn(watch_mempool(
-        network,
-        chain.clone(),
-        rpc.clone(),
-        treasury_keys.orchard_fvk(),
-        quick_tx,
-    ));
+    // The watcher forwards Zebra's change kind and txid. The run loop owns
+    // OtpQueue and admits or invalidates requests as those events arrive.
+    let (mempool_tx, mut mempool_rx) = mpsc::channel(64);
+    tokio::spawn(watch_mempool(chain.clone(), mempool_tx));
 
     let mut connection = TipSession::open(chain).await;
     'run: loop {
@@ -100,41 +93,48 @@ async fn main() {
                 Ok(tip) => tip,
                 Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
             },
-            Some((inbound, paid)) = quick_rx.recv() => {
-                // The quick entrance: evaluate now, forget immediately —
-                // deferral is the drain's concept, not this one's. The
-                // reader forwards everything it decrypts; this match is
-                // where "which lanes are quick" is decided.
-                match inbound {
-                    MintInbound::Request(
-                        request @ (Request::Update { .. } | Request::Release { .. }),
-                    ) => {
-                        let mtp_now = mtp
-                            .current()
-                            .expect("FATAL: MTP unavailable at the applied tip");
-                        relay(
-                            &network,
-                            &mut wallet,
-                            &treasury_keys,
-                            &sapling_spend,
-                            &sapling_output,
-                            &registry,
-                            &mut challenges,
-                            &oracle,
-                            &source,
-                            mtp_now,
-                            &request,
-                            paid,
-                            chain_tip.block_height() + 1,
-                            "mempool",
-                        )
-                        .await;
+            Some((kind, txid)) = mempool_rx.recv() => {
+                let mtp_now = mtp.current().expect("FATAL: MTP unavailable at the applied tip");
+                match kind {
+                    MempoolChangeKind::Invalidated => challenges.invalidate(txid, mtp_now),
+                    MempoolChangeKind::Mined => {}
+                    MempoolChangeKind::Added => {
+                        let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
+                        if let Some(transaction) = rpc.get_raw_transaction(branch_id, txid).await.ok().flatten() {
+                            for (_action_index, paid, memo) in decrypt_treasury_tx(
+                                &transaction,
+                                &treasury_keys.orchard_fvk(),
+                            ) {
+                                let MintInbound::Request(request) = MintInbound::decode(&network, &memo) else {
+                                    continue;
+                                };
+                                let (name, action, requested_ua, term) = match &request {
+                                    Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
+                                    Request::Release { name, ua } => (name, Action::Release, ua, None),
+                                    Request::Claim { .. } => continue,
+                                };
+                                let Some(record) = registry.record(name).cloned() else { continue; };
+                                let trigger_height = chain_tip.block_height() + 1;
+                                if !record.admits(action, requested_ua, term, trigger_height, mtp_now)
+                                    || paid < oracle.challenge_fee()
+                                {
+                                    continue;
+                                }
+                                let (_, pending) = OtpRequest::pending_challenge(
+                                    name, action, requested_ua, record.commitment, term, mtp_now,
+                                );
+                                let pending = challenges.admit_request(pending, txid, mtp_now);
+                                if !challenges.is_relayed(&pending)
+                                    && relay(
+                                        &network, &mut wallet, &treasury_keys, &sapling_spend,
+                                        &sapling_output, &record.ua, &source, &pending, "mempool",
+                                    ).await
+                                {
+                                    challenges.challenge_issued(&pending);
+                                }
+                            }
+                        }
                     }
-                    // Claims, echoes, and bare payments authorize against
-                    // money that must confirm — the block path owns them.
-                    MintInbound::Request(Request::Claim { .. })
-                    | MintInbound::Echo(_)
-                    | MintInbound::Unrecognized => {}
                 }
                 continue;
             }
@@ -392,7 +392,7 @@ async fn main() {
         // for the next tip. Nothing is re-read.
         let mut index = 0;
         while index < requests.len() {
-            let (_txid, request, paid, note_height) = requests.entry(index);
+            let (txid, request, paid, note_height) = requests.entry(index);
             let decided = 'lane: {
                 match request {
                     Request::Claim {
@@ -476,27 +476,29 @@ async fn main() {
                         true
                     }
                     request @ (Request::Update { .. } | Request::Release { .. }) => {
-                        // The relay lane: the mint challenges the controller.
-                        // The two ways money can refuse — no fee funds,
-                        // node rejection — defer; everything else is
-                        // decided.
-                        relay(
-                            &network,
-                            &mut wallet,
-                            &treasury_keys,
-                            &sapling_spend,
-                            &sapling_output,
-                            &registry,
-                            &mut challenges,
-                            &oracle,
-                            &source,
+                        let (name, action, requested_ua, term) = match request {
+                            Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
+                            Request::Release { name, ua } => (name, Action::Release, ua, None),
+                            Request::Claim { .. } => unreachable!(),
+                        };
+                        let Some(record) = registry.record(name).cloned() else {
+                            break 'lane true;
+                        };
+                        if !record.admits(action, requested_ua, term, note_height, mtp_now)
+                            || paid < oracle.challenge_fee()
+                        {
+                            break 'lane true;
+                        }
+                        let (_, pending) = OtpRequest::pending_challenge(
+                            name,
+                            action,
+                            requested_ua,
+                            record.commitment,
+                            term,
                             mtp_now,
-                            request,
-                            paid,
-                            note_height,
-                            "tip",
-                        )
-                        .await
+                        );
+                        challenges.admit_request(pending, *txid, mtp_now);
+                        true
                     }
                 }
             };
@@ -504,6 +506,32 @@ async fn main() {
                 requests.remove(index);
             } else {
                 index += 1;
+            }
+        }
+
+        // Queue admission is independent from submission. Retry every still-
+        // requested mempool or confirmed entry once during each tip pass.
+        for pending in challenges.requested(mtp_now) {
+            let Some(record) = registry
+                .record(&pending.name)
+                .filter(|record| record.commitment == pending.tip_rcm)
+            else {
+                continue;
+            };
+            if relay(
+                &network,
+                &mut wallet,
+                &treasury_keys,
+                &sapling_spend,
+                &sapling_output,
+                &record.ua,
+                &source,
+                &pending,
+                "tip",
+            )
+            .await
+            {
+                challenges.challenge_issued(&pending);
             }
         }
 
