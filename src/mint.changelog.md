@@ -1,5 +1,15 @@
 # Mint live-work design record
 
+## 2026-09-24 — The chain arc leaves the run loop (#177)
+
+- `follow` advances the mint to the announced tip — ancestor walk,
+  rewind, catch-up, Treasury mail routed — and returns the day the
+  advance started under, or nothing when the chain moved under the
+  attempt. Every `continue 'run` becomes the arc's own return; the
+  labeled loop is gone. `tip_holds` reads Zebra's answer after the
+  price fetch. The retry/race/fatal law is unchanged — same retries,
+  same panics, same logs.
+
 ## 2026-09-24 — The lanes answer one conversation each (#177)
 
 - `claim_lane` and `echo_lane` join `relay` in mint.rs — one
