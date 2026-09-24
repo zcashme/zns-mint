@@ -293,22 +293,14 @@ impl RequestQueue {
         self.requests.push(request);
     }
 
-    pub fn len(&self) -> usize {
-        self.requests.len()
+    /// Hands over every entry; the queue empties.
+    pub fn take(&mut self) -> Vec<NameRequest> {
+        std::mem::take(&mut self.requests)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.requests.is_empty()
-    }
-
-    /// The entry at `index`, in block order — the drain cursor reads.
-    pub fn entry(&self, index: usize) -> &NameRequest {
-        &self.requests[index]
-    }
-
-    /// The entry is decided. The only removal besides reorg truncation.
-    pub fn remove(&mut self, index: usize) {
-        self.requests.remove(index);
+    /// Holds the entries whose answer was not yet — order preserved.
+    pub fn requeue(&mut self, deferred: Vec<NameRequest>) {
+        self.requests = deferred;
     }
 
     /// Reorg: entries whose block was orphaned fall with it.
@@ -363,8 +355,10 @@ mod tests {
         queue.record(request(Action::Release, h(200)));
 
         queue.truncate_to(h(120));
-        assert_eq!(queue.len(), 1);
-        assert!(matches!(queue.entry(0).request, Request::Claim { .. }));
-        assert_eq!(queue.entry(0).height, h(100));
+        let remaining = queue.take();
+        assert_eq!(remaining.len(), 1);
+        assert!(matches!(remaining[0].request, Request::Claim { .. }));
+        assert_eq!(remaining[0].height, h(100));
+        assert!(queue.take().is_empty());
     }
 }

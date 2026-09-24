@@ -33,8 +33,8 @@ use crate::key::TreasuryKeys;
 use crate::wallet::Wallet;
 use crate::zcash::{CanonicalBlockSource, ChainClient, JsonRpc, MempoolChangeKind, MempoolSession};
 
-use otp::{OtpCode, OtpQueue, OtpRequest};
-use presale::AccessCode;
+use otp::{OtpCode, OtpQueue, OtpRequest, OtpResponse};
+use presale::{AccessCode, AccessCodeKey};
 use pricing::Oracle;
 use registry::Registry;
 
@@ -599,7 +599,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
 }
 
 // ===========================================================================
-// The relay lane — two entrances, one policy
+// The lanes — one conversation each
 // ===========================================================================
 
 /// One relay-lane evaluation: the decided-refusal battery, the challenge
@@ -711,6 +711,149 @@ pub async fn relay<P: Parameters + Send + 'static>(
         );
         false
     }
+}
+
+/// The claim lane: a paid claim on a free name — presale gate, price
+/// gate, authorize. Deferred only on a presale retry.
+pub async fn claim_lane(
+    registry: &Registry,
+    challenges: &mut OtpQueue,
+    oracle: &Oracle,
+    name_notes: &mut note::NameNoteQueue,
+    access_code_key: &AccessCodeKey,
+    entry: &treasury::NameRequest,
+    mtp_now: Timestamp,
+) -> bool {
+    let Request::Claim {
+        name,
+        ua,
+        term,
+        code,
+    } = &entry.request
+    else {
+        return true; // not this lane's conversation
+    };
+    // One open claim per name at a time: the Registry lags the mempool
+    // by a block; the queue holds an order only until its send.
+    if name_notes.claim_pending(name) {
+        tracing::debug!(name = %name.as_str(), "claim already pending for this name");
+        return true;
+    }
+    // Pre-sale gate: read-only table lookup. Unavailability defers; a
+    // deny is decided. Redemption is the name already live.
+    let name_live = registry
+        .record(name)
+        .is_some_and(|r| r.action != Action::Release);
+    match presale::decide(
+        presale::lookup_name(name, mtp_now).await,
+        code.as_ref(),
+        name_live,
+        access_code_key.as_bytes(),
+        name.as_str(),
+    ) {
+        presale::Decision::Retry => {
+            tracing::debug!(name = %name.as_str(), "pre-sale lookup unavailable; claim waits");
+            return false;
+        }
+        presale::Decision::Deny => {
+            tracing::debug!(name = %name.as_str(), "pre-sale claim refused");
+            return true;
+        }
+        presale::Decision::Allow => {}
+    }
+    // Payment gate: the quote at first sight is binding. An underpaid
+    // claim, or one whose quote does not fit, is dead and silent.
+    let Some(price) = oracle.quote(name, *term) else {
+        return true;
+    };
+    if entry.paid < price {
+        return true;
+    }
+    let Some(claim_note) = registry.authorize(
+        challenges,
+        Request::Claim {
+            name: name.clone(),
+            ua: ua.clone(),
+            term: *term,
+            code: code.clone(),
+        },
+        None,
+        entry.height,
+        mtp_now,
+    ) else {
+        tracing::debug!(name = %name.as_str(), "claim not authorized");
+        return true;
+    };
+    name_notes.admit(entry.height, claim_note);
+    true
+}
+
+/// The echo lane: a returned OTP matched against the mint's pending;
+/// decided in every outcome.
+pub fn echo_lane(
+    registry: &Registry,
+    challenges: &mut OtpQueue,
+    oracle: &Oracle,
+    name_notes: &mut note::NameNoteQueue,
+    response: OtpResponse,
+    mtp_now: Timestamp,
+) {
+    let OtpResponse { echo, paid, height } = response;
+    let Some(record) = registry.record(&echo.name).cloned() else {
+        return; // no record: no mint-issued challenge can match
+    };
+    if record.action.is_release() {
+        return;
+    }
+    let Some(sent) = challenges.awaiting(&echo, record.commitment, mtp_now) else {
+        return; // no pending challenge: dead
+    };
+    // The renewal or upgrade fee, binding at first sight: a shortfall
+    // voids the attempt and never consumes — the challenge stands,
+    // retryable with the same OTP inside D_OTP.
+    if let Some(term) = sent.term {
+        let Some(price) = oracle.quote(&echo.name, term) else {
+            tracing::debug!(
+                name = %echo.name.as_str(),
+                "update quote does not fit — attempt void, challenge stands"
+            );
+            return;
+        };
+        if paid < price {
+            tracing::debug!(
+                name = %echo.name.as_str(),
+                paid = paid.into_u64(),
+                "update respond underpaid — attempt void, challenge stands"
+            );
+            return;
+        }
+    }
+    let digits = sent.code.digits();
+    // Built from the mint's pending — the echo is only the key.
+    let authorized = match sent.action {
+        Action::Update => Request::Update {
+            name: sent.name.clone(),
+            ua: sent.ua.clone(),
+            term: sent.term,
+        },
+        Action::Release => Request::Release {
+            name: sent.name.clone(),
+            ua: sent.ua.clone(),
+        },
+        Action::Claim => unreachable!("claims never carry an OTP"),
+    };
+    let Some(transition_note) =
+        registry.authorize(challenges, authorized, Some(&digits), height, mtp_now)
+    else {
+        return;
+    };
+    // The seam where a voluntary release exists: the OTP that
+    // authorized it is consumed here, and the resulting note is
+    // indistinguishable from a unilateral one on chain.
+    if echo.action.is_release() {
+        tracing::info!(name = %echo.name.as_str(), "voluntary release authorized");
+    }
+    name_notes.admit(height, transition_note);
 }
 
 /// The mempool quick lane's reader: one task, one conversation —

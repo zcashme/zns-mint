@@ -1,5 +1,14 @@
 # Mint live-work design record
 
+## 2026-09-24 — The lanes answer one conversation each (#177)
+
+- `claim_lane` and `echo_lane` join `relay` in mint.rs — one
+  conversation kind per lane; the lanes read the law (`&Registry`) and
+  never mutate it.
+- `RequestQueue` answers by `take` and `requeue`: the run loop answers
+  each entry in a plain loop and hands back the not-yet, in order.
+  `entry`, `remove`, `len`, and `is_empty` leave the API.
+
 ## 2026-09-24 — The Treasury's mail returns from application (#177)
 
 - `apply_block` keeps the Treasury keys and the one decode, loses the

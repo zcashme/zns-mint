@@ -19,11 +19,11 @@ use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::{assemble, NameNoteQueue};
-use zns_mint::mint::otp::{OtpQueue, OtpResponse};
+use zns_mint::mint::otp::OtpQueue;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, NameRequest, RequestQueue};
 use zns_mint::mint::{
-    relay, watch_mempool, Action, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    relay, watch_mempool, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession, TransportError, RETRY_PAUSE};
 
@@ -381,190 +381,60 @@ async fn main() {
             .into_u64();
         zns_mint::metrics::snapshot(tip, treasury_zats, oracle.current().into_u64());
 
-        // Treasury requests. Each memo was decoded once, at block
-        // application; the drain decides each entry exactly once. A
-        // decided entry leaves the queue; a deferred relay — Treasury
-        // fee funds missing, or the node rejected the challenge — waits
-        // for the next tip. Nothing is re-read.
-        let mut index = 0;
-        while index < requests.len() {
-            let entry = requests.entry(index);
-            let paid = entry.paid;
-            let note_height = entry.height;
-            let decided = 'lane: {
-                match &entry.request {
-                    Request::Claim {
-                        name,
-                        ua,
-                        term,
-                        code,
-                    } => {
-                        // One open claim per name at a time: the Registry
-                        // lags the mempool by a block; the queue holds an
-                        // order only until its send. A rival payment that
-                        // slips past both may spend another anchor — any
-                        // duplicate the chain still carries is ignored,
-                        // first confirmed wins.
-                        if name_notes.claim_pending(name) {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                "claim already pending for this name"
-                            );
-                            break 'lane true;
-                        }
-                        // Pre-sale gate: read-only table lookup.
-                        // Unavailability defers with the queue; a deny is
-                        // decided. Redemption is the name already live.
-                        let name_live = registry
-                            .record(name)
-                            .is_some_and(|r| r.action != Action::Release);
-                        match zns_mint::mint::presale::decide(
-                            zns_mint::mint::presale::lookup_name(name, mtp_now).await,
-                            code.as_ref(),
-                            name_live,
-                            access_code_key.as_bytes(),
-                            name.as_str(),
-                        ) {
-                            zns_mint::mint::presale::Decision::Retry => {
-                                tracing::debug!(
-                                    name = %name.as_str(),
-                                    "pre-sale lookup unavailable; claim waits"
-                                );
-                                break 'lane false;
-                            }
-                            zns_mint::mint::presale::Decision::Deny => {
-                                tracing::debug!(
-                                    name = %name.as_str(),
-                                    "pre-sale claim refused"
-                                );
-                                break 'lane true;
-                            }
-                            zns_mint::mint::presale::Decision::Allow => {}
-                        }
-                        // Payment gate: the quote at first sight is binding.
-                        // An underpaid claim, or one whose quote does not
-                        // fit, is dead and silent; a new payment settles
-                        // a new evaluation.
-                        let Some(price) = oracle.quote(name, *term) else {
-                            break 'lane true;
-                        };
-                        if paid < price {
-                            break 'lane true;
-                        }
-                        let Some(claim_note) = registry.authorize(
-                            &mut challenges,
-                            Request::Claim {
-                                name: name.clone(),
-                                ua: ua.clone(),
-                                term: *term,
-                                code: code.clone(),
-                            },
-                            None,
-                            note_height,
-                            mtp_now,
-                        ) else {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                "claim not authorized"
-                            );
-                            break 'lane true;
-                        };
-                        // Enactment below resolves the anchor and broadcasts.
-                        name_notes.admit(note_height, claim_note);
-                        true
-                    }
-                    request @ (Request::Update { .. } | Request::Release { .. }) => {
-                        // The relay lane: the mint challenges the controller.
-                        // The two ways money can refuse — no fee funds,
-                        // node rejection — defer; everything else is
-                        // decided.
-                        relay(
-                            &network,
-                            &mut wallet,
-                            &treasury_keys,
-                            &sapling_spend,
-                            &sapling_output,
-                            &registry,
-                            &mut challenges,
-                            &oracle,
-                            &source,
-                            mtp_now,
-                            request,
-                            paid,
-                            note_height,
-                            "tip",
-                        )
-                        .await
-                    }
+        // The inbox answers, one conversation at a time; an answer is
+        // decided or not yet.
+        let mut deferred = Vec::new();
+        for entry in requests.take() {
+            let decided = match &entry.request {
+                Request::Claim { .. } => {
+                    zns_mint::mint::claim_lane(
+                        &registry,
+                        &mut challenges,
+                        &oracle,
+                        &mut name_notes,
+                        &access_code_key,
+                        &entry,
+                        mtp_now,
+                    )
+                    .await
+                }
+                request @ (Request::Update { .. } | Request::Release { .. }) => {
+                    relay(
+                        &network,
+                        &mut wallet,
+                        &treasury_keys,
+                        &sapling_spend,
+                        &sapling_output,
+                        &registry,
+                        &mut challenges,
+                        &oracle,
+                        &source,
+                        mtp_now,
+                        request,
+                        entry.paid,
+                        entry.height,
+                        "tip",
+                    )
+                    .await
                 }
             };
-            if decided {
-                requests.remove(index);
-            } else {
-                index += 1;
+            if !decided {
+                deferred.push(entry);
             }
         }
+        requests.requeue(deferred);
 
-        // The echo pass — decided in every outcome, never deferred. It
-        // runs after the request pass; `pending()` absorbs the
-        // reordered sighting.
-        for OtpResponse { echo, paid, height } in challenges.take_responses() {
-            let Some(record) = registry.record(&echo.name).cloned() else {
-                continue; // no record: no mint-issued challenge can match
-            };
-            if record.action.is_release() {
-                continue;
-            }
-            let Some(sent) = challenges.awaiting(&echo, record.commitment, mtp_now) else {
-                continue; // no pending challenge: dead
-            };
-            // The renewal or upgrade fee, binding at first sight: a
-            // shortfall voids the attempt and never consumes — the
-            // challenge stands, retryable with the same OTP inside D_OTP.
-            if let Some(term) = sent.term {
-                let Some(price) = oracle.quote(&echo.name, term) else {
-                    tracing::debug!(
-                        name = %echo.name.as_str(),
-                        "update quote does not fit — attempt void, challenge stands"
-                    );
-                    continue;
-                };
-                if paid < price {
-                    tracing::debug!(
-                        name = %echo.name.as_str(),
-                        paid = paid.into_u64(),
-                        "update respond underpaid — attempt void, challenge stands"
-                    );
-                    continue;
-                }
-            }
-            let digits = sent.code.digits();
-            // Built from the mint's pending — the echo is only the key.
-            let authorized = match sent.action {
-                Action::Update => Request::Update {
-                    name: sent.name.clone(),
-                    ua: sent.ua.clone(),
-                    term: sent.term,
-                },
-                Action::Release => Request::Release {
-                    name: sent.name.clone(),
-                    ua: sent.ua.clone(),
-                },
-                Action::Claim => unreachable!("claims never carry an OTP"),
-            };
-            let Some(transition_note) =
-                registry.authorize(&mut challenges, authorized, Some(&digits), height, mtp_now)
-            else {
-                continue;
-            };
-            // The seam where a voluntary release exists: the OTP that
-            // authorized it is consumed here, and the resulting note
-            // is indistinguishable from a unilateral one on chain.
-            // This line is the only durable record of the cause.
-            if echo.action.is_release() {
-                tracing::info!(name = %echo.name.as_str(), "voluntary release authorized");
-            }
-            name_notes.admit(height, transition_note);
+        // The echoes — decided in every outcome, answered after the
+        // requests; `pending()` absorbs the reordered sighting.
+        for response in challenges.take_responses() {
+            zns_mint::mint::echo_lane(
+                &registry,
+                &mut challenges,
+                &oracle,
+                &mut name_notes,
+                response,
+                mtp_now,
+            );
         }
 
         // Lifecycle releases, §4.5: the registry owns the clocks and
