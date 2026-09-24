@@ -622,8 +622,20 @@ pub async fn relay<P: Parameters + Send + 'static>(
         action: request.action,
         ua: request.ua.clone(),
     };
-    let Some(memo) = challenge.encode(network) else {
-        return false;
+    let memo = match challenge.encode(network) {
+        Some(memo) => memo,
+        None if request.action.is_claim() => {
+            unreachable!("claims never enter the controller challenge relay")
+        }
+        None => {
+            tracing::error!(
+                lane,
+                name = %request.name.as_str(),
+                action = request.action.as_str(),
+                "controller challenge memo exceeds the ZIP-302 512-byte limit"
+            );
+            return false;
+        }
     };
     let transaction = match treasury::challenge(
         network,

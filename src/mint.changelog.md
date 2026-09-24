@@ -1,5 +1,10 @@
 # Mint live-work design record
 
+## 2026-09-24 — Controller relay names its memo failure
+- A Claim reaching the controller relay is unreachable by design. An
+  oversized Update or Release challenge memo is reported with its request
+  context instead of silently leaving the request unrelayed.
+
 ## 2026-09-24 — OTP admission is keyed by request transaction (#183)
 
 - `OtpQueue::admit_request` keeps the source txid beside each request so
