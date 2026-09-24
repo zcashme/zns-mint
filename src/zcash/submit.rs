@@ -1,4 +1,4 @@
-//! Submission: "carry this" — one honest attempt, the node's answer.
+//! Submission: one broadcast attempt and its retrying caller.
 
 use zcash_primitives::transaction::{Transaction, TxId};
 
@@ -32,54 +32,29 @@ impl JsonRpc {
 }
 
 impl super::CanonicalBlockSource {
-    /// One broadcast attempt.
-    ///
-    /// `Ok` is the node's answer: accepted, already mined, or rejected.
-    /// `Err` means this attempt got no answer. The same bytes are safe to
-    /// send again. `label` names the flow in the logs.
-    pub async fn submit(
-        &self,
-        tx: &Transaction,
-        label: &'static str,
-    ) -> Result<SubmitOutcome, TransportError> {
-        match self.send_transaction(tx).await {
-            Ok(outcome @ (SubmitOutcome::Accepted | SubmitOutcome::Mined)) => {
-                tracing::info!(txid = %tx.txid(), what = label, ?outcome, "node accepted");
-                Ok(outcome)
-            }
-            Ok(SubmitOutcome::Rejected(error)) => {
-                tracing::error!(%error, txid = %tx.txid(), what = label, "node rejected");
-                Ok(SubmitOutcome::Rejected(error))
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    txid = %tx.txid(),
-                    what = label,
-                    "submission uncertain"
-                );
-                Err(error)
-            }
-        }
-    }
-
-    /// Repeats [`Self::submit`] while the node gives no answer.
-    ///
-    /// A rejection is returned as soon as the node makes it. Callers that
-    /// can resubmit on a later tip should use [`Self::submit`] instead, so
-    /// a quiet node does not stall the run loop.
-    pub async fn submit_until_answered(
-        &self,
-        tx: &Transaction,
-        label: &'static str,
-    ) -> SubmitOutcome {
+    /// Broadcasts a transaction, retrying transport uncertainty until the
+    /// node decides. `label` names the flow in the logs.
+    pub async fn submit(&self, tx: &Transaction, label: &'static str) -> bool {
         loop {
-            match self.submit(tx, label).await {
-                Ok(outcome) => return outcome,
+            match self.send_transaction(tx).await {
+                Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => {
+                    tracing::info!(txid = %tx.txid(), what = label, "submitted");
+                    return true;
+                }
+                Ok(SubmitOutcome::Rejected(error)) => {
+                    tracing::error!(%error, txid = %tx.txid(), what = label, "rejected");
+                    return false;
+                }
                 Err(error) if error.is_retryable() => {
+                    tracing::warn!(
+                        %error,
+                        txid = %tx.txid(),
+                        what = label,
+                        "submission uncertain; retrying"
+                    );
                     tokio::time::sleep(RETRY_PAUSE).await;
                 }
-                Err(error) => return SubmitOutcome::Rejected(error),
+                Err(error) => panic!("FATAL: {label} submission failed: {error}"),
             }
         }
     }

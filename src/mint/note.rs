@@ -4,7 +4,6 @@
 
 use time::Timestamp;
 use zcash_keys::address::UnifiedAddress;
-use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 pub mod assemble;
@@ -421,6 +420,7 @@ impl NameNote {
 
 use subtle::ConstantTimeEq as _;
 use zcash_primitives::block::Block;
+use zcash_primitives::transaction::TxId;
 
 /// One decrypted Name Note from the ZNS scan pass, with the facts the wallet
 /// store and the Registry evidence need.
@@ -587,23 +587,24 @@ pub fn decrypt_treasury_tx(
 // NameNoteQueue — authorized Name Notes awaiting the chain
 // ---------------------------------------------------------------------------
 
-/// Authorized Name Notes awaiting a mined transaction. Each entry is
-/// the note, the height whose evidence authorized it, and the txid of
-/// the broadcast still in flight. The drain removes an order when that
-/// transaction is mined, or when the world overtakes it. Acceptance
-/// into the mempool keeps the order. A reorg truncates it. The queue
-/// is memory: a restart empties it.
+/// Authorized Name Notes awaiting their first broadcast. Each pair is
+/// the note and the height whose evidence authorized it: the enactment
+/// drain removes an order when it is sent — the wallet's retained
+/// transaction is then the record of the open commitment until the
+/// chain resolves it — or when the world overtakes it; a reorg
+/// truncates it. Money stays in the wallet, so a restart empties the
+/// queue and the walk re-admits what still stands.
 #[derive(Clone, Debug, Default)]
 pub struct NameNoteQueue {
-    authorized: Vec<(NameNote, BlockHeight, Option<TxId>)>,
+    authorized: Vec<(NameNote, BlockHeight)>,
 }
 
 impl NameNoteQueue {
     /// Records a decision. Idempotent: a note already authorized keeps its
     /// original origin.
     pub fn admit(&mut self, origin: BlockHeight, note: NameNote) {
-        if !self.authorized.iter().any(|(n, _, _)| *n == note) {
-            self.authorized.push((note, origin, None));
+        if !self.authorized.iter().any(|(n, _)| *n == note) {
+            self.authorized.push((note, origin));
         }
     }
 
@@ -617,26 +618,8 @@ impl NameNoteQueue {
 
     /// The entry at `index`, in admission order — the drain cursor reads.
     pub fn entry(&self, index: usize) -> (&NameNote, BlockHeight) {
-        let (note, origin, _) = &self.authorized[index];
+        let (note, origin) = &self.authorized[index];
         (note, *origin)
-    }
-
-    /// The broadcast still in flight for this order, if one has been built.
-    pub fn pending_txid(&self, index: usize) -> Option<TxId> {
-        self.authorized[index].2
-    }
-
-    /// Records the transaction built for this order. Later tips resubmit
-    /// these bytes until the node reports it mined or the wallet's expiry
-    /// releases the inputs.
-    pub fn mark_submitted(&mut self, index: usize, txid: TxId) {
-        self.authorized[index].2 = Some(txid);
-    }
-
-    /// Drops the in-flight txid so the drain may build a successor.
-    /// The order itself stays.
-    pub fn clear_submission(&mut self, index: usize) {
-        self.authorized[index].2 = None;
     }
 
     /// The order is resolved — enacted, or overtaken by the world. The
@@ -647,14 +630,14 @@ impl NameNoteQueue {
 
     /// Reorg: drop origins above the common ancestor.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
-        self.authorized.retain(|(_, origin, _)| *origin <= ancestor);
+        self.authorized.retain(|(_, origin)| *origin <= ancestor);
     }
 
     /// The one-open-claim guard.
     pub fn claim_pending(&self, name: &Name) -> bool {
         self.authorized
             .iter()
-            .any(|(n, _, _)| n.action().is_claim() && n.name() == name)
+            .any(|(n, _)| n.action().is_claim() && n.name() == name)
     }
 }
 
