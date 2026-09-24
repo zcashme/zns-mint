@@ -1180,6 +1180,7 @@ impl<P: Parameters> Wallet<P> {
 #[cfg(test)]
 mod tests {
     use super::{Wallet, WalletError, MAX_CHECKPOINTS};
+    use crate::mint::REGISTRY_ACCOUNT;
     use incrementalmerkletree::frontier::Frontier;
     use zcash_client_backend::data_api::chain::ChainState;
     use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore};
@@ -2031,8 +2032,8 @@ mod tests {
         }
     }
 
-    /// The leaf is `zns_cmx(rcm, psi)`. An identical retry is a no-op; a
-    /// different memo or a different `psi` is refused.
+    /// The ZNS leaf and nullifier are accepted; the ordinary rseed leaf,
+    /// a changed memo, and a changed `psi` are refused.
     #[test]
     fn name_note_binding_uses_the_zns_cmx() {
         use incrementalmerkletree::{Marking, Position, Retention};
@@ -2047,9 +2048,8 @@ mod tests {
         let sk = orchard::keys::SpendingKey::from_bytes([5u8; 32])
             .into_option()
             .expect("spending key");
-        let recipient = orchard::keys::FullViewingKey::from(&sk)
-            .to_ivk(orchard::keys::Scope::External)
-            .address_at(0u32);
+        let fvk = orchard::keys::FullViewingKey::from(&sk);
+        let recipient = fvk.to_ivk(orchard::keys::Scope::External).address_at(0u32);
         let note = orchard::note::Note::from_parts(
             recipient,
             orchard::value::NoteValue::ZERO,
@@ -2066,16 +2066,14 @@ mod tests {
         let cmx = note.zns_cmx(rcm, psi).expect("ZNS cmx");
         let txid = zcash_primitives::transaction::TxId::from_bytes([8u8; 32]);
         let epk = zcash_note_encryption::EphemeralKeyBytes([9u8; 32]);
-        let nullifier = orchard::note::Nullifier::from_bytes(&[10u8; 32])
-            .into_option()
-            .expect("nullifier");
+        let nullifier = note.zns_nullifier(&fvk, rcm, psi).expect("ZNS nullifier");
+        assert_ne!(nullifier, note.nullifier(&fvk));
         let memo = [0u8; 512];
         let height = BlockHeight::from_u32(1);
 
-        let plant = || {
+        let plant = |leaf| {
             let mut wallet =
                 Wallet::new([], &empty_origin(), &[], &[], MainNetwork).expect("wallet");
-            let leaf = orchard::tree::MerkleHashOrchard::from_cmx(&cmx);
             wallet
                 .ironwood_tree
                 .append(
@@ -2096,7 +2094,8 @@ mod tests {
             wallet
         };
 
-        let mut wallet = plant();
+        let zns_leaf = orchard::tree::MerkleHashOrchard::from_cmx(&cmx);
+        let mut wallet = plant(zns_leaf);
         wallet
             .store_name_note(
                 height,
@@ -2111,6 +2110,14 @@ mod tests {
                 memo,
             )
             .expect("ZNS cmx matches the leaf");
+        let stored = wallet
+            .unspent_ironwood_note_by_nullifier(
+                REGISTRY_ACCOUNT,
+                nullifier,
+                zcash_client_backend::data_api::wallet::TargetHeight::from(height),
+            )
+            .expect("stored Name Note is found by its ZNS nullifier");
+        assert_eq!(*stored.note(), note);
         wallet
             .store_name_note(
                 height,
@@ -2144,7 +2151,7 @@ mod tests {
         ));
 
         let other = pasta_curves::pallas::Base::from_raw([8, 0, 0, 0]);
-        let mut wallet = plant();
+        let mut wallet = plant(zns_leaf);
         assert!(matches!(
             wallet.store_name_note(
                 height,
@@ -2156,6 +2163,24 @@ mod tests {
                 other,
                 nullifier,
                 epk,
+                memo,
+            ),
+            Err(WalletError::InvalidNameNote(_))
+        ));
+
+        let ordinary_cmx: orchard::note::ExtractedNoteCommitment = note.commitment().into();
+        let mut wallet = plant(orchard::tree::MerkleHashOrchard::from_cmx(&ordinary_cmx));
+        assert!(matches!(
+            wallet.store_name_note(
+                height,
+                Position::from(0),
+                txid,
+                0,
+                note,
+                rcm,
+                psi,
+                nullifier,
+                zcash_note_encryption::EphemeralKeyBytes([9u8; 32]),
                 memo,
             ),
             Err(WalletError::InvalidNameNote(_))
