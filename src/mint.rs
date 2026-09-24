@@ -727,7 +727,7 @@ pub async fn relay<P: Parameters + Send + 'static>(
         .await
     {
         crate::zcash::SubmitOutcome::Accepted | crate::zcash::SubmitOutcome::Mined => {
-            challenges.issue(pending);
+            challenges.challenge_issued(name, action, requested_ua, record.commitment);
             tracing::info!(
                 lane,
                 txid = %transaction.txid(),

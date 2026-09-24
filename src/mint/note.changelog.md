@@ -15,6 +15,7 @@
   enacted or overtaken. A sent order belongs to the wallet: its
   retained transaction is the record of the open commitment until the
   chain resolves it.
+
 ## 2026-09-21 — The treasury memo pass speaks per-transaction
 
 - `decrypt_treasury_tx` trial-decrypts one transaction's
