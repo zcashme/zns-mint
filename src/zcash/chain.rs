@@ -262,27 +262,47 @@ impl JsonRpc {
         &self,
         height: BlockHeight,
     ) -> Result<(BlockHash, BlockHeight, Timestamp), TransportError> {
-        let response: BlockHeaderResponse = self
-            .send_request("getblockheader", (u32::from(height).to_string(), true))
-            .await
-            .map_err(not_on_best_chain)?
-            .ok_or(TransportError::BadNodeData("getblockheader returned null"))?;
+        loop {
+            let result: Result<_, TransportError> = async {
+                let response: BlockHeaderResponse = self
+                    .send_request("getblockheader", (u32::from(height).to_string(), true))
+                    .await
+                    .map_err(not_on_best_chain)?
+                    .ok_or(TransportError::BadNodeData("getblockheader returned null"))?;
 
-        if response.height != u32::from(height) {
-            return Err(TransportError::BadNodeData(
-                "getblockheader answered a different height than requested",
-            ));
+                if response.height != u32::from(height) {
+                    return Err(TransportError::BadNodeData(
+                        "getblockheader answered a different height than requested",
+                    ));
+                }
+
+                let display_bytes = hex::decode(&response.hash)
+                    .map_err(|_| TransportError::BadNodeData("getblockheader hash hex"))?;
+                let hash = block_hash_from_display(&display_bytes)
+                    .ok_or(TransportError::BadNodeData("getblockheader hash length"))?;
+
+                let time = Timestamp::from_seconds(response.time as i64)
+                    .map_err(|_| TransportError::BadNodeData("getblockheader time"))?;
+
+                Ok((hash, BlockHeight::from_u32(response.height), time))
+            }
+            .await;
+
+            match result {
+                Ok(header) => return Ok(header),
+                Err(error)
+                    if error.is_retryable() || matches!(&error, TransportError::NotOnBestChain) =>
+                {
+                    tracing::warn!(
+                        %error,
+                        height = u32::from(height),
+                        "MTP header unavailable or unusable; retrying"
+                    );
+                    tokio::time::sleep(RETRY_PAUSE).await;
+                }
+                Err(error) => return Err(error),
+            }
         }
-
-        let display_bytes = hex::decode(&response.hash)
-            .map_err(|_| TransportError::BadNodeData("getblockheader hash hex"))?;
-        let hash = block_hash_from_display(&display_bytes)
-            .ok_or(TransportError::BadNodeData("getblockheader hash length"))?;
-
-        let time = Timestamp::from_seconds(response.time as i64)
-            .map_err(|_| TransportError::BadNodeData("getblockheader time"))?;
-
-        Ok((hash, BlockHeight::from_u32(response.height), time))
     }
 
     /// Fetches a full block by height and parses it under the compiled

@@ -5,6 +5,8 @@
 - `BadNodeData` and `BadCheckpoint` are retryable. Existing read loops
   repeat the same request after `RETRY_PAUSE` (five seconds), allowing
   recovery when Zebra returns unusable data while unhealthy.
+- MTP header reads retry the same height every five seconds on transient,
+  malformed, or not-on-best-chain responses.
 
 ## 2026-09-24 — Submission recognizes a duplicate in the mempool
 
