@@ -19,7 +19,7 @@ use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::FeeError;
-use zcash_primitives::transaction::{Transaction, TxId};
+use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
@@ -272,26 +272,23 @@ pub fn challenge<P: Parameters>(
 // RequestQueue — Treasury requests decoded once, at block application
 // ---------------------------------------------------------------------------
 
-/// One name request as the mint received it: the ask, the transaction
-/// that carried it, what it paid, and the block it landed in.
+/// One name request as received: the ask, its payment, its block.
 #[derive(Clone, Debug)]
 pub struct NameRequest {
-    pub txid: TxId,
     pub request: Request,
     pub paid: Zatoshis,
     pub height: BlockHeight,
 }
 
-/// Name requests decoded once at block application. Entries leave by
-/// decision (`remove`) or by reorg (`truncate_to`); nothing else removes
-/// them.
+/// Name requests awaiting the drain's decision. Entries leave by
+/// `remove` or by reorg truncation; nothing else removes them.
 #[derive(Clone, Debug, Default)]
 pub struct RequestQueue {
     requests: Vec<NameRequest>,
 }
 
 impl RequestQueue {
-    /// An arrival, decoded once at block application.
+    /// Records an arrival.
     pub fn record(&mut self, request: NameRequest) {
         self.requests.push(request);
     }
@@ -335,7 +332,6 @@ mod tests {
         };
         let name = Name::parse("alice").unwrap();
         NameRequest {
-            txid: TxId::NULL,
             request: match action {
                 Action::Claim => Request::Claim {
                     name,
@@ -357,34 +353,6 @@ mod tests {
 
     fn h(n: u32) -> BlockHeight {
         BlockHeight::from_u32(n)
-    }
-
-    #[test]
-    fn queue_records_in_block_order() {
-        let mut queue = RequestQueue::default();
-        assert_eq!(queue.len(), 0);
-
-        queue.record(request(Action::Claim, h(100)));
-        queue.record(request(Action::Update, h(101)));
-
-        assert_eq!(queue.len(), 2);
-        assert_eq!(queue.entry(0).txid, TxId::NULL);
-        assert_eq!(queue.entry(0).height, h(100));
-        assert_eq!(queue.entry(1).height, h(101));
-    }
-
-    #[test]
-    fn queue_remove_shifts_neighbors() {
-        let mut queue = RequestQueue::default();
-        queue.record(request(Action::Claim, h(100)));
-        queue.record(request(Action::Update, h(101)));
-        queue.record(request(Action::Release, h(102)));
-
-        queue.remove(1);
-        assert_eq!(queue.len(), 2);
-        // The entry after the removed one shifted into its place.
-        assert!(matches!(queue.entry(1).request, Request::Release { .. }));
-        assert_eq!(queue.entry(1).height, h(102));
     }
 
     #[test]

@@ -109,9 +109,7 @@ impl OtpRequest {
     }
 }
 
-/// A received echo, parked with the chain facts of its carrying
-/// transaction: what the controller said. Matching it against an
-/// issued challenge belongs to the drain.
+/// A received echo with its payment and block.
 #[derive(Clone, Debug)]
 pub struct OtpResponse {
     pub echo: Challenge,
@@ -119,12 +117,9 @@ pub struct OtpResponse {
     pub height: BlockHeight,
 }
 
-/// Where a challenge stands in its mint-side lifecycle. `Relayed` is
-/// the live offer — the response window is open. `Closed` is terminal:
-/// answered, elapsed, or cancelled; a Closed entry stays until its
-/// window itself would have ended, so the whole D_OTP span is
-/// accounted for. `Requested` is a challenge whose relay has not been
-/// accepted yet — the state the pre-relay intake will produce.
+/// A challenge's mint-side lifecycle: `Requested` awaits its relay,
+/// `Relayed` is the live offer, `Closed` is terminal — answered,
+/// elapsed, or cancelled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChallengeStatus {
     Requested,
@@ -132,8 +127,7 @@ pub enum ChallengeStatus {
     Closed,
 }
 
-/// The OTP conversation in one memory: challenges issued, in order,
-/// and the responses received against them.
+/// Issued challenges and received responses — one conversation.
 #[derive(Clone)]
 pub struct OtpQueue {
     requests: Vec<(OtpRequest, ChallengeStatus)>,
@@ -159,8 +153,7 @@ impl OtpQueue {
         self.requests.push((req, ChallengeStatus::Relayed));
     }
 
-    /// Parks a received echo with its chain facts. Recording only: an
-    /// echo is decided in every outcome, and deciding is the drain's.
+    /// Parks a received echo with its chain facts.
     pub fn respond(&mut self, echo: Challenge, paid: Zatoshis, height: BlockHeight) {
         self.responses.push(OtpResponse { echo, paid, height });
     }
@@ -170,10 +163,7 @@ impl OtpQueue {
         std::mem::take(&mut self.responses)
     }
 
-    /// Close relayed challenges whose window elapsed, then forget
-    /// Closed entries past their window. A challenge answered inside
-    /// its window remains as a Closed tombstone until the window
-    /// itself would have ended.
+    /// Closes elapsed challenges; forgets Closed ones past their window.
     fn sweep(&mut self, mtp: Timestamp) {
         for (request, status) in &mut self.requests {
             if *status == ChallengeStatus::Relayed && mtp >= request.expires_at {
@@ -205,8 +195,8 @@ impl OtpQueue {
     }
 
     /// The pending challenge this return matches at `tip_rcm`. Without
-    /// the commitment binding a six-digit code collision across two
-    /// live challenges could let `awaiting` return one pending while
+    /// the commitment binding, a code collision across two live
+    /// challenges could let `awaiting` return one pending while
     /// `accept` binds the other.
     pub fn awaiting(
         &mut self,
@@ -228,8 +218,7 @@ impl OtpQueue {
             .map(|(request, _)| request.clone())
     }
 
-    /// Accepts a returned OTP once: the match closes the challenge —
-    /// a second presentation finds nothing live to answer.
+    /// Accepts a returned OTP once; the challenge closes.
     pub fn accept(
         &mut self,
         name: &Name,
@@ -375,22 +364,6 @@ mod tests {
         // even though the code and other fields all match a live entry.
         let stale = commitment(3);
         assert!(q.awaiting(&echo, stale, t0).is_none());
-    }
-
-    #[test]
-    fn responses_park_and_leave_on_take() {
-        let mut q = OtpQueue::new();
-        let echo = Challenge {
-            code: OtpCode::for_test(*b"654321"),
-            name: test_name("alice"),
-            action: Action::Update,
-            ua: mainnet_ua(),
-        };
-
-        q.respond(echo, Zatoshis::ZERO, BlockHeight::from_u32(5));
-        assert_eq!(q.take_responses().len(), 1);
-        // Decided in every outcome: the batch left, the queue forgets.
-        assert!(q.take_responses().is_empty());
     }
 
     #[test]

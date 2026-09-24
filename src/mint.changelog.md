@@ -1,5 +1,19 @@
 # Mint live-work design record
 
+## 2026-09-24 — The Treasury's mail returns from application (#177)
+
+- `apply_block` keeps the Treasury keys and the one decode, loses the
+  queue parameters, and returns the block's arrivals. Where they file
+  is the caller's policy: the run loop routes requests to the queue,
+  echoes to the OTP queue, and logs a payment with no ask; boot drops
+  them — the scratch queues are gone, history scans without filing.
+- `Boot` sheds `challenges`; the run loop declares its three queues
+  together — born empty at every start, corrected by reorg, decided at
+  the tip.
+- `NameRequest` drops `txid` — nothing read it. The queue tests that
+  only exercised `Vec` are cut; the truncate boundary and the
+  accept-once replay guard remain.
+
 ## 2026-09-24 — The queue records challenge status (#177)
 
 - `ChallengeStatus { Requested, Relayed, Closed }` rides beside each

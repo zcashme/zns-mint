@@ -18,11 +18,10 @@ use zcash_protocol::value::Zatoshis;
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::assemble;
-use zns_mint::mint::note::NameNoteQueue;
+use zns_mint::mint::note::{assemble, NameNoteQueue};
 use zns_mint::mint::otp::{OtpQueue, OtpResponse};
 use zns_mint::mint::pricing::fetch_round;
-use zns_mint::mint::treasury::{self, RequestQueue};
+use zns_mint::mint::treasury::{self, NameRequest, RequestQueue};
 use zns_mint::mint::{
     relay, watch_mempool, Action, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
@@ -48,7 +47,6 @@ async fn main() {
         sapling_output,
         mut mtp,
         mut oracle,
-        mut challenges,
         access_code_key,
         mut registry,
     } = Boot::start().await;
@@ -58,13 +56,12 @@ async fn main() {
     let rpc = JsonRpc::new();
     let source = CanonicalBlockSource::new();
 
-    // Authorized Name Notes awaiting the chain: the lanes admit, the
-    // enactment phase builds and broadcasts.
-    let mut name_notes = NameNoteQueue::default();
-    // Treasury requests decoded once at block application: what each memo
-    // said, what it paid, the block that carried it. The drain at each tip
-    // decides entries; a reorg truncates them.
+    // The run loop's memory — born empty at every start, corrected by
+    // reorg, decided at the tip: requests awaiting decision, a challenge
+    // conversation and its responses, notes awaiting enactment.
     let mut requests = RequestQueue::default();
+    let mut challenges = OtpQueue::new();
+    let mut name_notes = NameNoteQueue::default();
 
     zns_mint::metrics::install();
     tracing::info!(
@@ -297,7 +294,10 @@ async fn main() {
                 continue 'run;
             }
 
-            zns_mint::mint::apply_block(
+            // The block's Treasury mail, routed where the queues live:
+            // requests file, echoes park, a payment with no ask is
+            // logged once and swept.
+            for (txid, inbound, paid) in zns_mint::mint::apply_block(
                 &network,
                 &registry_keys,
                 &treasury_keys,
@@ -308,9 +308,22 @@ async fn main() {
                 &mut registry,
                 &mut mtp,
                 &mut chain_tip,
-                &mut challenges,
-                &mut requests,
-            );
+            ) {
+                match inbound {
+                    MintInbound::Request(request) => requests.record(NameRequest {
+                        request,
+                        paid,
+                        height: next_height,
+                    }),
+                    MintInbound::Echo(echo) => challenges.respond(echo, paid, next_height),
+                    MintInbound::Unrecognized => tracing::info!(
+                        txid = %txid,
+                        value_zec = paid.into_u64() as f64 / 1e8,
+                        height = u32::from(next_height),
+                        "treasury received non-request payment"
+                    ),
+                }
+            }
         }
 
         tracing::info!(
@@ -492,12 +505,9 @@ async fn main() {
             }
         }
 
-        // The echo pass: responses parked on the OTP queue at block
-        // application, decided here in every outcome — an echo never
-        // waits for money; the renewal or upgrade fee declines on
-        // shortfall, it does not defer. It runs after the request
-        // pass; `pending()` absorbs the reordered sighting — an echo
-        // for a challenge relayed this same tip simply matches it.
+        // The echo pass — decided in every outcome, never deferred. It
+        // runs after the request pass; `pending()` absorbs the
+        // reordered sighting.
         for OtpResponse { echo, paid, height } in challenges.take_responses() {
             let Some(record) = registry.record(&echo.name).cloned() else {
                 continue; // no record: no mint-issued challenge can match
@@ -529,9 +539,7 @@ async fn main() {
                 }
             }
             let digits = sent.code.digits();
-            // The authorized request is built from the mint's own
-            // pending: the echo proved the controller saw the
-            // challenge — what it asked for was never theirs to say.
+            // Built from the mint's pending — the echo is only the key.
             let authorized = match sent.action {
                 Action::Update => Request::Update {
                     name: sent.name.clone(),

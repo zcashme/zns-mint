@@ -17,7 +17,6 @@ use std::str::FromStr;
 use crate::capsule;
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::mtp::MtpTracker;
-use crate::mint::otp::OtpQueue;
 use crate::mint::presale::{self, AccessCodeKey};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
@@ -58,8 +57,6 @@ pub struct Boot<P: Parameters> {
     pub mtp: MtpTracker,
     /// must not: fail-closed at birth — the first price or no start
     pub oracle: Oracle,
-    /// boot-initialized faculty: born empty, filled by `main`
-    pub challenges: OtpQueue,
     /// TEE-derived access-code key (HMAC purpose key, not the root)
     pub access_code_key: AccessCodeKey,
     /// produced: scanned and verified during boot sync
@@ -220,10 +217,9 @@ impl<P: Parameters + Send + 'static> Boot<P> {
         );
 
         // 4. Boot sync: scan from checkpoint to chain tip. The body is
-        // `apply_block` — the same one the run loop calls — with scratch
-        // queues: arrivals from history are balance, not instruction, so
-        // each block's intake lands in a queue that falls out of scope with
-        // the iteration.
+        // `apply_block` — the same one the run loop calls; its
+        // arrivals from history are balance, not instruction, and are
+        // dropped.
         let mut cursor = block_metadata(&origin);
         let mut registry = Registry::new();
         let source = crate::zcash::CanonicalBlockSource::new();
@@ -249,9 +245,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
                 .await
                 .expect("FATAL: block unavailable during boot sync");
 
-            let mut scratch_requests = crate::mint::treasury::RequestQueue::default();
-            let mut scratch_challenges = crate::mint::otp::OtpQueue::new();
-            crate::mint::apply_block(
+            drop(crate::mint::apply_block(
                 &network,
                 &registry_keys,
                 &treasury_keys,
@@ -262,9 +256,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
                 &mut registry,
                 &mut mtp,
                 &mut cursor,
-                &mut scratch_challenges,
-                &mut scratch_requests,
-            );
+            ));
         }
         tracing::info!(
             height = u32::from(cursor.block_height()),
@@ -317,10 +309,6 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             "boot: initial price ingested"
         );
 
-        // The challenge memory: empty by construction, filled by the run
-        // loop as update/release relays are issued.
-        let challenges = OtpQueue::new();
-
         // 7. Sapling proving parameters. Loading and hash verification happen
         // before attestation: a mint that produces a report can also prove
         // every transaction shape it is responsible for broadcasting.
@@ -361,7 +349,6 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             sapling_output,
             mtp,
             oracle,
-            challenges,
             access_code_key,
             registry,
         }

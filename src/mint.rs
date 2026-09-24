@@ -366,10 +366,11 @@ impl Name {
 // Block application
 // ---------------------------------------------------------------------------
 
-/// Applies one verified canonical successor to every faculty: scan, clock,
-/// Registry law, wallet commit, Treasury decode, Name Note storage, cursor.
-/// Never fetches, never broadcasts; `main` passes the live queues, boot
-/// passes scratch ones.
+/// Applies one verified canonical successor to every faculty: scan,
+/// clock, Registry law, wallet commit, Treasury decode, Name Note
+/// storage, cursor. Never fetches, never broadcasts. The Treasury's
+/// mail is read here — decode once — and returned; where it files is
+/// the caller's policy: the run loop routes it, boot drops it.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_block<P: Parameters + Send + 'static>(
     network: &P,
@@ -382,9 +383,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     registry: &mut registry::Registry,
     mtp: &mut mtp::MtpTracker,
     cursor: &mut ChainTip,
-    challenges: &mut OtpQueue,
-    requests: &mut treasury::RequestQueue,
-) {
+) -> Vec<(TxId, MintInbound, Zatoshis)> {
     use std::collections::BTreeMap;
     use std::convert::Infallible;
 
@@ -410,7 +409,13 @@ pub fn apply_block<P: Parameters + Send + 'static>(
 
     let block_time = block.header().time;
     let candidates = decrypt_name_notes(network, &block, registry_keys);
-    let treasury_memos = note::decrypt_treasury_memos(&block, treasury_keys);
+    let arrivals: Vec<(TxId, MintInbound, Zatoshis)> =
+        note::decrypt_treasury_memos(&block, treasury_keys)
+            .into_iter()
+            .map(|(txid, _action_index, paid, memo)| {
+                (txid, MintInbound::decode(network, &memo), paid)
+            })
+            .collect();
 
     let (header, batches) = decrypt_block(network, block, wallet.scanning_keys());
     let nullifiers =
@@ -567,32 +572,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
             error => panic!("FATAL: wallet block commit failed: {error}"),
         }
     }
-    // The scanner drops note plaintexts, so Treasury memos decode
-    // here, once per block, to their queues; the block remains the
-    // durable record. Decisions belong to the drain. The mempool
-    // quick path reads the same memos earlier and ephemerally; it
-    // records nothing — this pass stays the only intake.
-    for (txid, _action_index, paid, memo) in treasury_memos {
-        match MintInbound::decode(network, &memo) {
-            MintInbound::Request(request) => requests.record(treasury::NameRequest {
-                txid,
-                request,
-                paid,
-                height,
-            }),
-            // An echo answers a challenge — it parks beside the
-            // challenges it may match, never beside requests.
-            MintInbound::Echo(echo) => challenges.respond(echo, paid, height),
-            // A payment with no ask is decided at first sight: logged
-            // here, once, and the sweep keeps the value.
-            MintInbound::Unrecognized => tracing::info!(
-                txid = %txid,
-                value_zec = paid.into_u64() as f64 / 1e8,
-                height = u32::from(height),
-                "treasury received non-request payment"
-            ),
-        }
-    }
     for (index, position) in accepted_name_notes {
         let candidate = &candidates[index];
         wallet
@@ -616,6 +595,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         hash = %cursor.block_hash(),
         "canonical block applied"
     );
+    arrivals
 }
 
 // ===========================================================================
