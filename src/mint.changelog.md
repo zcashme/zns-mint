@@ -1,5 +1,18 @@
 # Mint live-work design record
 
+## 2026-09-24 — The queue records challenge status (#177)
+
+- `ChallengeStatus { Requested, Relayed, Closed }` rides beside each
+  issued challenge. `Relayed` is the live offer; `Closed` is terminal —
+  answered, elapsed, or cancelled. `accept` and the expiry sweep are
+  now explicit transitions the queue owns, replacing the silent
+  `remove`/`retain` calls; a Closed tombstone stays until its window
+  itself would have ended, so the whole D_OTP span is accounted for in
+  the queue.
+- `Requested` has no producer yet — challenges are born `Relayed`, at
+  relay acceptance. It is the state the request-to-relay handoff
+  (#176) will produce.
+
 ## 2026-09-24 — The request queue holds NameRequests (#177)
 
 - `NameRequest { txid, request, paid, height }` names the queue's

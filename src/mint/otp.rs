@@ -119,11 +119,24 @@ pub struct OtpResponse {
     pub height: BlockHeight,
 }
 
+/// Where a challenge stands in its mint-side lifecycle. `Relayed` is
+/// the live offer — the response window is open. `Closed` is terminal:
+/// answered, elapsed, or cancelled; a Closed entry stays until its
+/// window itself would have ended, so the whole D_OTP span is
+/// accounted for. `Requested` is a challenge whose relay has not been
+/// accepted yet — the state the pre-relay intake will produce.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChallengeStatus {
+    Requested,
+    Relayed,
+    Closed,
+}
+
 /// The OTP conversation in one memory: challenges issued, in order,
 /// and the responses received against them.
 #[derive(Clone)]
 pub struct OtpQueue {
-    challenges: Vec<OtpRequest>,
+    requests: Vec<(OtpRequest, ChallengeStatus)>,
     responses: Vec<OtpResponse>,
 }
 
@@ -136,14 +149,14 @@ impl Default for OtpQueue {
 impl OtpQueue {
     pub fn new() -> Self {
         Self {
-            challenges: Vec::new(),
+            requests: Vec::new(),
             responses: Vec::new(),
         }
     }
 
     /// Issues a challenge, no checks.
     pub fn issue(&mut self, req: OtpRequest) {
-        self.challenges.push(req);
+        self.requests.push((req, ChallengeStatus::Relayed));
     }
 
     /// Parks a received echo with its chain facts. Recording only: an
@@ -157,6 +170,21 @@ impl OtpQueue {
         std::mem::take(&mut self.responses)
     }
 
+    /// Close relayed challenges whose window elapsed, then forget
+    /// Closed entries past their window. A challenge answered inside
+    /// its window remains as a Closed tombstone until the window
+    /// itself would have ended.
+    fn sweep(&mut self, mtp: Timestamp) {
+        for (request, status) in &mut self.requests {
+            if *status == ChallengeStatus::Relayed && mtp >= request.expires_at {
+                *status = ChallengeStatus::Closed;
+            }
+        }
+        self.requests.retain(|(request, status)| {
+            !(*status == ChallengeStatus::Closed && mtp >= request.expires_at)
+        });
+    }
+
     /// A challenge already issued?
     pub fn pending(
         &mut self,
@@ -166,9 +194,10 @@ impl OtpQueue {
         tip_rcm: NameCommitment,
         mtp: Timestamp,
     ) -> bool {
-        self.challenges.retain(|request| mtp < request.expires_at);
-        self.challenges.iter().any(|request| {
-            request.name == *name
+        self.sweep(mtp);
+        self.requests.iter().any(|(request, status)| {
+            *status != ChallengeStatus::Closed
+                && request.name == *name
                 && request.action == action
                 && request.ua == *ua
                 && request.tip_rcm == tip_rcm
@@ -185,20 +214,22 @@ impl OtpQueue {
         tip_rcm: NameCommitment,
         mtp: Timestamp,
     ) -> Option<OtpRequest> {
-        self.challenges.retain(|request| mtp < request.expires_at);
-        self.challenges
+        self.sweep(mtp);
+        self.requests
             .iter()
-            .find(|request| {
-                request.name == returned.name
+            .find(|(request, status)| {
+                *status == ChallengeStatus::Relayed
+                    && request.name == returned.name
                     && request.action == returned.action
                     && request.ua == returned.ua
                     && request.tip_rcm == tip_rcm
                     && bool::from(request.code.0.ct_eq(&returned.code.0))
             })
-            .cloned()
+            .map(|(request, _)| request.clone())
     }
 
-    /// Accepts a returned OTP once.
+    /// Accepts a returned OTP once: the match closes the challenge —
+    /// a second presentation finds nothing live to answer.
     pub fn accept(
         &mut self,
         name: &Name,
@@ -208,21 +239,19 @@ impl OtpQueue {
         provided: &[u8; 6],
         mtp: Timestamp,
     ) -> bool {
-        // Expired entries never match.
-        self.challenges.retain(|req| mtp < req.expires_at);
+        self.sweep(mtp);
         let Some(provided_code) = OtpCode::from_digits(provided) else {
             return false;
         };
-        for i in 0..self.challenges.len() {
-            let req = &self.challenges[i];
-            if req.name == *name
+        for (req, status) in &mut self.requests {
+            if *status == ChallengeStatus::Relayed
+                && req.name == *name
                 && req.action == action
                 && &req.ua == ua
                 && req.tip_rcm == tip_rcm
-                && mtp < req.expires_at
                 && bool::from(req.code.0.ct_eq(&provided_code.0))
             {
-                self.challenges.remove(i);
+                *status = ChallengeStatus::Closed;
                 return true;
             }
         }
@@ -362,5 +391,33 @@ mod tests {
         assert_eq!(q.take_responses().len(), 1);
         // Decided in every outcome: the batch left, the queue forgets.
         assert!(q.take_responses().is_empty());
+    }
+
+    #[test]
+    fn accept_closes_the_challenge_once() {
+        let mut q = OtpQueue::new();
+        let alice = test_name("alice");
+        let ua = mainnet_ua();
+        let rcm = commitment(1);
+        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
+        let code = OtpCode::for_test(*b"417293");
+
+        q.issue(OtpRequest {
+            name: alice.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            term: None,
+            tip_rcm: rcm,
+            code: code.clone(),
+            expires_at: t0 + Duration::seconds(D_OTP),
+        });
+
+        assert!(q.pending(&alice, Action::Update, &ua, rcm, t0));
+
+        // Accepted once: the digits check out inside the window.
+        assert!(q.accept(&alice, Action::Update, &ua, rcm, &code.digits(), t0));
+        // A second presentation finds the challenge closed — no replay.
+        assert!(!q.accept(&alice, Action::Update, &ua, rcm, &code.digits(), t0));
+        assert!(!q.pending(&alice, Action::Update, &ua, rcm, t0));
     }
 }
