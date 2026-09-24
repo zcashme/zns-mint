@@ -249,7 +249,7 @@ pub enum TransportError {
 }
 
 impl TransportError {
-    /// Whether repeating the same read can recover without trusting new data.
+    /// Whether repeating the same operation can recover without trusting new data.
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -258,6 +258,8 @@ impl TransportError {
                 | Self::Timeout
                 | Self::HttpStatus(429)
                 | Self::HttpStatus(500..=599)
+                | Self::BadNodeData(_)
+                | Self::BadCheckpoint(_)
         ) || matches!(self, Self::Tonic(status) if matches!(status.code(), tonic::Code::Unavailable))
     }
 }

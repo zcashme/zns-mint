@@ -1,5 +1,11 @@
 # Zcash I/O changelog
 
+## 2026-09-24 — Retry unusable node payloads
+
+- `BadNodeData` and `BadCheckpoint` are retryable. Existing read loops
+  repeat the same request after `RETRY_PAUSE` (five seconds), allowing
+  recovery when Zebra returns unusable data while unhealthy.
+
 ## 2026-09-24 — Submission recognizes a duplicate in the mempool
 
 - `submit` keeps retrying the same signed transaction while transport is
