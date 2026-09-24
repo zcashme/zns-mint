@@ -1,5 +1,11 @@
 # Treasury design record
 
+## 2026-09-24 — Treasury uses the standard transfer helper (#192)
+
+- Challenge and sweep proposals use `propose_standard_transfer_to_address`
+  for their shared single-payment setup. The sweep's spendable-balance,
+  reserve, and threshold logic remains local.
+
 ## 2026-09-24 — Treasury owns the challenge relay value (#189)
 
 - `treasury::challenge` uses `CHALLENGE_RELAY_VALUE`, backed by upstream

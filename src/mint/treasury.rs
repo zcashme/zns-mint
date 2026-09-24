@@ -6,17 +6,15 @@ use std::convert::Infallible;
 use std::num::NonZeroU32;
 
 use zcash_client_backend::data_api::locking::{LockFilter, LockedInputPolicy};
-use zcash_client_backend::data_api::wallet::input_selection::{
-    GreedyInputSelector, GreedyInputSelectorError, SpendPolicy,
-};
+use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
 use zcash_client_backend::data_api::wallet::{
-    create_proposed_transactions, propose_transfer, ConfirmationsPolicy, SpendingKeys,
+    create_proposed_transactions, propose_standard_transfer_to_address, ConfirmationsPolicy,
+    SpendingKeys,
 };
 use zcash_client_backend::data_api::{
     InputSource as _, MaxSpendMode, TargetValue, WalletRead as _,
 };
-use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
-use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
+use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::{FeeError, MINIMUM_FEE};
 use zcash_primitives::transaction::{Transaction, TxId};
@@ -48,10 +46,11 @@ pub const VAULT_ADDRESS: transparent::address::TransparentAddress =
 /// One sweep: all Treasury value above the operating float moves to the
 /// vault when at least `SWEEP_MINIMUM` moves. The caller gates the
 /// once-per-day cadence. The ZIP-321 amount is `total` minus
-/// `SWEEP_RESERVE`; `propose_transfer` prices ZIP-317 and the fee comes
-/// out of the float (leftover is reserve minus fee, not exactly reserve).
-/// Only Sapling and Ironwood are spent. Returns `None` on any failure
-/// before the build. A read-back miss after a successful build is FATAL —
+/// `SWEEP_RESERVE`; the standard transfer helper prices ZIP-317 and the fee
+/// comes out of the float (leftover is reserve minus fee, not exactly reserve).
+/// The mint wallet currently selects only Sapling and Ironwood inputs.
+/// Returns `None` on any failure before the build. A read-back miss after a
+/// successful build is FATAL —
 /// the wallet has already marked the inputs spent.
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
@@ -112,34 +111,17 @@ pub fn sweep_to_vault<P: Parameters>(
         return None;
     };
 
-    let Some(request) = zip321::Payment::new(
-        zcash_keys::address::Address::Transparent(VAULT_ADDRESS).to_zcash_address(network),
-        Some(payment),
-        None,
-        None,
-        None,
-        vec![],
-    )
-    .ok()
-    .and_then(|pay| zip321::TransactionRequest::new(vec![pay]).ok()) else {
-        tracing::warn!("vault sweep skipped: ZIP-321 request invalid");
-        return None;
-    };
-
-    let proposal = propose_transfer::<_, _, _, _, Infallible>(
+    let proposal = propose_standard_transfer_to_address::<_, _, Infallible>(
         wallet,
         network,
+        StandardFeeRule::Zip317,
         TREASURY_ACCOUNT,
-        &GreedyInputSelector::new(),
-        &SingleOutputChangeStrategy::new(
-            StandardFeeRule::Zip317,
-            None,
-            zcash_protocol::ShieldedPool::Ironwood,
-            DustOutputPolicy::default(),
-        ),
-        request,
         policy,
-        &SpendPolicy::shielded_pools([ShieldedPool::Sapling, ShieldedPool::Ironwood]),
+        &zcash_keys::address::Address::Transparent(VAULT_ADDRESS),
+        payment,
+        None,
+        None,
+        ShieldedPool::Ironwood,
         None,
         None,
     )
@@ -193,43 +175,17 @@ pub fn challenge<P: Parameters>(
     controller: &zcash_keys::address::UnifiedAddress,
     memo: MemoBytes,
 ) -> Option<Transaction> {
-    let Some(request) = zip321::Payment::new(
-        zcash_keys::address::Address::Unified(controller.clone()).to_zcash_address(network),
-        Some(CHALLENGE_RELAY_VALUE),
-        Some(memo),
-        None,
-        None,
-        vec![],
-    )
-    .ok()
-    .and_then(|pay| zip321::TransactionRequest::new(vec![pay]).ok()) else {
-        tracing::warn!("challenge relay skipped: ZIP-321 request invalid");
-        return None;
-    };
-
-    let input_selector = GreedyInputSelector::<Wallet<P>>::new();
-    let change_strategy = SingleOutputChangeStrategy::<Wallet<P>>::new(
-        StandardFeeRule::Zip317,
-        None,
-        ShieldedPool::Ironwood,
-        DustOutputPolicy::default(),
-    );
-
-    let proposal = propose_transfer::<
-        Wallet<P>,
-        P,
-        GreedyInputSelector<Wallet<P>>,
-        SingleOutputChangeStrategy<Wallet<P>>,
-        Infallible,
-    >(
+    let proposal = propose_standard_transfer_to_address::<_, _, Infallible>(
         wallet,
         network,
+        StandardFeeRule::Zip317,
         TREASURY_ACCOUNT,
-        &input_selector,
-        &change_strategy,
-        request,
         ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false),
-        &SpendPolicy::default(),
+        &zcash_keys::address::Address::Unified(controller.clone()),
+        CHALLENGE_RELAY_VALUE,
+        Some(memo),
+        None,
+        ShieldedPool::Ironwood,
         None,
         None,
     )
