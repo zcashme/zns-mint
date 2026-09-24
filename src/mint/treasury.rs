@@ -6,25 +6,36 @@ use std::convert::Infallible;
 use std::num::NonZeroU32;
 
 use zcash_client_backend::data_api::locking::{LockFilter, LockedInputPolicy};
+use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
 use zcash_client_backend::data_api::wallet::{
     create_proposed_transactions, propose_standard_transfer_to_address, ConfirmationsPolicy,
-    SpendingKeys,
+    CreateErrT, ProposeTransferErrT, SpendingKeys,
 };
 use zcash_client_backend::data_api::{
     InputSource as _, MaxSpendMode, TargetValue, WalletRead as _,
 };
+use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::{FeeError, MINIMUM_FEE};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::memo::MemoBytes;
-use zcash_protocol::value::Zatoshis;
+use zcash_protocol::value::{BalanceError, Zatoshis};
 use zcash_protocol::ShieldedPool;
 
 use crate::mint::{Request, TREASURY_ACCOUNT};
-use crate::wallet::Wallet;
+use crate::wallet::{Wallet, WalletError};
+
+type TreasuryProposalError<P> = ProposeTransferErrT<
+    Wallet<P>,
+    Infallible,
+    GreedyInputSelector<Wallet<P>>,
+    SingleOutputChangeStrategy<Wallet<P>>,
+>;
+type TreasuryBuildError<P> =
+    CreateErrT<Wallet<P>, GreedyInputSelectorError, StandardFeeRule, FeeError, NoteId>;
 
 /// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
 /// actually moves, not on the balance behind it.
@@ -45,35 +56,40 @@ pub const VAULT_ADDRESS: transparent::address::TransparentAddress =
 
 /// A Treasury transaction was not built. Distinct from "nothing to do".
 #[derive(Debug)]
-pub enum BuildFailure {
+pub enum BuildFailure<ProposalError, TransactionError> {
     /// No target height or anchor was available.
     HeightsUnavailable,
-    /// Note selection failed.
-    Selection(String),
-    /// Selected note values overflowed the monetary range.
-    Balance,
-    /// The ZIP-321 payment could not be formed.
-    Request,
-    /// Input selection or fee calculation refused the proposal.
-    Proposal(String),
-    /// Proving or signing failed. The wallet was not asked to store a tx.
-    Build(String),
+    /// The wallet failed while reading target/anchor heights.
+    Heights(WalletError),
+    /// Wallet note selection failed.
+    Selection(WalletError),
+    /// Selected note values overflowed or underflowed the monetary range.
+    Balance(BalanceError),
+    /// The upstream wallet API rejected transaction proposal construction.
+    Proposal(ProposalError),
+    /// The upstream wallet API rejected transaction construction or storage.
+    Transaction(TransactionError),
 }
 
-impl std::fmt::Display for BuildFailure {
+impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::fmt::Display
+    for BuildFailure<ProposalError, TransactionError>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::HeightsUnavailable => write!(f, "no target or anchor height"),
+            Self::Heights(error) => write!(f, "target/anchor height lookup failed: {error}"),
             Self::Selection(error) => write!(f, "note selection failed: {error}"),
-            Self::Balance => write!(f, "selected notes overflow"),
-            Self::Request => write!(f, "ZIP-321 request invalid"),
-            Self::Proposal(error) => write!(f, "proposal failed: {error}"),
-            Self::Build(error) => write!(f, "transaction build failed: {error}"),
+            Self::Balance(error) => write!(f, "selected note value is invalid: {error}"),
+            Self::Proposal(error) => write!(f, "proposal failed: {error:?}"),
+            Self::Transaction(error) => write!(f, "transaction build failed: {error:?}"),
         }
     }
 }
 
-impl std::error::Error for BuildFailure {}
+impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::error::Error
+    for BuildFailure<ProposalError, TransactionError>
+{
+}
 
 /// One sweep: all Treasury value above the operating float moves to the
 /// vault when at least `SWEEP_MINIMUM` moves. `main` gates the once-per-day
@@ -88,11 +104,12 @@ pub fn sweep_to_vault<P: Parameters>(
     treasury_keys: &crate::key::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
-) -> Result<Option<Transaction>, BuildFailure> {
+) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
     let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
     let (target_height, _) = match wallet.get_target_and_anchor_heights(NonZeroU32::MIN) {
         Ok(Some(heights)) => heights,
-        Ok(None) | Err(_) => return Err(BuildFailure::HeightsUnavailable),
+        Ok(None) => return Err(BuildFailure::HeightsUnavailable),
+        Err(error) => return Err(BuildFailure::Heights(error)),
     };
 
     let lock_policy = LockedInputPolicy::Exclude;
@@ -110,9 +127,9 @@ pub fn sweep_to_vault<P: Parameters>(
             tracing::debug!("vault sweep skipped: no spendable notes");
             return Ok(None);
         }
-        Err(error) => return Err(BuildFailure::Selection(format!("{error:?}"))),
+        Err(error) => return Err(BuildFailure::Selection(error)),
     };
-    let total = notes.total_value().map_err(|_| BuildFailure::Balance)?;
+    let total = notes.total_value().map_err(BuildFailure::Balance)?;
 
     let Some(payment) = (total - SWEEP_RESERVE).filter(|p| *p >= SWEEP_MINIMUM) else {
         if total < SWEEP_RESERVE {
@@ -145,7 +162,7 @@ pub fn sweep_to_vault<P: Parameters>(
         None,
         None,
     )
-    .map_err(|error| BuildFailure::Proposal(format!("{error:?}")))?;
+    .map_err(BuildFailure::Proposal)?;
 
     let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
     let txids = create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
@@ -158,7 +175,7 @@ pub fn sweep_to_vault<P: Parameters>(
         &proposal,
         None,
     )
-    .map_err(|error| BuildFailure::Build(format!("{error:?}")))?;
+    .map_err(BuildFailure::Transaction)?;
 
     tracing::info!(txid = %txids.first(), "vault sweep built");
 
@@ -185,7 +202,7 @@ pub fn challenge<P: Parameters>(
     output_prover: &sapling::circuit::OutputParameters,
     controller: &zcash_keys::address::UnifiedAddress,
     memo: MemoBytes,
-) -> Result<Transaction, BuildFailure> {
+) -> Result<Transaction, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
     let proposal = propose_standard_transfer_to_address::<_, _, Infallible>(
         wallet,
         network,
@@ -200,7 +217,7 @@ pub fn challenge<P: Parameters>(
         None,
         None,
     )
-    .map_err(|error| BuildFailure::Proposal(format!("{error:?}")))?;
+    .map_err(BuildFailure::Proposal)?;
 
     let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
     let txids = create_proposed_transactions::<
@@ -220,7 +237,7 @@ pub fn challenge<P: Parameters>(
         &proposal,
         None,
     )
-    .map_err(|error| BuildFailure::Build(format!("{error:?}")))?;
+    .map_err(BuildFailure::Transaction)?;
 
     Ok(wallet
         .get_transaction(*txids.first())

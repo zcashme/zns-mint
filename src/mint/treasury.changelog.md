@@ -19,9 +19,11 @@
 ## 2026-09-24 — A skipped build names the failure
 
 - `sweep_to_vault` returns `Ok(None)` only when there is nothing to
-  move. Selection, balance, proposal, and build failures are
-  `BuildFailure`. `challenge` returns the same type instead of `None`
-  or a panic. A missing tx after a successful build is still fatal.
+  move. Wallet height and selection errors, balance errors, and the
+  upstream proposal and transaction errors retain their types in
+  `BuildFailure`; none are converted to strings. `challenge` returns the
+  same type instead of `None` or a panic. A missing tx after a successful
+  build is still fatal.
 
 ## 2026-09-22 — A built sweep that cannot be read back is FATAL
 
