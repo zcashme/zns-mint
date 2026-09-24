@@ -1,5 +1,13 @@
 # Zcash I/O changelog
 
+## 2026-09-24 — Submission returns the node's answer
+
+- `submit` is one attempt and returns `Result<SubmitOutcome, TransportError>`.
+  It no longer panics, and it no longer collapses accept and reject into a bool.
+- Already-in-mempool is `Accepted`. Already-in-chain stays `Mined`.
+- `submit_until_answered` repeats only while the node gives no answer.
+- HTTP 429 is retryable, with the 5xx band.
+
 ## 2026-09-23 — A malformed tip announcement does not abort
 
 - `next_tip` drops a notification whose hash is not 32 bytes and

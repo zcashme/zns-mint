@@ -1,5 +1,11 @@
 # `mint/note.rs` design record
 
+## 2026-09-24 — An order outlives mempool acceptance
+
+- `NameNoteQueue` stores the in-flight txid beside the note and origin.
+  `mark_submitted` records a broadcast. `clear_submission` drops it
+  without dropping the order. Removal is still mined, overtaken, or reorg.
+
 ## 2026-09-21 — Orders resolve at their send; the queue drains (#116)
 
 - `NameNoteQueue` membership now means one thing: a decision awaiting

@@ -694,24 +694,30 @@ pub async fn relay<P: Parameters + Send + 'static>(
         return false; // deferred
     };
 
-    if source.submit(&transaction, "controller challenge").await {
-        challenges.issue(pending);
-        tracing::info!(
-            lane,
-            txid = %transaction.txid(),
-            name = %name.as_str(),
-            action = action.as_str(),
-            "controller challenged"
-        );
-        true
-    } else {
-        tracing::debug!(
-            lane,
-            name = %name.as_str(),
-            action = action.as_str(),
-            "controller challenge rejected — deferred"
-        );
-        false
+    match source
+        .submit_until_answered(&transaction, "controller challenge")
+        .await
+    {
+        crate::zcash::SubmitOutcome::Accepted | crate::zcash::SubmitOutcome::Mined => {
+            challenges.issue(pending);
+            tracing::info!(
+                lane,
+                txid = %transaction.txid(),
+                name = %name.as_str(),
+                action = action.as_str(),
+                "controller challenged"
+            );
+            true
+        }
+        crate::zcash::SubmitOutcome::Rejected(_) => {
+            tracing::debug!(
+                lane,
+                name = %name.as_str(),
+                action = action.as_str(),
+                "controller challenge rejected — deferred"
+            );
+            false
+        }
     }
 }
 

@@ -27,7 +27,9 @@ use zns_mint::mint::{
     relay, watch_mempool, Action, Challenge, MintInbound, Request, REGISTRY_ACCOUNT,
     TREASURY_ACCOUNT,
 };
-use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession, TransportError, RETRY_PAUSE};
+use zns_mint::zcash::{
+    CanonicalBlockSource, JsonRpc, SubmitOutcome, TipSession, TransportError, RETRY_PAUSE,
+};
 
 #[tokio::main]
 async fn main() {
@@ -98,7 +100,10 @@ async fn main() {
         let (best_height, _) = tokio::select! {
             tip = connection.next_tip(&source) => match tip {
                 Ok(tip) => tip,
-                Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
+                Err(error) => {
+                    tracing::error!(%error, "canonical tip unusable; waiting for the next notification");
+                    continue;
+                }
             },
             Some((inbound, paid)) = quick_rx.recv() => {
                 // The quick entrance: evaluate now, forget immediately —
@@ -172,7 +177,12 @@ async fn main() {
                         continue 'run;
                     }
                     Err(error) => {
-                        panic!("FATAL: Zebra returned an invalid ancestor hash: {error}")
+                        tracing::error!(
+                            %error,
+                            height = u32::from(ancestor),
+                            "ancestor hash unusable; waiting for the next notification"
+                        );
+                        continue 'run;
                     }
                 }
             };
@@ -261,7 +271,12 @@ async fn main() {
                         continue 'run;
                     }
                     Err(error) => {
-                        panic!("FATAL: Zebra returned an invalid previous chain state: {error}")
+                        tracing::error!(
+                            %error,
+                            height = u32::from(from_height),
+                            "previous chain state unusable; waiting for the next notification"
+                        );
+                        continue 'run;
                     }
                 }
             };
@@ -285,7 +300,12 @@ async fn main() {
                         continue 'run;
                     }
                     Err(error) => {
-                        panic!("FATAL: Zebra returned an invalid canonical block: {error}")
+                        tracing::error!(
+                            %error,
+                            height = u32::from(next_height),
+                            "canonical block unusable; waiting for the next notification"
+                        );
+                        continue 'run;
                     }
                 }
             };
@@ -345,8 +365,9 @@ async fn main() {
             .current_day()
             .expect("FATAL: MTP unavailable at the applied tip");
         oracle.accumulate(fetch_round().await, today, mtp_now);
-        // Transient → skip rules to next tip (like the tip-mismatch
-        // branch below); race → re-converge; bad data → fatal.
+        // Transient → skip rules until the next notification. A tip
+        // race re-converges. An unusable answer does too: the mint
+        // stays up and reads the node again.
         let exact_tip = match source.canonical_tip().await {
             Ok(tip) => tip,
             Err(error) if error.is_retryable() => {
@@ -360,7 +381,10 @@ async fn main() {
                 tracing::warn!("tip lane returned NotOnBestChain; re-converging");
                 continue 'run;
             }
-            Err(error) => panic!("FATAL: Zebra returned an invalid tip: {error}"),
+            Err(error) => {
+                tracing::error!(%error, "post-catch-up tip unusable; skipping rules this notification");
+                continue;
+            }
         };
         if exact_tip != (tip, tip_hash) {
             tracing::warn!(
@@ -666,6 +690,7 @@ async fn main() {
             // an update in the same shape may be racing a sibling, and
             // stays queued instead.
             if note.action().is_release()
+                && name_notes.pending_txid(index).is_none()
                 && wallet
                     .unspent_ironwood_note_by_nullifier(
                         REGISTRY_ACCOUNT,
@@ -680,6 +705,15 @@ async fn main() {
                 );
                 name_notes.remove(index);
                 continue;
+            }
+
+            match resubmit_name_note(&source, &wallet, &mut name_notes, index, tip).await {
+                OpenOrder::Removed => continue,
+                OpenOrder::Stay => {
+                    index += 1;
+                    continue;
+                }
+                OpenOrder::Build => {}
             }
 
             let Some(transaction) = assemble::prepare(
@@ -703,22 +737,10 @@ async fn main() {
                 continue;
             };
 
-            if source.submit(&transaction, "NameNote").await {
-                tracing::info!(
-                    txid = %transaction.txid(),
-                    name = %note.name().as_str(),
-                    action = note.action().as_str(),
-                    "NameNote order sent — the wallet holds it until the chain answers"
-                );
-                name_notes.remove(index);
-            } else {
-                tracing::error!(
-                    txid = %transaction.txid(),
-                    name = %note.name().as_str(),
-                    action = note.action().as_str(),
-                    "NameNote submission rejected — inputs stranded until expiry"
-                );
-                index += 1;
+            name_notes.mark_submitted(index, transaction.txid());
+            match submit_name_note(&source, &transaction, &note, &mut name_notes, index).await {
+                OpenOrder::Removed => continue,
+                OpenOrder::Stay | OpenOrder::Build => index += 1,
             }
         }
 
@@ -731,7 +753,7 @@ async fn main() {
             today,
             previous_day,
         ) {
-            source.submit(&tx, "vault sweep").await;
+            source.submit_until_answered(&tx, "vault sweep").await;
         }
 
         tracing::debug!(
@@ -739,5 +761,97 @@ async fn main() {
             hash = %tip_hash,
             "mint rules applied at canonical tip"
         );
+    }
+}
+
+/// What the Name Note drain should do with the order at `index`.
+enum OpenOrder {
+    /// No live broadcast. Build one.
+    Build,
+    /// A broadcast is still outstanding. Leave the order and move on.
+    Stay,
+    /// The order left the queue. The index already points at the next one.
+    Removed,
+}
+
+/// Resubmits the order's recorded transaction, if it still blocks its inputs.
+async fn resubmit_name_note<P: zcash_protocol::consensus::Parameters>(
+    source: &CanonicalBlockSource,
+    wallet: &zns_mint::wallet::Wallet<P>,
+    name_notes: &mut NameNoteQueue,
+    index: usize,
+    tip: BlockHeight,
+) -> OpenOrder {
+    use zcash_client_backend::data_api::WalletRead as _;
+
+    let Some(txid) = name_notes.pending_txid(index) else {
+        return OpenOrder::Build;
+    };
+    if wallet.expired_unmined_at(txid, tip) {
+        tracing::warn!(%txid, "NameNote broadcast expired; building a successor");
+        name_notes.clear_submission(index);
+        return OpenOrder::Build;
+    }
+    let Ok(Some(transaction)) = wallet.get_transaction(txid) else {
+        tracing::error!(%txid, "NameNote broadcast missing from the wallet; building a successor");
+        name_notes.clear_submission(index);
+        return OpenOrder::Build;
+    };
+    let note = name_notes.entry(index).0.clone();
+    submit_name_note(source, &transaction, &note, name_notes, index).await
+}
+
+/// Sends `transaction` once and applies the node's answer to the order.
+async fn submit_name_note(
+    source: &CanonicalBlockSource,
+    transaction: &zcash_primitives::transaction::Transaction,
+    note: &zns_mint::mint::note::NameNote,
+    name_notes: &mut NameNoteQueue,
+    index: usize,
+) -> OpenOrder {
+    let txid = transaction.txid();
+    match source.submit(transaction, "NameNote").await {
+        Ok(SubmitOutcome::Mined) => {
+            tracing::info!(
+                %txid,
+                name = %note.name().as_str(),
+                action = note.action().as_str(),
+                "NameNote order mined"
+            );
+            name_notes.remove(index);
+            OpenOrder::Removed
+        }
+        Ok(SubmitOutcome::Accepted) => {
+            tracing::info!(
+                %txid,
+                name = %note.name().as_str(),
+                action = note.action().as_str(),
+                "NameNote order in the mempool; waiting for a block"
+            );
+            OpenOrder::Stay
+        }
+        Ok(SubmitOutcome::Rejected(error)) => {
+            tracing::error!(
+                %error,
+                %txid,
+                name = %note.name().as_str(),
+                action = note.action().as_str(),
+                "NameNote submission rejected; inputs stay locked until expiry"
+            );
+            // The rejected bytes must not be sent again. The order stays
+            // so a successor can be built once the wallet releases them.
+            name_notes.clear_submission(index);
+            OpenOrder::Stay
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                %txid,
+                name = %note.name().as_str(),
+                action = note.action().as_str(),
+                "NameNote submission uncertain; resubmitting next tip"
+            );
+            OpenOrder::Stay
+        }
     }
 }

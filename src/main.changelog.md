@@ -1,5 +1,14 @@
 # main.changelog.md
 
+## 2026-09-24 — A Name Note order stays until it is mined
+
+- An unusable Zebra answer logs and waits for the next notification.
+  It does not abort the process.
+- Mempool acceptance records the txid and resubmits those bytes on
+  later tips. The order leaves when the node reports it mined, or when
+  the world overtakes it. Rejection is not retried; expiry may build
+  a successor. A vault sweep still waits until the node answers.
+
 ## 2026-09-24 — Remove the seven-day liveness reminder (#174)
 
 - The mint no longer sends automatic OTP challenges as a liveness

@@ -205,6 +205,13 @@ impl RpcError {
     pub fn is_tx_already_in_chain(&self) -> bool {
         self.code == -27
     }
+
+    /// The node already has this transaction in its mempool. The message
+    /// is the discriminator: -26 is also a policy rejection.
+    pub fn is_already_in_mempool(&self) -> bool {
+        let message = self.message.to_ascii_lowercase();
+        message.contains("already in mempool") || message.contains("already in the mempool")
+    }
 }
 
 /// Maps the node's -8 rejection to [`TransportError::NotOnBestChain`], so a
@@ -246,7 +253,11 @@ impl TransportError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::Client(_) | Self::Hyper(_) | Self::Timeout | Self::HttpStatus(500..=599)
+            Self::Client(_)
+                | Self::Hyper(_)
+                | Self::Timeout
+                | Self::HttpStatus(429)
+                | Self::HttpStatus(500..=599)
         ) || matches!(self, Self::Tonic(status) if matches!(status.code(), tonic::Code::Unavailable))
     }
 }

@@ -153,8 +153,8 @@ pub enum Lookup {
 pub enum LookupError {
     /// Transport, timeout, or 5xx. Queue entry retried next tip.
     Transient,
-    /// 4xx, non-JSON body, unparsable `expires_at`, or multi-row for
-    /// one `normalized_name`. Retrying observes the same state; the
+    /// Non-429 4xx, non-JSON body, unparsable `expires_at`, or multi-row
+    /// for one `normalized_name`. Retrying observes the same state; the
     /// claim is dropped.
     Terminal,
 }
@@ -289,10 +289,9 @@ fn classify(rows: &[ProtectedRow], name: &Name, mtp: Timestamp) -> Result<Lookup
 /// `mtp` is the current canonical-chain MTP; used to decide whether a
 /// row's `expires_at` still gates the claim.
 ///
-/// Error kind reflects retry semantics: transport, timeout, and 5xx
-/// are [`LookupError::Transient`]; a 4xx status, malformed body, or
-/// malformed `expires_at` are [`LookupError::Terminal`] — retrying
-/// won't help until an operator changes state.
+/// Error kind reflects retry semantics: transport, timeout, 429, and
+/// 5xx are [`LookupError::Transient`]; any other 4xx, a malformed body,
+/// or a malformed `expires_at` are [`LookupError::Terminal`].
 pub async fn lookup_name(name: &Name, mtp: Timestamp) -> Result<Lookup, LookupError> {
     let url = format!(
         "{}?normalized_name=eq.{}&select=expires_at",
@@ -341,7 +340,9 @@ pub async fn lookup_name(name: &Name, mtp: Timestamp) -> Result<Lookup, LookupEr
         // may recover on its own. 4xx is a caller-side or config
         // problem (auth revoked, table missing, filter rejected) that
         // won't change without operator action.
-        let kind = if status.is_server_error() {
+        // 429 is a rate limit: the row has not been classified. 5xx may
+        // clear on its own. Other 4xx is auth, schema, or a missing table.
+        let kind = if status.as_u16() == 429 || status.is_server_error() {
             LookupError::Transient
         } else {
             LookupError::Terminal
