@@ -18,7 +18,7 @@ use zcash_client_backend::data_api::{
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
-use zcash_primitives::transaction::fees::zip317::FeeError;
+use zcash_primitives::transaction::fees::zip317::{FeeError, MINIMUM_FEE};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::memo::MemoBytes;
@@ -35,6 +35,10 @@ pub const SWEEP_MINIMUM: Zatoshis = Zatoshis::const_from_u64(100_000_000);
 /// Amount retained as Treasury change after a sweep (0.01 ZEC): the
 /// operating float that funds the next Name Note's fee.
 pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
+
+/// Amount paid to the controller with an OTP challenge memo. This is the
+/// payment value; the transaction's ZIP-317 fee is calculated separately.
+pub const CHALLENGE_RELAY_VALUE: Zatoshis = MINIMUM_FEE;
 
 /// The project vault's P2PKH address (placeholder pending final approved
 /// address).
@@ -178,7 +182,7 @@ pub fn sweep_to_vault<P: Parameters>(
 /// Proposes, builds, and records a Treasury payment carrying an OTP challenge
 /// memo to the controller. Funded from Treasury notes via upstream's generic
 /// selection path. Returns `None` when the Treasury cannot cover the relay
-/// value and fee; the lane retries next tip.
+/// payment and transaction fee; the lane retries next tip.
 #[allow(clippy::too_many_arguments)]
 pub fn challenge<P: Parameters>(
     network: &P,
@@ -188,11 +192,10 @@ pub fn challenge<P: Parameters>(
     output_prover: &sapling::circuit::OutputParameters,
     controller: &zcash_keys::address::UnifiedAddress,
     memo: MemoBytes,
-    relay_value: Zatoshis,
 ) -> Option<Transaction> {
     let Some(request) = zip321::Payment::new(
         zcash_keys::address::Address::Unified(controller.clone()).to_zcash_address(network),
-        Some(relay_value),
+        Some(CHALLENGE_RELAY_VALUE),
         Some(memo),
         None,
         None,

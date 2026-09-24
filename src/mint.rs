@@ -18,7 +18,6 @@ pub use time::Timestamp;
 
 pub use zcash_keys::address::UnifiedAddress;
 
-use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::memo::{Memo, MemoBytes};
@@ -632,7 +631,6 @@ pub async fn relay<P: Parameters + Send + 'static>(
         output_prover,
         controller_ua,
         memo,
-        MINIMUM_FEE,
     ) else {
         tracing::debug!(
             lane,
