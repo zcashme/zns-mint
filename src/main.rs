@@ -5,14 +5,13 @@
 //! `main` is then a pure run loop: it follows Zebra's canonical chain,
 //! scans each new block, enforces the Registry transition law, services
 //! Treasury memos (paid claims, update and release requests, OTP echoes),
-//! runs the lifecycle (expiry releases and liveness challenges), and
+//! runs the lifecycle (expiry releases), and
 //! sweeps the Treasury. The mint authors no genesis state: the anchor
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
 use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 
@@ -21,13 +20,11 @@ use tokio::sync::mpsc;
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::note::NameNoteQueue;
-use zns_mint::mint::otp::{OtpQueue, OtpRequest};
+use zns_mint::mint::otp::OtpQueue;
 use zns_mint::mint::pricing::fetch_round;
-use zns_mint::mint::registry::NameRecord;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
-    relay, watch_mempool, Action, MintInbound, Request, CHALLENGE_LEAD, LIVENESS_RETRY_COOLDOWN,
-    REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    relay, watch_mempool, Action, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession, TransportError, RETRY_PAUSE};
 
@@ -180,20 +177,33 @@ async fn main() {
             if wallet_hash == Some(canonical_hash) {
                 break;
             }
-            ancestor = BlockHeight::from_u32(u32::from(ancestor) - 1);
+            // Height 0 has no predecessor. Subtracting would wrap; the walk
+            // has already exhausted the chain.
+            let Some(prev) = u32::from(ancestor).checked_sub(1) else {
+                panic!(
+                    "FATAL: no common ancestor within the wallet's applied chain \
+                     (data exhausted at height {})",
+                    u32::from(ancestor)
+                );
+            };
+            ancestor = BlockHeight::from_u32(prev);
         }
 
         if ancestor < chain_tip.block_height() {
-            registry.truncate_to_height(ancestor);
+            // The wallet commits first. A refusal leaves the other faculties
+            // where they were. They then follow the height that committed,
+            // which can be the boot origin below the requested ancestor.
             chain_tip = wallet
                 .truncate_to(ancestor)
                 .expect("FATAL: wallet could not rewind to the common ancestor");
+            let rewound = chain_tip.block_height();
+            registry.truncate_to_height(rewound);
 
-            // Rebuild the entire MTP window at the ancestor. Retaining a
+            // Rebuild the entire MTP window at the committed height. Retaining a
             // partial old window and appending the same heights again would
             // mix histories after a deep reorg.
             mtp = zns_mint::mint::mtp::MtpTracker::default();
-            mtp.backfill(ancestor, |height| {
+            mtp.backfill(rewound, |height| {
                 let source = source.clone();
                 async move {
                     let (_, _, timestamp) = source.get_block_header(height).await?;
@@ -206,10 +216,10 @@ async fn main() {
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
-            name_notes.truncate_to(ancestor);
-            requests.truncate_to(ancestor);
+            name_notes.truncate_to(rewound);
+            requests.truncate_to(rewound);
             tracing::warn!(
-                height = u32::from(ancestor),
+                height = u32::from(rewound),
                 hash = %chain_tip.block_hash(),
                 "mint rewound to canonical ancestor"
             );
@@ -395,7 +405,14 @@ async fn main() {
                         // consumes — the challenge stands, retryable with
                         // the same OTP inside D_OTP.
                         if let Some(term) = sent.term {
-                            if paid < oracle.quote(&echo.name, term) {
+                            let Some(price) = oracle.quote(&echo.name, term) else {
+                                tracing::debug!(
+                                    name = %echo.name.as_str(),
+                                    "update quote does not fit — attempt void, challenge stands"
+                                );
+                                break 'lane true;
+                            };
+                            if paid < price {
                                 tracing::debug!(
                                     name = %echo.name.as_str(),
                                     paid = paid.into_u64(),
@@ -488,10 +505,13 @@ async fn main() {
                             }
                             zns_mint::mint::presale::Decision::Allow => {}
                         }
-                        let price = oracle.quote(name, *term);
                         // Payment gate: the quote at first sight is binding.
-                        // An underpaid claim is dead and silent; a new
-                        // payment settles a new evaluation.
+                        // An underpaid claim, or one whose quote does not
+                        // fit, is dead and silent; a new payment settles
+                        // a new evaluation.
+                        let Some(price) = oracle.quote(name, *term) else {
+                            break 'lane true;
+                        };
                         if paid < price {
                             break 'lane true;
                         }
@@ -558,92 +578,6 @@ async fn main() {
         for (name, release_note) in registry.releases_due(mtp_now) {
             tracing::info!(name = %name.as_str(), "lifecycle release authorized");
             name_notes.admit(tip, release_note);
-        }
-
-        // Liveness lead, §4.5.4: during the final OTP window the mint
-        // challenges the current controller to renew liveness. The
-        // snapshot stays — the lead loop needs each record.
-        let records = registry
-            .name_chain()
-            .map(|(name, record)| (name.clone(), record.clone()))
-            .collect::<Vec<(zns_mint::mint::Name, NameRecord)>>();
-        for (name, record) in records {
-            if record.action.is_release() {
-                continue;
-            }
-
-            // Liveness lead: while `mtp_now` is within CHALLENGE_LEAD of the
-            // deadline, ask the current controller to prove control. Skip if
-            // an OTP is still in play OR the same record was challenged
-            // inside its cooldown. Both are anti-spam bounds; without them a
-            // 7-day lead would issue up to ~336 challenges per name.
-            //
-            // Liveness is a mint-originated Relay, not a WP §5 Request →
-            // Relay → Respond authorization: the mint hasn't been asked
-            // anything, it is reminding the controller a deadline is near.
-            // Liveness is only *satisfied* when a fresh update Name Note
-            // lands (a real §5 flow the controller initiates), which resets
-            // `release_deadline` via `NameRecord::from_received`.
-            //
-            // The `liveness_issued` ledger lives in `OtpQueue`, which resets
-            // on restart and on any reorg (both call `OtpQueue::new()`), so
-            // a re-challenge inside the cooldown can occur after either.
-            // Harmless — an extra reminder to a live controller — but worth
-            // knowing when reading the logs.
-            let due_in = record.release_deadline.as_seconds() - mtp_now.as_seconds();
-            let cooldown = time::Duration::seconds(LIVENESS_RETRY_COOLDOWN);
-            if due_in > CHALLENGE_LEAD
-                || challenges.pending(
-                    &name,
-                    Action::Update,
-                    &record.ua,
-                    record.commitment,
-                    mtp_now,
-                )
-                || challenges.liveness_recently_issued(&name, record.commitment, mtp_now, cooldown)
-            {
-                continue;
-            }
-
-            let (challenge, pending) = OtpRequest::pending_challenge(
-                &name,
-                Action::Update,
-                &record.ua,
-                record.commitment,
-                None,
-                mtp_now,
-            );
-            let memo = challenge
-                .encode(&network)
-                .expect("liveness challenges are always encodable");
-            let relay_value = MINIMUM_FEE;
-            let Some(transaction) = treasury::challenge(
-                &network,
-                &mut wallet,
-                &treasury_keys,
-                &sapling_spend,
-                &sapling_output,
-                &record.ua,
-                memo,
-                relay_value,
-            ) else {
-                tracing::debug!(
-                    name = %name.as_str(),
-                    "liveness challenge awaits Treasury funds"
-                );
-                continue;
-            };
-
-            let accepted = source.submit(&transaction, "liveness challenge").await;
-            if accepted {
-                challenges.issue(pending);
-                challenges.mark_liveness_issued(name.clone(), record.commitment, mtp_now);
-                tracing::info!(
-                    txid = %transaction.txid(),
-                    name = %name.as_str(),
-                    "liveness challenge submitted"
-                );
-            }
         }
 
         // --- NameNote enactment ---

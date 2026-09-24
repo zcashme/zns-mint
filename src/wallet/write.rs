@@ -94,12 +94,13 @@ impl<P: Parameters> Wallet<P> {
     /// still truncate to, identical across the three trees by the commit
     /// discipline. `None` before the first applied block.
     fn retained_floor(&self) -> Option<BlockHeight> {
-        // The store error type is `Infallible`; `.ok()` cannot lose one.
-        self.sapling_tree.store().min_checkpoint_id().ok().flatten()
+        super::from_infallible(self.sapling_tree.store().min_checkpoint_id())
     }
 
-    /// The deepest applied block at or below `max_height` — the candidate
-    /// `try_truncate_trees_to` verifies against the trees.
+    /// The deepest applied block at or below `max_height`.
+    ///
+    /// `None` when every applied block sits above `max_height`. The boot
+    /// origin is a checkpoint, not an applied block, so it is not here.
     fn common_truncation_height(&self, max_height: BlockHeight) -> Option<BlockHeight> {
         self.blocks
             .range(..=max_height)
@@ -113,24 +114,9 @@ impl<P: Parameters> Wallet<P> {
     /// replaced only when all three succeed, so a failure leaves them unchanged.
     fn try_truncate_trees_to(&mut self, height: BlockHeight) -> Result<bool, WalletError> {
         let present = [
-            self.sapling_tree
-                .store()
-                .get_checkpoint(&height)
-                .ok()
-                .flatten()
-                .is_some(),
-            self.orchard_tree
-                .store()
-                .get_checkpoint(&height)
-                .ok()
-                .flatten()
-                .is_some(),
-            self.ironwood_tree
-                .store()
-                .get_checkpoint(&height)
-                .ok()
-                .flatten()
-                .is_some(),
+            super::from_infallible(self.sapling_tree.store().get_checkpoint(&height)).is_some(),
+            super::from_infallible(self.orchard_tree.store().get_checkpoint(&height)).is_some(),
+            super::from_infallible(self.ironwood_tree.store().get_checkpoint(&height)).is_some(),
         ];
         if present.iter().any(|have| !have) {
             return Ok(false);
@@ -160,12 +146,11 @@ impl<P: Parameters> Wallet<P> {
     /// Drops applied blocks above `height` and removes effects that belonged
     /// only to the abandoned branch.
     ///
-    /// Received notes (and their nullifiers, memos, and indexes) created above
-    /// `height` are deleted — otherwise they linger as phantom pending value.
-    /// Spend links whose spending transaction was mined above `height` and
-    /// was observed only through scanning (no retained raw transaction) are
-    /// cleared so the note is selectable again; locally built spends keep
-    /// their raw transaction and stay blocked until expiry.
+    /// Received notes created above `height` are deleted, along with their
+    /// nullifiers, memos, indexes, and locks. Scanned-only spends of
+    /// surviving notes are cleared so the note is selectable again; a
+    /// locally built spend keeps its raw transaction, sent outputs, and
+    /// trust mark, and stays blocked until expiry.
     fn drop_applied_above(&mut self, height: BlockHeight) {
         let orphaned: HashSet<TxId> = self
             .transaction_statuses
@@ -188,6 +173,10 @@ impl<P: Parameters> Wallet<P> {
             .retain(|note_id, _| !orphaned.contains(note_id.txid()));
         self.transaction_indices
             .retain(|txid, _| !orphaned.contains(txid));
+        // Sent rows exist for locally built transactions. A scanned
+        // transaction has none; drop a stray row with the orphaned txid.
+        self.sent_outputs
+            .retain(|txid, _| self.transactions.contains_key(txid) || !orphaned.contains(txid));
 
         // Scanned-only spends have no raw transaction; after un-mining they
         // would block forever. Locally built spends remain until expiry.
@@ -219,6 +208,29 @@ impl<P: Parameters> Wallet<P> {
             .retain(|_, end| *end <= height);
 
         self.blocks.retain(|h, _| *h <= height);
+
+        // A lock whose note was deleted can no longer be acquired or listed.
+        let stale_locks: Vec<_> = self
+            .locks
+            .keys()
+            .copied()
+            .filter(|output| self.output_account(output).is_none())
+            .collect();
+        for output in stale_locks {
+            self.locks.remove(&output);
+        }
+    }
+
+    /// Rewinds to the boot-origin checkpoint when `max_height` reaches it
+    /// and the checkpoint is still retained. A pruned origin, or a request
+    /// below the origin, is [`WalletError::TruncationTargetUnavailable`].
+    fn truncate_to_origin(&mut self, max_height: BlockHeight) -> Result<BlockHeight, WalletError> {
+        let origin = self.seed.block_height();
+        if max_height >= origin && self.try_truncate_trees_to(origin)? {
+            self.drop_applied_above(origin);
+            return Ok(origin);
+        }
+        Err(WalletError::TruncationTargetUnavailable(max_height))
     }
 }
 
@@ -651,7 +663,8 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
                 // Nothing has been applied; there is nothing to truncate.
                 return Ok(max_height);
             }
-            return Err(WalletError::TruncationTargetUnavailable(max_height));
+
+            return self.truncate_to_origin(max_height);
         };
 
         // Trees first on clones: on failure the live trees and tables stay
@@ -1070,15 +1083,8 @@ impl<P: Parameters> Wallet<P> {
             .map_err(|_| WalletError::InvalidNameNote("Ironwood action index does not fit u16"))?;
         let note_id = NoteId::new(txid, ShieldedPool::Ironwood, output_index);
 
-        if let Some(existing) = self.ironwood_notes.get(&note_id) {
-            if existing.note_commitment_tree_position() != position
-                || existing.nf().copied() != Some(nullifier)
-            {
-                return Err(WalletError::InvalidNameNote(
-                    "NoteId already identifies a different Ironwood note",
-                ));
-            }
-        }
+        // Nullifier collision: a different NoteId with the same nullifier
+        // means the nullifier was derived from a different note — refused.
         if let Some(owner) = self.ironwood_nullifiers.get(&nullifier) {
             if *owner != note_id {
                 return Err(WalletError::InvalidNameNote(
@@ -1086,14 +1092,60 @@ impl<P: Parameters> Wallet<P> {
                 ));
             }
         }
-        if self
+        // Binding check (committed fields): the note's commitment must match
+        // the tree leaf at position; the root from the path + note must equal
+        // the Ironwood anchor at this height.
+        let path = self
             .ironwood_witness(position, height)
             .map_err(WalletError::CommitmentTree)?
-            .is_none()
-        {
-            return Err(WalletError::InvalidNameNote(
+            .ok_or(WalletError::InvalidNameNote(
                 "no Ironwood witness at position for this height",
+            ))?;
+        let note_cmx: orchard::note::NoteCommitment = note.commitment();
+        let leaf = orchard::tree::MerkleHashOrchard::from_cmx(&(note_cmx.into()));
+        let computed_root = path.root(leaf);
+        let anchor = self
+            .ironwood_anchor(height)
+            .map_err(WalletError::CommitmentTree)?
+            .ok_or(WalletError::InvalidNameNote(
+                "no Ironwood anchor at height for binding check",
+            ))?;
+        if computed_root.to_bytes() != anchor.to_bytes() {
+            return Err(WalletError::InvalidNameNote(
+                "note commitment does not match tree root at height",
             ));
+        }
+
+        // Byte-identical retry (uncommitted fields): if the NoteId exists,
+        // every stored field must match byte-for-byte; any divergence is a
+        // refusal, not a silent overwrite.
+        if let Some(existing) = self.ironwood_notes.get(&note_id) {
+            if existing.note_commitment_tree_position() != position
+                || existing.nf().copied() != Some(nullifier)
+                || existing.note().0 != note
+                || existing.ephemeral_key().as_ref() != ephemeral_key.as_ref()
+                || existing.note().1 != orchard::ValuePool::Ironwood
+                || existing.account_id() != &REGISTRY_ACCOUNT
+                || existing.recipient_key_scope() != Some(zip32::Scope::External)
+            {
+                return Err(WalletError::InvalidNameNote(
+                    "NoteId exists with divergent fields",
+                ));
+            }
+            // Compare memo byte-for-byte via PartialEq on Memo.
+            let existing_memo = self.memos.get(&note_id);
+            let new_memo = Memo::Future(
+                zcash_protocol::memo::MemoBytes::from_bytes(&memo).map_err(|_| {
+                    WalletError::InvalidNameNote("memo bytes are not valid MemoBytes")
+                })?,
+            );
+            if existing_memo != Some(&new_memo) {
+                return Err(WalletError::InvalidNameNote(
+                    "NoteId exists with divergent memo",
+                ));
+            }
+            // Idempotent no-op: byte-identical retry succeeds without mutation.
+            return Ok(());
         }
 
         let memo = Memo::Future(
@@ -1352,7 +1404,7 @@ mod tests {
     #[test]
     fn truncate_clears_orphaned_receives_and_scanned_spends() {
         use zcash_client_backend::data_api::TransactionStatus;
-        use zcash_client_backend::wallet::NoteId;
+        use zcash_client_backend::wallet::{NoteId, OutputRef};
         use zcash_primitives::transaction::TxId;
 
         let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
@@ -1398,6 +1450,15 @@ mod tests {
             .transaction_statuses
             .insert(orphan_spend, TransactionStatus::Mined(h2));
         assert!(!wallet.transactions.contains_key(&orphan_spend));
+        wallet.sent_outputs.insert(orphan_spend, Vec::new());
+        let orphan_lock = OutputRef::from(note_h2);
+        let kept_lock = OutputRef::from(note_h1);
+        wallet
+            .locks
+            .insert(orphan_lock, (LockOwner::new([2; 32]), h2));
+        wallet
+            .locks
+            .insert(kept_lock, (LockOwner::new([3; 32]), h2));
 
         WalletWrite::truncate_to_height(wallet, h1).expect("h1 remains a checkpoint");
 
@@ -1412,6 +1473,18 @@ mod tests {
         assert!(
             !wallet.sapling_note_spends.contains_key(&note_h1),
             "scanned-only spend mined above the truncation height must clear"
+        );
+        assert!(
+            !wallet.sent_outputs.contains_key(&orphan_spend),
+            "scanned-only sent row mined above the truncation height must clear"
+        );
+        assert!(
+            !wallet.locks.contains_key(&orphan_lock),
+            "lock on a deleted note must clear"
+        );
+        assert!(
+            wallet.locks.contains_key(&kept_lock),
+            "lock on a surviving note must stay"
         );
 
         let account_id = st.test_account().unwrap().id();
@@ -1802,6 +1875,33 @@ mod tests {
         // Truncation does not lower knowledge: no clamp behind the writer.
         st.wallet_mut().truncate_to_height(h1).unwrap();
         assert_eq!(st.wallet().zebra_tip, Some(h2));
+    }
+
+    /// A request at the boot origin, with blocks applied above it, rewinds
+    /// to that checkpoint and clears the applied chain.
+    #[test]
+    fn truncate_to_the_boot_origin_clears_applied_blocks() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let origin = st.wallet().seed.block_height();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50_000);
+        let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h1, 1);
+        assert!(st.wallet().tip().block_height() > origin);
+        assert!(!st.wallet().sapling_notes.is_empty());
+
+        let metadata = st
+            .wallet_mut()
+            .truncate_to(origin)
+            .expect("origin checkpoint is retained");
+        assert_eq!(metadata.block_height(), origin);
+        assert_eq!(st.wallet().tip().block_height(), origin);
+        assert!(st.wallet().blocks.is_empty());
+        assert!(
+            st.wallet().sapling_notes.is_empty(),
+            "notes mined above the origin must be dropped"
+        );
     }
 
     /// A request above the applied tip commits the tip and returns it.

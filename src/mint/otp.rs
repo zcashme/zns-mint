@@ -1,7 +1,5 @@
 //! OTP auth for locked names.
 //!
-use std::collections::BTreeMap;
-
 use rand::Rng;
 use subtle::ConstantTimeEq;
 use time::{Duration, Timestamp};
@@ -109,12 +107,10 @@ impl OtpRequest {
     }
 }
 
-/// Issued challenges, in order, plus a rate-limit ledger for liveness
-/// challenges.
+/// Issued challenges, in order.
 #[derive(Clone)]
 pub struct OtpQueue {
     challenges: Vec<OtpRequest>,
-    liveness_issued: BTreeMap<(Name, [u8; 32]), Timestamp>,
 }
 
 impl Default for OtpQueue {
@@ -127,7 +123,6 @@ impl OtpQueue {
     pub fn new() -> Self {
         Self {
             challenges: Vec::new(),
-            liveness_issued: BTreeMap::new(),
         }
     }
 
@@ -207,32 +202,6 @@ impl OtpQueue {
         }
         false
     }
-
-    /// True while a liveness challenge issued for this current record is
-    /// still inside its cooldown window. Prunes elapsed entries.
-    ///
-    /// Independent of `pending`: the OTP code's own TTL is `D_OTP`, but the
-    /// rate limit on issuing a *new* code lives here.
-    pub fn liveness_recently_issued(
-        &mut self,
-        name: &Name,
-        tip_rcm: NameCommitment,
-        mtp: Timestamp,
-        cooldown: Duration,
-    ) -> bool {
-        self.liveness_issued
-            .retain(|_, last| mtp - *last < cooldown);
-        self.liveness_issued
-            .contains_key(&(name.clone(), tip_rcm.to_bytes()))
-    }
-
-    /// Records a liveness challenge issuance for rate-limiting. The key is
-    /// the current record's `(name, rcm)`; a subsequent accepted update
-    /// (new commitment) leaves the old entry stale, and it lapses on the
-    /// next `liveness_recently_issued` prune.
-    pub fn mark_liveness_issued(&mut self, name: Name, tip_rcm: NameCommitment, mtp: Timestamp) {
-        self.liveness_issued.insert((name, tip_rcm.to_bytes()), mtp);
-    }
 }
 
 #[cfg(test)]
@@ -287,82 +256,6 @@ mod tests {
         );
         assert_eq!(pending.term, Some(Term::Years(1)));
         assert_eq!(pending.tip_rcm, rcm);
-    }
-
-    #[test]
-    fn liveness_ledger_marks_and_clears_by_cooldown() {
-        let mut q = OtpQueue::new();
-        let alice = test_name("alice");
-        let rcm = commitment(1);
-        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
-        let cooldown = Duration::seconds(3600);
-
-        // Fresh record: no throttle.
-        assert!(!q.liveness_recently_issued(&alice, rcm, t0, cooldown));
-
-        // Marked: throttle holds through the cooldown window.
-        q.mark_liveness_issued(alice.clone(), rcm, t0);
-        assert!(q.liveness_recently_issued(&alice, rcm, t0, cooldown));
-        assert!(q.liveness_recently_issued(&alice, rcm, t0 + Duration::seconds(1_800), cooldown));
-
-        // Exactly at cooldown: released (the guard is strict `<`).
-        assert!(!q.liveness_recently_issued(&alice, rcm, t0 + Duration::seconds(3_600), cooldown));
-    }
-
-    #[test]
-    fn liveness_ledger_scopes_by_commitment() {
-        // A fresh update produces a new NameCommitment and must NOT inherit
-        // the previous record's throttle — the mint may challenge the new
-        // record immediately.
-        let mut q = OtpQueue::new();
-        let alice = test_name("alice");
-        let old_rcm = commitment(1);
-        let new_rcm = commitment(2);
-        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
-        let cooldown = Duration::seconds(3600);
-
-        q.mark_liveness_issued(alice.clone(), old_rcm, t0);
-        assert!(q.liveness_recently_issued(&alice, old_rcm, t0, cooldown));
-        assert!(!q.liveness_recently_issued(&alice, new_rcm, t0, cooldown));
-    }
-
-    #[test]
-    fn liveness_ledger_scopes_by_name() {
-        // Different names never share a throttle entry.
-        let mut q = OtpQueue::new();
-        let alice = test_name("alice");
-        let bob = test_name("bob");
-        let rcm = commitment(1);
-        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
-        let cooldown = Duration::seconds(3600);
-
-        q.mark_liveness_issued(alice.clone(), rcm, t0);
-        assert!(!q.liveness_recently_issued(&bob, rcm, t0, cooldown));
-    }
-
-    #[test]
-    fn liveness_ledger_is_independent_of_challenge_queue() {
-        // The rate-limit ledger is not the OTP-code queue: `pending` and
-        // `accept` are unaffected by `mark_liveness_issued`.
-        let mut q = OtpQueue::new();
-        let alice = test_name("alice");
-        let rcm = commitment(1);
-        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
-        let cooldown = Duration::seconds(3600);
-
-        q.mark_liveness_issued(alice.clone(), rcm, t0);
-        // Ledger throttles, but the code queue is empty.
-        assert!(q.liveness_recently_issued(&alice, rcm, t0, cooldown));
-        // No pending challenge for this record.
-        let ua_str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
-        let ua = match zcash_keys::address::Address::decode(
-            &zcash_protocol::consensus::MAIN_NETWORK,
-            ua_str,
-        ) {
-            Some(zcash_keys::address::Address::Unified(u)) => u,
-            _ => panic!("test UA"),
-        };
-        assert!(!q.pending(&alice, Action::Update, &ua, rcm, t0));
     }
 
     fn mainnet_ua() -> UnifiedAddress {

@@ -1,5 +1,20 @@
 # Wallet changelog
 
+## 2026-09-23 — Truncation can land on the boot origin
+
+- A request at or below every applied block rewinds to the origin
+  checkpoint when that checkpoint is still retained. The position
+  falls back to the seed, and notes mined above it are dropped. A
+  pruned origin, or a request below it, stays unavailable.
+
+## 2026-09-23 — Truncation drops rows that no longer name a note
+
+- `drop_applied_above` removes locks whose note was deleted, and
+  sent-output rows for scanned transactions mined above the cut.
+  A locally built spend keeps its raw transaction, sent outputs, and
+  trust mark.
+- Shard-store reads no longer map `Infallible` through `.ok()`. A
+  store error is not a missing checkpoint.
 ## 2026-09-23 — At-least selection stops on an exact total
 
 - `select_spendable_notes` takes another note only while the total is
