@@ -646,9 +646,8 @@ pub async fn relay<P: Parameters + Send + 'static>(
         // re-requests once the claim lands.
         return true;
     };
-    if !record.admits(action, requested_ua, term, trigger_height, mtp_now)
-        || challenges.pending(name, action, requested_ua, record.commitment, mtp_now)
-    {
+    let has_relayed = challenges.has_relayed(name, action, requested_ua, record.commitment);
+    if !record.admits(action, requested_ua, term, trigger_height, mtp_now) || has_relayed {
         return true;
     }
     // The challenge fee (issue #18): the price of triggering a
@@ -669,8 +668,37 @@ pub async fn relay<P: Parameters + Send + 'static>(
         return true;
     }
 
-    let (challenge, pending) =
+    // Pre-submission admission: the eligible OtpRequest enters
+    // OtpQueue before any challenge construction or submission.
+    // If an entry already exists (requested or relayed), reuse it.
+    let existing = challenges.find_active(name, action, requested_ua, record.commitment);
+    if existing.is_none() {
+        let (_, pending) = OtpRequest::pending_challenge(
+            name,
+            action,
+            requested_ua,
+            record.commitment,
+            term,
+            mtp_now,
+        );
+        challenges.issue(pending);
+    }
+
+    // Build or reuse the challenge memo from the queued entry.
+    let challenge_req = challenges
+        .find_active(name, action, requested_ua, record.commitment)
+        .expect("challenge entry must exist after admission");
+    let (_challenge, _) =
         OtpRequest::pending_challenge(name, action, requested_ua, record.commitment, term, mtp_now);
+    // Reuse the queued request's code if available; otherwise the
+    // rebuilt challenge carries the same fields. For this lifecycle
+    // the rebuilt memo is sufficient — the queue tracks state.
+    let challenge = Challenge {
+        code: challenge_req.code,
+        name: name.clone(),
+        action,
+        ua: requested_ua.clone(),
+    };
     let Some(memo) = challenge.encode(network) else {
         return true;
     };
@@ -695,7 +723,8 @@ pub async fn relay<P: Parameters + Send + 'static>(
     };
 
     if source.submit(&transaction, "controller challenge").await {
-        challenges.issue(pending);
+        // Advance the queued entry from Requested to Relayed.
+        challenges.challenge_issued(name, action, requested_ua, record.commitment);
         tracing::info!(
             lane,
             txid = %transaction.txid(),

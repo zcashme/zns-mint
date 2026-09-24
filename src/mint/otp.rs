@@ -107,10 +107,18 @@ impl OtpRequest {
     }
 }
 
+/// Lifecycle state for a pending challenge entry.
+#[derive(Clone, PartialEq, Eq)]
+pub enum ChallengeState {
+    Requested,
+    Relayed,
+    Responded,
+}
+
 /// Issued challenges, in order.
 #[derive(Clone)]
 pub struct OtpQueue {
-    challenges: Vec<OtpRequest>,
+    challenges: Vec<(OtpRequest, ChallengeState)>,
 }
 
 impl Default for OtpQueue {
@@ -126,9 +134,69 @@ impl OtpQueue {
         }
     }
 
+    /// Whether a `Relayed` entry exists for these parameters.
+    pub fn has_relayed(
+        &self,
+        name: &Name,
+        action: Action,
+        ua: &UnifiedAddress,
+        tip_rcm: NameCommitment,
+    ) -> bool {
+        self.challenges.iter().any(|(req, state)| {
+            matches!(state, ChallengeState::Relayed)
+                && req.name == *name
+                && req.action == action
+                && req.ua == *ua
+                && req.tip_rcm == tip_rcm
+        })
+    }
+
+    /// Updates a `Requested` entry to `Relayed` for retry/reuse.
+    pub fn challenge_issued(
+        &mut self,
+        name: &Name,
+        action: Action,
+        ua: &UnifiedAddress,
+        tip_rcm: NameCommitment,
+    ) -> bool {
+        for (req, state) in &mut self.challenges {
+            if matches!(state, ChallengeState::Requested)
+                && req.name == *name
+                && req.action == action
+                && req.ua == *ua
+                && req.tip_rcm == tip_rcm
+            {
+                *state = ChallengeState::Relayed;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Finds an active (`Requested` or `Relayed`) entry matching these
+    /// parameters and returns a clone of the `OtpRequest`.
+    pub fn find_active(
+        &self,
+        name: &Name,
+        action: Action,
+        ua: &UnifiedAddress,
+        tip_rcm: NameCommitment,
+    ) -> Option<OtpRequest> {
+        self.challenges
+            .iter()
+            .find(|(req, state)| {
+                !matches!(state, ChallengeState::Responded)
+                    && req.name == *name
+                    && req.action == action
+                    && req.ua == *ua
+                    && req.tip_rcm == tip_rcm
+            })
+            .map(|(req, _)| req.clone())
+    }
+
     /// Issues a challenge, no checks.
     pub fn issue(&mut self, req: OtpRequest) {
-        self.challenges.push(req);
+        self.challenges.push((req, ChallengeState::Requested));
     }
 
     /// A challenge already issued?
@@ -140,9 +208,12 @@ impl OtpQueue {
         tip_rcm: NameCommitment,
         mtp: Timestamp,
     ) -> bool {
-        self.challenges.retain(|request| mtp < request.expires_at);
-        self.challenges.iter().any(|request| {
-            request.name == *name
+        self.challenges.retain(|(request, state)| {
+            mtp < request.expires_at && !matches!(state, ChallengeState::Responded)
+        });
+        self.challenges.iter().any(|(request, state)| {
+            !matches!(state, ChallengeState::Responded)
+                && request.name == *name
                 && request.action == action
                 && request.ua == *ua
                 && request.tip_rcm == tip_rcm
@@ -159,17 +230,20 @@ impl OtpQueue {
         tip_rcm: NameCommitment,
         mtp: Timestamp,
     ) -> Option<OtpRequest> {
-        self.challenges.retain(|request| mtp < request.expires_at);
+        self.challenges.retain(|(request, state)| {
+            mtp < request.expires_at && !matches!(state, ChallengeState::Responded)
+        });
         self.challenges
             .iter()
-            .find(|request| {
-                request.name == returned.name
+            .find(|(request, state)| {
+                matches!(state, ChallengeState::Relayed)
+                    && request.name == returned.name
                     && request.action == returned.action
                     && request.ua == returned.ua
                     && request.tip_rcm == tip_rcm
                     && bool::from(request.code.0.ct_eq(&returned.code.0))
             })
-            .cloned()
+            .map(|(req, _)| req.clone())
     }
 
     /// Accepts a returned OTP once.
@@ -182,21 +256,23 @@ impl OtpQueue {
         provided: &[u8; 6],
         mtp: Timestamp,
     ) -> bool {
-        // Expired entries never match.
-        self.challenges.retain(|req| mtp < req.expires_at);
+        self.challenges.retain(|(req, state)| {
+            mtp < req.expires_at && !matches!(state, ChallengeState::Responded)
+        });
         let Some(provided_code) = OtpCode::from_digits(provided) else {
             return false;
         };
         for i in 0..self.challenges.len() {
-            let req = &self.challenges[i];
-            if req.name == *name
+            let (req, state) = &self.challenges[i];
+            if matches!(state, ChallengeState::Relayed)
+                && req.name == *name
                 && req.action == action
                 && &req.ua == ua
                 && req.tip_rcm == tip_rcm
                 && mtp < req.expires_at
                 && bool::from(req.code.0.ct_eq(&provided_code.0))
             {
-                self.challenges.remove(i);
+                self.challenges[i].1 = ChallengeState::Responded;
                 return true;
             }
         }
@@ -287,6 +363,7 @@ mod tests {
             code: shared.clone(),
             expires_at: t0 + Duration::seconds(D_OTP),
         });
+        q.challenges[0].1 = ChallengeState::Relayed;
         q.issue(OtpRequest {
             name: alice.clone(),
             action: Action::Update,
@@ -296,6 +373,7 @@ mod tests {
             code: shared.clone(),
             expires_at: t0 + Duration::seconds(D_OTP),
         });
+        q.challenges[1].1 = ChallengeState::Relayed;
 
         let echo = Challenge {
             code: shared.clone(),
