@@ -15,21 +15,69 @@ use zcash_client_backend::data_api::WalletRead as _;
 use zcash_protocol::consensus::{BlockHeight, BranchId};
 use zcash_protocol::value::Zatoshis;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use zcash_protocol::consensus::Parameters;
+use zebra_indexer_proto::MempoolChangeKind;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::NameNoteQueue;
 use zns_mint::mint::note::{assemble, decrypt_treasury_tx};
-use zns_mint::mint::otp::{OtpQueue, OtpRequest};
+use zns_mint::mint::otp::{OtpQueueCommand, OtpRequest};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
-    relay, watch_mempool, Action, Challenge, MintInbound, Request, REGISTRY_ACCOUNT,
-    TREASURY_ACCOUNT,
+    relay, Action, Challenge, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{
-    CanonicalBlockSource, JsonRpc, MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE,
+    CanonicalBlockSource, ChainClient, JsonRpc, MempoolSession, TipSession, TransportError,
+    RETRY_PAUSE,
 };
+
+async fn mempool_intake<P: Parameters + Clone + Send + 'static>(
+    chain: ChainClient,
+    rpc: JsonRpc,
+    network: P,
+    treasury_fvk: orchard::keys::FullViewingKey,
+    otp_tx: mpsc::Sender<OtpQueueCommand>,
+) {
+    let mut session = MempoolSession::open(chain).await;
+    loop {
+        let (kind, txid) = session.next().await;
+        match kind {
+            MempoolChangeKind::Invalidated => {
+                otp_tx
+                    .send(OtpQueueCommand::Invalidate(txid))
+                    .await
+                    .expect("OTP queue task stopped");
+            }
+            MempoolChangeKind::Mined => {}
+            MempoolChangeKind::Added => {
+                let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
+                let transaction = match rpc.get_raw_transaction(branch_id, txid).await {
+                    Ok(Some(transaction)) => transaction,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        tracing::warn!(%error, %txid, "mempool transaction fetch failed");
+                        continue;
+                    }
+                };
+                for (_action_index, paid, memo) in decrypt_treasury_tx(&transaction, &treasury_fvk)
+                {
+                    let MintInbound::Request(request) = MintInbound::decode(&network, &memo) else {
+                        continue;
+                    };
+                    if matches!(request, Request::Claim { .. }) {
+                        continue;
+                    }
+                    otp_tx
+                        .send(OtpQueueCommand::Candidate(request, paid, txid, None))
+                        .await
+                        .expect("OTP queue task stopped");
+                }
+            }
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -51,7 +99,7 @@ async fn main() {
         sapling_output,
         mut mtp,
         mut oracle,
-        mut challenges,
+        challenges,
         access_code_key,
         mut registry,
     } = Boot::start().await;
@@ -77,67 +125,25 @@ async fn main() {
         "mint awaiting Zebra tips"
     );
 
+    let (otp_tx, otp_rx) = mpsc::channel(128);
+    tokio::spawn(challenges.run(otp_rx));
+    tokio::spawn(mempool_intake(
+        chain.clone(),
+        rpc.clone(),
+        network.clone(),
+        treasury_keys.orchard_fvk(),
+        otp_tx.clone(),
+    ));
+
     // The tip session owns the stream's lifecycle — wake, repair, and
     // the re-read of the canonical tip that turns every wake-up into the
     // node's answer, never the announcement's promise. The orchestrator
     // holds position (the wallet) and never sees transport state.
-    // The watcher forwards Zebra's change kind and txid. The run loop owns
-    // OtpQueue and admits or invalidates requests as those events arrive.
-    let (mempool_tx, mut mempool_rx) = mpsc::channel(64);
-    tokio::spawn(watch_mempool(chain.clone(), mempool_tx));
-
     let mut connection = TipSession::open(chain).await;
     'run: loop {
-        let (best_height, _) = tokio::select! {
-            tip = connection.next_tip(&source) => match tip {
-                Ok(tip) => tip,
-                Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
-            },
-            Some((kind, txid)) = mempool_rx.recv() => {
-                let mtp_now = mtp.current().expect("FATAL: MTP unavailable at the applied tip");
-                match kind {
-                    MempoolChangeKind::Invalidated => challenges.invalidate(txid, mtp_now),
-                    MempoolChangeKind::Mined => {}
-                    MempoolChangeKind::Added => {
-                        let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
-                        if let Some(transaction) = rpc.get_raw_transaction(branch_id, txid).await.ok().flatten() {
-                            for (_action_index, paid, memo) in decrypt_treasury_tx(
-                                &transaction,
-                                &treasury_keys.orchard_fvk(),
-                            ) {
-                                let MintInbound::Request(request) = MintInbound::decode(&network, &memo) else {
-                                    continue;
-                                };
-                                let (name, action, requested_ua, term) = match &request {
-                                    Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
-                                    Request::Release { name, ua } => (name, Action::Release, ua, None),
-                                    Request::Claim { .. } => continue,
-                                };
-                                let Some(record) = registry.record(name).cloned() else { continue; };
-                                let trigger_height = chain_tip.block_height() + 1;
-                                if !record.admits(action, requested_ua, term, trigger_height, mtp_now)
-                                    || paid < oracle.challenge_fee()
-                                {
-                                    continue;
-                                }
-                                let (_, pending) = OtpRequest::pending_challenge(
-                                    name, action, requested_ua, record.commitment, term, mtp_now,
-                                );
-                                let pending = challenges.admit_request(pending, txid, mtp_now);
-                                if !challenges.is_relayed(&pending)
-                                    && relay(
-                                        &network, &mut wallet, &treasury_keys, &sapling_spend,
-                                        &sapling_output, &record.ua, &source, &pending, "mempool",
-                                    ).await
-                                {
-                                    challenges.challenge_issued(&pending);
-                                }
-                            }
-                        }
-                    }
-                }
-                continue;
-            }
+        let (best_height, _) = match connection.next_tip(&source).await {
+            Ok(tip) => tip,
+            Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
         };
 
         // Compare the wallet's own cursor with Zebra at the same height.
@@ -217,7 +223,10 @@ async fn main() {
             })
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
-            challenges = OtpQueue::new();
+            otp_tx
+                .send(OtpQueueCommand::Rewind(ancestor))
+                .await
+                .expect("OTP queue task stopped");
             name_notes.truncate_to(rewound);
             requests.truncate_to(rewound);
             echoes.retain(|(_, _, height)| *height <= rewound);
@@ -456,8 +465,14 @@ async fn main() {
                         if paid < price {
                             break 'lane true;
                         }
-                        let Some(claim_note) = registry.authorize(
-                            &mut challenges,
+                        let (reply, response) = oneshot::channel();
+                        otp_tx
+                            .send(OtpQueueCommand::Snapshot(reply))
+                            .await
+                            .expect("OTP queue task stopped");
+                        let mut queue = response.await.expect("OTP queue task stopped");
+                        let claim_note = registry.authorize(
+                            &mut queue,
                             Request::Claim {
                                 name: name.clone(),
                                 ua: ua.clone(),
@@ -467,7 +482,8 @@ async fn main() {
                             None,
                             note_height,
                             mtp_now,
-                        ) else {
+                        );
+                        let Some(claim_note) = claim_note else {
                             tracing::debug!(
                                 name = %name.as_str(),
                                 "claim not authorized"
@@ -479,28 +495,15 @@ async fn main() {
                         true
                     }
                     request @ (Request::Update { .. } | Request::Release { .. }) => {
-                        let (name, action, requested_ua, term) = match request {
-                            Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
-                            Request::Release { name, ua } => (name, Action::Release, ua, None),
-                            Request::Claim { .. } => unreachable!(),
-                        };
-                        let Some(record) = registry.record(name).cloned() else {
-                            break 'lane true;
-                        };
-                        if !record.admits(action, requested_ua, term, note_height, mtp_now)
-                            || paid < oracle.challenge_fee()
-                        {
-                            break 'lane true;
-                        }
-                        let (_, pending) = OtpRequest::pending_challenge(
-                            name,
-                            action,
-                            requested_ua,
-                            record.commitment,
-                            term,
-                            mtp_now,
-                        );
-                        challenges.admit_request(pending, *txid, mtp_now);
+                        otp_tx
+                            .send(OtpQueueCommand::Candidate(
+                                request.clone(),
+                                paid,
+                                *txid,
+                                Some(note_height),
+                            ))
+                            .await
+                            .expect("OTP queue task stopped");
                         true
                     }
                 }
@@ -512,9 +515,64 @@ async fn main() {
             }
         }
 
+        // Validate queued mempool and confirmed candidates against the current
+        // Registry/MTP state, then turn eligible requests into challenges.
+        let (reply, response) = oneshot::channel();
+        otp_tx
+            .send(OtpQueueCommand::Candidates(reply))
+            .await
+            .expect("OTP queue task stopped");
+        let candidates = response.await.expect("OTP queue task stopped");
+        for (request, paid, txid, confirmed_height) in candidates {
+            let (name, action, ua, term) = match &request {
+                Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
+                Request::Release { name, ua } => (name, Action::Release, ua, None),
+                Request::Claim { .. } => {
+                    otp_tx
+                        .send(OtpQueueCommand::RemoveCandidate(txid))
+                        .await
+                        .expect("OTP queue task stopped");
+                    continue;
+                }
+            };
+            let trigger_height = confirmed_height.unwrap_or(tip + 1);
+            let Some(record) = registry.record(name).cloned() else {
+                otp_tx
+                    .send(OtpQueueCommand::RemoveCandidate(txid))
+                    .await
+                    .expect("OTP queue task stopped");
+                continue;
+            };
+            if !record.admits(action, ua, term, trigger_height, mtp_now)
+                || paid < oracle.challenge_fee()
+            {
+                otp_tx
+                    .send(OtpQueueCommand::RemoveCandidate(txid))
+                    .await
+                    .expect("OTP queue task stopped");
+                continue;
+            }
+            let (_, pending) =
+                OtpRequest::pending_challenge(name, action, ua, record.commitment, term, mtp_now);
+            otp_tx
+                .send(OtpQueueCommand::Admit(pending, txid, mtp_now))
+                .await
+                .expect("OTP queue task stopped");
+            otp_tx
+                .send(OtpQueueCommand::RemoveCandidate(txid))
+                .await
+                .expect("OTP queue task stopped");
+        }
+
         // Queue admission is independent from submission. Retry every still-
         // requested mempool or confirmed entry once during each tip pass.
-        for pending in challenges.requested(mtp_now) {
+        let (reply, response) = oneshot::channel();
+        otp_tx
+            .send(OtpQueueCommand::Requested(mtp_now, reply))
+            .await
+            .expect("OTP queue task stopped");
+        let requested = response.await.expect("OTP queue task stopped");
+        for pending in requested {
             let Some(record) = registry
                 .record(&pending.name)
                 .filter(|record| record.commitment == pending.tip_rcm)
@@ -534,7 +592,10 @@ async fn main() {
             )
             .await
             {
-                challenges.challenge_issued(&pending);
+                otp_tx
+                    .send(OtpQueueCommand::Issued(pending.clone()))
+                    .await
+                    .expect("OTP queue task stopped");
             }
         }
 
@@ -551,7 +612,18 @@ async fn main() {
                 if record.action.is_release() {
                     break 'lane true;
                 }
-                let Some(sent) = challenges.awaiting(&echo, record.commitment, mtp_now) else {
+                let (reply, response) = oneshot::channel();
+                otp_tx
+                    .send(OtpQueueCommand::Awaiting(
+                        echo.clone(),
+                        record.commitment,
+                        mtp_now,
+                        reply,
+                    ))
+                    .await
+                    .expect("OTP queue task stopped");
+                let sent = response.await.expect("OTP queue task stopped");
+                let Some(sent) = sent else {
                     break 'lane true; // no pending challenge: dead
                 };
                 // The renewal or upgrade fee, binding at first
@@ -588,15 +660,21 @@ async fn main() {
                     },
                     Action::Claim => unreachable!("claims never carry an OTP"),
                 };
-                let Some(transition_note) = registry.authorize(
-                    &mut challenges,
-                    authorized,
-                    Some(&digits),
-                    note_height,
-                    mtp_now,
-                ) else {
+                let (reply, response) = oneshot::channel();
+                otp_tx
+                    .send(OtpQueueCommand::Snapshot(reply))
+                    .await
+                    .expect("OTP queue task stopped");
+                let mut queue = response.await.expect("OTP queue task stopped");
+                let transition_note =
+                    registry.authorize(&mut queue, authorized, Some(&digits), note_height, mtp_now);
+                let Some(transition_note) = transition_note else {
                     break 'lane true;
                 };
+                otp_tx
+                    .send(OtpQueueCommand::Responded(sent.clone()))
+                    .await
+                    .expect("OTP queue task stopped");
                 // The seam where a voluntary release exists:
                 // the OTP that authorized it is consumed here,
                 // and the resulting note is indistinguishable

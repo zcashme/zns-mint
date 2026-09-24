@@ -1,5 +1,13 @@
 # main.changelog.md
 
+## 2026-09-24 — Mempool OTP intake has its own queue task (#196)
+
+- The mempool intake task sends decoded update/release candidates and
+  invalidations to the single OTP queue owner while tip catch-up proceeds.
+- The tip loop validates candidates against its current Registry and MTP,
+  then requests or retries challenge relay through the queue task. Block
+  confirmation updates the candidate by txid.
+
 ## 2026-09-24 — The run loop gates vault sweeps by day (#186)
 
 - `main` compares the day before catch-up with the day after it and calls

@@ -25,11 +25,10 @@ use zcash_protocol::value::Zatoshis;
 use zip32::AccountId;
 
 use sapling::circuit::{OutputParameters, SpendParameters};
-use tokio::sync::mpsc;
 
 use crate::key::TreasuryKeys;
 use crate::wallet::Wallet;
-use crate::zcash::{CanonicalBlockSource, ChainClient, MempoolChangeKind, MempoolSession};
+use crate::zcash::CanonicalBlockSource;
 
 use otp::{OtpCode, OtpRequest};
 use presale::AccessCode;
@@ -659,17 +658,6 @@ pub async fn relay<P: Parameters + Send + 'static>(
             "controller challenge rejected — deferred"
         );
         false
-    }
-}
-
-/// Forwards Zebra's mempool changes to the run loop, which owns and updates
-/// the OTP queue. The original change kind and txid stay paired.
-pub async fn watch_mempool(chain: ChainClient, sender: mpsc::Sender<(MempoolChangeKind, TxId)>) {
-    let mut session = MempoolSession::open(chain).await;
-    loop {
-        if sender.send(session.next().await).await.is_err() {
-            return;
-        }
     }
 }
 

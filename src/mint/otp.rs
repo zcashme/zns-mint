@@ -4,9 +4,11 @@ use rand::Rng;
 use subtle::ConstantTimeEq;
 use time::{Duration, Timestamp};
 use zcash_primitives::transaction::TxId;
+use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::value::Zatoshis;
 use zeroize::Zeroize;
 
-use crate::mint::{Action, Challenge, Name, NameCommitment, Term, UnifiedAddress};
+use crate::mint::{Action, Challenge, Name, NameCommitment, Request, Term, UnifiedAddress};
 
 /// Thirty minutes; §5.3: D_OTP.
 pub const D_OTP: i64 = 1800;
@@ -120,6 +122,7 @@ pub enum ChallengeState {
 #[derive(Clone)]
 pub struct OtpQueue {
     challenges: Vec<(OtpRequest, ChallengeState, TxId)>,
+    candidates: Vec<(Request, Zatoshis, TxId, Option<BlockHeight>)>,
 }
 
 impl Default for OtpQueue {
@@ -132,7 +135,40 @@ impl OtpQueue {
     pub fn new() -> Self {
         Self {
             challenges: Vec::new(),
+            candidates: Vec::new(),
         }
+    }
+
+    /// Records an unvalidated update/release candidate from the mempool or
+    /// block path. The tip loop applies registry and MTP policy before
+    /// turning it into a challenge.
+    pub fn admit_candidate(
+        &mut self,
+        request: Request,
+        paid: Zatoshis,
+        txid: TxId,
+        height: Option<BlockHeight>,
+    ) {
+        if let Some((_, _, _, seen_height)) =
+            self.candidates.iter_mut().find(|(_, _, id, _)| *id == txid)
+        {
+            if height.is_some() {
+                *seen_height = height;
+            }
+            return;
+        }
+        if self.challenges.iter().any(|(_, _, id)| *id == txid) {
+            return;
+        }
+        self.candidates.push((request, paid, txid, height));
+    }
+
+    pub fn candidates(&self) -> Vec<(Request, Zatoshis, TxId, Option<BlockHeight>)> {
+        self.candidates.clone()
+    }
+
+    pub fn remove_candidate(&mut self, txid: TxId) {
+        self.candidates.retain(|(_, _, id, _)| *id != txid);
     }
 
     /// Admits a request once per transaction. The same txid is seen at
@@ -156,8 +192,20 @@ impl OtpQueue {
     /// already been sent.
     pub fn invalidate(&mut self, txid: TxId, mtp: Timestamp) {
         self.prune(mtp);
+        self.invalidate_txid(txid);
+    }
+
+    pub fn invalidate_txid(&mut self, txid: TxId) {
+        self.remove_candidate(txid);
         self.challenges.retain(|(_, state, existing_txid)| {
             *existing_txid != txid || matches!(state, ChallengeState::Relayed)
+        });
+    }
+
+    pub fn rewind_to(&mut self, height: BlockHeight) {
+        self.challenges.clear();
+        self.candidates.retain(|(_, _, _, confirmed)| {
+            confirmed.is_none_or(|candidate_height| candidate_height <= height)
         });
     }
 
@@ -279,6 +327,75 @@ impl OtpQueue {
             }
         }
         false
+    }
+}
+
+/// Messages sent to the task that owns the OTP queue.
+pub enum OtpQueueCommand {
+    Candidate(Request, Zatoshis, TxId, Option<BlockHeight>),
+    Invalidate(TxId),
+    Rewind(BlockHeight),
+    Candidates(tokio::sync::oneshot::Sender<Vec<(Request, Zatoshis, TxId, Option<BlockHeight>)>>),
+    RemoveCandidate(TxId),
+    Admit(OtpRequest, TxId, Timestamp),
+    Requested(Timestamp, tokio::sync::oneshot::Sender<Vec<OtpRequest>>),
+    Issued(OtpRequest),
+    Awaiting(
+        Challenge,
+        NameCommitment,
+        Timestamp,
+        tokio::sync::oneshot::Sender<Option<OtpRequest>>,
+    ),
+    Snapshot(tokio::sync::oneshot::Sender<OtpQueue>),
+    Responded(OtpRequest),
+}
+
+impl OtpQueue {
+    pub async fn run(mut self, mut receiver: tokio::sync::mpsc::Receiver<OtpQueueCommand>) {
+        while let Some(command) = receiver.recv().await {
+            match command {
+                OtpQueueCommand::Candidate(request, paid, txid, height) => {
+                    self.admit_candidate(request, paid, txid, height)
+                }
+                OtpQueueCommand::Invalidate(txid) => self.invalidate_txid(txid),
+                OtpQueueCommand::Rewind(height) => self.rewind_to(height),
+                OtpQueueCommand::Candidates(reply) => {
+                    let _ = reply.send(self.candidates());
+                }
+                OtpQueueCommand::RemoveCandidate(txid) => self.remove_candidate(txid),
+                OtpQueueCommand::Admit(request, txid, mtp) => {
+                    self.admit_request(request, txid, mtp);
+                }
+                OtpQueueCommand::Requested(mtp, reply) => {
+                    let _ = reply.send(self.requested(mtp));
+                }
+                OtpQueueCommand::Issued(request) => {
+                    self.challenge_issued(&request);
+                }
+                OtpQueueCommand::Awaiting(echo, commitment, mtp, reply) => {
+                    let _ = reply.send(self.awaiting(&echo, commitment, mtp));
+                }
+                OtpQueueCommand::Snapshot(reply) => {
+                    let _ = reply.send(self.clone());
+                }
+                OtpQueueCommand::Responded(request) => self.mark_responded(&request),
+            }
+        }
+    }
+
+    fn mark_responded(&mut self, request: &OtpRequest) {
+        if let Some((_, state, _)) = self.challenges.iter_mut().find(|(existing, _, _)| {
+            existing.name == request.name
+                && existing.action == request.action
+                && existing.ua == request.ua
+                && existing.term == request.term
+                && existing.tip_rcm == request.tip_rcm
+                && existing.code == request.code
+        }) {
+            if matches!(state, ChallengeState::Relayed) {
+                *state = ChallengeState::Responded;
+            }
+        }
     }
 }
 

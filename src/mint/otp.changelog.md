@@ -1,5 +1,14 @@
 # `mint/otp.rs` design record
 
+## 2026-09-24 — One task owns OTP queue state (#196)
+
+- `OtpQueueHandle` routes mempool and tip-loop operations through a bounded
+  command channel to one queue owner; callers no longer share mutable queue
+  memory.
+- Txid-keyed update/release candidates can wait unvalidated until the tip
+  loop checks Registry and MTP state. Block confirmation updates the same
+  candidate, while invalidation removes unsent work.
+
 ## 2026-09-22 — `awaiting` scopes by `tip_rcm`
 
 - `OtpQueue::awaiting` now binds `tip_rcm`, symmetric with `pending`
