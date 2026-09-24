@@ -1,5 +1,10 @@
 # main.changelog.md
 
+## 2026-09-24 — The run loop gates vault sweeps by day (#186)
+
+- `main` compares the day before catch-up with the day after it and calls
+  `sweep_to_vault` only when catch-up advances the mint's day.
+
 ## 2026-09-24 — Admit OTP requests by transaction across mempool and block paths (#183)
 
 - The mempool stream carries Zebra's change kind and txid to the run loop.

@@ -42,28 +42,20 @@ pub const VAULT_ADDRESS: transparent::address::TransparentAddress =
     transparent::address::TransparentAddress::PublicKeyHash([0x42; 20]);
 
 /// One sweep: all Treasury value above the operating float moves to the
-/// vault, and only when this tip's catch-up advanced the mint's day and
-/// at least `SWEEP_MINIMUM` moves. The ZIP-321 amount is `total` minus
+/// vault when at least `SWEEP_MINIMUM` moves. The caller gates the
+/// once-per-day cadence. The ZIP-321 amount is `total` minus
 /// `SWEEP_RESERVE`; `propose_transfer` prices ZIP-317 and the fee comes
 /// out of the float (leftover is reserve minus fee, not exactly reserve).
-/// Only Sapling and Ironwood are spent. Returns `None` on a same-day
-/// tip or any failure before the build; the next midnight crossing
-/// tries again. A read-back miss after a successful build is FATAL —
+/// Only Sapling and Ironwood are spent. Returns `None` on any failure
+/// before the build. A read-back miss after a successful build is FATAL —
 /// the wallet has already marked the inputs spent.
-#[allow(clippy::too_many_arguments)]
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
     treasury_keys: &crate::key::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
-    today: i64,
-    previous_day: i64,
 ) -> Option<Transaction> {
-    if today <= previous_day {
-        return None;
-    }
-
     let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
     let Some((target_height, _)) = wallet
         .get_target_and_anchor_heights(NonZeroU32::MIN)
