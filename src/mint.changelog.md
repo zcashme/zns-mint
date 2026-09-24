@@ -1,5 +1,21 @@
 # Mint live-work design record
 
+## 2026-09-24 — Echoes park on the OtpQueue (#177)
+
+- `OtpQueue` holds both sides of the conversation: issued challenges,
+  and a responses lane — `OtpResponse { echo, paid, height }` parks a
+  received echo with its chain facts. `respond` records at block
+  application; `take_responses` hands the drain the batch, and echoes
+  leave on read — decided in every outcome, they never defer.
+- `apply_block` routes `MintInbound::Echo` to the challenge memory and
+  gains a `&mut OtpQueue` parameter — the run loop passes the live
+  one, boot a scratch.
+- The drain's echo pass runs after the request pass and builds the
+  authorized request from the matched pending, not from the echo: the
+  controller's utterance is the lookup key; the term it renews was
+  the mint's to say. `pending()` makes the pass order
+  outcome-equivalent to the old interleaved block order.
+
 ## 2026-09-22 — The queue carries the txid for every lane (#137)
 
 - `RequestQueue` entries are `(TxId, MintInbound, Zatoshis,

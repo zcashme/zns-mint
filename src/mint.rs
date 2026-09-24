@@ -382,6 +382,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     registry: &mut registry::Registry,
     mtp: &mut mtp::MtpTracker,
     cursor: &mut ChainTip,
+    challenges: &mut OtpQueue,
     requests: &mut treasury::RequestQueue,
 ) {
     use std::collections::BTreeMap;
@@ -567,12 +568,17 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         }
     }
     // The scanner drops note plaintexts, so Treasury memos decode
-    // here, once per block, into the queue; the block remains the
+    // here, once per block, to their queues; the block remains the
     // durable record. Decisions belong to the drain. The mempool
     // quick path reads the same memos earlier and ephemerally; it
     // records nothing — this pass stays the only intake.
     for (txid, _action_index, paid, memo) in treasury_memos {
-        requests.record(txid, MintInbound::decode(network, &memo), paid, height);
+        match MintInbound::decode(network, &memo) {
+            // An echo answers a challenge — it parks beside the
+            // challenges it may match, never beside requests.
+            MintInbound::Echo(echo) => challenges.respond(echo, paid, height),
+            inbound => requests.record(txid, inbound, paid, height),
+        }
     }
     for (index, position) in accepted_name_notes {
         let candidate = &candidates[index];

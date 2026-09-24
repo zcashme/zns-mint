@@ -6,6 +6,8 @@ use time::{Duration, Timestamp};
 use zeroize::Zeroize;
 
 use crate::mint::{Action, Challenge, Name, NameCommitment, Term, UnifiedAddress};
+use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::value::Zatoshis;
 
 /// Thirty minutes; §5.3: D_OTP.
 pub const D_OTP: i64 = 1800;
@@ -107,10 +109,22 @@ impl OtpRequest {
     }
 }
 
-/// Issued challenges, in order.
+/// A received echo, parked with the chain facts of its carrying
+/// transaction: what the controller said. Matching it against an
+/// issued challenge belongs to the drain.
+#[derive(Clone, Debug)]
+pub struct OtpResponse {
+    pub echo: Challenge,
+    pub paid: Zatoshis,
+    pub height: BlockHeight,
+}
+
+/// The OTP conversation in one memory: challenges issued, in order,
+/// and the responses received against them.
 #[derive(Clone)]
 pub struct OtpQueue {
     challenges: Vec<OtpRequest>,
+    responses: Vec<OtpResponse>,
 }
 
 impl Default for OtpQueue {
@@ -123,12 +137,24 @@ impl OtpQueue {
     pub fn new() -> Self {
         Self {
             challenges: Vec::new(),
+            responses: Vec::new(),
         }
     }
 
     /// Issues a challenge, no checks.
     pub fn issue(&mut self, req: OtpRequest) {
         self.challenges.push(req);
+    }
+
+    /// Parks a received echo with its chain facts. Recording only: an
+    /// echo is decided in every outcome, and deciding is the drain's.
+    pub fn respond(&mut self, echo: Challenge, paid: Zatoshis, height: BlockHeight) {
+        self.responses.push(OtpResponse { echo, paid, height });
+    }
+
+    /// The responses received since the last drain; they leave on read.
+    pub fn take_responses(&mut self) -> Vec<OtpResponse> {
+        std::mem::take(&mut self.responses)
     }
 
     /// A challenge already issued?
@@ -320,5 +346,21 @@ mod tests {
         // even though the code and other fields all match a live entry.
         let stale = commitment(3);
         assert!(q.awaiting(&echo, stale, t0).is_none());
+    }
+
+    #[test]
+    fn responses_park_and_leave_on_take() {
+        let mut q = OtpQueue::new();
+        let echo = Challenge {
+            code: OtpCode::for_test(*b"654321"),
+            name: test_name("alice"),
+            action: Action::Update,
+            ua: mainnet_ua(),
+        };
+
+        q.respond(echo, Zatoshis::ZERO, BlockHeight::from_u32(5));
+        assert_eq!(q.take_responses().len(), 1);
+        // Decided in every outcome: the batch left, the queue forgets.
+        assert!(q.take_responses().is_empty());
     }
 }
