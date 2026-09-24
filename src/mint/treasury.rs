@@ -25,7 +25,7 @@ use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
 
-use crate::mint::{MintInbound, TREASURY_ACCOUNT};
+use crate::mint::{Request, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
 /// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
@@ -272,25 +272,28 @@ pub fn challenge<P: Parameters>(
 // RequestQueue — Treasury requests decoded once, at block application
 // ---------------------------------------------------------------------------
 
-/// Treasury requests decoded once at block application: what each memo
-/// said, what it paid, the block that carried it. Entries leave by
+/// One name request as the mint received it: the ask, the transaction
+/// that carried it, what it paid, and the block it landed in.
+#[derive(Clone, Debug)]
+pub struct NameRequest {
+    pub txid: TxId,
+    pub request: Request,
+    pub paid: Zatoshis,
+    pub height: BlockHeight,
+}
+
+/// Name requests decoded once at block application. Entries leave by
 /// decision (`remove`) or by reorg (`truncate_to`); nothing else removes
 /// them.
 #[derive(Clone, Debug, Default)]
 pub struct RequestQueue {
-    requests: Vec<(TxId, MintInbound, Zatoshis, BlockHeight)>,
+    requests: Vec<NameRequest>,
 }
 
 impl RequestQueue {
     /// An arrival, decoded once at block application.
-    pub fn record(
-        &mut self,
-        txid: TxId,
-        inbound: MintInbound,
-        paid: Zatoshis,
-        height: BlockHeight,
-    ) {
-        self.requests.push((txid, inbound, paid, height));
+    pub fn record(&mut self, request: NameRequest) {
+        self.requests.push(request);
     }
 
     pub fn len(&self) -> usize {
@@ -302,9 +305,8 @@ impl RequestQueue {
     }
 
     /// The entry at `index`, in block order — the drain cursor reads.
-    pub fn entry(&self, index: usize) -> (&TxId, &MintInbound, Zatoshis, BlockHeight) {
-        let (txid, inbound, paid, height) = &self.requests[index];
-        (txid, inbound, *paid, *height)
+    pub fn entry(&self, index: usize) -> &NameRequest {
+        &self.requests[index]
     }
 
     /// The entry is decided. The only removal besides reorg truncation.
@@ -314,8 +316,7 @@ impl RequestQueue {
 
     /// Reorg: entries whose block was orphaned fall with it.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
-        self.requests
-            .retain(|(_, _, _, height)| *height <= ancestor);
+        self.requests.retain(|request| request.height <= ancestor);
     }
 }
 
@@ -327,26 +328,31 @@ mod tests {
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
 
-    fn request(action: Action) -> MintInbound {
+    fn request(action: Action, height: BlockHeight) -> NameRequest {
         let ua = match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
             Some(zcash_keys::address::Address::Unified(ua)) => ua,
             _ => panic!("vector is a mainnet Unified Address"),
         };
         let name = Name::parse("alice").unwrap();
-        MintInbound::Request(match action {
-            Action::Claim => Request::Claim {
-                name,
-                ua,
-                term: Term::Forever,
-                code: None,
+        NameRequest {
+            txid: TxId::NULL,
+            request: match action {
+                Action::Claim => Request::Claim {
+                    name,
+                    ua,
+                    term: Term::Forever,
+                    code: None,
+                },
+                Action::Update => Request::Update {
+                    name,
+                    ua,
+                    term: None,
+                },
+                Action::Release => Request::Release { name, ua },
             },
-            Action::Update => Request::Update {
-                name,
-                ua,
-                term: None,
-            },
-            Action::Release => Request::Release { name, ua },
-        })
+            paid: Zatoshis::ZERO,
+            height,
+        }
     }
 
     fn h(n: u32) -> BlockHeight {
@@ -358,45 +364,39 @@ mod tests {
         let mut queue = RequestQueue::default();
         assert_eq!(queue.len(), 0);
 
-        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
-        queue.record(TxId::NULL, request(Action::Update), Zatoshis::ZERO, h(101));
+        queue.record(request(Action::Claim, h(100)));
+        queue.record(request(Action::Update, h(101)));
 
         assert_eq!(queue.len(), 2);
-        assert_eq!(*queue.entry(0).0, TxId::NULL);
-        assert_eq!(queue.entry(0).3, h(100));
-        assert_eq!(queue.entry(1).3, h(101));
+        assert_eq!(queue.entry(0).txid, TxId::NULL);
+        assert_eq!(queue.entry(0).height, h(100));
+        assert_eq!(queue.entry(1).height, h(101));
     }
 
     #[test]
     fn queue_remove_shifts_neighbors() {
         let mut queue = RequestQueue::default();
-        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
-        queue.record(TxId::NULL, request(Action::Update), Zatoshis::ZERO, h(101));
-        queue.record(TxId::NULL, request(Action::Release), Zatoshis::ZERO, h(102));
+        queue.record(request(Action::Claim, h(100)));
+        queue.record(request(Action::Update, h(101)));
+        queue.record(request(Action::Release, h(102)));
 
         queue.remove(1);
         assert_eq!(queue.len(), 2);
         // The entry after the removed one shifted into its place.
-        assert!(matches!(
-            queue.entry(1).1,
-            MintInbound::Request(Request::Release { .. })
-        ));
-        assert_eq!(queue.entry(1).3, h(102));
+        assert!(matches!(queue.entry(1).request, Request::Release { .. }));
+        assert_eq!(queue.entry(1).height, h(102));
     }
 
     #[test]
     fn queue_truncate_drops_only_orphaned_heights() {
         let mut queue = RequestQueue::default();
-        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
-        queue.record(TxId::NULL, request(Action::Update), Zatoshis::ZERO, h(150));
-        queue.record(TxId::NULL, request(Action::Release), Zatoshis::ZERO, h(200));
+        queue.record(request(Action::Claim, h(100)));
+        queue.record(request(Action::Update, h(150)));
+        queue.record(request(Action::Release, h(200)));
 
         queue.truncate_to(h(120));
         assert_eq!(queue.len(), 1);
-        assert!(matches!(
-            queue.entry(0).1,
-            MintInbound::Request(Request::Claim { .. })
-        ));
-        assert_eq!(queue.entry(0).3, h(100));
+        assert!(matches!(queue.entry(0).request, Request::Claim { .. }));
+        assert_eq!(queue.entry(0).height, h(100));
     }
 }

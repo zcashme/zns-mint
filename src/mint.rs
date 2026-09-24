@@ -574,10 +574,23 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     // records nothing — this pass stays the only intake.
     for (txid, _action_index, paid, memo) in treasury_memos {
         match MintInbound::decode(network, &memo) {
+            MintInbound::Request(request) => requests.record(treasury::NameRequest {
+                txid,
+                request,
+                paid,
+                height,
+            }),
             // An echo answers a challenge — it parks beside the
             // challenges it may match, never beside requests.
             MintInbound::Echo(echo) => challenges.respond(echo, paid, height),
-            inbound => requests.record(txid, inbound, paid, height),
+            // A payment with no ask is decided at first sight: logged
+            // here, once, and the sweep keeps the value.
+            MintInbound::Unrecognized => tracing::info!(
+                txid = %txid,
+                value_zec = paid.into_u64() as f64 / 1e8,
+                height = u32::from(height),
+                "treasury received non-request payment"
+            ),
         }
     }
     for (index, position) in accepted_name_notes {

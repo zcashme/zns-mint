@@ -1,5 +1,18 @@
 # Mint live-work design record
 
+## 2026-09-24 — The request queue holds NameRequests (#177)
+
+- `NameRequest { txid, request, paid, height }` names the queue's
+  entry: the ask, its carrying transaction, its payment, its block.
+  `MintInbound` leaves the queue entirely and settles into its one
+  job — the classifier at the door, one `decode` call shared by block
+  application and the mempool reader.
+- A payment with no ask is decided the moment it is sighted: the
+  non-request log moves from the tip drain to block application,
+  where the arrival is already known. An orphaned block's payment may
+  log and then vanish with the reorg, and a boot rescan replays the
+  lines of history — cosmetic; the sweep keeps the value either way.
+
 ## 2026-09-24 — Echoes park on the OtpQueue (#177)
 
 - `OtpQueue` holds both sides of the conversation: issued challenges,

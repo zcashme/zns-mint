@@ -375,29 +375,17 @@ async fn main() {
         // for the next tip. Nothing is re-read.
         let mut index = 0;
         while index < requests.len() {
-            let (txid, inbound, paid, note_height) = requests.entry(index);
+            let entry = requests.entry(index);
+            let paid = entry.paid;
+            let note_height = entry.height;
             let decided = 'lane: {
-                match inbound {
-                    MintInbound::Unrecognized => {
-                        tracing::info!(
-                            txid = %txid,
-                            value_zec = paid.into_u64() as f64 / 1e8,
-                            height = u32::from(note_height),
-                            "treasury received non-request payment"
-                        );
-                        break 'lane true;
-                    }
-                    // Unreachable by construction: intake routes echoes
-                    // to the OTP queue, never into this one. The arm
-                    // keeps the match exhaustive; a stray echo is
-                    // decided, not deferred.
-                    MintInbound::Echo(_) => break 'lane true,
-                    MintInbound::Request(Request::Claim {
+                match &entry.request {
+                    Request::Claim {
                         name,
                         ua,
                         term,
                         code,
-                    }) => {
+                    } => {
                         // One open claim per name at a time: the Registry
                         // lags the mempool by a block; the queue holds an
                         // order only until its send. A rival payment that
@@ -472,9 +460,7 @@ async fn main() {
                         name_notes.admit(note_height, claim_note);
                         true
                     }
-                    MintInbound::Request(
-                        request @ (Request::Update { .. } | Request::Release { .. }),
-                    ) => {
+                    request @ (Request::Update { .. } | Request::Release { .. }) => {
                         // The relay lane: the mint challenges the controller.
                         // The two ways money can refuse — no fee funds,
                         // node rejection — defer; everything else is
