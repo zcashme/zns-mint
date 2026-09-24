@@ -524,6 +524,41 @@ pub fn decrypt_name_notes<P: Parameters>(
     candidates
 }
 
+/// Claim names carried by a transaction the wallet still holds. Used to
+/// rebuild [`OpenClaims`] after a restart, from the unmined Name Note
+/// rather than from the payment that funded it.
+pub fn claim_names_in_transaction<P: Parameters>(
+    network: &P,
+    tx: &zcash_primitives::transaction::Transaction,
+    registry_fvk: &orchard::keys::FullViewingKey,
+) -> Vec<Name> {
+    let Some(bundle) = tx.ironwood_bundle() else {
+        return Vec::new();
+    };
+    if bundle.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3()
+        || !bundle.flags().outputs_enabled()
+    {
+        return Vec::new();
+    }
+    let ivk = registry_fvk
+        .to_ivk(orchard::keys::Scope::External)
+        .prepare();
+    let mut names = Vec::new();
+    for action in bundle.actions() {
+        let Some((_, _, memo)) = orchard::note_encryption::ZnsIronwoodDomain::for_action(action)
+            .try_decrypt(action, &ivk)
+        else {
+            continue;
+        };
+        if let Some(NameNote::Claim { name, .. }) = NameNote::decode(network, &memo) {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
 /// Trial-decrypts the block's Ironwood actions sent to the Treasury's
 /// external address, exposing each `(txid, action index, memo)`. The
 /// upstream scanner deliberately drops note plaintexts; request memos
@@ -661,30 +696,44 @@ pub struct OpenClaims {
 
 #[derive(Clone, Debug)]
 struct OpenClaim {
-    request: TxId,
     height: BlockHeight,
     sent: Option<TxId>,
 }
 
 impl OpenClaims {
-    /// Whether some other payment already owns `name`.
-    pub fn held_by_other(&self, name: &Name, request: TxId) -> bool {
-        self.by_name
-            .get(name)
-            .is_some_and(|open| open.request != request)
+    /// Whether any payment already owns `name`, including another action
+    /// of the same transaction.
+    pub fn held_by_other(&self, name: &Name, _request: TxId) -> bool {
+        self.by_name.contains_key(name)
     }
 
-    /// `request` owns `name`. The same payment may hold again; a different
-    /// one does not replace it.
+    /// `request` owns `name` when the name is free. An existing entry
+    /// stays, including another action of this same payment.
     pub fn hold(&mut self, name: Name, request: TxId, height: BlockHeight) {
         if self.held_by_other(&name, request) {
             return;
         }
-        self.by_name.entry(name).or_insert(OpenClaim {
-            request,
-            height,
-            sent: None,
-        });
+        self.by_name
+            .entry(name)
+            .or_insert(OpenClaim { height, sent: None });
+    }
+
+    /// An unmined claim Name Note still in the wallet owns `name`. A
+    /// restart has no other record of the payment that created it.
+    pub fn note_sent(&mut self, name: Name, sent: TxId) {
+        if let Some(open) = self.by_name.get_mut(&name) {
+            if open.sent.is_none() {
+                open.sent = Some(sent);
+            }
+            return;
+        }
+        self.by_name.insert(
+            name,
+            OpenClaim {
+                height: BlockHeight::from_u32(0),
+                sent: Some(sent),
+            },
+        );
     }
 
     /// The Name Note transaction broadcast for this claim.
@@ -1033,7 +1082,7 @@ mod tests {
         assert!(!open.held_by_other(&name, tx(1)));
         open.hold(name.clone(), tx(1), h(10));
         assert!(open.held_by_other(&name, tx(2)));
-        assert!(!open.held_by_other(&name, tx(1)));
+        assert!(open.held_by_other(&name, tx(1)));
 
         open.hold(name.clone(), tx(2), h(11));
         assert_eq!(open.outstanding().next().unwrap().1, None);

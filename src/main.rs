@@ -18,8 +18,9 @@ use zcash_protocol::value::Zatoshis;
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::{assemble, decrypt_treasury_tx};
-use zns_mint::mint::note::{NameNoteQueue, OpenClaims};
+use zns_mint::mint::note::{
+    assemble, claim_names_in_transaction, decrypt_treasury_tx, NameNoteQueue, OpenClaims,
+};
 use zns_mint::mint::otp::{OtpQueue, OtpRequest};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
@@ -389,6 +390,23 @@ async fn main() {
             .total()
             .into_u64();
         zns_mint::metrics::snapshot(tip, treasury_zats, oracle.current().into_u64());
+
+        // A restart forgets `open_claims`. The wallet still holds the
+        // unmined Name Note, and that note owns the name.
+        for (sent, tx) in wallet.pending_transactions() {
+            if tip >= tx.expiry_height() {
+                continue;
+            }
+            for name in claim_names_in_transaction(&network, tx, &registry_keys.orchard_fvk()) {
+                if registry
+                    .record(&name)
+                    .is_some_and(|record| !record.action.is_release())
+                {
+                    continue;
+                }
+                open_claims.note_sent(name, *sent);
+            }
+        }
 
         // A mined claim, or a sent Name Note that can no longer be mined,
         // frees the name for a later payment. No payment is returned.

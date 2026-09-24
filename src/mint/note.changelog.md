@@ -3,8 +3,9 @@
 ## 2026-09-24 — The earliest claim payment owns the name
 
 - `OpenClaims` records that payment until the run loop clears it.
-  A different payment does not replace it. A reorg drops a payment
-  above the ancestor.
+  Any existing entry owns the name, including another action of the
+  same transaction. `note_sent` rebuilds an owner from an unmined
+  Name Note after a restart. A reorg drops a payment above the ancestor.
 - `release_pending` is the created release note. A later one is not
   admitted over it.
 
