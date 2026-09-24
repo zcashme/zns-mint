@@ -65,7 +65,7 @@ pub enum WalletError {
     /// block would make that value invisible.
     UnexpectedOrchardReceive,
     /// `store_name_note` disagreed with applied wallet state (height, tx
-    /// status, tree position, or conflicting note/nullifier identity).
+    /// status, ZNS cmx, or a stored field).
     InvalidNameNote(&'static str),
 }
 

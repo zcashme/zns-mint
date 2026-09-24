@@ -580,6 +580,8 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                 candidate.txid,
                 candidate.action_index,
                 candidate.note,
+                orchard::note::NoteCommitTrapdoor::from_inner(candidate.payload.rcm(network)),
+                candidate.payload.psi(network),
                 candidate.nullifier,
                 candidate.ephemeral_key.clone(),
                 candidate.memo,
