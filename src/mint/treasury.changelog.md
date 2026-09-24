@@ -1,5 +1,16 @@
 # Treasury design record
 
+## 2026-09-24 — Treasury owns the challenge relay value (#189)
+
+- `treasury::challenge` uses `CHALLENGE_RELAY_VALUE`, backed by upstream
+  `MINIMUM_FEE`, instead of accepting a caller-provided payment value. The
+  ZIP-317 transaction fee remains separate.
+
+## 2026-09-24 — Sweep cadence belongs to the run loop (#186)
+
+- `sweep_to_vault` builds a sweep when called; `main` owns the once-per-day
+  gate and invokes it only when catch-up advances the mint's day.
+
 ## 2026-09-22 — A built sweep that cannot be read back is FATAL
 
 - `create_proposed_transactions` mutates the wallet before it returns

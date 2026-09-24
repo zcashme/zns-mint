@@ -1,5 +1,13 @@
 # Mint live-work design record
 
+## 2026-09-24 — OTP admission is keyed by request transaction (#183)
+
+- `OtpQueue::admit_request` keeps the source txid beside each request so
+  the mempool sighting and block confirmation share one lifecycle entry.
+  Invalidation removes a request whose challenge has not been relayed.
+- `find_active` is removed; queue admission, invalidation, and relay state
+  now use the request identity and transaction identity directly.
+
 ## 2026-09-24 — RequestQueue accepts only name requests (#179)
 
 - `MintInbound` remains the intake classifier. `apply_block` returns

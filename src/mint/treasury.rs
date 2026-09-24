@@ -18,7 +18,7 @@ use zcash_client_backend::data_api::{
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::{DustOutputPolicy, StandardFeeRule};
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
-use zcash_primitives::transaction::fees::zip317::FeeError;
+use zcash_primitives::transaction::fees::zip317::{FeeError, MINIMUM_FEE};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::memo::MemoBytes;
@@ -36,34 +36,30 @@ pub const SWEEP_MINIMUM: Zatoshis = Zatoshis::const_from_u64(100_000_000);
 /// operating float that funds the next Name Note's fee.
 pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 
+/// Amount paid to the controller with an OTP challenge memo. This is the
+/// payment value; the transaction's ZIP-317 fee is calculated separately.
+pub const CHALLENGE_RELAY_VALUE: Zatoshis = MINIMUM_FEE;
+
 /// The project vault's P2PKH address (placeholder pending final approved
 /// address).
 pub const VAULT_ADDRESS: transparent::address::TransparentAddress =
     transparent::address::TransparentAddress::PublicKeyHash([0x42; 20]);
 
 /// One sweep: all Treasury value above the operating float moves to the
-/// vault, and only when this tip's catch-up advanced the mint's day and
-/// at least `SWEEP_MINIMUM` moves. The ZIP-321 amount is `total` minus
+/// vault when at least `SWEEP_MINIMUM` moves. The caller gates the
+/// once-per-day cadence. The ZIP-321 amount is `total` minus
 /// `SWEEP_RESERVE`; `propose_transfer` prices ZIP-317 and the fee comes
 /// out of the float (leftover is reserve minus fee, not exactly reserve).
-/// Only Sapling and Ironwood are spent. Returns `None` on a same-day
-/// tip or any failure before the build; the next midnight crossing
-/// tries again. A read-back miss after a successful build is FATAL —
+/// Only Sapling and Ironwood are spent. Returns `None` on any failure
+/// before the build. A read-back miss after a successful build is FATAL —
 /// the wallet has already marked the inputs spent.
-#[allow(clippy::too_many_arguments)]
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
     treasury_keys: &crate::key::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
-    today: i64,
-    previous_day: i64,
 ) -> Option<Transaction> {
-    if today <= previous_day {
-        return None;
-    }
-
     let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
     let Some((target_height, _)) = wallet
         .get_target_and_anchor_heights(NonZeroU32::MIN)
@@ -186,7 +182,7 @@ pub fn sweep_to_vault<P: Parameters>(
 /// Proposes, builds, and records a Treasury payment carrying an OTP challenge
 /// memo to the controller. Funded from Treasury notes via upstream's generic
 /// selection path. Returns `None` when the Treasury cannot cover the relay
-/// value and fee; the lane retries next tip.
+/// payment and transaction fee; the lane retries next tip.
 #[allow(clippy::too_many_arguments)]
 pub fn challenge<P: Parameters>(
     network: &P,
@@ -196,11 +192,10 @@ pub fn challenge<P: Parameters>(
     output_prover: &sapling::circuit::OutputParameters,
     controller: &zcash_keys::address::UnifiedAddress,
     memo: MemoBytes,
-    relay_value: Zatoshis,
 ) -> Option<Transaction> {
     let Some(request) = zip321::Payment::new(
         zcash_keys::address::Address::Unified(controller.clone()).to_zcash_address(network),
-        Some(relay_value),
+        Some(CHALLENGE_RELAY_VALUE),
         Some(memo),
         None,
         None,
