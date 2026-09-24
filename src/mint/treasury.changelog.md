@@ -1,5 +1,11 @@
 # Treasury design record
 
+## 2026-09-24 — Treasury uses the standard transfer helper (#192)
+
+- Challenge and sweep proposals use `propose_standard_transfer_to_address`
+  for their shared single-payment setup. The sweep's spendable-balance,
+  reserve, and threshold logic remains local.
+
 ## 2026-09-24 — Treasury owns the challenge relay value (#189)
 
 - `treasury::challenge` uses `CHALLENGE_RELAY_VALUE`, backed by upstream
@@ -10,6 +16,14 @@
 
 - `sweep_to_vault` builds a sweep when called; `main` owns the once-per-day
   gate and invokes it only when catch-up advances the mint's day.
+## 2026-09-24 — A skipped build names the failure
+
+- `sweep_to_vault` returns `Ok(None)` only when there is nothing to
+  move. Wallet height and selection errors, balance errors, and the
+  upstream proposal and transaction errors retain their types in
+  `BuildFailure`; none are converted to strings. `challenge` returns the
+  same type instead of `None` or a panic. A missing tx after a successful
+  build is still fatal.
 
 ## 2026-09-22 — A built sweep that cannot be read back is FATAL
 

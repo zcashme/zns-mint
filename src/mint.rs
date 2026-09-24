@@ -579,6 +579,8 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                 candidate.txid,
                 candidate.action_index,
                 candidate.note,
+                orchard::note::NoteCommitTrapdoor::from_inner(candidate.payload.rcm(network)),
+                candidate.payload.psi(network),
                 candidate.nullifier,
                 candidate.ephemeral_key.clone(),
                 candidate.memo,
@@ -620,10 +622,22 @@ pub async fn relay<P: Parameters + Send + 'static>(
         action: request.action,
         ua: request.ua.clone(),
     };
-    let Some(memo) = challenge.encode(network) else {
-        return false;
+    let memo = match challenge.encode(network) {
+        Some(memo) => memo,
+        None if request.action.is_claim() => {
+            unreachable!("claims never enter the controller challenge relay")
+        }
+        None => {
+            tracing::error!(
+                lane,
+                name = %request.name.as_str(),
+                action = request.action.as_str(),
+                "controller challenge memo exceeds the ZIP-302 512-byte limit"
+            );
+            return false;
+        }
     };
-    let Some(transaction) = treasury::challenge(
+    let transaction = match treasury::challenge(
         network,
         wallet,
         treasury_keys,
@@ -631,14 +645,18 @@ pub async fn relay<P: Parameters + Send + 'static>(
         output_prover,
         controller_ua,
         memo,
-    ) else {
-        tracing::debug!(
-            lane,
-            name = %request.name.as_str(),
-            action = request.action.as_str(),
-            "controller challenge awaits Treasury funds"
-        );
-        return false;
+    ) {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            tracing::warn!(
+                lane,
+                %error,
+                name = %request.name.as_str(),
+                action = request.action.as_str(),
+                "controller challenge not built"
+            );
+            return false;
+        }
     };
     if source.submit(&transaction, "controller challenge").await {
         tracing::info!(

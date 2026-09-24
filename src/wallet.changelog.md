@@ -1,5 +1,11 @@
 # Wallet changelog
 
+## 2026-09-24 — Name Note binding uses the ZNS cmx
+
+- `store_name_note` takes the transition `(rcm, psi)` and requires
+  `zns_cmx` to be the Ironwood leaf at that position. The rseed
+  commitment is not the leaf. A retry must repeat every stored field.
+
 ## 2026-09-23 — Truncation can land on the boot origin
 
 - A request at or below every applied block rewinds to the origin
