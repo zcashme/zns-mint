@@ -1,5 +1,10 @@
 # `mint/presale.rs` design record
 
+## 2026-09-24 — A rate limit keeps the claim queued
+
+- HTTP 429 is `LookupError::Transient`. The paid claim waits for the
+  next tip. Other 4xx stays terminal.
+
 ## 2026-09-22 — Per-row expiry; terminal vs transient retry
 
 - Every row is protected. `expires_at` (`timestamptz`, nullable)

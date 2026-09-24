@@ -1,5 +1,20 @@
 # Zcash I/O changelog
 
+## 2026-09-24 — Retry unusable node payloads
+
+- `BadNodeData` and `BadCheckpoint` are retryable. Existing read loops
+  repeat the same request after `RETRY_PAUSE` (five seconds), allowing
+  recovery when Zebra returns unusable data while unhealthy.
+- MTP header reads retry the same height every five seconds on transient,
+  malformed, or not-on-best-chain responses.
+
+## 2026-09-24 — Submission recognizes a duplicate in the mempool
+
+- `submit` keeps retrying the same signed transaction while transport is
+  uncertain, returning after the node accepts, reports it mined, or rejects it.
+- Already-in-mempool is `Accepted`. Already-in-chain stays `Mined`.
+- HTTP 429 is retryable, with the 5xx band.
+
 ## 2026-09-23 — A malformed tip announcement does not abort
 
 - `next_tip` drops a notification whose hash is not 32 bytes and

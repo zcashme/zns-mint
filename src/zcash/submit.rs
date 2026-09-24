@@ -1,4 +1,4 @@
-//! Submission: "carry this" — one honest attempt, the node's answer.
+//! Submission: one broadcast attempt and its retrying caller.
 
 use zcash_primitives::transaction::{Transaction, TxId};
 
@@ -33,10 +33,7 @@ impl JsonRpc {
 
 impl super::CanonicalBlockSource {
     /// Broadcasts a transaction, retrying transport uncertainty until the
-    /// node decides; both acceptance and rejection return `false`-or-`true`
-    /// respectively — what the caller does with the verdict is its own.
-    /// `label` names the flow in the logs ("registration", "controller
-    /// challenge", …).
+    /// node decides. `label` names the flow in the logs.
     pub async fn submit(&self, tx: &Transaction, label: &'static str) -> bool {
         loop {
             match self.send_transaction(tx).await {
@@ -90,6 +87,9 @@ impl super::CanonicalBlockSource {
             },
             Err(TransportError::Rpc(ref rpc)) if rpc.is_tx_already_in_chain() => {
                 Ok(SubmitOutcome::Mined)
+            }
+            Err(TransportError::Rpc(ref rpc)) if rpc.is_already_in_mempool() => {
+                Ok(SubmitOutcome::Accepted)
             }
             Err(error) if error.is_retryable() => Err(error),
             Err(error) => Ok(SubmitOutcome::Rejected(error)),
