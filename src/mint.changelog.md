@@ -1,5 +1,15 @@
 # Mint live-work design record
 
+## 2026-09-24 — RequestQueue accepts only name requests (#179)
+
+- `MintInbound` remains the intake classifier. `apply_block` returns
+  confirmed arrivals; the run loop routes requests into `RequestQueue`,
+  holds echoes until the tip pass, and logs unrecognized payments on
+  block application. The challenge queue and its policy are unchanged.
+- Requests run before echoes at each tip. The non-request payment log
+  now occurs during block application, including boot rescans and blocks
+  later orphaned by a reorg.
+
 ## 2026-09-22 — The queue carries the txid for every lane (#137)
 
 - `RequestQueue` entries are `(TxId, MintInbound, Zatoshis,

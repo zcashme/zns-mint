@@ -249,8 +249,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
                 .await
                 .expect("FATAL: block unavailable during boot sync");
 
-            let mut scratch_requests = crate::mint::treasury::RequestQueue::default();
-            crate::mint::apply_block(
+            let _ = crate::mint::apply_block(
                 &network,
                 &registry_keys,
                 &treasury_keys,
@@ -261,7 +260,6 @@ impl<P: Parameters + Send + 'static> Boot<P> {
                 &mut registry,
                 &mut mtp,
                 &mut cursor,
-                &mut scratch_requests,
             );
         }
         tracing::info!(

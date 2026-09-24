@@ -368,8 +368,8 @@ impl Name {
 
 /// Applies one verified canonical successor to every faculty: scan, clock,
 /// Registry law, wallet commit, Treasury decode, Name Note storage, cursor.
-/// Never fetches, never broadcasts; `main` passes the live queues, boot
-/// passes scratch ones.
+/// Returns Treasury arrivals for the run loop to route; boot discards them.
+/// Never fetches, never broadcasts.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_block<P: Parameters + Send + 'static>(
     network: &P,
@@ -382,8 +382,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     registry: &mut registry::Registry,
     mtp: &mut mtp::MtpTracker,
     cursor: &mut ChainTip,
-    requests: &mut treasury::RequestQueue,
-) {
+) -> Vec<(TxId, MintInbound, Zatoshis)> {
     use std::collections::BTreeMap;
     use std::convert::Infallible;
 
@@ -567,13 +566,14 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         }
     }
     // The scanner drops note plaintexts, so Treasury memos decode
-    // here, once per block, into the queue; the block remains the
-    // durable record. Decisions belong to the drain. The mempool
+    // here, once per block, into arrivals; the block remains the
+    // durable record. Decisions belong to the run loop. The mempool
     // quick path reads the same memos earlier and ephemerally; it
     // records nothing — this pass stays the only intake.
-    for (txid, _action_index, paid, memo) in treasury_memos {
-        requests.record(txid, MintInbound::decode(network, &memo), paid, height);
-    }
+    let arrivals = treasury_memos
+        .into_iter()
+        .map(|(txid, _action_index, paid, memo)| (txid, MintInbound::decode(network, &memo), paid))
+        .collect();
     for (index, position) in accepted_name_notes {
         let candidate = &candidates[index];
         wallet
@@ -597,6 +597,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         hash = %cursor.block_hash(),
         "canonical block applied"
     );
+    arrivals
 }
 
 // ===========================================================================
@@ -753,7 +754,7 @@ pub async fn watch_mempool<P: Parameters + Send + 'static>(
         for (_action_index, paid, memo) in note::decrypt_treasury_tx(&transaction, &treasury_fvk) {
             // Intake's own door: the reader and block application
             // classify through one call.
-            let inbound = MintInbound::decode(&network, txid, &memo);
+            let inbound = MintInbound::decode(&network, &memo);
             if sender.send((inbound, paid)).await.is_err() {
                 return; // the orchestrator is gone; so are we
             }

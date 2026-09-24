@@ -24,7 +24,8 @@ use zns_mint::mint::otp::OtpQueue;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
-    relay, watch_mempool, Action, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    relay, watch_mempool, Action, Challenge, MintInbound, Request, REGISTRY_ACCOUNT,
+    TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{CanonicalBlockSource, JsonRpc, TipSession, TransportError, RETRY_PAUSE};
 
@@ -65,6 +66,7 @@ async fn main() {
     // said, what it paid, the block that carried it. The drain at each tip
     // decides entries; a reorg truncates them.
     let mut requests = RequestQueue::default();
+    let mut echoes: Vec<(Challenge, Zatoshis, BlockHeight)> = Vec::new();
 
     zns_mint::metrics::install();
     tracing::info!(
@@ -132,7 +134,7 @@ async fn main() {
                     // money that must confirm — the block path owns them.
                     MintInbound::Request(Request::Claim { .. })
                     | MintInbound::Echo(_)
-                    | MintInbound::Unrecognized(_) => {}
+                    | MintInbound::Unrecognized => {}
                 }
                 continue;
             }
@@ -218,6 +220,7 @@ async fn main() {
             challenges = OtpQueue::new();
             name_notes.truncate_to(rewound);
             requests.truncate_to(rewound);
+            echoes.retain(|(_, _, height)| *height <= rewound);
             tracing::warn!(
                 height = u32::from(rewound),
                 hash = %chain_tip.block_hash(),
@@ -297,7 +300,7 @@ async fn main() {
                 continue 'run;
             }
 
-            zns_mint::mint::apply_block(
+            let arrivals = zns_mint::mint::apply_block(
                 &network,
                 &registry_keys,
                 &treasury_keys,
@@ -308,8 +311,23 @@ async fn main() {
                 &mut registry,
                 &mut mtp,
                 &mut chain_tip,
-                &mut requests,
             );
+            for (txid, inbound, paid) in arrivals {
+                match inbound {
+                    MintInbound::Request(request) => {
+                        requests.record(txid, request, paid, next_height);
+                    }
+                    MintInbound::Echo(echo) => echoes.push((echo, paid, next_height)),
+                    MintInbound::Unrecognized => {
+                        tracing::info!(
+                            txid = %txid,
+                            value_zec = paid.into_u64() as f64 / 1e8,
+                            height = u32::from(next_height),
+                            "treasury received non-request payment"
+                        );
+                    }
+                }
+            }
         }
 
         tracing::info!(
@@ -374,95 +392,15 @@ async fn main() {
         // for the next tip. Nothing is re-read.
         let mut index = 0;
         while index < requests.len() {
-            let (txid, inbound, paid, note_height) = requests.entry(index);
+            let (_txid, request, paid, note_height) = requests.entry(index);
             let decided = 'lane: {
-                match inbound {
-                    MintInbound::Unrecognized => {
-                        tracing::info!(
-                            txid = %txid,
-                            value_zec = paid.into_u64() as f64 / 1e8,
-                            height = u32::from(note_height),
-                            "treasury received non-request payment"
-                        );
-                        break 'lane true;
-                    }
-                    MintInbound::Echo(echo) => {
-                        // The echo lane: an OTP response. Decided in every outcome —
-                        // an echo never waits for money; the renewal or
-                        // upgrade fee declines on shortfall, it does not defer.
-                        let Some(record) = registry.record(&echo.name).cloned() else {
-                            break 'lane true; // no record: no mint-issued challenge can match
-                        };
-                        if record.action.is_release() {
-                            break 'lane true;
-                        }
-                        let Some(sent) = challenges.awaiting(echo, record.commitment, mtp_now)
-                        else {
-                            break 'lane true; // no pending challenge: dead
-                        };
-                        // The renewal or upgrade fee, binding at first
-                        // sight: a shortfall voids the attempt and never
-                        // consumes — the challenge stands, retryable with
-                        // the same OTP inside D_OTP.
-                        if let Some(term) = sent.term {
-                            let Some(price) = oracle.quote(&echo.name, term) else {
-                                tracing::debug!(
-                                    name = %echo.name.as_str(),
-                                    "update quote does not fit — attempt void, challenge stands"
-                                );
-                                break 'lane true;
-                            };
-                            if paid < price {
-                                tracing::debug!(
-                                    name = %echo.name.as_str(),
-                                    paid = paid.into_u64(),
-                                    "update respond underpaid — attempt void, challenge stands"
-                                );
-                                break 'lane true;
-                            }
-                        }
-                        let digits = sent.code.digits();
-                        let authorized = match echo.action {
-                            Action::Update => Request::Update {
-                                name: echo.name.clone(),
-                                ua: echo.ua.clone(),
-                                term: sent.term,
-                            },
-                            Action::Release => Request::Release {
-                                name: echo.name.clone(),
-                                ua: echo.ua.clone(),
-                            },
-                            Action::Claim => unreachable!("claims never carry an OTP"),
-                        };
-                        let Some(transition_note) = registry.authorize(
-                            &mut challenges,
-                            authorized,
-                            Some(&digits),
-                            note_height,
-                            mtp_now,
-                        ) else {
-                            break 'lane true;
-                        };
-                        // The seam where a voluntary release exists:
-                        // the OTP that authorized it is consumed here,
-                        // and the resulting note is indistinguishable
-                        // from a unilateral one on chain. This line is
-                        // the only durable record of the cause.
-                        if echo.action.is_release() {
-                            tracing::info!(
-                                name = %echo.name.as_str(),
-                                "voluntary release authorized"
-                            );
-                        }
-                        name_notes.admit(note_height, transition_note);
-                        true
-                    }
-                    MintInbound::Request(Request::Claim {
+                match request {
+                    Request::Claim {
                         name,
                         ua,
                         term,
                         code,
-                    }) => {
+                    } => {
                         // One open claim per name at a time: the Registry
                         // lags the mempool by a block; the queue holds an
                         // order only until its send. A rival payment that
@@ -537,9 +475,7 @@ async fn main() {
                         name_notes.admit(note_height, claim_note);
                         true
                     }
-                    MintInbound::Request(
-                        request @ (Request::Update { .. } | Request::Release { .. }),
-                    ) => {
+                    request @ (Request::Update { .. } | Request::Release { .. }) => {
                         // The relay lane: the mint challenges the controller.
                         // The two ways money can refuse — no fee funds,
                         // node rejection — defer; everything else is
@@ -569,6 +505,81 @@ async fn main() {
             } else {
                 index += 1;
             }
+        }
+
+        // Confirmed OTP responses wait in the run loop until the tip pass.
+        // Requests run first; a voided echo leaves its challenge available.
+        for (echo, paid, note_height) in std::mem::take(&mut echoes) {
+            let _ = 'lane: {
+                // The echo lane: an OTP response. Decided in every outcome —
+                // an echo never waits for money; the renewal or
+                // upgrade fee declines on shortfall, it does not defer.
+                let Some(record) = registry.record(&echo.name).cloned() else {
+                    break 'lane true; // no record: no mint-issued challenge can match
+                };
+                if record.action.is_release() {
+                    break 'lane true;
+                }
+                let Some(sent) = challenges.awaiting(&echo, record.commitment, mtp_now) else {
+                    break 'lane true; // no pending challenge: dead
+                };
+                // The renewal or upgrade fee, binding at first
+                // sight: a shortfall voids the attempt and never
+                // consumes — the challenge stands, retryable with
+                // the same OTP inside D_OTP.
+                if let Some(term) = sent.term {
+                    let Some(price) = oracle.quote(&echo.name, term) else {
+                        tracing::debug!(
+                            name = %echo.name.as_str(),
+                            "update quote does not fit — attempt void, challenge stands"
+                        );
+                        break 'lane true;
+                    };
+                    if paid < price {
+                        tracing::debug!(
+                            name = %echo.name.as_str(),
+                            paid = paid.into_u64(),
+                            "update respond underpaid — attempt void, challenge stands"
+                        );
+                        break 'lane true;
+                    }
+                }
+                let digits = sent.code.digits();
+                let authorized = match echo.action {
+                    Action::Update => Request::Update {
+                        name: echo.name.clone(),
+                        ua: echo.ua.clone(),
+                        term: sent.term,
+                    },
+                    Action::Release => Request::Release {
+                        name: echo.name.clone(),
+                        ua: echo.ua.clone(),
+                    },
+                    Action::Claim => unreachable!("claims never carry an OTP"),
+                };
+                let Some(transition_note) = registry.authorize(
+                    &mut challenges,
+                    authorized,
+                    Some(&digits),
+                    note_height,
+                    mtp_now,
+                ) else {
+                    break 'lane true;
+                };
+                // The seam where a voluntary release exists:
+                // the OTP that authorized it is consumed here,
+                // and the resulting note is indistinguishable
+                // from a unilateral one on chain. This line is
+                // the only durable record of the cause.
+                if echo.action.is_release() {
+                    tracing::info!(
+                        name = %echo.name.as_str(),
+                        "voluntary release authorized"
+                    );
+                }
+                name_notes.admit(note_height, transition_note);
+                true
+            };
         }
 
         // Lifecycle releases, §4.5: the registry owns the clocks and

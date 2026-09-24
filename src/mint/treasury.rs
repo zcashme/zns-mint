@@ -25,7 +25,7 @@ use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
 
-use crate::mint::{MintInbound, TREASURY_ACCOUNT};
+use crate::mint::{Request, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
 /// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
@@ -278,19 +278,13 @@ pub fn challenge<P: Parameters>(
 /// them.
 #[derive(Clone, Debug, Default)]
 pub struct RequestQueue {
-    requests: Vec<(TxId, MintInbound, Zatoshis, BlockHeight)>,
+    requests: Vec<(TxId, Request, Zatoshis, BlockHeight)>,
 }
 
 impl RequestQueue {
-    /// An arrival, decoded once at block application.
-    pub fn record(
-        &mut self,
-        txid: TxId,
-        inbound: MintInbound,
-        paid: Zatoshis,
-        height: BlockHeight,
-    ) {
-        self.requests.push((txid, inbound, paid, height));
+    /// A recognized name request, routed after block application.
+    pub fn record(&mut self, txid: TxId, request: Request, paid: Zatoshis, height: BlockHeight) {
+        self.requests.push((txid, request, paid, height));
     }
 
     pub fn len(&self) -> usize {
@@ -302,9 +296,9 @@ impl RequestQueue {
     }
 
     /// The entry at `index`, in block order — the drain cursor reads.
-    pub fn entry(&self, index: usize) -> (&TxId, &MintInbound, Zatoshis, BlockHeight) {
-        let (txid, inbound, paid, height) = &self.requests[index];
-        (txid, inbound, *paid, *height)
+    pub fn entry(&self, index: usize) -> (&TxId, &Request, Zatoshis, BlockHeight) {
+        let (txid, request, paid, height) = &self.requests[index];
+        (txid, request, *paid, *height)
     }
 
     /// The entry is decided. The only removal besides reorg truncation.
@@ -322,18 +316,18 @@ impl RequestQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mint::{Action, Name, Request, Term};
+    use crate::mint::{Action, Name, Term};
     use zcash_protocol::consensus::MainNetwork;
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
 
-    fn request(action: Action) -> MintInbound {
+    fn request(action: Action) -> Request {
         let ua = match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
             Some(zcash_keys::address::Address::Unified(ua)) => ua,
             _ => panic!("vector is a mainnet Unified Address"),
         };
         let name = Name::parse("alice").unwrap();
-        MintInbound::Request(match action {
+        match action {
             Action::Claim => Request::Claim {
                 name,
                 ua,
@@ -346,7 +340,7 @@ mod tests {
                 term: None,
             },
             Action::Release => Request::Release { name, ua },
-        })
+        }
     }
 
     fn h(n: u32) -> BlockHeight {
@@ -377,10 +371,7 @@ mod tests {
         queue.remove(1);
         assert_eq!(queue.len(), 2);
         // The entry after the removed one shifted into its place.
-        assert!(matches!(
-            queue.entry(1).1,
-            MintInbound::Request(Request::Release { .. })
-        ));
+        assert!(matches!(queue.entry(1).1, Request::Release { .. }));
         assert_eq!(queue.entry(1).3, h(102));
     }
 
@@ -393,10 +384,7 @@ mod tests {
 
         queue.truncate_to(h(120));
         assert_eq!(queue.len(), 1);
-        assert!(matches!(
-            queue.entry(0).1,
-            MintInbound::Request(Request::Claim { .. })
-        ));
+        assert!(matches!(queue.entry(0).1, Request::Claim { .. }));
         assert_eq!(queue.entry(0).3, h(100));
     }
 }
