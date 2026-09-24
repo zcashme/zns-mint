@@ -1,5 +1,12 @@
 # main.changelog.md
 
+## 2026-09-24 — The drain logs the build it did not send
+
+- A Name Note that lacks a fee and one whose authority note is busy
+  log separately from a build error. A vault sweep error is a warning;
+  a same-day or below-minimum sweep stays silent.
+
+
 ## 2026-09-24 — The run loop gates vault sweeps by day (#186)
 
 - `main` compares the day before catch-up with the day after it and calls

@@ -7,6 +7,13 @@
   Invalidation removes a request whose challenge has not been relayed.
 - `find_active` is removed; queue admission, invalidation, and relay state
   now use the request identity and transaction identity directly.
+## 2026-09-24 — A missed mempool fetch is logged
+
+- The run loop logs a transport or parse failure with the txid while
+  fetching an announced mempool transaction.
+  `Ok(None)` stays a debug line: the transaction left before the fetch.
+  Neither skip authorizes or refuses the payment. That happens when
+  the transaction is mined.
 
 ## 2026-09-24 — RequestQueue accepts only name requests (#179)
 

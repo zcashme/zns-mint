@@ -43,30 +43,56 @@ pub const CHALLENGE_RELAY_VALUE: Zatoshis = MINIMUM_FEE;
 pub const VAULT_ADDRESS: transparent::address::TransparentAddress =
     transparent::address::TransparentAddress::PublicKeyHash([0x42; 20]);
 
+/// A Treasury transaction was not built. Distinct from "nothing to do".
+#[derive(Debug)]
+pub enum BuildFailure {
+    /// No target height or anchor was available.
+    HeightsUnavailable,
+    /// Note selection failed.
+    Selection(String),
+    /// Selected note values overflowed the monetary range.
+    Balance,
+    /// The ZIP-321 payment could not be formed.
+    Request,
+    /// Input selection or fee calculation refused the proposal.
+    Proposal(String),
+    /// Proving or signing failed. The wallet was not asked to store a tx.
+    Build(String),
+}
+
+impl std::fmt::Display for BuildFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HeightsUnavailable => write!(f, "no target or anchor height"),
+            Self::Selection(error) => write!(f, "note selection failed: {error}"),
+            Self::Balance => write!(f, "selected notes overflow"),
+            Self::Request => write!(f, "ZIP-321 request invalid"),
+            Self::Proposal(error) => write!(f, "proposal failed: {error}"),
+            Self::Build(error) => write!(f, "transaction build failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for BuildFailure {}
+
 /// One sweep: all Treasury value above the operating float moves to the
-/// vault when at least `SWEEP_MINIMUM` moves. The caller gates the
-/// once-per-day cadence. The ZIP-321 amount is `total` minus
-/// `SWEEP_RESERVE`; the standard transfer helper prices ZIP-317 and the fee
-/// comes out of the float (leftover is reserve minus fee, not exactly reserve).
-/// The mint wallet currently selects only Sapling and Ironwood inputs.
-/// Returns `None` on any failure before the build. A read-back miss after a
-/// successful build is FATAL —
-/// the wallet has already marked the inputs spent.
+/// vault when at least `SWEEP_MINIMUM` moves. `main` gates the once-per-day
+/// cadence. The ZIP-321 amount is `total` minus `SWEEP_RESERVE`; the standard
+/// transfer helper prices ZIP-317 and the fee comes out of the float. `Ok(None)`
+/// means nothing needs moving. `Err` reports a build failure; the next daily
+/// gate tries again. A read-back miss after a successful build is FATAL — the
+/// wallet has already marked the inputs spent.
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
     treasury_keys: &crate::key::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
-) -> Option<Transaction> {
+) -> Result<Option<Transaction>, BuildFailure> {
     let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
-    let Some((target_height, _)) = wallet
-        .get_target_and_anchor_heights(NonZeroU32::MIN)
-        .ok()
-        .flatten()
-    else {
-        tracing::warn!("vault sweep skipped: no target/anchor heights");
-        return None;
+    let (target_height, _) = match wallet.get_target_and_anchor_heights(NonZeroU32::MIN) {
+        Ok(Some(heights)) => heights,
+        Ok(None) | Err(_) => return Err(BuildFailure::HeightsUnavailable),
     };
 
     let lock_policy = LockedInputPolicy::Exclude;
@@ -82,17 +108,11 @@ pub fn sweep_to_vault<P: Parameters>(
         Ok(notes) if !notes.is_empty() => notes,
         Ok(_) => {
             tracing::debug!("vault sweep skipped: no spendable notes");
-            return None;
+            return Ok(None);
         }
-        Err(error) => {
-            tracing::warn!(?error, "vault sweep skipped: note selection failed");
-            return None;
-        }
+        Err(error) => return Err(BuildFailure::Selection(format!("{error:?}"))),
     };
-    let Some(total) = notes.total_value().ok() else {
-        tracing::warn!("vault sweep skipped: selected notes overflow");
-        return None;
-    };
+    let total = notes.total_value().map_err(|_| BuildFailure::Balance)?;
 
     let Some(payment) = (total - SWEEP_RESERVE).filter(|p| *p >= SWEEP_MINIMUM) else {
         if total < SWEEP_RESERVE {
@@ -108,7 +128,7 @@ pub fn sweep_to_vault<P: Parameters>(
                 "vault sweep skipped: payment below the minimum"
             );
         }
-        return None;
+        return Ok(None);
     };
 
     let proposal = propose_standard_transfer_to_address::<_, _, Infallible>(
@@ -125,15 +145,7 @@ pub fn sweep_to_vault<P: Parameters>(
         None,
         None,
     )
-    .map_err(|error| {
-        tracing::warn!(
-            ?error,
-            payment_zats = payment.into_u64(),
-            spendable_zats = total.into_u64(),
-            "vault sweep proposal failed"
-        )
-    })
-    .ok()?;
+    .map_err(|error| BuildFailure::Proposal(format!("{error:?}")))?;
 
     let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
     let txids = create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
@@ -146,25 +158,24 @@ pub fn sweep_to_vault<P: Parameters>(
         &proposal,
         None,
     )
-    .map_err(|error| tracing::warn!(?error, "vault sweep build failed"))
-    .ok()?;
+    .map_err(|error| BuildFailure::Build(format!("{error:?}")))?;
 
     tracing::info!(txid = %txids.first(), "vault sweep built");
 
     // The build stored the tx and marked its inputs spent; a miss here is
     // the wallet contradicting itself, not a skip. Stop; restart rescans.
-    Some(
+    Ok(Some(
         wallet
             .get_transaction(*txids.first())
             .expect("FATAL: vault sweep lookup failed after build")
             .expect("FATAL: built vault sweep tx missing from wallet"),
-    )
+    ))
 }
 
 /// Proposes, builds, and records a Treasury payment carrying an OTP challenge
 /// memo to the controller. Funded from Treasury notes via upstream's generic
-/// selection path. Returns `None` when the Treasury cannot cover the relay
-/// payment and transaction fee; the lane retries next tip.
+/// selection path. Build failures are returned to the relay lane, which
+/// logs them and tries again on a later tip.
 #[allow(clippy::too_many_arguments)]
 pub fn challenge<P: Parameters>(
     network: &P,
@@ -174,7 +185,7 @@ pub fn challenge<P: Parameters>(
     output_prover: &sapling::circuit::OutputParameters,
     controller: &zcash_keys::address::UnifiedAddress,
     memo: MemoBytes,
-) -> Option<Transaction> {
+) -> Result<Transaction, BuildFailure> {
     let proposal = propose_standard_transfer_to_address::<_, _, Infallible>(
         wallet,
         network,
@@ -189,7 +200,7 @@ pub fn challenge<P: Parameters>(
         None,
         None,
     )
-    .ok()?;
+    .map_err(|error| BuildFailure::Proposal(format!("{error:?}")))?;
 
     let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
     let txids = create_proposed_transactions::<
@@ -209,14 +220,12 @@ pub fn challenge<P: Parameters>(
         &proposal,
         None,
     )
-    .expect("FATAL: challenge transaction creation failed");
+    .map_err(|error| BuildFailure::Build(format!("{error:?}")))?;
 
-    Some(
-        wallet
-            .get_transaction(*txids.first())
-            .expect("FATAL: challenge transaction lookup failed")
-            .expect("FATAL: challenge transaction was not recorded"),
-    )
+    Ok(wallet
+        .get_transaction(*txids.first())
+        .expect("FATAL: challenge transaction lookup failed")
+        .expect("FATAL: challenge transaction was not recorded"))
 }
 
 // ---------------------------------------------------------------------------

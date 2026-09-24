@@ -16,6 +16,12 @@
 
 - `sweep_to_vault` builds a sweep when called; `main` owns the once-per-day
   gate and invokes it only when catch-up advances the mint's day.
+## 2026-09-24 — A skipped build names the failure
+
+- `sweep_to_vault` returns `Ok(None)` only when there is nothing to
+  move. Selection, balance, proposal, and build failures are
+  `BuildFailure`. `challenge` returns the same type instead of `None`
+  or a panic. A missing tx after a successful build is still fatal.
 
 ## 2026-09-22 — A built sweep that cannot be read back is FATAL
 

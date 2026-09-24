@@ -625,7 +625,7 @@ pub async fn relay<P: Parameters + Send + 'static>(
     let Some(memo) = challenge.encode(network) else {
         return false;
     };
-    let Some(transaction) = treasury::challenge(
+    let transaction = match treasury::challenge(
         network,
         wallet,
         treasury_keys,
@@ -633,14 +633,18 @@ pub async fn relay<P: Parameters + Send + 'static>(
         output_prover,
         controller_ua,
         memo,
-    ) else {
-        tracing::debug!(
-            lane,
-            name = %request.name.as_str(),
-            action = request.action.as_str(),
-            "controller challenge awaits Treasury funds"
-        );
-        return false;
+    ) {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            tracing::warn!(
+                lane,
+                %error,
+                name = %request.name.as_str(),
+                action = request.action.as_str(),
+                "controller challenge not built"
+            );
+            return false;
+        }
     };
     if source.submit(&transaction, "controller challenge").await {
         tracing::info!(

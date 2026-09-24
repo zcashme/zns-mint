@@ -1,5 +1,11 @@
 # Pricing changelog
 
+## 2026-09-24 — A dropped venue says why
+
+- URL, request, transport, timeout, and body failures log the venue
+  and the error before the round drops that quote. The round is still
+  `Option`.
+
 ## 2026-09-24 — A quote that does not fit is None
 
 - `quote` returns `None` when the zat product does not fit. The drain

@@ -1,5 +1,11 @@
 # `mint/note.rs` design record
 
+## 2026-09-24 — A Name Note build says why it stopped
+
+- `prepare` returns `PrepareError`. A missing authority note and a
+  short fee are different from a witness, anchor, memo, or builder
+  failure. The drain logs those separately and retries next tip.
+
 ## 2026-09-21 — Orders resolve at their send; the queue drains (#116)
 
 - `NameNoteQueue` membership now means one thing: a decision awaiting
