@@ -4,7 +4,9 @@
 
 - `prepare` returns `PrepareError`. A missing authority note and a
   short fee are different from a witness, anchor, memo, or builder
-  failure. The drain logs those separately and retries next tip.
+  failure. The drain logs those separately and retries next tip. Tree,
+  fee, memo, and builder errors retain their concrete error types instead
+  of being converted to strings.
 
 ## 2026-09-21 — Orders resolve at their send; the queue drains (#116)
 

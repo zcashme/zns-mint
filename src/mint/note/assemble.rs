@@ -6,7 +6,7 @@ use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{NoteId, ReceivedNote};
-use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
+use zcash_primitives::transaction::builder::{self, BuildConfig, Builder, BundlePadding};
 use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_primitives::transaction::Transaction;
@@ -16,7 +16,7 @@ use zcash_protocol::value::Zatoshis;
 use super::NameNote;
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
-use crate::wallet::Wallet;
+use crate::wallet::{TreeError, Wallet, WalletError};
 
 /// Why a Name Note transaction was not built. The caller retries next tip.
 /// Only [`PrepareError::FeeUnfunded`] means the Treasury could not cover
@@ -34,9 +34,13 @@ pub enum PrepareError {
     /// An update or release predecessor memo does not open its Name Note.
     PredecessorClosed,
     /// A note-commitment tree operation failed.
-    Tree(String),
-    /// The builder, the fee rule, or proving rejected the transaction.
-    Build(String),
+    Tree(TreeError),
+    /// The ZIP-317 fee rule could not calculate the required fee.
+    Fee(FeeError),
+    /// The wallet could not retrieve the predecessor memo.
+    Memo(WalletError),
+    /// The transaction builder or prover rejected the transaction.
+    Builder(builder::Error<FeeError>),
 }
 
 impl std::fmt::Display for PrepareError {
@@ -48,7 +52,9 @@ impl std::fmt::Display for PrepareError {
             Self::AnchorUnavailable => write!(f, "no Ironwood anchor at the applied tip"),
             Self::PredecessorClosed => write!(f, "predecessor memo does not open its Name Note"),
             Self::Tree(error) => write!(f, "note commitment tree error: {error}"),
-            Self::Build(error) => write!(f, "Name Note build failed: {error}"),
+            Self::Fee(error) => write!(f, "ZIP-317 fee calculation failed: {error}"),
+            Self::Memo(error) => write!(f, "predecessor memo lookup failed: {error}"),
+            Self::Builder(error) => write!(f, "Name Note transaction build failed: {error}"),
         }
     }
 }
@@ -110,7 +116,7 @@ pub fn prepare<P: Parameters>(
 
     let anchor = wallet
         .ironwood_anchor(tip)
-        .map_err(|error| PrepareError::Tree(error.to_string()))?
+        .map_err(PrepareError::Tree)?
         .ok_or(PrepareError::AnchorUnavailable)?;
     let authority_note = *authority.note();
     let authority_path = witness_at(wallet, &authority, tip)?;
@@ -136,7 +142,7 @@ pub fn prepare<P: Parameters>(
     if note.action().is_claim() {
         builder
             .add_ironwood_spend::<FeeError>(registry_fvk.clone(), authority_note, authority_path)
-            .map_err(|error| PrepareError::Build(error.to_string()))?;
+            .map_err(PrepareError::Builder)?;
     } else {
         let (rcm, psi) = predecessor_opening(network, wallet, &authority)?;
         builder
@@ -147,14 +153,14 @@ pub fn prepare<P: Parameters>(
                 rcm,
                 psi,
             )
-            .map_err(|error| PrepareError::Build(error.to_string()))?;
+            .map_err(PrepareError::Builder)?;
     }
 
     // Fee notes.
     for (note, path) in fee_notes {
         builder
             .add_ironwood_spend::<FeeError>(treasury_fvk.clone(), note, path)
-            .map_err(|error| PrepareError::Build(error.to_string()))?;
+            .map_err(PrepareError::Builder)?;
     }
 
     // The successor Name Note: a zero-value ZNS output whose commitment is
@@ -172,7 +178,7 @@ pub fn prepare<P: Parameters>(
             opening,
             psi,
         )
-        .map_err(|error| PrepareError::Build(error.to_string()))?;
+        .map_err(PrepareError::Builder)?;
 
     // Claims also stage a successor anchor: an ordinary zero-value Registry
     // output that authorizes the next claim.
@@ -184,7 +190,7 @@ pub fn prepare<P: Parameters>(
                 Zatoshis::ZERO,
                 zcash_protocol::memo::MemoBytes::empty(),
             )
-            .map_err(|error| PrepareError::Build(error.to_string()))?;
+            .map_err(PrepareError::Builder)?;
     }
 
     // Treasury change.
@@ -196,7 +202,7 @@ pub fn prepare<P: Parameters>(
                 treasury_change,
                 zcash_protocol::memo::MemoBytes::empty(),
             )
-            .map_err(|error| PrepareError::Build(error.to_string()))?;
+            .map_err(PrepareError::Builder)?;
     }
 
     let built = builder
@@ -212,7 +218,7 @@ pub fn prepare<P: Parameters>(
             output_prover,
             &StandardFeeRule::Zip317,
         )
-        .map_err(|error| PrepareError::Build(error.to_string()))?;
+        .map_err(PrepareError::Builder)?;
     let transaction = built.transaction().clone();
     wallet.record_sent(&transaction, target_height, transaction_fee);
     Ok(transaction)
@@ -225,7 +231,7 @@ fn witness_at<P: Parameters>(
 ) -> Result<orchard::tree::MerklePath, PrepareError> {
     let path = wallet
         .ironwood_witness(note.note_commitment_tree_position(), tip)
-        .map_err(|error| PrepareError::Tree(error.to_string()))?
+        .map_err(PrepareError::Tree)?
         .ok_or(PrepareError::WitnessUnavailable)?;
     Ok(orchard::tree::MerklePath::from(path))
 }
@@ -248,7 +254,7 @@ fn predecessor_opening<P: Parameters>(
 > {
     let memo = wallet
         .get_memo(*note.internal_note_id())
-        .map_err(|error| PrepareError::Build(error.to_string()))?;
+        .map_err(PrepareError::Memo)?;
     let payload = match memo {
         Some(zcash_protocol::memo::Memo::Future(bytes)) => {
             NameNote::decode(network, bytes.as_array())
@@ -278,5 +284,5 @@ fn fee<P: Parameters>(
             0,
             ironwood_actions,
         )
-        .map_err(|error| PrepareError::Build(error.to_string()))
+        .map_err(PrepareError::Fee)
 }
