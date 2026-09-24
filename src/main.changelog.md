@@ -1,13 +1,12 @@
 # main.changelog.md
 
-## 2026-09-24 — A Name Note order stays until it is mined
+## 2026-09-24 — Admit OTP requests by transaction across mempool and block paths (#183)
 
-- An unusable Zebra answer logs and waits for the next notification.
-  It does not abort the process.
-- Mempool acceptance records the txid and resubmits those bytes on
-  later tips. The order leaves when the node reports it mined, or when
-  the world overtakes it. Rejection is not retried; expiry may build
-  a successor. A vault sweep still waits until the node answers.
+- The mempool stream carries Zebra's change kind and txid to the run loop.
+  Eligible requests enter `OtpQueue` once by txid; invalidation retires an
+  unsent request, and block confirmation reuses the same entry. Requested
+  challenges retry during later tip passes.
+- `relay` now only submits an already admitted OTP challenge.
 
 ## 2026-09-24 — Remove the seven-day liveness reminder (#174)
 

@@ -12,15 +12,15 @@
 
 use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, BranchId};
 use zcash_protocol::value::Zatoshis;
 
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::assemble;
 use zns_mint::mint::note::NameNoteQueue;
-use zns_mint::mint::otp::OtpQueue;
+use zns_mint::mint::note::{assemble, decrypt_treasury_tx};
+use zns_mint::mint::otp::{OtpQueue, OtpRequest};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
@@ -28,7 +28,7 @@ use zns_mint::mint::{
     TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{
-    CanonicalBlockSource, JsonRpc, SubmitOutcome, TipSession, TransportError, RETRY_PAUSE,
+    CanonicalBlockSource, JsonRpc, MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE,
 };
 
 #[tokio::main]
@@ -81,65 +81,60 @@ async fn main() {
     // the re-read of the canonical tip that turns every wake-up into the
     // node's answer, never the announcement's promise. The orchestrator
     // holds position (the wallet) and never sees transport state.
-    // The mempool quick lane: update and release triggers relayed the
-    // moment the node reports them, before their blocks. One reader
-    // task turns mempool announcements into candidates; the orchestrator
-    // alone decides. Best-effort and forgetful — every decision the
-    // block path re-makes when the trigger confirms.
-    let (quick_tx, mut quick_rx) = mpsc::channel::<(MintInbound, Zatoshis)>(64);
-    tokio::spawn(watch_mempool(
-        network,
-        chain.clone(),
-        rpc.clone(),
-        treasury_keys.orchard_fvk(),
-        quick_tx,
-    ));
+    // The watcher forwards Zebra's change kind and txid. The run loop owns
+    // OtpQueue and admits or invalidates requests as those events arrive.
+    let (mempool_tx, mut mempool_rx) = mpsc::channel(64);
+    tokio::spawn(watch_mempool(chain.clone(), mempool_tx));
 
     let mut connection = TipSession::open(chain).await;
     'run: loop {
         let (best_height, _) = tokio::select! {
             tip = connection.next_tip(&source) => match tip {
                 Ok(tip) => tip,
-                Err(error) => {
-                    tracing::error!(%error, "canonical tip unusable; waiting for the next notification");
-                    continue;
-                }
+                Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
             },
-            Some((inbound, paid)) = quick_rx.recv() => {
-                // The quick entrance: evaluate now, forget immediately —
-                // deferral is the drain's concept, not this one's. The
-                // reader forwards everything it decrypts; this match is
-                // where "which lanes are quick" is decided.
-                match inbound {
-                    MintInbound::Request(
-                        request @ (Request::Update { .. } | Request::Release { .. }),
-                    ) => {
-                        let mtp_now = mtp
-                            .current()
-                            .expect("FATAL: MTP unavailable at the applied tip");
-                        relay(
-                            &network,
-                            &mut wallet,
-                            &treasury_keys,
-                            &sapling_spend,
-                            &sapling_output,
-                            &registry,
-                            &mut challenges,
-                            &oracle,
-                            &source,
-                            mtp_now,
-                            &request,
-                            paid,
-                            chain_tip.block_height() + 1,
-                            "mempool",
-                        )
-                        .await;
+            Some((kind, txid)) = mempool_rx.recv() => {
+                let mtp_now = mtp.current().expect("FATAL: MTP unavailable at the applied tip");
+                match kind {
+                    MempoolChangeKind::Invalidated => challenges.invalidate(txid, mtp_now),
+                    MempoolChangeKind::Mined => {}
+                    MempoolChangeKind::Added => {
+                        let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
+                        if let Some(transaction) = rpc.get_raw_transaction(branch_id, txid).await.ok().flatten() {
+                            for (_action_index, paid, memo) in decrypt_treasury_tx(
+                                &transaction,
+                                &treasury_keys.orchard_fvk(),
+                            ) {
+                                let MintInbound::Request(request) = MintInbound::decode(&network, &memo) else {
+                                    continue;
+                                };
+                                let (name, action, requested_ua, term) = match &request {
+                                    Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
+                                    Request::Release { name, ua } => (name, Action::Release, ua, None),
+                                    Request::Claim { .. } => continue,
+                                };
+                                let Some(record) = registry.record(name).cloned() else { continue; };
+                                let trigger_height = chain_tip.block_height() + 1;
+                                if !record.admits(action, requested_ua, term, trigger_height, mtp_now)
+                                    || paid < oracle.challenge_fee()
+                                {
+                                    continue;
+                                }
+                                let (_, pending) = OtpRequest::pending_challenge(
+                                    name, action, requested_ua, record.commitment, term, mtp_now,
+                                );
+                                let pending = challenges.admit_request(pending, txid, mtp_now);
+                                if !challenges.is_relayed(&pending)
+                                    && relay(
+                                        &network, &mut wallet, &treasury_keys, &sapling_spend,
+                                        &sapling_output, &record.ua, &source, &pending, "mempool",
+                                    ).await
+                                {
+                                    challenges.challenge_issued(&pending);
+                                }
+                            }
+                        }
                     }
-                    // Claims, echoes, and bare payments authorize against
-                    // money that must confirm — the block path owns them.
-                    MintInbound::Request(Request::Claim { .. })
-                    | MintInbound::Echo(_)
-                    | MintInbound::Unrecognized => {}
                 }
                 continue;
             }
@@ -177,12 +172,7 @@ async fn main() {
                         continue 'run;
                     }
                     Err(error) => {
-                        tracing::error!(
-                            %error,
-                            height = u32::from(ancestor),
-                            "ancestor hash unusable; waiting for the next notification"
-                        );
-                        continue 'run;
+                        panic!("FATAL: Zebra returned an invalid ancestor hash: {error}")
                     }
                 }
             };
@@ -271,12 +261,7 @@ async fn main() {
                         continue 'run;
                     }
                     Err(error) => {
-                        tracing::error!(
-                            %error,
-                            height = u32::from(from_height),
-                            "previous chain state unusable; waiting for the next notification"
-                        );
-                        continue 'run;
+                        panic!("FATAL: Zebra returned an invalid previous chain state: {error}")
                     }
                 }
             };
@@ -300,12 +285,7 @@ async fn main() {
                         continue 'run;
                     }
                     Err(error) => {
-                        tracing::error!(
-                            %error,
-                            height = u32::from(next_height),
-                            "canonical block unusable; waiting for the next notification"
-                        );
-                        continue 'run;
+                        panic!("FATAL: Zebra returned an invalid canonical block: {error}")
                     }
                 }
             };
@@ -365,9 +345,8 @@ async fn main() {
             .current_day()
             .expect("FATAL: MTP unavailable at the applied tip");
         oracle.accumulate(fetch_round().await, today, mtp_now);
-        // Transient → skip rules until the next notification. A tip
-        // race re-converges. An unusable answer does too: the mint
-        // stays up and reads the node again.
+        // Transient → skip rules to next tip (like the tip-mismatch
+        // branch below); race → re-converge; bad data → fatal.
         let exact_tip = match source.canonical_tip().await {
             Ok(tip) => tip,
             Err(error) if error.is_retryable() => {
@@ -381,10 +360,7 @@ async fn main() {
                 tracing::warn!("tip lane returned NotOnBestChain; re-converging");
                 continue 'run;
             }
-            Err(error) => {
-                tracing::error!(%error, "post-catch-up tip unusable; skipping rules this notification");
-                continue;
-            }
+            Err(error) => panic!("FATAL: Zebra returned an invalid tip: {error}"),
         };
         if exact_tip != (tip, tip_hash) {
             tracing::warn!(
@@ -416,7 +392,7 @@ async fn main() {
         // for the next tip. Nothing is re-read.
         let mut index = 0;
         while index < requests.len() {
-            let (_txid, request, paid, note_height) = requests.entry(index);
+            let (txid, request, paid, note_height) = requests.entry(index);
             let decided = 'lane: {
                 match request {
                     Request::Claim {
@@ -500,27 +476,29 @@ async fn main() {
                         true
                     }
                     request @ (Request::Update { .. } | Request::Release { .. }) => {
-                        // The relay lane: the mint challenges the controller.
-                        // The two ways money can refuse — no fee funds,
-                        // node rejection — defer; everything else is
-                        // decided.
-                        relay(
-                            &network,
-                            &mut wallet,
-                            &treasury_keys,
-                            &sapling_spend,
-                            &sapling_output,
-                            &registry,
-                            &mut challenges,
-                            &oracle,
-                            &source,
+                        let (name, action, requested_ua, term) = match request {
+                            Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
+                            Request::Release { name, ua } => (name, Action::Release, ua, None),
+                            Request::Claim { .. } => unreachable!(),
+                        };
+                        let Some(record) = registry.record(name).cloned() else {
+                            break 'lane true;
+                        };
+                        if !record.admits(action, requested_ua, term, note_height, mtp_now)
+                            || paid < oracle.challenge_fee()
+                        {
+                            break 'lane true;
+                        }
+                        let (_, pending) = OtpRequest::pending_challenge(
+                            name,
+                            action,
+                            requested_ua,
+                            record.commitment,
+                            term,
                             mtp_now,
-                            request,
-                            paid,
-                            note_height,
-                            "tip",
-                        )
-                        .await
+                        );
+                        challenges.admit_request(pending, *txid, mtp_now);
+                        true
                     }
                 }
             };
@@ -528,6 +506,32 @@ async fn main() {
                 requests.remove(index);
             } else {
                 index += 1;
+            }
+        }
+
+        // Queue admission is independent from submission. Retry every still-
+        // requested mempool or confirmed entry once during each tip pass.
+        for pending in challenges.requested(mtp_now) {
+            let Some(record) = registry
+                .record(&pending.name)
+                .filter(|record| record.commitment == pending.tip_rcm)
+            else {
+                continue;
+            };
+            if relay(
+                &network,
+                &mut wallet,
+                &treasury_keys,
+                &sapling_spend,
+                &sapling_output,
+                &record.ua,
+                &source,
+                &pending,
+                "tip",
+            )
+            .await
+            {
+                challenges.challenge_issued(&pending);
             }
         }
 
@@ -690,7 +694,6 @@ async fn main() {
             // an update in the same shape may be racing a sibling, and
             // stays queued instead.
             if note.action().is_release()
-                && name_notes.pending_txid(index).is_none()
                 && wallet
                     .unspent_ironwood_note_by_nullifier(
                         REGISTRY_ACCOUNT,
@@ -705,15 +708,6 @@ async fn main() {
                 );
                 name_notes.remove(index);
                 continue;
-            }
-
-            match resubmit_name_note(&source, &wallet, &mut name_notes, index, tip).await {
-                OpenOrder::Removed => continue,
-                OpenOrder::Stay => {
-                    index += 1;
-                    continue;
-                }
-                OpenOrder::Build => {}
             }
 
             let Some(transaction) = assemble::prepare(
@@ -737,10 +731,22 @@ async fn main() {
                 continue;
             };
 
-            name_notes.mark_submitted(index, transaction.txid());
-            match submit_name_note(&source, &transaction, &note, &mut name_notes, index).await {
-                OpenOrder::Removed => continue,
-                OpenOrder::Stay | OpenOrder::Build => index += 1,
+            if source.submit(&transaction, "NameNote").await {
+                tracing::info!(
+                    txid = %transaction.txid(),
+                    name = %note.name().as_str(),
+                    action = note.action().as_str(),
+                    "NameNote order sent — the wallet holds it until the chain answers"
+                );
+                name_notes.remove(index);
+            } else {
+                tracing::error!(
+                    txid = %transaction.txid(),
+                    name = %note.name().as_str(),
+                    action = note.action().as_str(),
+                    "NameNote submission rejected — inputs stranded until expiry"
+                );
+                index += 1;
             }
         }
 
@@ -753,7 +759,7 @@ async fn main() {
             today,
             previous_day,
         ) {
-            source.submit_until_answered(&tx, "vault sweep").await;
+            source.submit(&tx, "vault sweep").await;
         }
 
         tracing::debug!(
@@ -761,97 +767,5 @@ async fn main() {
             hash = %tip_hash,
             "mint rules applied at canonical tip"
         );
-    }
-}
-
-/// What the Name Note drain should do with the order at `index`.
-enum OpenOrder {
-    /// No live broadcast. Build one.
-    Build,
-    /// A broadcast is still outstanding. Leave the order and move on.
-    Stay,
-    /// The order left the queue. The index already points at the next one.
-    Removed,
-}
-
-/// Resubmits the order's recorded transaction, if it still blocks its inputs.
-async fn resubmit_name_note<P: zcash_protocol::consensus::Parameters>(
-    source: &CanonicalBlockSource,
-    wallet: &zns_mint::wallet::Wallet<P>,
-    name_notes: &mut NameNoteQueue,
-    index: usize,
-    tip: BlockHeight,
-) -> OpenOrder {
-    use zcash_client_backend::data_api::WalletRead as _;
-
-    let Some(txid) = name_notes.pending_txid(index) else {
-        return OpenOrder::Build;
-    };
-    if wallet.expired_unmined_at(txid, tip) {
-        tracing::warn!(%txid, "NameNote broadcast expired; building a successor");
-        name_notes.clear_submission(index);
-        return OpenOrder::Build;
-    }
-    let Ok(Some(transaction)) = wallet.get_transaction(txid) else {
-        tracing::error!(%txid, "NameNote broadcast missing from the wallet; building a successor");
-        name_notes.clear_submission(index);
-        return OpenOrder::Build;
-    };
-    let note = name_notes.entry(index).0.clone();
-    submit_name_note(source, &transaction, &note, name_notes, index).await
-}
-
-/// Sends `transaction` once and applies the node's answer to the order.
-async fn submit_name_note(
-    source: &CanonicalBlockSource,
-    transaction: &zcash_primitives::transaction::Transaction,
-    note: &zns_mint::mint::note::NameNote,
-    name_notes: &mut NameNoteQueue,
-    index: usize,
-) -> OpenOrder {
-    let txid = transaction.txid();
-    match source.submit(transaction, "NameNote").await {
-        Ok(SubmitOutcome::Mined) => {
-            tracing::info!(
-                %txid,
-                name = %note.name().as_str(),
-                action = note.action().as_str(),
-                "NameNote order mined"
-            );
-            name_notes.remove(index);
-            OpenOrder::Removed
-        }
-        Ok(SubmitOutcome::Accepted) => {
-            tracing::info!(
-                %txid,
-                name = %note.name().as_str(),
-                action = note.action().as_str(),
-                "NameNote order in the mempool; waiting for a block"
-            );
-            OpenOrder::Stay
-        }
-        Ok(SubmitOutcome::Rejected(error)) => {
-            tracing::error!(
-                %error,
-                %txid,
-                name = %note.name().as_str(),
-                action = note.action().as_str(),
-                "NameNote submission rejected; inputs stay locked until expiry"
-            );
-            // The rejected bytes must not be sent again. The order stays
-            // so a successor can be built once the wallet releases them.
-            name_notes.clear_submission(index);
-            OpenOrder::Stay
-        }
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                %txid,
-                name = %note.name().as_str(),
-                action = note.action().as_str(),
-                "NameNote submission uncertain; resubmitting next tip"
-            );
-            OpenOrder::Stay
-        }
     }
 }
