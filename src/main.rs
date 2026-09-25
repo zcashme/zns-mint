@@ -19,7 +19,8 @@ use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::{
-    assemble, claim_names_in_transaction, decrypt_treasury_tx, NameNoteQueue, OpenClaims,
+    assemble, claim_names_in_transaction, decrypt_treasury_tx, NameNoteQueue, NameNoteState,
+    OpenClaims,
 };
 use zns_mint::mint::otp::{OtpQueue, OtpRequest};
 use zns_mint::mint::pricing::fetch_round;
@@ -102,38 +103,46 @@ async fn main() {
                     MempoolChangeKind::Mined => {}
                     MempoolChangeKind::Added => {
                         let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
-                        if let Some(transaction) = rpc.get_raw_transaction(branch_id, txid).await.ok().flatten() {
-                            for (_action_index, paid, memo) in decrypt_treasury_tx(
-                                &transaction,
-                                &treasury_keys.orchard_fvk(),
-                            ) {
-                                let MintInbound::Request(request) = MintInbound::decode(&network, &memo) else {
-                                    continue;
-                                };
-                                let (name, action, requested_ua, term) = match &request {
-                                    Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
-                                    Request::Release { name, ua } => (name, Action::Release, ua, None),
-                                    Request::Claim { .. } => continue,
-                                };
-                                let Some(record) = registry.record(name).cloned() else { continue; };
-                                let trigger_height = chain_tip.block_height() + 1;
-                                if !record.admits(action, requested_ua, term, trigger_height, mtp_now)
-                                    || paid < oracle.challenge_fee()
-                                {
-                                    continue;
+                        match rpc.get_raw_transaction(branch_id, txid).await {
+                            Ok(Some(transaction)) => {
+                                for (_action_index, paid, memo) in decrypt_treasury_tx(
+                                    &transaction,
+                                    &treasury_keys.orchard_fvk(),
+                                ) {
+                                    let MintInbound::Request(request) = MintInbound::decode(&network, &memo) else {
+                                        continue;
+                                    };
+                                    let (name, action, requested_ua, term) = match &request {
+                                        Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
+                                        Request::Release { name, ua } => (name, Action::Release, ua, None),
+                                        Request::Claim { .. } => continue,
+                                    };
+                                    let Some(record) = registry.record(name).cloned() else { continue; };
+                                    let trigger_height = chain_tip.block_height() + 1;
+                                    if !record.admits(action, requested_ua, term, trigger_height, mtp_now)
+                                        || paid < oracle.challenge_fee()
+                                    {
+                                        continue;
+                                    }
+                                    let (_, pending) = OtpRequest::pending_challenge(
+                                        name, action, requested_ua, record.commitment, term, mtp_now,
+                                    );
+                                    let pending = challenges.admit_request(pending, txid, mtp_now);
+                                    if !challenges.is_relayed(&pending)
+                                        && relay(
+                                            &network, &mut wallet, &treasury_keys, &sapling_spend,
+                                            &sapling_output, &record.ua, &source, &pending, "mempool",
+                                        ).await
+                                    {
+                                        challenges.challenge_issued(&pending);
+                                    }
                                 }
-                                let (_, pending) = OtpRequest::pending_challenge(
-                                    name, action, requested_ua, record.commitment, term, mtp_now,
-                                );
-                                let pending = challenges.admit_request(pending, txid, mtp_now);
-                                if !challenges.is_relayed(&pending)
-                                    && relay(
-                                        &network, &mut wallet, &treasury_keys, &sapling_spend,
-                                        &sapling_output, &record.ua, &source, &pending, "mempool",
-                                    ).await
-                                {
-                                    challenges.challenge_issued(&pending);
-                                }
+                            }
+                            Ok(None) => {
+                                tracing::debug!(%txid, "mempool transaction gone before fetch");
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, %txid, "mempool transaction fetch failed");
                             }
                         }
                     }
@@ -220,8 +229,10 @@ async fn main() {
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
+            name_notes.rewind_seen();
             name_notes.truncate_to(rewound);
             open_claims.truncate_to(rewound);
+            name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
             echoes.retain(|(_, _, height)| *height <= rewound);
             tracing::warn!(
@@ -315,6 +326,7 @@ async fn main() {
                 &mut mtp,
                 &mut chain_tip,
             );
+            name_notes.reconcile_seen(&network, &registry);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
@@ -675,17 +687,18 @@ async fn main() {
         }
 
         // --- NameNote enactment ---
-        // The order drain: one broadcast per decision. An order leaves
-        // the queue when it is sent — the wallet's retained transaction
-        // is then the record of the open commitment until the chain
-        // resolves it — or when the world overtakes it. Nothing here
-        // re-enacts a sent order: the wallet answers for it.
+        // The order drain: one broadcast per decision. The queue tracks
+        // authorization through submission and canonical observation.
         let mut index = 0;
         while index < name_notes.len() {
-            let (note, origin) = {
-                let (note, origin) = name_notes.entry(index);
-                (note.clone(), origin)
+            let (note, origin, state) = {
+                let (note, origin, state) = name_notes.entry(index);
+                (note.clone(), origin, state)
             };
+            if state != NameNoteState::Authorized {
+                index += 1;
+                continue;
+            }
             // Authority: a claim spends a lineage pool anchor; an update
             // or release spends the predecessor — the record's nullifier
             // matched by commitment.
@@ -765,7 +778,7 @@ async fn main() {
                 continue;
             }
 
-            let Some(transaction) = assemble::prepare(
+            let transaction = match assemble::prepare(
                 &network,
                 &mut wallet,
                 &treasury_keys,
@@ -776,14 +789,36 @@ async fn main() {
                 authority_nf,
                 tip,
                 target_height,
-            ) else {
-                tracing::debug!(
-                    name = %note.name().as_str(),
-                    action = note.action().as_str(),
-                    "NameNote order awaits Treasury fee funds"
-                );
-                index += 1;
-                continue;
+            ) {
+                Ok(transaction) => transaction,
+                Err(assemble::PrepareError::FeeUnfunded) => {
+                    tracing::debug!(
+                        name = %note.name().as_str(),
+                        action = note.action().as_str(),
+                        "NameNote order awaits Treasury fee funds"
+                    );
+                    index += 1;
+                    continue;
+                }
+                Err(assemble::PrepareError::AuthorityUnavailable) => {
+                    tracing::debug!(
+                        name = %note.name().as_str(),
+                        action = note.action().as_str(),
+                        "NameNote order awaits its authority note"
+                    );
+                    index += 1;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        name = %note.name().as_str(),
+                        action = note.action().as_str(),
+                        "NameNote order could not be built"
+                    );
+                    index += 1;
+                    continue;
+                }
             };
 
             if source.submit(&transaction, "NameNote").await {
@@ -791,12 +826,13 @@ async fn main() {
                     txid = %transaction.txid(),
                     name = %note.name().as_str(),
                     action = note.action().as_str(),
-                    "NameNote order sent — the wallet holds it until the chain answers"
+                    "NameNote order sent"
                 );
                 if note.action().is_claim() {
                     open_claims.mark_sent(note.name(), transaction.txid());
                 }
-                name_notes.remove(index);
+                name_notes.set_state(index, NameNoteState::Submitted);
+                index += 1;
             } else {
                 tracing::error!(
                     txid = %transaction.txid(),
@@ -809,14 +845,20 @@ async fn main() {
         }
 
         if today > previous_day {
-            if let Some(tx) = treasury::sweep_to_vault(
+            match treasury::sweep_to_vault(
                 &network,
                 &mut wallet,
                 &treasury_keys,
                 &sapling_spend,
                 &sapling_output,
             ) {
-                source.submit(&tx, "vault sweep").await;
+                Ok(Some(tx)) => {
+                    source.submit(&tx, "vault sweep").await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "vault sweep not built");
+                }
             }
         }
 

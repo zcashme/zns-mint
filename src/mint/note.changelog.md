@@ -9,6 +9,21 @@
 - `release_pending` is the created release note. A later one is not
   admitted over it.
 
+## 2026-09-24 — A Name Note build says why it stopped
+
+- `prepare` returns `PrepareError`. A missing authority note and a
+  short fee are different from a witness, anchor, memo, or builder
+  failure. The drain logs those separately and retries next tip. Tree,
+  fee, memo, and builder errors retain their concrete error types instead
+  of being converted to strings.
+## 2026-09-24 — NameNote orders track authorization, submission, and observation (#195)
+
+- Each queued order keeps its `NameNote`, authorization origin, and a
+  `NameNoteState`: `Authorized`, `Submitted`, or `Seen`. Successful broadcast
+  advances to `Submitted`; the Registry's current record derives `Seen`.
+- A reorg rewinds seen orders to `Authorized`, then drops orders whose
+  authorization origin was orphaned. The transaction remains wallet-owned.
+
 ## 2026-09-21 — Orders resolve at their send; the queue drains (#116)
 
 - `NameNoteQueue` membership now means one thing: a decision awaiting
