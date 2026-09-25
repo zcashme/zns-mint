@@ -3,8 +3,7 @@
 ## 2026-09-24 — The earliest claim payment owns the name
 
 - `NameNoteQueue` carries claim ownership from authorization through
-  submission. The reservation ends when the claim is observed or the
-  transaction expires; reorged origins are removed.
+  submission until the claim is observed. Reorged origins are removed.
 - `release_pending` is the created release note. A later one is not
   admitted over it.
 

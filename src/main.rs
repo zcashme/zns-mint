@@ -322,7 +322,6 @@ async fn main() {
                 &mut chain_tip,
             );
             name_notes.reconcile_seen(&network, &registry);
-            name_notes.expire_claims(next_height);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
@@ -792,7 +791,7 @@ async fn main() {
                     action = note.action().as_str(),
                     "NameNote order sent"
                 );
-                name_notes.mark_submitted(index, transaction.expiry_height());
+                name_notes.mark_submitted(index);
                 index += 1;
             } else {
                 tracing::error!(

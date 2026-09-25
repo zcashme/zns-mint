@@ -601,16 +601,15 @@ pub enum NameNoteState {
 /// removed by their origin height.
 #[derive(Clone, Debug, Default)]
 pub struct NameNoteQueue {
-    orders: Vec<(NameNote, BlockHeight, NameNoteState, Option<BlockHeight>)>,
+    orders: Vec<(NameNote, BlockHeight, NameNoteState)>,
 }
 
 impl NameNoteQueue {
     /// Records a decision. Idempotent: a note already authorized keeps its
     /// original origin.
     pub fn admit(&mut self, origin: BlockHeight, note: NameNote) {
-        if !self.orders.iter().any(|(n, _, _, _)| *n == note) {
-            self.orders
-                .push((note, origin, NameNoteState::Authorized, None));
+        if !self.orders.iter().any(|(n, _, _)| *n == note) {
+            self.orders.push((note, origin, NameNoteState::Authorized));
         }
     }
 
@@ -624,7 +623,7 @@ impl NameNoteQueue {
 
     /// The entry at `index`, in admission order.
     pub fn entry(&self, index: usize) -> (&NameNote, BlockHeight, NameNoteState) {
-        let (note, origin, state, _) = &self.orders[index];
+        let (note, origin, state) = &self.orders[index];
         (note, *origin, *state)
     }
 
@@ -632,27 +631,17 @@ impl NameNoteQueue {
         self.orders.remove(index);
     }
 
-    /// Records a successful broadcast and when its claim can no longer be
-    /// mined. The queue remains the claim owner until confirmation or expiry.
-    pub fn mark_submitted(&mut self, index: usize, expiry_height: BlockHeight) {
+    /// Records a successful broadcast. The order stays queued until canonical
+    /// observation, so later claim payments cannot take ownership.
+    pub fn mark_submitted(&mut self, index: usize) {
         self.orders[index].2 = NameNoteState::Submitted;
-        self.orders[index].3 = Some(expiry_height);
-    }
-
-    /// A submitted claim that has expired no longer reserves its name.
-    pub fn expire_claims(&mut self, height: BlockHeight) {
-        self.orders.retain(|(note, _, state, expiry)| {
-            !(note.action().is_claim()
-                && *state == NameNoteState::Submitted
-                && expiry.is_some_and(|expiry| height >= expiry))
-        });
     }
 
     /// Derive `Seen` from the Registry's current canonical record. This keeps
     /// block application independent of the order tracker and recovers an
     /// observation when the registry already contains the transition.
     pub fn reconcile_seen<P: Parameters>(&mut self, network: &P, registry: &Registry) {
-        for (note, _, state, expiry) in &mut self.orders {
+        for (note, _, state) in &mut self.orders {
             let commitment = NameCommitment::from_inner(
                 orchard::note::NoteCommitTrapdoor::from_inner(note.rcm(network)),
             );
@@ -661,29 +650,27 @@ impl NameNoteQueue {
                 .is_some_and(|record| record.commitment == commitment)
             {
                 *state = NameNoteState::Seen;
-                *expiry = None;
             }
         }
     }
 
     /// Reorg: seen notes above the common ancestor must be enacted again.
     pub fn rewind_seen(&mut self) {
-        for (_, _, state, expiry) in &mut self.orders {
+        for (_, _, state) in &mut self.orders {
             if *state == NameNoteState::Seen {
                 *state = NameNoteState::Authorized;
-                *expiry = None;
             }
         }
     }
 
     /// Reorg: drop origins above the common ancestor.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
-        self.orders.retain(|(_, origin, _, _)| *origin <= ancestor);
+        self.orders.retain(|(_, origin, _)| *origin <= ancestor);
     }
 
     /// Whether an authorized or submitted claim still reserves this name.
     pub fn claim_pending(&self, name: &Name) -> bool {
-        self.orders.iter().any(|(n, _, state, _)| {
+        self.orders.iter().any(|(n, _, state)| {
             *state != NameNoteState::Seen && n.action().is_claim() && n.name() == name
         })
     }
@@ -691,7 +678,7 @@ impl NameNoteQueue {
     /// A release note already created for `name`. A later request or OTP
     /// does not replace it; creation order is the race.
     pub fn release_pending(&self, name: &Name) -> bool {
-        self.orders.iter().any(|(n, _, state, _)| {
+        self.orders.iter().any(|(n, _, state)| {
             *state != NameNoteState::Seen && n.action().is_release() && n.name() == name
         })
     }
@@ -1001,16 +988,10 @@ mod tests {
         assert_eq!(queue.entry(0).2, NameNoteState::Authorized);
         assert!(queue.claim_pending(claim.name()));
 
-        queue.mark_submitted(0, h(15));
+        queue.mark_submitted(0);
         queue.admit(h(12), claim.clone());
         assert_eq!(queue.entry(0).2, NameNoteState::Submitted);
         assert!(queue.claim_pending(claim.name()));
-        queue.expire_claims(h(15));
-        assert!(queue.is_empty());
-        assert!(!queue.claim_pending(claim.name()));
-
-        queue.admit(h(12), claim.clone());
-        assert_eq!(queue.entry(0).2, NameNoteState::Authorized);
         assert!(queue.claim_pending(claim.name()));
 
         queue.remove(0);
