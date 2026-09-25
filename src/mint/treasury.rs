@@ -259,14 +259,26 @@ pub struct RequestQueue {
 }
 
 impl RequestQueue {
-    /// A recognized name request, routed after block application.
-    pub fn record(&mut self, txid: TxId, request: Request, paid: Zatoshis, height: BlockHeight) {
+    /// A recognized request, routed after block application. Returns false
+    /// when an earlier queued claim already owns the name.
+    pub fn record(
+        &mut self,
+        txid: TxId,
+        request: Request,
+        paid: Zatoshis,
+        height: BlockHeight,
+    ) -> bool {
+        if let Request::Claim { name, .. } = &request {
+            if self.claim_pending(name) {
+                return false;
+            }
+        }
         self.requests.push((txid, request, paid, height));
+        true
     }
 
     /// Whether a claim for `name` is already waiting in transaction order.
-    /// Intake checks this before admitting another claim payment.
-    pub fn claim_pending(&self, name: &crate::mint::Name) -> bool {
+    fn claim_pending(&self, name: &crate::mint::Name) -> bool {
         self.requests.iter().any(|(_, request, _, _)| {
             matches!(request, Request::Claim { name: queued, .. } if queued == name)
         })

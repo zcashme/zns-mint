@@ -2,8 +2,6 @@
 //! derivation.
 //!
 
-use std::collections::BTreeMap;
-
 use time::Timestamp;
 use zcash_keys::address::UnifiedAddress;
 use zcash_primitives::transaction::TxId;
@@ -525,41 +523,6 @@ pub fn decrypt_name_notes<P: Parameters>(
     candidates
 }
 
-/// Claim names carried by a transaction the wallet still holds. Used to
-/// rebuild [`OpenClaims`] after a restart, from the unmined Name Note
-/// rather than from the payment that funded it.
-pub fn claim_names_in_transaction<P: Parameters>(
-    network: &P,
-    tx: &zcash_primitives::transaction::Transaction,
-    registry_fvk: &orchard::keys::FullViewingKey,
-) -> Vec<Name> {
-    let Some(bundle) = tx.ironwood_bundle() else {
-        return Vec::new();
-    };
-    if bundle.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3()
-        || !bundle.flags().outputs_enabled()
-    {
-        return Vec::new();
-    }
-    let ivk = registry_fvk
-        .to_ivk(orchard::keys::Scope::External)
-        .prepare();
-    let mut names = Vec::new();
-    for action in bundle.actions() {
-        let Some((_, _, memo)) = orchard::note_encryption::ZnsIronwoodDomain::for_action(action)
-            .try_decrypt(action, &ivk)
-        else {
-            continue;
-        };
-        if let Some(NameNote::Claim { name, .. }) = NameNote::decode(network, &memo) {
-            if !names.contains(&name) {
-                names.push(name);
-            }
-        }
-    }
-    names
-}
-
 /// Trial-decrypts the block's Ironwood actions sent to the Treasury's
 /// external address, exposing each `(txid, action index, memo)`. The
 /// upstream scanner deliberately drops note plaintexts; request memos
@@ -638,15 +601,16 @@ pub enum NameNoteState {
 /// removed by their origin height.
 #[derive(Clone, Debug, Default)]
 pub struct NameNoteQueue {
-    orders: Vec<(NameNote, BlockHeight, NameNoteState)>,
+    orders: Vec<(NameNote, BlockHeight, NameNoteState, Option<BlockHeight>)>,
 }
 
 impl NameNoteQueue {
     /// Records a decision. Idempotent: a note already authorized keeps its
     /// original origin.
     pub fn admit(&mut self, origin: BlockHeight, note: NameNote) {
-        if !self.orders.iter().any(|(n, _, _)| *n == note) {
-            self.orders.push((note, origin, NameNoteState::Authorized));
+        if !self.orders.iter().any(|(n, _, _, _)| *n == note) {
+            self.orders
+                .push((note, origin, NameNoteState::Authorized, None));
         }
     }
 
@@ -660,7 +624,7 @@ impl NameNoteQueue {
 
     /// The entry at `index`, in admission order.
     pub fn entry(&self, index: usize) -> (&NameNote, BlockHeight, NameNoteState) {
-        let (note, origin, state) = &self.orders[index];
+        let (note, origin, state, _) = &self.orders[index];
         (note, *origin, *state)
     }
 
@@ -668,15 +632,27 @@ impl NameNoteQueue {
         self.orders.remove(index);
     }
 
-    pub fn set_state(&mut self, index: usize, state: NameNoteState) {
-        self.orders[index].2 = state;
+    /// Records a successful broadcast and when its claim can no longer be
+    /// mined. The queue remains the claim owner until confirmation or expiry.
+    pub fn mark_submitted(&mut self, index: usize, expiry_height: BlockHeight) {
+        self.orders[index].2 = NameNoteState::Submitted;
+        self.orders[index].3 = Some(expiry_height);
+    }
+
+    /// A submitted claim that has expired no longer reserves its name.
+    pub fn expire_claims(&mut self, height: BlockHeight) {
+        self.orders.retain(|(note, _, state, expiry)| {
+            !(note.action().is_claim()
+                && *state == NameNoteState::Submitted
+                && expiry.is_some_and(|expiry| height >= expiry))
+        });
     }
 
     /// Derive `Seen` from the Registry's current canonical record. This keeps
     /// block application independent of the order tracker and recovers an
     /// observation when the registry already contains the transition.
     pub fn reconcile_seen<P: Parameters>(&mut self, network: &P, registry: &Registry) {
-        for (note, _, state) in &mut self.orders {
+        for (note, _, state, expiry) in &mut self.orders {
             let commitment = NameCommitment::from_inner(
                 orchard::note::NoteCommitTrapdoor::from_inner(note.rcm(network)),
             );
@@ -685,27 +661,29 @@ impl NameNoteQueue {
                 .is_some_and(|record| record.commitment == commitment)
             {
                 *state = NameNoteState::Seen;
+                *expiry = None;
             }
         }
     }
 
     /// Reorg: seen notes above the common ancestor must be enacted again.
     pub fn rewind_seen(&mut self) {
-        for (_, _, state) in &mut self.orders {
+        for (_, _, state, expiry) in &mut self.orders {
             if *state == NameNoteState::Seen {
                 *state = NameNoteState::Authorized;
+                *expiry = None;
             }
         }
     }
 
     /// Reorg: drop origins above the common ancestor.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
-        self.orders.retain(|(_, origin, _)| *origin <= ancestor);
+        self.orders.retain(|(_, origin, _, _)| *origin <= ancestor);
     }
 
-    /// The one-open-claim guard, for a note that has not been broadcast yet.
+    /// Whether an authorized or submitted claim still reserves this name.
     pub fn claim_pending(&self, name: &Name) -> bool {
-        self.orders.iter().any(|(n, _, state)| {
+        self.orders.iter().any(|(n, _, state, _)| {
             *state != NameNoteState::Seen && n.action().is_claim() && n.name() == name
         })
     }
@@ -713,81 +691,9 @@ impl NameNoteQueue {
     /// A release note already created for `name`. A later request or OTP
     /// does not replace it; creation order is the race.
     pub fn release_pending(&self, name: &Name) -> bool {
-        self.orders.iter().any(|(n, _, state)| {
+        self.orders.iter().any(|(n, _, state, _)| {
             *state != NameNoteState::Seen && n.action().is_release() && n.name() == name
         })
-    }
-}
-
-/// The payment that owns a name's open claim. The earliest request
-/// transaction holds the name until that claim is mined or its spend
-/// can no longer be mined. A later payment does not start a second note.
-#[derive(Clone, Debug, Default)]
-pub struct OpenClaims {
-    by_name: BTreeMap<Name, OpenClaim>,
-}
-
-#[derive(Clone, Debug)]
-struct OpenClaim {
-    height: BlockHeight,
-    sent: Option<TxId>,
-}
-
-impl OpenClaims {
-    /// Whether any payment already owns `name`, including another action
-    /// of the same transaction.
-    pub fn held_by_other(&self, name: &Name, _request: TxId) -> bool {
-        self.by_name.contains_key(name)
-    }
-
-    /// `request` owns `name` when the name is free. An existing entry
-    /// stays, including another action of this same payment.
-    pub fn hold(&mut self, name: Name, request: TxId, height: BlockHeight) {
-        if self.held_by_other(&name, request) {
-            return;
-        }
-        self.by_name
-            .entry(name)
-            .or_insert(OpenClaim { height, sent: None });
-    }
-
-    /// An unmined claim Name Note still in the wallet owns `name`. A
-    /// restart has no other record of the payment that created it.
-    pub fn note_sent(&mut self, name: Name, sent: TxId) {
-        if let Some(open) = self.by_name.get_mut(&name) {
-            if open.sent.is_none() {
-                open.sent = Some(sent);
-            }
-            return;
-        }
-        self.by_name.insert(
-            name,
-            OpenClaim {
-                height: BlockHeight::from_u32(0),
-                sent: Some(sent),
-            },
-        );
-    }
-
-    /// The Name Note transaction broadcast for this claim.
-    pub fn mark_sent(&mut self, name: &Name, sent: TxId) {
-        if let Some(open) = self.by_name.get_mut(name) {
-            open.sent = Some(sent);
-        }
-    }
-
-    /// Names still owned, with the Name Note transaction once it has been sent.
-    pub fn outstanding(&self) -> impl Iterator<Item = (&Name, Option<TxId>)> {
-        self.by_name.iter().map(|(name, open)| (name, open.sent))
-    }
-
-    pub fn clear(&mut self, name: &Name) {
-        self.by_name.remove(name);
-    }
-
-    /// Reorg: a payment above the ancestor no longer owns the name.
-    pub fn truncate_to(&mut self, ancestor: BlockHeight) {
-        self.by_name.retain(|_, open| open.height <= ancestor);
     }
 }
 
@@ -1095,12 +1001,15 @@ mod tests {
         assert_eq!(queue.entry(0).2, NameNoteState::Authorized);
         assert!(queue.claim_pending(claim.name()));
 
-        queue.set_state(0, NameNoteState::Submitted);
+        queue.mark_submitted(0, h(15));
         queue.admit(h(12), claim.clone());
         assert_eq!(queue.entry(0).2, NameNoteState::Submitted);
-        queue.set_state(0, NameNoteState::Seen);
+        assert!(queue.claim_pending(claim.name()));
+        queue.expire_claims(h(15));
+        assert!(queue.is_empty());
         assert!(!queue.claim_pending(claim.name()));
-        queue.rewind_seen();
+
+        queue.admit(h(12), claim.clone());
         assert_eq!(queue.entry(0).2, NameNoteState::Authorized);
         assert!(queue.claim_pending(claim.name()));
 
@@ -1110,27 +1019,6 @@ mod tests {
 
         queue.admit(h(12), claim);
         assert_eq!(queue.len(), 1);
-    }
-
-    #[test]
-    fn earliest_claim_payment_owns_the_name() {
-        let name = test_name();
-        let h = |n: u32| BlockHeight::from_u32(n);
-        let tx = |b: u8| TxId::from_bytes([b; 32]);
-        let mut open = OpenClaims::default();
-
-        assert!(!open.held_by_other(&name, tx(1)));
-        open.hold(name.clone(), tx(1), h(10));
-        assert!(open.held_by_other(&name, tx(2)));
-        assert!(open.held_by_other(&name, tx(1)));
-
-        open.hold(name.clone(), tx(2), h(11));
-        assert_eq!(open.outstanding().next().unwrap().1, None);
-        open.mark_sent(&name, tx(9));
-        assert_eq!(open.outstanding().next().unwrap().1, Some(tx(9)));
-
-        open.truncate_to(h(9));
-        assert!(open.outstanding().next().is_none());
     }
 
     #[test]

@@ -18,10 +18,7 @@ use zcash_protocol::value::Zatoshis;
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::{
-    assemble, claim_names_in_transaction, decrypt_treasury_tx, NameNoteQueue, NameNoteState,
-    OpenClaims,
-};
+use zns_mint::mint::note::{assemble, decrypt_treasury_tx, NameNoteQueue, NameNoteState};
 use zns_mint::mint::otp::{OtpQueue, OtpRequest};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
@@ -66,7 +63,6 @@ async fn main() {
     // Authorized Name Notes awaiting the chain: the lanes admit, the
     // enactment phase builds and broadcasts.
     let mut name_notes = NameNoteQueue::default();
-    let mut open_claims = OpenClaims::default();
     // Treasury requests decoded once at block application: what each memo
     // said, what it paid, the block that carried it. The drain at each tip
     // decides entries; a reorg truncates them.
@@ -231,7 +227,6 @@ async fn main() {
             challenges = OtpQueue::new();
             name_notes.rewind_seen();
             name_notes.truncate_to(rewound);
-            open_claims.truncate_to(rewound);
             name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
             echoes.retain(|(_, _, height)| *height <= rewound);
@@ -327,23 +322,26 @@ async fn main() {
                 &mut chain_tip,
             );
             name_notes.reconcile_seen(&network, &registry);
+            name_notes.expire_claims(next_height);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
                         if let Request::Claim { name, .. } = &request {
-                            let queued = requests.claim_pending(name);
-                            let authorized = name_notes.claim_pending(name);
-                            let submitted = open_claims.held_by_other(name, txid);
-                            if queued || authorized || submitted {
+                            if name_notes.claim_pending(name) {
                                 tracing::debug!(
                                     %txid,
                                     name = %name.as_str(),
-                                    "later claim payment ignored; an earlier payment owns the name"
+                                    "later claim payment ignored; an earlier Name Note owns the name"
                                 );
                                 continue;
                             }
                         }
-                        requests.record(txid, request, paid, next_height);
+                        if !requests.record(txid, request, paid, next_height) {
+                            tracing::debug!(
+                                %txid,
+                                "later claim payment ignored; an earlier queued payment owns the name"
+                            );
+                        }
                     }
                     MintInbound::Echo(echo) => echoes.push((echo, paid, next_height)),
                     MintInbound::Unrecognized => {
@@ -416,45 +414,6 @@ async fn main() {
             .into_u64();
         zns_mint::metrics::snapshot(tip, treasury_zats, oracle.current().into_u64());
 
-        // A restart forgets `open_claims`. The wallet still holds the
-        // unmined Name Note, and that note owns the name.
-        for (sent, tx) in wallet.pending_transactions() {
-            if tip >= tx.expiry_height() {
-                continue;
-            }
-            for name in claim_names_in_transaction(&network, tx, &registry_keys.orchard_fvk()) {
-                if registry
-                    .record(&name)
-                    .is_some_and(|record| !record.action.is_release())
-                {
-                    continue;
-                }
-                open_claims.note_sent(name, *sent);
-            }
-        }
-
-        // A mined claim, or a sent Name Note that can no longer be mined,
-        // frees the name for a later payment. No payment is returned.
-        let settled: Vec<_> = open_claims
-            .outstanding()
-            .filter_map(|(name, sent)| {
-                if registry
-                    .record(name)
-                    .is_some_and(|record| !record.action.is_release())
-                {
-                    return Some(name.clone());
-                }
-                let txid = sent?;
-                match wallet.get_transaction(txid) {
-                    Ok(Some(tx)) if tip < tx.expiry_height() => None,
-                    _ => Some(name.clone()),
-                }
-            })
-            .collect();
-        for name in settled {
-            open_claims.clear(&name);
-        }
-
         // Treasury requests. Each memo was decoded once, at block
         // application; the drain decides each entry exactly once. A
         // decided entry leaves the queue; a deferred relay — Treasury
@@ -474,13 +433,6 @@ async fn main() {
                         // The earliest payment owns the name until its claim
                         // is mined or that spend expires. A later payment
                         // does not start a second Name Note.
-                        if open_claims.held_by_other(name, *txid) {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                "earlier claim payment still owns this name"
-                            );
-                            break 'lane true;
-                        }
                         // Pre-sale gate: read-only table lookup.
                         // Unavailability defers with the queue; a deny is
                         // decided. Redemption is the name already live.
@@ -539,7 +491,6 @@ async fn main() {
                             break 'lane true;
                         };
                         // Enactment below resolves the anchor and broadcasts.
-                        open_claims.hold(name.clone(), *txid, note_height);
                         name_notes.admit(note_height, claim_note);
                         true
                     }
@@ -841,10 +792,7 @@ async fn main() {
                     action = note.action().as_str(),
                     "NameNote order sent"
                 );
-                if note.action().is_claim() {
-                    open_claims.mark_sent(note.name(), transaction.txid());
-                }
-                name_notes.set_state(index, NameNoteState::Submitted);
+                name_notes.mark_submitted(index, transaction.expiry_height());
                 index += 1;
             } else {
                 tracing::error!(

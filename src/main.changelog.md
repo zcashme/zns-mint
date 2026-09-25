@@ -2,11 +2,10 @@
 
 ## 2026-09-24 — A claim follows the earliest payment
 
-- The first request transaction for a name owns that claim until the
-  name is live or the sent Name Note can no longer be mined. A later
-  payment does not start a second note, and nothing is returned. Any
-  claim action in that payment counts, and a restart rebuilds the
-  owner from the unmined Name Note the wallet retained.
+- `RequestQueue` keeps the earliest claim payment for each name;
+  `NameNoteQueue` takes ownership when authorized and holds it through
+  submission until the Name Note is observed or its transaction expires.
+  Later claim payments do not start another note and are not returned.
 - A release note already created is the one that stands. A later OTP
   response or lifecycle release does not replace it.
 
