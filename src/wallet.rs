@@ -288,18 +288,6 @@ impl<P: Parameters> Wallet<P> {
             .expect("FATAL: wallet rejected a locally built transaction");
     }
 
-    /// Transactions stored here that are not yet in a block. One whose
-    /// expiry height has passed is still returned; this method does not
-    /// check expiry.
-    pub fn pending_transactions(&self) -> impl Iterator<Item = (&TxId, &Transaction)> {
-        self.transactions.iter().filter(|(txid, _)| {
-            !matches!(
-                self.transaction_statuses.get(txid),
-                Some(TransactionStatus::Mined(_))
-            )
-        })
-    }
-
     /// The block hash at `height`: an applied block, or the boot origin.
     pub fn block_hash_at(&self, height: BlockHeight) -> Option<BlockHash> {
         self.blocks
