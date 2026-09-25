@@ -9,6 +9,13 @@
 - A release note already created is the one that stands. A later OTP
   response or lifecycle release does not replace it.
 
+## 2026-09-25 — One unresolved NameNote per name
+
+- The first unresolved NameNote for a name owns it, whether update or
+  release. A later request is ignored; a conflicting OTP response does not
+  consume its challenge. Different names are independent. After confirmation,
+  the `Seen` entry remains for reorg tracking while a successor can be queued.
+
 ## 2026-09-24 — The drain logs the build it did not send
 
 - A Name Note that lacks a fee and one whose authority note is busy

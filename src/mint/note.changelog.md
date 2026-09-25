@@ -1,5 +1,11 @@
 # `mint/note.rs` design record
 
+## 2026-09-25 — One unresolved NameNote per name
+
+- `NameNoteQueue` admits at most one unresolved transition per name.
+  `Seen` entries stay for reorg tracking but release the slot, so a
+  successor transition can be queued. Other names remain independent.
+
 ## 2026-09-24 — The earliest claim payment owns the name
 
 - `NameNoteQueue` carries claim ownership from authorization through

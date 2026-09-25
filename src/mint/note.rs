@@ -605,12 +605,18 @@ pub struct NameNoteQueue {
 }
 
 impl NameNoteQueue {
-    /// Records a decision. Idempotent: a note already authorized keeps its
-    /// original origin.
-    pub fn admit(&mut self, origin: BlockHeight, note: NameNote) {
-        if !self.orders.iter().any(|(n, _, _)| *n == note) {
-            self.orders.push((note, origin, NameNoteState::Authorized));
+    /// Records a decision if no unresolved Name Note already exists for the
+    /// name. Admission order decides which transition owns that name; a
+    /// confirmed transition no longer reserves it.
+    pub fn admit(&mut self, origin: BlockHeight, note: NameNote) -> bool {
+        if self.orders.iter().any(|(existing, _, _)| *existing == note) {
+            return false;
         }
+        if self.transition_pending(note.name()) {
+            return false;
+        }
+        self.orders.push((note, origin, NameNoteState::Authorized));
+        true
     }
 
     pub fn len(&self) -> usize {
@@ -652,6 +658,17 @@ impl NameNoteQueue {
                 *state = NameNoteState::Seen;
             }
         }
+        // A different transition may have made an unresolved order's
+        // predecessor stale. It no longer owns the name; keep Seen entries
+        // so a reorg can rewind the transition we actually observed.
+        self.orders.retain(|(note, _, state)| {
+            if *state == NameNoteState::Seen || note.action().is_claim() {
+                return true;
+            }
+            registry.record(note.name()).is_some_and(|record| {
+                !record.action.is_release() && Some(record.commitment) == note.prev_rcm()
+            })
+        });
     }
 
     /// Reorg: seen notes above the common ancestor must be enacted again.
@@ -675,12 +692,12 @@ impl NameNoteQueue {
         })
     }
 
-    /// A release note already created for `name`. A later request or OTP
-    /// does not replace it; creation order is the race.
-    pub fn release_pending(&self, name: &Name) -> bool {
-        self.orders.iter().any(|(n, _, state)| {
-            *state != NameNoteState::Seen && n.action().is_release() && n.name() == name
-        })
+    /// Whether an unresolved Name Note already owns this name. `Seen` orders
+    /// remain for reorg tracking but no longer reserve the name.
+    pub fn transition_pending(&self, name: &Name) -> bool {
+        self.orders
+            .iter()
+            .any(|(note, _, state)| *state != NameNoteState::Seen && note.name() == name)
     }
 }
 
@@ -1010,11 +1027,52 @@ mod tests {
             prev: NameCommitment::from_bytes(&[1u8; 32]).unwrap(),
         };
         let mut queue = NameNoteQueue::default();
-        assert!(!queue.release_pending(release.name()));
+        assert!(!queue.transition_pending(release.name()));
         queue.admit(BlockHeight::from_u32(10), release.clone());
-        assert!(queue.release_pending(release.name()));
+        assert!(queue.transition_pending(release.name()));
         queue.remove(0);
-        assert!(!queue.release_pending(release.name()));
+        assert!(!queue.transition_pending(release.name()));
+    }
+
+    #[test]
+    fn one_unresolved_transition_per_name() {
+        let name = test_name();
+        let predecessor = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
+        let update = NameNote::Update {
+            name: name.clone(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+            prev: predecessor,
+        };
+        let release = NameNote::Release {
+            name: name.clone(),
+            ua: test_ua(),
+            prev: predecessor,
+        };
+        let height = BlockHeight::from_u32(10);
+        let mut queue = NameNoteQueue::default();
+
+        assert!(queue.admit(height, update));
+        assert!(!queue.admit(height, release.clone()));
+        assert!(queue.transition_pending(&name));
+        queue.mark_submitted(0);
+        assert_eq!(queue.entry(0).2, NameNoteState::Submitted);
+        assert!(!queue.admit(height, release.clone()));
+
+        let other_name = Name::parse("bob").unwrap();
+        let other_update = NameNote::Update {
+            name: other_name.clone(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+            prev: predecessor,
+        };
+        assert!(queue.admit(height, other_update));
+        assert!(queue.transition_pending(&other_name));
+
+        queue.orders[0].2 = NameNoteState::Seen;
+        assert!(!queue.transition_pending(&name));
+        assert!(queue.admit(height, release));
+        assert!(queue.transition_pending(&name));
     }
 
     #[test]
@@ -1026,7 +1084,7 @@ mod tests {
             expires_at: Expiry::Never,
         };
         let update = NameNote::Update {
-            name: test_name(),
+            name: Name::parse("carol").unwrap(),
             ua: test_ua(),
             expires_at: Expiry::Never,
             prev,
@@ -1057,7 +1115,7 @@ mod tests {
             expires_at: Expiry::Never,
         };
         let update = NameNote::Update {
-            name: test_name(),
+            name: Name::parse("bob").unwrap(),
             ua: test_ua(),
             expires_at: Expiry::Never,
             prev,
@@ -1093,16 +1151,17 @@ mod tests {
         );
         assert!(!queue.claim_pending(&bob));
 
+        let alice = test_name();
         queue.admit(
             h(11),
             NameNote::Claim {
-                name: bob.clone(),
+                name: alice.clone(),
                 ua: test_ua(),
                 expires_at: Expiry::Never,
             },
         );
-        assert!(queue.claim_pending(&bob));
-        // Other names are unblocked.
-        assert!(!queue.claim_pending(&test_name()));
+        assert!(queue.claim_pending(&alice));
+        // Other names are unblocked, regardless of transition type.
+        assert!(!queue.claim_pending(&bob));
     }
 }

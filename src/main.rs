@@ -430,8 +430,8 @@ async fn main() {
                         code,
                     } => {
                         // The earliest payment owns the name until its claim
-                        // is mined or that spend expires. A later payment
-                        // does not start a second Name Note.
+                        // is observed. A later payment does not start a
+                        // second Name Note.
                         // Pre-sale gate: read-only table lookup.
                         // Unavailability defers with the queue; a deny is
                         // decided. Redemption is the name already live.
@@ -502,6 +502,14 @@ async fn main() {
                         let Some(record) = registry.record(name).cloned() else {
                             break 'lane true;
                         };
+                        if name_notes.transition_pending(name) {
+                            tracing::debug!(
+                                name = %name.as_str(),
+                                action = action.as_str(),
+                                "transition already queued for the current Name Note"
+                            );
+                            break 'lane true;
+                        }
                         if !record.admits(action, requested_ua, term, note_height, mtp_now)
                             || paid < oracle.challenge_fee()
                         {
@@ -590,12 +598,13 @@ async fn main() {
                         break 'lane true;
                     }
                 }
-                // A release note already created stands. This OTP does
-                // not replace it, and it is not consumed.
-                if echo.action.is_release() && name_notes.release_pending(&echo.name) {
+                // A transition already admitted for this current Name Note
+                // owns its predecessor. Do not consume this OTP response.
+                if name_notes.transition_pending(&echo.name) {
                     tracing::debug!(
                         name = %echo.name.as_str(),
-                        "release already created; OTP response does not replace it"
+                        action = echo.action.as_str(),
+                        "transition already queued; OTP response does not replace it"
                     );
                     break 'lane true;
                 }
@@ -642,7 +651,7 @@ async fn main() {
         // `releases_due` re-derives the same notes per tip, so
         // admission is idempotent.
         for (name, release_note) in registry.releases_due(mtp_now) {
-            if name_notes.release_pending(&name) {
+            if name_notes.transition_pending(&name) {
                 continue;
             }
             tracing::info!(name = %name.as_str(), "lifecycle release authorized");
