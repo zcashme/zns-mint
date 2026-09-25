@@ -111,16 +111,35 @@ fn https_client() -> HttpsClient {
 /// implausible price — collapses to `None` and the venue is dropped from
 /// the round.
 async fn fetch_last(client: &HttpsClient, exchange: &Exchange) -> Option<Decimal> {
-    let uri: Uri = exchange.url.parse().ok()?;
-    let request = Request::builder()
+    let uri: Uri = match exchange.url.parse() {
+        Ok(uri) => uri,
+        Err(error) => {
+            tracing::warn!(exchange = exchange.name, %error, "pricing URL invalid");
+            return None;
+        }
+    };
+    let request = match Request::builder()
         .uri(uri)
         .header("accept", "application/json")
         .body(Empty::<Bytes>::default())
-        .ok()?;
-    let response = tokio::time::timeout(FETCH_TIMEOUT, client.request(request))
-        .await
-        .ok()?
-        .ok()?;
+    {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::warn!(exchange = exchange.name, %error, "pricing request invalid");
+            return None;
+        }
+    };
+    let response = match tokio::time::timeout(FETCH_TIMEOUT, client.request(request)).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            tracing::warn!(exchange = exchange.name, %error, "pricing fetch failed");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(exchange = exchange.name, "pricing fetch timed out");
+            return None;
+        }
+    };
     if !response.status().is_success() {
         tracing::warn!(
             exchange = exchange.name,
@@ -129,11 +148,16 @@ async fn fetch_last(client: &HttpsClient, exchange: &Exchange) -> Option<Decimal
         );
         return None;
     }
-    let bytes = Limited::new(response.into_body(), MAX_BODY_BYTES)
+    let bytes = match Limited::new(response.into_body(), MAX_BODY_BYTES)
         .collect()
         .await
-        .ok()?
-        .to_bytes();
+    {
+        Ok(collected) => collected.to_bytes(),
+        Err(error) => {
+            tracing::warn!(exchange = exchange.name, %error, "pricing body unreadable");
+            return None;
+        }
+    };
     let body: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
         Err(e) => {
@@ -205,10 +229,13 @@ pub async fn fetch_round() -> Option<Decimal> {
             let name = exchange.name;
             (
                 name,
-                tokio::time::timeout(FETCH_TIMEOUT, fetch_last(&client, exchange))
-                    .await
-                    .ok()
-                    .flatten(),
+                match tokio::time::timeout(FETCH_TIMEOUT, fetch_last(&client, exchange)).await {
+                    Ok(price) => price,
+                    Err(_) => {
+                        tracing::warn!(exchange = name, "pricing venue timed out");
+                        None
+                    }
+                },
             )
         });
     }

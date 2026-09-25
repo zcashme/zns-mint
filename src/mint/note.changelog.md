@@ -1,5 +1,12 @@
 # `mint/note.rs` design record
 
+## 2026-09-24 — A Name Note build says why it stopped
+
+- `prepare` returns `PrepareError`. A missing authority note and a
+  short fee are different from a witness, anchor, memo, or builder
+  failure. The drain logs those separately and retries next tip. Tree,
+  fee, memo, and builder errors retain their concrete error types instead
+  of being converted to strings.
 ## 2026-09-24 — NameNote orders track authorization, submission, and observation (#195)
 
 - Each queued order keeps its `NameNote`, authorization origin, and a

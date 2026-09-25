@@ -1,5 +1,10 @@
 # Mint live-work design record
 
+## 2026-09-24 — Controller relay names its memo failure
+- A Claim reaching the controller relay is unreachable by design. An
+  oversized Update or Release challenge memo is reported with its request
+  context instead of silently leaving the request unrelayed.
+
 ## 2026-09-24 — OTP admission is keyed by request transaction (#183)
 
 - `OtpQueue::admit_request` keeps the source txid beside each request so
@@ -7,6 +12,13 @@
   Invalidation removes a request whose challenge has not been relayed.
 - `find_active` is removed; queue admission, invalidation, and relay state
   now use the request identity and transaction identity directly.
+## 2026-09-24 — A missed mempool fetch is logged
+
+- The run loop logs a transport or parse failure with the txid while
+  fetching an announced mempool transaction.
+  `Ok(None)` stays a debug line: the transaction left before the fetch.
+  Neither skip authorizes or refuses the payment. That happens when
+  the transaction is mined.
 
 ## 2026-09-24 — RequestQueue accepts only name requests (#179)
 
