@@ -713,9 +713,9 @@ impl NameNoteQueue {
     /// A release note already created for `name`. A later request or OTP
     /// does not replace it; creation order is the race.
     pub fn release_pending(&self, name: &Name) -> bool {
-        self.orders
-            .iter()
-            .any(|(n, _, state)| *state != NameNoteState::Seen && n.action().is_release() && n.name() == name)
+        self.orders.iter().any(|(n, _, state)| {
+            *state != NameNoteState::Seen && n.action().is_release() && n.name() == name
+        })
     }
 }
 

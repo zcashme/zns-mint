@@ -264,6 +264,14 @@ impl RequestQueue {
         self.requests.push((txid, request, paid, height));
     }
 
+    /// Whether a claim for `name` is already waiting in transaction order.
+    /// Intake checks this before admitting another claim payment.
+    pub fn claim_pending(&self, name: &crate::mint::Name) -> bool {
+        self.requests.iter().any(|(_, request, _, _)| {
+            matches!(request, Request::Claim { name: queued, .. } if queued == name)
+        })
+    }
+
     pub fn len(&self) -> usize {
         self.requests.len()
     }

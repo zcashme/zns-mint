@@ -330,6 +330,19 @@ async fn main() {
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
+                        if let Request::Claim { name, .. } = &request {
+                            let queued = requests.claim_pending(name);
+                            let authorized = name_notes.claim_pending(name);
+                            let submitted = open_claims.held_by_other(name, txid);
+                            if queued || authorized || submitted {
+                                tracing::debug!(
+                                    %txid,
+                                    name = %name.as_str(),
+                                    "later claim payment ignored; an earlier payment owns the name"
+                                );
+                                continue;
+                            }
+                        }
                         requests.record(txid, request, paid, next_height);
                     }
                     MintInbound::Echo(echo) => echoes.push((echo, paid, next_height)),
