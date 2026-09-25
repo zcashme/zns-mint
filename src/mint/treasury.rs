@@ -359,6 +359,65 @@ mod tests {
     }
 
     #[test]
+    fn first_claim_per_name_wins_admission() {
+        let ua = match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
+            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            _ => panic!("vector is a mainnet Unified Address"),
+        };
+        let alice = Name::parse("alice").unwrap();
+        let bob = Name::parse("bob").unwrap();
+        let mut queue = RequestQueue::default();
+
+        assert!(queue.record(
+            TxId::from_bytes([1; 32]),
+            Request::Claim {
+                name: alice.clone(),
+                ua: ua.clone(),
+                term: Term::Forever,
+                code: None,
+            },
+            Zatoshis::ZERO,
+            h(100),
+        ));
+        assert!(!queue.record(
+            TxId::from_bytes([2; 32]),
+            Request::Claim {
+                name: alice,
+                ua: ua.clone(),
+                term: Term::Forever,
+                code: None,
+            },
+            Zatoshis::ZERO,
+            h(101),
+        ));
+        assert!(queue.record(
+            TxId::from_bytes([3; 32]),
+            Request::Claim {
+                name: bob,
+                ua,
+                term: Term::Forever,
+                code: None,
+            },
+            Zatoshis::ZERO,
+            h(102),
+        ));
+
+        assert_eq!(queue.len(), 2);
+        assert_eq!(*queue.entry(0).0, TxId::from_bytes([1; 32]));
+        assert_eq!(queue.entry(0).3, h(100));
+        assert!(matches!(
+            queue.entry(0).1,
+            Request::Claim { ref name, .. } if name.as_str() == "alice"
+        ));
+        assert_eq!(*queue.entry(1).0, TxId::from_bytes([3; 32]));
+        assert_eq!(queue.entry(1).3, h(102));
+        assert!(matches!(
+            queue.entry(1).1,
+            Request::Claim { ref name, .. } if name.as_str() == "bob"
+        ));
+    }
+
+    #[test]
     fn queue_remove_shifts_neighbors() {
         let mut queue = RequestQueue::default();
         queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));

@@ -609,9 +609,6 @@ impl NameNoteQueue {
     /// name. Admission order decides which transition owns that name; a
     /// confirmed transition no longer reserves it.
     pub fn admit(&mut self, origin: BlockHeight, note: NameNote) -> bool {
-        if self.orders.iter().any(|(existing, _, _)| *existing == note) {
-            return false;
-        }
         if self.transition_pending(note.name()) {
             return false;
         }
@@ -1017,6 +1014,26 @@ mod tests {
 
         queue.admit(h(12), claim);
         assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn identical_note_can_be_admitted_after_seen() {
+        let claim = NameNote::Claim {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+        let mut queue = NameNoteQueue::default();
+
+        assert!(queue.admit(BlockHeight::from_u32(10), claim.clone()));
+        queue.orders[0].2 = NameNoteState::Seen;
+        assert!(!queue.claim_pending(claim.name()));
+
+        assert!(queue.admit(BlockHeight::from_u32(20), claim));
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.entry(0).2, NameNoteState::Seen);
+        assert_eq!(queue.entry(1).2, NameNoteState::Authorized);
+        assert!(queue.claim_pending(queue.entry(1).0.name()));
     }
 
     #[test]

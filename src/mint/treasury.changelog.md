@@ -1,5 +1,10 @@
 # Treasury design record
 
+## 2026-09-25 — First queued claim wins per name
+
+- `RequestQueue::record` keeps the earliest claim for a name, rejects later
+  claims for that name, and still accepts claims for other names.
+
 ## 2026-09-24 — Treasury uses the standard transfer helper (#192)
 
 - Challenge and sweep proposals use `propose_standard_transfer_to_address`
