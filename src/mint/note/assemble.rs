@@ -209,10 +209,7 @@ pub fn prepare<P: Parameters>(
         .build(
             &Default::default(),
             &[],
-            &[
-                orchard::keys::SpendAuthorizingKey::from(treasury_keys.orchard_spending_key()),
-                orchard::keys::SpendAuthorizingKey::from(registry_keys.orchard_spending_key()),
-            ],
+            &[treasury_keys.orchard_ask(), registry_keys.orchard_ask()],
             rand::rngs::OsRng,
             spend_prover,
             output_prover,

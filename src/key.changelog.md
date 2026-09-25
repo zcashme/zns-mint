@@ -2,6 +2,18 @@
 
 Tracks design-relevant changes to `src/key.rs`.
 
+## 2026-09-25 — Narrow key access to account and signing capabilities (#200)
+
+- Made the `key` module private and re-exported only the opaque Treasury and
+  Registry capability types needed by the binary's Boot handoff. Derivation
+  and key accessors are now crate-private.
+- Scoped the upstream `SpendingKeys` copy path to Treasury keys and constructed
+  the wrapper inside `key.rs`; no accessor returns a raw unified spending key.
+- Replaced the Orchard spending-key accessor with a crate-private
+  `SpendAuthorizingKey` accessor. The run loop requests mempool memo
+  decryption through a purpose-specific function instead of receiving the
+  Treasury Orchard full viewing key.
+
 ## 2026-09-02 — Derived-artifact accessors replace raw spending-key exposure
 
 - Deleted `orchard_spending_key`: the raw `&SpendingKey` no longer becomes
