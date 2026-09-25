@@ -18,8 +18,8 @@ use zcash_protocol::value::Zatoshis;
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::NameNoteQueue;
 use zns_mint::mint::note::{assemble, decrypt_treasury_tx};
+use zns_mint::mint::note::{NameNoteQueue, NameNoteState};
 use zns_mint::mint::otp::{OtpQueue, OtpRequest};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
@@ -218,7 +218,9 @@ async fn main() {
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
+            name_notes.rewind_seen();
             name_notes.truncate_to(rewound);
+            name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
             echoes.retain(|(_, _, height)| *height <= rewound);
             tracing::warn!(
@@ -312,6 +314,7 @@ async fn main() {
                 &mut mtp,
                 &mut chain_tip,
             );
+            name_notes.reconcile_seen(&network, &registry);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
@@ -623,17 +626,18 @@ async fn main() {
         }
 
         // --- NameNote enactment ---
-        // The order drain: one broadcast per decision. An order leaves
-        // the queue when it is sent — the wallet's retained transaction
-        // is then the record of the open commitment until the chain
-        // resolves it — or when the world overtakes it. Nothing here
-        // re-enacts a sent order: the wallet answers for it.
+        // The order drain: one broadcast per decision. The queue tracks
+        // authorization through submission and canonical observation.
         let mut index = 0;
         while index < name_notes.len() {
-            let (note, origin) = {
-                let (note, origin) = name_notes.entry(index);
-                (note.clone(), origin)
+            let (note, origin, state) = {
+                let (note, origin, state) = name_notes.entry(index);
+                (note.clone(), origin, state)
             };
+            if state != NameNoteState::Authorized {
+                index += 1;
+                continue;
+            }
             // Authority: a claim spends a lineage pool anchor; an update
             // or release spends the predecessor — the record's nullifier
             // matched by commitment.
@@ -739,9 +743,10 @@ async fn main() {
                     txid = %transaction.txid(),
                     name = %note.name().as_str(),
                     action = note.action().as_str(),
-                    "NameNote order sent — the wallet holds it until the chain answers"
+                    "NameNote order sent"
                 );
-                name_notes.remove(index);
+                name_notes.set_state(index, NameNoteState::Submitted);
+                index += 1;
             } else {
                 tracing::error!(
                     txid = %transaction.txid(),
