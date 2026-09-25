@@ -714,7 +714,7 @@ async fn main() {
                     .filter(|record| {
                         !record.action.is_release() && Some(record.commitment) == note.prev_rcm()
                     })
-                    .map(|record| record.nullifier)
+                    .map(|record| record.predecessor_nullifier)
                 {
                     Some(nf) => nf,
                     None => {
