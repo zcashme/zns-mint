@@ -3,6 +3,7 @@
 use std::marker::PhantomData;
 
 use secrecy::{ExposeSecret, Secret};
+use zcash_client_backend::data_api::wallet::SpendingKeys;
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_protocol::consensus::Parameters;
 use zip32::AccountId;
@@ -34,7 +35,7 @@ impl MintAccount for Registry {
     const ACCOUNT_ID: AccountId = REGISTRY_ACCOUNT;
 }
 
-/// An account's signing capability — generated once at boot, moved never copied.
+/// An account's signing capability — generated once at boot and retained.
 pub struct AccountKeys<A: MintAccount> {
     spending: UnifiedSpendingKey,
     /// `fn() -> A` holds no value and touches no auto traits.
@@ -48,7 +49,7 @@ pub type RegistryKeys = AccountKeys<Registry>;
 
 impl<A: MintAccount> AccountKeys<A> {
     /// Derives the account's keys from the sealed seed; panics only on a cryptographically broken seed.
-    pub fn derive<P: Parameters>(network: &P, seed: &Secret<[u8; 32]>) -> Self {
+    pub(crate) fn derive<P: Parameters>(network: &P, seed: &Secret<[u8; 32]>) -> Self {
         let usk = UnifiedSpendingKey::from_seed(network, seed.expose_secret(), A::ACCOUNT_ID)
             .expect("FATAL: key derivation");
         Self {
@@ -58,24 +59,25 @@ impl<A: MintAccount> AccountKeys<A> {
     }
 
     /// The unified full viewing key — for scanning and address derivation.
-    pub fn fvk(&self) -> UnifiedFullViewingKey {
+    pub(crate) fn fvk(&self) -> UnifiedFullViewingKey {
         self.spending.to_unified_full_viewing_key()
     }
 
-    /// The Orchard-family spending key, for assembly paths that wrap it into upstream types themselves.
-    pub fn orchard_spending_key(&self) -> &orchard::keys::SpendingKey {
-        self.spending.orchard()
-    }
-
-    /// The Orchard-family full viewing key — the Ironwood viewing lane (Ironwood notes are signed by Orchard-family keys).
-    pub fn orchard_fvk(&self) -> orchard::keys::FullViewingKey {
+    /// The Orchard spend-authorizing capability used to sign Ironwood spends.
+    pub(crate) fn orchard_ask(&self) -> orchard::keys::SpendAuthorizingKey {
         self.spending.orchard().into()
     }
 
-    /// The one sanctioned copy of the spending key — handed to upstream's generic payment path ([`create_proposed_transactions`][upstream], Sapling-disabled and Ironwood-only) and dropped with the call.
-    ///
-    /// [upstream]: zcash_client_backend::data_api::wallet::create_proposed_transactions
-    pub fn usk_clone(&self) -> UnifiedSpendingKey {
-        self.spending.clone()
+    /// The Orchard-family full viewing key, for internal viewing operations.
+    pub(crate) fn orchard_fvk(&self) -> orchard::keys::FullViewingKey {
+        self.spending.orchard().into()
+    }
+}
+
+impl AccountKeys<Treasury> {
+    /// Copies the Treasury spending capability into the upstream wallet
+    /// wrapper for one payment construction call.
+    pub(crate) fn spending_keys(&self) -> SpendingKeys {
+        SpendingKeys::new(self.spending.clone())
     }
 }

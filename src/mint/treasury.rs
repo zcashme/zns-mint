@@ -10,7 +10,7 @@ use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
 use zcash_client_backend::data_api::wallet::{
     create_proposed_transactions, propose_standard_transfer_to_address, ConfirmationsPolicy,
-    CreateErrT, ProposeTransferErrT, SpendingKeys,
+    CreateErrT, ProposeTransferErrT,
 };
 use zcash_client_backend::data_api::{
     InputSource as _, MaxSpendMode, TargetValue, WalletRead as _,
@@ -164,7 +164,7 @@ pub fn sweep_to_vault<P: Parameters>(
     )
     .map_err(BuildFailure::Proposal)?;
 
-    let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
+    let spending_keys = treasury_keys.spending_keys();
     let txids = create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
         wallet,
         network,
@@ -219,7 +219,7 @@ pub fn challenge<P: Parameters>(
     )
     .map_err(BuildFailure::Proposal)?;
 
-    let spending_keys = SpendingKeys::new(treasury_keys.usk_clone());
+    let spending_keys = treasury_keys.spending_keys();
     let txids = create_proposed_transactions::<
         Wallet<P>,
         P,

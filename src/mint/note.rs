@@ -538,19 +538,31 @@ pub fn decrypt_treasury_memos(
 )> {
     let mut memos = Vec::new();
     for tx in block.vtx() {
-        for (action_index, paid, memo) in decrypt_treasury_tx(tx, &treasury_keys.orchard_fvk()) {
+        for (action_index, paid, memo) in
+            decrypt_treasury_tx_with_fvk(tx, &treasury_keys.orchard_fvk())
+        {
             memos.push((tx.txid(), action_index, paid, memo));
         }
     }
     memos
 }
 
-/// Trial-decrypts one transaction's Ironwood actions sent to the
-/// Treasury's external address, exposing each `(action index, value,
-/// memo)` — the per-transaction core [`decrypt_treasury_memos`] has
-/// always embedded, callable on a mempool fetch. The viewing key is the
-/// reader's whole need: this pass decrypts, it never signs.
-pub fn decrypt_treasury_tx(
+/// Trial-decrypts one transaction's Ironwood actions using the Treasury's
+/// viewing capability. Intended for mempool transactions, whose memos are
+/// not yet available through block scanning.
+pub fn decrypt_treasury_transaction(
+    tx: &zcash_primitives::transaction::Transaction,
+    treasury_keys: &crate::TreasuryKeys,
+) -> Vec<(
+    usize,
+    zcash_protocol::value::Zatoshis,
+    zcash_protocol::memo::MemoBytes,
+)> {
+    decrypt_treasury_tx_with_fvk(tx, &treasury_keys.orchard_fvk())
+}
+
+/// The viewing-key implementation shared by block and mempool memo scans.
+fn decrypt_treasury_tx_with_fvk(
     tx: &zcash_primitives::transaction::Transaction,
     treasury_fvk: &orchard::keys::FullViewingKey,
 ) -> Vec<(

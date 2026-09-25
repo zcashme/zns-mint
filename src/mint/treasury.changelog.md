@@ -1,5 +1,11 @@
 # Treasury design record
 
+## 2026-09-25 — Treasury spending wrapper is scoped to payment construction (#200)
+
+- Sweep and challenge construction request the upstream `SpendingKeys`
+  wrapper from the Treasury capability. The Registry capability cannot
+  produce that wrapper.
+
 ## 2026-09-25 — First queued claim wins per name
 
 - `RequestQueue::record` keeps the earliest claim for a name, rejects later

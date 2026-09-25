@@ -18,7 +18,7 @@ use zcash_protocol::value::Zatoshis;
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::{assemble, decrypt_treasury_tx, NameNoteQueue, NameNoteState};
+use zns_mint::mint::note::{assemble, decrypt_treasury_transaction, NameNoteQueue, NameNoteState};
 use zns_mint::mint::otp::{OtpQueue, OtpRequest};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
@@ -101,10 +101,9 @@ async fn main() {
                         let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
                         match rpc.get_raw_transaction(branch_id, txid).await {
                             Ok(Some(transaction)) => {
-                                for (_action_index, paid, memo) in decrypt_treasury_tx(
-                                    &transaction,
-                                    &treasury_keys.orchard_fvk(),
-                                ) {
+                                for (_action_index, paid, memo) in
+                                    decrypt_treasury_transaction(&transaction, &treasury_keys)
+                                {
                                     let MintInbound::Request(request) = MintInbound::decode(&network, &memo) else {
                                         continue;
                                     };

@@ -10,7 +10,8 @@ compile_error!(
 
 pub mod boot;
 pub mod capsule;
-pub mod key;
+mod key;
+pub use key::{RegistryKeys, TreasuryKeys};
 pub mod metrics;
 pub mod mint;
 pub mod tee;
