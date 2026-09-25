@@ -1,11 +1,26 @@
 # main.changelog.md
 
+## 2026-09-24 — A claim follows the earliest payment
+
+- `RequestQueue` keeps the earliest claim payment for each name;
+  `NameNoteQueue` takes ownership when authorized and holds it through
+  submission until the Name Note is observed. Later claim payments do not
+  start another note and are not returned.
+- A release note already created is the one that stands. A later OTP
+  response or lifecycle release does not replace it.
+
+## 2026-09-25 — One unresolved NameNote per name
+
+- The first unresolved NameNote for a name owns it, whether update or
+  release. A later request is ignored; a conflicting OTP response does not
+  consume its challenge. Different names are independent. After confirmation,
+  the `Seen` entry remains for reorg tracking while a successor can be queued.
+
 ## 2026-09-24 — The drain logs the build it did not send
 
 - A Name Note that lacks a fee and one whose authority note is busy
   log separately from a build error. A vault sweep error is a warning;
   a same-day or below-minimum sweep stays silent.
-
 
 ## 2026-09-24 — The run loop gates vault sweeps by day (#186)
 
@@ -84,14 +99,9 @@ Detailed rules live in `main.rs.context.md`. This file only records the definiti
   open). Transient waits (anchor locked, fee funds) stay queued. The
   stale-order leak is gone: "order waits: predecessor no longer
   current" was always dead, and now resolves.
-- The claim lane's guard stays `claim_pending` alone: with orders
-  resolving at their send, an order is open only until it is sent, and
-  a rival payment that slips past that window simply spends another
-  anchor — the Registry ignores the duplicate, first confirmed wins.
-- A claim that expires unmined no longer auto-retries: the order
-  resolved at its send, the payment is income, and a new payment
-  settles a new evaluation — the restart philosophy, now in-process.
-  A node-rejected send never resolved its order and retries naturally.
+- The claim lane's `claim_pending` guard includes submitted orders. Claim
+  ownership stays reserved until canonical observation, so a later payment
+  cannot start a competing Name Note.
 - The walk no longer takes the NameNoteQueue (see mint.changelog.md);
   a duplicate claim that still lands on chain is ignored, not fatal
   (see registry.changelog.md).

@@ -26,7 +26,8 @@ pub struct NameRecord {
     pub commitment: NameCommitment,
     pub confirmed_height: BlockHeight,
     pub release_deadline: Timestamp,
-    pub nullifier: orchard::note::Nullifier,
+    /// Nullifier of this record's note when spent as the next transition's predecessor.
+    pub predecessor_nullifier: orchard::note::Nullifier,
 }
 
 impl NameRecord {
@@ -56,7 +57,7 @@ impl NameRecord {
                 mtp.as_seconds() + crate::mint::LIVENESS_INTERVAL,
             )
             .expect("liveness deadline fits Timestamp"),
-            nullifier,
+            predecessor_nullifier: nullifier,
         }
     }
 
@@ -90,7 +91,7 @@ impl std::fmt::Debug for NameRecord {
             .field("ua", &self.ua)
             .field("commitment", &self.commitment)
             .field("confirmed_height", &self.confirmed_height)
-            .field("nullifier", &self.nullifier)
+            .field("predecessor_nullifier", &self.predecessor_nullifier)
             .finish()
     }
 }
@@ -227,9 +228,9 @@ impl Registry {
 
     /// Offers a confirmed claim candidate; true when its transaction
     /// spent a standing anchor and the name was free (or released).
-    /// A duplicate — the mint's restart and reorg worlds — still
-    /// advances the pool; first confirmed wins, the live registration
-    /// stands.
+    /// The caller offers transactions in block order, so the earlier
+    /// vtx wins inside one block. A later claim leaves the live
+    /// registration in place. The loser's anchor was already spent.
     #[allow(clippy::too_many_arguments)]
     pub fn accept_claim<P: Parameters>(
         &mut self,
@@ -395,7 +396,7 @@ impl Registry {
     fn names_spent_by(&self, nfs: &[orchard::note::Nullifier]) -> Vec<Name> {
         self.records
             .iter()
-            .filter(|(_, record)| nfs.contains(&record.nullifier))
+            .filter(|(_, record)| nfs.contains(&record.predecessor_nullifier))
             .map(|(name, _)| name.clone())
             .collect()
     }
@@ -518,7 +519,7 @@ mod tests {
             commitment: commitment(seed),
             confirmed_height: BlockHeight::from_u32(100),
             release_deadline: ts(release_deadline),
-            nullifier: nullifier(seed),
+            predecessor_nullifier: nullifier(seed),
         }
     }
 
@@ -753,7 +754,7 @@ mod tests {
         ));
         let kept = r.record(&test_name()).expect("alice still registered");
         assert_eq!(kept.commitment, first.commitment);
-        assert_eq!(kept.nullifier, first.nullifier);
+        assert_eq!(kept.predecessor_nullifier, first.predecessor_nullifier);
         assert_eq!(kept.confirmed_height, first.confirmed_height);
 
         // The pool followed the chain through both: one anchor out, one
@@ -826,7 +827,7 @@ mod tests {
         ));
         let alice = r.record(&test_name()).expect("alice marked released");
         assert_eq!(alice.action, Action::Release);
-        assert_eq!(alice.nullifier, nullifier(1));
+        assert_eq!(alice.predecessor_nullifier, nullifier(1));
         assert!(r.record(&Name::parse("bob").unwrap()).is_none());
         assert!(!r.anchor_pool().contains(&anchor));
         assert!(r.anchor_pool().contains(&succ));
@@ -844,7 +845,7 @@ mod tests {
         assert!(!r.anchor_pool().contains(&anchor));
         let alice = r.record(&test_name()).expect("alice marked released");
         assert_eq!(alice.action, Action::Release);
-        assert_eq!(alice.nullifier, nullifier(1));
+        assert_eq!(alice.predecessor_nullifier, nullifier(1));
     }
 
     fn live_alice(expires_at: Expiry, deadline: i64) -> Registry {
@@ -881,7 +882,7 @@ mod tests {
         ));
         let rec = r.record(&test_name()).expect("alice still bound");
         assert_eq!(rec.action, Action::Update);
-        assert_eq!(rec.nullifier, succ);
+        assert_eq!(rec.predecessor_nullifier, succ);
     }
 
     #[test]
@@ -899,7 +900,7 @@ mod tests {
         ));
         let rec = r.record(&test_name()).expect("alice marked released");
         assert_eq!(rec.action, Action::Release);
-        assert_eq!(rec.nullifier, succ);
+        assert_eq!(rec.predecessor_nullifier, succ);
     }
 
     #[test]
@@ -917,7 +918,7 @@ mod tests {
         ));
         let rec = r.record(&test_name()).expect("alice marked released");
         assert_eq!(rec.action, Action::Release);
-        assert_eq!(rec.nullifier, succ);
+        assert_eq!(rec.predecessor_nullifier, succ);
     }
 
     #[test]
@@ -946,12 +947,12 @@ mod tests {
         ));
         let alice = r.record(&test_name()).expect("alice marked released");
         assert_eq!(alice.action, Action::Release);
-        assert_eq!(alice.nullifier, nullifier(1));
+        assert_eq!(alice.predecessor_nullifier, nullifier(1));
         assert!(!r.anchor_pool().contains(&nullifier(9)));
         assert_eq!(
             r.record(&Name::parse("bob").unwrap())
                 .expect("bob unchanged")
-                .nullifier,
+                .predecessor_nullifier,
             nullifier(2)
         );
     }
@@ -975,7 +976,7 @@ mod tests {
         ));
         let alice = r.record(&test_name()).expect("alice marked released");
         assert_eq!(alice.action, Action::Release);
-        assert_eq!(alice.nullifier, nullifier(20));
+        assert_eq!(alice.predecessor_nullifier, nullifier(20));
     }
 
     #[test]
@@ -997,6 +998,6 @@ mod tests {
         ));
         let rec = r.record(&test_name()).expect("alice released");
         assert_eq!(rec.action, Action::Release);
-        assert_eq!(rec.nullifier, succ);
+        assert_eq!(rec.predecessor_nullifier, succ);
     }
 }

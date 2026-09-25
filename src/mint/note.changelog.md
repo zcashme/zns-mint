@@ -1,5 +1,20 @@
 # `mint/note.rs` design record
 
+## 2026-09-25 — One unresolved NameNote per name
+
+- `NameNoteQueue` admits at most one unresolved transition per name.
+  `Seen` entries stay for reorg tracking but release the slot, so a
+  successor transition can be queued. Other names remain independent.
+- A `Seen` note no longer rejects an identical later claim; only unresolved
+  entries deduplicate admission.
+
+## 2026-09-24 — The earliest claim payment owns the name
+
+- `NameNoteQueue` carries claim ownership from authorization through
+  submission until the claim is observed. Reorged origins are removed.
+- `release_pending` is the created release note. A later one is not
+  admitted over it.
+
 ## 2026-09-24 — A Name Note build says why it stopped
 
 - `prepare` returns `PrepareError`. A missing authority note and a

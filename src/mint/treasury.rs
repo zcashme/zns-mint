@@ -259,9 +259,29 @@ pub struct RequestQueue {
 }
 
 impl RequestQueue {
-    /// A recognized name request, routed after block application.
-    pub fn record(&mut self, txid: TxId, request: Request, paid: Zatoshis, height: BlockHeight) {
+    /// A recognized request, routed after block application. Returns false
+    /// when an earlier queued claim already owns the name.
+    pub fn record(
+        &mut self,
+        txid: TxId,
+        request: Request,
+        paid: Zatoshis,
+        height: BlockHeight,
+    ) -> bool {
+        if let Request::Claim { name, .. } = &request {
+            if self.claim_pending(name) {
+                return false;
+            }
+        }
         self.requests.push((txid, request, paid, height));
+        true
+    }
+
+    /// Whether a claim for `name` is already waiting in transaction order.
+    fn claim_pending(&self, name: &crate::mint::Name) -> bool {
+        self.requests.iter().any(|(_, request, _, _)| {
+            matches!(request, Request::Claim { name: queued, .. } if queued == name)
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -336,6 +356,65 @@ mod tests {
         assert_eq!(*queue.entry(0).0, TxId::NULL);
         assert_eq!(queue.entry(0).3, h(100));
         assert_eq!(queue.entry(1).3, h(101));
+    }
+
+    #[test]
+    fn first_claim_per_name_wins_admission() {
+        let ua = match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
+            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            _ => panic!("vector is a mainnet Unified Address"),
+        };
+        let alice = Name::parse("alice").unwrap();
+        let bob = Name::parse("bob").unwrap();
+        let mut queue = RequestQueue::default();
+
+        assert!(queue.record(
+            TxId::from_bytes([1; 32]),
+            Request::Claim {
+                name: alice.clone(),
+                ua: ua.clone(),
+                term: Term::Forever,
+                code: None,
+            },
+            Zatoshis::ZERO,
+            h(100),
+        ));
+        assert!(!queue.record(
+            TxId::from_bytes([2; 32]),
+            Request::Claim {
+                name: alice,
+                ua: ua.clone(),
+                term: Term::Forever,
+                code: None,
+            },
+            Zatoshis::ZERO,
+            h(101),
+        ));
+        assert!(queue.record(
+            TxId::from_bytes([3; 32]),
+            Request::Claim {
+                name: bob,
+                ua,
+                term: Term::Forever,
+                code: None,
+            },
+            Zatoshis::ZERO,
+            h(102),
+        ));
+
+        assert_eq!(queue.len(), 2);
+        assert_eq!(*queue.entry(0).0, TxId::from_bytes([1; 32]));
+        assert_eq!(queue.entry(0).3, h(100));
+        assert!(matches!(
+            queue.entry(0).1,
+            Request::Claim { ref name, .. } if name.as_str() == "alice"
+        ));
+        assert_eq!(*queue.entry(1).0, TxId::from_bytes([3; 32]));
+        assert_eq!(queue.entry(1).3, h(102));
+        assert!(matches!(
+            queue.entry(1).1,
+            Request::Claim { ref name, .. } if name.as_str() == "bob"
+        ));
     }
 
     #[test]

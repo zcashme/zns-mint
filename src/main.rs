@@ -18,8 +18,7 @@ use zcash_protocol::value::Zatoshis;
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::{assemble, decrypt_treasury_tx};
-use zns_mint::mint::note::{NameNoteQueue, NameNoteState};
+use zns_mint::mint::note::{assemble, decrypt_treasury_tx, NameNoteQueue, NameNoteState};
 use zns_mint::mint::otp::{OtpQueue, OtpRequest};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
@@ -326,7 +325,22 @@ async fn main() {
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
-                        requests.record(txid, request, paid, next_height);
+                        if let Request::Claim { name, .. } = &request {
+                            if name_notes.claim_pending(name) {
+                                tracing::debug!(
+                                    %txid,
+                                    name = %name.as_str(),
+                                    "later claim payment ignored; an earlier Name Note owns the name"
+                                );
+                                continue;
+                            }
+                        }
+                        if !requests.record(txid, request, paid, next_height) {
+                            tracing::debug!(
+                                %txid,
+                                "later claim payment ignored; an earlier queued payment owns the name"
+                            );
+                        }
                     }
                     MintInbound::Echo(echo) => echoes.push((echo, paid, next_height)),
                     MintInbound::Unrecognized => {
@@ -415,19 +429,9 @@ async fn main() {
                         term,
                         code,
                     } => {
-                        // One open claim per name at a time: the Registry
-                        // lags the mempool by a block; the queue holds an
-                        // order only until its send. A rival payment that
-                        // slips past both may spend another anchor — any
-                        // duplicate the chain still carries is ignored,
-                        // first confirmed wins.
-                        if name_notes.claim_pending(name) {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                "claim already pending for this name"
-                            );
-                            break 'lane true;
-                        }
+                        // The earliest payment owns the name until its claim
+                        // is observed. A later payment does not start a
+                        // second Name Note.
                         // Pre-sale gate: read-only table lookup.
                         // Unavailability defers with the queue; a deny is
                         // decided. Redemption is the name already live.
@@ -498,6 +502,14 @@ async fn main() {
                         let Some(record) = registry.record(name).cloned() else {
                             break 'lane true;
                         };
+                        if name_notes.transition_pending(name) {
+                            tracing::debug!(
+                                name = %name.as_str(),
+                                action = action.as_str(),
+                                "transition already queued for the current Name Note"
+                            );
+                            break 'lane true;
+                        }
                         if !record.admits(action, requested_ua, term, note_height, mtp_now)
                             || paid < oracle.challenge_fee()
                         {
@@ -586,6 +598,16 @@ async fn main() {
                         break 'lane true;
                     }
                 }
+                // A transition already admitted for this current Name Note
+                // owns its predecessor. Do not consume this OTP response.
+                if name_notes.transition_pending(&echo.name) {
+                    tracing::debug!(
+                        name = %echo.name.as_str(),
+                        action = echo.action.as_str(),
+                        "transition already queued; OTP response does not replace it"
+                    );
+                    break 'lane true;
+                }
                 let digits = sent.code.digits();
                 let authorized = match echo.action {
                     Action::Update => Request::Update {
@@ -629,6 +651,9 @@ async fn main() {
         // `releases_due` re-derives the same notes per tip, so
         // admission is idempotent.
         for (name, release_note) in registry.releases_due(mtp_now) {
+            if name_notes.transition_pending(&name) {
+                continue;
+            }
             tracing::info!(name = %name.as_str(), "lifecycle release authorized");
             name_notes.admit(tip, release_note);
         }
@@ -689,7 +714,7 @@ async fn main() {
                     .filter(|record| {
                         !record.action.is_release() && Some(record.commitment) == note.prev_rcm()
                     })
-                    .map(|record| record.nullifier)
+                    .map(|record| record.predecessor_nullifier)
                 {
                     Some(nf) => nf,
                     None => {
@@ -775,7 +800,7 @@ async fn main() {
                     action = note.action().as_str(),
                     "NameNote order sent"
                 );
-                name_notes.set_state(index, NameNoteState::Submitted);
+                name_notes.mark_submitted(index);
                 index += 1;
             } else {
                 tracing::error!(

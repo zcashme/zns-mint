@@ -86,7 +86,7 @@ enum Event {
         name: String,
         ua: String,
         expires_at_secs: Option<i64>,
-        /// Executor asserts this matches `registry.record(name).nullifier`.
+        /// Executor asserts this matches `registry.record(name).predecessor_nullifier`.
         prev_nullifier: Hex32,
         /// The successor NameNote's own nullifier.
         nullifier: Hex32,
@@ -233,7 +233,7 @@ fn apply(registry: &mut Registry, event: &Event) {
                 .record(&parsed_name)
                 .expect("update predecessor exists");
             assert_eq!(
-                record.nullifier.to_bytes(),
+                record.predecessor_nullifier.to_bytes(),
                 nf(prev_nullifier).to_bytes(),
                 "update prev_nullifier does not match current record for {name}",
             );
@@ -266,7 +266,7 @@ fn apply(registry: &mut Registry, event: &Event) {
                 .record(&parsed_name)
                 .expect("release predecessor exists");
             assert_eq!(
-                record.nullifier.to_bytes(),
+                record.predecessor_nullifier.to_bytes(),
                 nf(prev_nullifier).to_bytes(),
                 "release prev_nullifier does not match current record for {name}",
             );
@@ -326,7 +326,7 @@ fn record_snapshot(record: &zns_mint::mint::registry::NameRecord) -> RecordSnaps
         commitment: hex::encode(record.commitment.to_bytes()),
         confirmed_height: u32::from(record.confirmed_height),
         release_deadline_secs: record.release_deadline.as_seconds(),
-        nullifier: hex::encode(record.nullifier.to_bytes()),
+        nullifier: hex::encode(record.predecessor_nullifier.to_bytes()),
     }
 }
 
