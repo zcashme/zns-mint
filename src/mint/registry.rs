@@ -14,12 +14,13 @@ use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
 
 // ---------------------------------------------------------------------------
-// NameRecord — the current state of a name chain
+// NameRecord — a confirmed state in one name's chain
 // ---------------------------------------------------------------------------
 
-/// The current state of one name's chain.
+/// One confirmed state in a name's chain.
 #[derive(Clone, PartialEq, Eq)]
 pub struct NameRecord {
+    pub name: Name,
     pub action: Action,
     pub ua: UnifiedAddress,
     pub expires_at: Expiry,
@@ -46,6 +47,7 @@ impl NameRecord {
     ) -> Self {
         let rcm = note.rcm(params);
         Self {
+            name: note.name().clone(),
             action: note.action(),
             ua: note.ua().clone(),
             expires_at: note.expires_at().unwrap_or(Expiry::Never),
@@ -87,6 +89,7 @@ impl NameRecord {
 impl std::fmt::Debug for NameRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NameRecord")
+            .field("name", &self.name)
             .field("action", &self.action)
             .field("ua", &self.ua)
             .field("commitment", &self.commitment)
@@ -97,22 +100,17 @@ impl std::fmt::Debug for NameRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Registry — name-chain state with reorg undo
+// Registry — tip records, per-name chains, and anchor lineage
 // ---------------------------------------------------------------------------
 
-/// An undo-log entry: the record before a set_record.
-#[derive(Debug, Clone)]
-pub struct RegistryHistoryRecord {
-    pub height: BlockHeight,
-    pub name: Name,
-    pub prev_record: Option<NameRecord>,
-}
-
-/// Name records, a reorg undo log, and the anchor lineage pool.
+/// Name records at the applied tip, each name's confirmed record chain, and
+/// the anchor lineage pool.
 #[derive(Default)]
 pub struct Registry {
+    /// Names that are live at the applied tip. Released names are absent.
     records: BTreeMap<Name, NameRecord>,
-    history: Vec<RegistryHistoryRecord>,
+    /// All confirmed records for each name, in canonical application order.
+    history: BTreeMap<Name, Vec<NameRecord>>,
     anchors: AnchorPool,
 }
 
@@ -139,14 +137,8 @@ impl Registry {
                 term,
                 code: _,
             } => {
-                match self.record(&name).cloned() {
-                    None => {}
-                    Some(record) if record.action.is_release() => {
-                        if payment_height <= record.confirmed_height {
-                            return None;
-                        }
-                    }
-                    Some(_) => return None, // live
+                if !self.claim_is_admissible(&name, payment_height) {
+                    return None;
                 }
                 let expires_at = term.claim_expiry(mtp)?;
                 Some(NameNote::Claim {
@@ -157,9 +149,6 @@ impl Registry {
             }
             Request::Update { name, ua, term } => {
                 let record = self.record(&name).cloned()?;
-                if record.action.is_release() {
-                    return None;
-                }
                 if record.is_release_due(mtp) {
                     return None;
                 }
@@ -177,9 +166,6 @@ impl Registry {
             }
             Request::Release { name, ua } => {
                 let record = self.record(&name).cloned()?;
-                if record.action.is_release() {
-                    return None;
-                }
                 if record.ua != ua {
                     return None;
                 }
@@ -196,9 +182,33 @@ impl Registry {
         }
     }
 
-    /// The current record of a name.
+    /// The record for a name at the applied tip. Released names are absent.
     pub fn record(&self, name: &Name) -> Option<&NameRecord> {
         self.records.get(name)
+    }
+
+    /// The latest confirmed record for a name, including a release record.
+    pub fn latest_record(&self, name: &Name) -> Option<&NameRecord> {
+        self.history.get(name).and_then(|records| records.last())
+    }
+
+    /// The confirmed record chain for a name, oldest first.
+    pub fn record_history(&self, name: &Name) -> &[NameRecord] {
+        self.history.get(name).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether a payment at `payment_height` may claim this name: the name
+    /// must be absent from the applied-tip records, and any prior release
+    /// must precede the payment.
+    pub fn claim_is_admissible(&self, name: &Name, payment_height: BlockHeight) -> bool {
+        if self.record(name).is_some() {
+            return false;
+        }
+        match self.latest_record(name) {
+            None => true,
+            Some(record) if record.action.is_release() => payment_height > record.confirmed_height,
+            Some(_) => false,
+        }
     }
 
     /// The §4.5 clocks, swept: every live name whose purchased term or
@@ -207,7 +217,7 @@ impl Registry {
     pub fn releases_due(&self, mtp: Timestamp) -> impl Iterator<Item = (Name, NameNote)> + '_ {
         self.records
             .iter()
-            .filter(move |(_, record)| !record.action.is_release() && record.is_release_due(mtp))
+            .filter(move |(_, record)| record.is_release_due(mtp))
             .map(move |(name, record)| {
                 (
                     name.clone(),
@@ -261,18 +271,13 @@ impl Registry {
             self.mark_released(nfs, height);
             return false;
         }
-        if self
-            .record(note.name())
-            .is_some_and(|r| !r.action.is_release())
-        {
+        if self.record(note.name()).is_some() {
             // A late or duplicate claim: first confirmed wins.
             return false;
         }
-        self.set_record(
-            note.name().clone(),
-            NameRecord::from_received(params, note, nullifier, height, mtp),
-            height,
-        );
+        self.set_record(NameRecord::from_received(
+            params, note, nullifier, height, mtp,
+        ));
         true
     }
 
@@ -302,16 +307,13 @@ impl Registry {
             self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
             return false;
         }
-        let name = note.name().clone();
         if record.is_release_due(mtp) {
-            self.release_predecessor(params, name, &record, nullifier, height, mtp);
+            self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
             return false;
         }
-        self.set_record(
-            name,
-            NameRecord::from_received(params, note, nullifier, height, mtp),
-            height,
-        );
+        self.set_record(NameRecord::from_received(
+            params, note, nullifier, height, mtp,
+        ));
         true
     }
 
@@ -338,11 +340,9 @@ impl Registry {
             self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
             return false;
         }
-        self.set_record(
-            note.name().clone(),
-            NameRecord::from_received(params, note, nullifier, height, mtp),
-            height,
-        );
+        self.set_record(NameRecord::from_received(
+            params, note, nullifier, height, mtp,
+        ));
         true
     }
 
@@ -362,11 +362,9 @@ impl Registry {
             ua: record.ua.clone(),
             prev: record.commitment,
         };
-        self.set_record(
-            name,
-            NameRecord::from_received(params, &release, nullifier, height, mtp),
-            height,
-        );
+        self.set_record(NameRecord::from_received(
+            params, &release, nullifier, height, mtp,
+        ));
     }
 
     /// The live predecessor this transaction spent, when it is this
@@ -387,9 +385,7 @@ impl Registry {
         if spent.as_slice() != [note.name().clone()] {
             return None;
         }
-        self.record(note.name())
-            .filter(|record| !record.action.is_release())
-            .cloned()
+        self.record(note.name()).cloned()
     }
 
     /// The names whose current notes these nullifiers spend.
@@ -419,25 +415,30 @@ impl Registry {
             if record.action.is_release() {
                 continue;
             }
-            let mut tomb = record;
-            tomb.action = Action::Release;
-            tomb.confirmed_height = height;
-            self.set_record(name, tomb, height);
+            let mut released_record = record;
+            released_record.action = Action::Release;
+            released_record.confirmed_height = height;
+            self.set_record(released_record);
         }
     }
 
-    fn set_record(&mut self, name: Name, record: NameRecord, height: BlockHeight) {
-        let prev_record = self.records.insert(name.clone(), record);
-        self.history.push(RegistryHistoryRecord {
-            height,
-            name,
-            prev_record,
-        });
+    fn set_record(&mut self, record: NameRecord) {
+        let name = record.name.clone();
+        let history = self.history.entry(name.clone()).or_default();
+        if let Some(previous) = history.last() {
+            debug_assert!(previous.confirmed_height <= record.confirmed_height);
+        }
+        history.push(record.clone());
+        if record.action.is_release() {
+            self.records.remove(&name);
+        } else {
+            self.records.insert(name, record);
+        }
     }
 
-    /// Every known name record; diagnostics only.
-    pub fn name_chain(&self) -> impl Iterator<Item = (&Name, &NameRecord)> {
-        self.records.iter()
+    /// Every name record live at the applied tip; diagnostics only.
+    pub fn name_chain(&self) -> impl Iterator<Item = &NameRecord> {
+        self.records.values()
     }
 
     /// The anchor lineage pool — the only source of claim authority.
@@ -445,21 +446,24 @@ impl Registry {
         self.anchors.live()
     }
 
-    /// Rewinds the registry to height. Callers pass walk-found heights
-    /// at or above the boot origin.
+    /// Truncates every name's record chain to `height` and rebuilds the
+    /// records live at that tip. Callers pass walk-found heights at or above
+    /// the boot origin.
     pub fn truncate_to_height(&mut self, height: BlockHeight) {
-        while let Some(entry) = self.history.last() {
-            if entry.height <= height {
-                break;
+        self.history.retain(|_, records| {
+            while records
+                .last()
+                .is_some_and(|record| record.confirmed_height > height)
+            {
+                records.pop();
             }
-            let entry = self.history.pop().unwrap();
-            match entry.prev_record {
-                Some(old_record) => {
-                    self.records.insert(entry.name, old_record);
-                }
-                None => {
-                    self.records.remove(&entry.name);
-                }
+            !records.is_empty()
+        });
+
+        self.records.clear();
+        for records in self.history.values() {
+            if let Some(record) = records.last().filter(|record| !record.action.is_release()) {
+                self.records.insert(record.name.clone(), record.clone());
             }
         }
         self.anchors.truncate_to(height);
@@ -511,8 +515,15 @@ mod tests {
         zcash_primitives::transaction::TxId::from_bytes([0; 32])
     }
 
-    fn record(action: Action, expires_at: Expiry, release_deadline: i64, seed: u8) -> NameRecord {
+    fn record_for(
+        name: Name,
+        action: Action,
+        expires_at: Expiry,
+        release_deadline: i64,
+        seed: u8,
+    ) -> NameRecord {
         NameRecord {
+            name,
             action,
             ua: test_ua(),
             expires_at,
@@ -523,17 +534,22 @@ mod tests {
         }
     }
 
+    fn record(action: Action, expires_at: Expiry, release_deadline: i64, seed: u8) -> NameRecord {
+        record_for(test_name(), action, expires_at, release_deadline, seed)
+    }
+
+    fn at_height(mut record: NameRecord, height: u32) -> NameRecord {
+        record.confirmed_height = BlockHeight::from_u32(height);
+        record
+    }
+
     #[test]
     fn authorize_refuses_an_illegal_extension_without_consuming_the_otp() {
         use crate::mint::otp::{OtpCode, OtpRequest, D_OTP};
 
         let mut r = Registry::new();
         let mtp = ts(1_700_000_000);
-        r.set_record(
-            test_name(),
-            record(Action::Claim, Expiry::Never, 3_000_000_000, 1),
-            BlockHeight::from_u32(100),
-        );
+        r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
         let ua = test_ua();
         let code = OtpCode::for_test(*b"123456");
         let digits = code.expose_for_test();
@@ -643,11 +659,13 @@ mod tests {
                 4_u8,
             ),
         ] {
-            r.set_record(
+            r.set_record(record_for(
                 Name::parse(name).expect("test name parses"),
-                record(action, expires_at, deadline, seed),
-                BlockHeight::from_u32(100),
-            );
+                action,
+                expires_at,
+                deadline,
+                seed,
+            ));
         }
         // alpha: purchased term up (§4.5.2). bravo: liveness deadline
         // passed (§4.5.4). delta: live. gamma: already released.
@@ -766,6 +784,89 @@ mod tests {
     }
 
     #[test]
+    fn per_name_history_is_ordered_and_release_is_absent_from_tip_records() {
+        let mut r = Registry::new();
+        let name = test_name();
+        r.set_record(at_height(
+            record(Action::Claim, Expiry::Never, 3_000_000_000, 1),
+            100,
+        ));
+        r.set_record(at_height(
+            record(Action::Update, Expiry::Never, 3_100_000_000, 2),
+            120,
+        ));
+        r.set_record(at_height(
+            record(Action::Release, Expiry::Never, 3_100_000_000, 3),
+            140,
+        ));
+
+        let history = r.record_history(&name);
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].name, name);
+        assert_eq!(history[0].action, Action::Claim);
+        assert_eq!(history[0].confirmed_height, BlockHeight::from_u32(100));
+        assert_eq!(history[1].action, Action::Update);
+        assert_eq!(history[1].confirmed_height, BlockHeight::from_u32(120));
+        assert_eq!(history[2].action, Action::Release);
+        assert_eq!(history[2].confirmed_height, BlockHeight::from_u32(140));
+        assert!(r.record(&name).is_none());
+        assert_eq!(r.latest_record(&name), history.last());
+    }
+
+    #[test]
+    fn released_name_requires_a_later_claim_payment() {
+        let mut r = Registry::new();
+        let name = test_name();
+        r.set_record(at_height(
+            record(Action::Claim, Expiry::Never, 3_000_000_000, 1),
+            100,
+        ));
+        r.set_record(at_height(
+            record(Action::Release, Expiry::Never, 3_000_000_000, 2),
+            150,
+        ));
+
+        assert!(r.record(&name).is_none());
+        assert!(!r.claim_is_admissible(&name, BlockHeight::from_u32(150)));
+        assert!(r.claim_is_admissible(&name, BlockHeight::from_u32(151)));
+    }
+
+    #[test]
+    fn truncate_to_height_trims_each_name_chain_and_rebuilds_tip_records() {
+        let mut r = Registry::new();
+        let alice = test_name();
+        let bob = Name::parse("bob").unwrap();
+        r.set_record(at_height(
+            record(Action::Claim, Expiry::Never, 3_000_000_000, 1),
+            100,
+        ));
+        r.set_record(at_height(
+            record(Action::Update, Expiry::Never, 3_100_000_000, 2),
+            120,
+        ));
+        r.set_record(at_height(
+            record(Action::Release, Expiry::Never, 3_100_000_000, 3),
+            140,
+        ));
+        r.set_record(at_height(
+            record_for(bob.clone(), Action::Claim, Expiry::Never, 3_000_000_000, 4),
+            110,
+        ));
+
+        r.truncate_to_height(BlockHeight::from_u32(130));
+        assert_eq!(r.record_history(&alice).len(), 2);
+        assert_eq!(r.record(&alice).unwrap().action, Action::Update);
+        assert_eq!(r.record_history(&bob).len(), 1);
+        assert!(r.record(&bob).is_some());
+
+        r.truncate_to_height(BlockHeight::from_u32(99));
+        assert!(r.record_history(&alice).is_empty());
+        assert!(r.record_history(&bob).is_empty());
+        assert!(r.record(&alice).is_none());
+        assert!(r.record(&bob).is_none());
+    }
+
+    #[test]
     fn accept_claim_rejects_malformed_without_panic() {
         let mut r = Registry::new();
         let h = BlockHeight::from_u32(10);
@@ -825,7 +926,10 @@ mod tests {
             h,
             mtp
         ));
-        let alice = r.record(&test_name()).expect("alice marked released");
+        assert!(r.record(&test_name()).is_none());
+        let alice = r
+            .latest_record(&test_name())
+            .expect("release retained in history");
         assert_eq!(alice.action, Action::Release);
         assert_eq!(alice.predecessor_nullifier, nullifier(1));
         assert!(r.record(&Name::parse("bob").unwrap()).is_none());
@@ -843,18 +947,17 @@ mod tests {
         r.follow_spends(&[anchor, nullifier(1)], h);
 
         assert!(!r.anchor_pool().contains(&anchor));
-        let alice = r.record(&test_name()).expect("alice marked released");
+        assert!(r.record(&test_name()).is_none());
+        let alice = r
+            .latest_record(&test_name())
+            .expect("release retained in history");
         assert_eq!(alice.action, Action::Release);
         assert_eq!(alice.predecessor_nullifier, nullifier(1));
     }
 
     fn live_alice(expires_at: Expiry, deadline: i64) -> Registry {
         let mut r = Registry::new();
-        r.set_record(
-            test_name(),
-            record(Action::Claim, expires_at, deadline, 1),
-            BlockHeight::from_u32(100),
-        );
+        r.set_record(record(Action::Claim, expires_at, deadline, 1));
         r
     }
 
@@ -898,7 +1001,10 @@ mod tests {
             BlockHeight::from_u32(101),
             ts(1_000_000_000),
         ));
-        let rec = r.record(&test_name()).expect("alice marked released");
+        assert!(r.record(&test_name()).is_none());
+        let rec = r
+            .latest_record(&test_name())
+            .expect("release retained in history");
         assert_eq!(rec.action, Action::Release);
         assert_eq!(rec.predecessor_nullifier, succ);
     }
@@ -916,7 +1022,10 @@ mod tests {
             BlockHeight::from_u32(101),
             ts(1_000_000_000),
         ));
-        let rec = r.record(&test_name()).expect("alice marked released");
+        assert!(r.record(&test_name()).is_none());
+        let rec = r
+            .latest_record(&test_name())
+            .expect("release retained in history");
         assert_eq!(rec.action, Action::Release);
         assert_eq!(rec.predecessor_nullifier, succ);
     }
@@ -924,11 +1033,13 @@ mod tests {
     #[test]
     fn accept_update_with_anchor_spend_follows_the_pool() {
         let mut r = live_alice(Expiry::Never, 3_000_000_000);
-        r.set_record(
+        r.set_record(record_for(
             Name::parse("bob").unwrap(),
-            record(Action::Claim, Expiry::Never, 3_000_000_000, 2),
-            BlockHeight::from_u32(100),
-        );
+            Action::Claim,
+            Expiry::Never,
+            3_000_000_000,
+            2,
+        ));
         r.adopt_anchor(BlockHeight::from_u32(100), nullifier(9));
         let note = update_for_alice(Expiry::Never, 1);
         let height = BlockHeight::from_u32(101);
@@ -945,7 +1056,10 @@ mod tests {
             height,
             mtp,
         ));
-        let alice = r.record(&test_name()).expect("alice marked released");
+        assert!(r.record(&test_name()).is_none());
+        let alice = r
+            .latest_record(&test_name())
+            .expect("release retained in history");
         assert_eq!(alice.action, Action::Release);
         assert_eq!(alice.predecessor_nullifier, nullifier(1));
         assert!(!r.anchor_pool().contains(&nullifier(9)));
@@ -974,7 +1088,10 @@ mod tests {
             height,
             mtp,
         ));
-        let alice = r.record(&test_name()).expect("alice marked released");
+        assert!(r.record(&test_name()).is_none());
+        let alice = r
+            .latest_record(&test_name())
+            .expect("release retained in history");
         assert_eq!(alice.action, Action::Release);
         assert_eq!(alice.predecessor_nullifier, nullifier(20));
     }
@@ -996,7 +1113,10 @@ mod tests {
             BlockHeight::from_u32(101),
             ts(1_000_000_000),
         ));
-        let rec = r.record(&test_name()).expect("alice released");
+        assert!(r.record(&test_name()).is_none());
+        let rec = r
+            .latest_record(&test_name())
+            .expect("release retained in history");
         assert_eq!(rec.action, Action::Release);
         assert_eq!(rec.predecessor_nullifier, succ);
     }

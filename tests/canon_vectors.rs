@@ -109,7 +109,8 @@ struct Snapshot {
     after_event: usize,
     /// Live anchor-pool nullifiers, lowercase hex, sorted lexicographically.
     anchor_pool: Vec<Hex32>,
-    /// Name → current record. `BTreeMap` for deterministic key order.
+    /// Name → record at the applied tip; released names are absent.
+    /// `BTreeMap` gives deterministic key order.
     records: BTreeMap<String, RecordSnapshot>,
 }
 
@@ -300,7 +301,7 @@ fn snapshot(registry: &Registry, after_event: usize) -> Snapshot {
     anchor_pool.sort();
     let records: BTreeMap<String, RecordSnapshot> = registry
         .name_chain()
-        .map(|(name, record)| (name.as_str().to_owned(), record_snapshot(record)))
+        .map(|record| (record.name.as_str().to_owned(), record_snapshot(record)))
         .collect();
     Snapshot {
         after_event,

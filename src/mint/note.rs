@@ -652,16 +652,16 @@ impl NameNoteQueue {
         self.orders[index].2 = NameNoteState::Submitted;
     }
 
-    /// Derive `Seen` from the Registry's current canonical record. This keeps
-    /// block application independent of the order tracker and recovers an
-    /// observation when the registry already contains the transition.
+    /// Derive `Seen` from the Registry's latest confirmed record, including
+    /// releases. This keeps block application independent of the order
+    /// tracker and recovers an observation already in the name's history.
     pub fn reconcile_seen<P: Parameters>(&mut self, network: &P, registry: &Registry) {
         for (note, _, state) in &mut self.orders {
             let commitment = NameCommitment::from_inner(
                 orchard::note::NoteCommitTrapdoor::from_inner(note.rcm(network)),
             );
             if registry
-                .record(note.name())
+                .latest_record(note.name())
                 .is_some_and(|record| record.commitment == commitment)
             {
                 *state = NameNoteState::Seen;
@@ -674,9 +674,9 @@ impl NameNoteQueue {
             if *state == NameNoteState::Seen || note.action().is_claim() {
                 return true;
             }
-            registry.record(note.name()).is_some_and(|record| {
-                !record.action.is_release() && Some(record.commitment) == note.prev_rcm()
-            })
+            registry
+                .record(note.name())
+                .is_some_and(|record| Some(record.commitment) == note.prev_rcm())
         });
     }
 
