@@ -842,6 +842,11 @@ mod tests {
             110,
         ));
 
+        r.truncate_to_height(BlockHeight::from_u32(140));
+        assert_eq!(r.record_history(&alice).len(), 3);
+        assert_eq!(r.latest_record(&alice).unwrap().action, Action::Release);
+        assert!(r.record(&alice).is_none());
+
         r.truncate_to_height(BlockHeight::from_u32(130));
         assert_eq!(r.record_history(&alice).len(), 2);
         assert_eq!(r.record(&alice).unwrap().action, Action::Update);
