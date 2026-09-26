@@ -348,17 +348,7 @@
             "0200000000000000000000000000000000000000000000000000000000000000",
             "c100000000000000000000000000000000000000000000000000000000000000"
           ],
-          "records": {
-            "alice": {
-              "action": "release",
-              "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
-              "expires_at_secs": null,
-              "commitment": "64afb26b71cd790c33a0e6a626e56325e0d4120ee77d0f07cf9e6150e9680408",
-              "confirmed_height": 200,
-              "release_deadline_secs": 1741557600,
-              "nullifier": "b100000000000000000000000000000000000000000000000000000000000000"
-            }
-          }
+          "records": {}
         },
         {
           "after_event": 4,
@@ -468,17 +458,7 @@
           "anchor_pool": [
             "c100000000000000000000000000000000000000000000000000000000000000"
           ],
-          "records": {
-            "alice": {
-              "action": "release",
-              "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
-              "expires_at_secs": null,
-              "commitment": "cd7a333a2d707416fe4b59e17b1751feb9be1dc0fe358b9ee5a6c3a0ff3f7133",
-              "confirmed_height": 300,
-              "release_deadline_secs": 1751557600,
-              "nullifier": "a300000000000000000000000000000000000000000000000000000000000000"
-            }
-          }
+          "records": {}
         }
       ]
     },

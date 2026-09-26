@@ -434,9 +434,7 @@ async fn main() {
                         // Pre-sale gate: read-only table lookup.
                         // Unavailability defers with the queue; a deny is
                         // decided. Redemption is the name already live.
-                        let name_live = registry
-                            .record(name)
-                            .is_some_and(|r| r.action != Action::Release);
+                        let name_live = registry.record(name).is_some();
                         match zns_mint::mint::presale::decide(
                             zns_mint::mint::presale::lookup_name(name, mtp_now).await,
                             code.as_ref(),
@@ -479,7 +477,6 @@ async fn main() {
                                 code: code.clone(),
                             },
                             None,
-                            note_height,
                             mtp_now,
                         ) else {
                             tracing::debug!(
@@ -620,13 +617,9 @@ async fn main() {
                     },
                     Action::Claim => unreachable!("claims never carry an OTP"),
                 };
-                let Some(transition_note) = registry.authorize(
-                    &mut challenges,
-                    authorized,
-                    Some(&digits),
-                    note_height,
-                    mtp_now,
-                ) else {
+                let Some(transition_note) =
+                    registry.authorize(&mut challenges, authorized, Some(&digits), mtp_now)
+                else {
                     break 'lane true;
                 };
                 // The seam where a voluntary release exists:
@@ -662,9 +655,9 @@ async fn main() {
         // authorization through submission and canonical observation.
         let mut index = 0;
         while index < name_notes.len() {
-            let (note, origin, state) = {
-                let (note, origin, state) = name_notes.entry(index);
-                (note.clone(), origin, state)
+            let (note, state) = {
+                let (note, _, state) = name_notes.entry(index);
+                (note.clone(), state)
             };
             if state != NameNoteState::Authorized {
                 index += 1;
@@ -674,13 +667,8 @@ async fn main() {
             // or release spends the predecessor — the record's nullifier
             // matched by commitment.
             let authority_nf = if note.action().is_claim() {
-                // The name must still be claimable: free, or released
-                // after the payment arrived.
-                let claimable = match registry.record(note.name()) {
-                    None => true,
-                    Some(record) => record.action.is_release() && origin > record.confirmed_height,
-                };
-                if !claimable {
+                // The name must still be absent from the applied-tip registry.
+                if !registry.is_available(note.name()) {
                     tracing::debug!(
                         name = %note.name().as_str(),
                         "claim order dropped: the name is live on the chain"
@@ -710,9 +698,7 @@ async fn main() {
             } else {
                 match registry
                     .record(note.name())
-                    .filter(|record| {
-                        !record.action.is_release() && Some(record.commitment) == note.prev_rcm()
-                    })
+                    .filter(|record| Some(record.commitment) == note.prev_rcm())
                     .map(|record| record.predecessor_nullifier)
                 {
                     Some(nf) => nf,
