@@ -523,9 +523,77 @@ mod tests {
         record_for(test_name(), action, expires_at, release_deadline, seed)
     }
 
-    fn at_height(mut record: NameRecord, height: u32) -> NameRecord {
-        record.confirmed_height = BlockHeight::from_u32(height);
-        record
+    fn confirm_claim(
+        registry: &mut Registry,
+        name: &Name,
+        height: u32,
+        anchor_seed: u8,
+        successor_seed: u8,
+        note_seed: u8,
+    ) {
+        let block_height = BlockHeight::from_u32(height);
+        let anchor = nullifier(anchor_seed);
+        registry.adopt_anchor(BlockHeight::from_u32(height - 1), anchor);
+        let note = NameNote::Claim {
+            name: name.clone(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+        assert!(registry.accept_claim(
+            &MAIN_NETWORK,
+            &note,
+            nullifier(note_seed),
+            Some(nullifier(successor_seed)),
+            &[anchor],
+            block_height,
+            ts(1_700_000_000 + i64::from(height)),
+        ));
+    }
+
+    fn confirm_update(registry: &mut Registry, name: &Name, height: u32, note_seed: u8) {
+        let record = registry.record(name).expect("name is live").clone();
+        let note = NameNote::Update {
+            name: name.clone(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+            prev: record.commitment,
+        };
+        assert!(registry.accept_update(
+            &MAIN_NETWORK,
+            &note,
+            nullifier(note_seed),
+            &[record.predecessor_nullifier],
+            BlockHeight::from_u32(height),
+            ts(1_700_000_000 + i64::from(height)),
+        ));
+    }
+
+    fn confirm_release(registry: &mut Registry, name: &Name, height: u32, note_seed: u8) {
+        let record = registry.record(name).expect("name is live").clone();
+        let note = NameNote::Release {
+            name: name.clone(),
+            ua: record.ua.clone(),
+            prev: record.commitment,
+        };
+        assert!(registry.accept_release(
+            &MAIN_NETWORK,
+            &note,
+            nullifier(note_seed),
+            &[record.predecessor_nullifier],
+            BlockHeight::from_u32(height),
+            ts(1_700_000_000 + i64::from(height)),
+        ));
+    }
+
+    fn registry_with_alice_and_bob_history() -> Registry {
+        let mut registry = Registry::new();
+        let alice = test_name();
+        let bob = Name::parse("bob").unwrap();
+        confirm_claim(&mut registry, &alice, 100, 1, 11, 21);
+        confirm_claim(&mut registry, &bob, 110, 2, 12, 22);
+        confirm_update(&mut registry, &alice, 120, 23);
+        confirm_release(&mut registry, &alice, 140, 24);
+        registry
     }
 
     #[test]
@@ -769,20 +837,8 @@ mod tests {
 
     #[test]
     fn per_name_history_is_ordered_and_release_is_absent_from_tip_records() {
-        let mut r = Registry::new();
+        let r = registry_with_alice_and_bob_history();
         let name = test_name();
-        r.set_record(at_height(
-            record(Action::Claim, Expiry::Never, 3_000_000_000, 1),
-            100,
-        ));
-        r.set_record(at_height(
-            record(Action::Update, Expiry::Never, 3_100_000_000, 2),
-            120,
-        ));
-        r.set_record(at_height(
-            record(Action::Release, Expiry::Never, 3_100_000_000, 3),
-            140,
-        ));
 
         let history = r.record_history(&name);
         assert_eq!(history.len(), 3);
@@ -799,43 +855,21 @@ mod tests {
 
     #[test]
     fn released_name_is_available() {
-        let mut r = Registry::new();
+        let r = registry_with_alice_and_bob_history();
         let name = test_name();
-        r.set_record(at_height(
-            record(Action::Claim, Expiry::Never, 3_000_000_000, 1),
-            100,
-        ));
-        assert!(!r.is_available(&name));
-        r.set_record(at_height(
-            record(Action::Release, Expiry::Never, 3_000_000_000, 2),
-            150,
-        ));
+        let bob = Name::parse("bob").unwrap();
 
         assert!(r.record(&name).is_none());
         assert!(r.is_available(&name));
+        assert!(r.record(&bob).is_some());
+        assert!(!r.is_available(&bob));
     }
 
     #[test]
     fn truncate_to_height_trims_each_name_chain_and_rebuilds_tip_records() {
-        let mut r = Registry::new();
+        let mut r = registry_with_alice_and_bob_history();
         let alice = test_name();
         let bob = Name::parse("bob").unwrap();
-        r.set_record(at_height(
-            record(Action::Claim, Expiry::Never, 3_000_000_000, 1),
-            100,
-        ));
-        r.set_record(at_height(
-            record(Action::Update, Expiry::Never, 3_100_000_000, 2),
-            120,
-        ));
-        r.set_record(at_height(
-            record(Action::Release, Expiry::Never, 3_100_000_000, 3),
-            140,
-        ));
-        r.set_record(at_height(
-            record_for(bob.clone(), Action::Claim, Expiry::Never, 3_000_000_000, 4),
-            110,
-        ));
 
         r.truncate_to_height(BlockHeight::from_u32(140));
         assert_eq!(r.record_history(&alice).len(), 3);
