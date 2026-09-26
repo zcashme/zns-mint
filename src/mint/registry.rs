@@ -127,7 +127,6 @@ impl Registry {
         challenges: &mut OtpQueue,
         request: Request,
         otp: Option<&[u8; 6]>,
-        payment_height: BlockHeight,
         mtp: Timestamp,
     ) -> Option<NameNote> {
         match request {
@@ -137,7 +136,7 @@ impl Registry {
                 term,
                 code: _,
             } => {
-                if !self.claim_is_admissible(&name, payment_height) {
+                if !self.is_available(&name) {
                     return None;
                 }
                 let expires_at = term.claim_expiry(mtp)?;
@@ -197,18 +196,9 @@ impl Registry {
         self.history.get(name).map_or(&[], Vec::as_slice)
     }
 
-    /// Whether a payment at `payment_height` may claim this name: the name
-    /// must be absent from the applied-tip records, and any prior release
-    /// must precede the payment.
-    pub fn claim_is_admissible(&self, name: &Name, payment_height: BlockHeight) -> bool {
-        if self.record(name).is_some() {
-            return false;
-        }
-        match self.latest_record(name) {
-            None => true,
-            Some(record) if record.action.is_release() => payment_height > record.confirmed_height,
-            Some(_) => false,
-        }
+    /// Whether the name has no record in the applied-tip registry.
+    pub fn is_available(&self, name: &Name) -> bool {
+        self.record(name).is_none()
     }
 
     /// The §4.5 clocks, swept: every live name whose purchased term or
@@ -576,7 +566,6 @@ mod tests {
                     term: Some(Term::Years(1)),
                 },
                 Some(&digits),
-                BlockHeight::from_u32(101),
                 mtp,
             )
             .is_none());
@@ -814,21 +803,21 @@ mod tests {
     }
 
     #[test]
-    fn released_name_requires_a_later_claim_payment() {
+    fn released_name_is_available() {
         let mut r = Registry::new();
         let name = test_name();
         r.set_record(at_height(
             record(Action::Claim, Expiry::Never, 3_000_000_000, 1),
             100,
         ));
+        assert!(!r.is_available(&name));
         r.set_record(at_height(
             record(Action::Release, Expiry::Never, 3_000_000_000, 2),
             150,
         ));
 
         assert!(r.record(&name).is_none());
-        assert!(!r.claim_is_admissible(&name, BlockHeight::from_u32(150)));
-        assert!(r.claim_is_admissible(&name, BlockHeight::from_u32(151)));
+        assert!(r.is_available(&name));
     }
 
     #[test]
