@@ -652,17 +652,18 @@ impl NameNoteQueue {
         self.orders[index].2 = NameNoteState::Submitted;
     }
 
-    /// Derive `Seen` from the Registry's latest confirmed record, including
-    /// releases. This keeps block application independent of the order
-    /// tracker and recovers an observation already in the name's history.
+    /// Derive `Seen` from any matching confirmed record at or after the
+    /// order's origin. Earlier matches may belong to an older incarnation
+    /// of a deterministic note commitment.
     pub fn reconcile_seen<P: Parameters>(&mut self, network: &P, registry: &Registry) {
-        for (note, _, state) in &mut self.orders {
+        for (note, origin, state) in &mut self.orders {
             let commitment = NameCommitment::from_inner(
                 orchard::note::NoteCommitTrapdoor::from_inner(note.rcm(network)),
             );
             if registry
-                .latest_record(note.name())
-                .is_some_and(|record| record.commitment == commitment)
+                .record_history(note.name())
+                .iter()
+                .any(|record| record.confirmed_height >= *origin && record.commitment == commitment)
             {
                 *state = NameNoteState::Seen;
             }
@@ -729,6 +730,14 @@ mod tests {
 
     fn test_name() -> Name {
         Name::parse("alice").unwrap()
+    }
+
+    fn test_nullifier(seed: u8) -> orchard::note::Nullifier {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        orchard::note::Nullifier::from_bytes(&bytes)
+            .into_option()
+            .expect("test nullifier fits Pallas base")
     }
 
     /// The memo round-trip: encode → decode must preserve every field of
@@ -1026,6 +1035,130 @@ mod tests {
 
         queue.admit(h(12), claim);
         assert_eq!(queue.len(), 1);
+    }
+
+    fn registry_with_claim_release_reclaim() -> (Registry, NameNote, NameNote) {
+        let height = |n| BlockHeight::from_u32(n);
+        let name = test_name();
+        let ua = test_ua();
+        let mtp = Timestamp::from_seconds(1_700_000_000).unwrap();
+        let mut registry = Registry::new();
+
+        let first_claim = NameNote::Claim {
+            name: name.clone(),
+            ua: ua.clone(),
+            expires_at: Expiry::Never,
+        };
+        let first_anchor = test_nullifier(1);
+        registry.adopt_anchor(height(100), first_anchor);
+        assert!(registry.accept_claim(
+            &MAIN_NETWORK,
+            &first_claim,
+            test_nullifier(11),
+            Some(test_nullifier(21)),
+            &[first_anchor],
+            height(100),
+            mtp,
+        ));
+
+        let release = NameNote::Release {
+            name: name.clone(),
+            ua: ua.clone(),
+            prev: registry.record(&name).unwrap().commitment,
+        };
+        assert!(registry.accept_release(
+            &MAIN_NETWORK,
+            &release,
+            test_nullifier(12),
+            &[test_nullifier(11)],
+            height(120),
+            mtp,
+        ));
+
+        let reclaim = NameNote::Claim {
+            name: name.clone(),
+            ua,
+            expires_at: Expiry::At(Timestamp::from_seconds(2_000_000_000).unwrap()),
+        };
+        let second_anchor = test_nullifier(2);
+        registry.adopt_anchor(height(130), second_anchor);
+        assert!(registry.accept_claim(
+            &MAIN_NETWORK,
+            &reclaim,
+            test_nullifier(13),
+            Some(test_nullifier(23)),
+            &[second_anchor],
+            height(130),
+            mtp,
+        ));
+
+        (registry, release, reclaim)
+    }
+
+    #[test]
+    fn reconciliation_finds_release_before_latest_reclaim() {
+        let (registry, release, reclaim) = registry_with_claim_release_reclaim();
+        let height = |n| BlockHeight::from_u32(n);
+
+        let mut queue = NameNoteQueue::default();
+        queue.admit(height(105), release);
+        queue.mark_submitted(0);
+        queue.reconcile_seen(&MAIN_NETWORK, &registry);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.entry(0).2, NameNoteState::Seen);
+
+        queue.admit(height(126), reclaim);
+        queue.mark_submitted(1);
+        queue.reconcile_seen(&MAIN_NETWORK, &registry);
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.entry(0).2, NameNoteState::Seen);
+        assert_eq!(queue.entry(1).2, NameNoteState::Seen);
+    }
+
+    #[test]
+    fn release_order_is_reauthorized_after_deeper_reorg() {
+        let (mut registry, release, _) = registry_with_claim_release_reclaim();
+        let height = |n| BlockHeight::from_u32(n);
+        let mut queue = NameNoteQueue::default();
+        queue.admit(height(105), release);
+        queue.mark_submitted(0);
+        queue.reconcile_seen(&MAIN_NETWORK, &registry);
+        assert_eq!(queue.entry(0).2, NameNoteState::Seen);
+
+        queue.rewind_seen();
+        queue.truncate_to(height(110));
+        registry.truncate_to_height(height(110));
+        queue.reconcile_seen(&MAIN_NETWORK, &registry);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.entry(0).2, NameNoteState::Authorized);
+    }
+
+    #[test]
+    fn reconciliation_ignores_matching_records_before_order_origin() {
+        let height = |n| BlockHeight::from_u32(n);
+        let note = NameNote::Claim {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+        let mtp = Timestamp::from_seconds(1_700_000_000).unwrap();
+        let anchor = test_nullifier(1);
+        let mut registry = Registry::new();
+        registry.adopt_anchor(height(100), anchor);
+        assert!(registry.accept_claim(
+            &MAIN_NETWORK,
+            &note,
+            test_nullifier(11),
+            Some(test_nullifier(21)),
+            &[anchor],
+            height(100),
+            mtp,
+        ));
+
+        let mut queue = NameNoteQueue::default();
+        queue.admit(height(101), note);
+        queue.reconcile_seen(&MAIN_NETWORK, &registry);
+        assert_eq!(queue.entry(0).2, NameNoteState::Authorized);
     }
 
     #[test]

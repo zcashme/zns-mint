@@ -186,11 +186,6 @@ impl Registry {
         self.records.get(name)
     }
 
-    /// The latest confirmed record for a name, including a release record.
-    pub fn latest_record(&self, name: &Name) -> Option<&NameRecord> {
-        self.history.get(name).and_then(|records| records.last())
-    }
-
     /// The confirmed record chain for a name, oldest first.
     pub fn record_history(&self, name: &Name) -> &[NameRecord] {
         self.history.get(name).map_or(&[], Vec::as_slice)
@@ -799,7 +794,7 @@ mod tests {
         assert_eq!(history[2].action, Action::Release);
         assert_eq!(history[2].confirmed_height, BlockHeight::from_u32(140));
         assert!(r.record(&name).is_none());
-        assert_eq!(r.latest_record(&name), history.last());
+        assert_eq!(r.record_history(&name).last(), history.last());
     }
 
     #[test]
@@ -844,7 +839,10 @@ mod tests {
 
         r.truncate_to_height(BlockHeight::from_u32(140));
         assert_eq!(r.record_history(&alice).len(), 3);
-        assert_eq!(r.latest_record(&alice).unwrap().action, Action::Release);
+        assert_eq!(
+            r.record_history(&alice).last().unwrap().action,
+            Action::Release
+        );
         assert!(r.record(&alice).is_none());
 
         r.truncate_to_height(BlockHeight::from_u32(130));
@@ -922,7 +920,8 @@ mod tests {
         ));
         assert!(r.record(&test_name()).is_none());
         let alice = r
-            .latest_record(&test_name())
+            .record_history(&test_name())
+            .last()
             .expect("release retained in history");
         assert_eq!(alice.action, Action::Release);
         assert_eq!(alice.predecessor_nullifier, nullifier(1));
@@ -943,7 +942,8 @@ mod tests {
         assert!(!r.anchor_pool().contains(&anchor));
         assert!(r.record(&test_name()).is_none());
         let alice = r
-            .latest_record(&test_name())
+            .record_history(&test_name())
+            .last()
             .expect("release retained in history");
         assert_eq!(alice.action, Action::Release);
         assert_eq!(alice.predecessor_nullifier, nullifier(1));
@@ -997,7 +997,8 @@ mod tests {
         ));
         assert!(r.record(&test_name()).is_none());
         let rec = r
-            .latest_record(&test_name())
+            .record_history(&test_name())
+            .last()
             .expect("release retained in history");
         assert_eq!(rec.action, Action::Release);
         assert_eq!(rec.predecessor_nullifier, succ);
@@ -1018,7 +1019,8 @@ mod tests {
         ));
         assert!(r.record(&test_name()).is_none());
         let rec = r
-            .latest_record(&test_name())
+            .record_history(&test_name())
+            .last()
             .expect("release retained in history");
         assert_eq!(rec.action, Action::Release);
         assert_eq!(rec.predecessor_nullifier, succ);
@@ -1052,7 +1054,8 @@ mod tests {
         ));
         assert!(r.record(&test_name()).is_none());
         let alice = r
-            .latest_record(&test_name())
+            .record_history(&test_name())
+            .last()
             .expect("release retained in history");
         assert_eq!(alice.action, Action::Release);
         assert_eq!(alice.predecessor_nullifier, nullifier(1));
@@ -1084,7 +1087,8 @@ mod tests {
         ));
         assert!(r.record(&test_name()).is_none());
         let alice = r
-            .latest_record(&test_name())
+            .record_history(&test_name())
+            .last()
             .expect("release retained in history");
         assert_eq!(alice.action, Action::Release);
         assert_eq!(alice.predecessor_nullifier, nullifier(20));
@@ -1109,7 +1113,8 @@ mod tests {
         ));
         assert!(r.record(&test_name()).is_none());
         let rec = r
-            .latest_record(&test_name())
+            .record_history(&test_name())
+            .last()
             .expect("release retained in history");
         assert_eq!(rec.action, Action::Release);
         assert_eq!(rec.predecessor_nullifier, succ);
