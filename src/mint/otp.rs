@@ -225,11 +225,13 @@ impl OtpQueue {
 
     /// Burns a relayed challenge once, by the key [`OtpQueue::awaiting`]
     /// handed out: the entry is removed, so no later echo can claim it.
-    /// Returns whether an entry was removed.
+    /// Never-relayed entries are not burnable by key. Returns whether
+    /// an entry was removed.
     pub fn respond(&mut self, txid: TxId) -> bool {
         let before = self.challenges.len();
-        self.challenges
-            .retain(|(_, _, existing_txid)| *existing_txid != txid);
+        self.challenges.retain(|(_, state, existing_txid)| {
+            !(*existing_txid == txid && matches!(state, ChallengeState::Relayed))
+        });
         self.challenges.len() != before
     }
 }
@@ -443,5 +445,33 @@ mod tests {
         assert!(q.awaiting(&echo, rcm).is_some());
         q.prune(t0 + Duration::seconds(D_OTP + 1));
         assert!(q.awaiting(&echo, rcm).is_none());
+    }
+
+    /// `respond` burns only relayed challenges: a key to a never-relayed
+    /// entry is refused, and the entry stays queued for the relay loop.
+    #[test]
+    fn respond_never_burns_an_unrelayed_entry() {
+        let mut q = OtpQueue::new();
+        let alice = test_name("alice");
+        let ua = mainnet_ua();
+        let rcm = commitment(1);
+        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
+
+        q.admit_request(
+            OtpRequest {
+                name: alice.clone(),
+                action: Action::Update,
+                ua: ua.clone(),
+                term: None,
+                tip_rcm: rcm,
+                code: OtpCode::for_test(*b"123456"),
+                expires_at: t0 + Duration::seconds(D_OTP),
+            },
+            test_txid(1),
+        );
+        // Still `Requested`: the challenge memo was never accepted.
+
+        assert!(!q.respond(test_txid(1)));
+        assert_eq!(q.requested().len(), 1);
     }
 }

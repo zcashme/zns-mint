@@ -149,10 +149,13 @@ impl Registry {
 
     /// The update law: the NameNote a lawful update produces. The OTP
     /// binding was verified by the queue — `awaiting` matched the echo
-    /// to this pending at the current commitment, and the re-check here
-    /// keeps the law self-contained. `None` means unlawful.
+    /// to this pending at the current commitment; the checks here keep
+    /// the law self-contained. `None` means unlawful.
     pub fn authorize_update(&self, pending: &OtpRequest, mtp: Timestamp) -> Option<NameNote> {
         let record = self.record(&pending.name).cloned()?;
+        if pending.action != Action::Update {
+            return None;
+        }
         if record.commitment != pending.tip_rcm {
             return None;
         }
@@ -172,6 +175,9 @@ impl Registry {
     /// OTP binding was verified by the queue. `None` means unlawful.
     pub fn authorize_release(&self, pending: &OtpRequest) -> Option<NameNote> {
         let record = self.record(&pending.name).cloned()?;
+        if pending.action != Action::Release {
+            return None;
+        }
         if record.commitment != pending.tip_rcm {
             return None;
         }
@@ -605,6 +611,38 @@ mod tests {
             expires_at: ts(1_700_000_000 + D_OTP),
         };
         assert!(r.authorize_update(&pending, mtp).is_none());
+    }
+
+    /// The laws are action-typed: a release-shaped pending cannot feed
+    /// the update law, an update-shaped one cannot feed the release
+    /// law — even with the commitment and UA matching.
+    #[test]
+    fn authorize_laws_reject_pendings_for_other_actions() {
+        use crate::mint::otp::OtpCode;
+
+        let mut r = Registry::new();
+        let mtp = ts(1_700_000_000);
+        r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
+        let release_pending = OtpRequest {
+            name: test_name(),
+            action: Action::Release,
+            ua: test_ua(),
+            term: None,
+            tip_rcm: commitment(1),
+            code: OtpCode::for_test(*b"123456"),
+            expires_at: ts(1_700_000_000),
+        };
+        let update_pending = OtpRequest {
+            name: test_name(),
+            action: Action::Update,
+            ua: test_ua(),
+            term: Some(Term::Years(1)),
+            tip_rcm: commitment(1),
+            code: OtpCode::for_test(*b"123456"),
+            expires_at: ts(1_700_000_000),
+        };
+        assert!(r.authorize_update(&release_pending, mtp).is_none());
+        assert!(r.authorize_release(&update_pending).is_none());
     }
 
     /// The plural sweep: only names whose clocks have fired, each paired
