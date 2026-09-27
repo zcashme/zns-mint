@@ -370,10 +370,11 @@ use crate::wallet::block_metadata;
 
 #[cfg(feature = "regtest")]
 fn regtest_network() -> LocalNetwork {
-    // Matches `regtest-harness/src/lib.rs:zebrad_toml`. Zebra defaults every
-    // unconfigured pre-NU5 activation to 1 on regtest; the harness explicitly
-    // configures every NU6.x at 1 — NU6.3 is always active, from genesis.
+    // Matches the live integration harness (zns-integration-tests
+    // `zebra.rs`): every upgrade through NU6 defaults to 1 on regtest;
+    // the NU6.x family activates at 4 — ahead of the mint's birthday.
     let one = BlockHeight::from_u32(1);
+    let four = BlockHeight::from_u32(4);
     LocalNetwork {
         overwinter: Some(one),
         sapling: Some(one),
@@ -382,9 +383,9 @@ fn regtest_network() -> LocalNetwork {
         canopy: Some(one),
         nu5: Some(one),
         nu6: Some(one),
-        nu6_1: Some(one),
-        nu6_2: Some(one),
-        nu6_3: Some(one),
+        nu6_1: Some(four),
+        nu6_2: Some(four),
+        nu6_3: Some(four),
     }
 }
 
@@ -489,6 +490,8 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 // ---------------------------------------------------------------------------
 
 /// Fetches the origin treestate from Zebra: the block before the birthday.
+/// The checkpoint height must sit at or after every pool's activation —
+/// `z_gettreestate` omits pool sections that were never active.
 ///
 /// Zebra is part of the same measured TEE image; its identity is guaranteed
 /// by the SEV-SNP attestation, not by runtime RPC checks.
@@ -678,10 +681,11 @@ mod tests {
             NetworkUpgrade::Nu6_2,
             NetworkUpgrade::Nu6_3,
         ] {
-            assert_eq!(network.activation_height(upgrade), Some(one));
+            assert_eq!(network.activation_height(upgrade), Some(four));
         }
-        // The regtest birthday mirrors the harness: origin at 3, first
-        // observed block at 4.
-        assert_eq!(MINT_BIRTHDAY, four);
+        // The regtest birthday sits past the NU6.3 activation and the
+        // fixture's coinbase-maturity boilerplate: the wallet's history
+        // begins at the fixture boundary.
+        assert_eq!(MINT_BIRTHDAY, BlockHeight::from_u32(100));
     }
 }
