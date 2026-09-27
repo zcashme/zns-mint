@@ -1,6 +1,6 @@
 //! Pre-sale access codes for early claims of protected names.
 //!
-//! The mint looks up each claim name in Supabase `zn_protected_names`
+//! The mint looks up each claim name in Supabase `zn_names`
 //! (read-only). An absent row means the name is open. Every row in the
 //! table is protected; its `expires_at` (`timestamptz`, nullable) chooses
 //! between finite protection and forever protection. A row whose
@@ -227,7 +227,7 @@ pub fn decide(
     }
 }
 
-/// A row from `zn_protected_names`. Only `expires_at` matters here —
+/// A row from `zn_names`. Only `expires_at` matters here —
 /// every row is protected by construction, and the other columns
 /// (`id`, `normalized_name`, `created_at`, `source`, `dupe`) are ignored
 /// by serde's default field handling.

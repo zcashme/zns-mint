@@ -1,5 +1,13 @@
 # `mint/presale.rs` design record
 
+## 2026-09-27 — The gate queries `zn_names`
+
+- The Supabase table is `zn_names`; `zn_protected_names` was a
+  misnomer in the constant and in these records — no table answers to
+  it. `PRESALE_TABLE` is corrected; a lookup 404 is
+  `LookupError::Terminal` → `Deny`, so with the constant stale every
+  claim was decided dead on first contact with the gate.
+
 ## 2026-09-24 — A rate limit keeps the claim queued
 
 - HTTP 429 is `LookupError::Transient`. The paid claim waits for the
