@@ -656,7 +656,6 @@ mod tests {
 
         let network = regtest_network();
         let one = BlockHeight::from_u32(1);
-        let four = BlockHeight::from_u32(4);
 
         assert_eq!(
             network.network_type(),
@@ -680,8 +679,9 @@ mod tests {
         ] {
             assert_eq!(network.activation_height(upgrade), Some(one));
         }
-        // The regtest birthday mirrors the harness: origin at 3, first
-        // observed block at 4.
-        assert_eq!(MINT_BIRTHDAY, four);
+        // The regtest birthday sits past the NU6.3 activation and the
+        // fixture's coinbase-maturity boilerplate: the wallet's history
+        // begins at the fixture boundary.
+        assert_eq!(MINT_BIRTHDAY, BlockHeight::from_u32(100));
     }
 }

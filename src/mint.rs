@@ -45,9 +45,13 @@ pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(3_400_000);
 #[cfg(all(feature = "testnet", not(feature = "regtest")))]
 pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(4_338_933);
 
-/// Regtest birth: first block after the harness's NU6.3 activation (height 4).
+/// Regtest birth: past the NU6.3 activation (height 4) and the
+/// fixture's coinbase-maturity boilerplate — nothing the mint owns
+/// exists before this height. The origin checkpoint (`MINT_BIRTHDAY - 1`)
+/// must sit at or after every pool's activation, or `z_gettreestate`
+/// omits pool sections and boot cannot parse the treestate.
 #[cfg(feature = "regtest")]
-pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(4);
+pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(100);
 
 /// The liveness interval: one Julian year (365.25 days), in seconds.
 pub const LIVENESS_INTERVAL: i64 = 31_557_600;
