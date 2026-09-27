@@ -19,12 +19,11 @@ use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::{assemble, decrypt_treasury_transaction, NameNoteQueue, NameNoteState};
-use zns_mint::mint::otp::{OtpQueue, OtpRequest};
+use zns_mint::mint::otp::{OtpChallenge, OtpQueue};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
-    relay, watch_mempool, Action, Challenge, MintInbound, Request, REGISTRY_ACCOUNT,
-    TREASURY_ACCOUNT,
+    relay, watch_mempool, Action, MintInbound, OtpMemo, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{
     CanonicalBlockSource, JsonRpc, MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE,
@@ -67,7 +66,7 @@ async fn main() {
     // said, what it paid, the block that carried it. The drain at each tip
     // decides entries; a reorg truncates them.
     let mut requests = RequestQueue::default();
-    let mut echoes: Vec<(Challenge, Zatoshis, BlockHeight)> = Vec::new();
+    let mut echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)> = Vec::new();
 
     zns_mint::metrics::install();
     tracing::info!(
@@ -94,8 +93,9 @@ async fn main() {
             },
             Some((kind, txid)) = mempool_rx.recv() => {
                 let mtp_now = mtp.current().expect("FATAL: MTP unavailable at the applied tip");
+                challenges.prune(mtp_now);
                 match kind {
-                    MempoolChangeKind::Invalidated => challenges.invalidate(txid, mtp_now),
+                    MempoolChangeKind::Invalidated => challenges.invalidate(txid),
                     MempoolChangeKind::Mined => {}
                     MempoolChangeKind::Added => {
                         let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
@@ -119,10 +119,15 @@ async fn main() {
                                     {
                                         continue;
                                     }
-                                    let (_, pending) = OtpRequest::pending_challenge(
-                                        name, action, requested_ua, record.commitment, term, mtp_now,
+                                    let pending = OtpChallenge::issue(
+                                        name.clone(),
+                                        action,
+                                        requested_ua.clone(),
+                                        record.commitment,
+                                        term,
+                                        mtp_now,
                                     );
-                                    let pending = challenges.admit_request(pending, txid, mtp_now);
+                                    let pending = challenges.admit(pending, txid);
                                     if !challenges.is_relayed(&pending)
                                         && relay(
                                             &network, &mut wallet, &treasury_keys, &sapling_spend,
@@ -364,6 +369,7 @@ async fn main() {
         let mtp_now = mtp
             .current()
             .expect("FATAL: MTP unavailable at the applied tip");
+        challenges.prune(mtp_now);
 
         let today = mtp
             .current_day()
@@ -508,15 +514,15 @@ async fn main() {
                         {
                             break 'lane true;
                         }
-                        let (_, pending) = OtpRequest::pending_challenge(
-                            name,
+                        let pending = OtpChallenge::issue(
+                            name.clone(),
                             action,
-                            requested_ua,
+                            requested_ua.clone(),
                             record.commitment,
                             term,
                             mtp_now,
                         );
-                        challenges.admit_request(pending, *txid, mtp_now);
+                        challenges.admit(pending, *txid);
                         true
                     }
                 }
@@ -530,7 +536,7 @@ async fn main() {
 
         // Queue admission is independent from submission. Retry every still-
         // requested mempool or confirmed entry once during each tip pass.
-        for pending in challenges.requested(mtp_now) {
+        for pending in challenges.requested() {
             let Some(record) = registry
                 .record(&pending.name)
                 .filter(|record| record.commitment == pending.tip_rcm)
@@ -564,7 +570,7 @@ async fn main() {
                 let Some(record) = registry.record(&echo.name).cloned() else {
                     break 'lane true; // no record — released or unknown: no mint-issued challenge can match
                 };
-                let Some(sent) = challenges.awaiting(&echo, record.commitment, mtp_now) else {
+                let Some((key, sent)) = challenges.awaiting(&echo, record.commitment) else {
                     break 'lane true; // no pending challenge: dead
                 };
                 // The renewal or upgrade fee, binding at first
@@ -583,7 +589,7 @@ async fn main() {
                         tracing::debug!(
                             name = %echo.name.as_str(),
                             paid = paid.into_u64(),
-                            "update respond underpaid — attempt void, challenge stands"
+                            "update response underpaid — attempt void, challenge stands"
                         );
                         break 'lane true;
                     }
@@ -598,35 +604,22 @@ async fn main() {
                     );
                     break 'lane true;
                 }
-                let digits = sent.code.digits();
                 let authorized = match echo.action {
-                    Action::Update => registry.authorize_update(
-                        &mut challenges,
-                        echo.name.clone(),
-                        echo.ua.clone(),
-                        sent.term,
-                        &digits,
-                        mtp_now,
-                    ),
-                    Action::Release => registry.authorize_release(
-                        &mut challenges,
-                        echo.name.clone(),
-                        echo.ua.clone(),
-                        &digits,
-                        mtp_now,
-                    ),
-                    // Challenges never claim, and `Challenge::decode` refuses
+                    Action::Update => registry.authorize_update(&sent, mtp_now),
+                    Action::Release => registry.authorize_release(&sent),
+                    // Challenges never claim, and `OtpMemo::decode` refuses
                     // the verb; treat a claim echo as a dead memo regardless.
                     Action::Claim => break 'lane true,
                 };
                 let Some(transition_note) = authorized else {
                     break 'lane true;
                 };
-                // The seam where a voluntary release exists:
-                // the OTP that authorized it is consumed here,
-                // and the resulting note is indistinguishable
-                // from a unilateral one on chain. This line is
-                // the only durable record of the cause.
+                challenges.consume(key); // spent exactly when the law accepts
+                                         // The seam where a voluntary release exists:
+                                         // the OTP that authorized it is consumed here,
+                                         // and the resulting note is indistinguishable
+                                         // from a unilateral one on chain. This line is
+                                         // the only durable record of the cause.
                 if echo.action.is_release() {
                     tracing::info!(
                         name = %echo.name.as_str(),

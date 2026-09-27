@@ -31,7 +31,7 @@ use crate::key::TreasuryKeys;
 use crate::wallet::Wallet;
 use crate::zcash::{CanonicalBlockSource, ChainClient, MempoolChangeKind, MempoolSession};
 
-use otp::{OtpCode, OtpRequest};
+use otp::{OtpChallenge, OtpCode};
 use presale::AccessCode;
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
@@ -223,14 +223,14 @@ impl Request {
 
 /// A mint-issued challenge to a wallet, proving that the wallet controls a name via shielded-memos.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Challenge {
+pub struct OtpMemo {
     pub code: OtpCode,
     pub name: Name,
     pub action: Action,
     pub ua: UnifiedAddress,
 }
 
-impl Challenge {
+impl OtpMemo {
     /// Encodes the challenge memo; claims are never challenged.
     pub fn encode<P: Parameters>(&self, network: &P) -> Option<MemoBytes> {
         if self.action.is_claim() {
@@ -287,8 +287,8 @@ pub enum MintInbound {
     /// A request — a user's proposed transition, decoded from a Treasury
     /// memo; the Registry's `authorize_*` family rules on it.
     Request(Request),
-    /// An OTP respond — the relay memo returned; what `awaiting` takes.
-    Echo(Challenge),
+    /// An OTP consume — the relay memo returned; what `awaiting` takes.
+    Echo(OtpMemo),
     /// A payment with no parseable message: the drain logs it once and
     /// the sweep keeps the value; the queue names it by its txid.
     Unrecognized,
@@ -298,7 +298,7 @@ impl MintInbound {
     /// Classifies one Treasury memo: echo, request, or unrecognized
     /// payment. Called once per memo, at block application.
     pub fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Self {
-        if let Some(echo) = Challenge::decode(network, memo) {
+        if let Some(echo) = OtpMemo::decode(network, memo) {
             Self::Echo(echo)
         } else if let Some(request) = Request::decode(network, memo) {
             Self::Request(request)
@@ -600,7 +600,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
 }
 
 // ===========================================================================
-// Challenge submission
+// OtpMemo submission
 // ===========================================================================
 
 /// Builds and submits the challenge for a request already admitted to
@@ -614,16 +614,10 @@ pub async fn relay<P: Parameters + Send + 'static>(
     output_prover: &OutputParameters,
     controller_ua: &UnifiedAddress,
     source: &CanonicalBlockSource,
-    request: &OtpRequest,
+    request: &OtpChallenge,
     lane: &'static str,
 ) -> bool {
-    let challenge = Challenge {
-        code: request.code.clone(),
-        name: request.name.clone(),
-        action: request.action,
-        ua: request.ua.clone(),
-    };
-    let memo = match challenge.encode(network) {
+    let memo = match request.memo().encode(network) {
         Some(memo) => memo,
         None if request.action.is_claim() => {
             unreachable!("claims never enter the controller challenge relay")
@@ -816,7 +810,7 @@ mod tests {
         let memo = MemoBytes::from_bytes(&m).expect("a 512-byte memo fits");
         // The tail lands inside the terminal UA field — nothing parses.
         assert!(Request::decode(&network, &memo).is_none());
-        assert!(Challenge::decode(&network, &memo).is_none());
+        assert!(OtpMemo::decode(&network, &memo).is_none());
         assert!(matches!(
             MintInbound::decode(&network, &memo),
             MintInbound::Unrecognized
@@ -908,17 +902,17 @@ mod tests {
         let ua = test_ua();
 
         for action in [Action::Update, Action::Release] {
-            let challenge = Challenge {
+            let challenge = OtpMemo {
                 code: OtpCode::for_test(*b"417293"),
                 name: Name::parse("alice").unwrap(),
                 action,
                 ua: ua.clone(),
             };
             let memo = challenge.encode(&network).expect("non-claims encode");
-            assert_eq!(Challenge::decode(&network, &memo), Some(challenge));
+            assert_eq!(OtpMemo::decode(&network, &memo), Some(challenge));
         }
         // Claims are never challenged: encode refuses.
-        let claim = Challenge {
+        let claim = OtpMemo {
             code: OtpCode::for_test(*b"417293"),
             name: Name::parse("alice").unwrap(),
             action: Action::Claim,

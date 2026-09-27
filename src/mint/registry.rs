@@ -6,7 +6,7 @@ use anchor_pool::AnchorPool;
 
 pub use anchor_pool::ANCHOR_POOL_SIZE;
 
-use crate::mint::otp::OtpQueue;
+use crate::mint::otp::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
@@ -126,9 +126,7 @@ impl Registry {
         Self::default()
     }
 
-    /// The claim law: the NameNote a lawful claim produces.
-    /// `None` means unlawful; a claim's payment is kept.
-    /// A claim carries no OTP: the payment is the authorization.
+    /// The claim law. `None` means unlawful; the payment is kept.
     pub fn authorize_claim(
         &self,
         name: Name,
@@ -147,53 +145,42 @@ impl Registry {
         })
     }
 
-    /// The update law: the NameNote a lawful, OTP-confirmed update
-    /// produces. `None` means unlawful.
-    pub fn authorize_update(
-        &self,
-        challenges: &mut OtpQueue,
-        name: Name,
-        ua: UnifiedAddress,
-        term: Option<Term>,
-        otp: &[u8; 6],
-        mtp: Timestamp,
-    ) -> Option<NameNote> {
-        let record = self.record(&name).cloned()?;
+    /// The update law: action, commitment, clocks, term. `None` means unlawful.
+    pub fn authorize_update(&self, pending: &OtpChallenge, mtp: Timestamp) -> Option<NameNote> {
+        let record = self.record(&pending.name).cloned()?;
+        if pending.action != Action::Update {
+            return None;
+        }
+        if record.commitment != pending.tip_rcm {
+            return None;
+        }
         if record.is_release_due(mtp) {
             return None;
         }
-        let expires_at = record.expires_at.extend(term, mtp)?;
-        if !challenges.accept(&name, Action::Update, &ua, record.commitment, otp, mtp) {
-            return None;
-        }
+        let expires_at = record.expires_at.extend(pending.term, mtp)?;
         Some(NameNote::Update {
-            name,
-            ua,
+            name: pending.name.clone(),
+            ua: pending.ua.clone(),
             expires_at,
             prev: record.commitment,
         })
     }
 
-    /// The release law: the NameNote a lawful, OTP-confirmed release
-    /// produces. `None` means unlawful.
-    pub fn authorize_release(
-        &self,
-        challenges: &mut OtpQueue,
-        name: Name,
-        ua: UnifiedAddress,
-        otp: &[u8; 6],
-        mtp: Timestamp,
-    ) -> Option<NameNote> {
-        let record = self.record(&name).cloned()?;
-        if record.ua != ua {
+    /// The release law: action, commitment, UA. `None` means unlawful.
+    pub fn authorize_release(&self, pending: &OtpChallenge) -> Option<NameNote> {
+        let record = self.record(&pending.name).cloned()?;
+        if pending.action != Action::Release {
             return None;
         }
-        if !challenges.accept(&name, Action::Release, &ua, record.commitment, otp, mtp) {
+        if record.commitment != pending.tip_rcm {
+            return None;
+        }
+        if record.ua != pending.ua {
             return None;
         }
         Some(NameNote::Release {
-            name,
-            ua,
+            name: pending.name.clone(),
+            ua: pending.ua.clone(),
             prev: record.commitment,
         })
     }
@@ -502,10 +489,6 @@ mod tests {
         Timestamp::from_seconds(secs).unwrap()
     }
 
-    fn test_txid() -> zcash_primitives::transaction::TxId {
-        zcash_primitives::transaction::TxId::from_bytes([0; 32])
-    }
-
     fn record_for(
         name: Name,
         action: Action,
@@ -602,41 +585,56 @@ mod tests {
         registry
     }
 
+    /// A forever name cannot bank a term: refused, OTP unspent.
     #[test]
-    fn authorize_refuses_an_illegal_extension_without_consuming_the_otp() {
-        use crate::mint::otp::{OtpCode, OtpRequest, D_OTP};
+    fn authorize_refuses_an_illegal_extension() {
+        use crate::mint::otp::{OtpChallenge, OtpCode, D_OTP};
 
         let mut r = Registry::new();
         let mtp = ts(1_700_000_000);
         r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
-        let ua = test_ua();
-        let code = OtpCode::for_test(*b"123456");
-        let digits = code.expose_for_test();
-        let mut challenges = OtpQueue::new();
-        challenges.admit_request(
-            OtpRequest {
-                name: test_name(),
-                action: Action::Update,
-                ua: ua.clone(),
-                term: Some(Term::Years(1)),
-                tip_rcm: commitment(1),
-                code,
-                expires_at: ts(1_700_000_000 + D_OTP),
-            },
-            test_txid(),
-            mtp,
-        );
-        assert!(r
-            .authorize_update(
-                &mut challenges,
-                test_name(),
-                ua.clone(),
-                Some(Term::Years(1)),
-                &digits,
-                mtp,
-            )
-            .is_none());
-        assert!(challenges.pending(&test_name(), Action::Update, &ua, commitment(1), mtp));
+        let pending = OtpChallenge {
+            name: test_name(),
+            action: Action::Update,
+            ua: test_ua(),
+            term: Some(Term::Years(1)),
+            tip_rcm: commitment(1),
+            code: OtpCode::for_test(*b"123456"),
+            expires_at: ts(1_700_000_000 + D_OTP),
+        };
+        assert!(r.authorize_update(&pending, mtp).is_none());
+    }
+
+    /// The laws are action-typed: a release-shaped pending cannot feed
+    /// the update law, an update-shaped one cannot feed the release
+    /// law — even with the commitment and UA matching.
+    #[test]
+    fn authorize_laws_reject_pendings_for_other_actions() {
+        use crate::mint::otp::OtpCode;
+
+        let mut r = Registry::new();
+        let mtp = ts(1_700_000_000);
+        r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
+        let release_pending = OtpChallenge {
+            name: test_name(),
+            action: Action::Release,
+            ua: test_ua(),
+            term: None,
+            tip_rcm: commitment(1),
+            code: OtpCode::for_test(*b"123456"),
+            expires_at: ts(1_700_000_000),
+        };
+        let update_pending = OtpChallenge {
+            name: test_name(),
+            action: Action::Update,
+            ua: test_ua(),
+            term: Some(Term::Years(1)),
+            tip_rcm: commitment(1),
+            code: OtpCode::for_test(*b"123456"),
+            expires_at: ts(1_700_000_000),
+        };
+        assert!(r.authorize_update(&release_pending, mtp).is_none());
+        assert!(r.authorize_release(&update_pending).is_none());
     }
 
     /// The plural sweep: only names whose clocks have fired, each paired
