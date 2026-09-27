@@ -2,11 +2,9 @@
 
 pub mod mtp;
 pub mod note;
-pub mod otp;
 pub mod presale;
 pub mod pricing;
 pub mod registry;
-
 pub mod treasury;
 
 /// The mint's authoritative position on the Zcash chain.
@@ -31,8 +29,8 @@ use crate::key::TreasuryKeys;
 use crate::wallet::Wallet;
 use crate::zcash::{CanonicalBlockSource, ChainClient, MempoolChangeKind, MempoolSession};
 
-use otp::{OtpChallenge, OtpCode};
 use presale::AccessCode;
+use treasury::{OtpChallenge, OtpCode};
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);

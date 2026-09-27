@@ -19,9 +19,9 @@ use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::{assemble, decrypt_treasury_transaction, NameNoteQueue, NameNoteState};
-use zns_mint::mint::otp::{OtpChallenge, OtpQueue};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
+use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
 use zns_mint::mint::{
     relay, watch_mempool, Action, MintInbound, OtpMemo, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
