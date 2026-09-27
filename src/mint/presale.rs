@@ -38,7 +38,7 @@ pub const ACCESS_CODE_KEY_CONTEXT: &[u8] = b"ZNS/access-code/root/v1";
 const PRESALE_HOST: &str = "https://cclrkfymckyjfufvqedr.supabase.co";
 
 /// Protected-name collection.
-const PRESALE_TABLE: &str = "zn_protected_names";
+const PRESALE_TABLE: &str = "zn_names";
 
 /// Public Supabase publishable key (`apikey` for PostgREST).
 const PRESALE_PUBLISHABLE_KEY: &str = "sb_publishable_eRyX0Z5CY3bHm11iCFoZRA_-u2WgStF";
@@ -541,8 +541,8 @@ mod tests {
     }
 
     #[test]
-    fn table_is_zn_protected_names() {
-        assert_eq!(PRESALE_TABLE, "zn_protected_names");
+    fn table_is_zn_names() {
+        assert_eq!(PRESALE_TABLE, "zn_names");
         assert!(!PRESALE_PUBLISHABLE_KEY.is_empty());
     }
 
