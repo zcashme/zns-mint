@@ -2,6 +2,19 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-27 — One build-selected `Network` alias, one `start` (issue #211)
+
+- The three cfg-gated `Boot::start` impls (`Boot<MainNetwork>`,
+  `Boot<TestNetwork>`, `Boot<LocalNetwork>`) collapse into one
+  `impl Boot<Network>` over a build-selected alias. `start` inlines the
+  former `start_with_network` body and takes the network from
+  `boot_network()`.
+- The Sapling param loaders drop `pub(crate)` — no callers outside boot
+  — and their stale "run loop prologue" doc is corrected.
+- No behavior change: each build still compiles exactly one network
+  type, and `main`'s bare `Boot::start()` still resolves to a single
+  candidate.
+
 ## 2026-09-23 — Boot step 3 is one step (#158)
 
 - Fetch the origin checkpoint and both subtree-root batches, then one

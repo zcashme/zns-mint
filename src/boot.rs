@@ -77,34 +77,36 @@ const NETWORK_LABEL: &str = "testnet";
 #[cfg(feature = "regtest")]
 const NETWORK_LABEL: &str = "regtest";
 
+/// The build-selected network type; exactly one per binary.
 #[cfg(not(feature = "regtest"))]
 #[cfg(not(feature = "testnet"))]
-impl Boot<MainNetwork> {
-    pub async fn start() -> Self {
-        Self::start_with_network(zcash_protocol::consensus::MAIN_NETWORK).await
-    }
-}
-
+type Network = MainNetwork;
 #[cfg(all(feature = "testnet", not(feature = "regtest")))]
-impl Boot<TestNetwork> {
-    pub async fn start() -> Self {
-        Self::start_with_network(zcash_protocol::consensus::TEST_NETWORK).await
-    }
-}
-
+type Network = TestNetwork;
 #[cfg(feature = "regtest")]
-impl Boot<LocalNetwork> {
-    /// Development-harness entry point. It is unavailable unless the
-    /// development-only `regtest` feature is compiled in.
-    pub async fn start() -> Self {
-        Self::start_with_network(regtest_network()).await
+type Network = LocalNetwork;
+
+/// The one network value this build serves.
+fn boot_network() -> Network {
+    #[cfg(not(feature = "regtest"))]
+    #[cfg(not(feature = "testnet"))]
+    {
+        zcash_protocol::consensus::MAIN_NETWORK
+    }
+    #[cfg(all(feature = "testnet", not(feature = "regtest")))]
+    {
+        zcash_protocol::consensus::TEST_NETWORK
+    }
+    #[cfg(feature = "regtest")]
+    {
+        regtest_network()
     }
 }
 
-impl<P: Parameters + Send + 'static> Boot<P> {
-    /// Boot sequence for a concrete, boot-owned network parameter set.
-    ///
-    async fn start_with_network(network: P) -> Self {
+impl Boot<Network> {
+    /// Boot sequence for this build's network.
+    pub async fn start() -> Self {
+        let network = boot_network();
         tracing::info!("boot: starting");
 
         // 1. Liveness + connect: confirm both Zebra transports, get chain client.
@@ -168,7 +170,7 @@ impl<P: Parameters + Send + 'static> Boot<P> {
             &origin,
             &sapling_roots,
             &ironwood_roots,
-            network.clone(),
+            network,
         )
         .expect("FATAL: failed to seed commitment trees from the verified Zebra checkpoint");
         tracing::info!(
@@ -569,14 +571,13 @@ fn read_verified_sapling_params(
     bytes
 }
 
-/// Loads and verifies the Sapling spend prover: file size, BLAKE2b-512 hash,
-/// then upstream's own deserializer. Acquired by the run loop's prologue, not
-/// by boot — boot passes what the loop cannot acquire for itself.
+/// Loads and verifies the Sapling spend prover: size, BLAKE2b-512 hash,
+/// then upstream's own deserializer.
 ///
 /// `verify_point_encodings: false` is upstream-documented for exactly this
 /// pattern: verify the parameters another way, "such as checking the hash of
 /// the parameters file on disk" (sapling-crypto 0.7.0, circuit.rs).
-pub(crate) fn load_sapling_spend_params() -> SpendParameters {
+fn load_sapling_spend_params() -> SpendParameters {
     let dir = sapling_params_dir();
     let path = dir.join("sapling-spend.params");
     let bytes = read_verified_sapling_params(&path, SAPLING_SPEND_HASH, SAPLING_SPEND_BYTES);
@@ -586,7 +587,7 @@ pub(crate) fn load_sapling_spend_params() -> SpendParameters {
 
 /// Loads and verifies the Sapling output prover. See
 /// [`load_sapling_spend_params`].
-pub(crate) fn load_sapling_output_params() -> OutputParameters {
+fn load_sapling_output_params() -> OutputParameters {
     let dir = sapling_params_dir();
     let path = dir.join("sapling-output.params");
     let bytes = read_verified_sapling_params(&path, SAPLING_OUTPUT_HASH, SAPLING_OUTPUT_BYTES);
@@ -605,8 +606,8 @@ pub(crate) fn load_sapling_output_params() -> OutputParameters {
 /// and Registry UFVK, binding the attestation to the mint's identity.
 /// Production code path — not gated on any dev feature, so a `fake-tee`
 /// build still binds a real identity into its (unverifiable) report.
-fn generate_attestation_report_data<P: Parameters>(
-    network: &P,
+fn generate_attestation_report_data(
+    network: &Network,
     treasury_keys: &TreasuryKeys,
     registry_keys: &RegistryKeys,
 ) -> [u8; 64] {
