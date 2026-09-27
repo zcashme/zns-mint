@@ -52,15 +52,12 @@ impl NameRecord {
         confirmed_height: BlockHeight,
         mtp: Timestamp,
     ) -> Self {
-        let rcm = note.rcm(params);
         Self {
             name: note.name().clone(),
             action: note.action(),
             ua: note.ua().clone(),
             expires_at: note.expires_at().unwrap_or(Expiry::Never),
-            commitment: NameCommitment::from_inner(orchard::note::NoteCommitTrapdoor::from_inner(
-                rcm,
-            )),
+            commitment: note.commitment(params),
             confirmed_height,
             release_deadline: Timestamp::from_seconds(
                 mtp.as_seconds() + crate::mint::LIVENESS_INTERVAL,
