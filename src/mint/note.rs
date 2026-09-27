@@ -95,6 +95,14 @@ impl NameNote {
         zns_rcm(verb, name, ua.as_bytes(), &expiry, &prev)
     }
 
+    /// The note's ZNS commitment: the rcm wrapped as the chain's
+    /// identity.
+    pub fn commitment<P: Parameters>(&self, params: &P) -> NameCommitment {
+        NameCommitment::from_inner(orchard::note::NoteCommitTrapdoor::from_inner(
+            self.rcm(params),
+        ))
+    }
+
     /// The ψ component of the ZNS note commitment, derived from the
     /// transition tuple with derivation tag `psi`.
     pub fn psi<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Base {
@@ -657,9 +665,7 @@ impl NameNoteQueue {
     /// of a deterministic note commitment.
     pub fn reconcile_seen<P: Parameters>(&mut self, network: &P, registry: &Registry) {
         for (note, origin, state) in &mut self.orders {
-            let commitment = NameCommitment::from_inner(
-                orchard::note::NoteCommitTrapdoor::from_inner(note.rcm(network)),
-            );
+            let commitment = note.commitment(network);
             if registry
                 .record_history(note.name())
                 .iter()

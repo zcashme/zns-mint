@@ -114,7 +114,7 @@ async fn main() {
                                     };
                                     let Some(record) = registry.record(name).cloned() else { continue; };
                                     let trigger_height = chain_tip.block_height() + 1;
-                                    if !record.admits(action, requested_ua, term, trigger_height, mtp_now)
+                                    if !record.allows_challenge(action, requested_ua, term, trigger_height, mtp_now)
                                         || paid < oracle.challenge_fee()
                                     {
                                         continue;
@@ -498,8 +498,13 @@ async fn main() {
                             );
                             break 'lane true;
                         }
-                        if !record.admits(action, requested_ua, term, note_height, mtp_now)
-                            || paid < oracle.challenge_fee()
+                        if !record.allows_challenge(
+                            action,
+                            requested_ua,
+                            term,
+                            note_height,
+                            mtp_now,
+                        ) || paid < oracle.challenge_fee()
                         {
                             break 'lane true;
                         }
@@ -557,11 +562,8 @@ async fn main() {
                 // an echo never waits for money; the renewal or
                 // upgrade fee declines on shortfall, it does not defer.
                 let Some(record) = registry.record(&echo.name).cloned() else {
-                    break 'lane true; // no record: no mint-issued challenge can match
+                    break 'lane true; // no record — released or unknown: no mint-issued challenge can match
                 };
-                if record.action.is_release() {
-                    break 'lane true;
-                }
                 let Some(sent) = challenges.awaiting(&echo, record.commitment, mtp_now) else {
                     break 'lane true; // no pending challenge: dead
                 };
@@ -696,8 +698,7 @@ async fn main() {
             } else {
                 match registry
                     .record(note.name())
-                    .filter(|record| Some(record.commitment) == note.prev_rcm())
-                    .map(|record| record.predecessor_nullifier)
+                    .and_then(|record| record.nullifier(&note))
                 {
                     Some(nf) => nf,
                     None => {

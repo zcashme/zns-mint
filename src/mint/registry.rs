@@ -27,7 +27,6 @@ pub struct NameRecord {
     pub commitment: NameCommitment,
     pub confirmed_height: BlockHeight,
     pub release_deadline: Timestamp,
-    /// Nullifier of this record's note when spent as the next transition's predecessor.
     pub predecessor_nullifier: orchard::note::Nullifier,
 }
 
@@ -35,42 +34,44 @@ impl NameRecord {
     /// The §4.5 clocks, fired: the term lapsed or the liveness
     /// deadline reached at `mtp`.
     pub fn is_release_due(&self, mtp: Timestamp) -> bool {
-        self.expires_at.expired(mtp) || mtp >= self.release_deadline
+        self.has_expired(mtp) || mtp >= self.release_deadline
     }
 
-    fn from_received<P: Parameters>(
+    /// The §4.5.2 term test at `mtp`.
+    pub fn has_expired(&self, mtp: Timestamp) -> bool {
+        self.expires_at.expired(mtp)
+    }
+
+    /// The name's state as of `note` taking effect at `confirmed_height`:
+    /// commitment = the note's identity, liveness clock restarted from
+    /// `mtp`, `spent` = the nullifier it will reveal when next spent.
+    fn create<P: Parameters>(
         params: &P,
         note: &NameNote,
-        nullifier: orchard::note::Nullifier,
+        spent: orchard::note::Nullifier,
         confirmed_height: BlockHeight,
         mtp: Timestamp,
     ) -> Self {
-        let rcm = note.rcm(params);
         Self {
             name: note.name().clone(),
             action: note.action(),
             ua: note.ua().clone(),
             expires_at: note.expires_at().unwrap_or(Expiry::Never),
-            commitment: NameCommitment::from_inner(orchard::note::NoteCommitTrapdoor::from_inner(
-                rcm,
-            )),
+            commitment: note.commitment(params),
             confirmed_height,
             release_deadline: Timestamp::from_seconds(
                 mtp.as_seconds() + crate::mint::LIVENESS_INTERVAL,
             )
             .expect("liveness deadline fits Timestamp"),
-            predecessor_nullifier: nullifier,
+            predecessor_nullifier: spent,
         }
     }
 
-    /// Does this record admit a relay trigger? The five refusals: the
-    /// name is released — its last transition was a release; the term
-    /// has expired; the trigger is stale, carried at or before the
-    /// record's last confirmed transition, so it speaks against
-    /// superseded state; a release aimed from another UA; or a term
-    /// offered to a forever name, which has no runway to bank and no
-    /// second upgrade to buy.
-    pub fn admits(
+    /// Whether a live record lets a transition request proceed to
+    /// challenge: term unexpired at `mtp_now`, trigger newer than
+    /// this record, release from this record's controller, forever
+    /// names take no term.
+    pub fn allows_challenge(
         &self,
         action: Action,
         ua: &UnifiedAddress,
@@ -78,11 +79,16 @@ impl NameRecord {
         trigger_height: BlockHeight,
         mtp_now: Timestamp,
     ) -> bool {
-        !self.action.is_release()
-            && !self.expires_at.expired(mtp_now)
+        !self.has_expired(mtp_now)
             && trigger_height > self.confirmed_height
             && !(action.is_release() && *ua != self.ua)
             && !(self.expires_at == Expiry::Never && term.is_some())
+    }
+
+    /// This record's nullifier, when `note` still names this exact
+    /// state.
+    pub fn nullifier(&self, note: &NameNote) -> Option<orchard::note::Nullifier> {
+        (Some(self.commitment) == note.prev_rcm()).then_some(self.predecessor_nullifier)
     }
 }
 
@@ -271,9 +277,7 @@ impl Registry {
             // A late or duplicate claim: first confirmed wins.
             return false;
         }
-        self.set_record(NameRecord::from_received(
-            params, note, nullifier, height, mtp,
-        ));
+        self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
         true
     }
 
@@ -307,9 +311,7 @@ impl Registry {
             self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
             return false;
         }
-        self.set_record(NameRecord::from_received(
-            params, note, nullifier, height, mtp,
-        ));
+        self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
         true
     }
 
@@ -336,9 +338,7 @@ impl Registry {
             self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
             return false;
         }
-        self.set_record(NameRecord::from_received(
-            params, note, nullifier, height, mtp,
-        ));
+        self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
         true
     }
 
@@ -358,9 +358,7 @@ impl Registry {
             ua: record.ua.clone(),
             prev: record.commitment,
         };
-        self.set_record(NameRecord::from_received(
-            params, &release, nullifier, height, mtp,
-        ));
+        self.set_record(NameRecord::create(params, &release, nullifier, height, mtp));
     }
 
     /// The live predecessor this transaction spent, when it is this
@@ -408,9 +406,6 @@ impl Registry {
             let Some(record) = self.record(&name).cloned() else {
                 continue;
             };
-            if record.action.is_release() {
-                continue;
-            }
             let mut released_record = record;
             released_record.action = Action::Release;
             released_record.confirmed_height = height;
@@ -647,7 +642,7 @@ mod tests {
     /// The plural sweep: only names whose clocks have fired, each paired
     /// with its release note. Live and already-released names are absent.
     #[test]
-    fn the_record_admits_its_triggers_and_refuses_the_stale_the_expired_and_the_forever_term() {
+    fn allows_challenge_gates_the_stale_the_expired_and_the_forever_term() {
         let ua = test_ua();
         let now = ts(1_000_000_000);
         let above = BlockHeight::from_u32(101);
@@ -658,33 +653,24 @@ mod tests {
             1,
         );
 
-        // A live record admits an update, a term, and a release from
-        // its own UA.
-        assert!(live.admits(Action::Update, &ua, Some(Term::Years(1)), above, now));
-        assert!(live.admits(Action::Release, &ua, None, above, now));
-
-        // Released: the name is already released — nothing is admitted.
-        let released = record(
-            Action::Release,
-            Expiry::At(ts(2_000_000_000)),
-            2_000_000_000,
-            2,
-        );
-        assert!(!released.admits(Action::Update, &ua, None, above, now));
+        // A live record allows an update challenge, a term, and a
+        // release from its own UA.
+        assert!(live.allows_challenge(Action::Update, &ua, Some(Term::Years(1)), above, now));
+        assert!(live.allows_challenge(Action::Release, &ua, None, above, now));
 
         // Expired: the term has passed.
-        assert!(!live.admits(Action::Update, &ua, None, above, ts(2_000_000_001)));
+        assert!(!live.allows_challenge(Action::Update, &ua, None, above, ts(2_000_000_001)));
 
         // Stale: the trigger rides at or below the last confirmed
         // transition — it speaks against superseded state.
-        assert!(!live.admits(Action::Update, &ua, None, BlockHeight::from_u32(100), now));
-        assert!(!live.admits(Action::Update, &ua, None, BlockHeight::from_u32(99), now));
+        assert!(!live.allows_challenge(Action::Update, &ua, None, BlockHeight::from_u32(100), now));
+        assert!(!live.allows_challenge(Action::Update, &ua, None, BlockHeight::from_u32(99), now));
 
         // A forever name refuses any term — no runway to bank, no
-        // second upgrade to buy — and admits the termless otherwise.
+        // second upgrade to buy — and allows the termless otherwise.
         let forever = record(Action::Claim, Expiry::Never, 2_000_000_000, 3);
-        assert!(!forever.admits(Action::Update, &ua, Some(Term::Years(1)), above, now));
-        assert!(forever.admits(Action::Update, &ua, None, above, now));
+        assert!(!forever.allows_challenge(Action::Update, &ua, Some(Term::Years(1)), above, now));
+        assert!(forever.allows_challenge(Action::Update, &ua, None, above, now));
     }
 
     #[test]
@@ -750,7 +736,7 @@ mod tests {
     /// A claim sets `release_deadline = τ + L`. An update at a later block
     /// resets it to that block's MTP plus L (the σ+L check across §4.5.4).
     #[test]
-    fn record_from_received_sets_deadline_from_mtp_and_liveness_interval() {
+    fn record_create_sets_deadline_from_mtp_and_liveness_interval() {
         let name = test_name();
         let ua = test_ua();
         let l = crate::mint::LIVENESS_INTERVAL;
@@ -762,7 +748,7 @@ mod tests {
             ua: ua.clone(),
             expires_at: Expiry::Never,
         };
-        let rec = NameRecord::from_received(
+        let rec = NameRecord::create(
             &MAIN_NETWORK,
             &claim,
             nullifier(1),
@@ -779,7 +765,7 @@ mod tests {
             expires_at: Expiry::Never,
             prev: commitment(3),
         };
-        let rec2 = NameRecord::from_received(
+        let rec2 = NameRecord::create(
             &MAIN_NETWORK,
             &update,
             nullifier(2),
