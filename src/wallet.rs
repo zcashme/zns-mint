@@ -323,20 +323,6 @@ impl<P: Parameters> Wallet<P> {
         )
     }
 
-    /// True when `txid` is known, unmined, and past expiry at
-    /// `network_tip`. Unknown `txid`: false.
-    pub fn expired_unmined_at(&self, txid: TxId, network_tip: BlockHeight) -> bool {
-        let expiry = self.transactions.get(&txid).map(|tx| tx.expiry_height());
-        let unmined = !matches!(
-            self.transaction_statuses.get(&txid),
-            Some(TransactionStatus::Mined(_))
-        );
-        unmined
-            && expiry
-                .filter(|height| u32::from(*height) > 0)
-                .is_some_and(|expiry| expiry <= network_tip)
-    }
-
     /// Rewinds to the applied block at or below `max_height` and returns
     /// that block's metadata. The committed height can be lower than the
     /// request.

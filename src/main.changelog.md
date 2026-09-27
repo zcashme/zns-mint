@@ -1,5 +1,15 @@
 # main.changelog.md
 
+## 2026-09-27 — The order drain re-attempts until observed (#214)
+
+- The enactment gate no longer reads a submitted state — there is none.
+  Every unobserved order attempts its build each tip; the wallet's input
+  locks fail the rebuild while a send stands, and its expiry releases
+  them, so the send's own death resumes the order (#202).
+- The release "own open send" special case is gone: `prepare`'s
+  authority check is the general path, without the remove/re-admit
+  churn.
+
 ## 2026-09-24 — A claim follows the earliest payment
 
 - `RequestQueue` keeps the earliest claim payment for each name;

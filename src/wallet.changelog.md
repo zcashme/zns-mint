@@ -1,5 +1,12 @@
 # Wallet changelog
 
+## 2026-09-27 — The expiry judgment returns to the lock (#214)
+
+- `Wallet::expired_unmined_at` is gone: zero callers. Written in
+  anticipation of a queue-side expiry reconciliation that instead
+  dissolved — `spend_confirms_or_blocks` already judges expiry at the
+  input lock, from the same retained transaction and chain status.
+
 ## 2026-09-24 — Name Note binding uses the ZNS cmx
 
 - `store_name_note` takes the transition `(rcm, psi)` and requires
