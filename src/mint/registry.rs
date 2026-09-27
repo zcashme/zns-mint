@@ -42,10 +42,13 @@ impl NameRecord {
         self.expires_at.expired(mtp)
     }
 
-    fn from_received<P: Parameters>(
+    /// The name's state as of `note` taking effect at `confirmed_height`:
+    /// commitment = the note's identity, liveness clock restarted from
+    /// `mtp`, `spent` = the nullifier it will reveal when next spent.
+    fn create<P: Parameters>(
         params: &P,
         note: &NameNote,
-        nullifier: orchard::note::Nullifier,
+        spent: orchard::note::Nullifier,
         confirmed_height: BlockHeight,
         mtp: Timestamp,
     ) -> Self {
@@ -63,7 +66,7 @@ impl NameRecord {
                 mtp.as_seconds() + crate::mint::LIVENESS_INTERVAL,
             )
             .expect("liveness deadline fits Timestamp"),
-            predecessor_nullifier: nullifier,
+            predecessor_nullifier: spent,
         }
     }
 
@@ -277,9 +280,7 @@ impl Registry {
             // A late or duplicate claim: first confirmed wins.
             return false;
         }
-        self.set_record(NameRecord::from_received(
-            params, note, nullifier, height, mtp,
-        ));
+        self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
         true
     }
 
@@ -313,9 +314,7 @@ impl Registry {
             self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
             return false;
         }
-        self.set_record(NameRecord::from_received(
-            params, note, nullifier, height, mtp,
-        ));
+        self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
         true
     }
 
@@ -342,9 +341,7 @@ impl Registry {
             self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
             return false;
         }
-        self.set_record(NameRecord::from_received(
-            params, note, nullifier, height, mtp,
-        ));
+        self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
         true
     }
 
@@ -364,9 +361,7 @@ impl Registry {
             ua: record.ua.clone(),
             prev: record.commitment,
         };
-        self.set_record(NameRecord::from_received(
-            params, &release, nullifier, height, mtp,
-        ));
+        self.set_record(NameRecord::create(params, &release, nullifier, height, mtp));
     }
 
     /// The live predecessor this transaction spent, when it is this
@@ -747,7 +742,7 @@ mod tests {
     /// A claim sets `release_deadline = τ + L`. An update at a later block
     /// resets it to that block's MTP plus L (the σ+L check across §4.5.4).
     #[test]
-    fn record_from_received_sets_deadline_from_mtp_and_liveness_interval() {
+    fn record_create_sets_deadline_from_mtp_and_liveness_interval() {
         let name = test_name();
         let ua = test_ua();
         let l = crate::mint::LIVENESS_INTERVAL;
@@ -759,7 +754,7 @@ mod tests {
             ua: ua.clone(),
             expires_at: Expiry::Never,
         };
-        let rec = NameRecord::from_received(
+        let rec = NameRecord::create(
             &MAIN_NETWORK,
             &claim,
             nullifier(1),
@@ -776,7 +771,7 @@ mod tests {
             expires_at: Expiry::Never,
             prev: commitment(3),
         };
-        let rec2 = NameRecord::from_received(
+        let rec2 = NameRecord::create(
             &MAIN_NETWORK,
             &update,
             nullifier(2),
