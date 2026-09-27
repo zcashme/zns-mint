@@ -608,11 +608,11 @@ fn decrypt_treasury_tx_with_fvk(
 // NameNoteQueue — Name Notes through canonical resolution
 // ---------------------------------------------------------------------------
 
-/// State of an authorized Name Note order.
+/// State of a Name Note order: the decision, then its canonical
+/// observation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NameNoteState {
     Authorized,
-    Submitted,
     Seen,
 }
 
@@ -652,12 +652,6 @@ impl NameNoteQueue {
 
     pub fn remove(&mut self, index: usize) {
         self.orders.remove(index);
-    }
-
-    /// Records a successful broadcast. The order stays queued until canonical
-    /// observation, so later claim payments cannot take ownership.
-    pub fn mark_submitted(&mut self, index: usize) {
-        self.orders[index].2 = NameNoteState::Submitted;
     }
 
     /// Derive `Seen` from any matching confirmed record at or after the
@@ -701,7 +695,7 @@ impl NameNoteQueue {
         self.orders.retain(|(_, origin, _)| *origin <= ancestor);
     }
 
-    /// Whether an authorized or submitted claim still reserves this name.
+    /// Whether an open claim still reserves this name.
     pub fn claim_pending(&self, name: &Name) -> bool {
         self.orders.iter().any(|(n, _, state)| {
             *state != NameNoteState::Seen && n.action().is_claim() && n.name() == name
@@ -1029,10 +1023,8 @@ mod tests {
         assert_eq!(queue.entry(0).2, NameNoteState::Authorized);
         assert!(queue.claim_pending(claim.name()));
 
-        queue.mark_submitted(0);
         queue.admit(h(12), claim.clone());
-        assert_eq!(queue.entry(0).2, NameNoteState::Submitted);
-        assert!(queue.claim_pending(claim.name()));
+        assert_eq!(queue.entry(0).2, NameNoteState::Authorized);
         assert!(queue.claim_pending(claim.name()));
 
         queue.remove(0);
@@ -1108,13 +1100,11 @@ mod tests {
 
         let mut queue = NameNoteQueue::default();
         queue.admit(height(105), release);
-        queue.mark_submitted(0);
         queue.reconcile_seen(&MAIN_NETWORK, &registry);
         assert_eq!(queue.len(), 1);
         assert_eq!(queue.entry(0).2, NameNoteState::Seen);
 
         queue.admit(height(126), reclaim);
-        queue.mark_submitted(1);
         queue.reconcile_seen(&MAIN_NETWORK, &registry);
         assert_eq!(queue.len(), 2);
         assert_eq!(queue.entry(0).2, NameNoteState::Seen);
@@ -1127,7 +1117,6 @@ mod tests {
         let height = |n| BlockHeight::from_u32(n);
         let mut queue = NameNoteQueue::default();
         queue.admit(height(105), release);
-        queue.mark_submitted(0);
         queue.reconcile_seen(&MAIN_NETWORK, &registry);
         assert_eq!(queue.entry(0).2, NameNoteState::Seen);
 
@@ -1223,8 +1212,6 @@ mod tests {
         assert!(queue.admit(height, update));
         assert!(!queue.admit(height, release.clone()));
         assert!(queue.transition_pending(&name));
-        queue.mark_submitted(0);
-        assert_eq!(queue.entry(0).2, NameNoteState::Submitted);
         assert!(!queue.admit(height, release.clone()));
 
         let other_name = Name::parse("bob").unwrap();

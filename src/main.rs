@@ -644,15 +644,17 @@ async fn main() {
         }
 
         // --- NameNote enactment ---
-        // The order drain: one broadcast per decision. The queue tracks
-        // authorization through submission and canonical observation.
+        // The order drain: every unobserved decision attempts its build and
+        // broadcast each tip. A send in flight belongs to the wallet — its
+        // input locks fail the rebuild until the send mines or expires — so
+        // the attempt repeats until canonical observation.
         let mut index = 0;
         while index < name_notes.len() {
             let (note, state) = {
                 let (note, _, state) = name_notes.entry(index);
                 (note.clone(), state)
             };
-            if state != NameNoteState::Authorized {
+            if state == NameNoteState::Seen {
                 index += 1;
                 continue;
             }
@@ -669,20 +671,26 @@ async fn main() {
                     name_notes.remove(index);
                     continue;
                 }
-                match registry.anchor_pool().iter().copied().find(|nf| {
-                    wallet
-                        .unspent_ironwood_note_by_nullifier(
-                            REGISTRY_ACCOUNT,
-                            *nf,
-                            TargetHeight::from(tip),
-                        )
-                        .is_some()
-                }) {
-                    Some(nf) => nf,
-                    None => {
-                        tracing::warn!(
+                // Claims serialize on the pool head: every attempt targets
+                // the same anchor, so a send in flight blocks the rebuild
+                // instead of spawning a competitor. The head returns on
+                // expiry and advances on mining.
+                match registry.anchor_pool().iter().next().copied() {
+                    Some(nf)
+                        if wallet
+                            .unspent_ironwood_note_by_nullifier(
+                                REGISTRY_ACCOUNT,
+                                nf,
+                                TargetHeight::from(tip),
+                            )
+                            .is_some() =>
+                    {
+                        nf
+                    }
+                    _ => {
+                        tracing::debug!(
                             name = %note.name().as_str(),
-                            "no available claim anchor (all locked or spent)"
+                            "claim order waits: the pool head is in flight"
                         );
                         index += 1;
                         continue;
@@ -705,28 +713,6 @@ async fn main() {
                     }
                 }
             };
-            // A release whose predecessor the wallet will not release is
-            // this order's own open send — re-derivation re-admits
-            // releases every tip they stay due, so the churn self-heals;
-            // an update in the same shape may be racing a sibling, and
-            // stays queued instead.
-            if note.action().is_release()
-                && wallet
-                    .unspent_ironwood_note_by_nullifier(
-                        REGISTRY_ACCOUNT,
-                        authority_nf,
-                        TargetHeight::from(tip),
-                    )
-                    .is_none()
-            {
-                tracing::debug!(
-                    name = %note.name().as_str(),
-                    "release order sent: its transaction is still open"
-                );
-                name_notes.remove(index);
-                continue;
-            }
-
             let transaction = match assemble::prepare(
                 &network,
                 &mut wallet,
@@ -777,7 +763,6 @@ async fn main() {
                     action = note.action().as_str(),
                     "NameNote order sent"
                 );
-                name_notes.mark_submitted(index);
                 index += 1;
             } else {
                 tracing::error!(

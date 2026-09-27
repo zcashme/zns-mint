@@ -1,5 +1,15 @@
 # `mint/note.rs` design record
 
+## 2026-09-27 — The queue stops tracking sends
+
+- `NameNoteState::Submitted` and `mark_submitted` are gone. A send in
+  flight belongs to the wallet: its input locks block the rebuild, its
+  expiry releases them, and the loop re-attempts each tip until the
+  Registry observes the commitment. An entry holds the decision
+  (`Authorized`) and its canonical observation (`Seen`) — nothing more.
+- Fixes #202: an expired-unmined send can no longer strand its order;
+  there is no submitted state to strand.
+
 ## 2026-09-25 — One unresolved NameNote per name
 
 - `NameNoteQueue` admits at most one unresolved transition per name.
