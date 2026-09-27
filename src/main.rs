@@ -557,11 +557,8 @@ async fn main() {
                 // an echo never waits for money; the renewal or
                 // upgrade fee declines on shortfall, it does not defer.
                 let Some(record) = registry.record(&echo.name).cloned() else {
-                    break 'lane true; // no record: no mint-issued challenge can match
+                    break 'lane true; // no record — released or unknown: no mint-issued challenge can match
                 };
-                if record.action.is_release() {
-                    break 'lane true;
-                }
                 let Some(sent) = challenges.awaiting(&echo, record.commitment, mtp_now) else {
                     break 'lane true; // no pending challenge: dead
                 };
