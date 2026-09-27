@@ -406,9 +406,6 @@ impl Registry {
             let Some(record) = self.record(&name).cloned() else {
                 continue;
             };
-            if record.action.is_release() {
-                continue;
-            }
             let mut released_record = record;
             released_record.action = Action::Release;
             released_record.confirmed_height = height;
