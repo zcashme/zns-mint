@@ -6,7 +6,7 @@ use anchor_pool::AnchorPool;
 
 pub use anchor_pool::ANCHOR_POOL_SIZE;
 
-use crate::mint::otp::OtpChallenge;
+use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
@@ -588,7 +588,7 @@ mod tests {
     /// A forever name cannot bank a term: refused, OTP unspent.
     #[test]
     fn authorize_refuses_an_illegal_extension() {
-        use crate::mint::otp::{OtpChallenge, OtpCode, D_OTP};
+        use crate::mint::treasury::{OtpChallenge, OtpCode, D_OTP};
 
         let mut r = Registry::new();
         let mtp = ts(1_700_000_000);
@@ -610,7 +610,7 @@ mod tests {
     /// law — even with the commitment and UA matching.
     #[test]
     fn authorize_laws_reject_pendings_for_other_actions() {
-        use crate::mint::otp::OtpCode;
+        use crate::mint::treasury::OtpCode;
 
         let mut r = Registry::new();
         let mtp = ts(1_700_000_000);

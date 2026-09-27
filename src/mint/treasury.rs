@@ -2,6 +2,10 @@
 //! sweep, the challenge relay builder, and the request queue.
 //!
 
+mod otp;
+
+pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
+
 use std::convert::Infallible;
 use std::num::NonZeroU32;
 
