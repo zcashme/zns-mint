@@ -698,8 +698,7 @@ async fn main() {
             } else {
                 match registry
                     .record(note.name())
-                    .filter(|record| Some(record.commitment) == note.prev_rcm())
-                    .map(|record| record.predecessor_nullifier)
+                    .and_then(|record| record.nullifier(&note))
                 {
                     Some(nf) => nf,
                     None => {

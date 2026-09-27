@@ -84,6 +84,12 @@ impl NameRecord {
             && !(action.is_release() && *ua != self.ua)
             && !(self.expires_at == Expiry::Never && term.is_some())
     }
+
+    /// This record's nullifier, when `note` still names this exact
+    /// state.
+    pub fn nullifier(&self, note: &NameNote) -> Option<orchard::note::Nullifier> {
+        (Some(self.commitment) == note.prev_rcm()).then_some(self.predecessor_nullifier)
+    }
 }
 
 impl std::fmt::Debug for NameRecord {
