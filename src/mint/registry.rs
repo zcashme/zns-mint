@@ -7,7 +7,7 @@ use anchor_pool::AnchorPool;
 pub use anchor_pool::ANCHOR_POOL_SIZE;
 
 use crate::mint::otp::OtpQueue;
-use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, Term, UnifiedAddress};
+use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
 use zcash_protocol::consensus::BlockHeight;
@@ -120,65 +120,76 @@ impl Registry {
         Self::default()
     }
 
-    /// The transition law: the NameNote a lawful request produces.
+    /// The claim law: the NameNote a lawful claim produces.
     /// `None` means unlawful; a claim's payment is kept.
-    pub fn authorize(
+    /// A claim carries no OTP: the payment is the authorization.
+    pub fn authorize_claim(
         &self,
-        challenges: &mut OtpQueue,
-        request: Request,
-        otp: Option<&[u8; 6]>,
+        name: Name,
+        ua: UnifiedAddress,
+        term: Term,
         mtp: Timestamp,
     ) -> Option<NameNote> {
-        match request {
-            Request::Claim {
-                name,
-                ua,
-                term,
-                code: _,
-            } => {
-                if !self.is_available(&name) {
-                    return None;
-                }
-                let expires_at = term.claim_expiry(mtp)?;
-                Some(NameNote::Claim {
-                    name,
-                    ua,
-                    expires_at,
-                })
-            }
-            Request::Update { name, ua, term } => {
-                let record = self.record(&name).cloned()?;
-                if record.is_release_due(mtp) {
-                    return None;
-                }
-                let otp = otp?;
-                let expires_at = record.expires_at.extend(term, mtp)?;
-                if !challenges.accept(&name, Action::Update, &ua, record.commitment, otp, mtp) {
-                    return None;
-                }
-                Some(NameNote::Update {
-                    name,
-                    ua,
-                    expires_at,
-                    prev: record.commitment,
-                })
-            }
-            Request::Release { name, ua } => {
-                let record = self.record(&name).cloned()?;
-                if record.ua != ua {
-                    return None;
-                }
-                let otp = otp?;
-                if !challenges.accept(&name, Action::Release, &ua, record.commitment, otp, mtp) {
-                    return None;
-                }
-                Some(NameNote::Release {
-                    name,
-                    ua,
-                    prev: record.commitment,
-                })
-            }
+        if !self.is_available(&name) {
+            return None;
         }
+        let expires_at = term.claim_expiry(mtp)?;
+        Some(NameNote::Claim {
+            name,
+            ua,
+            expires_at,
+        })
+    }
+
+    /// The update law: the NameNote a lawful, OTP-confirmed update
+    /// produces. `None` means unlawful.
+    pub fn authorize_update(
+        &self,
+        challenges: &mut OtpQueue,
+        name: Name,
+        ua: UnifiedAddress,
+        term: Option<Term>,
+        otp: &[u8; 6],
+        mtp: Timestamp,
+    ) -> Option<NameNote> {
+        let record = self.record(&name).cloned()?;
+        if record.is_release_due(mtp) {
+            return None;
+        }
+        let expires_at = record.expires_at.extend(term, mtp)?;
+        if !challenges.accept(&name, Action::Update, &ua, record.commitment, otp, mtp) {
+            return None;
+        }
+        Some(NameNote::Update {
+            name,
+            ua,
+            expires_at,
+            prev: record.commitment,
+        })
+    }
+
+    /// The release law: the NameNote a lawful, OTP-confirmed release
+    /// produces. `None` means unlawful.
+    pub fn authorize_release(
+        &self,
+        challenges: &mut OtpQueue,
+        name: Name,
+        ua: UnifiedAddress,
+        otp: &[u8; 6],
+        mtp: Timestamp,
+    ) -> Option<NameNote> {
+        let record = self.record(&name).cloned()?;
+        if record.ua != ua {
+            return None;
+        }
+        if !challenges.accept(&name, Action::Release, &ua, record.commitment, otp, mtp) {
+            return None;
+        }
+        Some(NameNote::Release {
+            name,
+            ua,
+            prev: record.commitment,
+        })
     }
 
     /// The record for a name at the applied tip. Released names are absent.
@@ -621,14 +632,12 @@ mod tests {
             mtp,
         );
         assert!(r
-            .authorize(
+            .authorize_update(
                 &mut challenges,
-                Request::Update {
-                    name: test_name(),
-                    ua: ua.clone(),
-                    term: Some(Term::Years(1)),
-                },
-                Some(&digits),
+                test_name(),
+                ua.clone(),
+                Some(Term::Years(1)),
+                &digits,
                 mtp,
             )
             .is_none());

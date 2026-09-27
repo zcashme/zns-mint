@@ -284,7 +284,8 @@ impl Challenge {
 /// Classified once, at block application; the drain decides.
 #[derive(Clone, Debug)]
 pub enum MintInbound {
-    /// A request — what `authorize` takes.
+    /// A request — a user's proposed transition, decoded from a Treasury
+    /// memo; the Registry's `authorize_*` family rules on it.
     Request(Request),
     /// An OTP respond — the relay memo returned; what `awaiting` takes.
     Echo(Challenge),

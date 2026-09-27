@@ -468,17 +468,9 @@ async fn main() {
                         if paid < price {
                             break 'lane true;
                         }
-                        let Some(claim_note) = registry.authorize(
-                            &mut challenges,
-                            Request::Claim {
-                                name: name.clone(),
-                                ua: ua.clone(),
-                                term: *term,
-                                code: code.clone(),
-                            },
-                            None,
-                            mtp_now,
-                        ) else {
+                        let Some(claim_note) =
+                            registry.authorize_claim(name.clone(), ua.clone(), *term, mtp_now)
+                        else {
                             tracing::debug!(
                                 name = %name.as_str(),
                                 "claim not authorized"
@@ -606,20 +598,26 @@ async fn main() {
                 }
                 let digits = sent.code.digits();
                 let authorized = match echo.action {
-                    Action::Update => Request::Update {
-                        name: echo.name.clone(),
-                        ua: echo.ua.clone(),
-                        term: sent.term,
-                    },
-                    Action::Release => Request::Release {
-                        name: echo.name.clone(),
-                        ua: echo.ua.clone(),
-                    },
-                    Action::Claim => unreachable!("claims never carry an OTP"),
+                    Action::Update => registry.authorize_update(
+                        &mut challenges,
+                        echo.name.clone(),
+                        echo.ua.clone(),
+                        sent.term,
+                        &digits,
+                        mtp_now,
+                    ),
+                    Action::Release => registry.authorize_release(
+                        &mut challenges,
+                        echo.name.clone(),
+                        echo.ua.clone(),
+                        &digits,
+                        mtp_now,
+                    ),
+                    // Challenges never claim, and `Challenge::decode` refuses
+                    // the verb; treat a claim echo as a dead memo regardless.
+                    Action::Claim => break 'lane true,
                 };
-                let Some(transition_note) =
-                    registry.authorize(&mut challenges, authorized, Some(&digits), mtp_now)
-                else {
+                let Some(transition_note) = authorized else {
                     break 'lane true;
                 };
                 // The seam where a voluntary release exists:
