@@ -94,8 +94,9 @@ async fn main() {
             },
             Some((kind, txid)) = mempool_rx.recv() => {
                 let mtp_now = mtp.current().expect("FATAL: MTP unavailable at the applied tip");
+                challenges.prune(mtp_now);
                 match kind {
-                    MempoolChangeKind::Invalidated => challenges.invalidate(txid, mtp_now),
+                    MempoolChangeKind::Invalidated => challenges.invalidate(txid),
                     MempoolChangeKind::Mined => {}
                     MempoolChangeKind::Added => {
                         let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
@@ -122,7 +123,7 @@ async fn main() {
                                     let (_, pending) = OtpRequest::pending_challenge(
                                         name, action, requested_ua, record.commitment, term, mtp_now,
                                     );
-                                    let pending = challenges.admit_request(pending, txid, mtp_now);
+                                    let pending = challenges.admit_request(pending, txid);
                                     if !challenges.is_relayed(&pending)
                                         && relay(
                                             &network, &mut wallet, &treasury_keys, &sapling_spend,
@@ -364,6 +365,7 @@ async fn main() {
         let mtp_now = mtp
             .current()
             .expect("FATAL: MTP unavailable at the applied tip");
+        challenges.prune(mtp_now);
 
         let today = mtp
             .current_day()
@@ -516,7 +518,7 @@ async fn main() {
                             term,
                             mtp_now,
                         );
-                        challenges.admit_request(pending, *txid, mtp_now);
+                        challenges.admit_request(pending, *txid);
                         true
                     }
                 }
@@ -530,7 +532,7 @@ async fn main() {
 
         // Queue admission is independent from submission. Retry every still-
         // requested mempool or confirmed entry once during each tip pass.
-        for pending in challenges.requested(mtp_now) {
+        for pending in challenges.requested() {
             let Some(record) = registry
                 .record(&pending.name)
                 .filter(|record| record.commitment == pending.tip_rcm)
@@ -564,7 +566,7 @@ async fn main() {
                 let Some(record) = registry.record(&echo.name).cloned() else {
                     break 'lane true; // no record — released or unknown: no mint-issued challenge can match
                 };
-                let Some(sent) = challenges.awaiting(&echo, record.commitment, mtp_now) else {
+                let Some((key, sent)) = challenges.awaiting(&echo, record.commitment) else {
                     break 'lane true; // no pending challenge: dead
                 };
                 // The renewal or upgrade fee, binding at first
@@ -598,23 +600,9 @@ async fn main() {
                     );
                     break 'lane true;
                 }
-                let digits = sent.code.digits();
                 let authorized = match echo.action {
-                    Action::Update => registry.authorize_update(
-                        &mut challenges,
-                        echo.name.clone(),
-                        echo.ua.clone(),
-                        sent.term,
-                        &digits,
-                        mtp_now,
-                    ),
-                    Action::Release => registry.authorize_release(
-                        &mut challenges,
-                        echo.name.clone(),
-                        echo.ua.clone(),
-                        &digits,
-                        mtp_now,
-                    ),
+                    Action::Update => registry.authorize_update(&sent, mtp_now),
+                    Action::Release => registry.authorize_release(&sent),
                     // Challenges never claim, and `Challenge::decode` refuses
                     // the verb; treat a claim echo as a dead memo regardless.
                     Action::Claim => break 'lane true,
@@ -622,6 +610,10 @@ async fn main() {
                 let Some(transition_note) = authorized else {
                     break 'lane true;
                 };
+                // The code is spent exactly when the law accepts: the
+                // queue entry is removed here, after `Some` — a refusal
+                // above never consumed it.
+                challenges.respond(key);
                 // The seam where a voluntary release exists:
                 // the OTP that authorized it is consumed here,
                 // and the resulting note is indistinguishable
