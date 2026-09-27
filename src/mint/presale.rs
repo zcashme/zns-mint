@@ -1,6 +1,6 @@
 //! Pre-sale access codes for early claims of protected names.
 //!
-//! The mint looks up each claim name in Supabase `zn_protected_names`
+//! The mint looks up each claim name in Supabase `zn_names`
 //! (read-only). An absent row means the name is open. Every row in the
 //! table is protected; its `expires_at` (`timestamptz`, nullable) chooses
 //! between finite protection and forever protection. A row whose
@@ -38,7 +38,7 @@ pub const ACCESS_CODE_KEY_CONTEXT: &[u8] = b"ZNS/access-code/root/v1";
 const PRESALE_HOST: &str = "https://cclrkfymckyjfufvqedr.supabase.co";
 
 /// Protected-name collection.
-const PRESALE_TABLE: &str = "zn_protected_names";
+const PRESALE_TABLE: &str = "zn_names";
 
 /// Public Supabase publishable key (`apikey` for PostgREST).
 const PRESALE_PUBLISHABLE_KEY: &str = "sb_publishable_eRyX0Z5CY3bHm11iCFoZRA_-u2WgStF";
@@ -227,7 +227,7 @@ pub fn decide(
     }
 }
 
-/// A row from `zn_protected_names`. Only `expires_at` matters here —
+/// A row from `zn_names`. Only `expires_at` matters here —
 /// every row is protected by construction, and the other columns
 /// (`id`, `normalized_name`, `created_at`, `source`, `dupe`) are ignored
 /// by serde's default field handling.
@@ -541,8 +541,8 @@ mod tests {
     }
 
     #[test]
-    fn table_is_zn_protected_names() {
-        assert_eq!(PRESALE_TABLE, "zn_protected_names");
+    fn table_is_zn_names() {
+        assert_eq!(PRESALE_TABLE, "zn_names");
         assert!(!PRESALE_PUBLISHABLE_KEY.is_empty());
     }
 
