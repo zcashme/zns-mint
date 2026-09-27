@@ -27,7 +27,6 @@ pub struct NameRecord {
     pub commitment: NameCommitment,
     pub confirmed_height: BlockHeight,
     pub release_deadline: Timestamp,
-    /// Nullifier of this record's note when spent as the next transition's predecessor.
     pub predecessor_nullifier: orchard::note::Nullifier,
 }
 
@@ -35,7 +34,12 @@ impl NameRecord {
     /// The §4.5 clocks, fired: the term lapsed or the liveness
     /// deadline reached at `mtp`.
     pub fn is_release_due(&self, mtp: Timestamp) -> bool {
-        self.expires_at.expired(mtp) || mtp >= self.release_deadline
+        self.has_expired(mtp) || mtp >= self.release_deadline
+    }
+
+    /// The §4.5.2 term test at `mtp`.
+    pub fn has_expired(&self, mtp: Timestamp) -> bool {
+        self.expires_at.expired(mtp)
     }
 
     fn from_received<P: Parameters>(
@@ -63,13 +67,11 @@ impl NameRecord {
         }
     }
 
-    /// Does this record admit a relay trigger? The four refusals: the
-    /// term has expired; the trigger is stale, carried at or before the
-    /// record's last confirmed transition, so it speaks against
-    /// superseded state; a release aimed from another UA; or a term
-    /// offered to a forever name, which has no runway to bank and no
-    /// second upgrade to buy.
-    pub fn admits(
+    /// Whether a live record lets a transition request proceed to
+    /// challenge: term unexpired at `mtp_now`, trigger newer than
+    /// this record, release from this record's controller, forever
+    /// names take no term.
+    pub fn allows_challenge(
         &self,
         action: Action,
         ua: &UnifiedAddress,
@@ -77,7 +79,7 @@ impl NameRecord {
         trigger_height: BlockHeight,
         mtp_now: Timestamp,
     ) -> bool {
-        !self.expires_at.expired(mtp_now)
+        !self.has_expired(mtp_now)
             && trigger_height > self.confirmed_height
             && !(action.is_release() && *ua != self.ua)
             && !(self.expires_at == Expiry::Never && term.is_some())
@@ -645,7 +647,7 @@ mod tests {
     /// The plural sweep: only names whose clocks have fired, each paired
     /// with its release note. Live and already-released names are absent.
     #[test]
-    fn the_record_admits_its_triggers_and_refuses_the_stale_the_expired_and_the_forever_term() {
+    fn allows_challenge_gates_the_stale_the_expired_and_the_forever_term() {
         let ua = test_ua();
         let now = ts(1_000_000_000);
         let above = BlockHeight::from_u32(101);
@@ -656,24 +658,24 @@ mod tests {
             1,
         );
 
-        // A live record admits an update, a term, and a release from
-        // its own UA.
-        assert!(live.admits(Action::Update, &ua, Some(Term::Years(1)), above, now));
-        assert!(live.admits(Action::Release, &ua, None, above, now));
+        // A live record allows an update challenge, a term, and a
+        // release from its own UA.
+        assert!(live.allows_challenge(Action::Update, &ua, Some(Term::Years(1)), above, now));
+        assert!(live.allows_challenge(Action::Release, &ua, None, above, now));
 
         // Expired: the term has passed.
-        assert!(!live.admits(Action::Update, &ua, None, above, ts(2_000_000_001)));
+        assert!(!live.allows_challenge(Action::Update, &ua, None, above, ts(2_000_000_001)));
 
         // Stale: the trigger rides at or below the last confirmed
         // transition — it speaks against superseded state.
-        assert!(!live.admits(Action::Update, &ua, None, BlockHeight::from_u32(100), now));
-        assert!(!live.admits(Action::Update, &ua, None, BlockHeight::from_u32(99), now));
+        assert!(!live.allows_challenge(Action::Update, &ua, None, BlockHeight::from_u32(100), now));
+        assert!(!live.allows_challenge(Action::Update, &ua, None, BlockHeight::from_u32(99), now));
 
         // A forever name refuses any term — no runway to bank, no
-        // second upgrade to buy — and admits the termless otherwise.
+        // second upgrade to buy — and allows the termless otherwise.
         let forever = record(Action::Claim, Expiry::Never, 2_000_000_000, 3);
-        assert!(!forever.admits(Action::Update, &ua, Some(Term::Years(1)), above, now));
-        assert!(forever.admits(Action::Update, &ua, None, above, now));
+        assert!(!forever.allows_challenge(Action::Update, &ua, Some(Term::Years(1)), above, now));
+        assert!(forever.allows_challenge(Action::Update, &ua, None, above, now));
     }
 
     #[test]

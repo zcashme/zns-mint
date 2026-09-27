@@ -114,7 +114,7 @@ async fn main() {
                                     };
                                     let Some(record) = registry.record(name).cloned() else { continue; };
                                     let trigger_height = chain_tip.block_height() + 1;
-                                    if !record.admits(action, requested_ua, term, trigger_height, mtp_now)
+                                    if !record.allows_challenge(action, requested_ua, term, trigger_height, mtp_now)
                                         || paid < oracle.challenge_fee()
                                     {
                                         continue;
@@ -498,8 +498,13 @@ async fn main() {
                             );
                             break 'lane true;
                         }
-                        if !record.admits(action, requested_ua, term, note_height, mtp_now)
-                            || paid < oracle.challenge_fee()
+                        if !record.allows_challenge(
+                            action,
+                            requested_ua,
+                            term,
+                            note_height,
+                            mtp_now,
+                        ) || paid < oracle.challenge_fee()
                         {
                             break 'lane true;
                         }
