@@ -6,7 +6,7 @@ use anchor_pool::AnchorPool;
 
 pub use anchor_pool::ANCHOR_POOL_SIZE;
 
-use crate::mint::otp::OtpRequest;
+use crate::mint::otp::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
@@ -151,7 +151,7 @@ impl Registry {
     /// binding was verified by the queue — `awaiting` matched the echo
     /// to this pending at the current commitment; the checks here keep
     /// the law self-contained. `None` means unlawful.
-    pub fn authorize_update(&self, pending: &OtpRequest, mtp: Timestamp) -> Option<NameNote> {
+    pub fn authorize_update(&self, pending: &OtpChallenge, mtp: Timestamp) -> Option<NameNote> {
         let record = self.record(&pending.name).cloned()?;
         if pending.action != Action::Update {
             return None;
@@ -173,7 +173,7 @@ impl Registry {
 
     /// The release law: the NameNote a lawful release produces. The
     /// OTP binding was verified by the queue. `None` means unlawful.
-    pub fn authorize_release(&self, pending: &OtpRequest) -> Option<NameNote> {
+    pub fn authorize_release(&self, pending: &OtpChallenge) -> Option<NameNote> {
         let record = self.record(&pending.name).cloned()?;
         if pending.action != Action::Release {
             return None;
@@ -596,12 +596,12 @@ mod tests {
     /// without consuming the OTP is structural, not discipline.
     #[test]
     fn authorize_refuses_an_illegal_extension() {
-        use crate::mint::otp::{OtpCode, OtpRequest, D_OTP};
+        use crate::mint::otp::{OtpChallenge, OtpCode, D_OTP};
 
         let mut r = Registry::new();
         let mtp = ts(1_700_000_000);
         r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
-        let pending = OtpRequest {
+        let pending = OtpChallenge {
             name: test_name(),
             action: Action::Update,
             ua: test_ua(),
@@ -623,7 +623,7 @@ mod tests {
         let mut r = Registry::new();
         let mtp = ts(1_700_000_000);
         r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
-        let release_pending = OtpRequest {
+        let release_pending = OtpChallenge {
             name: test_name(),
             action: Action::Release,
             ua: test_ua(),
@@ -632,7 +632,7 @@ mod tests {
             code: OtpCode::for_test(*b"123456"),
             expires_at: ts(1_700_000_000),
         };
-        let update_pending = OtpRequest {
+        let update_pending = OtpChallenge {
             name: test_name(),
             action: Action::Update,
             ua: test_ua(),

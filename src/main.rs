@@ -19,12 +19,11 @@ use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::{assemble, decrypt_treasury_transaction, NameNoteQueue, NameNoteState};
-use zns_mint::mint::otp::{OtpQueue, OtpRequest};
+use zns_mint::mint::otp::{OtpChallenge, OtpQueue};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::{
-    relay, watch_mempool, Action, Challenge, MintInbound, Request, REGISTRY_ACCOUNT,
-    TREASURY_ACCOUNT,
+    relay, watch_mempool, Action, MintInbound, OtpMemo, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{
     CanonicalBlockSource, JsonRpc, MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE,
@@ -67,7 +66,7 @@ async fn main() {
     // said, what it paid, the block that carried it. The drain at each tip
     // decides entries; a reorg truncates them.
     let mut requests = RequestQueue::default();
-    let mut echoes: Vec<(Challenge, Zatoshis, BlockHeight)> = Vec::new();
+    let mut echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)> = Vec::new();
 
     zns_mint::metrics::install();
     tracing::info!(
@@ -120,10 +119,15 @@ async fn main() {
                                     {
                                         continue;
                                     }
-                                    let (_, pending) = OtpRequest::pending_challenge(
-                                        name, action, requested_ua, record.commitment, term, mtp_now,
+                                    let pending = OtpChallenge::issue(
+                                        name.clone(),
+                                        action,
+                                        requested_ua.clone(),
+                                        record.commitment,
+                                        term,
+                                        mtp_now,
                                     );
-                                    let pending = challenges.admit_request(pending, txid);
+                                    let pending = challenges.admit(pending, txid);
                                     if !challenges.is_relayed(&pending)
                                         && relay(
                                             &network, &mut wallet, &treasury_keys, &sapling_spend,
@@ -510,15 +514,15 @@ async fn main() {
                         {
                             break 'lane true;
                         }
-                        let (_, pending) = OtpRequest::pending_challenge(
-                            name,
+                        let pending = OtpChallenge::issue(
+                            name.clone(),
                             action,
-                            requested_ua,
+                            requested_ua.clone(),
                             record.commitment,
                             term,
                             mtp_now,
                         );
-                        challenges.admit_request(pending, *txid);
+                        challenges.admit(pending, *txid);
                         true
                     }
                 }
@@ -585,7 +589,7 @@ async fn main() {
                         tracing::debug!(
                             name = %echo.name.as_str(),
                             paid = paid.into_u64(),
-                            "update respond underpaid — attempt void, challenge stands"
+                            "update response underpaid — attempt void, challenge stands"
                         );
                         break 'lane true;
                     }
@@ -603,7 +607,7 @@ async fn main() {
                 let authorized = match echo.action {
                     Action::Update => registry.authorize_update(&sent, mtp_now),
                     Action::Release => registry.authorize_release(&sent),
-                    // Challenges never claim, and `Challenge::decode` refuses
+                    // Challenges never claim, and `OtpMemo::decode` refuses
                     // the verb; treat a claim echo as a dead memo regardless.
                     Action::Claim => break 'lane true,
                 };
@@ -613,7 +617,7 @@ async fn main() {
                 // The code is spent exactly when the law accepts: the
                 // queue entry is removed here, after `Some` — a refusal
                 // above never consumed it.
-                challenges.respond(key);
+                challenges.consume(key);
                 // The seam where a voluntary release exists:
                 // the OTP that authorized it is consumed here,
                 // and the resulting note is indistinguishable
