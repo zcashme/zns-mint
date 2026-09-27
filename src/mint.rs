@@ -45,11 +45,9 @@ pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(3_400_000);
 #[cfg(all(feature = "testnet", not(feature = "regtest")))]
 pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(4_338_933);
 
-/// Regtest birth: past the NU6.3 activation (height 4) and the
-/// fixture's coinbase-maturity boilerplate — nothing the mint owns
-/// exists before this height. The origin checkpoint (`MINT_BIRTHDAY - 1`)
-/// must sit at or after every pool's activation, or `z_gettreestate`
-/// omits pool sections and boot cannot parse the treestate.
+/// Regtest birth: the fixture boundary. NU6.3 activates at height 4;
+/// the fixture's coinbase maturity runs through 104; nothing the mint
+/// owns is earlier.
 #[cfg(feature = "regtest")]
 pub const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(100);
 

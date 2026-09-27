@@ -489,6 +489,8 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 // ---------------------------------------------------------------------------
 
 /// Fetches the origin treestate from Zebra: the block before the birthday.
+/// The checkpoint height must sit at or after every pool's activation —
+/// `z_gettreestate` omits pool sections that were never active.
 ///
 /// Zebra is part of the same measured TEE image; its identity is guaranteed
 /// by the SEV-SNP attestation, not by runtime RPC checks.
