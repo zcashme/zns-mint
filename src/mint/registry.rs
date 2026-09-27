@@ -63,9 +63,8 @@ impl NameRecord {
         }
     }
 
-    /// Does this record admit a relay trigger? The five refusals: the
-    /// name is released — its last transition was a release; the term
-    /// has expired; the trigger is stale, carried at or before the
+    /// Does this record admit a relay trigger? The four refusals: the
+    /// term has expired; the trigger is stale, carried at or before the
     /// record's last confirmed transition, so it speaks against
     /// superseded state; a release aimed from another UA; or a term
     /// offered to a forever name, which has no runway to bank and no
@@ -78,8 +77,7 @@ impl NameRecord {
         trigger_height: BlockHeight,
         mtp_now: Timestamp,
     ) -> bool {
-        !self.action.is_release()
-            && !self.expires_at.expired(mtp_now)
+        !self.expires_at.expired(mtp_now)
             && trigger_height > self.confirmed_height
             && !(action.is_release() && *ua != self.ua)
             && !(self.expires_at == Expiry::Never && term.is_some())
@@ -662,15 +660,6 @@ mod tests {
         // its own UA.
         assert!(live.admits(Action::Update, &ua, Some(Term::Years(1)), above, now));
         assert!(live.admits(Action::Release, &ua, None, above, now));
-
-        // Released: the name is already released — nothing is admitted.
-        let released = record(
-            Action::Release,
-            Expiry::At(ts(2_000_000_000)),
-            2_000_000_000,
-            2,
-        );
-        assert!(!released.admits(Action::Update, &ua, None, above, now));
 
         // Expired: the term has passed.
         assert!(!live.admits(Action::Update, &ua, None, above, ts(2_000_000_001)));
