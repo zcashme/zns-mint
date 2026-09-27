@@ -36,8 +36,20 @@ jobs:
       - name: rustfmt
         run: cargo fmt --check
 
-      - name: clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      # Network features are mutually exclusive (lib.rs compile_error), so
+      # clippy runs every supported combination explicitly. --all-features
+      # would enable testnet and regtest together and fail by design.
+      - name: clippy (default)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: clippy (testnet)
+        run: cargo clippy --all-targets --features testnet -- -D warnings
+
+      - name: clippy (regtest)
+        run: cargo clippy --all-targets --features regtest -- -D warnings
+
+      - name: clippy (regtest,fake-tee)
+        run: cargo clippy --all-targets --features regtest,fake-tee -- -D warnings
 
       - name: test (default)
         run: cargo test
@@ -46,7 +58,7 @@ jobs:
         run: cargo test --features regtest
 
       - name: docs
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps
 
       - name: coverage
         run: |
