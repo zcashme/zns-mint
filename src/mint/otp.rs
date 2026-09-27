@@ -68,10 +68,7 @@ pub struct OtpChallenge {
 }
 
 impl OtpChallenge {
-    /// Issues a challenge for this transition: draws the fresh code and
-    /// stamps the D_OTP expiry. The controller-facing body — what the
-    /// relay memo carries and what the echo decodes back into — is the
-    /// projection [`OtpChallenge::memo`].
+    /// Issues a challenge: draws a fresh code, expires after `D_OTP`.
     pub fn issue(
         name: Name,
         action: Action,
@@ -91,8 +88,7 @@ impl OtpChallenge {
         }
     }
 
-    /// The controller-facing body: the same code, in memo form — what
-    /// the relay sends and what the echo decodes back into.
+    /// The controller-facing projection: code, name, action, ua.
     pub fn memo(&self) -> OtpMemo {
         OtpMemo {
             code: self.code.clone(),
@@ -131,9 +127,8 @@ impl OtpQueue {
         }
     }
 
-    /// Admits a request once per transaction. The same txid is seen at
-    /// mempool admission and block confirmation; confirmation reuses its
-    /// queue entry instead of creating another challenge.
+    /// Admits a challenge, once per txid: the confirmation sighting
+    /// reuses the mempool entry instead of minting another code.
     pub fn admit(&mut self, request: OtpChallenge, txid: TxId) -> OtpChallenge {
         if let Some((existing, _, _)) = self
             .challenges
@@ -147,8 +142,8 @@ impl OtpQueue {
         request
     }
 
-    /// Removes an invalidated mempool request, if its challenge has not
-    /// already been sent.
+    /// Removes a challenge whose request transaction was invalidated,
+    /// unless already relayed.
     pub fn invalidate(&mut self, txid: TxId) {
         self.challenges.retain(|(_, state, existing_txid)| {
             *existing_txid != txid || matches!(state, ChallengeState::Relayed)
@@ -194,18 +189,15 @@ impl OtpQueue {
             .collect()
     }
 
-    /// Drops expired challenges. Owner-invoked: the run loop prunes at
-    /// the top of every wake-up, before any lane matches the store.
+    /// Drops expired challenges. The run loop calls this each wake-up.
     pub fn prune(&mut self, mtp: Timestamp) {
         self.challenges
             .retain(|(request, _, _)| mtp < request.expires_at);
     }
 
-    /// The pending challenge this return matches at `tip_rcm`, paired
-    /// with the burn key for [`OtpQueue::consume`]. Without the
-    /// commitment binding, a six-digit code collision across two live
-    /// challenges could let one echo resolve to the wrong pending.
-    /// Freshness is the owner's `prune`, not this scan.
+    /// Matches an echoed memo to a relayed challenge. The `tip_rcm`
+    /// binding keeps a shared code from crossing challenges; the
+    /// result carries the key for [`OtpQueue::consume`].
     pub fn awaiting(
         &self,
         returned: &OtpMemo,
@@ -224,10 +216,8 @@ impl OtpQueue {
             .map(|(req, _, txid)| (*txid, req.clone()))
     }
 
-    /// Burns a relayed challenge once, by the key [`OtpQueue::awaiting`]
-    /// handed out: the entry is removed, so no later echo can claim it.
-    /// Never-relayed entries are not burnable by key. Returns whether
-    /// an entry was removed.
+    /// Consumes a relayed challenge by key: one code, one use.
+    /// Returns `false` for unknown keys and never-relayed entries.
     pub fn consume(&mut self, txid: TxId) -> bool {
         let before = self.challenges.len();
         self.challenges.retain(|(_, state, existing_txid)| {

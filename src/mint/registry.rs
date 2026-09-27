@@ -126,9 +126,7 @@ impl Registry {
         Self::default()
     }
 
-    /// The claim law: the NameNote a lawful claim produces.
-    /// `None` means unlawful; a claim's payment is kept.
-    /// A claim carries no OTP: the payment is the authorization.
+    /// The claim law. `None` means unlawful; the payment is kept.
     pub fn authorize_claim(
         &self,
         name: Name,
@@ -147,10 +145,7 @@ impl Registry {
         })
     }
 
-    /// The update law: the NameNote a lawful update produces. The OTP
-    /// binding was verified by the queue — `awaiting` matched the echo
-    /// to this pending at the current commitment; the checks here keep
-    /// the law self-contained. `None` means unlawful.
+    /// The update law: action, commitment, clocks, term. `None` means unlawful.
     pub fn authorize_update(&self, pending: &OtpChallenge, mtp: Timestamp) -> Option<NameNote> {
         let record = self.record(&pending.name).cloned()?;
         if pending.action != Action::Update {
@@ -171,8 +166,7 @@ impl Registry {
         })
     }
 
-    /// The release law: the NameNote a lawful release produces. The
-    /// OTP binding was verified by the queue. `None` means unlawful.
+    /// The release law: action, commitment, UA. `None` means unlawful.
     pub fn authorize_release(&self, pending: &OtpChallenge) -> Option<NameNote> {
         let record = self.record(&pending.name).cloned()?;
         if pending.action != Action::Release {
@@ -591,9 +585,7 @@ mod tests {
         registry
     }
 
-    /// A forever name cannot bank a term: the law refuses. The queue
-    /// is not even in scope here — refusing an unlawful extension
-    /// without consuming the OTP is structural, not discipline.
+    /// A forever name cannot bank a term: refused, OTP unspent.
     #[test]
     fn authorize_refuses_an_illegal_extension() {
         use crate::mint::otp::{OtpChallenge, OtpCode, D_OTP};

@@ -614,15 +614,12 @@ async fn main() {
                 let Some(transition_note) = authorized else {
                     break 'lane true;
                 };
-                // The code is spent exactly when the law accepts: the
-                // queue entry is removed here, after `Some` — a refusal
-                // above never consumed it.
-                challenges.consume(key);
-                // The seam where a voluntary release exists:
-                // the OTP that authorized it is consumed here,
-                // and the resulting note is indistinguishable
-                // from a unilateral one on chain. This line is
-                // the only durable record of the cause.
+                challenges.consume(key); // spent exactly when the law accepts
+                                         // The seam where a voluntary release exists:
+                                         // the OTP that authorized it is consumed here,
+                                         // and the resulting note is indistinguishable
+                                         // from a unilateral one on chain. This line is
+                                         // the only durable record of the cause.
                 if echo.action.is_release() {
                     tracing::info!(
                         name = %echo.name.as_str(),
