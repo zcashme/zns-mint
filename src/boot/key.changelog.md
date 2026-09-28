@@ -1,6 +1,17 @@
 # Key module changelog
 
-Tracks design-relevant changes to `src/key.rs`.
+Tracks design-relevant changes to `src/boot/key.rs`.
+
+## 2026-09-29 — Account authority belongs to boot (#231)
+
+- Moved the private key implementation under boot, which re-exports only
+  `TreasuryKeys` and `RegistryKeys`. Existing crate-root type paths remain.
+- Narrowed `derive` to `pub(super)`: only boot and its descendants can
+  create account capabilities. Runtime accessors remain crate-private.
+- Derivation still uses upstream `UnifiedSpendingKey::from_seed`
+  (`zcash_keys` 0.16.1, `src/keys.rs:237`); Treasury payment construction
+  still uses `SpendingKeys` (`zcash_client_backend` 0.24.0-rc.7,
+  `src/data_api/wallet.rs:1375`). No key material or behavior changes.
 
 ## 2026-09-25 — Narrow key access to account and signing capabilities (#200)
 

@@ -1,6 +1,13 @@
 # Capsule module changelog
 
-Tracks design-relevant changes to `src/capsule.rs`.
+Tracks design-relevant changes to `src/boot/capsule.rs`.
+
+## 2026-09-29 — Capsule is a boot submodule (#231)
+
+- Moved the seed envelope implementation under `boot::capsule`, alongside
+  the TEE seam it uses. The existing root module path remains a re-export.
+- Updated the development capsule writer to use the boot module paths.
+  Capsule bytes, validation, AEAD, fingerprint checks, and wiping are unchanged.
 
 ## 2026-09-28 — Capsule operations are methods (#229)
 

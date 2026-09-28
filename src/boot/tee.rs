@@ -1,6 +1,6 @@
 //! The TEE seam: the two capabilities `boot` needs from the enclave.
 //!
-//! 1. A per-instance sealing key for [`crate::capsule`] (production: VCEK-rooted, SNP-derived).
+//! 1. A per-instance sealing key for [`crate::boot::capsule`] (production: VCEK-rooted, SNP-derived).
 //! 2. A signed attestation report binding the mint's identity (Treasury address + Registry FVK,
 //!    in `report_data`) to the measured guest image.
 //!

@@ -13,9 +13,9 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 
 use super::NameNote;
-use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::{TreeError, Wallet, WalletError};
+use crate::{RegistryKeys, TreasuryKeys};
 
 /// Why a Name Note transaction was not built. The caller retries next tip.
 /// Only [`PrepareError::FeeUnfunded`] means the Treasury could not cover

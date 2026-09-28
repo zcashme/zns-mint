@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/lib.rs`.
 
+## 2026-09-29 — Boot submodules retain their root paths (#231)
+
+- Removed the root capsule, TEE, and key module declarations. The existing
+  root `capsule`, `tee`, `TreasuryKeys`, and `RegistryKeys` paths now
+  re-export boot modules and capabilities.
+
 ## 2026-09-27 — Reject the testnet+regtest feature combo (PR #212)
 
 - `--features testnet,regtest` previously compiled, silently resolving

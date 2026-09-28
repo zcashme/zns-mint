@@ -105,7 +105,7 @@ impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::err
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
-    treasury_keys: &crate::key::TreasuryKeys,
+    treasury_keys: &crate::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
 ) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
@@ -201,7 +201,7 @@ pub fn sweep_to_vault<P: Parameters>(
 pub fn challenge<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
-    treasury_keys: &crate::key::TreasuryKeys,
+    treasury_keys: &crate::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
     controller: &zcash_keys::address::UnifiedAddress,
