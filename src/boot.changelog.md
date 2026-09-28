@@ -2,6 +2,14 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-29 — Boot owns seed intake, the TEE, and account authority (#231)
+
+- Adopted `capsule` and `tee` as public submodules and `key` as a private
+  submodule. Boot re-exports the Treasury and Registry capability types.
+- Account derivation is restricted to boot; runtime code receives and uses
+  the capabilities from the Boot handoff.
+- Seed intake, enclave calls, derivation, and attestation order are unchanged.
+
 ## 2026-09-28 — Seed intake uses Capsule methods (#229)
 
 - Boot calls `Capsule::parse` and `capsule.unseal` after the existing bounded

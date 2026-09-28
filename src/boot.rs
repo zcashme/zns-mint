@@ -1,5 +1,11 @@
 //! The boot sequence: acquire and verify every capability the run loop
 //! cannot acquire for itself, then hand them over as one contract.
+pub mod capsule;
+mod key;
+pub mod tee;
+
+pub use key::{RegistryKeys, TreasuryKeys};
+
 use secrecy::{ExposeSecret, Secret};
 #[cfg(not(feature = "regtest"))]
 #[cfg(not(feature = "testnet"))]
@@ -14,18 +20,17 @@ use zip32::fingerprint::SeedFingerprint;
 #[cfg(not(feature = "regtest"))]
 use std::str::FromStr;
 
-use crate::capsule::{self, Capsule};
-use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::mtp::MtpTracker;
 use crate::mint::presale::{self, AccessCodeKey};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::treasury::OtpQueue;
 use crate::mint::{MINT_BIRTHDAY, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
-use crate::tee::{self, Tee};
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
+use capsule::Capsule;
 use sapling::circuit::{OutputParameters, SpendParameters};
+use tee::Tee;
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata};

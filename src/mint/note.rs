@@ -9,9 +9,9 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 
 pub mod assemble;
 
-use crate::key::RegistryKeys;
 use crate::mint::registry::Registry;
 use crate::mint::{Action, Name, NameCommitment, LIVENESS_INTERVAL};
+use crate::RegistryKeys;
 
 /// A Name transition (§3.2), typed so every action carries exactly its
 /// legal fields.
@@ -537,7 +537,7 @@ pub fn decrypt_name_notes<P: Parameters>(
 /// arrive through this pass instead.
 pub fn decrypt_treasury_memos(
     block: &Block,
-    treasury_keys: &crate::key::TreasuryKeys,
+    treasury_keys: &crate::TreasuryKeys,
 ) -> Vec<(
     zcash_primitives::transaction::TxId,
     usize,

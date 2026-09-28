@@ -25,9 +25,9 @@ use zip32::AccountId;
 use sapling::circuit::{OutputParameters, SpendParameters};
 use tokio::sync::mpsc;
 
-use crate::key::TreasuryKeys;
 use crate::wallet::Wallet;
 use crate::zcash::{CanonicalBlockSource, ChainClient, MempoolChangeKind, MempoolSession};
+use crate::TreasuryKeys;
 
 use presale::AccessCode;
 use treasury::{OtpChallenge, OtpCode};
@@ -370,8 +370,8 @@ impl Name {
 #[allow(clippy::too_many_arguments)]
 pub fn apply_block<P: Parameters + Send + 'static>(
     network: &P,
-    registry_keys: &crate::key::RegistryKeys,
-    treasury_keys: &crate::key::TreasuryKeys,
+    registry_keys: &crate::RegistryKeys,
+    treasury_keys: &crate::TreasuryKeys,
     from_state: &zcash_client_backend::data_api::chain::ChainState,
     block: zcash_primitives::block::Block,
     height: BlockHeight,

@@ -1,6 +1,12 @@
 # TEE module changelog
 
-Tracks design-relevant changes to `src/tee.rs`.
+Tracks design-relevant changes to `src/boot/tee.rs`.
+
+## 2026-09-29 — TEE is a boot submodule (#231)
+
+- Moved the enclave seam under `boot::tee`, alongside capsule intake and
+  boot attestation. The existing root module path remains a re-export.
+- Production SNP operations, FakeTee behavior, and feature gates are unchanged.
 
 ## 2026-09-15 — Initial TEE seam (`Tee` trait, `RealSnpTee`, `FakeTee`)
 

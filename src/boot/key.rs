@@ -49,7 +49,7 @@ pub type RegistryKeys = AccountKeys<Registry>;
 
 impl<A: MintAccount> AccountKeys<A> {
     /// Derives the account's keys from the sealed seed; panics only on a cryptographically broken seed.
-    pub(crate) fn derive<P: Parameters>(network: &P, seed: &Secret<[u8; 32]>) -> Self {
+    pub(super) fn derive<P: Parameters>(network: &P, seed: &Secret<[u8; 32]>) -> Self {
         let usk = UnifiedSpendingKey::from_seed(network, seed.expose_secret(), A::ACCOUNT_ID)
             .expect("FATAL: key derivation");
         Self {

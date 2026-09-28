@@ -3,8 +3,8 @@
 //! Format is unchanged from the pre-refactor inlined codec: postcard-serialised
 //! `{ magic, fingerprint, nonce, ciphertext }`, magic = `b"ZNS_SEED"`, 24-byte
 //! `XChaCha20Poly1305` nonce, AAD = `magic || fingerprint`, plaintext = the
-//! 32-byte ZIP-32 seed. The sealing key comes from the [`crate::tee::Tee`]
-//! seam so integration tests can substitute [`crate::tee::FakeTee`] without
+//! 32-byte ZIP-32 seed. The sealing key comes from the [`crate::boot::tee::Tee`]
+//! seam so integration tests can substitute [`crate::boot::tee::FakeTee`] without
 //! forking the crypto.
 
 use std::fs::File;
@@ -20,7 +20,7 @@ use thiserror::Error;
 use zeroize::Zeroize;
 use zip32::fingerprint::SeedFingerprint;
 
-use crate::tee::{Tee, TeeError};
+use crate::boot::tee::{Tee, TeeError};
 
 /// The capsule magic; the first 8 bytes of every ZNS seed capsule.
 pub const MAGIC: [u8; 8] = *b"ZNS_SEED";
@@ -221,7 +221,7 @@ impl Capsule {
 #[cfg(all(test, feature = "fake-tee"))]
 mod tests {
     use super::*;
-    use crate::tee::FakeTee;
+    use crate::boot::tee::FakeTee;
     use rand::rngs::OsRng;
 
     fn a_seed() -> Secret<[u8; SEED_LEN]> {

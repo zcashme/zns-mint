@@ -10,8 +10,8 @@
 use rand::rngs::OsRng;
 use secrecy::Secret;
 use std::fs;
-use zns_mint::capsule::{Capsule, SEED_LEN};
-use zns_mint::tee::FakeTee;
+use zns_mint::boot::capsule::{Capsule, SEED_LEN};
+use zns_mint::boot::tee::FakeTee;
 
 fn main() {
     let seed = Secret::new([0u8; SEED_LEN]);
