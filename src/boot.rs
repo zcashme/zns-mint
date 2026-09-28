@@ -14,7 +14,7 @@ use zip32::fingerprint::SeedFingerprint;
 #[cfg(not(feature = "regtest"))]
 use std::str::FromStr;
 
-use crate::capsule;
+use crate::capsule::{self, Capsule};
 use crate::key::{RegistryKeys, TreasuryKeys};
 use crate::mint::mtp::MtpTracker;
 use crate::mint::presale::{self, AccessCodeKey};
@@ -136,10 +136,9 @@ impl Boot<Network> {
             let blob = capsule::read_capsule_file("keys/zns_seed.capsule").expect(
                 "FATAL: failed to read keys/zns_seed.capsule. The mint cannot boot without the sealed seed.",
             );
-            let capsule =
-                capsule::parse_capsule(&blob).expect("FATAL: failed to parse zns_seed.capsule");
+            let capsule = Capsule::parse(&blob).expect("FATAL: failed to parse zns_seed.capsule");
             tracing::info!("boot: deriving instance-bound sealing key from the TEE");
-            let seed = capsule::unseal_seed(tee.as_ref(), &capsule)
+            let seed = capsule.unseal(tee.as_ref())
                 .expect("FATAL: failed to unseal seed. Capsule tampering, wrong TEE, or wrong capsule for this instance.");
             verify_fingerprint(&seed, SEED_FINGERPRINT_RAW.trim());
             (
