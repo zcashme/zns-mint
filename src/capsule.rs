@@ -48,17 +48,8 @@ pub const CAPSULE_KEY_CONTEXT: &[u8] = b"ZNS_SEED/capsule/v1";
 /// Errors from capsule sealing, parsing, and unsealing.
 #[derive(Debug, Error)]
 pub enum CapsuleError {
-    #[error("capsule magic mismatch (not a ZNS seed capsule)")]
-    BadMagic,
-
-    #[error("capsule nonce length {actual} != expected {expected}")]
-    BadNonce { actual: usize, expected: usize },
-
-    #[error("capsule length {actual} != expected {expected}")]
-    BadLength { actual: usize, expected: usize },
-
-    #[error("capsule ciphertext length {actual} != expected {expected}")]
-    BadCiphertext { actual: usize, expected: usize },
+    #[error("invalid capsule format")]
+    BadCapsule,
 
     #[error("capsule file unreadable: {0}")]
     Read(#[from] std::io::Error),
@@ -99,10 +90,7 @@ pub fn read_capsule_file(path: impl AsRef<Path>) -> Result<Vec<u8>, CapsuleError
     let mut buf = Vec::with_capacity(CAPSULE_LEN + 1);
     limited.read_to_end(&mut buf)?;
     if buf.len() != CAPSULE_LEN {
-        return Err(CapsuleError::BadLength {
-            actual: buf.len(),
-            expected: CAPSULE_LEN,
-        });
+        return Err(CapsuleError::BadCapsule);
     }
     Ok(buf)
 }
@@ -111,10 +99,7 @@ pub fn read_capsule_file(path: impl AsRef<Path>) -> Result<Vec<u8>, CapsuleError
 /// The blob and both variable fields must be the fixed lengths.
 pub fn parse_capsule(blob: &[u8]) -> Result<Capsule, CapsuleError> {
     if blob.len() != CAPSULE_LEN {
-        return Err(CapsuleError::BadLength {
-            actual: blob.len(),
-            expected: CAPSULE_LEN,
-        });
+        return Err(CapsuleError::BadCapsule);
     }
     let capsule: Capsule =
         postcard::from_bytes(blob).map_err(|e| CapsuleError::Parse(e.to_string()))?;
@@ -125,16 +110,10 @@ pub fn parse_capsule(blob: &[u8]) -> Result<Capsule, CapsuleError> {
 /// Nonce and ciphertext are fixed sizes. Checked before decryption.
 fn fixed_fields(capsule: &Capsule) -> Result<(), CapsuleError> {
     if capsule.nonce.len() != NONCE_LEN {
-        return Err(CapsuleError::BadNonce {
-            actual: capsule.nonce.len(),
-            expected: NONCE_LEN,
-        });
+        return Err(CapsuleError::BadCapsule);
     }
     if capsule.ciphertext.len() != CIPHERTEXT_LEN {
-        return Err(CapsuleError::BadCiphertext {
-            actual: capsule.ciphertext.len(),
-            expected: CIPHERTEXT_LEN,
-        });
+        return Err(CapsuleError::BadCapsule);
     }
     Ok(())
 }
@@ -205,7 +184,7 @@ pub fn unseal_seed<T: Tee + ?Sized>(
     capsule: &Capsule,
 ) -> Result<Secret<[u8; SEED_LEN]>, CapsuleError> {
     if capsule.magic != MAGIC {
-        return Err(CapsuleError::BadMagic);
+        return Err(CapsuleError::BadCapsule);
     }
     fixed_fields(capsule)?;
 
@@ -274,8 +253,7 @@ mod tests {
         assert_eq!(out.expose_secret(), seed.expose_secret());
     }
 
-    /// A capsule whose magic no longer says `ZNS_SEED` never even reaches
-    /// AEAD — we fail fast with `BadMagic`.
+    /// Wrong magic is rejected before decryption.
     #[test]
     fn bad_magic_rejected() {
         let tee = FakeTee;
@@ -284,7 +262,7 @@ mod tests {
         capsule.magic[0] ^= 0xFF;
         assert!(matches!(
             unseal_seed(&tee, &capsule),
-            Err(CapsuleError::BadMagic)
+            Err(CapsuleError::BadCapsule)
         ));
     }
 
@@ -325,7 +303,7 @@ mod tests {
         capsule.nonce.truncate(NONCE_LEN - 1);
         assert!(matches!(
             unseal_seed(&tee, &capsule),
-            Err(CapsuleError::BadNonce { .. })
+            Err(CapsuleError::BadCapsule)
         ));
     }
 
@@ -369,13 +347,13 @@ mod bounds {
         let bytes = serialize_capsule(&envelope()).expect("serialize");
         assert!(matches!(
             parse_capsule(&bytes[..bytes.len() - 1]),
-            Err(CapsuleError::BadLength { .. })
+            Err(CapsuleError::BadCapsule)
         ));
         let mut long = bytes.clone();
         long.push(0);
         assert!(matches!(
             parse_capsule(&long),
-            Err(CapsuleError::BadLength { .. })
+            Err(CapsuleError::BadCapsule)
         ));
     }
 
@@ -387,7 +365,7 @@ mod bounds {
         bytes[len_at] = (CIPHERTEXT_LEN - 1) as u8;
         assert!(matches!(
             parse_capsule(&bytes),
-            Err(CapsuleError::BadCiphertext { .. })
+            Err(CapsuleError::BadCapsule)
         ));
     }
 
@@ -399,10 +377,7 @@ mod bounds {
         drop(file);
         assert!(matches!(
             read_capsule_file(&path),
-            Err(CapsuleError::BadLength {
-                actual: n,
-                ..
-            }) if n == CAPSULE_LEN + 1
+            Err(CapsuleError::BadCapsule)
         ));
         let _ = std::fs::remove_file(&path);
     }
