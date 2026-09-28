@@ -10,6 +10,39 @@
 
 use thiserror::Error;
 
+// The production KDF is only compiled on Linux (the sole
+// `RealSnpTee::derive_sealing_key` caller) and in tests (which exercise
+// `bind_context` directly, independent of `/dev/sev-guest`).
+#[cfg(any(target_os = "linux", test))]
+use hmac::{Hmac, Mac};
+#[cfg(any(target_os = "linux", test))]
+use sha2::Sha256;
+
+#[cfg(any(target_os = "linux", test))]
+type HmacSha256 = Hmac<Sha256>;
+
+/// Domain separator for the production sealing-key KDF. Distinct from
+/// `FakeTee`'s domain so a fake key never collides with a production
+/// one derived under the same `context`.
+#[cfg(any(target_os = "linux", test))]
+const SEALING_DOMAIN: &[u8] = b"ZNS_TEE/sealing-key/v1";
+
+/// Mixes `context` into an SNP-derived root key via
+/// `HMAC-SHA256(root, SEALING_DOMAIN || LE32(len(context)) || context)`.
+/// Length-prefixing rules out any two contexts that share a prefix
+/// producing the same key.
+#[cfg(any(target_os = "linux", test))]
+fn bind_context(root: &[u8; 32], context: &[u8]) -> [u8; 32] {
+    let mut mac = HmacSha256::new_from_slice(root).expect("HMAC-SHA256 accepts any key length");
+    mac.update(SEALING_DOMAIN);
+    mac.update(&(context.len() as u32).to_le_bytes());
+    mac.update(context);
+    let bytes = mac.finalize().into_bytes();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    key
+}
+
 #[derive(Debug, Error)]
 pub enum TeeError {
     /// The TEE could not derive a sealing key (firmware unavailable, IOCTL
@@ -58,8 +91,10 @@ impl Attestation {
 /// The TEE boundary. See the module docs for the split of concerns.
 pub trait Tee: Send + Sync {
     /// Derive a per-instance sealing key. `context` disambiguates keys
-    /// derived by the same TEE for different purposes; today the seed
-    /// capsule uses a single well-known context.
+    /// derived by the same TEE for different purposes: distinct
+    /// contexts must always produce distinct keys. Callers today:
+    /// `CAPSULE_KEY_CONTEXT` (seed capsule) and `ACCESS_CODE_KEY_CONTEXT`
+    /// (pre-sale root).
     fn derive_sealing_key(&self, context: &[u8]) -> Result<[u8; 32], TeeError>;
 
     /// Produce a signed attestation report whose `report_data` field
@@ -77,9 +112,11 @@ pub trait Tee: Send + Sync {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RealSnpTee;
 
-/// Derives — never fetches — the sealing key from the SEV-SNP firmware:
-/// `firmware.get_derived_key` returns a VCEK-rooted, per-chip key mixed
-/// from exactly two guest fields, matching the capsule creator:
+/// Two-step derivation: SNP-firmware root → context-bound sealing key.
+///
+/// Step 1 — `firmware.get_derived_key` returns a VCEK-rooted, per-chip
+/// key mixed from exactly two guest fields, matching the capsule
+/// creator:
 ///   guest_policy — launch conditions (debug, SMT, migration)
 ///   measurement  — code identity (hash of the guest image)
 ///
@@ -89,10 +126,17 @@ pub struct RealSnpTee;
 /// (`root_key_select = false`) is stable across reboots; VMRK is random
 /// per launch without a Migration Agent and would brick the capsule on
 /// first reboot.
+///
+/// Step 2 — `bind_context` HMACs the root with the caller's `context`,
+/// so `CAPSULE_KEY_CONTEXT` and `ACCESS_CODE_KEY_CONTEXT` derive
+/// disjoint keys from the same chip. Without this step both callers
+/// would share one SNP-derived key — the [`Tee`] trait contract on
+/// `context` would be silently false in production.
 #[cfg(target_os = "linux")]
 impl Tee for RealSnpTee {
-    fn derive_sealing_key(&self, _context: &[u8]) -> Result<[u8; 32], TeeError> {
+    fn derive_sealing_key(&self, context: &[u8]) -> Result<[u8; 32], TeeError> {
         use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
+        use zeroize::Zeroize;
 
         let mut firmware = Firmware::open()
             .map_err(|e| TeeError::SealingKey(format!("SEV-SNP firmware open: {e}")))?;
@@ -100,9 +144,12 @@ impl Tee for RealSnpTee {
         guest_fields.set_guest_policy(true);
         guest_fields.set_measurement(true);
         let request = DerivedKey::new(false, guest_fields, 0, 0, 0, None);
-        firmware
+        let mut root = firmware
             .get_derived_key(Some(1), request)
-            .map_err(|e| TeeError::SealingKey(format!("SEV-SNP get_derived_key: {e}")))
+            .map_err(|e| TeeError::SealingKey(format!("SEV-SNP get_derived_key: {e}")))?;
+        let key = bind_context(&root, context);
+        root.zeroize();
+        Ok(key)
     }
 
     fn get_attestation(&self, report_data: &[u8; 64]) -> Result<Attestation, TeeError> {
@@ -205,6 +252,68 @@ mod fake {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Cross-platform tests for the production KDF's context-binding step.
+/// These do not exercise `/dev/sev-guest`; they exercise the pure step
+/// that turns the SNP root into a context-scoped key. Runnable on any
+/// target and any feature set — the pre-audit gap was that the
+/// production keying model went untested even under `fake-tee`.
+#[cfg(test)]
+mod bind_context_tests {
+    use super::*;
+    use crate::capsule::CAPSULE_KEY_CONTEXT;
+    use crate::mint::presale::ACCESS_CODE_KEY_CONTEXT;
+
+    /// A synthetic root. Not a real SNP key — the point is only to fix
+    /// the KDF's inputs so the output is reproducible.
+    const ZERO_ROOT: [u8; 32] = [0u8; 32];
+
+    #[test]
+    fn deterministic() {
+        assert_eq!(
+            bind_context(&ZERO_ROOT, b"ctx"),
+            bind_context(&ZERO_ROOT, b"ctx")
+        );
+    }
+
+    /// The property this whole fix delivers: distinct contexts under
+    /// the same root produce distinct keys. Without this, the capsule
+    /// and access-code roots would share one SNP-derived key.
+    #[test]
+    fn distinct_contexts_disjoint_keys() {
+        assert_ne!(
+            bind_context(&ZERO_ROOT, CAPSULE_KEY_CONTEXT),
+            bind_context(&ZERO_ROOT, ACCESS_CODE_KEY_CONTEXT)
+        );
+    }
+
+    /// Length-prefixing rules out extension/prefix collisions: two
+    /// contexts where one is a prefix of the other must derive
+    /// different keys, even though a naive `domain || context`
+    /// concatenation would treat some of them identically.
+    #[test]
+    fn length_prefix_defeats_prefix_collisions() {
+        let a = bind_context(&ZERO_ROOT, b"foo");
+        let b = bind_context(&ZERO_ROOT, b"foobar");
+        assert_ne!(a, b);
+    }
+
+    /// Pinned bytes for `HMAC-SHA256(zero_root, SEALING_DOMAIN ||
+    /// LE32(len) || context)` at each live context. Any independent
+    /// implementation of the KDF must reproduce them; a change to the
+    /// domain, length prefix, or MAC construction turns this red.
+    #[test]
+    fn reference_vectors() {
+        assert_eq!(
+            hex::encode(bind_context(&ZERO_ROOT, CAPSULE_KEY_CONTEXT)),
+            "7aebe36ce1fe731c1a916d8925c3373608da202490eec602d9acbe91042030f8"
+        );
+        assert_eq!(
+            hex::encode(bind_context(&ZERO_ROOT, ACCESS_CODE_KEY_CONTEXT)),
+            "88b9a54ffa3b7d305c6bd1f90c7543329e9b383510e789ff765f9c262761a3d0"
+        );
+    }
+}
 
 #[cfg(all(test, feature = "fake-tee"))]
 mod tests {
