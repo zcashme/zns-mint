@@ -2,6 +2,15 @@
 
 Tracks design-relevant changes to `src/capsule.rs`.
 
+## 2026-09-28 — One structural capsule error (#227)
+
+- Magic, file-length, nonce-length, and ciphertext-length failures return
+  the plain `BadCapsule` variant, displayed as `invalid capsule format`.
+  Boot handles each failure identically; the separate variants and length
+  fields are removed. Validation order and the bounded file read stay the same.
+- Existing rejection tests expect `BadCapsule`; round-trip and authentication
+  tests retain their existing assertions.
+
 ## 2026-09-23 — Capsule bytes are bounded before they are parsed
 
 - `read_capsule_file` reads at most `CAPSULE_LEN + 1` bytes. Parse
