@@ -608,11 +608,10 @@ fn decrypt_treasury_tx_with_fvk(
 // NameNoteQueue — Name Notes through canonical resolution
 // ---------------------------------------------------------------------------
 
-/// State of an authorized Name Note order.
+/// An outstanding authorization or its canonical observation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NameNoteState {
     Authorized,
-    Submitted,
     Seen,
 }
 
@@ -682,7 +681,7 @@ impl NameNoteQueue {
             .any(|(note, _, state)| *state != NameNoteState::Seen && note.name() == name)
     }
 
-    /// The authorized orders awaiting broadcast, in admission order.
+    /// Outstanding authorized orders, in admission order.
     pub fn authorized_notes(&self) -> Vec<NameNote> {
         self.orders
             .iter()
@@ -699,17 +698,6 @@ impl NameNoteQueue {
             .position(|(note, _, state)| *state != NameNoteState::Seen && note.name() == name)
             .expect("FATAL: no unresolved order owns this name");
         self.orders.remove(index);
-    }
-
-    /// Records a successful broadcast. The order stays queued until canonical
-    /// observation, so later claim payments cannot take ownership.
-    pub fn mark_note_submitted(&mut self, name: &Name) {
-        let (_, _, state) = self
-            .orders
-            .iter_mut()
-            .find(|(note, _, state)| *state != NameNoteState::Seen && note.name() == name)
-            .expect("FATAL: no unresolved order owns this name");
-        *state = NameNoteState::Submitted;
     }
 }
 
@@ -1023,10 +1011,9 @@ mod tests {
         assert_eq!(queue.authorized_notes().len(), 1);
         assert!(queue.note_pending(claim.name()));
 
-        queue.mark_note_submitted(claim.name());
         assert!(!queue.admit(h(12), claim.clone()));
         assert!(queue.note_pending(claim.name()));
-        assert!(queue.authorized_notes().is_empty());
+        assert_eq!(queue.authorized_notes(), vec![claim.clone()]);
         // The original origin survives a rewind past the re-derivation.
         queue.rewind_to(h(11));
         assert!(queue.note_pending(claim.name()));
@@ -1104,14 +1091,12 @@ mod tests {
 
         let mut queue = NameNoteQueue::default();
         queue.admit(height(105), release.clone());
-        queue.mark_note_submitted(release.name());
         queue.reconcile_seen(&MAIN_NETWORK, &registry);
         assert!(!queue.note_pending(release.name()));
         assert!(queue.authorized_notes().is_empty());
 
         // The seen release frees the name for the reclaim.
         queue.admit(height(126), reclaim.clone());
-        queue.mark_note_submitted(reclaim.name());
         queue.reconcile_seen(&MAIN_NETWORK, &registry);
         assert!(!queue.note_pending(reclaim.name()));
 
@@ -1128,7 +1113,6 @@ mod tests {
         let height = |n| BlockHeight::from_u32(n);
         let mut queue = NameNoteQueue::default();
         queue.admit(height(105), release.clone());
-        queue.mark_note_submitted(release.name());
         queue.reconcile_seen(&MAIN_NETWORK, &registry);
         assert!(!queue.note_pending(release.name()));
 
@@ -1192,7 +1176,6 @@ mod tests {
 
         let mut queue = NameNoteQueue::default();
         assert!(queue.admit(height(100), claim.clone()));
-        queue.mark_note_submitted(claim.name());
         queue.reconcile_seen(&MAIN_NETWORK, &registry);
         assert!(!queue.note_pending(claim.name()));
 
@@ -1239,9 +1222,7 @@ mod tests {
         assert!(queue.admit(height, update));
         assert!(!queue.admit(height, release.clone()));
         assert!(queue.note_pending(&name));
-        queue.mark_note_submitted(&name);
-        // Submitted still owns the name; the drain re-offers nothing.
-        assert!(queue.authorized_notes().is_empty());
+        assert_eq!(queue.authorized_notes().len(), 1);
         assert!(!queue.admit(height, release.clone()));
 
         let other_name = Name::parse("bob").unwrap();

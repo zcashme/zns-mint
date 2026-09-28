@@ -1,5 +1,20 @@
 # main.changelog.md
 
+## 2026-09-28 — Record accepted NameNote sends and retry outstanding orders (#202, #225)
+
+- The drain records a NameNote transaction only after submission succeeds.
+  Rejection leaves its inputs available and the original order queued.
+  This deliberately differs from the upstream persistent-wallet contract
+  (`zcash_client_backend` 0.24.0, `data_api.rs:3912`), which requires
+  recording before broadcast. The mint wallet is in memory and the drain
+  executes serially; acceptance followed by a process failure is not durable.
+- Outstanding orders stay authorized until canonical observation. The
+  release-only unavailable-predecessor drop is removed; `AuthorityUnavailable`
+  waits on the wallet instead. Claims select the canonical pool head rather
+  than another spendable anchor, preventing an outstanding claim from being
+  built again with a different authority. This permits one outstanding claim
+  transaction at a time; updates and releases retain their own predecessors.
+
 ## 2026-09-28 — The order drain walks the queue by name (#223)
 
 - The NameNote drain is `for note in name_notes.authorized_notes()`

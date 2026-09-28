@@ -1,6 +1,5 @@
 //! The write path: one prepare function resolves the law's NameNote
-//! against the wallet and stages, proves, signs, and records the
-//! transaction.
+//! against the wallet and stages, proves, and signs the transaction.
 
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
@@ -61,7 +60,7 @@ impl std::fmt::Display for PrepareError {
 
 impl std::error::Error for PrepareError {}
 
-/// Builds and records a Name Note transaction for any action.
+/// Builds a Name Note transaction and its fee without recording a send.
 /// `authority_nf` is the claim anchor or the predecessor; Treasury fee
 /// notes cover the fee.
 #[allow(clippy::too_many_arguments)]
@@ -76,7 +75,7 @@ pub fn prepare<P: Parameters>(
     authority_nf: orchard::note::Nullifier,
     tip: BlockHeight,
     target_height: BlockHeight,
-) -> Result<Transaction, PrepareError> {
+) -> Result<(Transaction, Zatoshis), PrepareError> {
     let authority = wallet
         .unspent_ironwood_note_by_nullifier(REGISTRY_ACCOUNT, authority_nf, TargetHeight::from(tip))
         .ok_or(PrepareError::AuthorityUnavailable)?;
@@ -216,9 +215,7 @@ pub fn prepare<P: Parameters>(
             &StandardFeeRule::Zip317,
         )
         .map_err(PrepareError::Builder)?;
-    let transaction = built.transaction().clone();
-    wallet.record_sent(&transaction, target_height, transaction_fee);
-    Ok(transaction)
+    Ok((built.transaction().clone(), transaction_fee))
 }
 
 fn witness_at<P: Parameters>(
