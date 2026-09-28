@@ -1,5 +1,21 @@
 # `mint/note.rs` design record
 
+## 2026-09-28 — The queue resolves orders by name (#223)
+
+- `NameNoteQueue` loses its index surface (`len`, `is_empty`, `entry`,
+  `remove`, `mark_submitted`); the drain walks `authorized_notes()` and
+  resolves by name: `drop_note` removes a dead order,
+  `mark_note_submitted` records a broadcast. Resolution keys on the
+  name because `admit` guarantees at most one unresolved order per
+  name. `rewind_to` merges `rewind_seen` + `truncate_to` (one reorg
+  event, order-independent); `note_pending` replaces `claim_pending`
+  and `transition_pending` (every guard asks name-ownership; the verb
+  never matters — three of four sites require a live record, which
+  makes a pending claim unreachable there). Admission, confirmation,
+  and reorg semantics are unchanged.
+- Tests observe states through behavior — the pass, the predicates,
+  and `rewind_to` — instead of `entry`/field access.
+
 ## 2026-09-25 — One unresolved NameNote per name
 
 - `NameNoteQueue` admits at most one unresolved transition per name.

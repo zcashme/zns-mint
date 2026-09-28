@@ -18,7 +18,7 @@ use zcash_protocol::value::Zatoshis;
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::{assemble, decrypt_treasury_transaction, NameNoteQueue, NameNoteState};
+use zns_mint::mint::note::{assemble, decrypt_treasury_transaction, NameNoteQueue};
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
@@ -229,8 +229,7 @@ async fn main() {
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
-            name_notes.rewind_seen();
-            name_notes.truncate_to(rewound);
+            name_notes.rewind_to(rewound);
             name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
             echoes.retain(|(_, _, height)| *height <= rewound);
@@ -330,7 +329,7 @@ async fn main() {
                 match inbound {
                     MintInbound::Request(request) => {
                         if let Request::Claim { name, .. } = &request {
-                            if name_notes.claim_pending(name) {
+                            if name_notes.note_pending(name) {
                                 tracing::debug!(
                                     %txid,
                                     name = %name.as_str(),
@@ -496,7 +495,7 @@ async fn main() {
                         let Some(record) = registry.record(name).cloned() else {
                             break 'lane true;
                         };
-                        if name_notes.transition_pending(name) {
+                        if name_notes.note_pending(name) {
                             tracing::debug!(
                                 name = %name.as_str(),
                                 action = action.as_str(),
@@ -596,7 +595,7 @@ async fn main() {
                 }
                 // A transition already admitted for this current Name Note
                 // owns its predecessor. Do not consume this OTP response.
-                if name_notes.transition_pending(&echo.name) {
+                if name_notes.note_pending(&echo.name) {
                     tracing::debug!(
                         name = %echo.name.as_str(),
                         action = echo.action.as_str(),
@@ -636,26 +635,16 @@ async fn main() {
         // `releases_due` re-derives the same notes per tip, so
         // admission is idempotent.
         for (name, release_note) in registry.releases_due(mtp_now) {
-            if name_notes.transition_pending(&name) {
+            if name_notes.note_pending(&name) {
                 continue;
             }
             tracing::info!(name = %name.as_str(), "lifecycle release authorized");
             name_notes.admit(tip, release_note);
         }
 
-        // --- NameNote enactment ---
         // The order drain: one broadcast per decision. The queue tracks
         // authorization through submission and canonical observation.
-        let mut index = 0;
-        while index < name_notes.len() {
-            let (note, state) = {
-                let (note, _, state) = name_notes.entry(index);
-                (note.clone(), state)
-            };
-            if state != NameNoteState::Authorized {
-                index += 1;
-                continue;
-            }
+        for note in name_notes.authorized_notes() {
             // Authority: a claim spends a lineage pool anchor; an update
             // or release spends the predecessor — the record's nullifier
             // matched by commitment.
@@ -666,7 +655,7 @@ async fn main() {
                         name = %note.name().as_str(),
                         "claim order dropped: the name is live on the chain"
                     );
-                    name_notes.remove(index);
+                    name_notes.drop_note(note.name());
                     continue;
                 }
                 match registry.anchor_pool().iter().copied().find(|nf| {
@@ -684,7 +673,6 @@ async fn main() {
                             name = %note.name().as_str(),
                             "no available claim anchor (all locked or spent)"
                         );
-                        index += 1;
                         continue;
                     }
                 }
@@ -700,7 +688,7 @@ async fn main() {
                             action = note.action().as_str(),
                             "order dropped: its predecessor is no longer current"
                         );
-                        name_notes.remove(index);
+                        name_notes.drop_note(note.name());
                         continue;
                     }
                 }
@@ -723,7 +711,7 @@ async fn main() {
                     name = %note.name().as_str(),
                     "release order sent: its transaction is still open"
                 );
-                name_notes.remove(index);
+                name_notes.drop_note(note.name());
                 continue;
             }
 
@@ -746,7 +734,6 @@ async fn main() {
                         action = note.action().as_str(),
                         "NameNote order awaits Treasury fee funds"
                     );
-                    index += 1;
                     continue;
                 }
                 Err(assemble::PrepareError::AuthorityUnavailable) => {
@@ -755,7 +742,6 @@ async fn main() {
                         action = note.action().as_str(),
                         "NameNote order awaits its authority note"
                     );
-                    index += 1;
                     continue;
                 }
                 Err(error) => {
@@ -765,7 +751,6 @@ async fn main() {
                         action = note.action().as_str(),
                         "NameNote order could not be built"
                     );
-                    index += 1;
                     continue;
                 }
             };
@@ -777,8 +762,7 @@ async fn main() {
                     action = note.action().as_str(),
                     "NameNote order sent"
                 );
-                name_notes.mark_submitted(index);
-                index += 1;
+                name_notes.mark_note_submitted(note.name());
             } else {
                 tracing::error!(
                     txid = %transaction.txid(),
@@ -786,10 +770,10 @@ async fn main() {
                     action = note.action().as_str(),
                     "NameNote submission rejected — inputs stranded until expiry"
                 );
-                index += 1;
             }
         }
 
+        // A new MTP day sweeps the Treasury to the vault once.
         if today > previous_day {
             match treasury::sweep_to_vault(
                 &network,
