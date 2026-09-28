@@ -1,5 +1,14 @@
 # main.changelog.md
 
+## 2026-09-28 — The order drain walks the queue by name (#223)
+
+- The NameNote drain is `for note in name_notes.authorized_notes()`
+  with `drop_note`/`mark_note_submitted` resolutions; the raw index
+  walk and its five queue accessors are gone. `note_pending` replaces
+  `claim_pending`/`transition_pending` at the four guard sites, and
+  the reorg rewind is one `rewind_to` call. The vault sweep rides one
+  comment line. No decision, log, or ordering change.
+
 ## 2026-09-24 — A claim follows the earliest payment
 
 - `RequestQueue` keeps the earliest claim payment for each name;
