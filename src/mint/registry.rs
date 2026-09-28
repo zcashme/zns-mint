@@ -247,10 +247,10 @@ impl Registry {
             .filter(|nf| self.anchors.contains(nf))
             .copied()
             .collect();
-        // Facts first: the pool follows every spent standing anchor
-        // and adopts the created successor — whatever the rest of the
-        // transaction turns out to be. An unbacked claim retires
-        // nothing and adopts nothing: both are no-ops.
+        // The pool follows the chain: spent anchors retire whatever the
+        // verdict — the notes are consumed on chain. A successor joins
+        // one-for-one, only when exactly one anchor retired: an
+        // unbacked claim adopts nothing.
         self.anchors.retire_spent(nfs, successor, height);
 
         // The law: a well-formed claim spends exactly one anchor,
@@ -906,7 +906,8 @@ mod tests {
         assert!(!r.anchor_pool().contains(&a1));
         assert!(r.record(&test_name()).is_none());
 
-        // Two anchors: retire both, keep the successor, do not register.
+        // Two anchors: retire both, adopt nothing, do not register —
+        // one-for-one means a 2:1 spend is not a succession.
         r.adopt_anchor(h, a1);
         assert!(!r.accept_claim(
             &MAIN_NETWORK,
@@ -918,7 +919,39 @@ mod tests {
             mtp
         ));
         assert!(!r.anchor_pool().contains(&a2));
-        assert!(r.anchor_pool().contains(&succ));
+        assert!(!r.anchor_pool().contains(&succ));
+        assert!(r.record(&test_name()).is_none());
+    }
+
+    /// An unbacked claim (no live anchor spent) whose transaction still
+    /// creates a successor-shaped zero-value output: the claim is
+    /// rejected AND the successor is not adopted — authority cannot be
+    /// minted, only succeeded.
+    #[test]
+    fn unbacked_claim_with_successor_adopts_nothing() {
+        let mut r = Registry::new();
+        let h = BlockHeight::from_u32(10);
+        let mtp = ts(1_700_000_000);
+        let anchor = nullifier(1);
+        r.adopt_anchor(h, anchor);
+        let claim = NameNote::Claim {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+
+        assert!(!r.accept_claim(
+            &MAIN_NETWORK,
+            &claim,
+            nullifier(21),
+            Some(nullifier(200)),
+            &[nullifier(9)],
+            h,
+            mtp
+        ));
+        assert!(r.anchor_pool().contains(&anchor));
+        assert!(!r.anchor_pool().contains(&nullifier(200)));
+        assert_eq!(r.anchor_pool().len(), 1);
         assert!(r.record(&test_name()).is_none());
     }
 
