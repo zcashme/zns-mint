@@ -2,6 +2,20 @@
 
 Tracks design-relevant changes to `src/capsule.rs`.
 
+## 2026-09-28 — Capsule operations are methods (#229)
+
+- `Capsule::seal` and `Capsule::parse` construct the envelope;
+  `unseal` and `serialize` operate on it. The shared nonce/ciphertext check
+  is the private `validate_lengths` method. `read_capsule_file` remains a
+  free function for bounded filesystem intake.
+- The postcard layout, public fields, validation order, AEAD/AAD,
+  fingerprint check, and zeroization are unchanged. Existing upstream
+  `Aead` operations (`aead` 0.5.2, `src/lib.rs:167`) and ZIP-32
+  `SeedFingerprint::from_seed` (`zip32` 0.2.1, `src/fingerprint.rs:46`)
+  remain the implementation; no crypto wrapper or new type is introduced.
+- Boot, the fake-capsule writer, and existing tests use the method API.
+  Regtest and FakeTee selection are unchanged.
+
 ## 2026-09-28 — One structural capsule error (#227)
 
 - Magic, file-length, nonce-length, and ciphertext-length failures return

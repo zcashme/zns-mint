@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-28 — Seed intake uses Capsule methods (#229)
+
+- Boot calls `Capsule::parse` and `capsule.unseal` after the existing bounded
+  file read. Seed verification, derivation, error messages, and TEE selection
+  are unchanged.
+
 ## 2026-09-27 — One build-selected `Network` alias, one `start` (issue #211)
 
 - The three cfg-gated `Boot::start` impls (`Boot<MainNetwork>`,
