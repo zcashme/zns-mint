@@ -10,7 +10,7 @@
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
-use zcash_client_backend::data_api::wallet::{ConfirmationsPolicy, TargetHeight};
+use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_protocol::consensus::{BlockHeight, BranchId};
 use zcash_protocol::value::Zatoshis;
@@ -23,7 +23,7 @@ use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
 use zns_mint::mint::{
-    relay, watch_mempool, Action, MintInbound, OtpMemo, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    relay, watch_mempool, Action, MintInbound, OtpMemo, Request, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{
     CanonicalBlockSource, JsonRpc, MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE,
@@ -642,8 +642,6 @@ async fn main() {
             name_notes.admit(tip, release_note);
         }
 
-        // The order drain: one broadcast per decision. The queue tracks
-        // authorization through submission and canonical observation.
         for note in name_notes.authorized_notes() {
             // Authority: a claim spends a lineage pool anchor; an update
             // or release spends the predecessor — the record's nullifier
@@ -658,20 +656,12 @@ async fn main() {
                     name_notes.drop_note(note.name());
                     continue;
                 }
-                match registry.anchor_pool().iter().copied().find(|nf| {
-                    wallet
-                        .unspent_ironwood_note_by_nullifier(
-                            REGISTRY_ACCOUNT,
-                            *nf,
-                            TargetHeight::from(tip),
-                        )
-                        .is_some()
-                }) {
+                match registry.anchor_pool().iter().next().copied() {
                     Some(nf) => nf,
                     None => {
                         tracing::warn!(
                             name = %note.name().as_str(),
-                            "no available claim anchor (all locked or spent)"
+                            "no claim anchor in the pool"
                         );
                         continue;
                     }
@@ -693,29 +683,7 @@ async fn main() {
                     }
                 }
             };
-            // A release whose predecessor the wallet will not release is
-            // this order's own open send — re-derivation re-admits
-            // releases every tip they stay due, so the churn self-heals;
-            // an update in the same shape may be racing a sibling, and
-            // stays queued instead.
-            if note.action().is_release()
-                && wallet
-                    .unspent_ironwood_note_by_nullifier(
-                        REGISTRY_ACCOUNT,
-                        authority_nf,
-                        TargetHeight::from(tip),
-                    )
-                    .is_none()
-            {
-                tracing::debug!(
-                    name = %note.name().as_str(),
-                    "release order sent: its transaction is still open"
-                );
-                name_notes.drop_note(note.name());
-                continue;
-            }
-
-            let transaction = match assemble::prepare(
+            let (transaction, fee) = match assemble::prepare(
                 &network,
                 &mut wallet,
                 &treasury_keys,
@@ -756,19 +724,19 @@ async fn main() {
             };
 
             if source.submit(&transaction, "NameNote").await {
+                wallet.record_sent(&transaction, target_height, fee);
                 tracing::info!(
                     txid = %transaction.txid(),
                     name = %note.name().as_str(),
                     action = note.action().as_str(),
                     "NameNote order sent"
                 );
-                name_notes.mark_note_submitted(note.name());
             } else {
                 tracing::error!(
                     txid = %transaction.txid(),
                     name = %note.name().as_str(),
                     action = note.action().as_str(),
-                    "NameNote submission rejected — inputs stranded until expiry"
+                    "NameNote submission rejected — order will retry"
                 );
             }
         }

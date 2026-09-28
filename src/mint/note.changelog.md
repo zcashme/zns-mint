@@ -1,5 +1,16 @@
 # `mint/note.rs` design record
 
+## 2026-09-28 — Outstanding orders retry through wallet expiry (#202, #225)
+
+- `NameNoteState` retains `Authorized` and `Seen`; `Submitted` and
+  `mark_note_submitted` are removed. An outstanding order remains authorized
+  until canonical observation, preserving its original admission and name
+  reservation. Existing confirmation and reorg reconciliation stay intact.
+- `prepare` returns the transaction and its fee without recording a send.
+  The drain records accepted submissions. The wallet already blocks recorded
+  unmined spends until expiry, so retries wait before expiry and resume after
+  it without a queue expiry transition or new wallet API.
+
 ## 2026-09-28 — The queue resolves orders by name (#223)
 
 - `NameNoteQueue` loses its index surface (`len`, `is_empty`, `entry`,
