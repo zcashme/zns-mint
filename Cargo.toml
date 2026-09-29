@@ -52,6 +52,9 @@ tonic = "0.14"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "webpki-roots"] }
+# ureq (the AMD KDS fetch) enables rustls/ring and hyper-rustls enables
+# rustls/aws-lc-rs. Boot installs this provider as the process default.
+rustls = { version = "0.23", default-features = false, features = ["std", "aws-lc-rs"] }
 http-body-util = "0.1"
 http = "1"
 bytes = "1"

@@ -2,6 +2,13 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-30 — Boot installs a Rustls provider before HTTPS
+
+- The AMD KDS fetch uses ureq, which links Rustls with ring. The mint's
+  own HTTPS client links Rustls with aws-lc-rs. With both providers in
+  the binary, Rustls will not pick a default, so boot installs aws-lc-rs
+  before the first request.
+
 ## 2026-09-30 — Fingerprint is bound by the keygen attestation
 
 - Boot reads `keys/zns_mint.conf` for the network, the expected seed
