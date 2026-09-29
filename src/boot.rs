@@ -45,6 +45,8 @@ use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata};
 pub struct Boot<P: Parameters> {
     /// verified: boot-to-loop consensus — the loop never discovers parameters
     pub network: P,
+    /// verified: Registry birth and the run loop's reorg boundary
+    pub birthday: BlockHeight,
     /// acquired: boot proved that both Zebra transports are live
     pub chain: ChainClient,
     /// produced: trees seeded from the verified origin
@@ -108,7 +110,7 @@ fn boot_network() -> Network {
     }
 }
 
-/// First block the mint observes; everything before it is pre-birth.
+/// Registry birth and the mint's MTP day-zero block.
 #[cfg(not(feature = "regtest"))]
 #[cfg(not(feature = "testnet"))]
 const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(3_400_000);
@@ -121,6 +123,9 @@ const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(4_338_933);
 /// owns is earlier.
 #[cfg(feature = "regtest")]
 const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(100);
+
+/// Wallet history before birth; regtest retains its fixture boundary.
+const SCAN_LOOKBACK_BLOCKS: u32 = if cfg!(feature = "regtest") { 0 } else { 100 };
 
 impl Boot<Network> {
     /// Boot sequence for this build's network.
@@ -271,6 +276,7 @@ impl Boot<Network> {
 
             let _ = crate::mint::apply_block(
                 &network,
+                MINT_BIRTHDAY,
                 &registry_keys,
                 &treasury_keys,
                 &from_state,
@@ -368,6 +374,7 @@ impl Boot<Network> {
 
         Boot {
             network,
+            birthday: MINT_BIRTHDAY,
             chain: chain_client,
             cursor,
             wallet,
@@ -507,19 +514,19 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 // Step 3: Initialize (origin checkpoint, subtree roots, wallet, MTP)
 // ---------------------------------------------------------------------------
 
-/// Fetches the origin treestate from Zebra: the block before the birthday.
+/// Fetches the treestate immediately before the wallet scan window.
 /// The checkpoint height must sit at or after every pool's activation —
 /// `z_gettreestate` omits pool sections that were never active.
 ///
 /// Zebra is part of the same measured TEE image; its identity is guaranteed
 /// by the SEV-SNP attestation, not by runtime RPC checks.
 async fn origin_checkpoint(rpc: &zcash::JsonRpc) -> ChainState {
-    let checkpoint_height = MINT_BIRTHDAY - 1;
+    let checkpoint_height = MINT_BIRTHDAY - SCAN_LOOKBACK_BLOCKS - 1;
 
     let chain_state = rpc
         .chain_state_at(checkpoint_height)
         .await
-        .expect("FATAL: birthday treestate unavailable from Zebra");
+        .expect("FATAL: wallet origin treestate unavailable from Zebra");
 
     tracing::info!(
         "boot: origin checkpoint at height {}, hash {}",

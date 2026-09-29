@@ -1,5 +1,14 @@
 # main.changelog.md
 
+## 2026-09-29 — Wallet lookback does not widen Registry reorgs (#239)
+
+- The loop receives boot's fixed birthday and passes it to block
+  application. The ancestor walk stops if a fork crosses birthday,
+  even though wallet metadata now extends into the preceding 100 blocks.
+- A successful wallet truncation that falls back below birthday also
+  stops before Registry, MTP, or request state is rewound. Retained wallet
+  history does not authorize removing or replacing the ceremony.
+
 ## 2026-09-28 — Record accepted NameNote sends and retry outstanding orders (#202, #225)
 
 - The drain records a NameNote transaction only after submission succeeds.
