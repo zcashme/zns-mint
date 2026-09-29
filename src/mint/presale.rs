@@ -3,7 +3,7 @@
 //! `zn_names` is read once at boot and re-read once per MTP day by
 //! a background fetch whose result installs on completion; claims
 //! consult the cache synchronously — Supabase is never on a claim's
-//! path. Every row is protected; `expires_at`
+//! path. Every row is protected; `expiry_at`
 //! (`timestamptz`, nullable) is either a lift moment, judged against
 //! the current MTP per claim, or forever. A missing row, or a lift
 //! moment the MTP has reached, is unprotected. The six-digit code is not
@@ -12,6 +12,7 @@
 //! access-code-v1 HMAC construction. Redemption is the name live in
 //! the registry; the mint never writes Supabase.
 
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -172,14 +173,15 @@ pub fn derive_access_code_key(private_key: &[u8]) -> Zeroizing<[u8; 32]> {
     key
 }
 
-/// A row from `zn_names`. `normalized_name` must parse as a [`Name`];
-/// `expires_at` must be RFC 3339 or null. Other columns are ignored
-/// by serde's default field handling.
+/// A row from `zn_names`: `id` keys the cursor, `name` must parse
+/// as a [`Name`], `expiry_at` is RFC 3339 or null (forever). Other
+/// columns are ignored.
 #[derive(Deserialize)]
 struct ProtectedRow {
-    normalized_name: String,
+    id: String,
+    name: String,
     #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
-    expires_at: Option<Timestamp>,
+    expiry_at: Option<Timestamp>,
 }
 
 /// Deserialize `timestamptz` in the RFC 3339 shape PostgREST returns
@@ -226,22 +228,31 @@ impl ProtectedNames {
 }
 
 /// Reads the whole table, `PAGE_ROWS` at a time, keyset-paginated
-/// by name so concurrent inserts or deletes cannot shift the
-/// window. The first page carries the server's exact row count,
-/// and the read installs only when every counted row landed — so
-/// a duplicate spanning a page boundary, invisible to the cursor,
-/// refuses the read. Stops on a short page; refuses a read needing
-/// more than `MAX_PAGES` full pages. Any failure rejects the whole
-/// read (`None`) — a caller keeps what it has.
+/// by the unique `(name, id)`: inserts and deletes cannot shift
+/// the window, and no row can be skipped or repeated. The first
+/// page carries the server's exact row count; the read installs
+/// only when every counted row landed — duplicates coalesce
+/// wherever their pages arrive. Stops on a short page; refuses a
+/// read needing more than `MAX_PAGES` full pages. Any failure
+/// rejects the whole read (`None`) — a caller keeps what it has.
 pub async fn fetch() -> Option<ProtectedNames> {
     let client = https_client();
     let mut rows = BTreeMap::new();
-    let mut after: Option<String> = None;
+    let mut read = 0usize;
+    let mut coalesced = 0usize;
+    let mut after: Option<(String, String)> = None;
     let mut total: Option<usize> = None;
     let mut pages = 0;
     loop {
         let want_total = total.is_none();
-        let (page, counted) = fetch_page(&client, after.as_deref(), want_total).await?;
+        let (page, counted) = fetch_page(
+            &client,
+            after
+                .as_ref()
+                .map(|(name, id)| (name.as_str(), id.as_str())),
+            want_total,
+        )
+        .await?;
         pages += 1;
         if pages > MAX_PAGES && !page.is_empty() {
             tracing::warn!("pre-sale fetch exceeded the page ceiling");
@@ -249,14 +260,27 @@ pub async fn fetch() -> Option<ProtectedNames> {
         }
         total = total.or(counted);
         let short = page.len() < PAGE_ROWS;
-        let last = page.last().map(|row| row.normalized_name.clone());
+        let last = page.last().map(|row| (row.name.clone(), row.id.clone()));
+        let before = rows.len();
+        let page_len = page.len();
+        read += page_len;
         absorb(page, &mut rows)?;
+        coalesced += page_len - (rows.len() - before);
         if short {
             return match total {
-                Some(total) if total == rows.len() => Some(ProtectedNames(rows)),
+                Some(total) if total == read => {
+                    tracing::info!(
+                        names = rows.len(),
+                        rows = read,
+                        coalesced,
+                        "pre-sale fetch: table loaded"
+                    );
+                    Some(ProtectedNames(rows))
+                }
                 Some(total) => {
                     tracing::warn!(
                         counted = total,
+                        read,
                         installed = rows.len(),
                         "pre-sale fetch did not install every counted row"
                     );
@@ -272,23 +296,19 @@ pub async fn fetch() -> Option<ProtectedNames> {
     }
 }
 
-/// One page of rows after `after` (the previous page's last name),
-/// ordered by name, with the server's exact row count when
-/// `want_total`. The cursor is a value, not a position, so
-/// concurrent inserts and deletes cannot make pages repeat or
-/// skip. `None` on any transport, timeout, status, size, or parse
-/// failure; each is warned here. One end-to-end timeout covers the
-/// request and the body.
+/// One page of rows after `after` (the previous page's last
+/// `(name, id)`), ordered by `(name, id)`, with the server's exact
+/// row count when `want_total`. `None` on any transport, timeout,
+/// status, size, or parse failure; each is warned here. One
+/// end-to-end timeout covers the request and the body.
 async fn fetch_page(
     client: &HttpsClient,
-    after: Option<&str>,
+    after: Option<(&str, &str)>,
     want_total: bool,
 ) -> Option<(Vec<ProtectedRow>, Option<usize>)> {
-    let filter = after.map_or(String::new(), |after| {
-        format!("&normalized_name=gt.{after}")
-    });
+    let filter = keyset_filter(after);
     let url = format!(
-        "{}?select=normalized_name,expires_at&order=normalized_name.asc&limit={PAGE_ROWS}{filter}",
+        "{}?select=id,name,expiry_at&order=name.asc,id.asc&limit={PAGE_ROWS}{filter}",
         presale_rest_url(),
     );
     let uri: Uri = url.parse().ok()?;
@@ -336,23 +356,48 @@ async fn fetch_page(
     }
 }
 
-/// Validates rows into the map. One bad row — a `normalized_name`
-/// that is not a lawful [`Name`], or a duplicate — rejects the whole
-/// read: an existing protection can freeze, never silently drop.
+/// The filter for rows strictly after `(name, id)`: every later
+/// name, or the same name with a later id. Names are `[a-z0-9]`
+/// and ids UUID text, so no value needs escaping.
+fn keyset_filter(after: Option<(&str, &str)>) -> String {
+    match after {
+        None => String::new(),
+        Some((name, id)) => {
+            format!("&or=(name.gt.{name},and(name.eq.{name},id.gt.{id}))")
+        }
+    }
+}
+
+/// Validates rows into the map, coalescing a re-purchase into the
+/// strongest bought term: `Forever` over any expiry, the later
+/// expiry over the earlier. An unlawful `name` rejects the whole
+/// read — corruption, not a purchase; nothing paid-for is dropped.
 fn absorb(rows: Vec<ProtectedRow>, map: &mut BTreeMap<Name, ProtectionStatus>) -> Option<()> {
     for row in rows {
-        let name = Name::parse(&row.normalized_name)?;
-        let status = match row.expires_at {
+        let name = Name::parse(&row.name)?;
+        let status = match row.expiry_at {
             Some(ts) => ProtectionStatus::WithExpiry(ts),
             None => ProtectionStatus::Forever,
         };
-        if map.insert(name, status).is_some() {
-            tracing::warn!(
-                name = %row.normalized_name,
-                "pre-sale fetch: duplicate normalized_name"
-            );
-            return None;
-        }
+        match map.entry(name) {
+            Entry::Vacant(entry) => {
+                entry.insert(status);
+            }
+            Entry::Occupied(mut entry) => {
+                let strongest = match (*entry.get(), status) {
+                    (ProtectionStatus::Forever, _) | (_, ProtectionStatus::Forever) => {
+                        ProtectionStatus::Forever
+                    }
+                    (ProtectionStatus::WithExpiry(have), ProtectionStatus::WithExpiry(got)) => {
+                        ProtectionStatus::WithExpiry(have.max(got))
+                    }
+                    (ProtectionStatus::Unprotected, _) | (_, ProtectionStatus::Unprotected) => {
+                        unreachable!("Unprotected is never stored")
+                    }
+                };
+                entry.insert(strongest);
+            }
+        };
     }
     Some(())
 }
@@ -411,10 +456,11 @@ mod tests {
         Name::parse("alice").unwrap()
     }
 
-    fn row_with(name: &str, expires_at: Option<Timestamp>) -> ProtectedRow {
+    fn row_with(name: &str, expiry_at: Option<Timestamp>) -> ProtectedRow {
         ProtectedRow {
-            normalized_name: name.to_string(),
-            expires_at,
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            expiry_at,
         }
     }
 
@@ -467,7 +513,7 @@ mod tests {
         assert!(!table.is_protected(&alice(), ts(1_700_000_000)));
     }
 
-    /// Exact-second boundary: `mtp == expires_at` means the lift
+    /// Exact-second boundary: `mtp == expiry_at` means the lift
     /// moment has been reached; the row is unprotected.
     #[test]
     fn expiry_boundary_is_inclusive_unprotected() {
@@ -513,7 +559,7 @@ mod tests {
             row_with("alice", Some(ts(2_000_000_000))),
             row_with("bob", None),
         ];
-        assert_eq!(absorb(rows, &mut map), Some(()));
+        absorb(rows, &mut map).unwrap();
         let names = ProtectedNames(map);
         assert_eq!(
             names.get(&Name::parse("alice").unwrap()),
@@ -535,7 +581,7 @@ mod tests {
     fn absorb_keeps_expired_rows() {
         let mut map = BTreeMap::new();
         let rows = vec![row_with("alice", Some(ts(1_600_000_000)))];
-        assert_eq!(absorb(rows, &mut map), Some(()));
+        absorb(rows, &mut map).unwrap();
         assert_eq!(
             map.get(&Name::parse("alice").unwrap()),
             Some(&ProtectionStatus::WithExpiry(ts(1_600_000_000)))
@@ -550,48 +596,128 @@ mod tests {
         assert!(map.is_empty());
     }
 
+    /// A duplicate row is a re-purchase: the name's rows coalesce
+    /// to the strongest bought term.
     #[test]
-    fn absorb_rejects_duplicates() {
+    fn absorb_coalesces_identical_rows() {
         let mut map = BTreeMap::new();
         let rows = vec![row_with("alice", None), row_with("alice", None)];
-        assert_eq!(absorb(rows, &mut map), None);
+        absorb(rows, &mut map).unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.get(&Name::parse("alice").unwrap()),
+            Some(&ProtectionStatus::Forever)
+        );
     }
 
-    /// Extra columns Supabase returns (`id`, `created_at`, `source`,
-    /// `dupe`, and a `status` field the old schema carried) do not
-    /// prevent decoding — serde ignores unknown fields, so schema
-    /// evolution on unused columns is safe.
+    /// Two dated terms cover the name to the later lift moment.
+    #[test]
+    fn absorb_coalesces_expiries_to_the_latest() {
+        let mut map = BTreeMap::new();
+        let rows = vec![
+            row_with("alice", Some(ts(2_000_000_000))),
+            row_with("alice", Some(ts(1_900_000_000))),
+        ];
+        absorb(rows, &mut map).unwrap();
+        assert_eq!(
+            map.get(&Name::parse("alice").unwrap()),
+            Some(&ProtectionStatus::WithExpiry(ts(2_000_000_000)))
+        );
+    }
+
+    /// Forever covers any expiry, in either row order.
+    #[test]
+    fn absorb_coalesces_forever_over_an_expiry() {
+        for rows in [
+            vec![
+                row_with("alice", Some(ts(2_000_000_000))),
+                row_with("alice", None),
+            ],
+            vec![
+                row_with("alice", None),
+                row_with("alice", Some(ts(2_000_000_000))),
+            ],
+        ] {
+            let mut map = BTreeMap::new();
+            absorb(rows, &mut map).unwrap();
+            assert_eq!(
+                map.get(&Name::parse("alice").unwrap()),
+                Some(&ProtectionStatus::Forever)
+            );
+        }
+    }
+
+    /// The reported live shape: `9` and `tom` each hold an expiry
+    /// plus Forever among their re-purchases.
+    #[test]
+    fn absorb_coalesces_the_reported_table_shape() {
+        let mut map = BTreeMap::new();
+        let rows = vec![
+            row_with("9", Some(ts(1_795_898_400))),
+            row_with("9", None),
+            row_with("9", None),
+            row_with("9", None),
+            row_with("9", None),
+            row_with("tom", Some(ts(1_800_563_400))),
+            row_with("tom", None),
+            row_with("alice", Some(ts(2_000_000_000))),
+        ];
+        absorb(rows, &mut map).unwrap();
+        assert_eq!(map.len(), 3);
+        assert_eq!(
+            map.get(&Name::parse("9").unwrap()),
+            Some(&ProtectionStatus::Forever)
+        );
+        assert_eq!(
+            map.get(&Name::parse("tom").unwrap()),
+            Some(&ProtectionStatus::Forever)
+        );
+    }
+
+    /// Columns Supabase may return beyond the three the mint reads
+    /// (`id`, `name`, `expiry_at`) do not prevent decoding — serde
+    /// ignores unknown fields, so schema evolution on unused columns
+    /// is safe.
     #[test]
     fn row_decode_ignores_unused_columns() {
         let json = r#"[{
             "id": "00000000-0000-0000-0000-000000000000",
-            "normalized_name": "alice",
+            "name": "alice",
             "created_at": "2026-01-01T00:00:00+00:00",
-            "expires_at": "2027-06-15T12:34:56+00:00",
-            "source": "founder",
-            "dupe": false,
-            "status": "protected"
+            "expiry_at": "2027-06-15T12:34:56+00:00",
+            "source": "founder"
         }]"#;
         let rows: Vec<ProtectedRow> = serde_json::from_slice(json.as_bytes()).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].normalized_name, "alice");
+        assert_eq!(rows[0].name, "alice");
         // 2027-06-15T12:34:56 UTC = 1_813_062_896 seconds since the Unix epoch.
-        assert_eq!(rows[0].expires_at, Some(ts(1_813_062_896)));
+        assert_eq!(rows[0].expiry_at, Some(ts(1_813_062_896)));
     }
 
     #[test]
-    fn row_decode_null_expires_at() {
-        let json = r#"[{"normalized_name": "alice", "expires_at": null}]"#;
+    fn row_decode_null_expiry_at() {
+        let json = r#"[{"id": "0", "name": "alice", "expiry_at": null}]"#;
         let rows: Vec<ProtectedRow> = serde_json::from_slice(json.as_bytes()).unwrap();
-        assert_eq!(rows[0].expires_at, None);
+        assert_eq!(rows[0].expiry_at, None);
     }
 
-    /// A malformed `expires_at` string must fail the deserializer,
+    /// A malformed `expiry_at` string must fail the deserializer,
     /// which fails the whole read.
     #[test]
     fn row_decode_bad_timestamp_errors() {
-        let json = r#"[{"normalized_name": "alice", "expires_at": "not-a-timestamp"}]"#;
+        let json = r#"[{"id": "0", "name": "alice", "expiry_at": "not-a-timestamp"}]"#;
         let rows: Result<Vec<ProtectedRow>, _> = serde_json::from_slice(json.as_bytes());
         assert!(rows.is_err(), "malformed timestamp must not deserialize");
+    }
+
+    /// The cursor filter is the pagination contract: strictly after
+    /// `(name, id)`, in either dimension.
+    #[test]
+    fn keyset_filter_continues_strictly_after() {
+        assert_eq!(keyset_filter(None), "");
+        assert_eq!(
+            keyset_filter(Some(("9", "abc"))),
+            "&or=(name.gt.9,and(name.eq.9,id.gt.abc))"
+        );
     }
 }

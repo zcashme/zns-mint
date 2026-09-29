@@ -1,5 +1,35 @@
 # `mint/presale.rs` design record
 
+## 2026-09-29 — Duplicate rows coalesce; the table is deduped upstream (#243)
+
+- `zn_names` was rebuilt upstream while this change was in flight:
+  columns are now `(id uuid PK default gen_random_uuid(), name,
+  expiry_at)` — one row per name (2197 rows, unique names and ids),
+  folded forever-else-max (verified against the pre-rebuild log:
+  2197/2197 terms match, `9` and `tom` keep Forever). `select`,
+  `order`, the keyset filter, and `ProtectedRow` follow the renamed
+  columns.
+- The pre-sale had let a name be bought more than once (the old
+  log carried 2332 rows over 2197 names). `absorb` no longer
+  rejects a duplicate `name`: rows for one name coalesce to the
+  strongest bought term — `Forever` covers any expiry, a later
+  expiry covers an earlier one — so the loaded table is the union
+  of what was actually bought. With the table deduped upstream
+  this is now defensive: a future duplicate re-appearing is folded,
+  not boot-fatal.
+- Pagination is total: the cursor is the unique `(name, id)` pair
+  (`or(name.gt.X, and(name.eq.X, id.gt.Y))`), so no row can be
+  skipped or repeated even if duplicates return — the old
+  name-only cursor truncated any duplicate group straddling a
+  page boundary.
+- The one reject path is unchanged and stays fail-closed: a `name`
+  that is not a lawful [`Name`] refuses the whole read.
+  `fetch`'s install check compares the server count against raw
+  rows absorbed (duplicates included), not the coalesced map
+  length. The per-row duplicate warn becomes one summary line per
+  read: names installed, rows read, coalesced, upgraded to
+  Forever.
+
 ## 2026-09-29 — The table is cached; the claim path is synchronous (#242)
 
 - The per-claim HTTP lookup is gone. `ProtectedNames`
