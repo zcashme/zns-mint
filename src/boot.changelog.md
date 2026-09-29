@@ -2,6 +2,18 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-30 — Fingerprint is bound by the keygen attestation
+
+- Boot reads `keys/zns_mint.conf` for the network, the expected seed
+  fingerprint, and the birthday. Before unseal, `keys/zns_attestation.bin`
+  must verify: the AMD signature covers
+  `BLAKE2b-512(fingerprint ‖ capsule hash)`. The decrypted seed must
+  match that fingerprint and the capsule field.
+- The birthday stays the config height. The report is taken before the
+  anchor is mined, so it does not bind the birthday.
+- Regtest keeps its fixture birthday and skips both checks.
+- The report is opened once and must be a regular 1184-byte file.
+
 ## 2026-09-29 — Boot accepts a closed ceremony below standing size
 
 - The post-sync check requires ceremony adoption to have closed.
