@@ -228,6 +228,10 @@ fn blake2b256(bytes: &[u8]) -> [u8; 32] {
 impl Boot<Network> {
     /// Boot sequence for this build's network.
     pub async fn start() -> Self {
+        // ring and aws-lc-rs are both linked. Rustls will not choose a
+        // process default, and the first HTTPS client panics without one.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
         let network = boot_network();
         tracing::info!("boot: starting");
 
