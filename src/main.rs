@@ -385,9 +385,6 @@ async fn main() {
             .current_day()
             .expect("FATAL: MTP unavailable at the applied tip");
         oracle.accumulate(fetch_round().await, today, mtp_now);
-        if today > previous_day {
-            protected_names.refresh().await;
-        }
         // Transient or unusable tip data → skip this rule pass and wait
         // for another notification; a chain race re-converges.
         let exact_tip = match source.canonical_tip().await {
@@ -745,8 +742,12 @@ async fn main() {
             }
         }
 
-        // A new MTP day sweeps the Treasury to the vault once.
+        // A new MTP day refreshes the pre-sale table and sweeps the
+        // Treasury to the vault once. The refresh sits after the
+        // claim drain and keeps yesterday's rows on failure, so no
+        // claim ever waits on it.
         if today > previous_day {
+            protected_names.refresh().await;
             match treasury::sweep_to_vault(
                 &network,
                 &mut wallet,

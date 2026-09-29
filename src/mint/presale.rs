@@ -47,13 +47,13 @@ const PRESALE_PUBLISHABLE_KEY: &str = "sb_publishable_eRyX0Z5CY3bHm11iCFoZRA_-u2
 const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
-/// Rows per request: the largest page whose worst-case valid rows (a
-/// 63-byte name plus a 35-character RFC 3339 timestamp, ~137 bytes)
-/// stay comfortably under `MAX_BODY_BYTES`.
+/// Rows per request — four requests per thousand rows. Worst-case
+/// valid rows (~137 bytes: a 63-byte name plus a 35-character RFC
+/// 3339 timestamp) keep a page at ~34 KB, half of `MAX_BODY_BYTES`.
 const PAGE_ROWS: usize = 250;
 
-/// Page ceiling: a read past this many pages (25,000 names) is
-/// refused — a pathological table keeps yesterday's rows, loudly.
+/// Page ceiling: a read past this many full pages (~25,000 names)
+/// is refused — a pathological table keeps yesterday's rows, loudly.
 const MAX_PAGES: usize = 100;
 
 type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
@@ -229,9 +229,8 @@ impl ProtectedNames {
 }
 
 /// Reads the whole table, `PAGE_ROWS` at a time, stopping on a short
-/// page. Any failure — transport, timeout, non-success status, body
-/// over cap, malformed row, unlawful name, duplicate, page ceiling —
-/// rejects the whole read (`None`), so a caller keeps what it has.
+/// page. Any failure rejects the whole read (`None`) — a caller
+/// keeps what it has.
 pub async fn fetch() -> Option<ProtectedNames> {
     let client = https_client();
     let mut rows = BTreeMap::new();
@@ -244,18 +243,20 @@ pub async fn fetch() -> Option<ProtectedNames> {
             return Some(ProtectedNames(rows));
         }
         offset += PAGE_ROWS;
-        if offset >= PAGE_ROWS * MAX_PAGES {
+        if offset > PAGE_ROWS * MAX_PAGES {
             tracing::warn!("pre-sale fetch exceeded the page ceiling");
             return None;
         }
     }
 }
 
-/// One page of rows. `None` on any transport, timeout, status, size,
-/// or parse failure; each is warned here.
+/// One page of rows, ordered by name so pages neither repeat nor
+/// skip. `None` on any transport, timeout, status, size, or parse
+/// failure; each is warned here. One end-to-end timeout covers the
+/// request and the body.
 async fn fetch_page(client: &HttpsClient, offset: usize) -> Option<Vec<ProtectedRow>> {
     let url = format!(
-        "{}?select=normalized_name,expires_at&limit={PAGE_ROWS}&offset={offset}",
+        "{}?select=normalized_name,expires_at&order=normalized_name.asc&limit={PAGE_ROWS}&offset={offset}",
         presale_rest_url(),
     );
     let uri: Uri = url.parse().ok()?;
@@ -265,24 +266,31 @@ async fn fetch_page(client: &HttpsClient, offset: usize) -> Option<Vec<Protected
         .header("apikey", PRESALE_PUBLISHABLE_KEY)
         .body(Empty::<Bytes>::default())
         .ok()?;
-    let response = tokio::time::timeout(FETCH_TIMEOUT, client.request(request))
-        .await
-        .ok()?
-        .ok()?;
-    let status = response.status();
-    if !status.is_success() {
-        tracing::warn!(%status, "pre-sale fetch: non-success status");
-        return None;
-    }
-    let body = Limited::new(response.into_body(), MAX_BODY_BYTES)
-        .collect()
-        .await
-        .ok()?
-        .to_bytes();
-    match serde_json::from_slice(&body) {
-        Ok(rows) => Some(rows),
-        Err(error) => {
-            tracing::warn!(?error, "pre-sale fetch: json parse failed");
+    let page = tokio::time::timeout(FETCH_TIMEOUT, async {
+        let response = client.request(request).await.ok()?;
+        let status = response.status();
+        if !status.is_success() {
+            tracing::warn!(%status, "pre-sale fetch: non-success status");
+            return None;
+        }
+        let body = Limited::new(response.into_body(), MAX_BODY_BYTES)
+            .collect()
+            .await
+            .ok()?
+            .to_bytes();
+        match serde_json::from_slice(&body) {
+            Ok(rows) => Some(rows),
+            Err(error) => {
+                tracing::warn!(?error, "pre-sale fetch: json parse failed");
+                None
+            }
+        }
+    })
+    .await;
+    match page {
+        Ok(page) => page,
+        Err(_) => {
+            tracing::warn!("pre-sale fetch: timed out");
             None
         }
     }
