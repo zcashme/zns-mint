@@ -11,7 +11,7 @@ compile_error!(
 compile_error!("testnet and regtest are mutually exclusive network features");
 
 pub mod boot;
-pub use boot::{capsule, tee, RegistryKeys, TreasuryKeys};
+pub use boot::{RegistryKeys, TreasuryKeys};
 pub mod metrics;
 pub mod mint;
 pub mod wallet;

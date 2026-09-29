@@ -1,6 +1,12 @@
 # Capsule module changelog
 
-Tracks design-relevant changes to `src/boot/capsule.rs`.
+Tracks design-relevant changes to the seed capsule. The implementation
+now lives in `zns-canon`.
+
+## 2026-09-29 — Capsule moved to zns-canon
+
+- Seal, parse, and unseal are `zns_canon::capsule`. The mint no longer
+  keeps a copy.
 
 ## 2026-09-29 — Capsule is a boot submodule (#231)
 

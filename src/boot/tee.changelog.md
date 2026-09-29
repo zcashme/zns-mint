@@ -1,6 +1,12 @@
 # TEE module changelog
 
-Tracks design-relevant changes to `src/boot/tee.rs`.
+Tracks design-relevant changes to the enclave seam. The implementation
+now lives in `zns-canon`.
+
+## 2026-09-29 — TEE seam moved to zns-canon
+
+- `Tee`, `RealSnpTee`, and `FakeTee` are `zns_canon::sealing`. The mint
+  no longer keeps a copy.
 
 ## 2026-09-29 — TEE is a boot submodule (#231)
 
