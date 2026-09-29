@@ -119,19 +119,45 @@ fn require_established_ceremony(registry: &Registry) {
     );
 }
 
-/// Registry birth and the mint's MTP day-zero block.
-#[cfg(not(feature = "regtest"))]
-#[cfg(not(feature = "testnet"))]
-const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(3_400_000);
-
-#[cfg(all(feature = "testnet", not(feature = "regtest")))]
-const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(4_338_933);
-
 /// Regtest birth: the fixture boundary. NU6.3 activates at height 4;
 /// the fixture's coinbase maturity runs through 104; nothing the mint
-/// owns is earlier.
+/// owns is earlier. Mainnet and testnet take the birthday from
+/// `keys/zns_mint.conf`.
 #[cfg(feature = "regtest")]
 const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(100);
+
+/// Keygen's deployment record. The fingerprint and birthday are ceremony
+/// facts, read at boot, not compiled into the binary.
+#[cfg(not(feature = "regtest"))]
+#[derive(serde::Deserialize)]
+struct MintConfig {
+    network: String,
+    expected_seed_fingerprint: String,
+    birthday: u32,
+}
+
+#[cfg(not(feature = "regtest"))]
+fn load_mint_config() -> MintConfig {
+    let raw = std::fs::read_to_string("keys/zns_mint.conf")
+        .expect("FATAL: cannot read keys/zns_mint.conf");
+    toml::from_str(&raw).expect("FATAL: invalid keys/zns_mint.conf")
+}
+
+#[cfg(feature = "testnet")]
+fn require_config_network(config: &MintConfig) {
+    assert_eq!(
+        config.network, "testnet",
+        "FATAL: keys/zns_mint.conf network does not match testnet build"
+    );
+}
+
+#[cfg(not(any(feature = "testnet", feature = "regtest")))]
+fn require_config_network(config: &MintConfig) {
+    assert_eq!(
+        config.network, "mainnet",
+        "FATAL: keys/zns_mint.conf network does not match mainnet build"
+    );
+}
 
 impl Boot<Network> {
     /// Boot sequence for this build's network.
@@ -141,6 +167,17 @@ impl Boot<Network> {
 
         // 1. Liveness + connect: confirm both Zebra transports, get chain client.
         let (chain_client, _tip_height) = connect_zebra().await;
+
+        // Ceremony facts: network, the seed fingerprint, and the birthday.
+        // Regtest has no ceremony file; its birthday is the fixture boundary.
+        #[cfg(not(feature = "regtest"))]
+        let mint_config = load_mint_config();
+        #[cfg(not(feature = "regtest"))]
+        require_config_network(&mint_config);
+        #[cfg(not(feature = "regtest"))]
+        let mint_birthday = BlockHeight::from_u32(mint_config.birthday);
+        #[cfg(feature = "regtest")]
+        let mint_birthday = MINT_BIRTHDAY;
 
         // 1b. TEE handshake: pick the enclave seam. Production = `RealSnpTee`;
         // `fake-tee` feature = `FakeTee` for off-SNP tests. Capsule AEAD and
@@ -158,19 +195,33 @@ impl Boot<Network> {
         };
 
         // 2. Seed intake + verification: read capsule, unseal with the
-        //    TEE-derived sealing key, verify the compiled-in fingerprint,
-        //    then derive keys. The seed lives only inside this block —
-        //    Secret's Drop wipes it.
+        //    TEE-derived sealing key, verify the fingerprint in
+        //    keys/zns_mint.conf, then derive keys. The seed lives only
+        //    inside this block — Secret's Drop wipes it.
         let (treasury_keys, registry_keys) = {
             tracing::info!("boot: reading seed capsule from keys/zns_seed.capsule");
             let blob = read_capsule_file("keys/zns_seed.capsule").expect(
                 "FATAL: failed to read keys/zns_seed.capsule. The mint cannot boot without the sealed seed.",
             );
             let capsule = parse_capsule(&blob).expect("FATAL: failed to parse zns_seed.capsule");
+            // The capsule field and the decrypted seed already agree inside
+            // unseal. This is the config against that same fingerprint.
+            #[cfg(not(feature = "regtest"))]
+            {
+                let expected =
+                    SeedFingerprint::from_str(mint_config.expected_seed_fingerprint.trim())
+                        .expect("FATAL: invalid expected_seed_fingerprint in keys/zns_mint.conf");
+                if expected.to_bytes() != capsule.fingerprint {
+                    panic!("FATAL: capsule fingerprint does not match keys/zns_mint.conf");
+                }
+            }
             tracing::info!("boot: deriving instance-bound sealing key from the TEE");
             let seed = unseal_seed(tee.as_ref(), &capsule)
                 .expect("FATAL: failed to unseal seed. Capsule tampering, wrong TEE, or wrong capsule for this instance.");
-            verify_fingerprint(&seed, SEED_FINGERPRINT_RAW.trim());
+            #[cfg(not(feature = "regtest"))]
+            verify_fingerprint(&seed, mint_config.expected_seed_fingerprint.trim());
+            #[cfg(feature = "regtest")]
+            verify_fingerprint(&seed, "");
             (
                 TreasuryKeys::derive(&network, &seed),
                 RegistryKeys::derive(&network, &seed),
@@ -181,7 +232,10 @@ impl Boot<Network> {
         // 3. Born complete: fetch the origin checkpoint and both
         // subtree-root batches, then one `Wallet::new`.
         let rpc = zcash::JsonRpc::new();
-        let origin = origin_checkpoint(async |height| rpc.chain_state_at(height).await).await;
+        let origin = origin_checkpoint(mint_birthday, async |height| {
+            rpc.chain_state_at(height).await
+        })
+        .await;
         let checkpoint_height = origin.block_height();
         let sapling_roots = rpc
             .get_subtree_roots::<sapling::Node>("sapling", 0)
@@ -214,7 +268,7 @@ impl Boot<Network> {
         // the day-zero anchor for `current_day`.
         let mut birthday = MtpTracker::default();
         birthday
-            .backfill(MINT_BIRTHDAY, |height| {
+            .backfill(mint_birthday, |height| {
                 let rpc = rpc.clone();
                 async move {
                     let (_, _, timestamp) = rpc.get_block_header(height).await?;
@@ -282,7 +336,7 @@ impl Boot<Network> {
 
             let _ = crate::mint::apply_block(
                 &network,
-                MINT_BIRTHDAY,
+                mint_birthday,
                 &registry_keys,
                 &treasury_keys,
                 &from_state,
@@ -383,7 +437,7 @@ impl Boot<Network> {
 
         Boot {
             network,
-            birthday: MINT_BIRTHDAY,
+            birthday: mint_birthday,
             chain: chain_client,
             cursor,
             wallet,
@@ -482,15 +536,13 @@ fn select_tee() -> Box<dyn Tee> {
     }
 }
 
-static SEED_FINGERPRINT_RAW: &str = "PLACEHOLDER";
-
 fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
     let actual = SeedFingerprint::from_seed(seed.expose_secret())
         .expect("seed is 32 bytes, within ZIP-32's 32..=252 range");
 
     #[cfg(feature = "regtest")]
     {
-        let _ = expected; // Suppress unused warning in dev mode only.
+        let _ = expected;
         tracing::warn!(
             "boot: regtest fingerprint = {} (verification skipped)",
             actual
@@ -499,21 +551,13 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 
     #[cfg(not(feature = "regtest"))]
     {
-        #[cfg(not(feature = "testnet"))]
-        if expected.eq("PLACEHOLDER") {
-            panic!(
-                "FATAL: production build contains the placeholder seed fingerprint. \
-                 Replace deployment/seed_fingerprint.txt with the real fingerprint before building."
-            );
-        }
-
         let expected_fp = SeedFingerprint::from_str(expected)
-            .expect("FATAL: compiled binary contains an invalid seed fingerprint");
+            .expect("FATAL: invalid expected_seed_fingerprint in keys/zns_mint.conf");
 
         if actual != expected_fp {
             // Redacted panic: do not print either fingerprint.
             panic!(
-                "FATAL: SEED FINGERPRINT MISMATCH — decrypted seed does not match the fingerprint compiled into this binary"
+                "FATAL: SEED FINGERPRINT MISMATCH — decrypted seed does not match keys/zns_mint.conf"
             );
         }
         tracing::info!("boot: seed fingerprint verified");
@@ -531,12 +575,13 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 /// Zebra is part of the same measured TEE image; its identity is guaranteed
 /// by the SEV-SNP attestation, not by runtime RPC checks.
 async fn origin_checkpoint(
+    birthday: BlockHeight,
     treestate: impl std::ops::AsyncFnOnce(BlockHeight) -> Result<ChainState, zcash::TransportError>,
 ) -> ChainState {
     #[cfg(not(feature = "regtest"))]
-    let checkpoint_height = MINT_BIRTHDAY - 101;
+    let checkpoint_height = birthday - 101;
     #[cfg(feature = "regtest")]
-    let checkpoint_height = MINT_BIRTHDAY - 1;
+    let checkpoint_height = birthday - 1;
 
     let chain_state = treestate(checkpoint_height)
         .await
@@ -686,11 +731,15 @@ mod tests {
         use zcash_primitives::block::BlockHash;
 
         #[cfg(not(feature = "regtest"))]
-        let (checkpoint, first) = (MINT_BIRTHDAY - 101, MINT_BIRTHDAY - 100);
+        let birthday = BlockHeight::from_u32(10_000);
         #[cfg(feature = "regtest")]
-        let (checkpoint, first) = (BlockHeight::from_u32(99), BlockHeight::from_u32(100));
+        let birthday = MINT_BIRTHDAY;
+        #[cfg(not(feature = "regtest"))]
+        let (checkpoint, first) = (birthday - 101, birthday - 100);
+        #[cfg(feature = "regtest")]
+        let (checkpoint, first) = (birthday - 1, birthday);
 
-        let origin = origin_checkpoint(async |height| {
+        let origin = origin_checkpoint(birthday, async |height| {
             assert_eq!(height, checkpoint);
             Ok(ChainState::empty(height, BlockHash([0; 32])))
         })

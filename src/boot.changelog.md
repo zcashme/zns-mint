@@ -2,6 +2,13 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-30 — Fingerprint and birthday come from the mint config
+
+- Boot reads `keys/zns_mint.conf` for the network, the expected seed
+  fingerprint, and the birthday. The decrypted seed must match that
+  fingerprint and the capsule field. Regtest keeps its fixture birthday
+  and still skips the fingerprint check.
+
 ## 2026-09-29 — Boot accepts a closed ceremony below standing size
 
 - The post-sync check requires ceremony adoption to have closed.
