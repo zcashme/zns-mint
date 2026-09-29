@@ -5,27 +5,33 @@
 - The per-claim HTTP lookup is gone. `ProtectedNames`
   (`BTreeMap<Name, ProtectionStatus>`) is fetched once at boot
   (retry-until-good, before the attestation write) and refreshed
-  once per MTP day beside the vault sweep, after the claim drain.
-  No claim waits on Supabase after boot.
+  once per MTP day by a background fetch whose completed result
+  installs on a later pass. No claim waits on Supabase after boot.
 - `ProtectionStatus` is three-variant: `WithExpiry(Timestamp)` |
   `Forever`, with `Unprotected` as the flattened absence `get`
   returns — never stored. A lift moment the MTP has reached is
   judged per claim at the gate, so expiry lifts exactly on
-  schedule. `Lookup`, `LookupError`, `classify`, and
-  `Decision::Retry` die.
-- The gate is `AccessCodeDerivationKey::check_access(status, mtp,
-  name, offered)`: unprotected names pass, protected names must
-  present the key's code for the name. `Deny` means only a wrong
-  or missing code — a name already live is refused by
+  schedule. `Lookup`, `LookupError`, `classify`, and `Decision`
+  die.
+- The gate is two questions, each on its owner:
+  `ProtectedNames::is_protected(name, mtp)` judges protection
+  (expiry judged now); `AccessCodeDerivationKey::accepts(name,
+  offered)` judges the code. The lane refuses when the first is
+  true and the second false — a name already live is refused by
   `authorize_claim` (redemption). `code_for` is the public
   name→code impl.
-- `fetch` pages `order=normalized_name.asc&limit=250&offset=N` —
-  deterministically ordered, so pages neither repeat nor skip —
-  with one end-to-end timeout per page covering the request and
-  the body (the old lookup timed out headers only). A page of
-  worst-case valid rows (~137 B each) is ~34 KB under the
-  unchanged 64 KB cap; the read stops on a short page and refuses
-  past 100 full pages (~25,000 names). One bad row — an unlawful
+- `fetch` keyset-pages
+  `normalized_name=gt.<last>&order=normalized_name.asc&limit=250`
+  — the cursor is a value, not a position, so concurrent inserts
+  and deletes cannot make pages repeat or skip — with one
+  end-to-end timeout per page covering the request and the body
+  (the old lookup timed out headers only). A page of worst-case
+  valid rows (~137 B each) is ~34 KB under the unchanged 64 KB
+  cap; the read stops on a short page and refuses a 101st nonempty
+  page (~25,000 names). The first page demands `count=exact`, and
+  the read installs only when the map's length equals the server's
+  count — so a duplicate spanning a page boundary, invisible to
+  the cursor, refuses the read. One bad row — an unlawful
   `normalized_name`, a malformed `expires_at`, a duplicate —
   refuses the read: an existing protection can freeze, never
   silently drop. A failed refresh keeps yesterday's rows and

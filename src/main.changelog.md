@@ -2,13 +2,13 @@
 
 ## 2026-09-29 — The pre-sale gate reads the cache synchronously (#242)
 
-- The claim lane calls `access_code_key.check_access(
-  protected_names.get(name), mtp_now, name, code.as_ref())` — no
-  await, no `Decision::Retry` arm, no restatement of name-liveness
+- The claim lane refuses when `protected_names.is_protected(name,
+  mtp_now)` and not `access_code_key.accepts(name,
+  code.as_ref())` — no await, no restatement of name-liveness
   (`authorize_claim` refuses claims on live names). The table
-  refreshes once per MTP day beside the vault sweep, after the
-  claim drain, keeping yesterday's rows on failure — no claim ever
-  waits on it. Boot hands over `protected_names`; the run loop
+  refreshes once per MTP day as a background task; a completed
+  fetch installs on a later pass, so the run loop never blocks on
+  Supabase. Boot hands over `protected_names`; the run loop
   holds it beside `registry` and `oracle`.
 
 ## 2026-09-29 — Wallet lookback does not widen Registry reorgs (#239)

@@ -1,8 +1,9 @@
 //! The pre-sale protected-names table, cached in memory.
 //!
-//! `zn_names` is read once at boot and re-read once per MTP day in
-//! the tip pass; claims consult the cache synchronously — Supabase
-//! is never on a claim's path. Every row is protected; `expires_at`
+//! `zn_names` is read once at boot and re-read once per MTP day by
+//! a background fetch whose result installs on completion; claims
+//! consult the cache synchronously — Supabase is never on a claim's
+//! path. Every row is protected; `expires_at`
 //! (`timestamptz`, nullable) is either a lift moment, judged against
 //! the current MTP per claim, or forever. A missing row, or a lift
 //! moment the MTP has reached, is unprotected. The six-digit code is not
@@ -15,6 +16,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use hmac::{Hmac, Mac};
+use http::header::CONTENT_RANGE;
 use http::Uri;
 use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::Bytes;
@@ -52,8 +54,9 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 /// 3339 timestamp) keep a page at ~34 KB, half of `MAX_BODY_BYTES`.
 const PAGE_ROWS: usize = 250;
 
-/// Page ceiling: a read past this many full pages (~25,000 names)
-/// is refused — a pathological table keeps yesterday's rows, loudly.
+/// Page ceiling: a read needing more than this many full pages
+/// (~25,000 names) is refused — a pathological table keeps
+/// yesterday's rows, loudly.
 const MAX_PAGES: usize = 100;
 
 type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
@@ -142,7 +145,7 @@ impl AccessCode {
 }
 
 /// A name's protection status. `Unprotected` is never stored — it
-/// is the flattened absence, produced by [`ProtectedNames::get`]. A
+/// is the flattened absence `ProtectedNames::get` returns. A
 /// finite row stays `WithExpiry` whether five minutes or five years
 /// remain; the lift moment is judged against the current MTP per
 /// claim.
@@ -154,15 +157,6 @@ pub enum ProtectionStatus {
     WithExpiry(Timestamp),
     /// Protection never lifts.
     Forever,
-}
-
-/// The claim-lane verdict.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Decision {
-    /// Proceed to payment and authorize.
-    Allow,
-    /// Dead: wrong or missing code, or the name already exists (redeemed).
-    Deny,
 }
 
 /// Derive the purpose-specific access-code key from the TEE root.
@@ -206,66 +200,106 @@ where
 }
 
 /// The protected-names table: name → protection status. A name
-/// absent from the map is unprotected. Pure data; [`fetch`] and
-/// [`ProtectedNames::refresh`] are the only writers.
+/// absent from the map is unprotected. Pure data; [`fetch`] is the
+/// only writer.
 #[derive(Clone, Debug)]
 pub struct ProtectedNames(BTreeMap<Name, ProtectionStatus>);
 
 impl ProtectedNames {
     /// The name's status; `Unprotected` when absent.
-    pub fn get(&self, name: &Name) -> ProtectionStatus {
+    fn get(&self, name: &Name) -> ProtectionStatus {
         self.0
             .get(name)
             .copied()
             .unwrap_or(ProtectionStatus::Unprotected)
     }
 
-    /// Re-reads the table; keeps the current rows on a failed read.
-    pub async fn refresh(&mut self) {
-        if let Some(fresh) = fetch().await {
-            *self = fresh;
+    /// Is the name protected at this MTP? Expiry is judged now,
+    /// never stored — protection lifts exactly on schedule.
+    pub fn is_protected(&self, name: &Name, mtp: Timestamp) -> bool {
+        match self.get(name) {
+            ProtectionStatus::Unprotected => false,
+            ProtectionStatus::Forever => true,
+            ProtectionStatus::WithExpiry(ts) => mtp < ts,
         }
     }
 }
 
-/// Reads the whole table, `PAGE_ROWS` at a time, stopping on a short
-/// page. Any failure rejects the whole read (`None`) — a caller
-/// keeps what it has.
+/// Reads the whole table, `PAGE_ROWS` at a time, keyset-paginated
+/// by name so concurrent inserts or deletes cannot shift the
+/// window. The first page carries the server's exact row count,
+/// and the read installs only when every counted row landed — so
+/// a duplicate spanning a page boundary, invisible to the cursor,
+/// refuses the read. Stops on a short page; refuses a read needing
+/// more than `MAX_PAGES` full pages. Any failure rejects the whole
+/// read (`None`) — a caller keeps what it has.
 pub async fn fetch() -> Option<ProtectedNames> {
     let client = https_client();
     let mut rows = BTreeMap::new();
-    let mut offset = 0;
+    let mut after: Option<String> = None;
+    let mut total: Option<usize> = None;
+    let mut pages = 0;
     loop {
-        let page = fetch_page(&client, offset).await?;
-        let short = page.len() < PAGE_ROWS;
-        absorb(page, &mut rows)?;
-        if short {
-            return Some(ProtectedNames(rows));
-        }
-        offset += PAGE_ROWS;
-        if offset > PAGE_ROWS * MAX_PAGES {
+        let want_total = total.is_none();
+        let (page, counted) = fetch_page(&client, after.as_deref(), want_total).await?;
+        pages += 1;
+        if pages > MAX_PAGES && !page.is_empty() {
             tracing::warn!("pre-sale fetch exceeded the page ceiling");
             return None;
         }
+        total = total.or(counted);
+        let short = page.len() < PAGE_ROWS;
+        let last = page.last().map(|row| row.normalized_name.clone());
+        absorb(page, &mut rows)?;
+        if short {
+            return match total {
+                Some(total) if total == rows.len() => Some(ProtectedNames(rows)),
+                Some(total) => {
+                    tracing::warn!(
+                        counted = total,
+                        installed = rows.len(),
+                        "pre-sale fetch did not install every counted row"
+                    );
+                    None
+                }
+                None => {
+                    tracing::warn!("pre-sale fetch: row count missing");
+                    None
+                }
+            };
+        }
+        after = last;
     }
 }
 
-/// One page of rows, ordered by name so pages neither repeat nor
+/// One page of rows after `after` (the previous page's last name),
+/// ordered by name, with the server's exact row count when
+/// `want_total`. The cursor is a value, not a position, so
+/// concurrent inserts and deletes cannot make pages repeat or
 /// skip. `None` on any transport, timeout, status, size, or parse
 /// failure; each is warned here. One end-to-end timeout covers the
 /// request and the body.
-async fn fetch_page(client: &HttpsClient, offset: usize) -> Option<Vec<ProtectedRow>> {
+async fn fetch_page(
+    client: &HttpsClient,
+    after: Option<&str>,
+    want_total: bool,
+) -> Option<(Vec<ProtectedRow>, Option<usize>)> {
+    let filter = after.map_or(String::new(), |after| {
+        format!("&normalized_name=gt.{after}")
+    });
     let url = format!(
-        "{}?select=normalized_name,expires_at&order=normalized_name.asc&limit={PAGE_ROWS}&offset={offset}",
+        "{}?select=normalized_name,expires_at&order=normalized_name.asc&limit={PAGE_ROWS}{filter}",
         presale_rest_url(),
     );
     let uri: Uri = url.parse().ok()?;
-    let request = Request::builder()
+    let mut builder = Request::builder()
         .uri(uri)
         .header("accept", "application/json")
-        .header("apikey", PRESALE_PUBLISHABLE_KEY)
-        .body(Empty::<Bytes>::default())
-        .ok()?;
+        .header("apikey", PRESALE_PUBLISHABLE_KEY);
+    if want_total {
+        builder = builder.header("prefer", "count=exact");
+    }
+    let request = builder.body(Empty::<Bytes>::default()).ok()?;
     let page = tokio::time::timeout(FETCH_TIMEOUT, async {
         let response = client.request(request).await.ok()?;
         let status = response.status();
@@ -273,13 +307,19 @@ async fn fetch_page(client: &HttpsClient, offset: usize) -> Option<Vec<Protected
             tracing::warn!(%status, "pre-sale fetch: non-success status");
             return None;
         }
+        let total = response
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.rsplit('/').next())
+            .and_then(|value| value.parse::<usize>().ok());
         let body = Limited::new(response.into_body(), MAX_BODY_BYTES)
             .collect()
             .await
             .ok()?
             .to_bytes();
         match serde_json::from_slice(&body) {
-            Ok(rows) => Some(rows),
+            Ok(rows) => Some((rows, total)),
             Err(error) => {
                 tracing::warn!(?error, "pre-sale fetch: json parse failed");
                 None
@@ -336,28 +376,12 @@ impl AccessCodeDerivationKey {
         AccessCode::derive(self.0.as_ref(), name.as_str())
     }
 
-    /// The pre-sale gate. Unprotected names pass; protected names
-    /// must present this key's code for `name`. A name already live
-    /// is refused by the Registry's own authorization — redemption —
-    /// not here.
-    pub fn check_access(
-        &self,
-        status: ProtectionStatus,
-        mtp: Timestamp,
-        name: &Name,
-        offered: Option<&AccessCode>,
-    ) -> Decision {
-        let protected = match status {
-            ProtectionStatus::Unprotected => false,
-            ProtectionStatus::Forever => true,
-            ProtectionStatus::WithExpiry(ts) => mtp < ts,
-        };
-        if !protected {
-            return Decision::Allow;
-        }
+    /// Does the offered code match this key's code for `name`?
+    /// A missing code never matches.
+    pub fn accepts(&self, name: &Name, offered: Option<&AccessCode>) -> bool {
         match offered {
-            Some(offered) if self.code_for(name).ct_eq(offered) => Decision::Allow,
-            _ => Decision::Deny,
+            Some(offered) => self.code_for(name).ct_eq(offered),
+            None => false,
         }
     }
 }
@@ -416,29 +440,31 @@ mod tests {
         );
     }
 
+    fn table_of(rows: &[(&str, ProtectionStatus)]) -> ProtectedNames {
+        let mut map = BTreeMap::new();
+        for (name, status) in rows {
+            map.insert(Name::parse(name).unwrap(), *status);
+        }
+        ProtectedNames(map)
+    }
+
     #[test]
-    fn unprotected_names_need_no_code() {
-        assert_eq!(
-            gate().check_access(
-                ProtectionStatus::Unprotected,
-                ts(1_700_000_000),
-                &alice(),
-                None,
-            ),
-            Decision::Allow
-        );
+    fn forever_and_a_future_expiry_are_protected() {
+        let table = table_of(&[
+            ("alice", ProtectionStatus::Forever),
+            ("bob", ProtectionStatus::WithExpiry(ts(2_000_000_000))),
+        ]);
+        assert!(table.is_protected(&alice(), ts(1_700_000_000)));
+        assert!(table.is_protected(&Name::parse("bob").unwrap(), ts(1_700_000_000)));
     }
 
     /// The audit-critical case: a lift moment the MTP has reached is
-    /// unprotected — judged per claim, never stored, so it lifts exactly
-    /// on schedule without waiting for a refresh.
+    /// unprotected — judged per claim, never stored, so it lifts
+    /// exactly on schedule without waiting for a refresh.
     #[test]
     fn expired_protection_is_unprotected() {
-        let expired = ProtectionStatus::WithExpiry(ts(1_600_000_000));
-        assert_eq!(
-            gate().check_access(expired, ts(1_700_000_000), &alice(), None),
-            Decision::Allow
-        );
+        let table = table_of(&[("alice", ProtectionStatus::WithExpiry(ts(1_600_000_000)))]);
+        assert!(!table.is_protected(&alice(), ts(1_700_000_000)));
     }
 
     /// Exact-second boundary: `mtp == expires_at` means the lift
@@ -446,51 +472,27 @@ mod tests {
     #[test]
     fn expiry_boundary_is_inclusive_unprotected() {
         let now = ts(1_700_000_000);
-        let status = ProtectionStatus::WithExpiry(now);
-        assert_eq!(
-            gate().check_access(status, now, &alice(), None),
-            Decision::Allow
-        );
+        let table = table_of(&[("alice", ProtectionStatus::WithExpiry(now))]);
+        assert!(!table.is_protected(&alice(), now));
     }
 
     #[test]
-    fn protected_with_expiry_requires_the_matching_code() {
-        let expected = gate().code_for(&alice());
-        let wrong = AccessCode::parse("999999").unwrap();
-        let status = ProtectionStatus::WithExpiry(ts(2_000_000_000));
-
-        assert_eq!(
-            gate().check_access(status, ts(1_700_000_000), &alice(), Some(&expected)),
-            Decision::Allow
-        );
-        assert_eq!(
-            gate().check_access(status, ts(1_700_000_000), &alice(), Some(&wrong)),
-            Decision::Deny
-        );
-        assert_eq!(
-            gate().check_access(status, ts(1_700_000_000), &alice(), None),
-            Decision::Deny
-        );
+    fn an_absent_name_is_unprotected() {
+        let table = table_of(&[]);
+        assert!(!table.is_protected(&alice(), ts(1_700_000_000)));
     }
 
     #[test]
-    fn protected_forever_requires_the_matching_code() {
+    fn the_matching_code_is_accepted() {
         let expected = gate().code_for(&alice());
-        let wrong = AccessCode::parse("999999").unwrap();
-        let status = ProtectionStatus::Forever;
+        assert!(gate().accepts(&alice(), Some(&expected)));
+    }
 
-        assert_eq!(
-            gate().check_access(status, ts(1_700_000_000), &alice(), Some(&expected)),
-            Decision::Allow
-        );
-        assert_eq!(
-            gate().check_access(status, ts(1_700_000_000), &alice(), Some(&wrong)),
-            Decision::Deny
-        );
-        assert_eq!(
-            gate().check_access(status, ts(1_700_000_000), &alice(), None),
-            Decision::Deny
-        );
+    #[test]
+    fn a_wrong_or_missing_code_is_refused() {
+        let wrong = AccessCode::parse("999999").unwrap();
+        assert!(!gate().accepts(&alice(), Some(&wrong)));
+        assert!(!gate().accepts(&alice(), None));
     }
 
     #[test]

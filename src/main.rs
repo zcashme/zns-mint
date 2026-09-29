@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::{assemble, decrypt_treasury_transaction, NameNoteQueue};
+use zns_mint::mint::presale::ProtectedNames;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury::{self, RequestQueue};
 use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
@@ -69,6 +70,9 @@ async fn main() {
     // decides entries; a reorg truncates them.
     let mut requests = RequestQueue::default();
     let mut echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)> = Vec::new();
+    // A background pre-sale fetch in flight; its result installs on
+    // a later pass.
+    let mut presale_refresh: Option<tokio::task::JoinHandle<Option<ProtectedNames>>> = None;
 
     zns_mint::metrics::install();
     tracing::info!(
@@ -447,22 +451,16 @@ async fn main() {
                         // The earliest payment owns the name until its claim
                         // is observed. A later payment does not start a
                         // second Name Note.
-                        // Pre-sale gate: the cached table, judged against
-                        // the tip MTP.
-                        match access_code_key.check_access(
-                            protected_names.get(name),
-                            mtp_now,
-                            name,
-                            code.as_ref(),
-                        ) {
-                            zns_mint::mint::presale::Decision::Deny => {
-                                tracing::debug!(
-                                    name = %name.as_str(),
-                                    "pre-sale claim refused"
-                                );
-                                break 'lane true;
-                            }
-                            zns_mint::mint::presale::Decision::Allow => {}
+                        // Pre-sale gate: the table judges protection at
+                        // the tip MTP, the key judges the code.
+                        if protected_names.is_protected(name, mtp_now)
+                            && !access_code_key.accepts(name, code.as_ref())
+                        {
+                            tracing::debug!(
+                                name = %name.as_str(),
+                                "pre-sale claim refused"
+                            );
+                            break 'lane true;
                         }
                         // Payment gate: the quote at first sight is binding.
                         // An underpaid claim, or one whose quote does not
@@ -742,12 +740,27 @@ async fn main() {
             }
         }
 
-        // A new MTP day refreshes the pre-sale table and sweeps the
-        // Treasury to the vault once. The refresh sits after the
-        // claim drain and keeps yesterday's rows on failure, so no
-        // claim ever waits on it.
+        // A completed background pre-sale fetch installs now; an
+        // unfinished one keeps waiting off the loop's path.
+        if let Some(handle) = presale_refresh.take() {
+            if handle.is_finished() {
+                match handle.await {
+                    Ok(Some(fresh)) => protected_names = fresh,
+                    Ok(None) => tracing::warn!("pre-sale refresh failed; yesterday's rows stand"),
+                    Err(error) => tracing::warn!(?error, "pre-sale refresh task failed"),
+                }
+            } else {
+                presale_refresh = Some(handle);
+            }
+        }
+
+        // A new MTP day refreshes the pre-sale table in the
+        // background and sweeps the Treasury to the vault once. No
+        // claim ever waits on the fetch.
         if today > previous_day {
-            protected_names.refresh().await;
+            if presale_refresh.is_none() {
+                presale_refresh = Some(tokio::spawn(zns_mint::mint::presale::fetch()));
+            }
             match treasury::sweep_to_vault(
                 &network,
                 &mut wallet,
