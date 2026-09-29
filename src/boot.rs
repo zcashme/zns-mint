@@ -172,7 +172,7 @@ impl Boot<Network> {
         // 3. Born complete: fetch the origin checkpoint and both
         // subtree-root batches, then one `Wallet::new`.
         let rpc = zcash::JsonRpc::new();
-        let origin = origin_checkpoint(&rpc).await;
+        let origin = origin_checkpoint(async |height| rpc.chain_state_at(height).await).await;
         let checkpoint_height = origin.block_height();
         let sapling_roots = rpc
             .get_subtree_roots::<sapling::Node>("sapling", 0)
@@ -517,14 +517,15 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 ///
 /// Zebra is part of the same measured TEE image; its identity is guaranteed
 /// by the SEV-SNP attestation, not by runtime RPC checks.
-async fn origin_checkpoint(rpc: &zcash::JsonRpc) -> ChainState {
+async fn origin_checkpoint(
+    treestate: impl std::ops::AsyncFnOnce(BlockHeight) -> Result<ChainState, zcash::TransportError>,
+) -> ChainState {
     #[cfg(not(feature = "regtest"))]
     let checkpoint_height = MINT_BIRTHDAY - 101;
     #[cfg(feature = "regtest")]
     let checkpoint_height = MINT_BIRTHDAY - 1;
 
-    let chain_state = rpc
-        .chain_state_at(checkpoint_height)
+    let chain_state = treestate(checkpoint_height)
         .await
         .expect("FATAL: wallet origin treestate unavailable from Zebra");
 
@@ -667,6 +668,24 @@ fn generate_attestation_report_data(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn origin_checkpoint_selects_the_scan_boundary() {
+        use zcash_primitives::block::BlockHash;
+
+        #[cfg(not(feature = "regtest"))]
+        let (checkpoint, first) = (MINT_BIRTHDAY - 101, MINT_BIRTHDAY - 100);
+        #[cfg(feature = "regtest")]
+        let (checkpoint, first) = (BlockHeight::from_u32(99), BlockHeight::from_u32(100));
+
+        let origin = origin_checkpoint(async |height| {
+            assert_eq!(height, checkpoint);
+            Ok(ChainState::empty(height, BlockHash([0; 32])))
+        })
+        .await;
+        assert_eq!(origin.block_height(), checkpoint);
+        assert_eq!(origin.block_height() + 1, first);
+    }
+
     /// Builds encrypted scan fixtures with dummy proofs and signatures.
     fn scan_transaction(
         builder: orchard::builder::Builder,
@@ -701,6 +720,8 @@ mod tests {
 
     #[test]
     fn birthday_gates_protocol_processing_without_skipping_wallet_history() {
+        use std::collections::{BTreeMap, BTreeSet};
+
         use incrementalmerkletree::frontier::{CommitmentTree, Frontier};
         use incrementalmerkletree::witness::IncrementalWitness;
         use orchard::builder::{Builder, BundleType};
@@ -710,7 +731,8 @@ mod tests {
         use zcash_client_backend::data_api::wallet::TargetHeight;
         use zcash_keys::keys::UnifiedAddressRequest;
         use zcash_primitives::block::{Block, BlockHash, BlockHeaderData};
-        use zcash_protocol::consensus::NetworkUpgrade;
+
+        use crate::mint::{decrypt_name_notes, Action, Expiry, Name, NameNote, Request, Term};
 
         let network = boot_network();
         let seed = Secret::new([0; 32]);
@@ -718,8 +740,12 @@ mod tests {
         let registry_keys = RegistryKeys::derive(&network, &seed);
         let treasury_fvk = treasury_keys.orchard_fvk();
         let registry_fvk = registry_keys.orchard_fvk();
-        let first_height = network.activation_height(NetworkUpgrade::Nu6_3).unwrap() + 100;
-        let second_height = first_height + 1;
+        let first_height = network
+            .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+            .unwrap()
+            + 100;
+        let ceremony_height = first_height + 1;
+        let claim_height = ceremony_height + 1;
         let origin = ChainState::empty(first_height - 1, BlockHash([0; 32]));
         let version = BundleVersion::ironwood_v3();
         let builder = |anchor| {
@@ -746,6 +772,21 @@ mod tests {
             .unwrap();
             Block::from_parts(header, (tx, Vec::new()).into(), height)
         };
+        let (ua, _) = treasury_keys
+            .fvk()
+            .default_address(UnifiedAddressRequest::SHIELDED)
+            .unwrap();
+        let name = Name::parse("alice").unwrap();
+        let expected_request = Request::Claim {
+            name: name.clone(),
+            ua: ua.clone(),
+            term: Term::Forever,
+            code: None,
+        };
+        let request_memo = zcash_protocol::memo::MemoBytes::from_bytes(
+            format!("ZNS:claim:forever:alice:{}", ua.encode(&network)).as_bytes(),
+        )
+        .unwrap();
 
         let mut funding = builder(orchard::Anchor::empty_tree());
         funding
@@ -753,7 +794,7 @@ mod tests {
                 None,
                 treasury_fvk.address_at(0u32, zip32::Scope::External),
                 NoteValue::from_raw(60_000),
-                [0; 512],
+                *request_memo.as_array(),
             )
             .unwrap();
         let funding_tx = scan_transaction(funding);
@@ -774,6 +815,7 @@ mod tests {
                 witness.append(leaf).unwrap();
             }
         }
+        let first_root = tree.root();
         let funding_block = test_block(funding_tx, first_height, origin.block_hash());
         let funded = ChainState::new(
             first_height,
@@ -782,37 +824,97 @@ mod tests {
             Frontier::empty(),
             tree.to_frontier(),
         );
-        let mut request = builder(tree.root().into());
-        request
+        let mut ceremony = builder(tree.root().into());
+        ceremony
             .add_spend(
                 treasury_fvk.clone(),
                 payment,
                 witness.unwrap().path().unwrap().into(),
             )
             .unwrap();
-        let (ua, _) = treasury_keys
-            .fvk()
-            .default_address(UnifiedAddressRequest::SHIELDED)
-            .unwrap();
-        let memo = zcash_protocol::memo::MemoBytes::from_bytes(
-            format!("ZNS:claim:forever:alice:{}", ua.encode(&network)).as_bytes(),
-        )
-        .unwrap();
-        let expected_request = crate::mint::Request::Claim {
-            name: crate::mint::Name::parse("alice").unwrap(),
-            ua,
-            term: crate::mint::Term::Forever,
-            code: None,
-        };
-        request
+        ceremony
             .add_output(
                 None,
                 treasury_fvk.address_at(0u32, zip32::Scope::External),
                 NoteValue::from_raw(50_000),
-                *memo.as_array(),
+                *request_memo.as_array(),
             )
             .unwrap();
-        request
+        for _ in 0..crate::mint::registry::ANCHOR_POOL_SIZE {
+            ceremony
+                .add_output(
+                    None,
+                    registry_fvk.address_at(0u32, zip32::Scope::External),
+                    NoteValue::ZERO,
+                    [0; 512],
+                )
+                .unwrap();
+        }
+        let ceremony_tx = scan_transaction(ceremony);
+        let ceremony_txid = ceremony_tx.txid();
+        let ceremony_bundle = ceremony_tx.ironwood_bundle().unwrap();
+        let anchors = ceremony_bundle
+            .decrypt_outputs_with_keys(&[registry_fvk.to_ivk(zip32::Scope::External)]);
+        assert_eq!(anchors.len(), crate::mint::registry::ANCHOR_POOL_SIZE);
+        let ceremony_pool: BTreeSet<_> = anchors
+            .iter()
+            .map(|(_, _, note, _, _)| note.nullifier(&registry_fvk))
+            .collect();
+        let (anchor_index, _, anchor_note, _, _) = anchors[0];
+        let anchor_nf = anchor_note.nullifier(&registry_fvk);
+        let (fee_index, _, fee_note, _, _) = ceremony_bundle
+            .decrypt_outputs_with_keys(&[treasury_fvk.to_ivk(zip32::Scope::External)])
+            .pop()
+            .unwrap();
+        let mut witnesses: BTreeMap<_, IncrementalWitness<MerkleHashOrchard, 32>> = BTreeMap::new();
+        for (index, action) in ceremony_bundle.actions().iter().enumerate() {
+            let leaf = MerkleHashOrchard::from_cmx(action.cmx());
+            tree.append(leaf).unwrap();
+            for witness in witnesses.values_mut() {
+                witness.append(leaf).unwrap();
+            }
+            if index == anchor_index || index == fee_index {
+                witnesses.insert(index, IncrementalWitness::from_tree(tree.clone()).unwrap());
+            }
+        }
+        let ceremony_root = tree.root();
+        let ceremony_block = test_block(ceremony_tx, ceremony_height, funded.block_hash());
+        let ceremonied = ChainState::new(
+            ceremony_height,
+            ceremony_block.header().hash(),
+            Frontier::empty(),
+            Frontier::empty(),
+            tree.to_frontier(),
+        );
+        let payload = NameNote::Claim {
+            name: name.clone(),
+            ua,
+            expires_at: Expiry::Never,
+        };
+        let mut claim = builder(tree.root().into());
+        for (fvk, note, index) in [
+            (registry_fvk.clone(), anchor_note, anchor_index),
+            (treasury_fvk.clone(), fee_note, fee_index),
+        ] {
+            claim
+                .add_spend(
+                    fvk,
+                    note,
+                    witnesses.remove(&index).unwrap().path().unwrap().into(),
+                )
+                .unwrap();
+        }
+        claim
+            .add_zns_output(
+                None,
+                registry_fvk.address_at(0u32, zip32::Scope::External),
+                NoteValue::ZERO,
+                payload.encode(&network),
+                orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(&network)),
+                payload.psi(&network),
+            )
+            .unwrap();
+        claim
             .add_output(
                 None,
                 registry_fvk.address_at(0u32, zip32::Scope::External),
@@ -820,24 +922,41 @@ mod tests {
                 [0; 512],
             )
             .unwrap();
-        let request_tx = scan_transaction(request);
-        let request_txid = request_tx.txid();
-        let request_bundle = request_tx.ironwood_bundle().unwrap();
-        let (_, _, gift, _, _) = request_bundle
+        claim
+            .add_output(
+                None,
+                treasury_fvk.address_at(0u32, zip32::Scope::Internal),
+                NoteValue::from_raw(40_000),
+                [0; 512],
+            )
+            .unwrap();
+        let claim_tx = scan_transaction(claim);
+        let claim_bundle = claim_tx.ironwood_bundle().unwrap();
+        let (_, _, successor, _, _) = claim_bundle
             .decrypt_outputs_with_keys(&[registry_fvk.to_ivk(zip32::Scope::External)])
             .pop()
             .unwrap();
-        let gift_nf = gift.nullifier(&registry_fvk);
-        let first_root = tree.root();
-        for action in request_bundle.actions().iter() {
+        let successor_nf = successor.nullifier(&registry_fvk);
+        for action in claim_bundle.actions().iter() {
             tree.append(MerkleHashOrchard::from_cmx(action.cmx()))
                 .unwrap();
         }
-        let roots = [first_root, tree.root()];
-        let request_block = test_block(request_tx, second_height, funded.block_hash());
-        let blocks = [(origin.clone(), funding_block), (funded, request_block)];
+        let roots = [first_root, ceremony_root, tree.root()];
+        let claim_block = test_block(claim_tx, claim_height, ceremonied.block_hash());
+        let candidates = decrypt_name_notes(&network, &claim_block, &registry_keys);
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert_eq!(candidate.payload, payload);
+        let mut succeeded_pool = ceremony_pool.clone();
+        assert!(succeeded_pool.remove(&anchor_nf));
+        assert!(succeeded_pool.insert(successor_nf));
+        let blocks = [
+            (origin.clone(), funding_block),
+            (funded, ceremony_block),
+            (ceremonied, claim_block),
+        ];
 
-        for birthday in [second_height + 1, second_height] {
+        for birthday in [claim_height + 1, ceremony_height] {
             let mut wallet = Wallet::new(
                 [
                     (TREASURY_ACCOUNT, treasury_keys.fvk()),
@@ -873,10 +992,6 @@ mod tests {
                 );
                 assert_eq!(cursor.block_height(), height);
                 assert_eq!(cursor.block_hash(), block.header().hash());
-                assert_eq!(wallet.tip().block_height(), height);
-                assert_eq!(wallet.tip().block_hash(), cursor.block_hash());
-                assert_eq!(cursor.sapling_tree_size(), Some(0));
-                assert_eq!(cursor.orchard_tree_size(), Some(0));
                 assert_eq!(cursor.ironwood_tree_size(), Some(tree_size));
                 assert_eq!(
                     wallet.ironwood_anchor(height).unwrap().unwrap(),
@@ -884,12 +999,17 @@ mod tests {
                 );
                 assert_eq!(
                     mtp.current().unwrap().as_seconds(),
-                    i64::from(u32::from(height))
+                    i64::from(u32::from(
+                        [first_height, ceremony_height, ceremony_height][index]
+                    ))
                 );
                 let tip = TargetHeight::from(height + 1);
                 let notes = wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, tip);
                 assert_eq!(notes.len(), 1);
-                assert_eq!(notes[0].note().value().inner(), [60_000, 50_000][index]);
+                assert_eq!(
+                    notes[0].note().value().inner(),
+                    [60_000, 50_000, 40_000][index]
+                );
                 assert_eq!(
                     wallet
                         .unspent_ironwood_note_by_nullifier(TREASURY_ACCOUNT, payment_nf, tip)
@@ -898,27 +1018,56 @@ mod tests {
                 );
                 assert_eq!(
                     wallet
-                        .unspent_ironwood_note_by_nullifier(REGISTRY_ACCOUNT, gift_nf, tip)
+                        .unspent_ironwood_note_by_nullifier(REGISTRY_ACCOUNT, anchor_nf, tip)
                         .is_some(),
                     index == 1,
                 );
-                assert_eq!(
-                    registry.anchor_pool().len(),
-                    usize::from(height >= birthday)
-                );
-                assert_eq!(
-                    registry.anchor_pool().contains(&gift_nf),
-                    height >= birthday
-                );
-                if height < birthday {
+                if height < birthday || index == 2 {
                     assert!(arrivals.is_empty());
                 } else {
                     assert!(matches!(
                         arrivals.as_slice(),
                         [(txid, crate::mint::MintInbound::Request(request), paid)]
-                            if *txid == request_txid && request == &expected_request
+                            if *txid == ceremony_txid && request == &expected_request
                                 && paid.into_u64() == 50_000
                     ));
+                }
+                let expected_pool = match (height >= birthday, index) {
+                    (true, 1) => ceremony_pool.clone(),
+                    (true, 2) => succeeded_pool.clone(),
+                    _ => BTreeSet::new(),
+                };
+                assert_eq!(registry.anchor_pool(), &expected_pool);
+                let stored = wallet.unspent_ironwood_note_by_nullifier(
+                    REGISTRY_ACCOUNT,
+                    candidate.nullifier,
+                    tip,
+                );
+                if height < birthday || index < 2 {
+                    assert!(registry.record(&name).is_none());
+                    assert!(registry.record_history(&name).is_empty());
+                    assert!(stored.is_none());
+                } else {
+                    let record = registry.record(&name).unwrap();
+                    assert_eq!(record.action, Action::Claim);
+                    assert_eq!(record.commitment, payload.commitment(&network));
+                    assert_eq!(&record.ua, payload.ua());
+                    assert_eq!(record.expires_at, Expiry::Never);
+                    assert_eq!(record.confirmed_height, claim_height);
+                    assert_eq!(record.predecessor_nullifier, candidate.nullifier);
+                    assert_eq!(registry.record_history(&name).len(), 1);
+                    let stored = stored.unwrap();
+                    assert_eq!(*stored.note(), candidate.note);
+                    assert_eq!(
+                        wallet.get_memo(*stored.internal_note_id()).unwrap(),
+                        Some(zcash_protocol::memo::Memo::Future(
+                            zcash_protocol::memo::MemoBytes::from_bytes(&candidate.memo).unwrap()
+                        ))
+                    );
+                    assert_eq!(
+                        wallet.witness(&stored, height).unwrap().root(candidate.cmx),
+                        roots[index].into()
+                    );
                 }
             }
         }

@@ -2,6 +2,21 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-29 — Replay a ceremony and a backed Name Note claim (#240)
+
+- The birthday regression now receives Treasury funds, creates all 40
+  ceremony anchors in one transaction, and spends one anchor with Treasury
+  fees to create a Name Note and successor. It verifies the exact record,
+  stored memo, and ZNS Merkle witness. A later-birthday replay retains wallet
+  funds, spends, trees, and MTP while admitting no Registry history or notes.
+- Uses the pinned Orchard builder's witness-checked spends and ZNS output
+  (`orchard` faa82e4, `builder.rs:1108` and `builder.rs:1228`). Removed empty
+  Sapling/Orchard assertions and repeated wallet-tip assertions.
+- `origin_checkpoint` accepts the treestate call as an inline closure;
+  boot supplies `JsonRpc::chain_state_at`. Its regression checks the actual
+  requested checkpoint and following height: birthday minus 101/100 for
+  mainnet/testnet, 99/100 for regtest. No checkpoint helper was extracted.
+
 ## 2026-09-29 — Exercise wallet scanning across the birthday boundary (#240)
 
 - One two-block fixture is replayed with its second block before and at
