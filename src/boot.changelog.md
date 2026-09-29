@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-29 — Choose the checkpoint directly (#240)
+
+- `origin_checkpoint` selects birthday minus 101 for mainnet/testnet and
+  birthday minus one for regtest. Removed the single-use lookback constant.
+  The scan still starts at the following block.
+
 ## 2026-09-29 — Wallet scanning starts 100 blocks before birth (#239)
 
 - Mainnet and testnet seed the wallet at `MINT_BIRTHDAY - 101` and scan

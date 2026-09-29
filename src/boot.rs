@@ -124,9 +124,6 @@ const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(4_338_933);
 #[cfg(feature = "regtest")]
 const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(100);
 
-/// Wallet history before birth; regtest retains its fixture boundary.
-const SCAN_LOOKBACK_BLOCKS: u32 = if cfg!(feature = "regtest") { 0 } else { 100 };
-
 impl Boot<Network> {
     /// Boot sequence for this build's network.
     pub async fn start() -> Self {
@@ -521,7 +518,10 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 /// Zebra is part of the same measured TEE image; its identity is guaranteed
 /// by the SEV-SNP attestation, not by runtime RPC checks.
 async fn origin_checkpoint(rpc: &zcash::JsonRpc) -> ChainState {
-    let checkpoint_height = MINT_BIRTHDAY - SCAN_LOOKBACK_BLOCKS - 1;
+    #[cfg(not(feature = "regtest"))]
+    let checkpoint_height = MINT_BIRTHDAY - 101;
+    #[cfg(feature = "regtest")]
+    let checkpoint_height = MINT_BIRTHDAY - 1;
 
     let chain_state = rpc
         .chain_state_at(checkpoint_height)
