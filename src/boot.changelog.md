@@ -2,6 +2,17 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-29 — Boot owns the birthday (#237)
+
+- `MINT_BIRTHDAY` (mainnet `3_400_000`, testnet `4_338_933`, regtest
+  `100`) moves verbatim from `src/mint.rs` into the network-selection
+  section, private. The cfg gates are unchanged; the values move as
+  bytes, never retyped.
+- The regtest value, `regtest_network()`'s schedule, and the test
+  pinning them at height 100 now share one file.
+- No behavior change: same constant, same gates, identical constant
+  folding; the mint import shrinks by one name.
+
 ## 2026-09-29 — Boot owns seed intake, the TEE, and account authority (#231)
 
 - Adopted `capsule` and `tee` as public submodules and `key` as a private
