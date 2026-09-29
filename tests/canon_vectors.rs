@@ -50,6 +50,9 @@ enum Event {
     /// Ceremony filling: a zero-value Registry output joins until the
     /// pool has once reached standing size, in canonical scan order.
     AdoptAnchor { height: u32, nullifier: Hex32 },
+    /// A Registry spend with no Name Note. Every live anchor in `spent`
+    /// retires, and no successor is seated.
+    Retire { height: u32, spent: Vec<Hex32> },
     /// A backed Claim: retires `spent_anchor`, adopts `successor_anchor`,
     /// binds the name. `expect` says whether the record transition lands;
     /// a rejected claim (a duplicate on a live name) still advances the
@@ -163,6 +166,10 @@ fn apply(registry: &mut Registry, event: &Event) {
     match event {
         Event::AdoptAnchor { height, nullifier } => {
             registry.adopt_anchor(BlockHeight::from_u32(*height), nf(nullifier));
+        }
+        Event::Retire { height, spent } => {
+            let nfs: Vec<_> = spent.iter().map(|s| nf(s)).collect();
+            registry.follow_spends(&nfs, BlockHeight::from_u32(*height));
         }
         Event::Claim {
             height,
@@ -408,8 +415,9 @@ fn ceremony_fill() -> Scenario {
     }
 }
 
-/// Ceremony adoption closes at standing size. A later ordinary output
-/// does not refill the pool; a rewind before that block reopens it.
+/// Ceremony adoption closes at standing size. A later spend shrinks the
+/// pool, and an ordinary output offered after that does not refill it.
+/// Rewind before the completion block reopens adoption.
 fn ceremony_closes_once() -> Scenario {
     let mut events: Vec<Event> = (1..=ANCHOR_POOL_SIZE)
         .map(|i| Event::AdoptAnchor {
@@ -417,8 +425,12 @@ fn ceremony_closes_once() -> Scenario {
             nullifier: hex32_from_seed(i as u8),
         })
         .collect();
-    events.push(Event::AdoptAnchor {
+    events.push(Event::Retire {
         height: 101,
+        spent: vec![hex32_from_seed(1), hex32_from_seed(2)],
+    });
+    events.push(Event::AdoptAnchor {
+        height: 102,
         nullifier: hex32_from_seed(0xF0),
     });
     events.push(Event::Rewind { to_height: 100 });
@@ -429,7 +441,7 @@ fn ceremony_closes_once() -> Scenario {
     });
     Scenario {
         name: "ceremony_closes_once".to_owned(),
-        description: "Once the ceremony reaches standing size, ordinary outputs do not refill it. Rewind before that block lets the ceremony be reconstructed.".to_owned(),
+        description: "After the ceremony reaches standing size, a spend shrinks the pool and a later ordinary output does not refill it. Rewind before the completion block lets the ceremony be reconstructed.".to_owned(),
         trace: run(&events),
         events,
     }

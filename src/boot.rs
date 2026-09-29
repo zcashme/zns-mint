@@ -1084,6 +1084,310 @@ mod tests {
         }
     }
 
+    /// The ceremony closes adoption. A later Registry spend of two live
+    /// anchors leaves the pool short, and an unbacked Claim's ordinary
+    /// output — offered before the Claim is judged — does not refill it.
+    #[test]
+    fn depleted_pool_excludes_an_unbacked_claim_successor() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use incrementalmerkletree::frontier::{CommitmentTree, Frontier};
+        use incrementalmerkletree::witness::IncrementalWitness;
+        use orchard::builder::{Builder, BundleType};
+        use orchard::bundle::BundleVersion;
+        use orchard::tree::MerkleHashOrchard;
+        use orchard::value::NoteValue;
+        use zcash_keys::keys::UnifiedAddressRequest;
+        use zcash_primitives::block::{Block, BlockHash, BlockHeaderData};
+
+        use crate::mint::registry::ANCHOR_POOL_SIZE;
+        use crate::mint::{decrypt_name_notes, Expiry, Name, NameNote};
+
+        let network = boot_network();
+        let seed = Secret::new([0; 32]);
+        let treasury_keys = TreasuryKeys::derive(&network, &seed);
+        let registry_keys = RegistryKeys::derive(&network, &seed);
+        let treasury_fvk = treasury_keys.orchard_fvk();
+        let registry_fvk = registry_keys.orchard_fvk();
+        let first_height = network
+            .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+            .unwrap()
+            + 100;
+        let ceremony_height = first_height + 1;
+        let deplete_height = ceremony_height + 1;
+        let unbacked_height = deplete_height + 1;
+        let origin = ChainState::empty(first_height - 1, BlockHash([0; 32]));
+        let version = BundleVersion::ironwood_v3();
+        let builder = |anchor| {
+            Builder::new(
+                BundleType::DEFAULT,
+                version,
+                version.default_flags(),
+                anchor,
+            )
+            .unwrap()
+        };
+        let test_block = |tx, height: BlockHeight, prev_block| {
+            let header = BlockHeaderData {
+                version: 4,
+                prev_block,
+                merkle_root: [0; 32],
+                final_sapling_root: [0; 32],
+                time: u32::from(height),
+                bits: 0,
+                nonce: [0; 32],
+                solution: vec![],
+            }
+            .freeze()
+            .unwrap();
+            Block::from_parts(header, (tx, Vec::new()).into(), height)
+        };
+        let (ua, _) = treasury_keys
+            .fvk()
+            .default_address(UnifiedAddressRequest::SHIELDED)
+            .unwrap();
+        let name = Name::parse("alice").unwrap();
+
+        let mut funding = builder(orchard::Anchor::empty_tree());
+        funding
+            .add_output(
+                None,
+                treasury_fvk.address_at(0u32, zip32::Scope::External),
+                NoteValue::from_raw(60_000),
+                [0; 512],
+            )
+            .unwrap();
+        let funding_tx = scan_transaction(funding);
+        let funding_bundle = funding_tx.ironwood_bundle().unwrap();
+        let (payment_index, _, payment, _, _) = funding_bundle
+            .decrypt_outputs_with_keys(&[treasury_fvk.to_ivk(zip32::Scope::External)])
+            .pop()
+            .unwrap();
+        let mut tree = CommitmentTree::<MerkleHashOrchard, 32>::empty();
+        let mut payment_witness = None;
+        for (index, action) in funding_bundle.actions().iter().enumerate() {
+            let leaf = MerkleHashOrchard::from_cmx(action.cmx());
+            tree.append(leaf).unwrap();
+            if index == payment_index {
+                payment_witness = IncrementalWitness::from_tree(tree.clone());
+            } else if let Some(witness) = payment_witness.as_mut() {
+                witness.append(leaf).unwrap();
+            }
+        }
+        let funding_block = test_block(funding_tx, first_height, origin.block_hash());
+        let funded = ChainState::new(
+            first_height,
+            funding_block.header().hash(),
+            Frontier::empty(),
+            Frontier::empty(),
+            tree.to_frontier(),
+        );
+
+        let mut ceremony = builder(tree.root().into());
+        ceremony
+            .add_spend(
+                treasury_fvk.clone(),
+                payment,
+                payment_witness.unwrap().path().unwrap().into(),
+            )
+            .unwrap();
+        ceremony
+            .add_output(
+                None,
+                treasury_fvk.address_at(0u32, zip32::Scope::External),
+                NoteValue::from_raw(50_000),
+                [0; 512],
+            )
+            .unwrap();
+        for _ in 0..ANCHOR_POOL_SIZE {
+            ceremony
+                .add_output(
+                    None,
+                    registry_fvk.address_at(0u32, zip32::Scope::External),
+                    NoteValue::ZERO,
+                    [0; 512],
+                )
+                .unwrap();
+        }
+        let ceremony_tx = scan_transaction(ceremony);
+        let ceremony_bundle = ceremony_tx.ironwood_bundle().unwrap();
+        let mut anchors = ceremony_bundle
+            .decrypt_outputs_with_keys(&[registry_fvk.to_ivk(zip32::Scope::External)]);
+        assert_eq!(anchors.len(), ANCHOR_POOL_SIZE);
+        let ceremony_pool: BTreeSet<_> = anchors
+            .iter()
+            .map(|(_, _, note, _, _)| note.nullifier(&registry_fvk))
+            .collect();
+        let (a0_index, _, a0_note, _, _) = anchors.remove(0);
+        let (a1_index, _, a1_note, _, _) = anchors.remove(0);
+        let a0_nf = a0_note.nullifier(&registry_fvk);
+        let a1_nf = a1_note.nullifier(&registry_fvk);
+        let (fee_index, _, fee_note, _, _) = ceremony_bundle
+            .decrypt_outputs_with_keys(&[treasury_fvk.to_ivk(zip32::Scope::External)])
+            .pop()
+            .unwrap();
+        let mut anchor_witnesses: BTreeMap<_, IncrementalWitness<MerkleHashOrchard, 32>> =
+            BTreeMap::new();
+        let mut fee_witness: Option<IncrementalWitness<MerkleHashOrchard, 32>> = None;
+        for (index, action) in ceremony_bundle.actions().iter().enumerate() {
+            let leaf = MerkleHashOrchard::from_cmx(action.cmx());
+            tree.append(leaf).unwrap();
+            for witness in anchor_witnesses.values_mut() {
+                witness.append(leaf).unwrap();
+            }
+            if let Some(witness) = fee_witness.as_mut() {
+                witness.append(leaf).unwrap();
+            }
+            let tracked = IncrementalWitness::from_tree(tree.clone()).unwrap();
+            if index == a0_index || index == a1_index {
+                anchor_witnesses.insert(index, tracked);
+            } else if index == fee_index {
+                fee_witness = Some(tracked);
+            }
+        }
+        let ceremony_block = test_block(ceremony_tx, ceremony_height, funded.block_hash());
+        let ceremonied = ChainState::new(
+            ceremony_height,
+            ceremony_block.header().hash(),
+            Frontier::empty(),
+            Frontier::empty(),
+            tree.to_frontier(),
+        );
+
+        let mut deplete = builder(tree.root().into());
+        for (index, note) in [(a0_index, a0_note), (a1_index, a1_note)] {
+            deplete
+                .add_spend(
+                    registry_fvk.clone(),
+                    note,
+                    anchor_witnesses
+                        .remove(&index)
+                        .unwrap()
+                        .path()
+                        .unwrap()
+                        .into(),
+                )
+                .unwrap();
+        }
+        let deplete_tx = scan_transaction(deplete);
+        let deplete_bundle = deplete_tx.ironwood_bundle().unwrap();
+        let mut fee_witness = fee_witness.unwrap();
+        for action in deplete_bundle.actions().iter() {
+            let leaf = MerkleHashOrchard::from_cmx(action.cmx());
+            tree.append(leaf).unwrap();
+            fee_witness.append(leaf).unwrap();
+        }
+        let deplete_block = test_block(deplete_tx, deplete_height, ceremonied.block_hash());
+        let depleted = ChainState::new(
+            deplete_height,
+            deplete_block.header().hash(),
+            Frontier::empty(),
+            Frontier::empty(),
+            tree.to_frontier(),
+        );
+
+        let payload = NameNote::Claim {
+            name: name.clone(),
+            ua,
+            expires_at: Expiry::Never,
+        };
+        let mut unbacked = builder(tree.root().into());
+        unbacked
+            .add_spend(
+                treasury_fvk.clone(),
+                fee_note,
+                fee_witness.path().unwrap().into(),
+            )
+            .unwrap();
+        unbacked
+            .add_zns_output(
+                None,
+                registry_fvk.address_at(0u32, zip32::Scope::External),
+                NoteValue::ZERO,
+                payload.encode(&network),
+                orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(&network)),
+                payload.psi(&network),
+            )
+            .unwrap();
+        unbacked
+            .add_output(
+                None,
+                registry_fvk.address_at(0u32, zip32::Scope::External),
+                NoteValue::ZERO,
+                [0; 512],
+            )
+            .unwrap();
+        unbacked
+            .add_output(
+                None,
+                treasury_fvk.address_at(0u32, zip32::Scope::External),
+                NoteValue::from_raw(40_000),
+                [0; 512],
+            )
+            .unwrap();
+        let unbacked_tx = scan_transaction(unbacked);
+        let unbacked_bundle = unbacked_tx.ironwood_bundle().unwrap();
+        let registry_outs = unbacked_bundle
+            .decrypt_outputs_with_keys(&[registry_fvk.to_ivk(zip32::Scope::External)]);
+        assert_eq!(registry_outs.len(), 1);
+        let (_, _, successor, _, _) = registry_outs.into_iter().next().unwrap();
+        let successor_nf = successor.nullifier(&registry_fvk);
+        let unbacked_block = test_block(unbacked_tx, unbacked_height, depleted.block_hash());
+        assert_eq!(
+            decrypt_name_notes(&network, &unbacked_block, &registry_keys).len(),
+            1
+        );
+
+        let mut wallet = Wallet::new(
+            [
+                (TREASURY_ACCOUNT, treasury_keys.fvk()),
+                (REGISTRY_ACCOUNT, registry_keys.fvk()),
+            ],
+            &origin,
+            &[],
+            &[],
+            network,
+        )
+        .unwrap();
+        let mut registry = Registry::new();
+        let mut mtp = MtpTracker::default();
+        let mut cursor = block_metadata(&origin);
+        let mut expected = BTreeSet::new();
+        for (height, from_state, block) in [
+            (first_height, &origin, &funding_block),
+            (ceremony_height, &funded, &ceremony_block),
+            (deplete_height, &ceremonied, &deplete_block),
+            (unbacked_height, &depleted, &unbacked_block),
+        ] {
+            crate::mint::apply_block(
+                &network,
+                ceremony_height,
+                &registry_keys,
+                &treasury_keys,
+                from_state,
+                test_block(block.vtx()[0].clone(), height, from_state.block_hash()),
+                height,
+                &mut wallet,
+                &mut registry,
+                &mut mtp,
+                &mut cursor,
+            );
+            if height == ceremony_height {
+                expected = ceremony_pool.clone();
+                assert!(registry.anchor_adoption_closed());
+            } else if height == deplete_height {
+                expected.remove(&a0_nf);
+                expected.remove(&a1_nf);
+                assert!(registry.anchor_adoption_closed());
+            } else if height == unbacked_height {
+                assert!(registry.anchor_adoption_closed());
+                assert!(!registry.anchor_pool().contains(&successor_nf));
+                assert!(registry.record(&name).is_none());
+            }
+            assert_eq!(registry.anchor_pool(), &expected);
+        }
+    }
+
     #[test]
     #[cfg(not(feature = "regtest"))]
     #[should_panic(expected = "FATAL: SEED FINGERPRINT MISMATCH")]
