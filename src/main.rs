@@ -52,6 +52,7 @@ async fn main() {
         mut oracle,
         mut challenges,
         access_code_key,
+        mut protected_names,
         mut registry,
     } = Boot::start().await;
 
@@ -384,6 +385,9 @@ async fn main() {
             .current_day()
             .expect("FATAL: MTP unavailable at the applied tip");
         oracle.accumulate(fetch_round().await, today, mtp_now);
+        if today > previous_day {
+            protected_names.refresh().await;
+        }
         // Transient or unusable tip data → skip this rule pass and wait
         // for another notification; a chain race re-converges.
         let exact_tip = match source.canonical_tip().await {
@@ -446,24 +450,14 @@ async fn main() {
                         // The earliest payment owns the name until its claim
                         // is observed. A later payment does not start a
                         // second Name Note.
-                        // Pre-sale gate: read-only table lookup.
-                        // Unavailability defers with the queue; a deny is
-                        // decided. Redemption is the name already live.
-                        let name_live = registry.record(name).is_some();
-                        match zns_mint::mint::presale::decide(
-                            zns_mint::mint::presale::lookup_name(name, mtp_now).await,
+                        // Pre-sale gate: the cached table, judged against
+                        // the tip MTP.
+                        match access_code_key.check_access(
+                            protected_names.get(name),
+                            mtp_now,
+                            name,
                             code.as_ref(),
-                            name_live,
-                            access_code_key.as_bytes(),
-                            name.as_str(),
                         ) {
-                            zns_mint::mint::presale::Decision::Retry => {
-                                tracing::debug!(
-                                    name = %name.as_str(),
-                                    "pre-sale lookup unavailable; claim waits"
-                                );
-                                break 'lane false;
-                            }
                             zns_mint::mint::presale::Decision::Deny => {
                                 tracing::debug!(
                                     name = %name.as_str(),

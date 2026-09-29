@@ -1,5 +1,16 @@
 # main.changelog.md
 
+## 2026-09-29 — The pre-sale gate reads the cache synchronously (#242)
+
+- The claim lane calls `access_code_key.check_access(
+  protected_names.get(name), mtp_now, name, code.as_ref())` — no
+  await, no `Decision::Retry` arm, and no
+  restatement of name-liveness: `authorize_claim` refuses claims on
+  live names. The table
+  refreshes once per MTP day beside the price fetch
+  (`today > previous_day`), keeping yesterday's rows on failure — the
+  vault-sweep contract. Boot hands over `protected_names`; the run
+  loop holds it beside `registry` and `oracle`.
 ## 2026-09-29 — Wallet lookback does not widen Registry reorgs (#239)
 
 - The loop receives boot's fixed birthday and passes it to block

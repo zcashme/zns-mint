@@ -1,5 +1,35 @@
 # `mint/presale.rs` design record
 
+## 2026-09-29 — The table is cached; the claim path is synchronous (#242)
+
+- The per-claim HTTP lookup is gone. `ProtectedNames`
+  (`BTreeMap<Name, ProtectionStatus>`) is fetched once at boot
+  (retry-until-good, before the attestation write) and refreshed once
+  per MTP day at `today > previous_day` in the tip pass. Supabase is
+  never on a claim's critical path after boot.
+- `ProtectionStatus` is three-variant — `WithExpiry(Timestamp)` |
+  `Forever`, with `Unprotected` as the flattened absence `get`
+  returns; it is never stored. A lift moment the MTP has reached is
+  judged per claim in `decide`, so expiry lifts exactly on schedule.
+  The `Lookup`/`LookupError`/`classify` trio and `Decision::Retry`
+  die; `Deny` now means only a wrong or missing code — a name
+  already live is refused by `authorize_claim` (redemption), not
+  restated at the gate.
+- The gate is `AccessCodeDerivationKey::check_access(status, mtp,
+  name, offered)` — the key holds its own secret and derives the
+  expected code for the name; `code_for` is the public name→code
+  impl. The free `decide` is gone.
+- `fetch` paginates `limit=250&offset=N` (four requests per thousand
+  rows; worst-case valid row ~137 B keeps a page at ~34 KB under the
+  unchanged 64 KB cap), stops on a short page, and refuses the whole
+  read past 100 pages (25,000 names). One bad row — an unlawful
+  `normalized_name`, a malformed `expires_at`, a duplicate — refuses
+  the read: an existing protection can freeze, never silently drop.
+  A failed refresh keeps yesterday's rows and tries next midnight
+  (the vault-sweep contract).
+- `AccessCodeKey` is renamed `AccessCodeDerivationKey`; `AccessCode`
+  and the test vectors are unchanged.
+
 ## 2026-09-27 — The gate queries `zn_names`
 
 - The Supabase table is `zn_names`; `zn_protected_names` was a

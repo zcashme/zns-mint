@@ -1,16 +1,17 @@
-//! Pre-sale access codes for early claims of protected names.
+//! The pre-sale protected-names table, cached in memory.
 //!
-//! The mint looks up each claim name in Supabase `zn_names`
-//! (read-only). An absent row means the name is open. Every row in the
-//! table is protected; its `expires_at` (`timestamptz`, nullable) chooses
-//! between finite protection and forever protection. A row whose
-//! `expires_at` is at or before the current MTP is treated as open —
-//! the protection has expired. The six-digit code is not stored in the
-//! table: it is derived in the TEE from a root key
+//! `zn_names` is read once at boot and re-read once per MTP day in
+//! the tip pass; claims consult the cache synchronously — Supabase
+//! is never on a claim's path. Every row is protected; `expires_at`
+//! (`timestamptz`, nullable) is either a lift moment, judged against
+//! the current MTP per claim, or forever. A missing row, or a lift
+//! moment the MTP has reached, is unprotected. The six-digit code is not
+//! stored in the table: it is derived in the TEE from a root key
 //! (`Tee::derive_sealing_key`) and the claim name, matching the
-//! access-code-v1 HMAC construction. Redemption is the name live in the
-//! registry; the mint never writes Supabase.
+//! access-code-v1 HMAC construction. Redemption is the name live in
+//! the registry; the mint never writes Supabase.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use hmac::{Hmac, Mac};
@@ -45,6 +46,15 @@ const PRESALE_PUBLISHABLE_KEY: &str = "sb_publishable_eRyX0Z5CY3bHm11iCFoZRA_-u2
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// Rows per request: the largest page whose worst-case valid rows (a
+/// 63-byte name plus a 35-character RFC 3339 timestamp, ~137 bytes)
+/// stay comfortably under `MAX_BODY_BYTES`.
+const PAGE_ROWS: usize = 250;
+
+/// Page ceiling: a read past this many pages (25,000 names) is
+/// refused — a pathological table keeps yesterday's rows, loudly.
+const MAX_PAGES: usize = 100;
 
 type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
 type HmacSha256 = Hmac<Sha256>;
@@ -131,54 +141,28 @@ impl AccessCode {
     }
 }
 
-/// Outcome of one read-only pre-sale lookup for a claim name.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Lookup {
-    /// Name is not in the protected table, or its row's protection has
-    /// already expired at the current MTP. The ordinary claim path
-    /// applies.
-    Open,
-    /// Name is in the table with an `expires_at` in the future; the
-    /// offered memo code must match the TEE derive. The wrapped
-    /// timestamp is the moment protection lifts, kept for observability.
-    ProtectedWithExpiry(Timestamp),
-    /// Name is in the table with a null `expires_at`; the offered memo
-    /// code must match the TEE derive. Protection does not lift.
-    ProtectedForever,
+/// A name's protection status. `Unprotected` is never stored — it
+/// is the flattened absence, produced by [`ProtectedNames::get`]. A
+/// finite row stays `WithExpiry` whether five minutes or five years
+/// remain; the lift moment is judged against the current MTP per
+/// claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProtectionStatus {
+    /// Returned for an absent name; never stored.
+    Unprotected,
+    /// Protection lifts when the MTP reaches the timestamp.
+    WithExpiry(Timestamp),
+    /// Protection never lifts.
+    Forever,
 }
 
-/// Why a pre-sale lookup could not be classified. The variant is the
-/// only distinction callers branch on — retry vs give up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LookupError {
-    /// Transport, timeout, or 5xx. Queue entry retried next tip.
-    Transient,
-    /// Non-429 4xx, non-JSON body, unparsable `expires_at`, or multi-row
-    /// for one `normalized_name`. Retrying observes the same state; the
-    /// claim is dropped.
-    Terminal,
-}
-
-impl std::fmt::Display for LookupError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Transient => f.write_str("pre-sale lookup transient failure"),
-            Self::Terminal => f.write_str("pre-sale lookup terminal failure"),
-        }
-    }
-}
-
-impl std::error::Error for LookupError {}
-
-/// Claim-lane decision after the lookup.
+/// The claim-lane verdict.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     /// Proceed to payment and authorize.
     Allow,
     /// Dead: wrong or missing code, or the name already exists (redeemed).
     Deny,
-    /// Keep the queue entry; try again on the next tip.
-    Retry,
 }
 
 /// Derive the purpose-specific access-code key from the TEE root.
@@ -194,45 +178,12 @@ pub fn derive_access_code_key(private_key: &[u8]) -> Zeroizing<[u8; 32]> {
     key
 }
 
-/// Pure gate. For every protected variant, recomputes the code from
-/// `access_code_key` and the claim `name` (must be the same bytes the
-/// issuer used — the memo's normalized ZNS name). A transient lookup
-/// error keeps the queue entry alive with [`Decision::Retry`]; a
-/// terminal lookup error frees the slot with [`Decision::Deny`] so a
-/// permanently broken row does not tie up the queue forever.
-pub fn decide(
-    lookup: Result<Lookup, LookupError>,
-    offered: Option<&AccessCode>,
-    name_live: bool,
-    access_code_key: &[u8],
-    name: &str,
-) -> Decision {
-    let lookup = match lookup {
-        Ok(lookup) => lookup,
-        Err(LookupError::Transient) => return Decision::Retry,
-        Err(LookupError::Terminal) => return Decision::Deny,
-    };
-    match lookup {
-        Lookup::Open => Decision::Allow,
-        Lookup::ProtectedWithExpiry(_) | Lookup::ProtectedForever => {
-            if name_live {
-                return Decision::Deny;
-            }
-            let expected = AccessCode::derive(access_code_key, name);
-            match offered {
-                Some(offered) if expected.ct_eq(offered) => Decision::Allow,
-                _ => Decision::Deny,
-            }
-        }
-    }
-}
-
-/// A row from `zn_names`. Only `expires_at` matters here —
-/// every row is protected by construction, and the other columns
-/// (`id`, `normalized_name`, `created_at`, `source`, `dupe`) are ignored
+/// A row from `zn_names`. `normalized_name` must parse as a [`Name`];
+/// `expires_at` must be RFC 3339 or null. Other columns are ignored
 /// by serde's default field handling.
 #[derive(Deserialize)]
 struct ProtectedRow {
+    normalized_name: String,
     #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
     expires_at: Option<Timestamp>,
 }
@@ -240,8 +191,7 @@ struct ProtectedRow {
 /// Deserialize `timestamptz` in the RFC 3339 shape PostgREST returns
 /// (e.g. `"2027-01-01T00:00:00+00:00"`). `null` → `None`; any string
 /// that does not parse as RFC 3339 fails the deserializer, which
-/// bubbles up as [`LookupError::Terminal`] via `serde_json` — the row
-/// data is structurally broken, retrying will observe the same bytes.
+/// fails the whole read.
 fn deserialize_optional_timestamp<'de, D>(deserializer: D) -> Result<Option<Timestamp>, D::Error>
 where
     D: Deserializer<'de>,
@@ -255,137 +205,115 @@ where
     Ok(Some(ts))
 }
 
-/// Classifies pre-sale rows into a [`Lookup`] outcome relative to `mtp`.
-///
-/// - `[]` (absence): [`Lookup::Open`] — the name is not in the table.
-/// - `[row]` with null `expires_at`: [`Lookup::ProtectedForever`].
-/// - `[row]` with `expires_at > mtp`: [`Lookup::ProtectedWithExpiry`].
-/// - `[row]` with `expires_at <= mtp`: [`Lookup::Open`] — protection
-///   has expired.
-/// - Multiple rows for one `normalized_name` violates the schema's
-///   uniqueness; returned as [`LookupError::Terminal`] with a `warn`
-///   log. Retrying will observe the same duplicate rows.
-fn classify(rows: &[ProtectedRow], name: &Name, mtp: Timestamp) -> Result<Lookup, LookupError> {
-    match rows {
-        [] => Ok(Lookup::Open),
-        [row] => match row.expires_at {
-            None => Ok(Lookup::ProtectedForever),
-            Some(expires_at) if mtp >= expires_at => Ok(Lookup::Open),
-            Some(expires_at) => Ok(Lookup::ProtectedWithExpiry(expires_at)),
-        },
-        _ => {
-            tracing::warn!(
-                name = %name.as_str(),
-                rows = rows.len(),
-                "pre-sale returned multiple rows for one normalized name"
-            );
-            Err(LookupError::Terminal)
+/// The protected-names table: name → protection status. A name
+/// absent from the map is unprotected. Pure data; [`fetch`] and
+/// [`ProtectedNames::refresh`] are the only writers.
+#[derive(Clone, Debug)]
+pub struct ProtectedNames(BTreeMap<Name, ProtectionStatus>);
+
+impl ProtectedNames {
+    /// The name's status; `Unprotected` when absent.
+    pub fn get(&self, name: &Name) -> ProtectionStatus {
+        self.0
+            .get(name)
+            .copied()
+            .unwrap_or(ProtectionStatus::Unprotected)
+    }
+
+    /// Re-reads the table; keeps the current rows on a failed read.
+    pub async fn refresh(&mut self) {
+        if let Some(fresh) = fetch().await {
+            *self = fresh;
         }
     }
 }
 
-/// Read-only lookup by `normalized_name`. The code is TEE-derived.
-///
-/// `mtp` is the current canonical-chain MTP; used to decide whether a
-/// row's `expires_at` still gates the claim.
-///
-/// Error kind reflects retry semantics: transport, timeout, 429, and
-/// 5xx are [`LookupError::Transient`]; any other 4xx, a malformed body,
-/// or a malformed `expires_at` are [`LookupError::Terminal`].
-pub async fn lookup_name(name: &Name, mtp: Timestamp) -> Result<Lookup, LookupError> {
-    let url = format!(
-        "{}?normalized_name=eq.{}&select=expires_at",
-        presale_rest_url(),
-        name.as_str()
-    );
-    // URL parse and request build only fail on a code bug given a
-    // static base and a validated `Name`. Terminal: retrying will
-    // reproduce the same programmer error.
-    let uri: Uri = match url.parse() {
-        Ok(uri) => uri,
-        Err(error) => {
-            tracing::warn!(?error, name = %name.as_str(), "pre-sale lookup: invalid URL");
-            return Err(LookupError::Terminal);
-        }
-    };
-    let mut builder = Request::builder()
-        .uri(uri)
-        .header("accept", "application/json");
-    if !PRESALE_PUBLISHABLE_KEY.is_empty() {
-        builder = builder.header("apikey", PRESALE_PUBLISHABLE_KEY);
-    }
-    let request = match builder.body(Empty::<Bytes>::default()) {
-        Ok(request) => request,
-        Err(error) => {
-            tracing::warn!(?error, name = %name.as_str(), "pre-sale lookup: request build failed");
-            return Err(LookupError::Terminal);
-        }
-    };
-
+/// Reads the whole table, `PAGE_ROWS` at a time, stopping on a short
+/// page. Any failure — transport, timeout, non-success status, body
+/// over cap, malformed row, unlawful name, duplicate, page ceiling —
+/// rejects the whole read (`None`), so a caller keeps what it has.
+pub async fn fetch() -> Option<ProtectedNames> {
     let client = https_client();
-    let response = match tokio::time::timeout(FETCH_TIMEOUT, client.request(request)).await {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => {
-            tracing::warn!(?error, name = %name.as_str(), "pre-sale lookup: http transport failed");
-            return Err(LookupError::Transient);
+    let mut rows = BTreeMap::new();
+    let mut offset = 0;
+    loop {
+        let page = fetch_page(&client, offset).await?;
+        let short = page.len() < PAGE_ROWS;
+        absorb(page, &mut rows)?;
+        if short {
+            return Some(ProtectedNames(rows));
         }
-        Err(_) => {
-            tracing::warn!(name = %name.as_str(), "pre-sale lookup: timed out");
-            return Err(LookupError::Transient);
+        offset += PAGE_ROWS;
+        if offset >= PAGE_ROWS * MAX_PAGES {
+            tracing::warn!("pre-sale fetch exceeded the page ceiling");
+            return None;
         }
-    };
+    }
+}
+
+/// One page of rows. `None` on any transport, timeout, status, size,
+/// or parse failure; each is warned here.
+async fn fetch_page(client: &HttpsClient, offset: usize) -> Option<Vec<ProtectedRow>> {
+    let url = format!(
+        "{}?select=normalized_name,expires_at&limit={PAGE_ROWS}&offset={offset}",
+        presale_rest_url(),
+    );
+    let uri: Uri = url.parse().ok()?;
+    let request = Request::builder()
+        .uri(uri)
+        .header("accept", "application/json")
+        .header("apikey", PRESALE_PUBLISHABLE_KEY)
+        .body(Empty::<Bytes>::default())
+        .ok()?;
+    let response = tokio::time::timeout(FETCH_TIMEOUT, client.request(request))
+        .await
+        .ok()?
+        .ok()?;
     let status = response.status();
     if !status.is_success() {
-        // 5xx (and any non-standard non-4xx) is Transient — Supabase
-        // may recover on its own. 4xx is a caller-side or config
-        // problem (auth revoked, table missing, filter rejected) that
-        // won't change without operator action.
-        // 429 is a rate limit: the row has not been classified. 5xx may
-        // clear on its own. Other 4xx is auth, schema, or a missing table.
-        let kind = if status.as_u16() == 429 || status.is_server_error() {
-            LookupError::Transient
-        } else {
-            LookupError::Terminal
-        };
-        tracing::warn!(
-            status = %status,
-            name = %name.as_str(),
-            ?kind,
-            "pre-sale lookup: non-success HTTP status"
-        );
-        return Err(kind);
+        tracing::warn!(%status, "pre-sale fetch: non-success status");
+        return None;
     }
-    // Body read failures are transport-shaped (mid-stream reset, or a
-    // response exceeding MAX_BODY_BYTES). Transient so a truncated
-    // fetch does not sink a paid claim.
-    let body = match Limited::new(response.into_body(), MAX_BODY_BYTES)
+    let body = Limited::new(response.into_body(), MAX_BODY_BYTES)
         .collect()
         .await
-    {
-        Ok(collected) => collected.to_bytes(),
+        .ok()?
+        .to_bytes();
+    match serde_json::from_slice(&body) {
+        Ok(rows) => Some(rows),
         Err(error) => {
-            tracing::warn!(?error, name = %name.as_str(), "pre-sale lookup: body read failed");
-            return Err(LookupError::Transient);
+            tracing::warn!(?error, "pre-sale fetch: json parse failed");
+            None
         }
-    };
-    // JSON parse failure covers both a malformed body and a row whose
-    // `expires_at` is not RFC 3339. Both mean the bytes on the wire
-    // will not become valid without operator action: Terminal.
-    let rows: Vec<ProtectedRow> = match serde_json::from_slice(&body) {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(?error, name = %name.as_str(), "pre-sale lookup: json parse failed");
-            return Err(LookupError::Terminal);
+    }
+}
+
+/// Validates rows into the map. One bad row — a `normalized_name`
+/// that is not a lawful [`Name`], or a duplicate — rejects the whole
+/// read: an existing protection can freeze, never silently drop.
+fn absorb(rows: Vec<ProtectedRow>, map: &mut BTreeMap<Name, ProtectionStatus>) -> Option<()> {
+    for row in rows {
+        let name = Name::parse(&row.normalized_name)?;
+        let status = match row.expires_at {
+            Some(ts) => ProtectionStatus::WithExpiry(ts),
+            None => ProtectionStatus::Forever,
+        };
+        if map.insert(name, status).is_some() {
+            tracing::warn!(
+                name = %row.normalized_name,
+                "pre-sale fetch: duplicate normalized_name"
+            );
+            return None;
         }
-    };
-    classify(&rows, name, mtp)
+    }
+    Some(())
 }
 
 /// Zeroizing holder for the boot-derived access-code key.
 #[derive(Clone)]
-pub struct AccessCodeKey(Zeroizing<[u8; 32]>);
+pub struct AccessCodeDerivationKey(Zeroizing<[u8; 32]>);
 
-impl AccessCodeKey {
+impl AccessCodeDerivationKey {
     /// From a TEE root private key (`ACCESS_CODE_KEY_CONTEXT`).
     pub fn from_private_key(private_key: &[u8; 32]) -> Self {
         Self(derive_access_code_key(private_key))
@@ -393,6 +321,36 @@ impl AccessCodeKey {
 
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    /// The six-digit code a protected `name` must present.
+    pub fn code_for(&self, name: &Name) -> AccessCode {
+        AccessCode::derive(self.0.as_ref(), name.as_str())
+    }
+
+    /// The pre-sale gate. Unprotected names pass; protected names
+    /// must present this key's code for `name`. A name already live
+    /// is refused by the Registry's own authorization — redemption —
+    /// not here.
+    pub fn check_access(
+        &self,
+        status: ProtectionStatus,
+        mtp: Timestamp,
+        name: &Name,
+        offered: Option<&AccessCode>,
+    ) -> Decision {
+        let protected = match status {
+            ProtectionStatus::Unprotected => false,
+            ProtectionStatus::Forever => true,
+            ProtectionStatus::WithExpiry(ts) => mtp < ts,
+        };
+        if !protected {
+            return Decision::Allow;
+        }
+        match offered {
+            Some(offered) if self.code_for(name).ct_eq(offered) => Decision::Allow,
+            _ => Decision::Deny,
+        }
     }
 }
 
@@ -413,8 +371,19 @@ mod tests {
         Timestamp::from_seconds(secs).unwrap()
     }
 
-    fn row_with(expires_at: Option<Timestamp>) -> ProtectedRow {
-        ProtectedRow { expires_at }
+    fn gate() -> AccessCodeDerivationKey {
+        AccessCodeDerivationKey::from_private_key(&vector_private_key())
+    }
+
+    fn alice() -> Name {
+        Name::parse("alice").unwrap()
+    }
+
+    fn row_with(name: &str, expires_at: Option<Timestamp>) -> ProtectedRow {
+        ProtectedRow {
+            normalized_name: name.to_string(),
+            expires_at,
+        }
     }
 
     #[test]
@@ -440,104 +409,85 @@ mod tests {
     }
 
     #[test]
-    fn open_names_need_no_code() {
-        let key = derive_access_code_key(&vector_private_key());
+    fn unprotected_names_need_no_code() {
         assert_eq!(
-            decide(Ok(Lookup::Open), None, false, key.as_ref(), "alice"),
+            gate().check_access(
+                ProtectionStatus::Unprotected,
+                ts(1_700_000_000),
+                &alice(),
+                None,
+            ),
+            Decision::Allow
+        );
+    }
+
+    /// The audit-critical case: a lift moment the MTP has reached is
+    /// unprotected — judged per claim, never stored, so it lifts exactly
+    /// on schedule without waiting for a refresh.
+    #[test]
+    fn expired_protection_is_unprotected() {
+        let expired = ProtectionStatus::WithExpiry(ts(1_600_000_000));
+        assert_eq!(
+            gate().check_access(expired, ts(1_700_000_000), &alice(), None),
+            Decision::Allow
+        );
+    }
+
+    /// Exact-second boundary: `mtp == expires_at` means the lift
+    /// moment has been reached; the row is unprotected.
+    #[test]
+    fn expiry_boundary_is_inclusive_unprotected() {
+        let now = ts(1_700_000_000);
+        let status = ProtectionStatus::WithExpiry(now);
+        assert_eq!(
+            gate().check_access(status, now, &alice(), None),
             Decision::Allow
         );
     }
 
     #[test]
     fn protected_with_expiry_requires_the_matching_code() {
-        let key = derive_access_code_key(&vector_private_key());
-        let expected = AccessCode::derive(key.as_ref(), "alice");
+        let expected = gate().code_for(&alice());
         let wrong = AccessCode::parse("999999").unwrap();
-        let lookup = || Ok(Lookup::ProtectedWithExpiry(ts(2_000_000_000)));
+        let status = ProtectionStatus::WithExpiry(ts(2_000_000_000));
 
         assert_eq!(
-            decide(lookup(), Some(&expected), false, key.as_ref(), "alice"),
+            gate().check_access(status, ts(1_700_000_000), &alice(), Some(&expected)),
             Decision::Allow
         );
         assert_eq!(
-            decide(lookup(), Some(&wrong), false, key.as_ref(), "alice"),
+            gate().check_access(status, ts(1_700_000_000), &alice(), Some(&wrong)),
             Decision::Deny
         );
         assert_eq!(
-            decide(lookup(), None, false, key.as_ref(), "alice"),
+            gate().check_access(status, ts(1_700_000_000), &alice(), None),
             Decision::Deny
         );
     }
 
     #[test]
     fn protected_forever_requires_the_matching_code() {
-        let key = derive_access_code_key(&vector_private_key());
-        let expected = AccessCode::derive(key.as_ref(), "alice");
+        let expected = gate().code_for(&alice());
         let wrong = AccessCode::parse("999999").unwrap();
-        let lookup = || Ok(Lookup::ProtectedForever);
+        let status = ProtectionStatus::Forever;
 
         assert_eq!(
-            decide(lookup(), Some(&expected), false, key.as_ref(), "alice"),
+            gate().check_access(status, ts(1_700_000_000), &alice(), Some(&expected)),
             Decision::Allow
         );
         assert_eq!(
-            decide(lookup(), Some(&wrong), false, key.as_ref(), "alice"),
+            gate().check_access(status, ts(1_700_000_000), &alice(), Some(&wrong)),
             Decision::Deny
         );
         assert_eq!(
-            decide(lookup(), None, false, key.as_ref(), "alice"),
+            gate().check_access(status, ts(1_700_000_000), &alice(), None),
             Decision::Deny
         );
     }
 
     #[test]
-    fn live_name_redeems_the_code() {
-        let key = derive_access_code_key(&vector_private_key());
-        let expected = AccessCode::derive(key.as_ref(), "alice");
-        for lookup in [
-            Lookup::ProtectedWithExpiry(ts(2_000_000_000)),
-            Lookup::ProtectedForever,
-        ] {
-            assert_eq!(
-                decide(Ok(lookup), Some(&expected), true, key.as_ref(), "alice"),
-                Decision::Deny
-            );
-        }
-    }
-
-    #[test]
-    fn transient_error_retries() {
-        let key = derive_access_code_key(&vector_private_key());
-        let offered = AccessCode::parse("352582").unwrap();
-        assert_eq!(
-            decide(
-                Err(LookupError::Transient),
-                Some(&offered),
-                false,
-                key.as_ref(),
-                "alice",
-            ),
-            Decision::Retry
-        );
-    }
-
-    /// A permanent lookup failure must
-    /// free the queue slot rather than retry forever. Payment stays in
-    /// Treasury; no on-chain effect. The claim is dropped.
-    #[test]
-    fn terminal_error_denies() {
-        let key = derive_access_code_key(&vector_private_key());
-        let offered = AccessCode::parse("352582").unwrap();
-        assert_eq!(
-            decide(
-                Err(LookupError::Terminal),
-                Some(&offered),
-                false,
-                key.as_ref(),
-                "alice",
-            ),
-            Decision::Deny
-        );
+    fn code_for_matches_the_vector() {
+        assert_eq!(gate().code_for(&alice()).expose_for_test(), *b"352582");
     }
 
     #[test]
@@ -547,63 +497,54 @@ mod tests {
     }
 
     #[test]
-    fn absent_row_is_open() {
-        let name = Name::parse("alice").unwrap();
-        assert_eq!(classify(&[], &name, ts(1_700_000_000)), Ok(Lookup::Open));
+    fn absorb_builds_the_map() {
+        let mut map = BTreeMap::new();
+        let rows = vec![
+            row_with("alice", Some(ts(2_000_000_000))),
+            row_with("bob", None),
+        ];
+        assert_eq!(absorb(rows, &mut map), Some(()));
+        let names = ProtectedNames(map);
+        assert_eq!(
+            names.get(&Name::parse("alice").unwrap()),
+            ProtectionStatus::WithExpiry(ts(2_000_000_000))
+        );
+        assert_eq!(
+            names.get(&Name::parse("bob").unwrap()),
+            ProtectionStatus::Forever
+        );
+        assert_eq!(
+            names.get(&Name::parse("carol").unwrap()),
+            ProtectionStatus::Unprotected
+        );
     }
 
+    /// An expired row is stored as `WithExpiry` all the same — the
+    /// lift moment is data, not a state.
     #[test]
-    fn null_expiry_is_forever() {
-        let name = Name::parse("alice").unwrap();
-        let rows = [row_with(None)];
+    fn absorb_keeps_expired_rows() {
+        let mut map = BTreeMap::new();
+        let rows = vec![row_with("alice", Some(ts(1_600_000_000)))];
+        assert_eq!(absorb(rows, &mut map), Some(()));
         assert_eq!(
-            classify(&rows, &name, ts(1_700_000_000)),
-            Ok(Lookup::ProtectedForever)
+            map.get(&Name::parse("alice").unwrap()),
+            Some(&ProtectionStatus::WithExpiry(ts(1_600_000_000)))
         );
     }
 
     #[test]
-    fn future_expiry_is_protected() {
-        let name = Name::parse("alice").unwrap();
-        let expiry = ts(2_000_000_000);
-        let rows = [row_with(Some(expiry))];
-        assert_eq!(
-            classify(&rows, &name, ts(1_700_000_000)),
-            Ok(Lookup::ProtectedWithExpiry(expiry))
-        );
+    fn absorb_rejects_unlawful_names() {
+        let mut map = BTreeMap::new();
+        let rows = vec![row_with("Not-A-Name!", None)];
+        assert_eq!(absorb(rows, &mut map), None);
+        assert!(map.is_empty());
     }
 
-    /// The audit-critical case: protection whose deadline has passed
-    /// must not gate the claim. The row still exists but its clock ran
-    /// out, so it flattens to `Open` for `decide`.
     #[test]
-    fn past_expiry_becomes_open() {
-        let name = Name::parse("alice").unwrap();
-        let rows = [row_with(Some(ts(1_600_000_000)))];
-        assert_eq!(classify(&rows, &name, ts(1_700_000_000)), Ok(Lookup::Open));
-    }
-
-    /// Exact-second boundary: `mtp == expires_at` means the deadline
-    /// has been reached; the row is open.
-    #[test]
-    fn expiry_boundary_is_inclusive_open() {
-        let name = Name::parse("alice").unwrap();
-        let now = ts(1_700_000_000);
-        let rows = [row_with(Some(now))];
-        assert_eq!(classify(&rows, &name, now), Ok(Lookup::Open));
-    }
-
-    /// A schema anomaly for one name is Terminal — the duplicate rows
-    /// will still be there on the next tip. Retrying only wastes a
-    /// fetch; denying frees the queue slot.
-    #[test]
-    fn multiple_rows_are_terminal() {
-        let name = Name::parse("alice").unwrap();
-        let rows = [row_with(None), row_with(None)];
-        assert_eq!(
-            classify(&rows, &name, ts(1_700_000_000)),
-            Err(LookupError::Terminal)
-        );
+    fn absorb_rejects_duplicates() {
+        let mut map = BTreeMap::new();
+        let rows = vec![row_with("alice", None), row_with("alice", None)];
+        assert_eq!(absorb(rows, &mut map), None);
     }
 
     /// Extra columns Supabase returns (`id`, `created_at`, `source`,
@@ -623,23 +564,23 @@ mod tests {
         }]"#;
         let rows: Vec<ProtectedRow> = serde_json::from_slice(json.as_bytes()).unwrap();
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].normalized_name, "alice");
         // 2027-06-15T12:34:56 UTC = 1_813_062_896 seconds since the Unix epoch.
         assert_eq!(rows[0].expires_at, Some(ts(1_813_062_896)));
     }
 
     #[test]
     fn row_decode_null_expires_at() {
-        let json = r#"[{"expires_at": null}]"#;
+        let json = r#"[{"normalized_name": "alice", "expires_at": null}]"#;
         let rows: Vec<ProtectedRow> = serde_json::from_slice(json.as_bytes()).unwrap();
         assert_eq!(rows[0].expires_at, None);
     }
 
     /// A malformed `expires_at` string must fail the deserializer,
-    /// which bubbles up through `serde_json::from_slice` in
-    /// `lookup_name` and yields `LookupBadRequest`.
+    /// which fails the whole read.
     #[test]
     fn row_decode_bad_timestamp_errors() {
-        let json = r#"[{"expires_at": "not-a-timestamp"}]"#;
+        let json = r#"[{"normalized_name": "alice", "expires_at": "not-a-timestamp"}]"#;
         let rows: Result<Vec<ProtectedRow>, _> = serde_json::from_slice(json.as_bytes());
         assert!(rows.is_err(), "malformed timestamp must not deserialize");
     }

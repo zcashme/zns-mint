@@ -2,6 +2,14 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-29 — Boot fetches the pre-sale table before attestation (#242)
+
+- Step 6b: `presale::fetch` in a retry-until-good loop with
+  `RETRY_PAUSE` — no table, no start. `Boot` carries the resulting
+  `ProtectedNames` to the run loop; `AccessCodeKey` is renamed
+  `AccessCodeDerivationKey`. The fetch sits before the Sapling
+  parameter load and the attestation write: nothing fallible after
+  attestation.
 ## 2026-09-29 — Replay a ceremony and a backed Name Note claim (#240)
 
 - The birthday regression now receives Treasury funds, creates all 40
