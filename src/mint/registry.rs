@@ -424,6 +424,11 @@ impl Registry {
         self.anchors.live()
     }
 
+    /// Whether ceremony adoption has reached standing size and stays closed.
+    pub fn anchor_adoption_closed(&self) -> bool {
+        self.anchors.adoption_closed()
+    }
+
     /// Truncates every name's record chain to `height` and rebuilds the
     /// records live at that tip. Callers pass walk-found heights at or above
     /// the boot origin.

@@ -2,6 +2,16 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-09-29 — Ceremony adoption closes once (#236)
+
+- The pool records the block where ceremony adoption first reaches
+  40, kept apart from the live set so a later spend in that block
+  can shrink the pool without reopening it. Ordinary zero-value
+  outputs after that do not refill a vacancy. A successor still
+  enters when exactly one live anchor was spent. Rewind clears the
+  close only when that completion block is removed; a rewind to
+  the block itself, or to a later depleted state, keeps it closed.
+
 ## 2026-09-23 — A refused update extension leaves the OTP
 
 - `authorize` computes `expires_at.extend` before `challenges.accept`.

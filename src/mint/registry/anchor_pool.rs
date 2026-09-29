@@ -6,8 +6,9 @@
 //! (`tests/fixtures/canon-vectors-v1.json`), the same rules as events
 //! and snapshots, not this type. The pool stays a pure function of
 //! chain history either way: the ceremony's zero-value Registry
-//! outputs, adopted in canonical scan order, and a successor joins only
-//! through the retirement of a live anchor — one-for-one.
+//! outputs, adopted in canonical scan order until the pool first
+//! reaches standing size, and a successor joins only through the
+//! retirement of a live anchor — one-for-one.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,6 +24,9 @@ pub const ANCHOR_POOL_SIZE: usize = 40;
 pub struct AnchorPool {
     live: BTreeSet<Nullifier>,
     checkpoints: BTreeMap<BlockHeight, BTreeSet<Nullifier>>,
+    /// Block where ceremony adoption first reached standing size.
+    /// Later ordinary outputs do not refill a shrunken pool.
+    established: Option<BlockHeight>,
 }
 
 impl AnchorPool {
@@ -41,15 +45,27 @@ impl AnchorPool {
         self.live.len() >= ANCHOR_POOL_SIZE
     }
 
+    /// Whether ceremony adoption has already reached standing size.
+    pub fn adoption_closed(&self) -> bool {
+        self.established.is_some()
+    }
+
     /// Ceremony filling: a zero-value Registry output joins the pool
-    /// below standing size.
+    /// until adoption first reaches standing size. A later shrink does
+    /// not reopen it.
     ///
     /// Callers must invoke this in canonical scan order — transaction
     /// index within the block, then action index within the transaction —
     /// or two consumers of the same chain diverge on ties when more than
     /// one eligible output arrives at once.
     pub fn adopt(&mut self, height: BlockHeight, nf: Nullifier) {
-        if !self.is_full() && self.live.insert(nf) {
+        if self.adoption_closed() || self.is_full() {
+            return;
+        }
+        if self.live.insert(nf) {
+            if self.live.len() == ANCHOR_POOL_SIZE {
+                self.established = Some(height);
+            }
             self.checkpoints.insert(height, self.live.clone());
         }
     }
@@ -85,8 +101,15 @@ impl AnchorPool {
     }
 
     /// Rewinds to the pool state at `height`, discarding every
-    /// checkpoint above.
+    /// checkpoint above. Ceremony completion clears only when that
+    /// block itself is removed.
     pub fn truncate_to(&mut self, height: BlockHeight) {
+        if self
+            .established
+            .is_some_and(|established| established > height)
+        {
+            self.established = None;
+        }
         self.checkpoints.retain(|&h, _| h <= height);
         self.live = self
             .checkpoints
@@ -207,6 +230,42 @@ mod tests {
         pool.retire_spent(&[nullifier(1)], Some(nullifier(200)), h(11));
         assert!(pool.contains(&nullifier(200)));
         assert_eq!(pool.live().len(), ANCHOR_POOL_SIZE);
+    }
+
+    #[test]
+    fn ceremony_adoption_stays_closed_after_the_pool_shrinks() {
+        let mut pool = AnchorPool::default();
+        for i in 0..ANCHOR_POOL_SIZE {
+            pool.adopt(h(10), nullifier(i as u8 + 1));
+        }
+        assert!(pool.adoption_closed());
+
+        // Same block: two anchors retire, then an ordinary output is offered.
+        pool.retire_spent(&[nullifier(1), nullifier(2)], None, h(10));
+        pool.adopt(h(10), nullifier(200));
+        assert!(!pool.contains(&nullifier(200)));
+        assert_eq!(pool.live().len(), ANCHOR_POOL_SIZE - 2);
+
+        // A backed successor still replaces the one anchor it spends.
+        pool.retire_spent(&[nullifier(3)], Some(nullifier(201)), h(11));
+        assert!(pool.contains(&nullifier(201)));
+        pool.adopt(h(12), nullifier(202));
+        assert!(!pool.contains(&nullifier(202)));
+
+        // Rewind to the completion block: still closed, still depleted.
+        pool.truncate_to(h(10));
+        assert!(pool.adoption_closed());
+        assert!(!pool.contains(&nullifier(201)));
+        assert_eq!(pool.live().len(), ANCHOR_POOL_SIZE - 2);
+        pool.adopt(h(10), nullifier(203));
+        assert!(!pool.contains(&nullifier(203)));
+
+        // Rewind before completion: the ceremony can be reconstructed.
+        pool.truncate_to(h(9));
+        assert!(!pool.adoption_closed());
+        assert_eq!(pool.live().len(), 0);
+        pool.adopt(h(10), nullifier(1));
+        assert!(pool.contains(&nullifier(1)));
     }
 
     #[test]
