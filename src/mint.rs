@@ -459,8 +459,9 @@ pub fn apply_block<P: Parameters + Send + 'static>(
             .filter(|output| *output.account_id() == REGISTRY_ACCOUNT)
             .collect();
 
-        // Ceremony filling: zero-value Registry outputs join the pool in
-        // canonical order while below standing size.
+        // Ceremony filling: zero-value Registry outputs join until the
+        // pool has once reached standing size. A later shrink does not
+        // reopen that path; a backed successor still enters one-for-one.
         for output in &registry_outputs {
             if output.note().0.value().inner() == 0 {
                 if let Some(nf) = output.nf() {

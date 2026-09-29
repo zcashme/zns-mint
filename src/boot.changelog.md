@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-29 — Boot accepts a closed ceremony below standing size
+
+- The post-sync check requires ceremony adoption to have closed.
+  A Registry spend that seated no successor may leave the live set
+  short; that history still boots.
+
 ## 2026-09-29 — Seed capsule and TEE come from zns-canon
 
 - Boot unseals through `zns_canon::capsule` and `zns_canon::sealing`.

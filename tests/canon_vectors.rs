@@ -47,9 +47,12 @@ struct Scenario {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Event {
-    /// Ceremony filling: a zero-value Registry output joins the pool
-    /// below standing size, in canonical scan order.
+    /// Ceremony filling: a zero-value Registry output joins until the
+    /// pool has once reached standing size, in canonical scan order.
     AdoptAnchor { height: u32, nullifier: Hex32 },
+    /// A Registry spend with no Name Note. Every live anchor in `spent`
+    /// retires, and no successor is seated.
+    Retire { height: u32, spent: Vec<Hex32> },
     /// A backed Claim: retires `spent_anchor`, adopts `successor_anchor`,
     /// binds the name. `expect` says whether the record transition lands;
     /// a rejected claim (a duplicate on a live name) still advances the
@@ -109,6 +112,9 @@ struct Snapshot {
     after_event: usize,
     /// Live anchor-pool nullifiers, lowercase hex, sorted lexicographically.
     anchor_pool: Vec<Hex32>,
+    /// Ceremony adoption has reached standing size. Stays true after the
+    /// pool shrinks, until a rewind removes the completion block.
+    adoption_closed: bool,
     /// Name → record at the applied tip; released names are absent.
     /// `BTreeMap` gives deterministic key order.
     records: BTreeMap<String, RecordSnapshot>,
@@ -160,6 +166,10 @@ fn apply(registry: &mut Registry, event: &Event) {
     match event {
         Event::AdoptAnchor { height, nullifier } => {
             registry.adopt_anchor(BlockHeight::from_u32(*height), nf(nullifier));
+        }
+        Event::Retire { height, spent } => {
+            let nfs: Vec<_> = spent.iter().map(|s| nf(s)).collect();
+            registry.follow_spends(&nfs, BlockHeight::from_u32(*height));
         }
         Event::Claim {
             height,
@@ -306,6 +316,7 @@ fn snapshot(registry: &Registry, after_event: usize) -> Snapshot {
     Snapshot {
         after_event,
         anchor_pool,
+        adoption_closed: registry.anchor_adoption_closed(),
         records,
     }
 }
@@ -386,9 +397,8 @@ fn hex32_from_seed(seed: u8) -> Hex32 {
 // ---------------------------------------------------------------------------
 
 /// Scans a small ceremony of five zero-value Registry outputs. Verifies
-/// that adoption is in canonical scan order and that the pool never
-/// exceeds standing size (kept small here — the full `ANCHOR_POOL_SIZE`
-/// case is exercised in the anchor pool's unit tests).
+/// that adoption is in canonical scan order. Standing size, and the
+/// close after it, are `ceremony_closes_once`.
 fn ceremony_fill() -> Scenario {
     let events: Vec<Event> = (1..=5)
         .map(|i| Event::AdoptAnchor {
@@ -400,6 +410,38 @@ fn ceremony_fill() -> Scenario {
         name: "ceremony_fill".to_owned(),
         description: "Five zero-value Registry outputs enter the anchor pool in scan order."
             .to_owned(),
+        trace: run(&events),
+        events,
+    }
+}
+
+/// Ceremony adoption closes at standing size. A later spend shrinks the
+/// pool, and an ordinary output offered after that does not refill it.
+/// Rewind before the completion block reopens adoption.
+fn ceremony_closes_once() -> Scenario {
+    let mut events: Vec<Event> = (1..=ANCHOR_POOL_SIZE)
+        .map(|i| Event::AdoptAnchor {
+            height: 100,
+            nullifier: hex32_from_seed(i as u8),
+        })
+        .collect();
+    events.push(Event::Retire {
+        height: 101,
+        spent: vec![hex32_from_seed(1), hex32_from_seed(2)],
+    });
+    events.push(Event::AdoptAnchor {
+        height: 102,
+        nullifier: hex32_from_seed(0xF0),
+    });
+    events.push(Event::Rewind { to_height: 100 });
+    events.push(Event::Rewind { to_height: 99 });
+    events.push(Event::AdoptAnchor {
+        height: 100,
+        nullifier: hex32_from_seed(1),
+    });
+    Scenario {
+        name: "ceremony_closes_once".to_owned(),
+        description: "After the ceremony reaches standing size, a spend shrinks the pool and a later ordinary output does not refill it. Rewind before the completion block lets the ceremony be reconstructed.".to_owned(),
         trace: run(&events),
         events,
     }
@@ -682,6 +724,7 @@ fn build_vectors() -> Vectors {
         anchor_pool_size: ANCHOR_POOL_SIZE,
         scenarios: vec![
             ceremony_fill(),
+            ceremony_closes_once(),
             backed_claim(),
             unbacked_claim(),
             duplicate_claim(),
