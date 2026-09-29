@@ -667,6 +667,263 @@ fn generate_attestation_report_data(
 mod tests {
     use super::*;
 
+    /// Builds encrypted scan fixtures with dummy proofs and signatures.
+    fn scan_transaction(
+        builder: orchard::builder::Builder,
+    ) -> zcash_primitives::transaction::Transaction {
+        let (bundle, _) = builder
+            .build::<zcash_protocol::value::ZatBalance>(rand::rngs::OsRng)
+            .unwrap()
+            .unwrap();
+        let proof_size = orchard::Proof::expected_proof_size(bundle.actions().len());
+        let bundle = bundle.map_authorization(
+            &mut (),
+            |_, _, _| [0u8; 64].into(),
+            |_, _| {
+                orchard::bundle::Authorized::from_parts(
+                    orchard::Proof::new(vec![0; proof_size]),
+                    [0u8; 64].into(),
+                )
+            },
+        );
+        zcash_primitives::transaction::TransactionData::from_parts_v6(
+            zcash_protocol::consensus::BranchId::Nu6_3,
+            0,
+            BlockHeight::from_u32(0),
+            None,
+            None,
+            None,
+            Some(bundle),
+        )
+        .freeze()
+        .unwrap()
+    }
+
+    #[test]
+    fn birthday_gates_protocol_processing_without_skipping_wallet_history() {
+        use incrementalmerkletree::frontier::{CommitmentTree, Frontier};
+        use incrementalmerkletree::witness::IncrementalWitness;
+        use orchard::builder::{Builder, BundleType};
+        use orchard::bundle::BundleVersion;
+        use orchard::tree::MerkleHashOrchard;
+        use orchard::value::NoteValue;
+        use zcash_client_backend::data_api::wallet::TargetHeight;
+        use zcash_keys::keys::UnifiedAddressRequest;
+        use zcash_primitives::block::{Block, BlockHash, BlockHeaderData};
+        use zcash_protocol::consensus::NetworkUpgrade;
+
+        let network = boot_network();
+        let seed = Secret::new([0; 32]);
+        let treasury_keys = TreasuryKeys::derive(&network, &seed);
+        let registry_keys = RegistryKeys::derive(&network, &seed);
+        let treasury_fvk = treasury_keys.orchard_fvk();
+        let registry_fvk = registry_keys.orchard_fvk();
+        let first_height = network.activation_height(NetworkUpgrade::Nu6_3).unwrap() + 100;
+        let second_height = first_height + 1;
+        let origin = ChainState::empty(first_height - 1, BlockHash([0; 32]));
+        let version = BundleVersion::ironwood_v3();
+        let builder = |anchor| {
+            Builder::new(
+                BundleType::DEFAULT,
+                version,
+                version.default_flags(),
+                anchor,
+            )
+            .unwrap()
+        };
+        let test_block = |tx, height: BlockHeight, prev_block| {
+            let header = BlockHeaderData {
+                version: 4,
+                prev_block,
+                merkle_root: [0; 32],
+                final_sapling_root: [0; 32],
+                time: u32::from(height),
+                bits: 0,
+                nonce: [0; 32],
+                solution: vec![],
+            }
+            .freeze()
+            .unwrap();
+            Block::from_parts(header, (tx, Vec::new()).into(), height)
+        };
+
+        let mut funding = builder(orchard::Anchor::empty_tree());
+        funding
+            .add_output(
+                None,
+                treasury_fvk.address_at(0u32, zip32::Scope::External),
+                NoteValue::from_raw(60_000),
+                [0; 512],
+            )
+            .unwrap();
+        let funding_tx = scan_transaction(funding);
+        let funding_bundle = funding_tx.ironwood_bundle().unwrap();
+        let (payment_index, _, payment, _, _) = funding_bundle
+            .decrypt_outputs_with_keys(&[treasury_fvk.to_ivk(zip32::Scope::External)])
+            .pop()
+            .unwrap();
+        let payment_nf = payment.nullifier(&treasury_fvk);
+        let mut tree = CommitmentTree::<MerkleHashOrchard, 32>::empty();
+        let mut witness = None;
+        for (index, action) in funding_bundle.actions().iter().enumerate() {
+            let leaf = MerkleHashOrchard::from_cmx(action.cmx());
+            tree.append(leaf).unwrap();
+            if index == payment_index {
+                witness = IncrementalWitness::from_tree(tree.clone());
+            } else if let Some(witness) = witness.as_mut() {
+                witness.append(leaf).unwrap();
+            }
+        }
+        let funding_block = test_block(funding_tx, first_height, origin.block_hash());
+        let funded = ChainState::new(
+            first_height,
+            funding_block.header().hash(),
+            Frontier::empty(),
+            Frontier::empty(),
+            tree.to_frontier(),
+        );
+        let mut request = builder(tree.root().into());
+        request
+            .add_spend(
+                treasury_fvk.clone(),
+                payment,
+                witness.unwrap().path().unwrap().into(),
+            )
+            .unwrap();
+        let (ua, _) = treasury_keys
+            .fvk()
+            .default_address(UnifiedAddressRequest::SHIELDED)
+            .unwrap();
+        let memo = zcash_protocol::memo::MemoBytes::from_bytes(
+            format!("ZNS:claim:forever:alice:{}", ua.encode(&network)).as_bytes(),
+        )
+        .unwrap();
+        let expected_request = crate::mint::Request::Claim {
+            name: crate::mint::Name::parse("alice").unwrap(),
+            ua,
+            term: crate::mint::Term::Forever,
+            code: None,
+        };
+        request
+            .add_output(
+                None,
+                treasury_fvk.address_at(0u32, zip32::Scope::External),
+                NoteValue::from_raw(50_000),
+                *memo.as_array(),
+            )
+            .unwrap();
+        request
+            .add_output(
+                None,
+                registry_fvk.address_at(0u32, zip32::Scope::External),
+                NoteValue::ZERO,
+                [0; 512],
+            )
+            .unwrap();
+        let request_tx = scan_transaction(request);
+        let request_txid = request_tx.txid();
+        let request_bundle = request_tx.ironwood_bundle().unwrap();
+        let (_, _, gift, _, _) = request_bundle
+            .decrypt_outputs_with_keys(&[registry_fvk.to_ivk(zip32::Scope::External)])
+            .pop()
+            .unwrap();
+        let gift_nf = gift.nullifier(&registry_fvk);
+        let first_root = tree.root();
+        for action in request_bundle.actions().iter() {
+            tree.append(MerkleHashOrchard::from_cmx(action.cmx()))
+                .unwrap();
+        }
+        let roots = [first_root, tree.root()];
+        let request_block = test_block(request_tx, second_height, funded.block_hash());
+        let blocks = [(origin.clone(), funding_block), (funded, request_block)];
+
+        for birthday in [second_height + 1, second_height] {
+            let mut wallet = Wallet::new(
+                [
+                    (TREASURY_ACCOUNT, treasury_keys.fvk()),
+                    (REGISTRY_ACCOUNT, registry_keys.fvk()),
+                ],
+                &origin,
+                &[],
+                &[],
+                network,
+            )
+            .unwrap();
+            let mut registry = Registry::new();
+            let mut mtp = MtpTracker::default();
+            let mut cursor = block_metadata(&origin);
+            let mut tree_size = 0;
+            for (index, (from_state, block)) in blocks.iter().enumerate() {
+                let height = first_height + u32::try_from(index).unwrap();
+                tree_size +=
+                    u32::try_from(block.vtx()[0].ironwood_bundle().unwrap().actions().len())
+                        .unwrap();
+                let arrivals = crate::mint::apply_block(
+                    &network,
+                    birthday,
+                    &registry_keys,
+                    &treasury_keys,
+                    from_state,
+                    test_block(block.vtx()[0].clone(), height, from_state.block_hash()),
+                    height,
+                    &mut wallet,
+                    &mut registry,
+                    &mut mtp,
+                    &mut cursor,
+                );
+                assert_eq!(cursor.block_height(), height);
+                assert_eq!(cursor.block_hash(), block.header().hash());
+                assert_eq!(wallet.tip().block_height(), height);
+                assert_eq!(wallet.tip().block_hash(), cursor.block_hash());
+                assert_eq!(cursor.sapling_tree_size(), Some(0));
+                assert_eq!(cursor.orchard_tree_size(), Some(0));
+                assert_eq!(cursor.ironwood_tree_size(), Some(tree_size));
+                assert_eq!(
+                    wallet.ironwood_anchor(height).unwrap().unwrap(),
+                    roots[index].into()
+                );
+                assert_eq!(
+                    mtp.current().unwrap().as_seconds(),
+                    i64::from(u32::from(height))
+                );
+                let tip = TargetHeight::from(height + 1);
+                let notes = wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, tip);
+                assert_eq!(notes.len(), 1);
+                assert_eq!(notes[0].note().value().inner(), [60_000, 50_000][index]);
+                assert_eq!(
+                    wallet
+                        .unspent_ironwood_note_by_nullifier(TREASURY_ACCOUNT, payment_nf, tip)
+                        .is_some(),
+                    index == 0,
+                );
+                assert_eq!(
+                    wallet
+                        .unspent_ironwood_note_by_nullifier(REGISTRY_ACCOUNT, gift_nf, tip)
+                        .is_some(),
+                    index == 1,
+                );
+                assert_eq!(
+                    registry.anchor_pool().len(),
+                    usize::from(height >= birthday)
+                );
+                assert_eq!(
+                    registry.anchor_pool().contains(&gift_nf),
+                    height >= birthday
+                );
+                if height < birthday {
+                    assert!(arrivals.is_empty());
+                } else {
+                    assert!(matches!(
+                        arrivals.as_slice(),
+                        [(txid, crate::mint::MintInbound::Request(request), paid)]
+                            if *txid == request_txid && request == &expected_request
+                                && paid.into_u64() == 50_000
+                    ));
+                }
+            }
+        }
+    }
+
     #[test]
     #[cfg(not(feature = "regtest"))]
     #[should_panic(expected = "FATAL: SEED FINGERPRINT MISMATCH")]

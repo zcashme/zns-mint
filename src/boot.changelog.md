@@ -2,6 +2,18 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-29 — Exercise wallet scanning across the birthday boundary (#240)
+
+- One two-block fixture is replayed with its second block before and at
+  birthday. It checks received funds, the earlier note's spend, all tree
+  sizes, the Ironwood root, MTP, cursor, exact Treasury request, and exact
+  Registry anchor. Key derivation remains private to boot.
+- The fixture uses the upstream Orchard builder for encrypted outputs
+  (`orchard` faa82e4, `builder.rs:1199`) and test-block constructor
+  (`zcash_primitives` e6b0657, `block.rs:313`). Dummy authorization follows
+  upstream bundle fixtures (`orchard`, `bundle.rs:1215`); proof and
+  signature verification remain outside this scanner regression.
+
 ## 2026-09-29 — Choose the checkpoint directly (#240)
 
 - `origin_checkpoint` selects birthday minus 101 for mainnet/testnet and
