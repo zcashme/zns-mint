@@ -110,6 +110,15 @@ fn boot_network() -> Network {
     }
 }
 
+/// Ceremony adoption has closed. The live set may sit below standing
+/// size after a Registry spend that seated no successor.
+fn require_established_ceremony(registry: &Registry) {
+    assert!(
+        registry.anchor_adoption_closed(),
+        "FATAL: ceremony adoption has not closed"
+    );
+}
+
 /// Registry birth and the mint's MTP day-zero block.
 #[cfg(not(feature = "regtest"))]
 #[cfg(not(feature = "testnet"))]
@@ -290,17 +299,10 @@ impl Boot<Network> {
             "boot: synced to chain tip"
         );
 
-        // 5. Genesis sanity checks. The anchor lineage pool is the ceremony's
-        // root, conserved one-for-one by every accepted claim: exactly
-        // ANCHOR_POOL_SIZE standing, forever. Forged or donated zero-value
-        // Registry notes are not in the pool and never count.
+        // 5. Genesis sanity checks. Ceremony adoption has closed. A later
+        // Registry spend may leave the live set short.
+        require_established_ceremony(&registry);
         let anchor_count = registry.anchor_pool().len();
-        assert_eq!(
-            anchor_count,
-            crate::mint::registry::ANCHOR_POOL_SIZE,
-            "FATAL: anchor lineage pool expected {}, found {anchor_count}",
-            crate::mint::registry::ANCHOR_POOL_SIZE
-        );
         // Boot refuses to run with a treasury below MIN_TREASURY_BALANCE.
         // The node's tip is never pushed into the wallet.
         let treasury_balance = wallet
@@ -1084,9 +1086,9 @@ mod tests {
         }
     }
 
-    /// The ceremony closes adoption. A later Registry spend of two live
-    /// anchors leaves the pool short, and an unbacked Claim's ordinary
-    /// output — offered before the Claim is judged — does not refill it.
+    /// A Registry spend leaves the closed pool short. An unbacked Claim's
+    /// ordinary output does not refill it, and the boot check accepts
+    /// that replayed history.
     #[test]
     fn depleted_pool_excludes_an_unbacked_claim_successor() {
         use std::collections::{BTreeMap, BTreeSet};
@@ -1386,6 +1388,8 @@ mod tests {
             }
             assert_eq!(registry.anchor_pool(), &expected);
         }
+        require_established_ceremony(&registry);
+        assert_eq!(registry.anchor_pool().len(), ANCHOR_POOL_SIZE - 2);
     }
 
     #[test]

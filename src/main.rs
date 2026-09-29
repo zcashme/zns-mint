@@ -1,7 +1,7 @@
 //! The Zcash Name Service attested Mint.
 //!
 //! Boot establishes identity, syncs from the wallet origin checkpoint to the
-//! chain tip, and verifies genesis (40 anchors, minimum Treasury balance).
+//! chain tip, and verifies genesis (ceremony adoption closed, minimum Treasury balance).
 //! `main` is then a pure run loop: it follows Zebra's canonical chain,
 //! scans each new block, enforces the Registry transition law, services
 //! Treasury memos (paid claims, update and release requests, OTP echoes),
