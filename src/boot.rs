@@ -160,6 +160,10 @@ fn require_config_network(config: &MintConfig) {
     );
 }
 
+/// SEV-SNP attestation report length. Any other size is not a report.
+#[cfg(not(feature = "regtest"))]
+const ATTESTATION_REPORT_LEN: usize = 1184;
+
 /// The conf fingerprint is not an identity pin by itself. The keygen
 /// report must carry `BLAKE2b-512(fingerprint ‖ capsule hash)` under the
 /// AMD signature before that fingerprint is used.
@@ -167,16 +171,46 @@ fn require_config_network(config: &MintConfig) {
 fn require_keygen_attestation(capsule_bytes: &[u8], fingerprint: &SeedFingerprint) {
     let capsule_hash = blake2b256(capsule_bytes);
     let expected = zns_canon::attestation::report_data(fingerprint, &capsule_hash);
-    let path = std::path::Path::new("keys/zns_attestation.bin");
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            panic!("FATAL: keys/zns_attestation.bin is a symlink");
-        }
-        Ok(_) => {}
-        Err(error) => panic!("FATAL: cannot read keys/zns_attestation.bin: {error}"),
-    }
-    let bytes = std::fs::read(path).expect("FATAL: cannot read keys/zns_attestation.bin");
+    let bytes = read_attestation_report(std::path::Path::new("keys/zns_attestation.bin"));
     let _checked = zns_canon::attestation::stored(bytes, &expected);
+}
+
+/// One open of the keygen report. The descriptor must be a regular file
+/// of [`ATTESTATION_REPORT_LEN`] bytes; that same descriptor is what is read.
+#[cfg(not(feature = "regtest"))]
+fn read_attestation_report(path: &std::path::Path) -> Vec<u8> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .unwrap_or_else(|error| {
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                panic!("FATAL: {} is a symlink", path.display());
+            }
+            if error.kind() == std::io::ErrorKind::IsADirectory {
+                panic!("FATAL: {} is not a regular file", path.display());
+            }
+            panic!("FATAL: cannot read {}: {error}", path.display());
+        });
+    let meta = file
+        .metadata()
+        .unwrap_or_else(|error| panic!("FATAL: cannot stat {}: {error}", path.display()));
+    if !meta.file_type().is_file() {
+        panic!("FATAL: {} is not a regular file", path.display());
+    }
+    if meta.len() != ATTESTATION_REPORT_LEN as u64 {
+        panic!(
+            "FATAL: {} is not a {ATTESTATION_REPORT_LEN}-byte SEV-SNP attestation report",
+            path.display()
+        );
+    }
+    let mut bytes = vec![0u8; ATTESTATION_REPORT_LEN];
+    file.read_exact(&mut bytes)
+        .unwrap_or_else(|error| panic!("FATAL: cannot read {}: {error}", path.display()));
+    bytes
 }
 
 #[cfg(not(feature = "regtest"))]
@@ -1518,5 +1552,60 @@ mod tests {
         // fixture's coinbase-maturity boilerplate: the wallet's history
         // begins at the fixture boundary.
         assert_eq!(MINT_BIRTHDAY, BlockHeight::from_u32(100));
+    }
+
+    #[cfg(not(feature = "regtest"))]
+    fn attestation_scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "zns-mint-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    #[cfg(not(feature = "regtest"))]
+    fn attestation_report_read_returns_the_opened_bytes() {
+        let dir = attestation_scratch("report");
+        let path = dir.join("report.bin");
+        let body = vec![0x5A; ATTESTATION_REPORT_LEN];
+        std::fs::write(&path, &body).unwrap();
+        assert_eq!(read_attestation_report(&path), body);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(not(feature = "regtest"))]
+    #[should_panic(expected = "is a symlink")]
+    fn attestation_report_symlink_is_refused() {
+        let dir = attestation_scratch("symlink");
+        let target = dir.join("target.bin");
+        let link = dir.join("report.bin");
+        std::fs::write(&target, vec![0u8; ATTESTATION_REPORT_LEN]).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let _ = read_attestation_report(&link);
+    }
+
+    #[test]
+    #[cfg(not(feature = "regtest"))]
+    #[should_panic(expected = "is not a regular file")]
+    fn attestation_report_directory_is_refused() {
+        let dir = attestation_scratch("directory");
+        let _ = read_attestation_report(&dir);
+    }
+
+    #[test]
+    #[cfg(not(feature = "regtest"))]
+    #[should_panic(expected = "is not a 1184-byte")]
+    fn attestation_report_wrong_length_is_refused() {
+        let dir = attestation_scratch("length");
+        let path = dir.join("report.bin");
+        std::fs::write(&path, vec![0u8; ATTESTATION_REPORT_LEN + 1]).unwrap();
+        let _ = read_attestation_report(&path);
     }
 }

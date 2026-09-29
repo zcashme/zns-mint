@@ -37,6 +37,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Keygen's `keys/zns_mint.conf`: network, seed fingerprint, birthday.
 toml = "0.8"
+# `O_NOFOLLOW` when opening the keygen attestation report.
+libc = "0.2"
 # Exchange price parsing: `Decimal` deserializes JSON price strings
 # ("41.53") directly, so no hand-rolled decimal parser is needed.
 rust_decimal = { version = "1.42", features = ["serde-with-str"] }

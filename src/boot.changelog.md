@@ -12,6 +12,7 @@ Tracks design-relevant changes to `src/boot.rs`.
 - The birthday stays the config height. The report is taken before the
   anchor is mined, so it does not bind the birthday.
 - Regtest keeps its fixture birthday and skips both checks.
+- The report is opened once and must be a regular 1184-byte file.
 
 ## 2026-09-29 — Boot accepts a closed ceremony below standing size
 
