@@ -1,5 +1,20 @@
 # Mint live-work design record
 
+## 2026-09-29 — `MINT_BIRTHDAY` moves to boot (#237)
+
+- Boot has been the constant's only consumer since #108 deleted the
+  run-loop floor panic and tip assert. The three cfg-selected values move
+  verbatim to `src/boot.rs`, private, beside `NETWORK_LABEL`, the
+  `Network` alias, and `boot_network()`. The regtest pin (height 100)
+  now sits with `regtest_network()`'s schedule and the test that binds
+  them.
+- Boot-only stops being changelog prose: outside `boot.rs` the name no
+  longer resolves, so a run-loop import is a compile error, not a review.
+- Nothing downstream changes. The reorg walk's floor is the wallet's
+  data bottom; the day-zero anchor is the `BIRTHDAY` static in `mtp.rs`.
+  `MIN_TREASURY_BALANCE` stays: it is policy, not a deployment
+  coordinate.
+
 ## 2026-09-24 — Controller relay names its memo failure
 - A Claim reaching the controller relay is unreachable by design. An
   oversized Update or Release challenge memo is reported with its request

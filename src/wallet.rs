@@ -186,7 +186,7 @@ impl<P: Parameters> Wallet<P> {
             marking: Marking::Reference,
         };
         // Checkpoint id is birthday − 1: each frontier is the tree state at
-        // the start of `MINT_BIRTHDAY`. Empty frontiers are inserted too —
+        // the start of the birthday block. Empty frontiers are inserted too —
         // the per-pool origin checkpoint is the scan origin.
         wallet
             .sapling_tree

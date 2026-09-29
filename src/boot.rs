@@ -25,7 +25,7 @@ use crate::mint::presale::{self, AccessCodeKey};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::treasury::OtpQueue;
-use crate::mint::{MINT_BIRTHDAY, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::{MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
 use capsule::Capsule;
@@ -107,6 +107,20 @@ fn boot_network() -> Network {
         regtest_network()
     }
 }
+
+/// First block the mint observes; everything before it is pre-birth.
+#[cfg(not(feature = "regtest"))]
+#[cfg(not(feature = "testnet"))]
+const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(3_400_000);
+
+#[cfg(all(feature = "testnet", not(feature = "regtest")))]
+const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(4_338_933);
+
+/// Regtest birth: the fixture boundary. NU6.3 activates at height 4;
+/// the fixture's coinbase maturity runs through 104; nothing the mint
+/// owns is earlier.
+#[cfg(feature = "regtest")]
+const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(100);
 
 impl Boot<Network> {
     /// Boot sequence for this build's network.
