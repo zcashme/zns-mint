@@ -2,6 +2,11 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-29 — Seed capsule and TEE come from zns-canon
+
+- Boot unseals through `zns_canon::capsule` and `zns_canon::sealing`.
+  The mint copies of those modules are gone.
+
 ## 2026-09-29 — Boot fetches the pre-sale table before attestation (#242)
 
 - Step 6b: `presale::fetch` in a retry-until-good loop with

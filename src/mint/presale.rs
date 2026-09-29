@@ -33,7 +33,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::mint::Name;
 
-/// Context for [`crate::tee::Tee::derive_sealing_key`]: the access-code
+/// Context for [`zns_canon::sealing::Tee::derive_sealing_key`]: the access-code
 /// root private key (32 bytes). Distinct from the capsule sealing context.
 pub const ACCESS_CODE_KEY_CONTEXT: &[u8] = b"ZNS/access-code/root/v1";
 

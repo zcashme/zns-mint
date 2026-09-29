@@ -1,8 +1,6 @@
 //! The boot sequence: acquire and verify every capability the run loop
 //! cannot acquire for itself, then hand them over as one contract.
-pub mod capsule;
 mod key;
-pub mod tee;
 
 pub use key::{RegistryKeys, TreasuryKeys};
 
@@ -28,12 +26,12 @@ use crate::mint::treasury::OtpQueue;
 use crate::mint::{MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 use crate::zcash::{self, ChainClient};
-use capsule::Capsule;
 use sapling::circuit::{OutputParameters, SpendParameters};
-use tee::Tee;
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata};
+use zns_canon::capsule::{parse_capsule, read_capsule_file, unseal_seed};
+use zns_canon::sealing::Tee;
 
 // ---------------------------------------------------------------------------
 // Boot life-cycle
@@ -156,12 +154,12 @@ impl Boot<Network> {
         //    Secret's Drop wipes it.
         let (treasury_keys, registry_keys) = {
             tracing::info!("boot: reading seed capsule from keys/zns_seed.capsule");
-            let blob = capsule::read_capsule_file("keys/zns_seed.capsule").expect(
+            let blob = read_capsule_file("keys/zns_seed.capsule").expect(
                 "FATAL: failed to read keys/zns_seed.capsule. The mint cannot boot without the sealed seed.",
             );
-            let capsule = Capsule::parse(&blob).expect("FATAL: failed to parse zns_seed.capsule");
+            let capsule = parse_capsule(&blob).expect("FATAL: failed to parse zns_seed.capsule");
             tracing::info!("boot: deriving instance-bound sealing key from the TEE");
-            let seed = capsule.unseal(tee.as_ref())
+            let seed = unseal_seed(tee.as_ref(), &capsule)
                 .expect("FATAL: failed to unseal seed. Capsule tampering, wrong TEE, or wrong capsule for this instance.");
             verify_fingerprint(&seed, SEED_FINGERPRINT_RAW.trim());
             (
@@ -460,9 +458,9 @@ async fn connect_zebra() -> (ChainClient, BlockHeight) {
 // Step 2: Seed intake + verification
 // ---------------------------------------------------------------------------
 
-/// Selects the TEE seam for this build: [`crate::tee::FakeTee`] behind the
-/// `fake-tee` feature (dev-only; blocked from release by a
-/// `compile_error!` in `crate::lib`), otherwise [`crate::tee::RealSnpTee`].
+/// Selects the TEE seam for this build: [`zns_canon::sealing::FakeTee`]
+/// behind the `fake-tee` feature (dev-only; blocked from release by a
+/// `compile_error!` in `crate::lib`), otherwise [`zns_canon::sealing::RealSnpTee`].
 ///
 /// Returned as a boxed trait object because boot doesn't specialise on
 /// which TEE it holds — the two capabilities it needs (sealing key,
@@ -474,11 +472,11 @@ fn select_tee() -> Box<dyn Tee> {
             "boot: FAKE TEE selected — sealing key and attestation are dev-only; \
              any real verifier rejects this report"
         );
-        Box::new(tee::FakeTee)
+        Box::new(zns_canon::sealing::FakeTee)
     }
     #[cfg(not(feature = "fake-tee"))]
     {
-        Box::new(tee::RealSnpTee)
+        Box::new(zns_canon::sealing::RealSnpTee)
     }
 }
 
