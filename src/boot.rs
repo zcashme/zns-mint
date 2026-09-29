@@ -126,8 +126,9 @@ fn require_established_ceremony(registry: &Registry) {
 #[cfg(feature = "regtest")]
 const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(100);
 
-/// Keygen's deployment record. The fingerprint and birthday are ceremony
-/// facts, read at boot, not compiled into the binary.
+/// Keygen's deployment record. The fingerprint is accepted only when the
+/// keygen attestation binds it to the capsule bytes. The birthday is the
+/// anchor's inclusion height; this report does not cover it.
 #[cfg(not(feature = "regtest"))]
 #[derive(serde::Deserialize)]
 struct MintConfig {
@@ -157,6 +158,37 @@ fn require_config_network(config: &MintConfig) {
         config.network, "mainnet",
         "FATAL: keys/zns_mint.conf network does not match mainnet build"
     );
+}
+
+/// The conf fingerprint is not an identity pin by itself. The keygen
+/// report must carry `BLAKE2b-512(fingerprint ‖ capsule hash)` under the
+/// AMD signature before that fingerprint is used.
+#[cfg(not(feature = "regtest"))]
+fn require_keygen_attestation(capsule_bytes: &[u8], fingerprint: &SeedFingerprint) {
+    let capsule_hash = blake2b256(capsule_bytes);
+    let expected = zns_canon::attestation::report_data(fingerprint, &capsule_hash);
+    let path = std::path::Path::new("keys/zns_attestation.bin");
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            panic!("FATAL: keys/zns_attestation.bin is a symlink");
+        }
+        Ok(_) => {}
+        Err(error) => panic!("FATAL: cannot read keys/zns_attestation.bin: {error}"),
+    }
+    let bytes = std::fs::read(path).expect("FATAL: cannot read keys/zns_attestation.bin");
+    let _checked = zns_canon::attestation::stored(bytes, &expected);
+}
+
+#[cfg(not(feature = "regtest"))]
+fn blake2b256(bytes: &[u8]) -> [u8; 32] {
+    blake2b_simd::Params::new()
+        .hash_length(32)
+        .to_state()
+        .update(bytes)
+        .finalize()
+        .as_bytes()[..32]
+        .try_into()
+        .expect("BLAKE2b-256 is 32 bytes")
 }
 
 impl Boot<Network> {
@@ -194,18 +226,17 @@ impl Boot<Network> {
             AccessCodeDerivationKey::from_private_key(&root)
         };
 
-        // 2. Seed intake + verification: read capsule, unseal with the
-        //    TEE-derived sealing key, verify the fingerprint in
-        //    keys/zns_mint.conf, then derive keys. The seed lives only
-        //    inside this block — Secret's Drop wipes it.
+        // 2. Seed intake + verification: read capsule, require the keygen
+        //    attestation to bind its fingerprint, unseal, then derive keys.
+        //    The seed lives only inside this block — Secret's Drop wipes it.
         let (treasury_keys, registry_keys) = {
             tracing::info!("boot: reading seed capsule from keys/zns_seed.capsule");
             let blob = read_capsule_file("keys/zns_seed.capsule").expect(
                 "FATAL: failed to read keys/zns_seed.capsule. The mint cannot boot without the sealed seed.",
             );
             let capsule = parse_capsule(&blob).expect("FATAL: failed to parse zns_seed.capsule");
-            // The capsule field and the decrypted seed already agree inside
-            // unseal. This is the config against that same fingerprint.
+            // Config, capsule field, and the attested fingerprint are one
+            // value. Unseal then requires that value of the decrypted seed.
             #[cfg(not(feature = "regtest"))]
             {
                 let expected =
@@ -214,6 +245,7 @@ impl Boot<Network> {
                 if expected.to_bytes() != capsule.fingerprint {
                     panic!("FATAL: capsule fingerprint does not match keys/zns_mint.conf");
                 }
+                require_keygen_attestation(&blob, &expected);
             }
             tracing::info!("boot: deriving instance-bound sealing key from the TEE");
             let seed = unseal_seed(tee.as_ref(), &capsule)
