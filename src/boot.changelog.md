@@ -2,6 +2,53 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-29 — Replay a ceremony and a backed Name Note claim (#240)
+
+- The birthday regression now receives Treasury funds, creates all 40
+  ceremony anchors in one transaction, and spends one anchor with Treasury
+  fees to create a Name Note and successor. It verifies the exact record,
+  stored memo, and ZNS Merkle witness. A later-birthday replay retains wallet
+  funds, spends, trees, and MTP while admitting no Registry history or notes.
+- Uses the pinned Orchard builder's witness-checked spends and ZNS output
+  (`orchard` faa82e4, `builder.rs:1108` and `builder.rs:1228`). Removed empty
+  Sapling/Orchard assertions and repeated wallet-tip assertions.
+- `origin_checkpoint` accepts the treestate call as an inline closure;
+  boot supplies `JsonRpc::chain_state_at`. Its regression checks the actual
+  requested checkpoint and following height: birthday minus 101/100 for
+  mainnet/testnet, 99/100 for regtest. No checkpoint helper was extracted.
+
+## 2026-09-29 — Exercise wallet scanning across the birthday boundary (#240)
+
+- One two-block fixture is replayed with its second block before and at
+  birthday. It checks received funds, the earlier note's spend, all tree
+  sizes, the Ironwood root, MTP, cursor, exact Treasury request, and exact
+  Registry anchor. Key derivation remains private to boot.
+- The fixture uses the upstream Orchard builder for encrypted outputs
+  (`orchard` faa82e4, `builder.rs:1199`) and test-block constructor
+  (`zcash_primitives` e6b0657, `block.rs:313`). Dummy authorization follows
+  upstream bundle fixtures (`orchard`, `bundle.rs:1215`); proof and
+  signature verification remain outside this scanner regression.
+
+## 2026-09-29 — Choose the checkpoint directly (#240)
+
+- `origin_checkpoint` selects birthday minus 101 for mainnet/testnet and
+  birthday minus one for regtest. Removed the single-use lookback constant.
+  The scan still starts at the following block.
+
+## 2026-09-29 — Wallet scanning starts 100 blocks before birth (#239)
+
+- Mainnet and testnet seed the wallet at `MINT_BIRTHDAY - 101` and scan
+  from `MINT_BIRTHDAY - 100`. Regtest keeps checkpoint 99 and first block
+  100. The checkpoint still needs all pool frontiers after activation.
+- The wallet derives account scan birthdays from the earlier origin;
+  the mint's day zero remains the MTP of `MINT_BIRTHDAY`.
+- Boot passes its private birthday value to block application and the
+  run loop. Earlier blocks restore wallet funds and spends without
+  admitting Registry authority, Name Notes, or Treasury requests.
+- Upstream requires scanning immediately after the supplied chain state:
+  `zcash_client_backend` 0.24.0, `data_api/chain.rs:635` and
+  `scanning/full.rs:451`.
+
 ## 2026-09-29 — Boot owns the birthday (#237)
 
 - `MINT_BIRTHDAY` (mainnet `3_400_000`, testnet `4_338_933`, regtest

@@ -1,6 +1,6 @@
 //! The Zcash Name Service attested Mint.
 //!
-//! Boot establishes identity, syncs from the birthday checkpoint to the
+//! Boot establishes identity, syncs from the wallet origin checkpoint to the
 //! chain tip, and verifies genesis (40 anchors, minimum Treasury balance).
 //! `main` is then a pure run loop: it follows Zebra's canonical chain,
 //! scans each new block, enforces the Registry transition law, services
@@ -40,6 +40,7 @@ async fn main() {
 
     let Boot {
         network,
+        birthday,
         chain,
         mut wallet,
         cursor: mut chain_tip,
@@ -156,6 +157,10 @@ async fn main() {
         // no state above that common ancestor survives.
         let mut ancestor = chain_tip.block_height().min(best_height);
         loop {
+            assert!(
+                ancestor >= birthday,
+                "FATAL: canonical fork crossed the mint birthday"
+            );
             let wallet_hash = wallet.block_hash_at(ancestor);
             if wallet_hash.is_none() {
                 panic!(
@@ -210,6 +215,10 @@ async fn main() {
                 .truncate_to(ancestor)
                 .expect("FATAL: wallet could not rewind to the common ancestor");
             let rewound = chain_tip.block_height();
+            assert!(
+                rewound >= birthday,
+                "FATAL: wallet rewind crossed the mint birthday"
+            );
             registry.truncate_to_height(rewound);
 
             // Rebuild the entire MTP window at the committed height. Retaining a
@@ -314,6 +323,7 @@ async fn main() {
 
             let arrivals = zns_mint::mint::apply_block(
                 &network,
+                birthday,
                 &registry_keys,
                 &treasury_keys,
                 &from_state,

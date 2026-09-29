@@ -1,5 +1,15 @@
 # Mint live-work design record
 
+## 2026-09-29 — Pre-birthday blocks restore wallet history only (#239)
+
+- `apply_block` receives boot's birthday. Before it, the ordinary upstream
+  scan and wallet commit still track notes, spends, and all commitments.
+  The MTP window and cursor advance normally.
+- Name Note decryption, Registry transitions and ceremony adoption, and
+  Treasury memo intake begin at birthday. Earlier payments remain wallet
+  funds without becoming instructions; earlier Registry gifts cannot seed
+  the authority pool. Boot continues discarding historical arrivals.
+
 ## 2026-09-29 — `MINT_BIRTHDAY` moves to boot (#237)
 
 - Boot has been the constant's only consumer since #108 deleted the
