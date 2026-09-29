@@ -21,7 +21,7 @@ use zip32::fingerprint::SeedFingerprint;
 use std::str::FromStr;
 
 use crate::mint::mtp::MtpTracker;
-use crate::mint::presale::{self, AccessCodeKey};
+use crate::mint::presale::{self, AccessCodeDerivationKey, ProtectedNames};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::treasury::OtpQueue;
@@ -68,7 +68,9 @@ pub struct Boot<P: Parameters> {
     /// boot-initialized faculty: born empty, filled by `main`
     pub challenges: OtpQueue,
     /// TEE-derived access-code key (HMAC purpose key, not the root)
-    pub access_code_key: AccessCodeKey,
+    pub access_code_key: AccessCodeDerivationKey,
+    /// must not: fail-closed at birth — the table or no start
+    pub protected_names: ProtectedNames,
     /// produced: scanned and verified during boot sync
     pub registry: Registry,
 }
@@ -145,7 +147,7 @@ impl Boot<Network> {
             let root = tee
                 .derive_sealing_key(presale::ACCESS_CODE_KEY_CONTEXT)
                 .expect("FATAL: access-code root key unavailable from the TEE");
-            AccessCodeKey::from_private_key(&root)
+            AccessCodeDerivationKey::from_private_key(&root)
         };
 
         // 2. Seed intake + verification: read capsule, unseal with the
@@ -336,6 +338,16 @@ impl Boot<Network> {
             "boot: initial price ingested"
         );
 
+        // 6b. Pre-sale table: fail-closed at birth — no table, no start.
+        let protected_names = loop {
+            if let Some(names) = presale::fetch().await {
+                tracing::info!("boot: pre-sale table fetched");
+                break names;
+            }
+            tracing::warn!("boot: pre-sale table unavailable; retrying");
+            tokio::time::sleep(crate::zcash::RETRY_PAUSE).await;
+        };
+
         // The challenge memory: empty by construction, filled by the run
         // loop as update/release relays are issued.
         let challenges = OtpQueue::new();
@@ -383,6 +395,7 @@ impl Boot<Network> {
             oracle,
             challenges,
             access_code_key,
+            protected_names,
             registry,
         }
     }
