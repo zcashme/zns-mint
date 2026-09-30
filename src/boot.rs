@@ -238,6 +238,10 @@ impl Boot<Network> {
         // 1. Liveness + connect: confirm both Zebra transports, get chain client.
         let (chain_client, _tip_height) = connect_zebra().await;
 
+        // The one node handle: both dialects behind one door, bound to the
+        // client this boot proved live.
+        let source = crate::zcash::CanonicalBlockSource::new(chain_client.clone());
+
         // Ceremony facts: network, the seed fingerprint, and the birthday.
         // Regtest has no ceremony file; its birthday is the fixture boundary.
         #[cfg(not(feature = "regtest"))]
@@ -301,17 +305,16 @@ impl Boot<Network> {
 
         // 3. Born complete: fetch the origin checkpoint and both
         // subtree-root batches, then one `Wallet::new`.
-        let rpc = zcash::JsonRpc::new();
         let origin = origin_checkpoint(mint_birthday, async |height| {
-            rpc.chain_state_at(height).await
+            source.chain_state_at(height).await
         })
         .await;
         let checkpoint_height = origin.block_height();
-        let sapling_roots = rpc
+        let sapling_roots = source
             .get_subtree_roots::<sapling::Node>("sapling", 0)
             .await
             .expect("FATAL: Sapling subtree roots unavailable from Zebra");
-        let ironwood_roots = rpc
+        let ironwood_roots = source
             .get_subtree_roots::<orchard::tree::MerkleHashOrchard>("ironwood", 0)
             .await
             .expect("FATAL: Ironwood subtree roots unavailable from Zebra");
@@ -339,9 +342,9 @@ impl Boot<Network> {
         let mut birthday = MtpTracker::default();
         birthday
             .backfill(mint_birthday, |height| {
-                let rpc = rpc.clone();
+                let source = source.clone();
                 async move {
-                    let (_, _, timestamp) = rpc.get_block_header(height).await?;
+                    let (_, _, timestamp) = source.get_block_header(height).await?;
                     Ok::<_, zcash::TransportError>(
                         u32::try_from(timestamp.as_seconds())
                             .expect("Zcash block-header timestamps are u32 seconds"),
@@ -358,9 +361,9 @@ impl Boot<Network> {
         // 3e. MTP backfill: the 11 header timestamps through the origin
         // checkpoint, so the MTP window is complete before the first scan.
         mtp.backfill(checkpoint_height, |height| {
-            let rpc = rpc.clone();
+            let source = source.clone();
             async move {
-                let (_, _, timestamp) = rpc.get_block_header(height).await?;
+                let (_, _, timestamp) = source.get_block_header(height).await?;
                 Ok::<_, zcash::TransportError>(
                     u32::try_from(timestamp.as_seconds())
                         .expect("Zcash block-header timestamps are u32 seconds"),
@@ -381,7 +384,6 @@ impl Boot<Network> {
         // the iteration.
         let mut cursor = block_metadata(&origin);
         let mut registry = Registry::new();
-        let source = crate::zcash::CanonicalBlockSource::new();
         let (best_height, _best_hash) = source
             .exact_tip()
             .await
@@ -395,11 +397,11 @@ impl Boot<Network> {
             let from_height = cursor.block_height();
             let next_height = from_height + 1;
 
-            let from_state = rpc
+            let from_state = source
                 .chain_state_at(from_height)
                 .await
                 .expect("FATAL: chain state unavailable during boot sync");
-            let block = rpc
+            let block = source
                 .get_block(&network, next_height)
                 .await
                 .expect("FATAL: block unavailable during boot sync");

@@ -2,6 +2,16 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-30 — Boot builds the one-door facade at connect
+
+- `CanonicalBlockSource::new(chain_client)` binds both node dialects
+  once, right after `connect_zebra`; every boot read — treestate,
+  subtree roots, MTP headers, boot-sync blocks, boot tip — rides it.
+  The private `JsonRpc` handle and the boot-sync bypass are gone; boot
+  and the run loop share one lane for identical operations.
+  `connect_zebra`'s internal probe stays: it is the fail-fast liveness
+  check, and it precedes the client's existence.
+
 ## 2026-09-30 — Boot installs a Rustls provider before HTTPS
 
 - The AMD KDS fetch uses ureq, which links Rustls with ring. The mint's

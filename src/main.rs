@@ -27,7 +27,7 @@ use zns_mint::mint::{
     relay, watch_mempool, Action, MintInbound, OtpMemo, Request, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{
-    CanonicalBlockSource, JsonRpc, MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE,
+    CanonicalBlockSource, MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE,
 };
 
 #[tokio::main]
@@ -57,10 +57,9 @@ async fn main() {
         mut registry,
     } = Boot::start().await;
 
-    // A pure function of config — hardcoded node, hardcoded timeouts;
-    // reconstructing it loses nothing.
-    let rpc = JsonRpc::new();
-    let source = CanonicalBlockSource::new();
+    // The one node handle: both dialects behind one door, bound to the
+    // gRPC client boot proved live.
+    let source = CanonicalBlockSource::new(chain.clone());
 
     // Authorized Name Notes awaiting the chain: the lanes admit, the
     // enactment phase builds and broadcasts.
@@ -105,7 +104,7 @@ async fn main() {
                     MempoolChangeKind::Mined => {}
                     MempoolChangeKind::Added => {
                         let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
-                        match rpc.get_raw_transaction(branch_id, txid).await {
+                        match source.get_raw_transaction(branch_id, txid).await {
                             Ok(Some(transaction)) => {
                                 for (_action_index, paid, memo) in
                                     decrypt_treasury_transaction(&transaction, &treasury_keys)
