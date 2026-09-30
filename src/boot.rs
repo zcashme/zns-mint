@@ -503,7 +503,10 @@ impl Boot<Network> {
                 &registry_ufvk,
                 attestation.as_bytes(),
             );
-            write_identity_document(std::path::Path::new(IDENTITY_DOC_FILE), &doc);
+            // Regenerated every boot. A torn write is a partial file; a
+            // consumer accepts the document only after the report binding checks.
+            std::fs::write(IDENTITY_DOC_FILE, &doc)
+                .expect("FATAL: failed to write identity doc to disk");
             tracing::info!(
                 doc_hash = %hex::encode(blake2b256(&doc)),
                 "boot: identity doc written to zns_mint_identity.json"
@@ -822,51 +825,6 @@ fn identity_document(
     .expect("FATAL: identity document serialization")
 }
 
-/// Replaces `path` by rename. The previous file stays until the new
-/// bytes are synced. A symlink at `path` is replaced, not followed.
-fn write_identity_document(path: &std::path::Path, bytes: &[u8]) {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let tmp = path.with_extension("json.tmp");
-    match std::fs::remove_file(&tmp) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => panic!("FATAL: remove {}: {error}", tmp.display()),
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&tmp)
-        .unwrap_or_else(|error| {
-            if error.raw_os_error() == Some(libc::ELOOP) {
-                panic!("FATAL: {} is a symlink", tmp.display());
-            }
-            panic!("FATAL: create {}: {error}", tmp.display());
-        });
-    file.write_all(bytes)
-        .unwrap_or_else(|error| panic!("FATAL: write {}: {error}", tmp.display()));
-    file.sync_all()
-        .unwrap_or_else(|error| panic!("FATAL: sync {}: {error}", tmp.display()));
-    drop(file);
-    std::fs::rename(&tmp, path).unwrap_or_else(|error| {
-        panic!(
-            "FATAL: rename {} to {}: {error}",
-            tmp.display(),
-            path.display()
-        )
-    });
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(std::path::Path::new("."));
-    std::fs::File::open(parent)
-        .and_then(|dir| dir.sync_all())
-        .expect("FATAL: sync identity doc directory");
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -935,35 +893,6 @@ mod tests {
         assert_eq!(value["registry_ufvk"], "u1ufvk");
         let decoded = hex::decode(value["report"].as_str().expect("hex report")).expect("hex");
         assert_eq!(decoded, report);
-    }
-
-    #[test]
-    fn identity_document_rename_replaces_a_symlink() {
-        let dir = std::env::temp_dir().join(format!(
-            "zns-mint-identity-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir(&dir).expect("scratch dir");
-        let target = dir.join("target.json");
-        let link = dir.join("zns_mint_identity.json");
-        let original = b"original";
-        std::fs::write(&target, original).unwrap();
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-
-        let doc = identity_document("testnet", "u1ua", "u1ufvk", &[9u8; 4]);
-        write_identity_document(&link, &doc);
-
-        assert_eq!(std::fs::read(&target).unwrap(), original);
-        assert!(std::fs::symlink_metadata(&link)
-            .unwrap()
-            .file_type()
-            .is_file());
-        assert_eq!(std::fs::read(&link).unwrap(), doc);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]

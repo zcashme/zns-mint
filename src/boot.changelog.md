@@ -5,10 +5,10 @@ Tracks design-relevant changes to `src/boot.rs`.
 ## 2026-09-30 — Boot emits the attested identity document (issue #254)
 
 - Boot derives the Treasury UA and Registry UFVK once (`mint_identity`),
-  binds them into the SNP report (`identity_report_data`), and renames
-  `zns_mint_identity.json` into place — network, both strings, the
-  hex-encoded report — so the report's `REPORT_DATA` preimage ships
-  with the commitment. A crash keeps the previous document.
+  binds them into the SNP report (`identity_report_data`), and writes
+  `zns_mint_identity.json` — network, both strings, hex-encoded report —
+  in place of the bare `zns_mint_attestation.bin`, so the report's
+  `REPORT_DATA` preimage finally ships with the commitment.
 - The document hash is logged at boot for operator correlation.
 - `connect_zebra` returns only the chain client; the unused boot tip is
   dropped.
