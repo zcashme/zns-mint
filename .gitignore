@@ -15,5 +15,6 @@ lcov.info
 /keys/zns_seed.capsule
 /zns_mint_attestation.bin
 /zns_mint_identity.json
+/zns_mint_identity.json.tmp
 
 .cursor/
