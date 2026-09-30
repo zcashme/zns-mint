@@ -267,7 +267,7 @@ impl OtpMemo {
 }
 
 /// What a user said to the Treasury, in the shape each consumer takes.
-/// Classified once, at block application; the drain decides.
+/// Classified once, at block application; the deciding pass resolves.
 #[derive(Clone, Debug)]
 pub enum MintInbound {
     /// A request — a user's proposed transition, decoded from a Treasury
@@ -275,7 +275,7 @@ pub enum MintInbound {
     Request(Request),
     /// An OTP consume — the relay memo returned; what `awaiting` takes.
     Echo(OtpMemo),
-    /// A payment with no parseable message: the drain logs it once and
+    /// A payment with no parseable message: the deciding pass logs it once and
     /// the sweep keeps the value; the queue names it by its txid.
     Unrecognized,
 }
