@@ -254,9 +254,9 @@ pub fn challenge<P: Parameters>(
 // ---------------------------------------------------------------------------
 
 /// Treasury requests decoded once at block application: what each memo
-/// said, what it paid, the block that carried it. Entries leave by
-/// decision (`remove`) or by reorg (`truncate_to`); nothing else removes
-/// them.
+/// said, what it paid, the block that carried it. Entries are queued at
+/// block application and leave by decision (`resolved`) or by reorg
+/// (`truncate_to`); nothing else removes them.
 #[derive(Clone, Debug, Default)]
 pub struct RequestQueue {
     requests: Vec<(TxId, Request, Zatoshis, BlockHeight)>,
@@ -288,23 +288,14 @@ impl RequestQueue {
         })
     }
 
-    pub fn len(&self) -> usize {
-        self.requests.len()
+    /// Every request pending decision, in queue order.
+    pub fn pending(&self) -> Vec<(TxId, Request, Zatoshis, BlockHeight)> {
+        self.requests.clone()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.requests.is_empty()
-    }
-
-    /// The entry at `index`, in block order — the drain cursor reads.
-    pub fn entry(&self, index: usize) -> (&TxId, &Request, Zatoshis, BlockHeight) {
-        let (txid, request, paid, height) = &self.requests[index];
-        (txid, request, *paid, *height)
-    }
-
-    /// The entry is decided. The only removal besides reorg truncation.
-    pub fn remove(&mut self, index: usize) {
-        self.requests.remove(index);
+    /// The request is decided. The only removal besides reorg truncation.
+    pub fn resolved(&mut self, txid: TxId) {
+        self.requests.retain(|(queued, _, _, _)| *queued != txid);
     }
 
     /// Reorg: entries whose block was orphaned fall with it.
@@ -351,15 +342,26 @@ mod tests {
     #[test]
     fn queue_records_in_block_order() {
         let mut queue = RequestQueue::default();
-        assert_eq!(queue.len(), 0);
+        assert!(queue.pending().is_empty());
 
-        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
-        queue.record(TxId::NULL, request(Action::Update), Zatoshis::ZERO, h(101));
+        queue.record(
+            TxId::from_bytes([1; 32]),
+            request(Action::Claim),
+            Zatoshis::ZERO,
+            h(100),
+        );
+        queue.record(
+            TxId::from_bytes([2; 32]),
+            request(Action::Update),
+            Zatoshis::ZERO,
+            h(101),
+        );
 
-        assert_eq!(queue.len(), 2);
-        assert_eq!(*queue.entry(0).0, TxId::NULL);
-        assert_eq!(queue.entry(0).3, h(100));
-        assert_eq!(queue.entry(1).3, h(101));
+        let pending = queue.pending();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].0, TxId::from_bytes([1; 32]));
+        assert_eq!(pending[0].3, h(100));
+        assert_eq!(pending[1].3, h(101));
     }
 
     #[test]
@@ -406,33 +408,61 @@ mod tests {
             h(102),
         ));
 
-        assert_eq!(queue.len(), 2);
-        assert_eq!(*queue.entry(0).0, TxId::from_bytes([1; 32]));
-        assert_eq!(queue.entry(0).3, h(100));
+        let pending = queue.pending();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].0, TxId::from_bytes([1; 32]));
+        assert_eq!(pending[0].3, h(100));
         assert!(matches!(
-            queue.entry(0).1,
+            pending[0].1,
             Request::Claim { ref name, .. } if name.as_str() == "alice"
         ));
-        assert_eq!(*queue.entry(1).0, TxId::from_bytes([3; 32]));
-        assert_eq!(queue.entry(1).3, h(102));
+        assert_eq!(pending[1].0, TxId::from_bytes([3; 32]));
+        assert_eq!(pending[1].3, h(102));
         assert!(matches!(
-            queue.entry(1).1,
+            pending[1].1,
             Request::Claim { ref name, .. } if name.as_str() == "bob"
         ));
     }
 
     #[test]
-    fn queue_remove_shifts_neighbors() {
+    fn resolved_leaves_survivors_in_order() {
+        let mut queue = RequestQueue::default();
+        queue.record(
+            TxId::from_bytes([1; 32]),
+            request(Action::Claim),
+            Zatoshis::ZERO,
+            h(100),
+        );
+        queue.record(
+            TxId::from_bytes([2; 32]),
+            request(Action::Update),
+            Zatoshis::ZERO,
+            h(101),
+        );
+        queue.record(
+            TxId::from_bytes([3; 32]),
+            request(Action::Release),
+            Zatoshis::ZERO,
+            h(102),
+        );
+
+        queue.resolved(TxId::from_bytes([2; 32]));
+        let pending = queue.pending();
+        assert_eq!(pending.len(), 2);
+        // The neighbors kept their relative order.
+        assert_eq!(pending[0].0, TxId::from_bytes([1; 32]));
+        assert_eq!(pending[1].0, TxId::from_bytes([3; 32]));
+        assert!(matches!(pending[1].1, Request::Release { .. }));
+        assert_eq!(pending[1].3, h(102));
+    }
+
+    #[test]
+    fn resolved_unknown_txid_is_a_no_op() {
         let mut queue = RequestQueue::default();
         queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
-        queue.record(TxId::NULL, request(Action::Update), Zatoshis::ZERO, h(101));
-        queue.record(TxId::NULL, request(Action::Release), Zatoshis::ZERO, h(102));
 
-        queue.remove(1);
-        assert_eq!(queue.len(), 2);
-        // The entry after the removed one shifted into its place.
-        assert!(matches!(queue.entry(1).1, Request::Release { .. }));
-        assert_eq!(queue.entry(1).3, h(102));
+        queue.resolved(TxId::from_bytes([9; 32]));
+        assert_eq!(queue.pending().len(), 1);
     }
 
     #[test]
@@ -443,8 +473,9 @@ mod tests {
         queue.record(TxId::NULL, request(Action::Release), Zatoshis::ZERO, h(200));
 
         queue.truncate_to(h(120));
-        assert_eq!(queue.len(), 1);
-        assert!(matches!(queue.entry(0).1, Request::Claim { .. }));
-        assert_eq!(queue.entry(0).3, h(100));
+        let pending = queue.pending();
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(pending[0].1, Request::Claim { .. }));
+        assert_eq!(pending[0].3, h(100));
     }
 }

@@ -1,5 +1,15 @@
 # main.changelog.md
 
+## 2026-09-30 — The request pass resolves by key (#259)
+
+- The Treasury request walk is index arithmetic no more: the loop
+  iterates `requests.pending()` — a snapshot in queue order — and
+  pushes each verdict with `requests.resolved(txid)`. Survivors keep
+  their positions; a forgotten resolution resurfaces next pass. The
+  pass comment names the truth: nothing defers — refused gates are
+  dead, and enacted requests hand their retries to the note and
+  challenge queues.
+
 ## 2026-09-30 — The run loop holds one node handle
 
 - `CanonicalBlockSource::new(chain)` binds both node dialects; the

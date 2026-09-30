@@ -400,7 +400,7 @@ impl Oracle {
     /// The challenge fee (issue #18): the minimum payment that triggers a
     /// controller challenge — one dollar at the current published rate,
     /// rounded up to the next 100_000-zat increment. Anti-spam pricing,
-    /// not revenue: the drain refuses underpaid relay requests outright.
+    /// not revenue: the deciding pass refuses underpaid relay requests outright.
     pub fn challenge_fee(&self) -> Zatoshis {
         const GRID: u64 = 100_000;
         let rate = self.current().into_u64();

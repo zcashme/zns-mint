@@ -1,5 +1,13 @@
 # Treasury design record
 
+## 2026-09-30 — The pass resolves by txid (#259)
+
+- `RequestQueue` loses its index surface (`len`, `is_empty`, `entry`,
+  `remove`). The tip pass reads a `pending()` snapshot and pushes each
+  verdict back with `resolved(txid)`; survivors keep their positions.
+  The queue stays decision-neutral — today every gate resolves, and the
+  keep path exists for the law, not for the container.
+
 ## 2026-09-25 — Treasury spending wrapper is scoped to payment construction (#200)
 
 - Sweep and challenge construction request the upstream `SpendingKeys`
