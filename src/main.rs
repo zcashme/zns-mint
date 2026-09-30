@@ -27,7 +27,7 @@ use zns_mint::mint::{
     relay, watch_mempool, Action, MintInbound, OtpMemo, Request, TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{
-    CanonicalBlockSource, JsonRpc, MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE,
+    CanonicalBlockSource, MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE,
 };
 
 #[tokio::main]
@@ -57,17 +57,16 @@ async fn main() {
         mut registry,
     } = Boot::start().await;
 
-    // A pure function of config — hardcoded node, hardcoded timeouts;
-    // reconstructing it loses nothing.
-    let rpc = JsonRpc::new();
-    let source = CanonicalBlockSource::new();
+    // The one node handle: both dialects behind one door, bound to the
+    // gRPC client boot proved live.
+    let source = CanonicalBlockSource::new(chain.clone());
 
     // Authorized Name Notes awaiting the chain: the lanes admit, the
     // enactment phase builds and broadcasts.
     let mut name_notes = NameNoteQueue::default();
     // Treasury requests decoded once at block application: what each memo
-    // said, what it paid, the block that carried it. The drain at each tip
-    // decides entries; a reorg truncates them.
+    // said, what it paid, the block that carried it. The deciding pass at
+    // each tip resolves entries; a reorg truncates them.
     let mut requests = RequestQueue::default();
     let mut echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)> = Vec::new();
     // A background pre-sale fetch in flight; its result installs on
@@ -105,7 +104,7 @@ async fn main() {
                     MempoolChangeKind::Mined => {}
                     MempoolChangeKind::Added => {
                         let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
-                        match rpc.get_raw_transaction(branch_id, txid).await {
+                        match source.get_raw_transaction(branch_id, txid).await {
                             Ok(Some(transaction)) => {
                                 for (_action_index, paid, memo) in
                                     decrypt_treasury_transaction(&transaction, &treasury_keys)
@@ -433,15 +432,13 @@ async fn main() {
         zns_mint::metrics::snapshot(tip, treasury_zats, oracle.current().into_u64());
 
         // Treasury requests. Each memo was decoded once, at block
-        // application; the drain decides each entry exactly once. A
-        // decided entry leaves the queue; a deferred relay — Treasury
-        // fee funds missing, or the node rejected the challenge — waits
-        // for the next tip. Nothing is re-read.
-        let mut index = 0;
-        while index < requests.len() {
-            let (txid, request, paid, note_height) = requests.entry(index);
-            let decided = 'lane: {
-                match request {
+        // application; the deciding pass resolves each pending entry
+        // exactly once, in queue order. A resolved entry leaves the
+        // queue — refused by a gate, or handed to the queue that owns
+        // its retries. Nothing defers; nothing is re-read.
+        for (txid, request, paid, note_height) in requests.pending() {
+            let resolved = 'lane: {
+                match &request {
                     Request::Claim {
                         name,
                         ua,
@@ -520,15 +517,13 @@ async fn main() {
                             term,
                             mtp_now,
                         );
-                        challenges.admit(pending, *txid);
+                        challenges.admit(pending, txid);
                         true
                     }
                 }
             };
-            if decided {
-                requests.remove(index);
-            } else {
-                index += 1;
+            if resolved {
+                requests.resolved(txid);
             }
         }
 
@@ -630,7 +625,7 @@ async fn main() {
         }
 
         // Lifecycle releases, §4.5: the registry owns the clocks and
-        // their plural; the sweep drains the batch each tip.
+        // their plural; the sweep moves the batch out each tip.
         // `releases_due` re-derives the same notes per tip, so
         // admission is idempotent.
         for (name, release_note) in registry.releases_due(mtp_now) {

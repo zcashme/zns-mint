@@ -83,20 +83,17 @@ impl JsonRpc {
             Err(e) => Err(e),
         }
     }
+}
 
-    /// Fetches every transaction ID currently in the mempool — the
-    /// re-baseline snapshot after a stream reconnect; diff it against the
-    /// pending set.
-    pub async fn get_raw_mempool(&self) -> Result<Vec<TxId>, TransportError> {
-        let txids: Vec<String> = self
-            .send_request("getrawmempool", [(); 0])
-            .await?
-            .ok_or(TransportError::BadNodeData("getrawmempool returned null"))?;
-
-        txids
-            .iter()
-            .map(|hex| TxId::from_hex(hex).ok_or(TransportError::BadNodeData("getrawmempool txid")))
-            .collect()
+impl super::CanonicalBlockSource {
+    /// Fetches a transaction by ID over the JSON-RPC dialect — the run
+    /// loop's one handle reaches the mempool reader through the facade.
+    pub async fn get_raw_transaction(
+        &self,
+        branch_id: BranchId,
+        txid: TxId,
+    ) -> Result<Option<Transaction>, TransportError> {
+        self.rpc.get_raw_transaction(branch_id, txid).await
     }
 }
 

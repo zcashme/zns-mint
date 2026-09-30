@@ -48,7 +48,7 @@ pub(crate) const MAX_RESPONSE_BYTES: usize = 4 * MAX_BLOCK_BYTES;
 
 /// A stateless JSON-RPC transport: one POST per call to the local Zebra.
 #[derive(Clone)]
-pub struct JsonRpc {
+pub(crate) struct JsonRpc {
     client: HyperClient<HttpConnector, Full<Bytes>>,
 }
 
@@ -144,23 +144,27 @@ impl Default for JsonRpc {
 // The orchestrator's handle — impls in every conversation file
 // ============================================================================
 
-/// The orchestrator's view of the node: canonical reads and the one place a
-/// transaction is ever broadcast. The run loop holds no other handle;
-/// raw-transaction reads stay deliberately outside this charter (the
-/// mempool reader's, not the orchestrator's).
+/// The one node handle: both dialects behind one door. Canonical blocks
+/// and reorg-walk hashes ride the Indexer gRPC; tree state, subtree
+/// roots, MTP headers, raw transactions, and broadcast ride JSON-RPC.
+/// Unary gRPC calls go out on a fresh handle to the shared HTTP/2
+/// connection — `Channel` is an `Arc` — so every public method stays
+/// `&self`.
 #[derive(Clone)]
-pub struct CanonicalBlockSource(pub(crate) JsonRpc);
-
-impl CanonicalBlockSource {
-    /// Same transport, same hardcoded node — a view, not a connection.
-    pub fn new() -> Self {
-        Self(JsonRpc::new())
-    }
+pub struct CanonicalBlockSource {
+    pub(crate) rpc: JsonRpc,
+    pub(crate) chain: ChainClient,
 }
 
-impl Default for CanonicalBlockSource {
-    fn default() -> Self {
-        Self::new()
+impl CanonicalBlockSource {
+    /// Binds the connected gRPC client (boot's connect product) to a
+    /// fresh JSON-RPC transport. Same hardcoded node — a view, not a
+    /// connection.
+    pub fn new(chain: ChainClient) -> Self {
+        Self {
+            rpc: JsonRpc::new(),
+            chain,
+        }
     }
 }
 
@@ -214,11 +218,16 @@ impl RpcError {
     }
 }
 
-/// Maps the node's -8 rejection to [`TransportError::NotOnBestChain`], so a
-/// tip race never reads as malformed data.
+/// Maps the node's tip-race verdicts to [`TransportError::NotOnBestChain`],
+/// so a race never reads as malformed data or transport death: JSON-RPC
+/// error -8, and the Indexer gRPC's `not_found` for a hash or height off
+/// the best chain.
 pub(crate) fn not_on_best_chain(error: TransportError) -> TransportError {
     match error {
         TransportError::Rpc(ref rpc) if rpc.code == -8 => TransportError::NotOnBestChain,
+        TransportError::Tonic(ref status) if status.code() == tonic::Code::NotFound => {
+            TransportError::NotOnBestChain
+        }
         error => error,
     }
 }
@@ -260,6 +269,83 @@ impl TransportError {
                 | Self::HttpStatus(500..=599)
                 | Self::BadNodeData(_)
                 | Self::BadCheckpoint(_)
-        ) || matches!(self, Self::Tonic(status) if matches!(status.code(), tonic::Code::Unavailable))
+        ) || matches!(
+            self,
+            Self::Tonic(status) if matches!(
+                status.code(),
+                // Unavailable: the proto crate's protocol notes — a stream
+                // or connection that ended. Cancelled: the endpoint's
+                // REQUEST_TIMEOUT firing — tonic maps the client-side
+                // deadline to cancelled, never deadline-exceeded
+                // (find_status_in_source_chain). DeadlineExceeded: a
+                // server-enforced deadline, which none sets today.
+                tonic::Code::Unavailable
+                    | tonic::Code::Cancelled
+                    | tonic::Code::DeadlineExceeded
+            )
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_rpc_minus_eight_maps_to_not_on_best_chain() {
+        let error = TransportError::Rpc(RpcError {
+            code: -8,
+            message: "block not found".to_string(),
+            data: None,
+        });
+        assert!(matches!(
+            not_on_best_chain(error),
+            TransportError::NotOnBestChain
+        ));
+    }
+
+    #[test]
+    fn indexer_not_found_maps_to_not_on_best_chain() {
+        let status = tonic::Status::not_found("block not found");
+        assert!(matches!(
+            not_on_best_chain(TransportError::Tonic(status)),
+            TransportError::NotOnBestChain
+        ));
+    }
+
+    #[test]
+    fn other_verdicts_pass_through_unmapped() {
+        let invalid = not_on_best_chain(TransportError::Tonic(tonic::Status::invalid_argument(
+            "bad request length",
+        )));
+        assert!(matches!(invalid, TransportError::Tonic(_)));
+
+        let no_information = TransportError::Rpc(RpcError {
+            code: -5,
+            message: "No information available about transaction".to_string(),
+            data: None,
+        });
+        assert!(matches!(
+            not_on_best_chain(no_information),
+            TransportError::Rpc(_)
+        ));
+    }
+
+    #[test]
+    fn grpc_retryability_matrix() {
+        let deadline = TransportError::Tonic(tonic::Status::deadline_exceeded("timeout"));
+        assert!(deadline.is_retryable());
+
+        // The verdict the endpoint's REQUEST_TIMEOUT actually fires:
+        // tonic maps the client-side deadline to cancelled.
+        let cancelled = TransportError::Tonic(tonic::Status::cancelled("Timeout expired"));
+        assert!(cancelled.is_retryable());
+
+        let unavailable = TransportError::Tonic(tonic::Status::unavailable("connection ended"));
+        assert!(unavailable.is_retryable());
+
+        // A best-chain miss is a verdict: re-converge, never retry.
+        let not_found = TransportError::Tonic(tonic::Status::not_found("block not found"));
+        assert!(!not_found.is_retryable());
     }
 }

@@ -76,7 +76,7 @@ impl super::CanonicalBlockSource {
         tx.write(&mut tx_bytes)
             .expect("serializing a completed transaction cannot fail");
 
-        match self.0.send(&hex::encode(tx_bytes)).await {
+        match self.rpc.send(&hex::encode(tx_bytes)).await {
             Ok(returned_txid) => match TxId::from_hex(&returned_txid) {
                 Some(txid) if txid == tx.txid() => Ok(SubmitOutcome::Accepted),
                 // A success envelope that names another transaction — or
