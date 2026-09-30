@@ -1,0 +1,55 @@
+[package]
+name = "zns-mint-integration-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Boot-completion harness: real regtest Zebra, a Zallet-funded Treasury, and the dev ceremony Boot::start() requires"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+blake2b_simd = "1"
+hex = "0.4"
+rand = "0.8"
+secp256k1 = "0.29"
+secrecy = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "default-tls"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+zip32 = "0.2.1"
+
+# Same ZNS Ironwood graph as zns-mint (patched orchard + zcash_primitives).
+transparent = { package = "zcash_transparent", version = "0.10.0", default-features = false, features = ["transparent-inputs"] }
+zcash_keys = { version = "0.16.1", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
+zcash_primitives = { version = "0.30.0", default-features = false, features = ["std", "circuits", "multicore", "transparent-inputs", "unsafe-zns"] }
+zcash_protocol = "0.10.5"
+zcash_script = "0.4"
+orchard = { version = "0.15.5", default-features = false, features = ["unsafe-zns", "circuit", "multicore"] }
+
+# The mint under test, linked in-process: Boot::start() on regtest,fake-tee.
+zns-mint = { path = "..", features = ["regtest", "fake-tee"] }
+# Zebra + Zallet process harness (pinned rev; bump deliberately).
+zns-integration-tests = { git = "https://github.com/zcashme/zns-integration-tests.git", rev = "f28fabfb56e4962a7e95283134791fb41c51337c" }
+# Capsule sealing + FakeTee; same branch pin zns-mint carries.
+zns-canon = { git = "https://github.com/zcashme/zns-canon.git", branch = "main" }
+
+[patch.crates-io]
+orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.15.5.2" }
+zcash_primitives = { git = "https://github.com/zcashme/zns-zcash_primitives.git", tag = "zns-zcash_primitives-v0.30.1.2" }
+
+# Debug Halo2 is too slow for a 42-action Ironwood bundle.
+[profile.dev.package.orchard]
+opt-level = 3
+[profile.dev.package.halo2_proofs]
+opt-level = 3
+[profile.dev.package.halo2_gadgets]
+opt-level = 3
+[profile.test.package.orchard]
+opt-level = 3
+[profile.test.package.halo2_proofs]
+opt-level = 3
+[profile.test.package.halo2_gadgets]
+opt-level = 3
