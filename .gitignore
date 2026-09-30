@@ -10,9 +10,10 @@ lcov.info
 /ens-contracts/
 
 # Boot secrets and artifacts. Never commit.
-# The sealed seed capsule (real or FakeTee-produced) and the attestation
-# report written on boot are per-instance, per-machine outputs.
+# The sealed seed capsule (real or FakeTee-produced) and the identity
+# document written on boot are per-instance, per-machine outputs.
 /keys/zns_seed.capsule
 /zns_mint_attestation.bin
+/zns_mint_identity.json
 
 .cursor/

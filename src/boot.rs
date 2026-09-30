@@ -51,9 +51,9 @@ pub struct Boot<P: Parameters> {
     pub wallet: Wallet<P>,
     /// produced: the origin cursor the loop extends
     pub cursor: BlockMetadata,
-    /// cannot: derived from the seed — the seed dies before this exists
+    /// produced: derived from the seed — the seed dies before this exists
     pub treasury_keys: TreasuryKeys,
-    /// cannot: derived from the seed
+    /// produced: derived from the seed
     pub registry_keys: RegistryKeys,
     /// must not fail after attestation: hash-verified before the report
     pub sapling_spend: SpendParameters,
@@ -164,6 +164,9 @@ fn require_config_network(config: &MintConfig) {
 #[cfg(not(feature = "regtest"))]
 const ATTESTATION_REPORT_LEN: usize = 1184;
 
+/// The boot identity document: written once, at attestation time.
+const IDENTITY_DOC_FILE: &str = "zns_mint_identity.json";
+
 /// The conf fingerprint is not an identity pin by itself. The keygen
 /// report must carry `BLAKE2b-512(fingerprint ‖ capsule hash)` under the
 /// AMD signature before that fingerprint is used.
@@ -213,7 +216,6 @@ fn read_attestation_report(path: &std::path::Path) -> Vec<u8> {
     bytes
 }
 
-#[cfg(not(feature = "regtest"))]
 fn blake2b256(bytes: &[u8]) -> [u8; 32] {
     blake2b_simd::Params::new()
         .hash_length(32)
@@ -236,7 +238,7 @@ impl Boot<Network> {
         tracing::info!("boot: starting");
 
         // 1. Liveness + connect: confirm both Zebra transports, get chain client.
-        let (chain_client, _tip_height) = connect_zebra().await;
+        let chain_client = connect_zebra().await;
 
         // The one node handle: both dialects behind one door, bound to the
         // client this boot proved live.
@@ -484,21 +486,33 @@ impl Boot<Network> {
         let sapling_spend = load_sapling_spend_params();
         let sapling_output = load_sapling_output_params();
 
-        // 8. Attestation. Nothing fallible is acquired after this point.
+        // 8. Identity. Nothing fallible is acquired after this point.
         //
         // Regtest does NOT skip attestation: regtest is a local-consensus
         // toggle, not a TEE toggle. `--features fake-tee` (typically with
         // `regtest,fake-tee`) is what substitutes the report source so
         // the mint can produce a report outside SEV-SNP.
         {
-            let report_data =
-                generate_attestation_report_data(&network, &treasury_keys, &registry_keys);
+            let (treasury_ua, registry_ufvk) =
+                mint_identity(&network, &treasury_keys, &registry_keys);
+            let report_data = identity_report_data(&treasury_ua, &registry_ufvk);
             let attestation = tee
                 .get_attestation(&report_data)
                 .expect("FATAL: failed to obtain TEE attestation report");
-            std::fs::write("zns_mint_attestation.bin", attestation.as_bytes())
-                .expect("FATAL: failed to write attestation to disk");
-            tracing::info!("boot: attestation report written to zns_mint_attestation.bin");
+            let doc = identity_document(
+                NETWORK_LABEL,
+                &treasury_ua,
+                &registry_ufvk,
+                attestation.as_bytes(),
+            );
+            // Regenerated every boot. A torn write is a partial file; a
+            // consumer accepts the document only after the report binding checks.
+            std::fs::write(IDENTITY_DOC_FILE, &doc)
+                .expect("FATAL: failed to write identity doc to disk");
+            tracing::info!(
+                doc_hash = %hex::encode(blake2b256(&doc)),
+                "boot: identity doc written to zns_mint_identity.json"
+            );
         }
 
         tracing::info!(
@@ -554,8 +568,8 @@ fn regtest_network() -> LocalNetwork {
 // Step 1: Liveness + connect
 // ---------------------------------------------------------------------------
 
-/// Zebra liveness; boot tip.
-async fn connect_zebra() -> (ChainClient, BlockHeight) {
+/// Zebra liveness.
+async fn connect_zebra() -> ChainClient {
     // JSON-RPC liveness
     let rpc = zcash::JsonRpc::new();
     let info = rpc
@@ -579,7 +593,7 @@ async fn connect_zebra() -> (ChainClient, BlockHeight) {
         .expect("FATAL: chain_tip_change gRPC call failed");
     tracing::info!("boot: gRPC chain client connected");
 
-    (chain, BlockHeight::from_u32(info.blocks))
+    chain
 }
 
 // ---------------------------------------------------------------------------
@@ -758,36 +772,59 @@ fn load_sapling_output_params() -> OutputParameters {
 // Step 5: Attestation
 // ---------------------------------------------------------------------------
 
-/// Constructs the 64-byte attestation report data: BLAKE2b-512 of
-/// `treasury_default_address || "||" || registry_fvk`.
-///
-/// An external verifier checks this against the expected Treasury address
-/// and Registry UFVK, binding the attestation to the mint's identity.
-/// Production code path — not gated on any dev feature, so a `fake-tee`
-/// build still binds a real identity into its (unverifiable) report.
-fn generate_attestation_report_data(
+/// The mint's public identity: the Treasury's shielded default address and
+/// the Registry's UFVK, in exactly the encoded form the attestation binds.
+fn mint_identity(
     network: &Network,
     treasury_keys: &TreasuryKeys,
     registry_keys: &RegistryKeys,
-) -> [u8; 64] {
+) -> (String, String) {
     use zcash_keys::keys::UnifiedAddressRequest;
 
     let (treasury_addr, _) = treasury_keys
         .fvk()
         .default_address(UnifiedAddressRequest::SHIELDED)
         .expect("FATAL: Treasury FVK missing default address");
-    let treasury_addr_str = treasury_addr.encode(network);
-    let registry_fvk_str = registry_keys.fvk().encode(network);
+    (
+        treasury_addr.encode(network),
+        registry_keys.fvk().encode(network),
+    )
+}
 
+/// Constructs the 64-byte attestation report data: BLAKE2b-512 of
+/// `treasury_ua || "||" || registry_ufvk`.
+///
+/// An external verifier checks this against the published Treasury address
+/// and Registry UFVK, binding the attestation to the mint's identity.
+/// Production code path — not gated on any dev feature, so a `fake-tee`
+/// build still binds a real identity into its (unverifiable) report.
+fn identity_report_data(treasury_ua: &str, registry_ufvk: &str) -> [u8; 64] {
     let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
-    hasher.update(treasury_addr_str.as_bytes());
+    hasher.update(treasury_ua.as_bytes());
     hasher.update(b"||");
-    hasher.update(registry_fvk_str.as_bytes());
+    hasher.update(registry_ufvk.as_bytes());
     let hash = hasher.finalize();
 
     let mut report_data = [0u8; 64];
     report_data.copy_from_slice(hash.as_bytes());
     report_data
+}
+
+/// The boot identity document: the attested identity strings and the
+/// hex-encoded 1184-byte SNP report binding them.
+fn identity_document(
+    network: &str,
+    treasury_ua: &str,
+    registry_ufvk: &str,
+    report: &[u8],
+) -> Vec<u8> {
+    serde_json::to_vec_pretty(&serde_json::json!({
+        "network": network,
+        "treasury_ua": treasury_ua,
+        "registry_ufvk": registry_ufvk,
+        "report": hex::encode(report),
+    }))
+    .expect("FATAL: identity document serialization")
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +834,68 @@ fn generate_attestation_report_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The identity strings come from the same SHIELDED default-address
+    /// derivation the attestation binds; the Treasury receiver must never
+    /// be transparent.
+    #[test]
+    fn mint_identity_is_shielded_only() {
+        let seed = Secret::new([0x42u8; 32]);
+        let network = boot_network();
+        let treasury_keys = TreasuryKeys::derive(&network, &seed);
+        let (treasury_ua, _) = mint_identity(
+            &network,
+            &treasury_keys,
+            &RegistryKeys::derive(&network, &seed),
+        );
+
+        let decoded = zcash_keys::address::Address::decode(&network, &treasury_ua)
+            .expect("FATAL: identity UA does not decode");
+        let ua = match decoded {
+            zcash_keys::address::Address::Unified(ua) => ua,
+            _ => panic!("FATAL: identity is not a unified address"),
+        };
+        assert!(
+            ua.orchard().is_some(),
+            "identity UA lacks an Orchard receiver"
+        );
+        assert!(
+            ua.transparent().is_none(),
+            "identity UA carries a transparent receiver"
+        );
+    }
+
+    /// Different identities bind to different report data — otherwise the
+    /// seam would silently accept identity confusion. The fixed vector pins
+    /// the exact commitment — algorithm, separator, encoding order — that
+    /// external verifiers depend on.
+    #[test]
+    fn identity_report_data_distinguishes_identities() {
+        let treasury_ua = "u1treasury";
+        let registry_ufvk = "u1registry";
+        assert_eq!(
+            hex::encode(identity_report_data(treasury_ua, registry_ufvk)),
+            "f730323e01e9a258d3973eaf7bb9a0c734cf9fd3013cd65460811926f63372ecf4e78ba21ff78265157f93a9a9a477539ffce08ca821bcc9cd0e95f2344b311c"
+        );
+        assert_ne!(
+            identity_report_data(treasury_ua, registry_ufvk),
+            identity_report_data(registry_ufvk, treasury_ua)
+        );
+    }
+
+    /// The document carries the four contract fields and the report
+    /// survives the hex round-trip.
+    #[test]
+    fn identity_document_round_trips() {
+        let report = [7u8; 1184];
+        let doc = identity_document("testnet", "u1ua", "u1ufvk", &report);
+        let value: serde_json::Value = serde_json::from_slice(&doc).expect("valid JSON");
+        assert_eq!(value["network"], "testnet");
+        assert_eq!(value["treasury_ua"], "u1ua");
+        assert_eq!(value["registry_ufvk"], "u1ufvk");
+        let decoded = hex::decode(value["report"].as_str().expect("hex report")).expect("hex");
+        assert_eq!(decoded, report);
+    }
 
     #[tokio::test]
     async fn origin_checkpoint_selects_the_scan_boundary() {
