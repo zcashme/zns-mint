@@ -1,5 +1,24 @@
 # Zcash I/O changelog
 
+## 2026-09-30 — The endpoint timeout retries as cancelled (#257)
+
+- tonic 0.14 maps the endpoint's client-side `REQUEST_TIMEOUT` to
+  `Status::cancelled("Timeout expired")` — `find_status_in_source_chain`
+  walks the tower error sources and downcasts `TimeoutExpired` to
+  cancelled, never deadline-exceeded (reproduced against the locked
+  tonic 0.14.6). A stalled `Indexer.GetBlock` — node up, one call silent
+  past five seconds — therefore reached the run loop's FATAL arm
+  instead of the retry arm, where the JSON lane's `Timeout` retried the
+  same stall. `Cancelled` joins `Unavailable` in `is_retryable`;
+  `DeadlineExceeded` stays for a server-enforced deadline, which none
+  sets today. Zebra's indexer never answers cancelled, and nothing in
+  the mint cancels a unary call, so the code is unambiguous here.
+- Corrections to #253's entry, both names only: the timeout verdict is
+  cancelled, not deadline-exceeded; the decode-cap trip is
+  `out_of_range` (tonic's decompression limit is the
+  `resource-exhausted` path), not `resource-exhausted`. Behavior was as
+  intended in both.
+
 ## 2026-09-30 — Blocks and walk hashes ride the Indexer gRPC; the facade is the one door
 
 - `CanonicalBlockSource` holds both dialects: `rpc` (JSON-RPC) and

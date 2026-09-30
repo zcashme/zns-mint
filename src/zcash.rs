@@ -274,9 +274,14 @@ impl TransportError {
             Self::Tonic(status) if matches!(
                 status.code(),
                 // Unavailable: the proto crate's protocol notes — a stream
-                // or connection that ended. DeadlineExceeded: the endpoint's
-                // REQUEST_TIMEOUT firing.
-                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+                // or connection that ended. Cancelled: the endpoint's
+                // REQUEST_TIMEOUT firing — tonic maps the client-side
+                // deadline to cancelled, never deadline-exceeded
+                // (find_status_in_source_chain). DeadlineExceeded: a
+                // server-enforced deadline, which none sets today.
+                tonic::Code::Unavailable
+                    | tonic::Code::Cancelled
+                    | tonic::Code::DeadlineExceeded
             )
         )
     }
@@ -330,6 +335,11 @@ mod tests {
     fn grpc_retryability_matrix() {
         let deadline = TransportError::Tonic(tonic::Status::deadline_exceeded("timeout"));
         assert!(deadline.is_retryable());
+
+        // The verdict the endpoint's REQUEST_TIMEOUT actually fires:
+        // tonic maps the client-side deadline to cancelled.
+        let cancelled = TransportError::Tonic(tonic::Status::cancelled("Timeout expired"));
+        assert!(cancelled.is_retryable());
 
         let unavailable = TransportError::Tonic(tonic::Status::unavailable("connection ended"));
         assert!(unavailable.is_retryable());
