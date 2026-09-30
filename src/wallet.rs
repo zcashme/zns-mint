@@ -19,7 +19,7 @@ use zcash_client_backend::{
     data_api::{
         BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus, WalletWrite,
     },
-    wallet::{NoteId, OutputRef, ReceivedNote, WalletIronwoodOutput, WalletSaplingOutput},
+    wallet::{NoteId, OutputRef, WalletIronwoodOutput, WalletSaplingOutput},
 };
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::block::BlockHash;
@@ -217,7 +217,10 @@ impl<P: Parameters> Wallet<P> {
         Ok(wallet)
     }
 
-    /// The consensus parameters this wallet was constructed for.
+    /// The consensus parameters this wallet was constructed for: the field's
+    /// read surface, without which it is write-only outside tests and dies
+    /// under `dead_code`. Mirrors `zcash_client_sqlite::WalletDb`'s stored
+    /// `params`.
     pub fn network(&self) -> &P {
         &self.network
     }
@@ -225,11 +228,6 @@ impl<P: Parameters> Wallet<P> {
     /// The wallet's own scanning faculty, born from the same UFVKs.
     pub fn scanning_keys(&self) -> &ScanningKeys<AccountId, (AccountId, zip32::Scope)> {
         &self.scanning_keys
-    }
-
-    /// Returns the viewing key of one fixed mint account.
-    pub fn ufvk_for(&self, account: AccountId) -> Option<&UnifiedFullViewingKey> {
-        self.ufvks.get(&account)
     }
 
     /// Scan floor for one account, if the account is present.
@@ -240,27 +238,6 @@ impl<P: Parameters> Wallet<P> {
     /// Earliest account birthday; wallet-wide scan and progress floor.
     pub(crate) fn wallet_birthday(&self) -> Option<BlockHeight> {
         self.account_birthdays.values().copied().min()
-    }
-
-    /// Witnesses one received Ironwood note at `tip`.
-    pub fn witness(
-        &mut self,
-        note: &ReceivedNote<NoteId, orchard::note::Note>,
-        tip: BlockHeight,
-    ) -> Option<orchard::tree::MerklePath> {
-        let path = self
-            .ironwood_witness(note.note_commitment_tree_position(), tip)
-            .expect("FATAL: Ironwood tree access failed")
-            .expect("FATAL: owned note has no witness at the applied tip");
-        Some(orchard::tree::MerklePath::from(path))
-    }
-
-    /// The Ironwood anchor at `tip`: the root every spend of this block's
-    /// transaction must prove against.
-    pub fn anchor_at(&mut self, tip: BlockHeight) -> orchard::tree::Anchor {
-        self.ironwood_anchor(tip)
-            .expect("FATAL: Ironwood tree access failed")
-            .expect("FATAL: wallet has no Ironwood anchor at its applied tip")
     }
 
     /// Records a mint-built transaction as sent-but-unconfirmed intent:
@@ -383,7 +360,7 @@ pub(crate) mod testing {
             AccountBirthday, OutputOfSentTx, WalletTest,
         },
         proto::compact_formats::CompactBlock,
-        wallet::{Note, Recipient},
+        wallet::{Note, ReceivedNote, Recipient},
     };
     use zcash_keys::address::Address;
     use zcash_keys::keys::{transparent::gap_limits::GapLimits, UnifiedSpendingKey};

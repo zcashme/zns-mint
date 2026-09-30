@@ -1192,7 +1192,7 @@ mod tests {
     use zcash_client_backend::data_api::Account;
     use zcash_client_backend::data_api::{WalletRead, WalletWrite};
     use zcash_primitives::block::BlockHash;
-    use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkType, Parameters};
+    use zcash_protocol::consensus::{BlockHeight, MainNetwork};
     use zcash_protocol::value::Zatoshis;
     use zip32::AccountId;
 
@@ -1548,14 +1548,6 @@ mod tests {
             wallet.reserve_next_n_internal_addresses(account, 1),
             Err(WalletError::FixedAccountsOnly)
         ));
-    }
-
-    #[test]
-    fn wallet_knows_its_network() {
-        let origin = empty_origin();
-        let wallet =
-            Wallet::new([], &origin, &[], &[], MainNetwork).expect("empty UFVK set is valid");
-        assert_eq!(wallet.network().network_type(), NetworkType::Main);
     }
 
     // Both pruned and retained checkpoints must preserve older witnesses.

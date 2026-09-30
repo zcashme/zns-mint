@@ -1,5 +1,23 @@
 # Wallet changelog
 
+## 2026-09-25 — Pruning unconsumed wallet sugar
+
+- `Wallet::ufvk_for`, `Wallet::witness`, `Wallet::anchor_at` are gone; all
+  three had zero production callers. The Registry UFVK flows boot →
+  attestation report straight from the ZIP-32 derivation (`mint_identity`),
+  never back through the wallet. The Name Note assembler takes its anchor
+  and witnesses from `ironwood_anchor`/`ironwood_witness` and maps absence
+  to `AssembleError` — the request path fails the attempt, not the daemon —
+  and the deleted wrappers were `expect`-flavored, inviting panics into
+  that path. The boot replay test calls `ironwood_witness` directly now.
+- `Wallet::network` stays. Its field's only reads live in the `#[cfg(test)]`
+  testing seam (`get_sent_outputs`), so without the getter the field is
+  write-only in production builds and dies under `dead_code` — the
+  2026-09-17 rationale stands. The doc comment now says so, and
+  `wallet_knows_its_network` (the getter's only caller) goes with it.
+- `sync_status` / `expired_unmined_at` keep their offered-but-unconsumed
+  status: metrics and expiry reconciliation remain their intended consumers.
+
 ## 2026-09-24 — Name Note binding uses the ZNS cmx
 
 - `store_name_note` takes the transition `(rcm, psi)` and requires
