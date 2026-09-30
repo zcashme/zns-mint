@@ -1,5 +1,12 @@
 # main.changelog.md
 
+## 2026-09-30 — The run loop holds one node handle
+
+- `CanonicalBlockSource::new(chain)` binds both node dialects; the
+  standalone `JsonRpc` local is gone and the facade serves the mempool
+  lane's raw-transaction reads. The charter sentence — the run loop
+  holds no other handle — is now enforced by absence.
+
 ## 2026-09-29 — The pre-sale gate reads the cache synchronously (#242)
 
 - The claim lane refuses when `protected_names.is_protected(name,

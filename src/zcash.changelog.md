@@ -1,5 +1,36 @@
 # Zcash I/O changelog
 
+## 2026-09-30 — Blocks and walk hashes ride the Indexer gRPC; the facade is the one door
+
+- `CanonicalBlockSource` holds both dialects: `rpc` (JSON-RPC) and
+  `chain` (Indexer gRPC), built from boot's connected client. Unary gRPC
+  calls go out on a clone of the shared connection — `Channel` is an
+  `Arc` — so the public surface stays `&self`. `main` and `boot` hold
+  exactly one handle; the standalone `JsonRpc` is `pub(crate)`, and its
+  only remaining constructor is `connect_zebra`'s liveness probe.
+- Canonical blocks and reorg-walk hashes ride `Indexer.GetBlock` — raw
+  consensus bytes, no hex detour. `JsonRpc::get_block` and
+  `JsonRpc::get_block_hash` are deleted; the walk's genesis answer comes
+  from the wire hash, where `Block::read` refuses to parse. The
+  boot-sync bypass rides the facade too, so boot and the run loop share
+  one lane for identical operations.
+- `not_on_best_chain` maps the Indexer's `not_found` — a hash or height
+  off the best chain (zakura indexer server, methods.rs) — to
+  `NotOnBestChain`, so the walk's and catch-up's re-converge arms live
+  again; the verdict stays non-retryable. `is_retryable` gains
+  `deadline-exceeded`: the endpoint's `REQUEST_TIMEOUT` firing.
+- The gRPC answer bound is ours by declaration: `2 × MAX_BLOCK_BYTES`,
+  set at connect. A consensus-max block fits twice over; a larger
+  answer is a node verdict (`resource-exhausted` → FATAL), not a retry —
+  deliberate asymmetry with the hex lane, where an oversized body is
+  retryable bad node data.
+- `JsonRpc::get_raw_mempool` is deleted: the re-baseline it served was
+  retracted by doctrine (2026-09-21) and it had zero callers.
+- Wire convention pinned by test: a `BlockRequest` height is exactly
+  four big-endian bytes; 32 would silently name a hash. The parse path
+  is tested against upstream's own mainnet block fixture — parse,
+  byte-identical re-encode, and a wrong-height refusal.
+
 ## 2026-09-24 — Retry unusable node payloads
 
 - `BadNodeData` and `BadCheckpoint` are retryable. Existing read loops
