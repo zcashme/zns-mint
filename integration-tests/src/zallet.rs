@@ -41,6 +41,11 @@ fn pick_port() -> Result<u16> {
 const RPC_UP_TIMEOUT: Duration = Duration::from_secs(120);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// Per-request bound: long enough for `z_sendfromaccount`'s in-call prove,
+/// short enough that a stalled zallet fails the poll loops instead of
+/// parking them past their deadlines.
+const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Must match `[[rpc.auth]]` in [`zallet_toml`].
 const RPC_USER: &str = "user";
 const RPC_PASS: &str = "pass";
@@ -161,7 +166,10 @@ impl Zallet {
     /// Issue a JSON-RPC call, returning the `result` on success.
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
         let body = json!({ "jsonrpc": "1.0", "id": "harness", "method": method, "params": params });
-        let resp = reqwest::Client::new()
+        let resp = reqwest::Client::builder()
+            .timeout(RPC_REQUEST_TIMEOUT)
+            .build()
+            .context("build zallet rpc client")?
             .post(self.rpc_url())
             .basic_auth(RPC_USER, Some(RPC_PASS))
             .json(&body)
@@ -241,15 +249,6 @@ impl Zallet {
             .to_string();
         self.wait_for_operation(&opid).await?;
         Ok(remaining)
-    }
-
-    /// Account 0's spendable Orchard balance, in zatoshis.
-    pub async fn orchard_spendable_zats(&self) -> Result<u64> {
-        let balances = self.call("z_getbalanceforaccount", json!([0])).await?;
-        Ok(balances
-            .pointer("/pools/orchard/spendable/valueZat")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0))
     }
 
     /// Spend from account 0 through `fund_source` (e.g. `"orchard"`),
