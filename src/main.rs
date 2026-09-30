@@ -13,22 +13,16 @@
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_protocol::consensus::{BlockHeight, BranchId};
-use zcash_protocol::value::Zatoshis;
 
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::{assemble, decrypt_treasury_transaction, NameNoteQueue};
-use zns_mint::mint::presale::ProtectedNames;
+use zns_mint::mint::note::{assemble, decrypt_treasury_transaction};
 use zns_mint::mint::pricing::fetch_round;
-use zns_mint::mint::treasury::{self, RequestQueue};
+use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
-use zns_mint::mint::{
-    relay, watch_mempool, Action, MintInbound, OtpMemo, Request, TREASURY_ACCOUNT,
-};
-use zns_mint::zcash::{
-    CanonicalBlockSource, MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE,
-};
+use zns_mint::mint::{relay, watch_mempool, Action, MintInbound, Request, TREASURY_ACCOUNT};
+use zns_mint::zcash::{MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
 async fn main() {
@@ -43,6 +37,7 @@ async fn main() {
         network,
         birthday,
         chain,
+        source,
         mut wallet,
         cursor: mut chain_tip,
         treasury_keys,
@@ -55,23 +50,11 @@ async fn main() {
         access_code_key,
         mut protected_names,
         mut registry,
+        mut name_notes,
+        mut requests,
+        mut echoes,
+        mut presale_refresh,
     } = Boot::start().await;
-
-    // The one node handle: both dialects behind one door, bound to the
-    // gRPC client boot proved live.
-    let source = CanonicalBlockSource::new(chain.clone());
-
-    // Authorized Name Notes awaiting the chain: the lanes admit, the
-    // enactment phase builds and broadcasts.
-    let mut name_notes = NameNoteQueue::default();
-    // Treasury requests decoded once at block application: what each memo
-    // said, what it paid, the block that carried it. The deciding pass at
-    // each tip resolves entries; a reorg truncates them.
-    let mut requests = RequestQueue::default();
-    let mut echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)> = Vec::new();
-    // A background pre-sale fetch in flight; its result installs on
-    // a later pass.
-    let mut presale_refresh: Option<tokio::task::JoinHandle<Option<ProtectedNames>>> = None;
 
     zns_mint::metrics::install();
     tracing::info!(
