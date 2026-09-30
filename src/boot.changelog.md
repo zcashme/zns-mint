@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-09-30 — Boot hands over initialized run state
+
+- Boot returns the `CanonicalBlockSource` it used for sync and initializes
+  the Name Note, request, echo, and pre-sale refresh slots before writing
+  the identity document. The run loop receives these through `Boot`.
+
 ## 2026-09-30 — Boot emits the attested identity document (issue #254)
 
 - Boot derives the Treasury UA and Registry UFVK once (`mint_identity`),

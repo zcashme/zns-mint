@@ -13,19 +13,21 @@ use zcash_protocol::consensus::TestNetwork;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 #[cfg(feature = "regtest")]
 use zcash_protocol::local_consensus::LocalNetwork;
+use zcash_protocol::value::Zatoshis;
 use zip32::fingerprint::SeedFingerprint;
 
 #[cfg(not(feature = "regtest"))]
 use std::str::FromStr;
 
 use crate::mint::mtp::MtpTracker;
+use crate::mint::note::NameNoteQueue;
 use crate::mint::presale::{self, AccessCodeDerivationKey, ProtectedNames};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
-use crate::mint::treasury::OtpQueue;
-use crate::mint::{MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::treasury::{OtpQueue, RequestQueue};
+use crate::mint::{OtpMemo, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
-use crate::zcash::{self, ChainClient};
+use crate::zcash::{self, CanonicalBlockSource, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
@@ -47,6 +49,8 @@ pub struct Boot<P: Parameters> {
     pub birthday: BlockHeight,
     /// acquired: boot proved that both Zebra transports are live
     pub chain: ChainClient,
+    /// acquired: the node source used during boot sync
+    pub source: CanonicalBlockSource,
     /// produced: trees seeded from the verified origin
     pub wallet: Wallet<P>,
     /// produced: the origin cursor the loop extends
@@ -71,6 +75,14 @@ pub struct Boot<P: Parameters> {
     pub protected_names: ProtectedNames,
     /// produced: scanned and verified during boot sync
     pub registry: Registry,
+    /// initialized: pending Name Note authorizations
+    pub name_notes: NameNoteQueue,
+    /// initialized: pending Treasury requests
+    pub requests: RequestQueue,
+    /// initialized: pending OTP echoes
+    pub echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)>,
+    /// initialized: no pre-sale refresh is in flight
+    pub presale_refresh: Option<tokio::task::JoinHandle<Option<ProtectedNames>>>,
 }
 
 /// Network label for logging.
@@ -242,7 +254,7 @@ impl Boot<Network> {
 
         // The one node handle: both dialects behind one door, bound to the
         // client this boot proved live.
-        let source = crate::zcash::CanonicalBlockSource::new(chain_client.clone());
+        let source = CanonicalBlockSource::new(chain_client.clone());
 
         // Ceremony facts: network, the seed fingerprint, and the birthday.
         // Regtest has no ceremony file; its birthday is the fixture boundary.
@@ -479,6 +491,10 @@ impl Boot<Network> {
         // The challenge memory: empty by construction, filled by the run
         // loop as update/release relays are issued.
         let challenges = OtpQueue::new();
+        let name_notes = NameNoteQueue::default();
+        let requests = RequestQueue::default();
+        let echoes = Vec::new();
+        let presale_refresh = None;
 
         // 7. Sapling proving parameters. Loading and hash verification happen
         // before attestation: a mint that produces a report can also prove
@@ -525,6 +541,7 @@ impl Boot<Network> {
             network,
             birthday: mint_birthday,
             chain: chain_client,
+            source,
             cursor,
             wallet,
             treasury_keys,
@@ -537,6 +554,10 @@ impl Boot<Network> {
             access_code_key,
             protected_names,
             registry,
+            name_notes,
+            requests,
+            echoes,
+            presale_refresh,
         }
     }
 }

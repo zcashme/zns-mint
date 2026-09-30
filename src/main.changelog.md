@@ -1,5 +1,10 @@
 # main.changelog.md
 
+## 2026-09-30 — Main receives its initial state from Boot
+
+- The run loop destructures the node source and four initialized slots
+  from `Boot` instead of constructing them after the boot handoff.
+
 ## 2026-09-30 — The request pass resolves by key (#259)
 
 - The Treasury request walk is index arithmetic no more: the loop
