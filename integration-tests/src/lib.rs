@@ -15,6 +15,14 @@
 //!
 //! `mod zallet` (with `child`) is vendored from the same rev: the wallet
 //! client there is still private to the sibling crate.
+//!
+//! The `happy_path` test binary drives the mint as a black box through
+//! claim → update → release: request memos from a real wallet, the mint's
+//! on-chain OTP challenges answered with echo payments, and every
+//! successor note verified with `zns-verify`, including the `rcm` chain
+//! linkage. The `zns-integration-tests` dep there is process plumbing
+//! only (`Zebrad`, `Mint`, the dev ceremony) — every assertion lives in
+//! this repo.
 
 use std::time::{Duration, Instant};
 
@@ -50,7 +58,18 @@ pub use zallet::Zallet;
 use zns_integration_tests::Zebrad;
 
 mod child;
+mod phases;
+mod stack;
+mod user;
+mod verify;
 mod zallet;
+
+pub use phases::{claim, release, update};
+pub use stack::Stack;
+pub use verify::{
+    challenge_txid, registration_txid, registry_commitment_keys, wait_for_verified_name_note,
+    VerifiedNameNote, VECTOR_G_D, VECTOR_PK_D,
+};
 
 /// Matches `zns-mint::mint::registry::ANCHOR_POOL_SIZE`.
 pub const ANCHOR_POOL_SIZE: usize = 40;

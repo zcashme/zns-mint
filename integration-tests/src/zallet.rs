@@ -22,7 +22,7 @@ use crate::child::ChildProcess;
 
 /// Vendored from `zns-integration-tests` at f28fabf (`src/binaries.rs`):
 /// `$ZALLET_BIN`, else `zallet-zebra` on `$PATH`.
-fn zallet_bin() -> Option<PathBuf> {
+pub(crate) fn zallet_bin() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("ZALLET_BIN") {
         return Some(PathBuf::from(p));
     }
