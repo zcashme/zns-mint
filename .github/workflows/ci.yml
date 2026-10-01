@@ -90,6 +90,17 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
+      # The tag the mint's harness was verified against locally; the
+      # sibling harness repo's CI pins a newer rev on purpose. Bump
+      # deliberately. Checked out before rust-cache so the
+      # zallet/backends/zebra workspace it lists exists.
+      - name: Checkout zallet
+        uses: actions/checkout@v4
+        with:
+          repository: zcash/zallet
+          ref: v0.1.0-beta.3
+          path: zallet
+
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
         with:
@@ -112,16 +123,6 @@ jobs:
           test -n "$bin"
           chmod +x "$bin"
           echo "ZEBRAD_BIN=${GITHUB_WORKSPACE}/${bin#./}" >> "$GITHUB_ENV"
-
-      # The tag the mint's harness was verified against locally; the
-      # sibling harness repo's CI pins a newer rev on purpose. Bump
-      # deliberately.
-      - name: Checkout zallet
-        uses: actions/checkout@v4
-        with:
-          repository: zcash/zallet
-          ref: v0.1.0-beta.3
-          path: zallet
 
       - name: Build zallet (zebra backend)
         working-directory: zallet/backends/zebra
@@ -154,6 +155,14 @@ jobs:
           fi
           test "$(stat -c%s "$spend")" -eq 47958396
           test "$(stat -c%s "$output")" -eq 3592860
+
+      - name: rustfmt (integration)
+        working-directory: integration-tests
+        run: cargo fmt --check
+
+      - name: clippy (integration)
+        working-directory: integration-tests
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: boot completion
         working-directory: integration-tests

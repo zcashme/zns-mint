@@ -9,10 +9,11 @@
   report must equal a fresh FakeTee attestation over
   `identity_report_data()`. The strings derive once in the new
   `mint_identity_strings()`; `identity_report_data()` consumes it.
-- CI now runs this test: pinned `zebrad` and `zallet-zebra` installed
-  from version-keyed caches, Sapling parameters fetched on miss (the
-  mint verifies but never downloads them), and a rust-cache scoped to
-  this workspace.
+- CI now runs this test: pinned `zebrad` downloaded with SHA-256
+  verification and `zallet-zebra` built from `v0.1.0-beta.3` on every
+  run (zebrad, fmt, and clippy are never cached); only the Sapling
+  parameters (fetched on miss; the mint verifies but never downloads
+  them) and cargo artifacts are cached.
 
 ## 2026-09-24
 
