@@ -17,7 +17,7 @@ env:
 jobs:
   ci:
     name: test
-    runs-on: ubuntu-latest
+    runs-on: zvs
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -73,3 +73,99 @@ jobs:
             lcov.info
             coverage/
           if-no-files-found: error
+
+  integration:
+    name: integration (boot completion)
+    runs-on: zvs
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # zebra-indexer-proto (tonic/prost) needs protoc at build time.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # The tag the mint's harness was verified against locally; the
+      # sibling harness repo's CI pins a newer rev on purpose. Bump
+      # deliberately. Checked out before rust-cache so the
+      # zallet/backends/zebra workspace it lists exists.
+      - name: Checkout zallet
+        uses: actions/checkout@v4
+        with:
+          repository: zcash/zallet
+          ref: v0.1.0-beta.3
+          path: zallet
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            integration-tests
+            zallet/backends/zebra
+
+      # Prebuilt release binary, sha256-checked; the harness resolves it
+      # through ZEBRAD_BIN.
+      - name: Install zebrad
+        run: |
+          set -euo pipefail
+          asset="zebrad-6.3.0-x86_64-unknown-linux-gnu.tar.gz"
+          base="https://github.com/ZcashFoundation/zebra/releases/download/v6.3.0"
+          curl -fsSL -O "${base}/${asset}"
+          curl -fsSL -O "${base}/${asset}.sha256"
+          sha256sum -c "${asset}.sha256"
+          tar -xzf "${asset}"
+          bin="$(find . -maxdepth 3 -type f -name zebrad | head -n 1)"
+          test -n "$bin"
+          chmod +x "$bin"
+          echo "ZEBRAD_BIN=${GITHUB_WORKSPACE}/${bin#./}" >> "$GITHUB_ENV"
+
+      - name: Build zallet (zebra backend)
+        working-directory: zallet/backends/zebra
+        run: cargo build --locked --release
+
+      - name: Export zallet binary path
+        run: echo "ZALLET_BIN=${{ github.workspace }}/zallet/backends/zebra/target/release/zallet-zebra" >> "$GITHUB_ENV"
+
+      # Workspace-scoped params: the mint verifies but never downloads
+      # (fail-closed at boot), and ZCASH_PARAMS_DIR keeps them off the
+      # shared runner's home.
+      - name: Cache Sapling params
+        uses: actions/cache@v4
+        with:
+          path: zcash-params
+          key: sapling-params-spend-47958396-output-3592860
+
+      - name: Fetch Sapling params
+        run: |
+          set -euo pipefail
+          mkdir -p zcash-params
+          base="https://download.z.cash/downloads"
+          spend="zcash-params/sapling-spend.params"
+          output="zcash-params/sapling-output.params"
+          if [[ ! -f "$spend" || "$(stat -c%s "$spend")" -ne 47958396 ]]; then
+            curl -L --fail -o "$spend" "${base}/sapling-spend.params"
+          fi
+          if [[ ! -f "$output" || "$(stat -c%s "$output")" -ne 3592860 ]]; then
+            curl -L --fail -o "$output" "${base}/sapling-output.params"
+          fi
+          test "$(stat -c%s "$spend")" -eq 47958396
+          test "$(stat -c%s "$output")" -eq 3592860
+
+      - name: rustfmt (integration)
+        working-directory: integration-tests
+        run: cargo fmt --check
+
+      - name: clippy (integration)
+        working-directory: integration-tests
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: boot completion
+        working-directory: integration-tests
+        env:
+          ZCASH_PARAMS_DIR: ${{ github.workspace }}/zcash-params
+        run: cargo test --test boot_completion -- --nocapture

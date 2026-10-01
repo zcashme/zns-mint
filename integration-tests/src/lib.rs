@@ -496,10 +496,9 @@ pub async fn publish_ceremony(zebra: &Zebrad) -> Result<u32> {
     Ok(tip + 1)
 }
 
-/// The attested identity: `BLAKE2b-512(treasury default shielded address
-/// || "||" || registry UFVK)` — boot's report-data contract, recomputed
-/// from the seed alone, the way an external verifier would.
-pub fn identity_report_data() -> [u8; 64] {
+/// The attested identity strings: the Treasury's default shielded
+/// address and the Registry UFVK, both derived from the seed alone.
+pub fn mint_identity_strings() -> (String, String) {
     let network = regtest_network();
     let treasury_fvk = account_usk(&network, &DEV_SEED, 0)
         .expect("treasury usk")
@@ -510,8 +509,17 @@ pub fn identity_report_data() -> [u8; 64] {
     let (treasury_addr, _) = treasury_fvk
         .default_address(UnifiedAddressRequest::SHIELDED)
         .expect("treasury default address");
-    let treasury_addr_str = treasury_addr.encode(&network);
-    let registry_fvk_str = registry_fvk.encode(&network);
+    (
+        treasury_addr.encode(&network),
+        registry_fvk.encode(&network),
+    )
+}
+
+/// The attested identity: `BLAKE2b-512(treasury default shielded address
+/// || "||" || registry UFVK)` — boot's report-data contract, recomputed
+/// from the seed alone, the way an external verifier would.
+pub fn identity_report_data() -> [u8; 64] {
+    let (treasury_addr_str, registry_fvk_str) = mint_identity_strings();
 
     let mut hasher = Blake2b::new().hash_length(64).to_state();
     hasher.update(treasury_addr_str.as_bytes());

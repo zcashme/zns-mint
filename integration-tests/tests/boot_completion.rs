@@ -85,16 +85,32 @@ async fn boot_completes_on_wallet_funded_dev_ceremony() -> Result<()> {
     assert!(boot.registry.anchor_adoption_closed());
     assert!(boot.oracle.current().into_u64() > 0);
 
-    // A fresh FakeTee report binding the fixture identity — recomputed
-    // from the seed alone, not read from the mint's internals. FakeTee
-    // output is deterministic development behavior, not SNP evidence.
-    let expected = fixture::identity_report_data();
+    // Boot's attested identity document: network, identity strings, and
+    // hex-encoded report, verified against a fresh FakeTee recomputation
+    // from the seed alone. FakeTee output is deterministic development
+    // behavior, not SNP evidence.
     let fresh = zns_canon::sealing::FakeTee
-        .get_attestation(&expected)
+        .get_attestation(&fixture::identity_report_data())
         .context("fresh FakeTee report")?;
-    let on_disk =
-        std::fs::read("zns_mint_attestation.bin").context("boot must write a fresh attestation")?;
-    if on_disk != fresh.as_bytes().to_vec() {
+    let doc: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string("zns_mint_identity.json")
+            .context("boot must write the identity document")?,
+    )
+    .context("identity document is not valid JSON")?;
+    let (treasury_ua, registry_ufvk) = fixture::mint_identity_strings();
+    assert_eq!(doc["network"], "regtest", "identity doc network");
+    assert_eq!(doc["treasury_ua"], treasury_ua, "identity doc treasury UA");
+    assert_eq!(
+        doc["registry_ufvk"], registry_ufvk,
+        "identity doc registry UFVK"
+    );
+    let report = hex::decode(
+        doc["report"]
+            .as_str()
+            .context("identity doc has no report")?,
+    )
+    .context("identity doc report is not hex")?;
+    if report != fresh.as_bytes().to_vec() {
         bail!("attestation does not bind the fixture identity");
     }
     Ok(())
