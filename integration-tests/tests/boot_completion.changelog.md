@@ -1,5 +1,19 @@
 # boot_completion.changelog.md
 
+## 2026-10-01
+
+- The final check verifies boot's attested identity document
+  (`zns_mint_identity.json`, issue #254) in place of the retired
+  `zns_mint_attestation.bin`: network label, Treasury UA, and Registry
+  UFVK must equal the fixture's `DEV_SEED` derivation, and the hex
+  report must equal a fresh FakeTee attestation over
+  `identity_report_data()`. The strings derive once in the new
+  `mint_identity_strings()`; `identity_report_data()` consumes it.
+- CI now runs this test: pinned `zebrad` and `zallet-zebra` installed
+  from version-keyed caches, Sapling parameters fetched on miss (the
+  mint verifies but never downloads them), and a rust-cache scoped to
+  this workspace.
+
 ## 2026-09-24
 
 - Replaces the stale `boot_and_sync.rs` (boot at height 4, no capsule, no
