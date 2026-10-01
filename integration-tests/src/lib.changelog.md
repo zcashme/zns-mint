@@ -21,3 +21,30 @@
   scan-completeness signal (status sync trails the balance scan), the
   spendable shielded balance lives under `ironwood` once NU6.3 is active
   (never `orchard`), and memos are refused to transparent recipients.
+
+## 2026-10-01
+
+- New `happy_path` test (closes #267): the mint's black-box happy path —
+  claim → update → release — now lives in this repo. The user is a real
+  Zallet wallet; update and release walk the full OTP dance (mint relays
+  the challenge on chain to the controller UA, the wallet reads it via
+  `z_viewtransaction`, the echo payment answers it); every successor note
+  is verified with `zns-verify` and chained by `rcm` (`prev` must equal
+  the predecessor's own derived `rcm`, recomputed here from the memo
+  fields through `zns_psi_rcm`).
+- The `zns-integration-tests` dep is harness-only by rule now:
+  `Zebrad`, `Mint`, and `ceremony::{publish, treasury_ua, miner_address,
+  FIXTURE_HEIGHT}`. The test phases, the payer (`user.rs`), the verify
+  stack, and the bring-up (`stack.rs`) are owned here, so sibling
+  harness changes can only break this test mechanically, never
+  semantically. `User`'s funding plan is sized for this test's five
+  2.0-ZEC payments, not the sibling's four.
+- The update's term slot is `none` (carried forward): a forever record
+  rejects a term-carrying update (`allows_challenge`), and the happy
+  path does not test transfer/rebind — a different-UA update stays a
+  separate, adversarial scenario.
+- `zallet_bin` became `pub(crate)` so `Stack::start` can skip gracefully
+  when zallet is missing locally, mirroring the zebrad skip.
+- The OTP read waits for the challenge txid in a mined block and for
+  Zallet to scan that height before calling `z_viewtransaction`; both
+  update and release use this path.
