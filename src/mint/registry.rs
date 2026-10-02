@@ -4,7 +4,7 @@ mod anchor_pool;
 
 use anchor_pool::AnchorPool;
 
-pub use anchor_pool::ANCHOR_POOL_SIZE;
+pub use anchor_pool::{is_ceremony_fill, ANCHOR_POOL_SIZE};
 
 use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Term, UnifiedAddress};

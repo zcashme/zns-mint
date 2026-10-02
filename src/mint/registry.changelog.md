@@ -2,6 +2,13 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-10-02 — Ceremony fill is the keygen transaction
+
+- `apply_block` adopts zero-value registry outputs only from a
+  transaction that carries all 40 and no name note. A note outside
+  that transaction does not join. A claim successor still enters
+  through `retire_spent`.
+
 ## 2026-09-29 — Ceremony adoption closes once (#236)
 
 - The pool records the block where ceremony adoption first reaches
