@@ -1318,8 +1318,12 @@ mod tests {
                             zcash_protocol::memo::MemoBytes::from_bytes(&candidate.memo).unwrap()
                         ))
                     );
+                    let path = wallet
+                        .ironwood_witness(stored.note_commitment_tree_position(), height)
+                        .expect("FATAL: Ironwood tree access failed")
+                        .expect("FATAL: owned note has no witness at the applied tip");
                     assert_eq!(
-                        wallet.witness(&stored, height).unwrap().root(candidate.cmx),
+                        orchard::tree::MerklePath::from(path).root(candidate.cmx),
                         roots[index].into()
                     );
                 }
