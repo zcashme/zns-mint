@@ -53,10 +53,9 @@ enum Event {
     /// A Registry spend with no Name Note. Every live anchor in `spent`
     /// retires, and no successor is seated.
     Retire { height: u32, spent: Vec<Hex32> },
-    /// A backed Claim: retires `spent_anchor`, adopts `successor_anchor`,
-    /// binds the name. `expect` says whether the record transition lands;
-    /// a rejected claim (a duplicate on a live name) still advances the
-    /// pool.
+    /// A backed Claim: retires `spent_anchor` and, when admitted, adopts
+    /// `successor_anchor` and binds the name. A rejected claim retires
+    /// the spent anchor and leaves `successor_anchor` out.
     Claim {
         height: u32,
         mtp_secs: i64,
@@ -135,8 +134,8 @@ struct RecordSnapshot {
 /// Lowercase 32-byte hex string.
 type Hex32 = String;
 
-/// Whether the Mint admits the transition. A rejected claim can still
-/// advance the anchor pool — rejection is about the record, not the chain.
+/// Whether the Mint admits the transition. A rejected claim retires
+/// its spent anchor and does not seat the successor.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Expectation {
@@ -506,8 +505,8 @@ fn unbacked_claim() -> Scenario {
     }
 }
 
-/// Two backed Claims for the same name: the pool advances both times,
-/// the first registration stands.
+/// Two backed Claims for the same name: the first registers. The
+/// second retires its anchor and leaves its successor out.
 fn duplicate_claim() -> Scenario {
     let a1 = hex32_from_seed(0x01);
     let a2 = hex32_from_seed(0x02);
@@ -535,9 +534,8 @@ fn duplicate_claim() -> Scenario {
             nullifier: n1,
             expect: Expectation::Accepted,
         },
-        // Second backed claim for the same live name: rejected for the
-        // record, accepted for the pool — the anchor is still retired
-        // and the successor adopted.
+        // Second backed claim for the same live name: the anchor retires,
+        // the successor stays out, and the first registration stands.
         Event::Claim {
             height: 120,
             mtp_secs: 1_700_100_000,
@@ -552,8 +550,8 @@ fn duplicate_claim() -> Scenario {
     ];
     Scenario {
         name: "duplicate_claim".to_owned(),
-        description: "Second backed claim on a live name advances the anchor pool without \
-             changing the registration."
+        description: "Second backed claim on a live name retires its anchor and leaves its \
+             successor out. The first registration stands."
             .to_owned(),
         trace: run(&events),
         events,

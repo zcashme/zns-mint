@@ -225,11 +225,10 @@ impl Registry {
         self.anchors.adopt(height, nf);
     }
 
-    /// Offers a confirmed claim candidate; true when its transaction
-    /// spent a standing anchor and the name was free (or released).
-    /// The caller offers transactions in block order, so the earlier
-    /// vtx wins inside one block. A later claim leaves the live
-    /// registration in place. The loser's anchor was already spent.
+    /// Offers a confirmed claim candidate; true when it spent one
+    /// standing anchor, spent no Name Note, and the name was free.
+    /// Earlier vtx wins inside one block. A rejected claim retires
+    /// the anchor it spent and does not seat its successor.
     #[allow(clippy::too_many_arguments)]
     pub fn accept_claim<P: Parameters>(
         &mut self,
@@ -247,11 +246,14 @@ impl Registry {
             .filter(|nf| self.anchors.contains(nf))
             .copied()
             .collect();
-        // The pool follows the chain: spent anchors retire whatever the
-        // verdict — the notes are consumed on chain. A successor joins
-        // one-for-one, only when exactly one anchor retired: an
-        // unbacked claim adopts nothing.
-        self.anchors.retire_spent(nfs, successor, height);
+        // Spent anchors retire on any verdict. The successor joins only
+        // when this claim is admitted: one anchor, no Name Note, name free.
+        let seated = successor.filter(|_| {
+            spent.len() == 1
+                && self.names_spent_by(nfs).is_empty()
+                && self.record(note.name()).is_none()
+        });
+        self.anchors.retire_spent(nfs, seated, height);
 
         // The law: a well-formed claim spends exactly one anchor,
         // spends no Name Note, creates a zero-value successor, and
@@ -779,8 +781,9 @@ mod tests {
     }
 
     /// Two backed claims for the same name confirm in order: the first
-    /// registers, the second advances the pool and is ignored — no
-    /// panic, first registration kept (#116).
+    /// registers and seats its successor. The second is ignored: its
+    /// anchor retires, its successor stays out, and the first
+    /// registration stands (#116).
     #[test]
     fn accept_claim_keeps_first_when_a_second_confirms() {
         let mut r = Registry::new();
@@ -825,12 +828,12 @@ mod tests {
         assert_eq!(kept.predecessor_nullifier, first.predecessor_nullifier);
         assert_eq!(kept.confirmed_height, first.confirmed_height);
 
-        // The pool followed the chain through both: one anchor out, one
-        // successor in, each time.
+        // The pool follows both spends: one anchor out each time, and a
+        // successor in only for the admitted claim.
         assert!(!r.anchor_pool().contains(&a1));
         assert!(!r.anchor_pool().contains(&a2));
         assert!(r.anchor_pool().contains(&succ1));
-        assert!(r.anchor_pool().contains(&succ2));
+        assert!(!r.anchor_pool().contains(&succ2));
     }
 
     #[test]
@@ -992,7 +995,7 @@ mod tests {
         assert_eq!(alice.predecessor_nullifier, nullifier(1));
         assert!(r.record(&Name::parse("bob").unwrap()).is_none());
         assert!(!r.anchor_pool().contains(&anchor));
-        assert!(r.anchor_pool().contains(&succ));
+        assert!(!r.anchor_pool().contains(&succ));
     }
 
     #[test]

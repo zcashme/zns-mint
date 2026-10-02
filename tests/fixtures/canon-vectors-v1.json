@@ -1663,7 +1663,7 @@
     },
     {
       "name": "duplicate_claim",
-      "description": "Second backed claim on a live name advances the anchor pool without changing the registration.",
+      "description": "Second backed claim on a live name retires its anchor and leaves its successor out. The first registration stands.",
       "events": [
         {
           "kind": "adopt_anchor",
@@ -1740,8 +1740,7 @@
         {
           "after_event": 3,
           "anchor_pool": [
-            "c100000000000000000000000000000000000000000000000000000000000000",
-            "c200000000000000000000000000000000000000000000000000000000000000"
+            "c100000000000000000000000000000000000000000000000000000000000000"
           ],
           "adoption_closed": false,
           "records": {
