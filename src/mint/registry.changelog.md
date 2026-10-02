@@ -2,6 +2,15 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-10-03 — A rejected claim does not seat its successor
+
+- `accept_claim` still retires every live anchor the transaction
+  spent. The successor joins only when the claim is admitted: one
+  anchor, no Name Note, and a free or released name.
+- A duplicate on a live name, or a claim that also spends a Name
+  Note, leaves the successor out. The registration stands, except
+  where a spent name is marked released.
+
 ## 2026-10-02 — Ceremony fill is the keygen transaction
 
 - `apply_block` adopts zero-value registry outputs only from a
