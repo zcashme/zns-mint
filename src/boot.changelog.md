@@ -2,6 +2,13 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-10-03 — Boot reloads open payments
+
+- The scan still applies every block. Request and echo memos are written
+  to the obligation store as they are seen. After the scan, rows the
+  registry has already finished are confirmed, and the open ones fill the
+  queues handed to the run loop.
+
 ## 2026-09-30 — Boot hands over initialized run state
 
 - Boot returns the `CanonicalBlockSource` it used for sync and initializes

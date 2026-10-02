@@ -54,6 +54,7 @@ async fn main() {
         mut requests,
         mut echoes,
         mut presale_refresh,
+        obligations,
     } = Boot::start().await;
 
     zns_mint::metrics::install();
@@ -82,16 +83,26 @@ async fn main() {
             Some((kind, txid)) = mempool_rx.recv() => {
                 let mtp_now = mtp.current().expect("FATAL: MTP unavailable at the applied tip");
                 challenges.prune(mtp_now);
+                obligations
+                    .expire(mtp_now.as_seconds())
+                    .expect("FATAL: obligation store rejected an expiry");
                 match kind {
-                    MempoolChangeKind::Invalidated => challenges.invalidate(txid),
+                    MempoolChangeKind::Invalidated => {
+                        challenges.invalidate(txid);
+                        obligations
+                            .drop_unrelayed(txid)
+                            .expect("FATAL: obligation store rejected an invalidation");
+                    }
                     MempoolChangeKind::Mined => {}
                     MempoolChangeKind::Added => {
                         let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
                         match source.get_raw_transaction(branch_id, txid).await {
                             Ok(Some(transaction)) => {
-                                for (_action_index, paid, memo) in
+                                for (action_index, paid, memo) in
                                     decrypt_treasury_transaction(&transaction, &treasury_keys)
                                 {
+                                    let action_index = u32::try_from(action_index)
+                                        .expect("action index fits u32");
                                     let MintInbound::Request(request) = MintInbound::decode(&network, &memo) else {
                                         continue;
                                     };
@@ -107,6 +118,9 @@ async fn main() {
                                     {
                                         continue;
                                     }
+                                    obligations
+                                        .observe(txid, action_index, &memo, paid, None)
+                                        .expect("FATAL: obligation store rejected a payment");
                                     let pending = OtpChallenge::issue(
                                         name.clone(),
                                         action,
@@ -115,6 +129,9 @@ async fn main() {
                                         term,
                                         mtp_now,
                                     );
+                                    obligations
+                                        .remember_otp(txid, action_index, &pending)
+                                        .expect("FATAL: obligation store rejected a challenge");
                                     let pending = challenges.admit(pending, txid);
                                     if !challenges.is_relayed(&pending)
                                         && relay(
@@ -123,6 +140,9 @@ async fn main() {
                                         ).await
                                     {
                                         challenges.challenge_issued(&pending);
+                                        obligations
+                                            .mark_relayed(txid)
+                                            .expect("FATAL: obligation store rejected a relay");
                                     }
                                 }
                             }
@@ -224,11 +244,22 @@ async fn main() {
             })
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
-            challenges = OtpQueue::new();
-            name_notes.rewind_to(rewound);
+            obligations
+                .truncate_above(rewound)
+                .expect("FATAL: obligation store rejected a reorg");
+            obligations
+                .reconcile(&network, &registry)
+                .expect("FATAL: obligation reconcile failed");
+            obligations
+                .reload(
+                    &network,
+                    &mut challenges,
+                    &mut name_notes,
+                    &mut requests,
+                    &mut echoes,
+                )
+                .expect("FATAL: obligation reload failed");
             name_notes.reconcile_seen(&network, &registry);
-            requests.truncate_to(rewound);
-            echoes.retain(|(_, _, height)| *height <= rewound);
             tracing::warn!(
                 height = u32::from(rewound),
                 hash = %chain_tip.block_hash(),
@@ -322,7 +353,13 @@ async fn main() {
                 &mut chain_tip,
             );
             name_notes.reconcile_seen(&network, &registry);
-            for (txid, inbound, paid) in arrivals {
+            for (txid, action_index, inbound, paid, memo) in arrivals {
+                let instruction = matches!(inbound, MintInbound::Request(_) | MintInbound::Echo(_));
+                if instruction {
+                    obligations
+                        .observe(txid, action_index, &memo, paid, Some(next_height))
+                        .expect("FATAL: obligation store rejected a payment");
+                }
                 match inbound {
                     MintInbound::Request(request) => {
                         if let Request::Claim { name, .. } = &request {
@@ -332,17 +369,25 @@ async fn main() {
                                     name = %name.as_str(),
                                     "later claim payment ignored; an earlier Name Note owns the name"
                                 );
+                                obligations
+                                    .close(txid, action_index)
+                                    .expect("FATAL: obligation store rejected a close");
                                 continue;
                             }
                         }
-                        if !requests.record(txid, request, paid, next_height) {
+                        if !requests.record(txid, request, paid, next_height, action_index) {
                             tracing::debug!(
                                 %txid,
                                 "later claim payment ignored; an earlier queued payment owns the name"
                             );
+                            obligations
+                                .close(txid, action_index)
+                                .expect("FATAL: obligation store rejected a close");
                         }
                     }
-                    MintInbound::Echo(echo) => echoes.push((echo, paid, next_height)),
+                    MintInbound::Echo(echo) => {
+                        echoes.push((txid, action_index, echo, paid, next_height))
+                    }
                     MintInbound::Unrecognized => {
                         tracing::info!(
                             txid = %txid,
@@ -365,7 +410,13 @@ async fn main() {
         let mtp_now = mtp
             .current()
             .expect("FATAL: MTP unavailable at the applied tip");
+        obligations
+            .reconcile(&network, &registry)
+            .expect("FATAL: obligation reconcile failed");
         challenges.prune(mtp_now);
+        obligations
+            .expire(mtp_now.as_seconds())
+            .expect("FATAL: obligation store rejected an expiry");
 
         let today = mtp
             .current_day()
@@ -419,7 +470,7 @@ async fn main() {
         // exactly once, in queue order. A resolved entry leaves the
         // queue — refused by a gate, or handed to the queue that owns
         // its retries. Nothing defers; nothing is re-read.
-        for (txid, request, paid, note_height) in requests.pending() {
+        for (txid, request, paid, note_height, action_index) in requests.pending() {
             let resolved = 'lane: {
                 match &request {
                     Request::Claim {
@@ -440,6 +491,9 @@ async fn main() {
                                 name = %name.as_str(),
                                 "pre-sale claim refused"
                             );
+                            obligations
+                                .close(txid, action_index)
+                                .expect("FATAL: obligation store rejected a close");
                             break 'lane true;
                         }
                         // Payment gate: the quote at first sight is binding.
@@ -447,9 +501,15 @@ async fn main() {
                         // fit, is dead and silent; a new payment settles
                         // a new evaluation.
                         let Some(price) = oracle.quote(name, *term) else {
+                            obligations
+                                .close(txid, action_index)
+                                .expect("FATAL: obligation store rejected a close");
                             break 'lane true;
                         };
                         if paid < price {
+                            obligations
+                                .close(txid, action_index)
+                                .expect("FATAL: obligation store rejected a close");
                             break 'lane true;
                         }
                         let Some(claim_note) =
@@ -459,9 +519,15 @@ async fn main() {
                                 name = %name.as_str(),
                                 "claim not authorized"
                             );
+                            obligations
+                                .close(txid, action_index)
+                                .expect("FATAL: obligation store rejected a close");
                             break 'lane true;
                         };
                         // Enactment below resolves the anchor and broadcasts.
+                        obligations
+                            .authorize(txid, action_index, &network, &claim_note)
+                            .expect("FATAL: obligation store rejected an authorization");
                         name_notes.admit(note_height, claim_note);
                         true
                     }
@@ -472,6 +538,9 @@ async fn main() {
                             Request::Claim { .. } => unreachable!(),
                         };
                         let Some(record) = registry.record(name).cloned() else {
+                            obligations
+                                .close(txid, action_index)
+                                .expect("FATAL: obligation store rejected a close");
                             break 'lane true;
                         };
                         if name_notes.note_pending(name) {
@@ -480,6 +549,9 @@ async fn main() {
                                 action = action.as_str(),
                                 "transition already queued for the current Name Note"
                             );
+                            obligations
+                                .close(txid, action_index)
+                                .expect("FATAL: obligation store rejected a close");
                             break 'lane true;
                         }
                         if !record.allows_challenge(
@@ -490,6 +562,9 @@ async fn main() {
                             mtp_now,
                         ) || paid < oracle.challenge_fee()
                         {
+                            obligations
+                                .close(txid, action_index)
+                                .expect("FATAL: obligation store rejected a close");
                             break 'lane true;
                         }
                         let pending = OtpChallenge::issue(
@@ -500,19 +575,22 @@ async fn main() {
                             term,
                             mtp_now,
                         );
+                        obligations
+                            .remember_otp(txid, action_index, &pending)
+                            .expect("FATAL: obligation store rejected a challenge");
                         challenges.admit(pending, txid);
                         true
                     }
                 }
             };
             if resolved {
-                requests.resolved(txid);
+                requests.resolved(txid, action_index);
             }
         }
 
         // Queue admission is independent from submission. Retry every still-
         // requested mempool or confirmed entry once during each tip pass.
-        for pending in challenges.requested() {
+        for (txid, pending) in challenges.requested() {
             let Some(record) = registry
                 .record(&pending.name)
                 .filter(|record| record.commitment == pending.tip_rcm)
@@ -533,20 +611,29 @@ async fn main() {
             .await
             {
                 challenges.challenge_issued(&pending);
+                obligations
+                    .mark_relayed(txid)
+                    .expect("FATAL: obligation store rejected a relay");
             }
         }
 
         // Confirmed OTP responses wait in the run loop until the tip pass.
         // Requests run first; a voided echo leaves its challenge available.
-        for (echo, paid, note_height) in std::mem::take(&mut echoes) {
+        for (txid, action_index, echo, paid, note_height) in std::mem::take(&mut echoes) {
             let _ = 'lane: {
                 // The echo lane: an OTP response. Decided in every outcome —
                 // an echo never waits for money; the renewal or
                 // upgrade fee declines on shortfall, it does not defer.
                 let Some(record) = registry.record(&echo.name).cloned() else {
+                    obligations
+                        .close(txid, action_index)
+                        .expect("FATAL: obligation store rejected a close");
                     break 'lane true; // no record — released or unknown: no mint-issued challenge can match
                 };
                 let Some((key, sent)) = challenges.awaiting(&echo, record.commitment) else {
+                    obligations
+                        .close(txid, action_index)
+                        .expect("FATAL: obligation store rejected a close");
                     break 'lane true; // no pending challenge: dead
                 };
                 // The renewal or upgrade fee, binding at first
@@ -559,6 +646,9 @@ async fn main() {
                             name = %echo.name.as_str(),
                             "update quote does not fit — attempt void, challenge stands"
                         );
+                        obligations
+                            .close(txid, action_index)
+                            .expect("FATAL: obligation store rejected a close");
                         break 'lane true;
                     };
                     if paid < price {
@@ -567,6 +657,9 @@ async fn main() {
                             paid = paid.into_u64(),
                             "update response underpaid — attempt void, challenge stands"
                         );
+                        obligations
+                            .close(txid, action_index)
+                            .expect("FATAL: obligation store rejected a close");
                         break 'lane true;
                     }
                 }
@@ -578,6 +671,9 @@ async fn main() {
                         action = echo.action.as_str(),
                         "transition already queued; OTP response does not replace it"
                     );
+                    obligations
+                        .close(txid, action_index)
+                        .expect("FATAL: obligation store rejected a close");
                     break 'lane true;
                 }
                 let authorized = match echo.action {
@@ -585,11 +681,22 @@ async fn main() {
                     Action::Release => registry.authorize_release(&sent),
                     // Challenges never claim, and `OtpMemo::decode` refuses
                     // the verb; treat a claim echo as a dead memo regardless.
-                    Action::Claim => break 'lane true,
+                    Action::Claim => {
+                        obligations
+                            .close(txid, action_index)
+                            .expect("FATAL: obligation store rejected a close");
+                        break 'lane true;
+                    }
                 };
                 let Some(transition_note) = authorized else {
+                    obligations
+                        .close(txid, action_index)
+                        .expect("FATAL: obligation store rejected a close");
                     break 'lane true;
                 };
+                obligations
+                    .authorize(txid, action_index, &network, &transition_note)
+                    .expect("FATAL: obligation store rejected an authorization");
                 challenges.consume(key); // spent exactly when the law accepts
                                          // The seam where a voluntary release exists:
                                          // the OTP that authorized it is consumed here,
@@ -701,6 +808,9 @@ async fn main() {
             };
 
             if source.submit(&transaction, "NameNote").await {
+                obligations
+                    .enact(&network, &note, transaction.txid())
+                    .expect("FATAL: obligation store rejected a broadcast");
                 wallet.record_sent(&transaction, target_height, fee);
                 tracing::info!(
                     txid = %transaction.txid(),

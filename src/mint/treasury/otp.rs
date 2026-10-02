@@ -28,6 +28,11 @@ impl OtpCode {
         Self(rand::thread_rng().gen_range(0..1_000_000))
     }
 
+    /// The numeric value, in `0..1_000_000`.
+    pub(crate) fn raw(&self) -> u32 {
+        self.0
+    }
+
     /// The six ASCII digits.
     pub fn digits(&self) -> [u8; 6] {
         let mut digits = [0u8; 6];
@@ -180,12 +185,13 @@ impl OtpQueue {
         })
     }
 
-    /// Returns queued requests that still need a challenge submission.
-    pub fn requested(&self) -> Vec<OtpChallenge> {
+    /// Returns queued requests that still need a challenge submission,
+    /// with the payment transaction that issued each one.
+    pub fn requested(&self) -> Vec<(TxId, OtpChallenge)> {
         self.challenges
             .iter()
             .filter(|(_, state, _)| matches!(state, ChallengeState::Requested))
-            .map(|(request, _, _)| request.clone())
+            .map(|(request, _, txid)| (*txid, request.clone()))
             .collect()
     }
 

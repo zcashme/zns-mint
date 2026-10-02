@@ -1,5 +1,17 @@
 # Mint live-work design record
 
+## 2026-10-03 — Open Treasury payments survive a restart
+
+- `obligations.db` records each Treasury request and OTP echo. A restart
+  reloads the open rows into the request, challenge, echo, and Name Note
+  queues. A name note already on the chain, or a later matching transition
+  at or after the payment, is confirmed and is not decided again.
+- The authorized Name Note is stored before broadcast, so a crash resubmits
+  that transition. A reorg drops payments above the fork and returns a
+  confirmed note to open when the registry no longer has it.
+- A refused payment is closed, and so is an expired challenge that never
+  authorized a Name Note. The fee remains in the Treasury.
+
 ## 2026-09-29 — Pre-birthday blocks restore wallet history only (#239)
 
 - `apply_block` receives boot's birthday. Before it, the ordinary upstream

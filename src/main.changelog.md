@@ -1,5 +1,13 @@
 # main.changelog.md
 
+## 2026-10-03 — The run loop writes the obligation store
+
+- A confirmed payment is stored before it is queued. Authorization, the
+  challenge code, relay, and broadcast update that row. A refusal or an
+  expired challenge closes it.
+- A reorg deletes payments above the fork and reloads the queues from the
+  rows that remain.
+
 ## 2026-09-30 — Main receives its initial state from Boot
 
 - The run loop destructures the node source and four initialized slots
