@@ -81,8 +81,8 @@ impl NameRecord {
     ) -> bool {
         !self.has_expired(mtp_now)
             && trigger_height > self.confirmed_height
-            && !(action.is_release() && *ua != self.ua)
-            && !(self.expires_at == Expiry::Never && term.is_some())
+            && (!action.is_release() || *ua == self.ua)
+            && (self.expires_at != Expiry::Never || term.is_none())
     }
 
     /// This record's nullifier, when `note` still names this exact
