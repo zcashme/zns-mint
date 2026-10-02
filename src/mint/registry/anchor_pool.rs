@@ -18,6 +18,13 @@ use zcash_protocol::consensus::BlockHeight;
 /// Standing size of the anchor lineage pool; mirrors keygen's NUM_ANCHORS.
 pub const ANCHOR_POOL_SIZE: usize = 40;
 
+/// The keygen ceremony is one transaction: the whole standing set of
+/// zero-value registry outputs, and no name note. A note outside that
+/// transaction does not join the pool.
+pub fn is_ceremony_fill(zero_value_outputs: usize, name_notes: usize) -> bool {
+    zero_value_outputs == ANCHOR_POOL_SIZE && name_notes == 0
+}
+
 /// The set of nullifiers currently conferring claim authority, plus a
 /// height-indexed checkpoint stack for reorg-safe rewind.
 #[derive(Default, Clone)]
@@ -230,6 +237,15 @@ mod tests {
         pool.retire_spent(&[nullifier(1)], Some(nullifier(200)), h(11));
         assert!(pool.contains(&nullifier(200)));
         assert_eq!(pool.live().len(), ANCHOR_POOL_SIZE);
+    }
+
+    #[test]
+    fn ceremony_fill_is_the_keygen_transaction() {
+        assert!(is_ceremony_fill(ANCHOR_POOL_SIZE, 0));
+        assert!(!is_ceremony_fill(1, 0));
+        assert!(!is_ceremony_fill(ANCHOR_POOL_SIZE - 1, 0));
+        assert!(!is_ceremony_fill(ANCHOR_POOL_SIZE + 1, 0));
+        assert!(!is_ceremony_fill(ANCHOR_POOL_SIZE, 1));
     }
 
     #[test]

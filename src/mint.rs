@@ -459,14 +459,18 @@ pub fn apply_block<P: Parameters + Send + 'static>(
             .filter(|output| *output.account_id() == REGISTRY_ACCOUNT)
             .collect();
 
-        // Ceremony filling: zero-value Registry outputs join until the
-        // pool has once reached standing size. A later shrink does not
-        // reopen that path; a backed successor still enters one-for-one.
-        for output in &registry_outputs {
-            if output.note().0.value().inner() == 0 {
-                if let Some(nf) = output.nf() {
-                    registry.adopt_anchor(height, *nf);
-                }
+        // The keygen transaction carries every standing anchor and no
+        // name note. A zero-value note in any other transaction does not
+        // join. A claim's successor still enters through `accept_claim`.
+        let name_notes = notes_by_tx.get(&txid).map(Vec::len).unwrap_or(0);
+        let ceremony: Vec<_> = registry_outputs
+            .iter()
+            .filter(|output| output.note().0.value().inner() == 0)
+            .filter_map(|output| output.nf().copied())
+            .collect();
+        if registry::is_ceremony_fill(ceremony.len(), name_notes) {
+            for nf in ceremony {
+                registry.adopt_anchor(height, nf);
             }
         }
 
