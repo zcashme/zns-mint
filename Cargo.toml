@@ -62,6 +62,8 @@ bytes = "1"
 # tonic — direct listing adds no code.
 futures-util = "0.3"
 hex = "0.4"
+# Durable payment obligations. The wallet itself is rebuilt from the chain.
+rusqlite = { version = "0.32", features = ["bundled"] }
 zns-canon = { git = "https://github.com/zcashme/zns-canon.git", branch = "main" }
 incrementalmerkletree = "0.8.2"
 
