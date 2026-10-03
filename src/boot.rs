@@ -21,11 +21,12 @@ use std::str::FromStr;
 
 use crate::mint::mtp::MtpTracker;
 use crate::mint::note::NameNoteQueue;
+use crate::mint::obligation::ObligationStore;
 use crate::mint::presale::{self, AccessCodeDerivationKey, ProtectedNames};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::treasury::{OtpQueue, RequestQueue};
-use crate::mint::{OtpMemo, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::{MintInbound, OtpMemo, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 use crate::zcash::{self, CanonicalBlockSource, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
@@ -80,7 +81,15 @@ pub struct Boot<P: Parameters> {
     /// initialized: pending Treasury requests
     pub requests: RequestQueue,
     /// initialized: pending OTP echoes
-    pub echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)>,
+    pub echoes: Vec<(
+        zcash_primitives::transaction::TxId,
+        u32,
+        OtpMemo,
+        Zatoshis,
+        BlockHeight,
+    )>,
+    /// produced: open Treasury payments, reloaded into the queues above
+    pub obligations: ObligationStore,
     /// initialized: no pre-sale refresh is in flight
     pub presale_refresh: Option<tokio::task::JoinHandle<Option<ProtectedNames>>>,
 }
@@ -392,10 +401,11 @@ impl Boot<Network> {
         );
 
         // 4. Boot sync: scan from checkpoint to chain tip. The body is
-        // `apply_block` — the same one the run loop calls — with scratch
-        // queues: arrivals from history are balance, not instruction, so
-        // each block's intake lands in a queue that falls out of scope with
-        // the iteration.
+        // `apply_block` — the same one the run loop calls. Arrivals are
+        // recorded in the obligation store. After the scan, open rows are
+        // loaded into the queues the run loop decides.
+        let obligations =
+            ObligationStore::open_default().expect("FATAL: cannot open the obligation store");
         let mut cursor = block_metadata(&origin);
         let mut registry = Registry::new();
         let (best_height, _best_hash) = source
@@ -420,7 +430,7 @@ impl Boot<Network> {
                 .await
                 .expect("FATAL: block unavailable during boot sync");
 
-            let _ = crate::mint::apply_block(
+            let arrivals = crate::mint::apply_block(
                 &network,
                 mint_birthday,
                 &registry_keys,
@@ -433,6 +443,13 @@ impl Boot<Network> {
                 &mut mtp,
                 &mut cursor,
             );
+            for (txid, action_index, inbound, paid, memo) in arrivals {
+                if matches!(inbound, MintInbound::Request(_) | MintInbound::Echo(_)) {
+                    obligations
+                        .observe(txid, action_index, &memo, paid, Some(next_height))
+                        .expect("FATAL: obligation store rejected a payment");
+                }
+            }
         }
         tracing::info!(
             height = u32::from(cursor.block_height()),
@@ -488,12 +505,24 @@ impl Boot<Network> {
             tokio::time::sleep(crate::zcash::RETRY_PAUSE).await;
         };
 
-        // The challenge memory: empty by construction, filled by the run
-        // loop as update/release relays are issued.
-        let challenges = OtpQueue::new();
-        let name_notes = NameNoteQueue::default();
-        let requests = RequestQueue::default();
-        let echoes = Vec::new();
+        // Open payments from this scan and from earlier runs. A name note
+        // the registry already has is confirmed and stays out of the queues.
+        let mut challenges = OtpQueue::new();
+        let mut name_notes = NameNoteQueue::default();
+        let mut requests = RequestQueue::default();
+        let mut echoes = Vec::new();
+        obligations
+            .reconcile(&network, &registry)
+            .expect("FATAL: obligation reconcile failed");
+        obligations
+            .reload(
+                &network,
+                &mut challenges,
+                &mut name_notes,
+                &mut requests,
+                &mut echoes,
+            )
+            .expect("FATAL: obligation reload failed");
         let presale_refresh = None;
 
         // 7. Sapling proving parameters. Loading and hash verification happen
@@ -557,6 +586,7 @@ impl Boot<Network> {
             name_notes,
             requests,
             echoes,
+            obligations,
             presale_refresh,
         }
     }
@@ -1281,7 +1311,7 @@ mod tests {
                 } else {
                     assert!(matches!(
                         arrivals.as_slice(),
-                        [(txid, crate::mint::MintInbound::Request(request), paid)]
+                        [(txid, _, crate::mint::MintInbound::Request(request), paid, _)]
                             if *txid == ceremony_txid && request == &expected_request
                                 && paid.into_u64() == 50_000
                     ));

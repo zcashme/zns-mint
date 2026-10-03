@@ -662,6 +662,11 @@ impl NameNoteQueue {
         });
     }
 
+    /// Drops every order. The obligation store reloads payment-backed notes.
+    pub fn clear(&mut self) {
+        self.orders.clear();
+    }
+
     /// Reorg: drop orders admitted above the common ancestor and
     /// reauthorize seen orders whose confirmation is gone.
     pub fn rewind_to(&mut self, ancestor: BlockHeight) {

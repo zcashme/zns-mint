@@ -2,6 +2,7 @@
 
 pub mod mtp;
 pub mod note;
+pub mod obligation;
 pub mod presale;
 pub mod pricing;
 pub mod registry;
@@ -351,7 +352,8 @@ impl Name {
 
 /// Applies one verified canonical successor to every faculty: scan, clock,
 /// Registry law, wallet commit, Treasury decode, Name Note storage, cursor.
-/// Returns Treasury arrivals for the run loop to route; boot discards them.
+/// Returns Treasury arrivals for the run loop to route. Boot records them
+/// in the obligation store and restores the ones the chain has not finished.
 /// Before birthday, applies only wallet history, clock, and cursor.
 /// Never fetches, never broadcasts.
 #[allow(clippy::too_many_arguments)]
@@ -367,7 +369,13 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     registry: &mut registry::Registry,
     mtp: &mut mtp::MtpTracker,
     cursor: &mut ChainTip,
-) -> Vec<(TxId, MintInbound, Zatoshis)> {
+) -> Vec<(
+    TxId,
+    u32,
+    MintInbound,
+    Zatoshis,
+    zcash_protocol::memo::MemoBytes,
+)> {
     use std::collections::BTreeMap;
     use std::convert::Infallible;
 
@@ -581,7 +589,16 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     // records nothing — this pass stays the only intake.
     let arrivals = treasury_memos
         .into_iter()
-        .map(|(txid, _action_index, paid, memo)| (txid, MintInbound::decode(network, &memo), paid))
+        .map(|(txid, action_index, paid, memo)| {
+            let inbound = MintInbound::decode(network, &memo);
+            (
+                txid,
+                u32::try_from(action_index).expect("action index fits u32"),
+                inbound,
+                paid,
+                memo,
+            )
+        })
         .collect();
     for (index, position) in accepted_name_notes {
         let candidate = &candidates[index];
