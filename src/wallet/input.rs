@@ -60,18 +60,27 @@ impl<P: Parameters> Wallet<P> {
     }
 
     /// Whether a recorded spending transaction either confirms the spend or
-    /// still potentially stands at `target_height`.
-    fn spend_confirms_or_blocks(&self, txid: &TxId, target_height: TargetHeight) -> bool {
+    /// still potentially stands at `target_height`. A remembered rejection
+    /// does not stand: those notes can be selected again.
+    pub(super) fn spend_confirms_or_blocks(
+        &self,
+        txid: &TxId,
+        target_height: TargetHeight,
+    ) -> bool {
         use zcash_client_backend::data_api::TransactionStatus;
 
         match self.transaction_statuses.get(txid) {
             // Every spend recorded by `put_blocks` is mined; a mined spend is
             // confirmed.
             Some(TransactionStatus::Mined(_)) => true,
-            // Unmined spends (mempool / reorged / node no longer recognizes the
-            // txid) block re-selection until the retained raw transaction's
-            // expiry height is below the target — then the spend can never
-            // confirm. Expiry height zero means no expiry.
+            // Unmined spends block re-selection until the raw transaction's
+            // expiry is below the target. Expiry height zero means no expiry.
+            // A recorded refusal releases the notes now.
+            Some(TransactionStatus::NotInMainChain | TransactionStatus::TxidNotRecognized)
+                if self.rejected_broadcasts.contains(txid) =>
+            {
+                false
+            }
             Some(TransactionStatus::NotInMainChain | TransactionStatus::TxidNotRecognized) => {
                 self.unmined_spend_still_blocks(txid, target_height)
             }
@@ -1009,6 +1018,69 @@ mod tests {
             st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
             fund,
             "after tip passes expiry, TxidNotRecognized spends unlock"
+        );
+    }
+
+    /// A refusal recorded by the mint releases the inputs before expiry.
+    /// A status change alone still withholds them.
+    #[test]
+    fn broadcast_rejection_releases_notes_before_expiry() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let fund = Zatoshis::const_from_u64(60_000);
+        let (h, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, fund);
+        st.scan_cached_blocks(h, 1);
+        st.wallet_mut().update_chain_tip(h).unwrap();
+
+        let account = st.test_account().unwrap().clone();
+        let to_extsk = SaplingPoolTester::sk(&[0xf5; 32]);
+        let to: Address = SaplingPoolTester::sk_default_address(&to_extsk);
+        let request = TransactionRequest::new(vec![Payment::without_memo(
+            to.to_zcash_address(st.network()),
+            Zatoshis::const_from_u64(10_000),
+        )])
+        .unwrap();
+
+        let change_strategy = standard::SingleOutputChangeStrategy::new(
+            StandardFeeRule::Zip317,
+            None,
+            SaplingPoolTester::SHIELDED_PROTOCOL,
+            DustOutputPolicy::default(),
+        );
+        let input_selector = GreedyInputSelector::new();
+        let proposal = st
+            .propose_transfer(
+                account.id(),
+                &input_selector,
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap();
+        let sent_txid = st.create_proposed_expecting(&proposal, 1)[0];
+
+        assert_eq!(
+            st.wallet().notes_still_held(h),
+            vec![sent_txid],
+            "the unmined spend is on the hold list"
+        );
+        assert_eq!(
+            st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+            Zatoshis::ZERO,
+            "inputs stay blocked while the local send is outstanding"
+        );
+
+        st.wallet_mut().note_broadcast_rejected(sent_txid);
+
+        assert!(
+            st.wallet().notes_still_held(h).is_empty(),
+            "a refusal leaves the hold list"
+        );
+        assert_eq!(
+            st.get_spendable_balance(account.id(), ConfirmationsPolicy::MIN),
+            fund,
+            "a refusal releases the notes before expiry"
         );
     }
 
