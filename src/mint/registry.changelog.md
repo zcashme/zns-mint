@@ -2,6 +2,14 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-10-03 — A claim built before a release does not register after it
+
+- `accept_claim` takes the transaction expiry. When the name's latest
+  record is a release, a transaction whose expiry falls inside the
+  standard expiry window of that release is refused. Its anchor still
+  retires, and its successor stays out.
+- A claim built after the release, with expiry past that window, registers.
+
 ## 2026-10-03 — A rejected claim does not seat its successor
 
 - `accept_claim` still retires every live anchor the transaction

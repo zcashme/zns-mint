@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use time::Timestamp;
 use zcash_keys::address::{Address, UnifiedAddress};
+use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::{BlockHeight, MainNetwork};
 
 use zns_mint::mint::registry::{Registry, ANCHOR_POOL_SIZE};
@@ -194,6 +195,7 @@ fn apply(registry: &mut Registry, event: &Event) {
                 &[nf(spent_anchor)],
                 BlockHeight::from_u32(*height),
                 ts(*mtp_secs),
+                BlockHeight::from_u32(*height) + DEFAULT_TX_EXPIRY_DELTA,
             );
             match *expect {
                 Expectation::Accepted => assert!(ok, "backed claim was rejected: {name}"),
@@ -226,6 +228,7 @@ fn apply(registry: &mut Registry, event: &Event) {
                 &nfs,
                 BlockHeight::from_u32(*height),
                 ts(*mtp_secs),
+                BlockHeight::from_u32(*height) + DEFAULT_TX_EXPIRY_DELTA,
             );
             assert!(!accepted, "unbacked claim was accepted: {name}");
         }
