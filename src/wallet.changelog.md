@@ -1,5 +1,14 @@
 # Wallet changelog
 
+## 2026-10-03 — Unmined transactions can be offered again
+
+- `pending_broadcasts` returns stored transactions still marked not in
+  the chain whose expiry is ahead of the tip. Expiry height zero does
+  not expire.
+- `note_broadcast_rejected` records a rejection so a later pass skips
+  those bytes. A mined transaction is unchanged. The spend still
+  reserves the notes until expiry.
+
 ## 2026-09-25 — Pruning unconsumed wallet sugar
 
 - `Wallet::ufvk_for`, `Wallet::witness`, `Wallet::anchor_at` are gone; all
