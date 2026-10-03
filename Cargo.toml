@@ -69,7 +69,7 @@ incrementalmerkletree = "0.8.2"
 # elements. Both are already transitive deps (via zcash_spec / orchard); pulling
 # them direct adds no new compiled code to the graph.
 blake2b_simd = "1"
-pasta_curves = "0.5"
+pasta_curves = "0.6"
 
 zcash_note_encryption = "0.4"
 
