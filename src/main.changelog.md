@@ -1,5 +1,15 @@
 # main.changelog.md
 
+## 2026-10-03 — An accepted transaction is sent again until it mines
+
+- Each tip resubmits a stored transaction the node has not mined, while
+  its expiry is still ahead. A rejection is remembered for this process,
+  so those bytes are not offered again. The notes stay reserved until
+  expiry.
+- The controller challenge and the vault sweep are covered by that pass.
+  A name note still waits in its queue; the pass also resubmits the copy
+  the wallet stored.
+
 ## 2026-09-30 — Main receives its initial state from Boot
 
 - The run loop destructures the node source and four initialized slots

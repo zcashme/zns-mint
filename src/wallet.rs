@@ -300,6 +300,35 @@ impl<P: Parameters> Wallet<P> {
         )
     }
 
+    /// Stored transactions the node has not mined and that can still be
+    /// mined at `network_tip`. A remembered rejection is omitted; its
+    /// notes stay reserved until expiry.
+    pub fn pending_broadcasts(&self, network_tip: BlockHeight) -> Vec<Transaction> {
+        self.transactions
+            .iter()
+            .filter(|(txid, tx)| {
+                matches!(
+                    self.transaction_statuses.get(txid),
+                    Some(TransactionStatus::NotInMainChain)
+                ) && {
+                    let expiry = tx.expiry_height();
+                    u32::from(expiry) == 0 || expiry > network_tip
+                }
+            })
+            .map(|(_, tx)| tx.clone())
+            .collect()
+    }
+
+    /// The node rejected `txid`. Later passes do not offer those bytes
+    /// again. A mined transaction is left as mined.
+    pub fn note_broadcast_rejected(&mut self, txid: TxId) {
+        if let Some(status) = self.transaction_statuses.get_mut(&txid) {
+            if matches!(status, TransactionStatus::NotInMainChain) {
+                *status = TransactionStatus::TxidNotRecognized;
+            }
+        }
+    }
+
     /// True when `txid` is known, unmined, and past expiry at
     /// `network_tip`. Unknown `txid`: false.
     pub fn expired_unmined_at(&self, txid: TxId, network_tip: BlockHeight) -> bool {
