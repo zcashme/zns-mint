@@ -1,5 +1,12 @@
 # Zcash I/O changelog
 
+## 2026-10-03 — An already-known transaction is acceptance
+
+- `is_already_in_mempool` treats "already known" and "already-known"
+  as the node already holding the transaction, same as "already in
+  mempool". Hyphens are read as spaces. A policy rejection such as a
+  high fee still does not match, so `submit` returns false only then.
+
 ## 2026-09-30 — The endpoint timeout retries as cancelled (#257)
 
 - tonic 0.14 maps the endpoint's client-side `REQUEST_TIMEOUT` to

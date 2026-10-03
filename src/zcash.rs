@@ -211,10 +211,13 @@ impl RpcError {
     }
 
     /// The node already has this transaction in its mempool. The message
-    /// is the discriminator: -26 is also a policy rejection.
+    /// is the discriminator: -26 is also a policy rejection. Zcash reports
+    /// that case as already in the mempool, or as already known.
     pub fn is_already_in_mempool(&self) -> bool {
-        let message = self.message.to_ascii_lowercase();
-        message.contains("already in mempool") || message.contains("already in the mempool")
+        let message = self.message.to_ascii_lowercase().replace('-', " ");
+        message.contains("already in mempool")
+            || message.contains("already in the mempool")
+            || message.contains("already known")
     }
 }
 
@@ -329,6 +332,29 @@ mod tests {
             not_on_best_chain(no_information),
             TransportError::Rpc(_)
         ));
+    }
+
+    #[test]
+    fn already_in_mempool_covers_already_known() {
+        for message in [
+            "txn-already-in-mempool",
+            "transaction already in the mempool",
+            "txn-already-known",
+            "transaction already known",
+        ] {
+            let rpc = RpcError {
+                code: -26,
+                message: message.to_string(),
+                data: None,
+            };
+            assert!(rpc.is_already_in_mempool(), "{message}");
+        }
+        let rejected = RpcError {
+            code: -26,
+            message: "absurdly-high-fee".to_string(),
+            data: None,
+        };
+        assert!(!rejected.is_already_in_mempool());
     }
 
     #[test]
