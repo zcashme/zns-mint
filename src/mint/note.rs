@@ -704,6 +704,7 @@ impl NameNoteQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
     use zcash_protocol::consensus::MAIN_NETWORK;
 
     /// A real mainnet UA with every known receiver kind — Orchard,
@@ -1048,6 +1049,7 @@ mod tests {
             &[first_anchor],
             height(100),
             mtp,
+            height(100) + DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         let release = NameNote::Release {
@@ -1079,6 +1081,7 @@ mod tests {
             &[second_anchor],
             height(130),
             mtp,
+            height(130) + DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         (registry, release, reclaim)
@@ -1143,6 +1146,7 @@ mod tests {
             &[anchor],
             height(100),
             mtp,
+            height(100) + DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         let mut queue = NameNoteQueue::default();
@@ -1172,6 +1176,7 @@ mod tests {
             &[anchor],
             height(100),
             mtp,
+            height(100) + DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         let mut queue = NameNoteQueue::default();

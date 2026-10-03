@@ -391,6 +391,11 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         "FATAL: fetched block does not continue the applied cursor"
     );
 
+    let expiry_by_txid: BTreeMap<TxId, BlockHeight> = block
+        .vtx()
+        .iter()
+        .map(|tx| (tx.txid(), tx.expiry_height()))
+        .collect();
     let block_time = block.header().time;
     let (candidates, treasury_memos) = if height >= birthday {
         (
@@ -489,6 +494,10 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                     } else {
                         None
                     };
+                    let expiry = expiry_by_txid
+                        .get(&txid)
+                        .copied()
+                        .expect("FATAL: scanned transaction is missing from the block");
                     registry.accept_claim(
                         network,
                         &candidate.payload,
@@ -497,6 +506,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                         &nfs,
                         height,
                         block_mtp,
+                        expiry,
                     )
                 } else {
                     match action {

@@ -10,6 +10,7 @@ use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
+use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
 
@@ -227,8 +228,10 @@ impl Registry {
 
     /// Offers a confirmed claim candidate; true when it spent one
     /// standing anchor, spent no Name Note, and the name was free.
-    /// Earlier vtx wins inside one block. A rejected claim retires
-    /// the anchor it spent and does not seat its successor.
+    /// After a release, `expiry` must sit past the standard expiry
+    /// window, so a transaction built earlier does not register.
+    /// A rejected claim retires the anchor it spent and does not seat
+    /// its successor.
     #[allow(clippy::too_many_arguments)]
     pub fn accept_claim<P: Parameters>(
         &mut self,
@@ -239,6 +242,7 @@ impl Registry {
         nfs: &[orchard::note::Nullifier],
         height: BlockHeight,
         mtp: Timestamp,
+        expiry: BlockHeight,
     ) -> bool {
         assert!(matches!(note, NameNote::Claim { .. }));
         let spent: Vec<_> = nfs
@@ -246,28 +250,45 @@ impl Registry {
             .filter(|nf| self.anchors.contains(nf))
             .copied()
             .collect();
+        let name_free = self.record(note.name()).is_none();
+        let built_after_release = !self.built_before_release(note.name(), expiry);
         // Spent anchors retire on any verdict. The successor joins only
-        // when this claim is admitted: one anchor, no Name Note, name free.
+        // when this claim is admitted: one anchor, no Name Note, name free,
+        // and not an older transaction mining after a release.
         let seated = successor.filter(|_| {
             spent.len() == 1
                 && self.names_spent_by(nfs).is_empty()
-                && self.record(note.name()).is_none()
+                && name_free
+                && built_after_release
         });
         self.anchors.retire_spent(nfs, seated, height);
 
         // The law: a well-formed claim spends exactly one anchor,
         // spends no Name Note, creates a zero-value successor, and
-        // finds the name free (or released).
+        // finds the name free (or released after this transaction was built).
         if successor.is_none() || spent.len() != 1 || !self.names_spent_by(nfs).is_empty() {
             self.mark_released(nfs, height);
             return false;
         }
-        if self.record(note.name()).is_some() {
+        if !name_free {
             // A late or duplicate claim: first confirmed wins.
+            return false;
+        }
+        if !built_after_release {
             return false;
         }
         self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
         true
+    }
+
+    /// The mint builds a claim only after a release is applied, and sets
+    /// expiry to the target height plus the standard delta. A transaction
+    /// inside that window was built before the release.
+    fn built_before_release(&self, name: &Name, expiry: BlockHeight) -> bool {
+        let Some(latest) = self.record_history(name).last() else {
+            return false;
+        };
+        latest.action.is_release() && expiry <= latest.confirmed_height + DEFAULT_TX_EXPIRY_DELTA
     }
 
     /// Offers a confirmed update candidate; true when the transaction
@@ -543,6 +564,7 @@ mod tests {
             &[anchor],
             block_height,
             ts(1_700_000_000 + i64::from(height)),
+            block_height + DEFAULT_TX_EXPIRY_DELTA,
         ));
     }
 
@@ -810,7 +832,8 @@ mod tests {
             Some(succ1),
             &[a1],
             h1,
-            mtp
+            mtp,
+            h1 + DEFAULT_TX_EXPIRY_DELTA,
         ));
         let first = r.record(&test_name()).expect("alice registered").clone();
 
@@ -821,7 +844,8 @@ mod tests {
             Some(succ2),
             &[a2],
             h2,
-            mtp
+            mtp,
+            h2 + DEFAULT_TX_EXPIRY_DELTA,
         ));
         let kept = r.record(&test_name()).expect("alice still registered");
         assert_eq!(kept.commitment, first.commitment);
@@ -834,6 +858,56 @@ mod tests {
         assert!(!r.anchor_pool().contains(&a2));
         assert!(r.anchor_pool().contains(&succ1));
         assert!(!r.anchor_pool().contains(&succ2));
+    }
+
+    /// A claim transaction built before a release does not register if it
+    /// mines afterward. One built after the release does.
+    #[test]
+    fn a_claim_built_before_release_does_not_register_after_it() {
+        let mut r = Registry::new();
+        let name = test_name();
+        let release_height = BlockHeight::from_u32(110);
+        confirm_claim(&mut r, &name, 100, 1, 11, 21);
+        confirm_release(&mut r, &name, 110, 24);
+        assert!(r.record(&name).is_none());
+
+        let claim = NameNote::Claim {
+            name: name.clone(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+        let stale_anchor = nullifier(3);
+        let stale_successor = nullifier(30);
+        r.adopt_anchor(release_height, stale_anchor);
+        assert!(!r.accept_claim(
+            &MAIN_NETWORK,
+            &claim,
+            nullifier(31),
+            Some(stale_successor),
+            &[stale_anchor],
+            BlockHeight::from_u32(120),
+            ts(1_700_000_120),
+            release_height + DEFAULT_TX_EXPIRY_DELTA,
+        ));
+        assert!(r.record(&name).is_none());
+        assert!(!r.anchor_pool().contains(&stale_anchor));
+        assert!(!r.anchor_pool().contains(&stale_successor));
+
+        let fresh_anchor = nullifier(4);
+        let fresh_successor = nullifier(40);
+        r.adopt_anchor(release_height, fresh_anchor);
+        assert!(r.accept_claim(
+            &MAIN_NETWORK,
+            &claim,
+            nullifier(41),
+            Some(fresh_successor),
+            &[fresh_anchor],
+            BlockHeight::from_u32(121),
+            ts(1_700_000_121),
+            release_height + DEFAULT_TX_EXPIRY_DELTA + 1,
+        ));
+        assert!(r.record(&name).is_some());
+        assert!(r.anchor_pool().contains(&fresh_successor));
     }
 
     #[test]
@@ -910,7 +984,16 @@ mod tests {
         };
 
         // No successor: retire the spent anchor, do not register.
-        assert!(!r.accept_claim(&MAIN_NETWORK, &claim, nullifier(20), None, &[a1], h, mtp));
+        assert!(!r.accept_claim(
+            &MAIN_NETWORK,
+            &claim,
+            nullifier(20),
+            None,
+            &[a1],
+            h,
+            mtp,
+            h + DEFAULT_TX_EXPIRY_DELTA,
+        ));
         assert!(!r.anchor_pool().contains(&a1));
         assert!(r.record(&test_name()).is_none());
 
@@ -924,7 +1007,8 @@ mod tests {
             Some(succ),
             &[a2, a1],
             h,
-            mtp
+            mtp,
+            h + DEFAULT_TX_EXPIRY_DELTA,
         ));
         assert!(!r.anchor_pool().contains(&a2));
         assert!(!r.anchor_pool().contains(&succ));
@@ -955,7 +1039,8 @@ mod tests {
             Some(nullifier(200)),
             &[nullifier(9)],
             h,
-            mtp
+            mtp,
+            h + DEFAULT_TX_EXPIRY_DELTA,
         ));
         assert!(r.anchor_pool().contains(&anchor));
         assert!(!r.anchor_pool().contains(&nullifier(200)));
@@ -984,7 +1069,8 @@ mod tests {
             Some(succ),
             &[anchor, nullifier(1)],
             h,
-            mtp
+            mtp,
+            h + DEFAULT_TX_EXPIRY_DELTA,
         ));
         assert!(r.record(&test_name()).is_none());
         let alice = r
