@@ -1,5 +1,14 @@
 # main.changelog.md
 
+## 2026-10-03 — A rejected transaction releases its notes
+
+- A node rejection releases the notes that transaction selected. A
+  later build can spend them. The same bytes are not offered again.
+- The vault sweep and the controller challenge record that rejection
+  when the node refuses them. The rebroadcast pass does the same for
+  a stored transaction, including a name note.
+- Each tip logs the unmined transactions that still hold notes.
+
 ## 2026-10-03 — An accepted transaction is sent again until it mines
 
 - Each tip resubmits a stored transaction the node has not mined, while

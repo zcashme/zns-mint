@@ -99,6 +99,8 @@ pub struct Wallet<P: Parameters> {
     transactions: BTreeMap<TxId, Transaction>,
     transaction_statuses: BTreeMap<TxId, TransactionStatus>,
     transaction_indices: BTreeMap<TxId, TxIndex>,
+    /// Transactions the node refused. Selection may use their notes again.
+    rejected_broadcasts: BTreeSet<TxId>,
 
     trusted_transactions: BTreeSet<TxId>,
 
@@ -164,6 +166,7 @@ impl<P: Parameters> Wallet<P> {
             transactions: BTreeMap::new(),
             transaction_statuses: BTreeMap::new(),
             transaction_indices: BTreeMap::new(),
+            rejected_broadcasts: BTreeSet::new(),
             trusted_transactions: BTreeSet::new(),
             sapling_notes: BTreeMap::new(),
             ironwood_notes: BTreeMap::new(),
@@ -301,8 +304,8 @@ impl<P: Parameters> Wallet<P> {
     }
 
     /// Stored transactions the node has not mined and that can still be
-    /// mined at `network_tip`. A remembered rejection is omitted; its
-    /// notes stay reserved until expiry.
+    /// mined at `network_tip`. A remembered rejection is omitted. Its
+    /// notes are selectable again.
     pub fn pending_broadcasts(&self, network_tip: BlockHeight) -> Vec<Transaction> {
         self.transactions
             .iter()
@@ -320,13 +323,49 @@ impl<P: Parameters> Wallet<P> {
     }
 
     /// The node rejected `txid`. Later passes do not offer those bytes
-    /// again. A mined transaction is left as mined.
+    /// again, and selection may use the notes. A mined transaction is
+    /// left as mined.
     pub fn note_broadcast_rejected(&mut self, txid: TxId) {
-        if let Some(status) = self.transaction_statuses.get_mut(&txid) {
-            if matches!(status, TransactionStatus::NotInMainChain) {
-                *status = TransactionStatus::TxidNotRecognized;
+        let rejected = matches!(
+            self.transaction_statuses.get(&txid),
+            Some(TransactionStatus::NotInMainChain)
+        );
+        if rejected {
+            self.transaction_statuses
+                .insert(txid, TransactionStatus::TxidNotRecognized);
+            self.rejected_broadcasts.insert(txid);
+        }
+    }
+
+    /// A mined transaction was accepted. A later un-mine reserves its
+    /// notes again until expiry.
+    pub(crate) fn note_broadcast_mined(&mut self, txid: &TxId) {
+        self.rejected_broadcasts.remove(txid);
+    }
+
+    /// Unmined spends that still withhold their notes at `network_tip`.
+    /// A remembered rejection is absent. Mined spends are absent.
+    pub fn notes_still_held(&self, network_tip: BlockHeight) -> Vec<TxId> {
+        use zcash_client_backend::data_api::wallet::TargetHeight;
+
+        let target = TargetHeight::from(network_tip + 1);
+        let mut held = BTreeSet::new();
+        for txid in self
+            .sapling_note_spends
+            .values()
+            .chain(self.ironwood_note_spends.values())
+        {
+            if matches!(
+                self.transaction_statuses.get(txid),
+                Some(TransactionStatus::Mined(_))
+            ) {
+                continue;
+            }
+            if self.spend_confirms_or_blocks(txid, target) {
+                held.insert(*txid);
             }
         }
+        held.into_iter().collect()
     }
 
     /// True when `txid` is known, unmined, and past expiry at

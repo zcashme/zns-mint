@@ -1,5 +1,14 @@
 # Wallet changelog
 
+## 2026-10-03 — A rejection releases the notes it selected
+
+- `note_broadcast_rejected` records the refusal. Selection may use
+  those notes again. A `TxidNotRecognized` spend that was not recorded
+  here still withholds its notes until expiry. Mining clears the
+  refusal, so a later un-mine reserves the notes again.
+- `notes_still_held` lists unmined spends that still withhold notes.
+  A remembered rejection is absent.
+
 ## 2026-10-03 — Unmined transactions can be offered again
 
 - `pending_broadcasts` returns stored transactions still marked not in
