@@ -4,8 +4,9 @@
 
 - `is_already_in_mempool` treats "already known" and "already-known"
   as the node already holding the transaction, same as "already in
-  mempool". Hyphens are read as spaces. A policy rejection such as a
-  high fee still does not match, so `submit` returns false only then.
+  mempool". Hyphens are read as spaces. A high fee is one message that
+  still does not match. Every unmatched non-retryable answer stays
+  rejected, and `submit` returns false for each of them.
 
 ## 2026-09-30 — The endpoint timeout retries as cancelled (#257)
 
