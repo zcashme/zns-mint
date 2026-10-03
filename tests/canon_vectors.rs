@@ -68,6 +68,10 @@ enum Event {
         successor_anchor: Hex32,
         /// The NameNote's own nullifier.
         nullifier: Hex32,
+        /// Transaction expiry height. Absent means the mint's standard
+        /// expiry: the claim height plus the default delta.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expiry_height: Option<u32>,
         expect: Expectation,
     },
     /// Attacker-shaped Claim: no live anchor spent. Mint drops the
@@ -180,6 +184,7 @@ fn apply(registry: &mut Registry, event: &Event) {
             spent_anchor,
             successor_anchor,
             nullifier,
+            expiry_height,
             expect,
         } => {
             let note = NameNote::Claim {
@@ -187,6 +192,9 @@ fn apply(registry: &mut Registry, event: &Event) {
                 ua: parse_ua(ua),
                 expires_at: expiry(*expires_at_secs),
             };
+            let tx_expiry = expiry_height
+                .map(BlockHeight::from_u32)
+                .unwrap_or_else(|| BlockHeight::from_u32(*height) + DEFAULT_TX_EXPIRY_DELTA);
             let ok = registry.accept_claim(
                 &MainNetwork,
                 &note,
@@ -195,7 +203,7 @@ fn apply(registry: &mut Registry, event: &Event) {
                 &[nf(spent_anchor)],
                 BlockHeight::from_u32(*height),
                 ts(*mtp_secs),
-                BlockHeight::from_u32(*height) + DEFAULT_TX_EXPIRY_DELTA,
+                tx_expiry,
             );
             match *expect {
                 Expectation::Accepted => assert!(ok, "backed claim was rejected: {name}"),
@@ -469,6 +477,7 @@ fn backed_claim() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n1,
+            expiry_height: None,
             expect: Expectation::Accepted,
         },
     ];
@@ -535,6 +544,7 @@ fn duplicate_claim() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n1,
+            expiry_height: None,
             expect: Expectation::Accepted,
         },
         // Second backed claim for the same live name: the anchor retires,
@@ -548,6 +558,7 @@ fn duplicate_claim() -> Scenario {
             spent_anchor: a2,
             successor_anchor: s2,
             nullifier: n2,
+            expiry_height: None,
             expect: Expectation::Rejected,
         },
     ];
@@ -589,6 +600,7 @@ fn claim_after_release() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n1.clone(),
+            expiry_height: None,
             expect: Expectation::Accepted,
         },
         Event::Release {
@@ -608,12 +620,78 @@ fn claim_after_release() -> Scenario {
             spent_anchor: a2,
             successor_anchor: s2,
             nullifier: n2,
+            expiry_height: None,
             expect: Expectation::Accepted,
         },
     ];
     Scenario {
         name: "claim_after_release".to_owned(),
         description: "A new Claim after Release binds the name to the second claimant.".to_owned(),
+        trace: run(&events),
+        events,
+    }
+}
+
+/// A claim mined after a release, whose expiry still falls inside the
+/// standard window of that release. It was built before the release.
+fn claim_inside_release_window() -> Scenario {
+    let a1 = hex32_from_seed(0x01);
+    let a2 = hex32_from_seed(0x02);
+    let s1 = hex32_from_seed(0xC1);
+    let s2 = hex32_from_seed(0xC2);
+    let n1 = hex32_from_seed(0xA1);
+    let n_release = hex32_from_seed(0xB1);
+    let n2 = hex32_from_seed(0xA2);
+    let release_height: u32 = 200;
+    let events = vec![
+        Event::AdoptAnchor {
+            height: 100,
+            nullifier: a1.clone(),
+        },
+        Event::AdoptAnchor {
+            height: 100,
+            nullifier: a2.clone(),
+        },
+        Event::Claim {
+            height: 110,
+            mtp_secs: 1_700_000_000,
+            name: "alice".to_owned(),
+            ua: TEST_UA.to_owned(),
+            expires_at_secs: None,
+            spent_anchor: a1,
+            successor_anchor: s1,
+            nullifier: n1.clone(),
+            expiry_height: None,
+            expect: Expectation::Accepted,
+        },
+        Event::Release {
+            height: release_height,
+            mtp_secs: 1_710_000_000,
+            name: "alice".to_owned(),
+            ua: TEST_UA.to_owned(),
+            prev_nullifier: n1,
+            nullifier: n_release,
+        },
+        // Mined after the release, but expiry is the release height plus
+        // the standard delta: the transaction was built before the release.
+        Event::Claim {
+            height: 220,
+            mtp_secs: 1_720_000_000,
+            name: "alice".to_owned(),
+            ua: TEST_UA.to_owned(),
+            expires_at_secs: None,
+            spent_anchor: a2,
+            successor_anchor: s2,
+            nullifier: n2,
+            expiry_height: Some(release_height + DEFAULT_TX_EXPIRY_DELTA),
+            expect: Expectation::Rejected,
+        },
+    ];
+    Scenario {
+        name: "claim_inside_release_window".to_owned(),
+        description: "A claim whose expiry falls inside the latest release's window retires \
+             its anchor and leaves its successor out. The name stays free."
+            .to_owned(),
         trace: run(&events),
         events,
     }
@@ -641,6 +719,7 @@ fn update_then_release() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n_claim.clone(),
+            expiry_height: None,
             expect: Expectation::Accepted,
         },
         Event::Update {
@@ -691,6 +770,7 @@ fn reorg() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n_claim.clone(),
+            expiry_height: None,
             expect: Expectation::Accepted,
         },
         Event::Update {
@@ -730,6 +810,7 @@ fn build_vectors() -> Vectors {
             unbacked_claim(),
             duplicate_claim(),
             claim_after_release(),
+            claim_inside_release_window(),
             update_then_release(),
             reorg(),
         ],
