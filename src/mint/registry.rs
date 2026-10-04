@@ -6,6 +6,7 @@ use anchor_pool::AnchorPool;
 
 pub use anchor_pool::{is_ceremony_fill, ANCHOR_POOL_SIZE};
 
+use crate::mint::note::NameNoteQueue;
 use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
@@ -68,11 +69,11 @@ impl NameRecord {
         }
     }
 
-    /// Whether a live record lets a transition request proceed to
-    /// challenge: term unexpired at `mtp_now`, trigger newer than
-    /// this record, release from this record's controller, forever
-    /// names take no term.
-    pub fn allows_challenge(
+    /// The clock-and-verb check behind [`Registry::authorize_challenge`]:
+    /// both §4.5 clocks live at `mtp_now`, trigger newer than this
+    /// record, release from this record's controller, forever names
+    /// take no term.
+    fn allows_challenge(
         &self,
         action: Action,
         ua: &UnifiedAddress,
@@ -80,7 +81,7 @@ impl NameRecord {
         trigger_height: BlockHeight,
         mtp_now: Timestamp,
     ) -> bool {
-        !self.has_expired(mtp_now)
+        !self.is_release_due(mtp_now)
             && trigger_height > self.confirmed_height
             && !(action.is_release() && *ua != self.ua)
             && !(self.expires_at == Expiry::Never && term.is_some())
@@ -184,6 +185,30 @@ impl Registry {
             ua: pending.ua.clone(),
             prev: record.commitment,
         })
+    }
+
+    /// The request gate, the authorize family's twin: the note
+    /// unspoken-for, both §4.5 clocks live at `mtp_now`, the request
+    /// newer than the record, forever names taking no term. The record,
+    /// when a challenge may proceed; the paying lanes add the fee.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_challenge(
+        &self,
+        name_notes: &NameNoteQueue,
+        name: &Name,
+        action: Action,
+        requested_ua: &UnifiedAddress,
+        term: Option<Term>,
+        trigger_height: BlockHeight,
+        mtp_now: Timestamp,
+    ) -> Option<NameRecord> {
+        let record = self.records.get(name)?;
+        if name_notes.note_pending(name) {
+            return None;
+        }
+        record
+            .allows_challenge(action, requested_ua, term, trigger_height, mtp_now)
+            .then(|| record.clone())
     }
 
     /// The record for a name at the applied tip. Released names are absent.
@@ -698,6 +723,122 @@ mod tests {
         let forever = record(Action::Claim, Expiry::Never, 2_000_000_000, 3);
         assert!(!forever.allows_challenge(Action::Update, &ua, Some(Term::Years(1)), above, now));
         assert!(forever.allows_challenge(Action::Update, &ua, None, above, now));
+    }
+
+    /// The gate applies both §4.5 clocks — the same predicate the law
+    /// applies. A name past its liveness deadline cannot buy a
+    /// challenge, even with purchased term remaining: the update it
+    /// would buy is one `authorize_update` always voids.
+    #[test]
+    fn allows_challenge_refuses_liveness_due_names() {
+        let ua = test_ua();
+        let above = BlockHeight::from_u32(101);
+        // Term runs to 2_000_000_000; the liveness deadline passed at
+        // 1_500_000_000. Term-live, liveness-due.
+        let term_live = record(
+            Action::Claim,
+            Expiry::At(ts(2_000_000_000)),
+            1_500_000_000,
+            1,
+        );
+
+        assert!(term_live.allows_challenge(
+            Action::Update,
+            &ua,
+            Some(Term::Years(1)),
+            above,
+            ts(1_499_999_999)
+        ));
+        assert!(!term_live.allows_challenge(
+            Action::Update,
+            &ua,
+            Some(Term::Years(1)),
+            above,
+            ts(1_500_000_000)
+        ));
+
+        // A forever name past its liveness deadline: refused termless too.
+        let forever = record(Action::Claim, Expiry::Never, 1_500_000_000, 2);
+        assert!(!forever.allows_challenge(Action::Update, &ua, None, above, ts(1_500_000_000)));
+
+        // Release challenges from the controller are refused alike; the
+        // lifecycle sweep releases without a challenge.
+        assert!(!term_live.allows_challenge(Action::Release, &ua, None, above, ts(1_500_000_000)));
+    }
+
+    /// The gate and the law answer the liveness clock with one
+    /// verdict, through the same public twin: before the deadline a
+    /// request both passes and authorizes; at the deadline
+    /// `authorize_challenge` refuses what `authorize_update` voids.
+    #[test]
+    fn the_gate_and_the_update_law_agree_on_the_liveness_clock() {
+        use crate::mint::note::NameNoteQueue;
+        use crate::mint::treasury::{OtpChallenge, OtpCode, D_OTP};
+
+        let mut r = Registry::new();
+        let name = test_name();
+        let ua = test_ua();
+        let deadline = 1_500_000_000_i64;
+        r.set_record(record(
+            Action::Claim,
+            Expiry::At(ts(2_000_000_000)),
+            deadline,
+            1,
+        ));
+        let queue = NameNoteQueue::default();
+
+        let pending = |mtp: i64| OtpChallenge {
+            name: name.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            term: Some(Term::Years(1)),
+            tip_rcm: commitment(1),
+            code: OtpCode::for_test(*b"123456"),
+            expires_at: ts(mtp + D_OTP),
+        };
+
+        let before = ts(deadline - 1);
+        let after = ts(deadline);
+        let above = BlockHeight::from_u32(101);
+        let term = Some(Term::Years(1));
+
+        assert!(r
+            .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, before)
+            .is_some());
+        assert!(r.authorize_update(&pending(deadline - 1), before).is_some());
+
+        assert!(r
+            .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, after)
+            .is_none());
+        assert!(r.authorize_update(&pending(deadline), after).is_none());
+    }
+
+    /// A name with a transition already admitted cannot buy a
+    /// challenge: the gate consults the note queue, the same state the
+    /// echo lane enforces.
+    #[test]
+    fn authorize_challenge_refuses_when_the_note_is_spoken_for() {
+        let mut r = Registry::new();
+        r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
+        let mut queue = NameNoteQueue::default();
+        let release = NameNote::Release {
+            name: test_name(),
+            ua: test_ua(),
+            prev: commitment(1),
+        };
+        assert!(queue.admit(BlockHeight::from_u32(100), release));
+
+        assert!(r
+            .authorize_challenge(
+                &queue,
+                &test_name(),
+                Action::Update,
+                &test_ua(),
+                None,
+                BlockHeight::from_u32(101),
+                ts(1_000_000_000)
+            )
+            .is_none());
     }
 
     #[test]
