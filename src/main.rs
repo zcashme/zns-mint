@@ -17,36 +17,12 @@ use zcash_protocol::consensus::{BlockHeight, BranchId};
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::{assemble, decrypt_treasury_transaction, NameNoteQueue};
+use zns_mint::mint::note::{assemble, decrypt_treasury_transaction};
 use zns_mint::mint::pricing::fetch_round;
-use zns_mint::mint::registry::NameRecord;
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
-use zns_mint::mint::{
-    relay, watch_mempool, Action, MintInbound, Name, Request, Term, Timestamp, UnifiedAddress,
-    TREASURY_ACCOUNT,
-};
+use zns_mint::mint::{relay, watch_mempool, Action, MintInbound, Request, TREASURY_ACCOUNT};
 use zns_mint::zcash::{MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE};
-
-/// The one challenge gate, shared by every lane that admits or relays
-/// a challenge (#292): the note unspoken-for, both §4.5 clocks live
-/// at `mtp_now`, the request newer than the record, forever names
-/// taking no term. Admission must imply what the echo lane and the
-/// law honor; the paying lanes add the fee check themselves.
-#[allow(clippy::too_many_arguments)]
-fn challenge_allowed(
-    name_notes: &NameNoteQueue,
-    record: &NameRecord,
-    name: &Name,
-    action: Action,
-    requested_ua: &UnifiedAddress,
-    term: Option<Term>,
-    trigger_height: BlockHeight,
-    mtp_now: Timestamp,
-) -> bool {
-    !name_notes.note_pending(name)
-        && record.allows_challenge(action, requested_ua, term, trigger_height, mtp_now)
-}
 
 #[tokio::main]
 async fn main() {
@@ -124,19 +100,19 @@ async fn main() {
                                         Request::Release { name, ua } => (name, Action::Release, ua, None),
                                         Request::Claim { .. } => continue,
                                     };
-                                    let Some(record) = registry.record(name).cloned() else { continue; };
                                     let trigger_height = chain_tip.block_height() + 1;
-                                    if !challenge_allowed(
+                                    let Some(record) = registry.authorize_challenge(
                                         &name_notes,
-                                        &record,
                                         name,
                                         action,
                                         requested_ua,
                                         term,
                                         trigger_height,
                                         mtp_now,
-                                    ) || paid < oracle.challenge_fee()
-                                    {
+                                    ) else {
+                                        continue;
+                                    };
+                                    if paid < oracle.challenge_fee() {
                                         continue;
                                     }
                                     let pending = OtpChallenge::issue(
@@ -503,28 +479,18 @@ async fn main() {
                             Request::Release { name, ua } => (name, Action::Release, ua, None),
                             Request::Claim { .. } => unreachable!(),
                         };
-                        let Some(record) = registry.record(name).cloned() else {
-                            break 'lane true;
-                        };
-                        if name_notes.note_pending(name) {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                action = action.as_str(),
-                                "transition already queued for the current Name Note"
-                            );
-                            break 'lane true;
-                        }
-                        if !challenge_allowed(
+                        let Some(record) = registry.authorize_challenge(
                             &name_notes,
-                            &record,
                             name,
                             action,
                             requested_ua,
                             term,
                             target_height,
                             mtp_now,
-                        ) || paid < oracle.challenge_fee()
-                        {
+                        ) else {
+                            break 'lane true;
+                        };
+                        if paid < oracle.challenge_fee() {
                             break 'lane true;
                         }
                         let pending = OtpChallenge::issue(
@@ -548,22 +514,18 @@ async fn main() {
         // Queue admission is independent from submission. Retry every still-
         // requested mempool or confirmed entry once during each tip pass.
         for pending in challenges.requested() {
-            let Some(record) = registry
-                .record(&pending.name)
-                .filter(|record| record.commitment == pending.tip_rcm)
-            else {
-                continue;
-            };
-            if !challenge_allowed(
+            let Some(record) = registry.authorize_challenge(
                 &name_notes,
-                record,
                 &pending.name,
                 pending.action,
                 &pending.ua,
                 pending.term,
                 target_height,
                 mtp_now,
-            ) {
+            ) else {
+                continue;
+            };
+            if record.commitment != pending.tip_rcm {
                 continue;
             }
             if relay(
@@ -635,6 +597,11 @@ async fn main() {
                     Action::Claim => break 'lane true,
                 };
                 let Some(transition_note) = authorized else {
+                    tracing::debug!(
+                        name = %echo.name.as_str(),
+                        action = echo.action.as_str(),
+                        "echo refused by the law — payment kept"
+                    );
                     break 'lane true;
                 };
                 challenges.consume(key); // spent exactly when the law accepts
