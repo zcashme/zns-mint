@@ -17,12 +17,36 @@ use zcash_protocol::consensus::{BlockHeight, BranchId};
 use tokio::sync::mpsc;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::{assemble, decrypt_treasury_transaction};
+use zns_mint::mint::note::{assemble, decrypt_treasury_transaction, NameNoteQueue};
 use zns_mint::mint::pricing::fetch_round;
+use zns_mint::mint::registry::NameRecord;
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
-use zns_mint::mint::{relay, watch_mempool, Action, MintInbound, Request, TREASURY_ACCOUNT};
+use zns_mint::mint::{
+    relay, watch_mempool, Action, MintInbound, Name, Request, Term, Timestamp, UnifiedAddress,
+    TREASURY_ACCOUNT,
+};
 use zns_mint::zcash::{MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE};
+
+/// The one challenge gate, shared by every lane that admits or relays
+/// a challenge (#292): the note unspoken-for, both §4.5 clocks live
+/// at `mtp_now`, the request newer than the record, forever names
+/// taking no term. Admission must imply what the echo lane and the
+/// law honor; the paying lanes add the fee check themselves.
+#[allow(clippy::too_many_arguments)]
+fn challenge_allowed(
+    name_notes: &NameNoteQueue,
+    record: &NameRecord,
+    name: &Name,
+    action: Action,
+    requested_ua: &UnifiedAddress,
+    term: Option<Term>,
+    trigger_height: BlockHeight,
+    mtp_now: Timestamp,
+) -> bool {
+    !name_notes.note_pending(name)
+        && record.allows_challenge(action, requested_ua, term, trigger_height, mtp_now)
+}
 
 #[tokio::main]
 async fn main() {
@@ -102,8 +126,16 @@ async fn main() {
                                     };
                                     let Some(record) = registry.record(name).cloned() else { continue; };
                                     let trigger_height = chain_tip.block_height() + 1;
-                                    if !record.allows_challenge(action, requested_ua, term, trigger_height, mtp_now)
-                                        || paid < oracle.challenge_fee()
+                                    if !challenge_allowed(
+                                        &name_notes,
+                                        &record,
+                                        name,
+                                        action,
+                                        requested_ua,
+                                        term,
+                                        trigger_height,
+                                        mtp_now,
+                                    ) || paid < oracle.challenge_fee()
                                     {
                                         continue;
                                     }
@@ -482,11 +514,14 @@ async fn main() {
                             );
                             break 'lane true;
                         }
-                        if !record.allows_challenge(
+                        if !challenge_allowed(
+                            &name_notes,
+                            &record,
+                            name,
                             action,
                             requested_ua,
                             term,
-                            note_height,
+                            target_height,
                             mtp_now,
                         ) || paid < oracle.challenge_fee()
                         {
@@ -519,6 +554,18 @@ async fn main() {
             else {
                 continue;
             };
+            if !challenge_allowed(
+                &name_notes,
+                record,
+                &pending.name,
+                pending.action,
+                &pending.ua,
+                pending.term,
+                target_height,
+                mtp_now,
+            ) {
+                continue;
+            }
             if relay(
                 &network,
                 &mut wallet,

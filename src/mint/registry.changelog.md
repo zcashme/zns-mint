@@ -2,6 +2,23 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-10-03 — The request gate joins the authorize family
+
+- `Registry::authorize_challenge` is the request-side twin of
+  `authorize_update`/`authorize_release`: the note unspoken-for (the
+  `NameNoteQueue` consulted, not left to the lanes), both §4.5 clocks
+  live at `mtp_now`, the request newer than the record, forever names
+  taking no term. It returns the record when a challenge may proceed;
+  the paying lanes add the fee check. `allows_challenge` narrows to
+  the private clock-and-verb check behind it.
+- A name past its liveness deadline can no longer buy a challenge,
+  even with purchased term remaining: the update such a request buys
+  is one `authorize_update` always voids, and the request and renewal
+  payments were kept. The gate and the law now answer the clocks with
+  one verdict.
+- Release challenges from a liveness-due controller are refused alike;
+  the lifecycle sweep releases without a challenge.
+
 ## 2026-10-03 — A claim built before a release does not register after it
 
 - `accept_claim` takes the transaction expiry. When the name's latest
