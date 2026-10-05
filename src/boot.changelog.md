@@ -8,10 +8,9 @@ Tracks design-relevant changes to `src/boot.rs`.
   the anchor txid from `keys/ceremony_state.toml`. A missing txid, a
   missing birthday, or a birthday that disagrees with
   `keys/zns_mint.conf` refuses boot.
-- It writes `keys/zns_genesis_record.json` and the raw report
-  `keys/zns_genesis_attestation.bin` over `genesis_report_data`.
-  `zns_mint_identity.json` is unchanged. Regtest has no ceremony file,
-  so it skips this.
+- It writes `zns_genesis_record.json` in the working directory. The
+  file holds the genesis facts and the hex-encoded report together.
+  `keys/` stays read-only. Regtest has no ceremony file, so it skips this.
 
 ## 2026-09-30 — Boot hands over initialized run state
 

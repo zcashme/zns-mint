@@ -183,13 +183,10 @@ const IDENTITY_DOC_FILE: &str = "zns_mint_identity.json";
 #[cfg(not(feature = "regtest"))]
 const CEREMONY_STATE_FILE: &str = "keys/ceremony_state.toml";
 
-/// Genesis facts written beside the raw SNP report. Rewritten every boot.
+/// Genesis facts and the hex-encoded SNP report, one file. `keys/` is
+/// read-only in production, so this stays in the working directory.
 #[cfg(not(feature = "regtest"))]
-const GENESIS_RECORD_FILE: &str = "keys/zns_genesis_record.json";
-
-/// Raw SNP report over `genesis_report_data`. Rewritten every boot.
-#[cfg(not(feature = "regtest"))]
-const GENESIS_REPORT_FILE: &str = "keys/zns_genesis_attestation.bin";
+const GENESIS_RECORD_FILE: &str = "zns_genesis_record.json";
 
 /// The conf fingerprint is not an identity pin by itself. The keygen
 /// report must carry `BLAKE2b-512(fingerprint ‖ capsule hash)` under the
@@ -267,11 +264,10 @@ fn write_genesis_statement(
     let attestation = tee
         .get_attestation(&report_data)
         .expect("FATAL: failed to obtain the genesis attestation report");
-    let document = genesis_document(&record, &txid_hex);
+    let document = genesis_document(&record, &txid_hex, attestation.as_bytes());
+    // One file, like the identity document. A torn write is a partial file.
     std::fs::write(GENESIS_RECORD_FILE, &document)
         .unwrap_or_else(|error| panic!("FATAL: failed to write {GENESIS_RECORD_FILE}: {error}"));
-    std::fs::write(GENESIS_REPORT_FILE, attestation.as_bytes())
-        .unwrap_or_else(|error| panic!("FATAL: failed to write {GENESIS_REPORT_FILE}: {error}"));
     tracing::info!(
         txid = %txid_hex,
         birthday = record.birthday,
@@ -345,7 +341,11 @@ fn ceremony_anchor(text: &str) -> Result<(String, u32), String> {
 }
 
 #[cfg(not(feature = "regtest"))]
-fn genesis_document(record: &zns_canon::genesis::GenesisRecord, txid_hex: &str) -> Vec<u8> {
+fn genesis_document(
+    record: &zns_canon::genesis::GenesisRecord,
+    txid_hex: &str,
+    report: &[u8],
+) -> Vec<u8> {
     serde_json::to_vec_pretty(&serde_json::json!({
         "version": record.version,
         "network": NETWORK_LABEL,
@@ -353,6 +353,7 @@ fn genesis_document(record: &zns_canon::genesis::GenesisRecord, txid_hex: &str) 
         "capsule_hash": hex::encode(record.capsule_hash),
         "anchor_txid": txid_hex.trim(),
         "birthday": record.birthday,
+        "report": hex::encode(report),
     }))
     .expect("FATAL: genesis record serialization")
 }
@@ -1086,10 +1087,13 @@ mod tests {
         assert_eq!(hex::encode(record.anchor_txid), txid);
         assert_eq!(record.seed_fingerprint, [0x11; 32]);
         assert_eq!(record.capsule_hash, [0x22; 32]);
-        let document = genesis_document(&record, &parsed_txid);
+        let report = [7u8; 4];
+        let document = genesis_document(&record, &parsed_txid, &report);
         let value: serde_json::Value = serde_json::from_slice(&document).expect("json");
         assert_eq!(value["anchor_txid"], txid);
         assert_eq!(value["birthday"], 4408922);
+        let decoded = hex::decode(value["report"].as_str().expect("hex report")).expect("hex");
+        assert_eq!(decoded, report);
     }
 
     #[cfg(not(feature = "regtest"))]
