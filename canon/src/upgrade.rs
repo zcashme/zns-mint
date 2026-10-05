@@ -1,8 +1,9 @@
 //! Authorized measurement change between two guest images.
 //!
 //! A migration may unseal a capsule only for the measurement named here.
-//! Signature verification is not implemented: the maintainer key scheme and
-//! the 2-of-3 policy are not fixed yet.
+//! Signature verification is not done. The policy is m-of-n maintainer
+//! signatures; the threshold, the key set, and the signature algorithm are
+//! not fixed yet.
 
 use blake2b_simd::Params as Blake2bParams;
 use thiserror::Error;
@@ -72,16 +73,16 @@ pub fn manifest_hash(manifest: &UpgradeManifest) -> [u8; 32] {
         .expect("BLAKE2b-256 length")
 }
 
-/// Check that at least two of three maintainers signed this manifest.
+/// Check that an m-of-n set of maintainers signed this manifest.
 ///
-/// Not implemented. The signature algorithm and the maintainer key set are
-/// still open.
+/// Not done. The threshold, the signature algorithm, and the maintainer key
+/// set are still open.
 pub fn verify_manifest_signatures(
     _manifest: &UpgradeManifest,
     _signatures: &[MaintainerSignature],
 ) -> Result<(), UpgradeError> {
     Err(UpgradeError::NoImpl(
-        "2-of-3 maintainer signature verification is not implemented",
+        "TODO: m-of-n maintainer signature verification.",
     ))
 }
 
