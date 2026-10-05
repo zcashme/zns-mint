@@ -304,6 +304,8 @@ fn genesis_record(
             "ceremony birthday {ceremony_birthday} does not match keys/zns_mint.conf birthday {config_birthday}"
         ));
     }
+    // TODO: confirm this txid is the anchor on chain. A substituted
+    // ceremony file with the matching birthday still passes these checks.
     let txid = hex::decode(txid_hex.trim())
         .map_err(|_| format!("{CEREMONY_STATE_FILE} txid is not hex"))?;
     let anchor_txid: [u8; 32] = txid
