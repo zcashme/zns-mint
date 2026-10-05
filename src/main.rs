@@ -546,7 +546,7 @@ async fn main() {
                 let Some(record) = registry.record(&echo.name).cloned() else {
                     break 'lane true; // no record — released or unknown: no mint-issued challenge can match
                 };
-                let Some((key, sent)) = challenges.awaiting(&echo, record.commitment) else {
+                let Some((key, sent)) = challenges.answer(&echo, record.commitment) else {
                     break 'lane true; // no pending challenge: dead
                 };
                 // The renewal or upgrade fee, binding at first
