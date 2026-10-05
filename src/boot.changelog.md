@@ -2,6 +2,17 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-10-05 — Boot attests the genesis anchor
+
+- After the capsule check, and after the seed is dropped, boot reads
+  the anchor txid from `keys/ceremony_state.toml`. A missing txid, a
+  missing birthday, or a birthday that disagrees with
+  `keys/zns_mint.conf` refuses boot.
+- It writes `keys/zns_genesis_record.json` and the raw report
+  `keys/zns_genesis_attestation.bin` over `genesis_report_data`.
+  `zns_mint_identity.json` is unchanged. Regtest has no ceremony file,
+  so it skips this.
+
 ## 2026-09-30 — Boot hands over initialized run state
 
 - Boot returns the `CanonicalBlockSource` it used for sync and initializes
