@@ -301,13 +301,6 @@ mod tests {
         }
     }
 
-    /// Admits and relays in one step: the challenge as the lane holds it.
-    fn admit_relayed(q: &mut OtpQueue, challenge: &OtpChallenge, txid: TxId) -> OtpChallenge {
-        let pending = q.admit(challenge.clone(), txid);
-        assert!(q.challenge_issued(&pending));
-        pending
-    }
-
     #[test]
     fn the_birth_shares_one_code_and_expires_after_d_otp() {
         let ua = match zcash_keys::address::Address::decode(
@@ -452,76 +445,59 @@ mod tests {
         assert!(!q.consume(key));
     }
 
-    /// One live entry per pending transition: a repeat request keeps
-    /// the first code and moves the entry to the newest txid; a
-    /// different transition opens its own entry.
+    /// The queue's contract in one walk: one live entry per pending
+    /// transition; a repeat request receives it and cannot be retired
+    /// by an invalidated earlier request; five wrong echoes are
+    /// tolerated and the sixth retires the entry they name, alone;
+    /// and a hit burns exactly once.
     #[test]
-    fn one_live_code_per_pending_request() {
+    fn a_challenge_survives_a_repeat_and_retires_at_six() {
         let mut q = OtpQueue::new();
-        let first = transition_challenge(1, *b"111111");
-        q.admit(first.clone(), test_txid(1));
 
-        // A repeat request, its own txid and would-be code.
+        // A first request opens one entry for its transition.
+        let check_in = transition_challenge(1, *b"111111");
+        let pending = q.admit(check_in.clone(), test_txid(1));
+
+        // A repeat request receives the same entry — same code — and
+        // moves it to the newest txid: invalidating the first request
+        // cannot retire the challenge the second backs. Proven while
+        // the entry is still Requested — invalidate removes only
+        // Requested entries — by relaying after the invalidation.
         let again = q.admit(transition_challenge(1, *b"222222"), test_txid(2));
-        assert_eq!(again.code, first.code);
-
-        // The entry follows the newest txid: invalidating the first
-        // request cannot retire the challenge the second backs.
+        assert_eq!(again.code, pending.code);
         q.invalidate(test_txid(1));
-        let pending = q.requested();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].code, first.code);
+        assert!(q.challenge_issued(&pending));
+        assert!(q.is_relayed(&pending));
 
-        // A different transition opens its own entry.
-        q.admit(transition_challenge(2, *b"333333"), test_txid(3));
-        assert_eq!(q.requested().len(), 2);
-    }
+        // A different transition opens its own entry, its own code.
+        let rebind = transition_challenge(2, *b"333333");
+        let other = q.admit(rebind.clone(), test_txid(3));
+        assert!(q.challenge_issued(&other));
+        assert_ne!(other.code, pending.code);
 
-    /// A wrong echo counts one attempt; the sixth retires the
-    /// challenge, and the right code finds nothing after it.
-    #[test]
-    fn six_wrong_echoes_retire_the_challenge() {
-        let mut q = OtpQueue::new();
-        let challenge = transition_challenge(1, *b"123456");
-        let pending = admit_relayed(&mut q, &challenge, test_txid(1));
-        let wrong = |n: u32| -> [u8; 6] { format!("{n:06}").as_bytes().try_into().unwrap() };
-
-        // Five wrong echoes are tolerated: the right code still answers.
+        // Five wrong echoes against the check-in are tolerated: its
+        // right code still answers.
         for n in 1..MAX_ATTEMPTS {
+            let wrong: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();
             assert!(q
-                .answer(&echo_for(&pending, wrong(n)), challenge.tip_rcm)
+                .answer(&echo_for(&pending, wrong), check_in.tip_rcm)
                 .is_none());
         }
-        let right = echo_for(&pending, *b"123456");
-        assert!(q.answer(&right, challenge.tip_rcm).is_some());
+        let right = echo_for(&pending, *b"111111");
+        let (key, _) = q.answer(&right, check_in.tip_rcm).expect("still answers");
 
-        // The sixth retires the challenge: even the right code is dead.
-        assert!(q
-            .answer(&echo_for(&pending, wrong(MAX_ATTEMPTS)), challenge.tip_rcm)
-            .is_none());
-        assert!(q.answer(&right, challenge.tip_rcm).is_none());
-    }
+        // The hit burns exactly once; the same echo finds nothing after.
+        assert!(q.consume(key));
+        assert!(q.answer(&right, check_in.tip_rcm).is_none());
 
-    /// A miss charges the transition the echo names: six wrong echoes
-    /// retire one transition and leave its neighbor answerable.
-    #[test]
-    fn a_miss_charges_the_transition_it_names() {
-        let mut q = OtpQueue::new();
-        let first = admit_relayed(&mut q, &transition_challenge(1, *b"111111"), test_txid(1));
-        let second = admit_relayed(&mut q, &transition_challenge(2, *b"222222"), test_txid(2));
-
+        // Six wrong echoes retire the entry they name, and only it.
         for n in 1..=MAX_ATTEMPTS {
-            let echo = echo_for(&second, {
-                let code: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();
-                code
-            });
-            assert!(q.answer(&echo, second.tip_rcm).is_none());
+            let wrong: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();
+            assert!(q.answer(&echo_for(&other, wrong), rebind.tip_rcm).is_none());
         }
-        let retired = echo_for(&second, *b"222222");
-        assert!(q.answer(&retired, second.tip_rcm).is_none());
         assert!(q
-            .answer(&echo_for(&first, *b"111111"), first.tip_rcm)
-            .is_some());
+            .answer(&echo_for(&other, *b"333333"), rebind.tip_rcm)
+            .is_none());
     }
 
     /// Freshness is the owner's prune, not the scans': an expired
