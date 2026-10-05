@@ -539,6 +539,7 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
             Some(height) => {
                 self.transaction_statuses
                     .insert(txid, TransactionStatus::Mined(height));
+                self.note_broadcast_mined(&txid);
             }
             None => {
                 // A mempool observation must not downgrade a known mined
@@ -963,6 +964,7 @@ impl<P: Parameters> Wallet<P> {
                 let txid = wtx.txid();
                 self.transaction_statuses
                     .insert(txid, TransactionStatus::Mined(height));
+                self.note_broadcast_mined(&txid);
                 self.transaction_indices.insert(txid, wtx.block_index());
 
                 for output in wtx.sapling_outputs() {

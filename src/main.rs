@@ -376,12 +376,21 @@ async fn main() {
         challenges.prune(mtp_now);
 
         // A transaction the node accepted is sent again until it is mined
-        // or it expires. A rejection is not offered again.
+        // or it expires. A rejection is not offered again, and its notes
+        // can be selected.
         for transaction in wallet.pending_broadcasts(tip) {
             let txid = transaction.txid();
             if !source.submit(&transaction, "unmined").await {
                 wallet.note_broadcast_rejected(txid);
             }
+        }
+        let held = wallet.notes_still_held(tip);
+        if !held.is_empty() {
+            let txids: Vec<String> = held.iter().map(ToString::to_string).collect();
+            tracing::info!(
+                txids = %txids.join(" "),
+                "unmined transactions holding notes"
+            );
         }
 
         let today = mtp
@@ -770,7 +779,9 @@ async fn main() {
                 &sapling_output,
             ) {
                 Ok(Some(tx)) => {
-                    source.submit(&tx, "vault sweep").await;
+                    if !source.submit(&tx, "vault sweep").await {
+                        wallet.note_broadcast_rejected(tx.txid());
+                    }
                 }
                 Ok(None) => {}
                 Err(error) => {

@@ -675,6 +675,7 @@ pub async fn relay<P: Parameters + Send + 'static>(
         );
         true
     } else {
+        wallet.note_broadcast_rejected(transaction.txid());
         tracing::debug!(
             lane,
             name = %request.name.as_str(),
