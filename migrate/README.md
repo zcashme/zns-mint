@@ -1,2 +1,35 @@
 # zns-migrate
-Migration tool for new software releases in the guest TEE
+
+One-shot move of a sealed ZNS seed from the guest that holds it (`source`) to the next measured guest (`target`).
+
+```bash
+# M2, the guest that will hold the new capsule
+zns-migrate target \
+  --manifest /migration/upgrade.toml \
+  --transport-dir /migration \
+  --output-capsule /state/keys/zns_seed.capsule
+
+# M1, the guest that holds the current capsule
+zns-migrate source \
+  --manifest /migration/upgrade.toml \
+  --transport-dir /migration \
+  --input-capsule /state/keys/zns_seed.capsule
+```
+
+Either side may start first. Target waits until source writes `source.ready`, then publishes an attested X25519 offer before source unseals the capsule. The transport directory is an untrusted channel, not state:
+
+```text
+source.ready
+offer.bin
+attestation.bin
+encrypted_seed.bin
+receipt.bin
+```
+
+Use a fresh directory for each attempt. The capsule stays outside that directory. Target will not replace an existing capsule unless `--replace-after-verified-migration` is set. After the new capsule is linked into place, target unseals it again and only then writes the receipt.
+
+`zns-canon` supplies sealing, capsule parsing, the manifest hash, migration `report_data`, and — in a production build — stored SNP report verification. Maintainer signatures are not checked: `verify_manifest_signatures` in `zns-canon` is still unimplemented. Source does require the report measurement to equal the manifest's `to_measurement`, and the offer's manifest hash to match.
+
+The X25519 seed wrap lives in this binary for now. `zns-canon` still returns `NoImpl` for ephemeral key generation, encryption, and decryption, and those functions do not bind the offer nonce or manifest hash.
+
+This crate path-depends on a sibling checkout of `zns-canon` at `../zns-canon`. A development binary that runs without SEV-SNP is `cargo run --features fake-tee`. That feature is refused in release builds.
