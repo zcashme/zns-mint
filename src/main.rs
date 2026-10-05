@@ -375,6 +375,15 @@ async fn main() {
             .expect("FATAL: MTP unavailable at the applied tip");
         challenges.prune(mtp_now);
 
+        // A transaction the node accepted is sent again until it is mined
+        // or it expires. A rejection is not offered again.
+        for transaction in wallet.pending_broadcasts(tip) {
+            let txid = transaction.txid();
+            if !source.submit(&transaction, "unmined").await {
+                wallet.note_broadcast_rejected(txid);
+            }
+        }
+
         let today = mtp
             .current_day()
             .expect("FATAL: MTP unavailable at the applied tip");
