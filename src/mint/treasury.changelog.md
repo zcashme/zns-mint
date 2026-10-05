@@ -1,5 +1,12 @@
 # Treasury design record
 
+## 2026-10-05 — The relay sends no value (#299)
+
+- `CHALLENGE_RELAY_VALUE` is zero. The OTP memo rides a zero-value
+  output — the same shape as a claim successor anchor — and only the
+  ZIP-317 fee remains. The controller no longer receives 10,000 zats
+  per challenge; the value bought nothing.
+
 ## 2026-10-05 — One live code per pending request; an attempt budget (#297)
 
 - `OtpQueue::admit` keeps one entry per pending transition

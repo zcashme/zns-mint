@@ -22,7 +22,7 @@ use zcash_client_backend::data_api::{
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
-use zcash_primitives::transaction::fees::zip317::{FeeError, MINIMUM_FEE};
+use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::memo::MemoBytes;
@@ -49,9 +49,9 @@ pub const SWEEP_MINIMUM: Zatoshis = Zatoshis::const_from_u64(100_000_000);
 /// operating float that funds the next Name Note's fee.
 pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 
-/// Amount paid to the controller with an OTP challenge memo. This is the
-/// payment value; the transaction's ZIP-317 fee is calculated separately.
-pub const CHALLENGE_RELAY_VALUE: Zatoshis = MINIMUM_FEE;
+/// The relay sends no value — the memo is the message. The
+/// transaction's ZIP-317 fee is calculated separately.
+pub const CHALLENGE_RELAY_VALUE: Zatoshis = Zatoshis::ZERO;
 
 /// The project vault's P2PKH address (placeholder pending final approved
 /// address).
