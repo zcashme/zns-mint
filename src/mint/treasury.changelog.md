@@ -1,5 +1,17 @@
 # Treasury design record
 
+## 2026-10-05 — One live code per pending request; an attempt budget (#297)
+
+- `OtpQueue::admit` keeps one entry per pending transition
+  `(name, action, ua, tip_rcm)`: a repeat request receives the live
+  entry — same code, same deadline — and stamps the newest request
+  txid, so an invalidated earlier request cannot retire a challenge a
+  later payment backs. A different transition opens its own entry.
+- `OtpQueue::answer` replaces `awaiting`: a wrong code counts toward
+  `MAX_ATTEMPTS` (six — §5's fixed maximum number of verification
+  attempts), charged to the transition the echo names, and retires
+  the challenge at the limit.
+
 ## 2026-10-05 — The queue records; the deciding pass rules (#295)
 
 - `RequestQueue::record` stores every request, in transaction order,
