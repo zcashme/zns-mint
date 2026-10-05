@@ -101,6 +101,12 @@ pub async fn block_contains_txid(zebra: &Zebrad, height: u32, txid: &str) -> Res
     Ok(block.vtx().iter().any(|tx| tx.txid().to_string() == txid))
 }
 
+/// The block's transaction ids, in block order.
+pub async fn block_txids(zebra: &Zebrad, height: u32) -> Result<Vec<String>> {
+    let block = read_block(zebra, height).await?;
+    Ok(block.vtx().iter().map(|tx| tx.txid().to_string()).collect())
+}
+
 async fn read_block(zebra: &Zebrad, height: u32) -> Result<Block> {
     let network = regtest_network();
     let hex = zebra

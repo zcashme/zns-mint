@@ -87,4 +87,59 @@ impl User {
             .await
             .context("user pays treasury")
     }
+
+    /// Spend `zats` zatoshis to the Treasury with `memo`; returns the txid.
+    pub async fn pay_treasury_zats(&self, memo: &str, zats: u64) -> Result<String> {
+        self.zallet.wait_until_synced(0, SYNC_TIMEOUT).await?;
+        let memo_hex: String = memo.bytes().map(|b| format!("{b:02x}")).collect();
+        let amount = format!("{}.{:08}", zats / 100_000_000, zats % 100_000_000);
+        let recipients = json!([
+            {
+                "address": treasury_ua()?,
+                "amount": amount,
+                "memo": memo_hex,
+            }
+        ]);
+        self.zallet
+            .send_from_account("orchard", recipients, "FullPrivacy")
+            .await
+            .context("user pays treasury (arbitrary amount)")
+    }
+
+    /// A second wallet on the node, funded by a shielded transfer from
+    /// `funder`. No zebrad restart — safe after the mint is live.
+    pub async fn fund_attached(zebra: &mut Zebrad, funder: &User, zats: u64) -> Result<Self> {
+        let mut zallet = Zallet::init(zebra)?;
+        zallet.start_daemon().await?;
+        let mut target = zebra.tip_height().await?;
+        zallet.wait_until_synced(target, SYNC_TIMEOUT).await?;
+        let ua = zallet.orchard_ua().await?;
+        let this = Self {
+            miner_address: zallet.miner_address.clone(),
+            ua,
+            zallet,
+        };
+        funder.pay_ua(&this.ua, zats).await?;
+        zebra.generate_blocks(1).await?;
+        target = zebra.tip_height().await?;
+        this.zallet.wait_until_synced(target, SYNC_TIMEOUT).await?;
+        wait_until_shielded(&this.zallet, zats, SYNC_TIMEOUT).await?;
+        Ok(this)
+    }
+
+    /// Spend `zats` zatoshis shielded to `address`; returns the txid.
+    pub async fn pay_ua(&self, address: &str, zats: u64) -> Result<String> {
+        self.zallet.wait_until_synced(0, SYNC_TIMEOUT).await?;
+        let amount = format!("{}.{:08}", zats / 100_000_000, zats % 100_000_000);
+        let recipients = json!([
+            {
+                "address": address,
+                "amount": amount,
+            }
+        ]);
+        self.zallet
+            .send_from_account("orchard", recipients, "FullPrivacy")
+            .await
+            .context("user pays wallet")
+    }
 }

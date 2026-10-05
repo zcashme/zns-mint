@@ -1,5 +1,17 @@
 # main.changelog.md
 
+## 2026-10-05 — The deciding pass is the only claim ruling site (#295)
+
+- The arrivals loop no longer rules: the `note_pending` pre-check and
+  the queue's admission refusal are gone, and every request is recorded
+  for the deciding pass.
+- The claim lane checks `NameNoteQueue::admit` and logs the refusal:
+  a later sufficient claim for a queued name resolves with a verdict —
+  "transition already queued; the earlier payment owns the name" —
+  instead of losing silently. The first sufficient payment in block
+  order still wins; payments for dead claims are kept and swept,
+  doctrine unchanged.
+
 ## 2026-09-30 — Main receives its initial state from Boot
 
 - The run loop destructures the node source and four initialized slots

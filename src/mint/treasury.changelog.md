@@ -1,5 +1,15 @@
 # Treasury design record
 
+## 2026-10-05 — The queue records; the deciding pass rules (#295)
+
+- `RequestQueue::record` stores every request, in transaction order,
+  and returns nothing. The per-name claim slot is no longer an
+  admission decision: a claim the deciding pass will kill can no
+  longer deny the slot to a later claim in the same batch, whose
+  payment was kept without a verdict.
+- `claim_pending` is deleted. `NameNoteQueue::admit` remains the one
+  per-name rule, applied after the payment gate.
+
 ## 2026-09-30 — The pass resolves by txid (#259)
 
 - `RequestQueue` loses its index surface (`len`, `is_empty`, `entry`,

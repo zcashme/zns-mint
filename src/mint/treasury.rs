@@ -263,29 +263,10 @@ pub struct RequestQueue {
 }
 
 impl RequestQueue {
-    /// A recognized request, routed after block application. Returns false
-    /// when an earlier queued claim already owns the name.
-    pub fn record(
-        &mut self,
-        txid: TxId,
-        request: Request,
-        paid: Zatoshis,
-        height: BlockHeight,
-    ) -> bool {
-        if let Request::Claim { name, .. } = &request {
-            if self.claim_pending(name) {
-                return false;
-            }
-        }
+    /// A recognized request, routed after block application. Admission
+    /// records facts in transaction order; the deciding pass rules.
+    pub fn record(&mut self, txid: TxId, request: Request, paid: Zatoshis, height: BlockHeight) {
         self.requests.push((txid, request, paid, height));
-        true
-    }
-
-    /// Whether a claim for `name` is already waiting in transaction order.
-    fn claim_pending(&self, name: &crate::mint::Name) -> bool {
-        self.requests.iter().any(|(_, request, _, _)| {
-            matches!(request, Request::Claim { name: queued, .. } if queued == name)
-        })
     }
 
     /// Every request pending decision, in queue order.
@@ -365,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn first_claim_per_name_wins_admission() {
+    fn queue_records_every_claim_in_order() {
         let ua = match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
             Some(zcash_keys::address::Address::Unified(ua)) => ua,
             _ => panic!("vector is a mainnet Unified Address"),
@@ -374,7 +355,7 @@ mod tests {
         let bob = Name::parse("bob").unwrap();
         let mut queue = RequestQueue::default();
 
-        assert!(queue.record(
+        queue.record(
             TxId::from_bytes([1; 32]),
             Request::Claim {
                 name: alice.clone(),
@@ -384,19 +365,19 @@ mod tests {
             },
             Zatoshis::ZERO,
             h(100),
-        ));
-        assert!(!queue.record(
+        );
+        queue.record(
             TxId::from_bytes([2; 32]),
             Request::Claim {
-                name: alice,
+                name: alice.clone(),
                 ua: ua.clone(),
                 term: Term::Forever,
                 code: None,
             },
             Zatoshis::ZERO,
             h(101),
-        ));
-        assert!(queue.record(
+        );
+        queue.record(
             TxId::from_bytes([3; 32]),
             Request::Claim {
                 name: bob,
@@ -406,21 +387,21 @@ mod tests {
             },
             Zatoshis::ZERO,
             h(102),
-        ));
+        );
 
+        // Admission records every claim; the deciding pass rules.
         let pending = queue.pending();
-        assert_eq!(pending.len(), 2);
+        assert_eq!(pending.len(), 3);
         assert_eq!(pending[0].0, TxId::from_bytes([1; 32]));
-        assert_eq!(pending[0].3, h(100));
+        assert_eq!(pending[1].0, TxId::from_bytes([2; 32]));
+        assert_eq!(pending[2].0, TxId::from_bytes([3; 32]));
         assert!(matches!(
             pending[0].1,
             Request::Claim { ref name, .. } if name.as_str() == "alice"
         ));
-        assert_eq!(pending[1].0, TxId::from_bytes([3; 32]));
-        assert_eq!(pending[1].3, h(102));
         assert!(matches!(
             pending[1].1,
-            Request::Claim { ref name, .. } if name.as_str() == "bob"
+            Request::Claim { ref name, .. } if name.as_str() == "alice"
         ));
     }
 
