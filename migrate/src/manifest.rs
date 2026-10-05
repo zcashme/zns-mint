@@ -1,11 +1,15 @@
 //! Upgrade manifest file.
 //!
-//! Maintainer signatures are not checked. `zns-canon`'s
-//! `verify_manifest_signatures` still returns `NoImpl`, and inventing an
-//! m-of-n scheme here would pretend that check had happened. This loader
-//! only checks that the file is a version-1 manifest with fixed-width fields.
-//! Source authorization is the attested target measurement plus the manifest
-//! hash, both of which cover these bytes.
+//! TODO: require maintainer signatures before this file authorizes
+//! `to_measurement`. `zns_canon::upgrade::verify_manifest_signatures` still
+//! returns `NoImpl` ("m-of-n maintainer signature verification"). Inventing
+//! that scheme here would pretend the check had happened. Until it is
+//! called, replacing this file before startup selects the guest that
+//! receives the seed. The attestation checks only show that the target
+//! matches the file.
+//!
+//! This loader only checks that the file is a version-1 manifest with
+//! fixed-width fields.
 
 use std::fs;
 use std::path::Path;
