@@ -1,8 +1,9 @@
 //! Directory transport.
 //!
-//! The directory is a one-shot channel, not trusted state. Readers accept a
-//! file only at its exact expected length, refuse symlinks, and do not treat
-//! a file that was already there as this attempt. Source writes `source.ready`
+//! The directory is a one-shot channel, not trusted state. Readers open each
+//! path once, without following a symlink or blocking on a FIFO, and accept
+//! the descriptor only when it is a regular file of the expected length.
+//! Source writes `source.ready`
 //! after seeing an empty channel; target waits for that latch before it
 //! publishes an offer. A leftover offer from a crashed attempt is refused
 //! instead of being answered with the seed.
@@ -215,33 +216,15 @@ impl DirTransport {
         let path = self.dir.join(name);
         let deadline = Instant::now() + self.timeout;
         loop {
-            match fs::symlink_metadata(&path) {
-                Ok(meta) if meta.file_type().is_symlink() => {
-                    return Err(MigrateError::transport(format!(
-                        "{} is a symlink",
-                        path.display()
-                    )));
-                }
-                Ok(meta) if meta.is_file() => return read_bounded(&path, exact, max),
-                Ok(_) => {
-                    return Err(MigrateError::transport(format!(
-                        "{} is not a file",
-                        path.display()
-                    )));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match open_channel_file(&path)? {
+                Some(file) => return read_bounded(file, &path, exact, max),
+                None => {
                     if Instant::now() >= deadline {
                         return Err(MigrateError::transport(format!(
                             "timed out waiting for {name}"
                         )));
                     }
                     thread::sleep(POLL);
-                }
-                Err(error) => {
-                    return Err(MigrateError::io(
-                        format!("inspect {}", path.display()),
-                        error,
-                    ));
                 }
             }
         }
@@ -269,9 +252,44 @@ fn exact(label: &str, bytes: &[u8], len: usize) -> Result<(), MigrateError> {
     }
 }
 
-fn read_bounded(path: &Path, exact: Option<usize>, max: usize) -> Result<Vec<u8>, MigrateError> {
-    let file = File::open(path)
-        .map_err(|error| MigrateError::io(format!("read {}", path.display()), error))?;
+/// Open `path` and keep that descriptor. A later replacement of the directory
+/// entry cannot turn this read into a symlink or a FIFO.
+fn open_channel_file(path: &Path) -> Result<Option<File>, MigrateError> {
+    let opened = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path);
+    let file = match opened {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(MigrateError::transport(format!(
+                "{} is a symlink",
+                path.display()
+            )));
+        }
+        Err(error) => {
+            return Err(MigrateError::io(format!("open {}", path.display()), error));
+        }
+    };
+    let meta = file
+        .metadata()
+        .map_err(|error| MigrateError::io(format!("stat {}", path.display()), error))?;
+    if !meta.is_file() {
+        return Err(MigrateError::transport(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    Ok(Some(file))
+}
+
+fn read_bounded(
+    file: File,
+    path: &Path,
+    exact: Option<usize>,
+    max: usize,
+) -> Result<Vec<u8>, MigrateError> {
     let mut limited = file.take((max as u64).saturating_add(1));
     let mut buf = Vec::new();
     limited
@@ -401,5 +419,26 @@ mod tests {
         assert!(err.to_string().contains("symlink"));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&other);
+    }
+
+    #[test]
+    fn a_fifo_does_not_block_past_the_open() {
+        let dir = scratch("fifo");
+        let offer = dir.join(OFFER_FILE);
+        let status = std::process::Command::new("mkfifo")
+            .arg(&offer)
+            .status()
+            .expect("mkfifo");
+        assert!(status.success());
+        let transport = DirTransport::open(&dir, Duration::from_secs(30)).unwrap();
+        let started = Instant::now();
+        let err = transport.wait_offer().unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "open blocked for {:?}",
+            started.elapsed()
+        );
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
