@@ -546,7 +546,7 @@ async fn main() {
                 let Some(record) = registry.record(&echo.name).cloned() else {
                     break 'lane true; // no record — released or unknown: no mint-issued challenge can match
                 };
-                let Some((key, sent)) = challenges.answer(&echo, record.commitment) else {
+                let Some(sent) = challenges.answer(&echo, record.commitment) else {
                     break 'lane true; // no pending challenge: dead
                 };
                 // The renewal or upgrade fee, binding at first
@@ -595,12 +595,12 @@ async fn main() {
                     );
                     break 'lane true;
                 };
-                challenges.consume(key); // spent exactly when the law accepts
-                                         // The seam where a voluntary release exists:
-                                         // the OTP that authorized it is consumed here,
-                                         // and the resulting note is indistinguishable
-                                         // from a unilateral one on chain. This line is
-                                         // the only durable record of the cause.
+                challenges.consume(&sent); // spent exactly when the law accepts
+                                           // The seam where a voluntary release exists:
+                                           // the OTP that authorized it is consumed here,
+                                           // and the resulting note is indistinguishable
+                                           // from a unilateral one on chain. This line is
+                                           // the only durable record of the cause.
                 if echo.action.is_release() {
                     tracing::info!(
                         name = %echo.name.as_str(),

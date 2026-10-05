@@ -222,11 +222,7 @@ impl OtpQueue {
     /// The relayed challenge an echo answers when its code is right;
     /// a wrong code counts one attempt against the transition the
     /// echo names and retires it at [`MAX_ATTEMPTS`].
-    pub fn answer(
-        &mut self,
-        returned: &OtpMemo,
-        tip_rcm: NameCommitment,
-    ) -> Option<(TxId, OtpChallenge)> {
+    pub fn answer(&mut self, returned: &OtpMemo, tip_rcm: NameCommitment) -> Option<OtpChallenge> {
         let index = self.challenges.iter().position(|(request, state, _, _)| {
             matches!(state, ChallengeState::Relayed)
                 && request.name == returned.name
@@ -234,9 +230,9 @@ impl OtpQueue {
                 && request.ua == returned.ua
                 && request.tip_rcm == tip_rcm
         })?;
-        let (request, _, txid, attempts) = &mut self.challenges[index];
+        let (request, _, _, attempts) = &mut self.challenges[index];
         if bool::from(request.code.0.ct_eq(&returned.code.0)) {
-            return Some((*txid, request.clone()));
+            return Some(request.clone());
         }
         if attempts.count() {
             self.challenges.remove(index);
@@ -244,12 +240,17 @@ impl OtpQueue {
         None
     }
 
-    /// Consumes a relayed challenge by key: one code, one use.
-    /// Returns `false` for unknown keys and never-relayed entries.
-    pub fn consume(&mut self, txid: TxId) -> bool {
+    /// Consumes the answered challenge: one code, one use. The
+    /// transition is the key — a txid can back several challenges,
+    /// and consuming one must not evict its neighbors.
+    pub fn consume(&mut self, answered: &OtpChallenge) -> bool {
         let before = self.challenges.len();
-        self.challenges.retain(|(_, state, existing_txid, _)| {
-            !(*existing_txid == txid && matches!(state, ChallengeState::Relayed))
+        self.challenges.retain(|(existing, state, _, _)| {
+            !(matches!(state, ChallengeState::Relayed)
+                && existing.name == answered.name
+                && existing.action == answered.action
+                && existing.ua == answered.ua
+                && existing.tip_rcm == answered.tip_rcm)
         });
         self.challenges.len() != before
     }
@@ -388,13 +389,13 @@ mod tests {
 
         // The echo picked up at the new tip resolves to the new-tip
         // pending — its term is Years(5), not Years(1).
-        let (_, matched) = q.answer(&echo, new_rcm).expect("new-tip pending");
+        let matched = q.answer(&echo, new_rcm).expect("new-tip pending");
         assert_eq!(matched.term, Some(Term::Years(5)));
         assert_eq!(matched.tip_rcm, new_rcm);
 
         // And re-scoping to the old commitment resolves to the old
         // pending, not the new one — the two are strictly separated.
-        let (_, matched) = q.answer(&echo, old_rcm).expect("old-tip pending");
+        let matched = q.answer(&echo, old_rcm).expect("old-tip pending");
         assert_eq!(matched.term, Some(Term::Years(1)));
         assert_eq!(matched.tip_rcm, old_rcm);
 
@@ -437,12 +438,12 @@ mod tests {
             ua: ua.clone(),
         };
 
-        let (key, matched) = q.answer(&echo, rcm).expect("live pending");
+        let matched = q.answer(&echo, rcm).expect("live pending");
         assert_eq!(matched.tip_rcm, rcm);
 
-        assert!(q.consume(key));
+        assert!(q.consume(&matched));
         assert!(q.answer(&echo, rcm).is_none());
-        assert!(!q.consume(key));
+        assert!(!q.consume(&matched));
     }
 
     /// The queue's contract in one walk: one live entry per pending
@@ -469,9 +470,11 @@ mod tests {
         assert!(q.challenge_issued(&pending));
         assert!(q.is_relayed(&pending));
 
-        // A different transition opens its own entry, its own code.
+        // A different transition opens its own entry, its own code —
+        // here under the same txid, as one transaction carrying two
+        // requests would produce.
         let rebind = transition_challenge(2, *b"333333");
-        let other = q.admit(rebind.clone(), test_txid(3));
+        let other = q.admit(rebind.clone(), test_txid(2));
         assert!(q.challenge_issued(&other));
         assert_ne!(other.code, pending.code);
 
@@ -484,11 +487,13 @@ mod tests {
                 .is_none());
         }
         let right = echo_for(&pending, *b"111111");
-        let (key, _) = q.answer(&right, check_in.tip_rcm).expect("still answers");
+        let answered = q.answer(&right, check_in.tip_rcm).expect("still answers");
 
-        // The hit burns exactly once; the same echo finds nothing after.
-        assert!(q.consume(key));
+        // The hit burns exactly once — and only the entry it answered:
+        // the neighbor that shares its txid stands.
+        assert!(q.consume(&answered));
         assert!(q.answer(&right, check_in.tip_rcm).is_none());
+        assert!(q.is_relayed(&other));
 
         // Six wrong echoes retire the entry they name, and only it.
         for n in 1..=MAX_ATTEMPTS {
@@ -548,21 +553,19 @@ mod tests {
         let rcm = commitment(1);
         let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
 
-        q.admit(
-            OtpChallenge {
-                name: alice.clone(),
-                action: Action::Update,
-                ua: ua.clone(),
-                term: None,
-                tip_rcm: rcm,
-                code: OtpCode::for_test(*b"123456"),
-                expires_at: t0 + Duration::seconds(D_OTP),
-            },
-            test_txid(1),
-        );
+        let challenge = OtpChallenge {
+            name: alice.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            term: None,
+            tip_rcm: rcm,
+            code: OtpCode::for_test(*b"123456"),
+            expires_at: t0 + Duration::seconds(D_OTP),
+        };
+        q.admit(challenge.clone(), test_txid(1));
         // Still `Requested`: the challenge memo was never accepted.
 
-        assert!(!q.consume(test_txid(1)));
+        assert!(!q.consume(&challenge));
         assert_eq!(q.requested().len(), 1);
     }
 }
