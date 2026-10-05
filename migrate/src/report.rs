@@ -42,7 +42,7 @@ pub fn measurement(
     report_data.copy_from_slice(&bytes[report_at..tag_at]);
     if report_data != *expected_report_data {
         return Err(MigrateError::transport(
-            "development attestation report_data does not match the offer",
+            "development attestation report_data does not match",
         ));
     }
     let mut hasher = Sha256::new();

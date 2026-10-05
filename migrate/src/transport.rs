@@ -23,6 +23,7 @@ pub const ATTESTATION_FILE: &str = "attestation.bin";
 pub const ENCRYPTED_SEED_FILE: &str = "encrypted_seed.bin";
 pub const SOURCE_ATTESTATION_FILE: &str = "source_attestation.bin";
 pub const RECEIPT_FILE: &str = "receipt.bin";
+pub const RECEIPT_ATTESTATION_FILE: &str = "receipt_attestation.bin";
 pub const SOURCE_READY_FILE: &str = "source.ready";
 
 const READY_MAGIC: &[u8] = b"ZNS_MIGRATE_READY_V1";
@@ -35,6 +36,7 @@ const PROTOCOL_FILES: &[&str] = &[
     ENCRYPTED_SEED_FILE,
     SOURCE_ATTESTATION_FILE,
     RECEIPT_FILE,
+    RECEIPT_ATTESTATION_FILE,
 ];
 
 pub struct DirTransport {
@@ -141,6 +143,15 @@ impl DirTransport {
 
     pub fn wait_receipt(&self) -> Result<Vec<u8>, MigrateError> {
         self.wait_file(RECEIPT_FILE, Some(RECEIPT_LEN), RECEIPT_LEN)
+    }
+
+    pub fn publish_receipt_attestation(&self, bytes: &[u8]) -> Result<(), MigrateError> {
+        bounded_attestation(bytes)?;
+        self.write_new(RECEIPT_ATTESTATION_FILE, bytes)
+    }
+
+    pub fn wait_receipt_attestation(&self) -> Result<Vec<u8>, MigrateError> {
+        self.wait_file(RECEIPT_ATTESTATION_FILE, None, ATTESTATION_MAX)
     }
 
     fn refuse_existing(&self, names: &[&str]) -> Result<(), MigrateError> {

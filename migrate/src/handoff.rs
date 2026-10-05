@@ -40,6 +40,12 @@ pub const WRAP_DOMAIN: &[u8] = b"ZNS_MIGRATION_WRAP_V1";
 /// Distinct from `ZNS_MIGRATION_V1`, which binds only the target's offer.
 pub const TRANSFER_REPORT_DOMAIN: &[u8] = b"ZNS_MIGRATION_TRANSFER_V1";
 
+/// Domain separation for [`receipt_report_data`].
+///
+/// Distinct from the offer and transfer domains, so those reports cannot
+/// be presented as a receipt.
+pub const RECEIPT_REPORT_DOMAIN: &[u8] = b"ZNS_MIGRATION_RECEIPT_V1";
+
 const AEAD_NONCE_LEN: usize = 24;
 const TAG_LEN: usize = 16;
 const CIPHERTEXT_LEN: usize = SEED_LEN + TAG_LEN;
@@ -279,6 +285,26 @@ pub fn transfer_report_data(
     input.extend_from_slice(TRANSFER_REPORT_DOMAIN);
     input.extend_from_slice(&offer_bytes);
     input.extend_from_slice(&transfer_bytes);
+    blake2b_512(&input)
+}
+
+/// `BLAKE2b-512(b"ZNS_MIGRATION_RECEIPT_V1" || offer || receipt)`.
+///
+/// The target passes this to `Tee::get_attestation` after the resealed
+/// capsule is on disk. The source accepts a receipt only when its report
+/// matches these exact bytes, so a writer who knows the seed fingerprint
+/// cannot finish the attempt with a receipt the target did not produce.
+pub fn receipt_report_data(
+    offer: &MigrationOffer,
+    receipt: &MigrationReceipt,
+) -> [u8; REPORT_DATA_LEN] {
+    let offer_bytes = encode_offer(offer);
+    let receipt_bytes = encode_receipt(receipt);
+    let mut input =
+        Vec::with_capacity(RECEIPT_REPORT_DOMAIN.len() + offer_bytes.len() + receipt_bytes.len());
+    input.extend_from_slice(RECEIPT_REPORT_DOMAIN);
+    input.extend_from_slice(&offer_bytes);
+    input.extend_from_slice(&receipt_bytes);
     blake2b_512(&input)
 }
 
@@ -609,6 +635,41 @@ mod tests {
         let mut other_offer = offer;
         other_offer.nonce[0] ^= 1;
         assert_ne!(transfer_report_data(&other_offer, &transfer), bound);
+    }
+
+    #[test]
+    fn receipt_report_binds_this_offer_and_this_receipt() {
+        let offer = MigrationOffer {
+            ephemeral_pubkey: [1u8; 32],
+            nonce: [2u8; 32],
+            manifest_hash: [3u8; 32],
+        };
+        let receipt = MigrationReceipt {
+            manifest_hash: [3u8; 32],
+            new_capsule_hash: [4u8; 32],
+            seed_fingerprint: [5u8; 32],
+        };
+        let bound = receipt_report_data(&offer, &receipt);
+        assert_ne!(bound, zns_canon::migration::migration_report_data(&offer));
+        assert_ne!(
+            bound,
+            transfer_report_data(
+                &offer,
+                &EncryptedSeedTransfer {
+                    sender_ephemeral_pubkey: [4u8; 32],
+                    nonce: [5u8; AEAD_NONCE_LEN],
+                    ciphertext: [6u8; CIPHERTEXT_LEN],
+                }
+            )
+        );
+
+        let mut other_offer = offer;
+        other_offer.nonce[0] ^= 1;
+        assert_ne!(receipt_report_data(&other_offer, &receipt), bound);
+
+        let mut other_capsule = receipt;
+        other_capsule.new_capsule_hash[0] ^= 1;
+        assert_ne!(receipt_report_data(&offer, &other_capsule), bound);
     }
 
     #[test]

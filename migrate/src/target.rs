@@ -4,8 +4,10 @@
 //! offer and this ciphertext, and that report's measurement is the manifest's
 //! `from_measurement`. After the capsule is linked into place, it is read
 //! back and unsealed. The receipt is written only when that reopened seed
-//! matches the one just decrypted. An existing capsule is left untouched
-//! unless the operator set `--replace-after-verified-migration`.
+//! matches the one just decrypted. The receipt is published with an
+//! attestation that binds this offer and this receipt, and only when that
+//! report's measurement is `to_measurement`. An existing capsule is left
+//! untouched unless the operator set `--replace-after-verified-migration`.
 
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -94,7 +96,19 @@ pub fn run(
         new_capsule_hash: handoff::hash_capsule(&persisted),
         seed_fingerprint: parsed.fingerprint,
     };
+    let receipt_report = handoff::receipt_report_data(&offer, &receipt);
+    let receipt_attestation = tee.get_attestation(&receipt_report)?;
+    if receipt_attestation.as_bytes().is_empty() {
+        return Err(MigrateError::transport("TEE returned an empty attestation"));
+    }
+    let receipt_measurement = attest::measurement(receipt_attestation.as_bytes(), &receipt_report)?;
+    require_measurement(
+        &receipt_measurement,
+        &manifest.to_measurement,
+        MigrateError::Measurement,
+    )?;
     transport.publish_receipt(&handoff::encode_receipt(&receipt))?;
+    transport.publish_receipt_attestation(receipt_attestation.as_bytes())?;
     info!(
         capsule = hex::encode(receipt.new_capsule_hash),
         fingerprint = hex::encode(receipt.seed_fingerprint),

@@ -9,14 +9,16 @@
 //! attest the transfer
 //! publish the transfer only if our measurement is from_measurement
 //! zeroize seed
-//! wait for receipt
-//! exit
+//! wait for the receipt and the target's attestation of it
+//! exit only when that report measurement is to_measurement
 //! ```
 //!
 //! There is no second offer. A failed check of the target returns before the
 //! capsule is unsealed. The transfer is published only with an attestation
 //! that binds this offer and this ciphertext, and only when that report's
-//! measurement is the manifest's `from_measurement`.
+//! measurement is the manifest's `from_measurement`. The receipt is accepted
+//! only when a target report binds this offer and this receipt, and that
+//! report's measurement is `to_measurement`.
 
 use rand::rngs::OsRng;
 use tracing::info;
@@ -28,7 +30,7 @@ use zns_canon::upgrade::{self, UpgradeManifest};
 use crate::attest::{self, require_measurement};
 use crate::cli::Args;
 use crate::error::MigrateError;
-use crate::handoff::{self, MigrationReceipt};
+use crate::handoff;
 use crate::transport::{self, DirTransport};
 
 pub fn run(
@@ -89,8 +91,17 @@ pub fn run(
     transport.publish_source_attestation(source_report.as_bytes())?;
     info!("seed wrapped; plaintext dropped");
 
-    let receipt = wait_receipt(transport)?;
+    let receipt = wait_peer(transport.wait_receipt())?;
+    let receipt = handoff::decode_receipt(&receipt)?;
     handoff::verify_receipt(&receipt, manifest, &capsule_bytes, &capsule.fingerprint)?;
+    let receipt_report = wait_peer(transport.wait_receipt_attestation())?;
+    let expected = handoff::receipt_report_data(&offer, &receipt);
+    let receipt_measurement = attest::measurement(&receipt_report, &expected)?;
+    require_measurement(
+        &receipt_measurement,
+        &manifest.to_measurement,
+        MigrateError::Measurement,
+    )?;
     info!(
         capsule = hex::encode(receipt.new_capsule_hash),
         fingerprint = hex::encode(receipt.seed_fingerprint),
@@ -115,9 +126,9 @@ pub(crate) fn authorize(
     Ok(())
 }
 
-fn wait_receipt(transport: &DirTransport) -> Result<MigrationReceipt, MigrateError> {
-    match transport.wait_receipt() {
-        Ok(bytes) => Ok(handoff::decode_receipt(&bytes)?),
+fn wait_peer(result: Result<Vec<u8>, MigrateError>) -> Result<Vec<u8>, MigrateError> {
+    match result {
+        Ok(bytes) => Ok(bytes),
         Err(error) if error.to_string().contains("timed out") => Err(MigrateError::transport(
             format!("{error}; encrypted seed was already written, not retrying"),
         )),

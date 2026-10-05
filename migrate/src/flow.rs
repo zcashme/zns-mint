@@ -6,13 +6,16 @@ use std::time::Duration;
 use rand::rngs::OsRng;
 use secrecy::{ExposeSecret, Secret};
 use zns_canon::capsule::{self, SEED_LEN};
-use zns_canon::sealing::FakeTee;
-use zns_canon::upgrade::UpgradeManifest;
+use zns_canon::migration::{self, MigrationOffer};
+use zns_canon::sealing::{FakeTee, Tee};
+use zns_canon::upgrade::{self, UpgradeManifest};
 
 use crate::cli::{Args, Role};
 use crate::execute;
 use crate::handoff;
-use crate::transport::{ENCRYPTED_SEED_FILE, OFFER_FILE, RECEIPT_FILE};
+use crate::transport::{
+    DirTransport, ENCRYPTED_SEED_FILE, OFFER_FILE, RECEIPT_ATTESTATION_FILE, RECEIPT_FILE,
+};
 
 struct Fixture {
     root: PathBuf,
@@ -156,6 +159,12 @@ fn source_and_target_move_the_seed_and_reopen_the_new_capsule() {
     .unwrap();
     assert_eq!(receipt.new_capsule_hash, handoff::hash_capsule(&persisted));
     assert_eq!(receipt.seed_fingerprint, source_capsule.fingerprint);
+    let offer =
+        handoff::decode_offer(&fs::read(fixture.channel().join(OFFER_FILE)).unwrap()).unwrap();
+    let receipt_report = fs::read(fixture.channel().join(RECEIPT_ATTESTATION_FILE)).unwrap();
+    let expected = handoff::receipt_report_data(&offer, &receipt);
+    let measurement = crate::attest::measurement(&receipt_report, &expected).unwrap();
+    assert_eq!(measurement, fixture.manifest.to_measurement);
 }
 
 #[test]
@@ -291,4 +300,56 @@ fn a_writer_cannot_install_a_seed_the_source_did_not_attest() {
         "{err}"
     );
     assert_eq!(fs::read(output).unwrap(), b"keep-me");
+}
+
+#[test]
+fn a_forged_receipt_does_not_finish_the_source() {
+    let fixture = Fixture::new("receipt", [0xFA; 48], "guest-2");
+    fixture.seal_input();
+    let transport = DirTransport::open(&fixture.channel(), Duration::from_secs(5)).unwrap();
+    let args = fixture.args(Role::Source, false, Duration::from_secs(5));
+    let source = thread::spawn(move || execute(args));
+
+    transport.target_begin().unwrap();
+    let mut rng = OsRng;
+    let keypair = handoff::generate_ephemeral_keypair(&mut rng);
+    let mut nonce = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rng, &mut nonce);
+    let manifest_hash = upgrade::manifest_hash(&fixture.manifest);
+    let offer = MigrationOffer {
+        ephemeral_pubkey: keypair.public,
+        nonce,
+        manifest_hash,
+    };
+    let report_data = migration::migration_report_data(&offer);
+    let attestation = FakeTee.get_attestation(&report_data).unwrap();
+    transport
+        .publish_offer(&handoff::encode_offer(&offer))
+        .unwrap();
+    transport
+        .publish_attestation(attestation.as_bytes())
+        .unwrap();
+    let _transfer = transport.wait_encrypted_seed().unwrap();
+    let _source_report = transport.wait_source_attestation().unwrap();
+
+    let input = fs::read(fixture.input()).unwrap();
+    let parsed = capsule::parse_capsule(&input).unwrap();
+    let receipt = handoff::MigrationReceipt {
+        manifest_hash,
+        new_capsule_hash: [0xab; 32],
+        seed_fingerprint: parsed.fingerprint,
+    };
+    handoff::verify_receipt(&receipt, &fixture.manifest, &input, &parsed.fingerprint).unwrap();
+    transport
+        .publish_receipt(&handoff::encode_receipt(&receipt))
+        .unwrap();
+    transport
+        .publish_receipt_attestation(attestation.as_bytes())
+        .unwrap();
+
+    let err = source.join().unwrap().unwrap_err();
+    assert!(
+        err.to_string().contains("report_data does not match"),
+        "{err}"
+    );
 }

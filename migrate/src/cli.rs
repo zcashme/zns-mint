@@ -21,6 +21,7 @@ unseals anything. The directory is an untrusted one-shot channel:
     encrypted_seed.bin
     source_attestation.bin
     receipt.bin
+    receipt_attestation.bin
 
 Use a fresh directory for each attempt. The capsule stays outside it.
 Target will not overwrite an existing capsule unless
@@ -34,7 +35,9 @@ Maintainer signatures on the manifest are not checked: zns-canon does not
 implement that verification yet. Source requires the target report's
 measurement to equal to_measurement. Target requires the source report's
 measurement to equal from_measurement, and that report must bind the offer
-and the ciphertext, before it installs a capsule.
+and the ciphertext, before it installs a capsule. Source accepts the receipt
+only when receipt_attestation.bin binds that offer and that receipt, and the
+report measurement equals to_measurement.
 ";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
