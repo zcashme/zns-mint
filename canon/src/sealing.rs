@@ -77,18 +77,24 @@ pub trait Tee: Send + Sync {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RealSnpTee;
 
-/// Derives — never fetches — the sealing key from the SEV-SNP firmware:
-/// `firmware.get_derived_key` returns a VCEK-rooted, per-chip key mixed
-/// from exactly two guest fields, matching the capsule creator:
+/// Derives — never fetches — the sealing key from the SEV-SNP firmware.
+///
+/// The key is mixed from exactly two guest fields, matching the capsule
+/// creator:
 ///   guest_policy — launch conditions (debug, SMT, migration)
 ///   measurement  — code identity (hash of the guest image)
 ///
-/// `image_id` and `family_id` are deliberately excluded: they are
-/// hypervisor-supplied labels with no security content, and including
-/// them makes the key brittle to launch-blob drift. VCEK
-/// (`root_key_select = false`) is stable across reboots; VMRK is random
-/// per launch without a Migration Agent and would brick the capsule on
-/// first reboot.
+/// That binding is the property migration relies on: a different measurement
+/// cannot derive the key that opens an existing capsule. `image_id` and
+/// `family_id` are excluded because they are hypervisor-supplied labels, and
+/// mixing them in would make the key depend on launch-blob drift.
+///
+/// `DerivedKey::new(false, ...)` sets `root_key_select` to 0. The `sev` crate
+/// defines 0 as the VCEK and 1 as the VMRK. VMPL, guest SVN, and TCB version
+/// are passed as 0, and the launch mitigation vector is omitted. The VCEK
+/// root is stable across reboots. The VMRK is random per launch without a
+/// Migration Agent and would make the capsule unopenable after the first
+/// reboot.
 #[cfg(target_os = "linux")]
 impl Tee for RealSnpTee {
     fn derive_sealing_key(&self, _context: &[u8]) -> Result<[u8; 32], TeeError> {
