@@ -1,5 +1,16 @@
 # lib.changelog.md
 
+## 2026-10-05
+
+- `User::fund_attached` and `User::pay_ua` join the harness: a second
+  wallet funded by shielded transfer (no zebrad restart — safe after
+  the mint is live), and shielded payments to an arbitrary address.
+- `verify::block_txids` and `verify::find_verified_name_note` are
+  exported; the slot regression test (`tests/slot_regression.rs`)
+  drives K underpaid claims plus one full-price claim through a single
+  block, asserts block membership with a dust claim decoded before the
+  buyer, and asserts the full-price claim wins the name's slot.
+
 ## 2026-09-24
 
 - New harness library for the boot-completion scenario, replacing

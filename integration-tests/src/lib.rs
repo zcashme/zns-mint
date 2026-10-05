@@ -66,9 +66,11 @@ mod zallet;
 
 pub use phases::{claim, release, update};
 pub use stack::Stack;
+pub use user::User;
 pub use verify::{
-    challenge_txid, registration_txid, registry_commitment_keys, wait_for_verified_name_note,
-    VerifiedNameNote, VECTOR_G_D, VECTOR_PK_D,
+    block_txids, challenge_txid, find_verified_name_note, registration_txid,
+    registry_commitment_keys, wait_for_verified_name_note, VerifiedNameNote, VECTOR_G_D,
+    VECTOR_PK_D,
 };
 
 /// Matches `zns-mint::mint::registry::ANCHOR_POOL_SIZE`.

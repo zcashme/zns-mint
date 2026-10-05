@@ -333,22 +333,7 @@ async fn main() {
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
-                        if let Request::Claim { name, .. } = &request {
-                            if name_notes.note_pending(name) {
-                                tracing::debug!(
-                                    %txid,
-                                    name = %name.as_str(),
-                                    "later claim payment ignored; an earlier Name Note owns the name"
-                                );
-                                continue;
-                            }
-                        }
-                        if !requests.record(txid, request, paid, next_height) {
-                            tracing::debug!(
-                                %txid,
-                                "later claim payment ignored; an earlier queued payment owns the name"
-                            );
-                        }
+                        requests.record(txid, request, paid, next_height);
                     }
                     MintInbound::Echo(echo) => echoes.push((echo, paid, next_height)),
                     MintInbound::Unrecognized => {
@@ -470,7 +455,13 @@ async fn main() {
                             break 'lane true;
                         };
                         // Enactment below resolves the anchor and broadcasts.
-                        name_notes.admit(note_height, claim_note);
+                        if !name_notes.admit(note_height, claim_note) {
+                            tracing::debug!(
+                                %txid,
+                                name = %name.as_str(),
+                                "transition already queued; the earlier payment owns the name"
+                            );
+                        }
                         true
                     }
                     request @ (Request::Update { .. } | Request::Release { .. }) => {
