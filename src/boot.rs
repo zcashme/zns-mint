@@ -179,6 +179,15 @@ const ATTESTATION_REPORT_LEN: usize = 1184;
 /// The boot identity document: written once, at attestation time.
 const IDENTITY_DOC_FILE: &str = "zns_mint_identity.json";
 
+/// Keygen's ceremony record. The anchor txid lives only here.
+#[cfg(not(feature = "regtest"))]
+const CEREMONY_STATE_FILE: &str = "keys/ceremony_state.toml";
+
+/// Genesis facts and the hex-encoded SNP report, one file. `keys/` is
+/// read-only in production, so this stays in the working directory.
+#[cfg(not(feature = "regtest"))]
+const GENESIS_RECORD_FILE: &str = "zns_genesis_record.json";
+
 /// The conf fingerprint is not an identity pin by itself. The keygen
 /// report must carry `BLAKE2b-512(fingerprint ‖ capsule hash)` under the
 /// AMD signature before that fingerprint is used.
@@ -226,6 +235,129 @@ fn read_attestation_report(path: &std::path::Path) -> Vec<u8> {
     file.read_exact(&mut bytes)
         .unwrap_or_else(|error| panic!("FATAL: cannot read {}: {error}", path.display()));
     bytes
+}
+
+/// Reads the ceremony anchor and attests it. The seed is not an input.
+/// A missing txid, a missing birthday, or a birthday that disagrees with
+/// `keys/zns_mint.conf` refuses boot.
+#[cfg(not(feature = "regtest"))]
+fn write_genesis_statement(
+    tee: &dyn Tee,
+    capsule_hash: [u8; 32],
+    fingerprint: [u8; 32],
+    config_birthday: u32,
+) {
+    let text = std::fs::read_to_string(CEREMONY_STATE_FILE)
+        .unwrap_or_else(|error| panic!("FATAL: cannot read {CEREMONY_STATE_FILE}: {error}"));
+    let (txid_hex, ceremony_birthday) =
+        ceremony_anchor(&text).unwrap_or_else(|error| panic!("FATAL: {error}"));
+    let record = genesis_record(
+        genesis_network(),
+        fingerprint,
+        capsule_hash,
+        config_birthday,
+        ceremony_birthday,
+        &txid_hex,
+    )
+    .unwrap_or_else(|error| panic!("FATAL: {error}"));
+    let report_data = zns_canon::genesis::genesis_report_data(&record);
+    let attestation = tee
+        .get_attestation(&report_data)
+        .expect("FATAL: failed to obtain the genesis attestation report");
+    let document = genesis_document(&record, &txid_hex, attestation.as_bytes());
+    // One file, like the identity document. A torn write is a partial file.
+    std::fs::write(GENESIS_RECORD_FILE, &document)
+        .unwrap_or_else(|error| panic!("FATAL: failed to write {GENESIS_RECORD_FILE}: {error}"));
+    tracing::info!(
+        txid = %txid_hex,
+        birthday = record.birthday,
+        "boot: genesis attestation written"
+    );
+}
+
+#[cfg(not(feature = "regtest"))]
+fn genesis_network() -> zns_canon::genesis::NetworkId {
+    use zns_canon::genesis::NetworkId;
+    #[cfg(feature = "testnet")]
+    {
+        NetworkId::Testnet
+    }
+    #[cfg(not(feature = "testnet"))]
+    {
+        NetworkId::Mainnet
+    }
+}
+
+/// The ceremony file's `txid` string, decoded as 32 bytes. That string is
+/// `Transaction::txid`'s display form.
+#[cfg(not(feature = "regtest"))]
+fn genesis_record(
+    network: zns_canon::genesis::NetworkId,
+    fingerprint: [u8; 32],
+    capsule_hash: [u8; 32],
+    config_birthday: u32,
+    ceremony_birthday: u32,
+    txid_hex: &str,
+) -> Result<zns_canon::genesis::GenesisRecord, String> {
+    if ceremony_birthday != config_birthday {
+        return Err(format!(
+            "ceremony birthday {ceremony_birthday} does not match keys/zns_mint.conf birthday {config_birthday}"
+        ));
+    }
+    // TODO: confirm this txid is the anchor on chain. A substituted
+    // ceremony file with the matching birthday still passes these checks.
+    let txid = hex::decode(txid_hex.trim())
+        .map_err(|_| format!("{CEREMONY_STATE_FILE} txid is not hex"))?;
+    let anchor_txid: [u8; 32] = txid
+        .try_into()
+        .map_err(|_| format!("{CEREMONY_STATE_FILE} txid is not 32 bytes"))?;
+    Ok(zns_canon::genesis::GenesisRecord {
+        version: 1,
+        network,
+        seed_fingerprint: fingerprint,
+        capsule_hash,
+        anchor_txid,
+        birthday: ceremony_birthday,
+    })
+}
+
+#[cfg(not(feature = "regtest"))]
+fn ceremony_anchor(text: &str) -> Result<(String, u32), String> {
+    #[derive(serde::Deserialize)]
+    struct CeremonyAnchor {
+        #[serde(default)]
+        txid: Option<String>,
+        #[serde(default)]
+        birthday: Option<u32>,
+    }
+    let parsed: CeremonyAnchor = toml::from_str(text)
+        .map_err(|error| format!("{CEREMONY_STATE_FILE} is invalid: {error}"))?;
+    let txid = parsed
+        .txid
+        .filter(|txid| !txid.trim().is_empty())
+        .ok_or_else(|| format!("{CEREMONY_STATE_FILE} has no anchor txid"))?;
+    let birthday = parsed
+        .birthday
+        .ok_or_else(|| format!("{CEREMONY_STATE_FILE} has no birthday"))?;
+    Ok((txid, birthday))
+}
+
+#[cfg(not(feature = "regtest"))]
+fn genesis_document(
+    record: &zns_canon::genesis::GenesisRecord,
+    txid_hex: &str,
+    report: &[u8],
+) -> Vec<u8> {
+    serde_json::to_vec_pretty(&serde_json::json!({
+        "version": record.version,
+        "network": NETWORK_LABEL,
+        "seed_fingerprint": hex::encode(record.seed_fingerprint),
+        "capsule_hash": hex::encode(record.capsule_hash),
+        "anchor_txid": txid_hex.trim(),
+        "birthday": record.birthday,
+        "report": hex::encode(report),
+    }))
+    .expect("FATAL: genesis record serialization")
 }
 
 fn blake2b256(bytes: &[u8]) -> [u8; 32] {
@@ -285,7 +417,7 @@ impl Boot<Network> {
         // 2. Seed intake + verification: read capsule, require the keygen
         //    attestation to bind its fingerprint, unseal, then derive keys.
         //    The seed lives only inside this block — Secret's Drop wipes it.
-        let (treasury_keys, registry_keys) = {
+        let (treasury_keys, registry_keys, genesis_binding) = {
             tracing::info!("boot: reading seed capsule from keys/zns_seed.capsule");
             let blob = read_capsule_file("keys/zns_seed.capsule").expect(
                 "FATAL: failed to read keys/zns_seed.capsule. The mint cannot boot without the sealed seed.",
@@ -310,12 +442,31 @@ impl Boot<Network> {
             verify_fingerprint(&seed, mint_config.expected_seed_fingerprint.trim());
             #[cfg(feature = "regtest")]
             verify_fingerprint(&seed, "");
+            #[cfg(not(feature = "regtest"))]
+            let genesis_binding = Some((blake2b256(&blob), capsule.fingerprint));
+            #[cfg(feature = "regtest")]
+            let genesis_binding: Option<([u8; 32], [u8; 32])> = None;
             (
                 TreasuryKeys::derive(&network, &seed),
                 RegistryKeys::derive(&network, &seed),
+                genesis_binding,
             )
         };
         tracing::info!("boot: keys derived (treasury=acct0, registry=acct1); seed wiped");
+
+        // The anchor txid and birthday, attested after the seed is gone.
+        // Regtest has no ceremony file, so this binding is unused there.
+        #[cfg(not(feature = "regtest"))]
+        if let Some((capsule_hash, fingerprint)) = genesis_binding {
+            write_genesis_statement(
+                tee.as_ref(),
+                capsule_hash,
+                fingerprint,
+                mint_config.birthday,
+            );
+        }
+        #[cfg(feature = "regtest")]
+        let _ = genesis_binding;
 
         // 3. Born complete: fetch the origin checkpoint and both
         // subtree-root batches, then one `Wallet::new`.
@@ -916,6 +1067,57 @@ mod tests {
         assert_eq!(value["registry_ufvk"], "u1ufvk");
         let decoded = hex::decode(value["report"].as_str().expect("hex report")).expect("hex");
         assert_eq!(decoded, report);
+    }
+
+    #[cfg(not(feature = "regtest"))]
+    #[test]
+    fn genesis_record_uses_the_ceremony_txid_and_birthday() {
+        let txid = "ab".repeat(32);
+        let text = format!("state = \"COMPLETE\"\ntxid = \"{txid}\"\nbirthday = 4408922\n");
+        let (parsed_txid, birthday) = ceremony_anchor(&text).expect("anchor");
+        let record = genesis_record(
+            genesis_network(),
+            [0x11; 32],
+            [0x22; 32],
+            4408922,
+            birthday,
+            &parsed_txid,
+        )
+        .expect("record");
+        assert_eq!(record.version, 1);
+        assert_eq!(record.birthday, 4408922);
+        assert_eq!(hex::encode(record.anchor_txid), txid);
+        assert_eq!(record.seed_fingerprint, [0x11; 32]);
+        assert_eq!(record.capsule_hash, [0x22; 32]);
+        let report = [7u8; 4];
+        let document = genesis_document(&record, &parsed_txid, &report);
+        let value: serde_json::Value = serde_json::from_slice(&document).expect("json");
+        assert_eq!(value["anchor_txid"], txid);
+        assert_eq!(value["birthday"], 4408922);
+        let decoded = hex::decode(value["report"].as_str().expect("hex report")).expect("hex");
+        assert_eq!(decoded, report);
+    }
+
+    #[cfg(not(feature = "regtest"))]
+    #[test]
+    fn genesis_record_refuses_a_birthday_mismatch() {
+        let error = genesis_record(
+            genesis_network(),
+            [0x11; 32],
+            [0x22; 32],
+            100,
+            200,
+            &"ab".repeat(32),
+        )
+        .expect_err("birthdays differ");
+        assert!(error.contains("does not match"));
+    }
+
+    #[cfg(not(feature = "regtest"))]
+    #[test]
+    fn ceremony_anchor_requires_txid_and_birthday() {
+        assert!(ceremony_anchor("state = \"SEALED\"\n").is_err());
+        assert!(ceremony_anchor("txid = \"ab\"\n").is_err());
     }
 
     #[tokio::test]
