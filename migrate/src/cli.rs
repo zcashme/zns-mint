@@ -19,6 +19,7 @@ unseals anything. The directory is an untrusted one-shot channel:
     offer.bin
     attestation.bin
     encrypted_seed.bin
+    source_attestation.bin
     receipt.bin
 
 Use a fresh directory for each attempt. The capsule stays outside it.
@@ -30,8 +31,10 @@ Target will not overwrite an existing capsule unless
 --timeout-secs <N> is how long to wait for the peer (default 120, max 86400).
 
 Maintainer signatures on the manifest are not checked: zns-canon does not
-implement that verification yet. Source still requires the target report's
-measurement to equal the manifest's to_measurement.
+implement that verification yet. Source requires the target report's
+measurement to equal to_measurement. Target requires the source report's
+measurement to equal from_measurement, and that report must bind the offer
+and the ciphertext, before it installs a capsule.
 ";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);

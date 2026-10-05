@@ -20,6 +20,7 @@ use crate::handoff::{OFFER_LEN, RECEIPT_LEN, TRANSFER_LEN};
 pub const OFFER_FILE: &str = "offer.bin";
 pub const ATTESTATION_FILE: &str = "attestation.bin";
 pub const ENCRYPTED_SEED_FILE: &str = "encrypted_seed.bin";
+pub const SOURCE_ATTESTATION_FILE: &str = "source_attestation.bin";
 pub const RECEIPT_FILE: &str = "receipt.bin";
 pub const SOURCE_READY_FILE: &str = "source.ready";
 
@@ -31,6 +32,7 @@ const PROTOCOL_FILES: &[&str] = &[
     OFFER_FILE,
     ATTESTATION_FILE,
     ENCRYPTED_SEED_FILE,
+    SOURCE_ATTESTATION_FILE,
     RECEIPT_FILE,
 ];
 
@@ -105,12 +107,7 @@ impl DirTransport {
     }
 
     pub fn publish_attestation(&self, bytes: &[u8]) -> Result<(), MigrateError> {
-        if bytes.is_empty() || bytes.len() > ATTESTATION_MAX {
-            return Err(MigrateError::transport(format!(
-                "attestation is {} bytes",
-                bytes.len()
-            )));
-        }
+        bounded_attestation(bytes)?;
         self.write_new(ATTESTATION_FILE, bytes)
     }
 
@@ -121,6 +118,15 @@ impl DirTransport {
     pub fn publish_encrypted_seed(&self, bytes: &[u8]) -> Result<(), MigrateError> {
         exact("encrypted seed", bytes, TRANSFER_LEN)?;
         self.write_new(ENCRYPTED_SEED_FILE, bytes)
+    }
+
+    pub fn publish_source_attestation(&self, bytes: &[u8]) -> Result<(), MigrateError> {
+        bounded_attestation(bytes)?;
+        self.write_new(SOURCE_ATTESTATION_FILE, bytes)
+    }
+
+    pub fn wait_source_attestation(&self) -> Result<Vec<u8>, MigrateError> {
+        self.wait_file(SOURCE_ATTESTATION_FILE, None, ATTESTATION_MAX)
     }
 
     pub fn wait_encrypted_seed(&self) -> Result<Vec<u8>, MigrateError> {
@@ -240,6 +246,16 @@ impl DirTransport {
             }
         }
     }
+}
+
+fn bounded_attestation(bytes: &[u8]) -> Result<(), MigrateError> {
+    if bytes.is_empty() || bytes.len() > ATTESTATION_MAX {
+        return Err(MigrateError::transport(format!(
+            "attestation is {} bytes",
+            bytes.len()
+        )));
+    }
+    Ok(())
 }
 
 fn exact(label: &str, bytes: &[u8], len: usize) -> Result<(), MigrateError> {

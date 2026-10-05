@@ -1,9 +1,11 @@
 //! M2. The attested ephemeral key is published before any seed arrives.
 //!
-//! After the capsule is linked into place, it is read back and unsealed. The
-//! receipt is written only when that reopened seed matches the one just
-//! decrypted. An existing capsule is left untouched unless the operator set
-//! `--replace-after-verified-migration`.
+//! A transfer is decrypted only after its source attestation matches this
+//! offer and this ciphertext, and that report's measurement is the manifest's
+//! `from_measurement`. After the capsule is linked into place, it is read
+//! back and unsealed. The receipt is written only when that reopened seed
+//! matches the one just decrypted. An existing capsule is left untouched
+//! unless the operator set `--replace-after-verified-migration`.
 
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -14,6 +16,7 @@ use zns_canon::migration::{self, MigrationOffer};
 use zns_canon::sealing::Tee;
 use zns_canon::upgrade::{self, UpgradeManifest};
 
+use crate::attest::{self, require_measurement};
 use crate::cli::Args;
 use crate::error::MigrateError;
 use crate::handoff::{self, MigrationReceipt};
@@ -59,7 +62,16 @@ pub fn run(
     transport.publish_attestation(attestation.as_bytes())?;
     info!("offer attested");
 
-    let transfer = handoff::decode_transfer(&transport.wait_encrypted_seed()?)?;
+    let transfer_bytes = transport.wait_encrypted_seed()?;
+    let source_report = transport.wait_source_attestation()?;
+    let transfer = handoff::decode_transfer(&transfer_bytes)?;
+    let expected = handoff::transfer_report_data(&offer, &transfer);
+    let source_measurement = attest::measurement(&source_report, &expected)?;
+    require_measurement(
+        &source_measurement,
+        &manifest.from_measurement,
+        MigrateError::SourceMeasurement,
+    )?;
     let seed = {
         let seed = handoff::decrypt_transfer(&keypair.secret, &offer, &transfer)?;
         drop(keypair);

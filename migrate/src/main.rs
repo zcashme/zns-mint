@@ -5,6 +5,7 @@
 //! and the migration `report_data` come from `zns-canon`. SNP report
 //! verification on the source is `zns_canon::attestation::stored`.
 
+mod attest;
 mod cli;
 mod error;
 mod handoff;

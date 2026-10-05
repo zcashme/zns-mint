@@ -21,7 +21,16 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(name: &str, to_measurement: [u8; 48], release: &str) -> Self {
+    fn new(name: &str, measurement: [u8; 48], release: &str) -> Self {
+        Self::with_measurements(name, measurement, measurement, release)
+    }
+
+    fn with_measurements(
+        name: &str,
+        from_measurement: [u8; 48],
+        to_measurement: [u8; 48],
+        release: &str,
+    ) -> Self {
         let root =
             std::env::temp_dir().join(format!("zns-migrate-flow-{}-{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&root);
@@ -30,7 +39,7 @@ impl Fixture {
         let manifest = UpgradeManifest {
             version: 1,
             sequence: 4,
-            from_measurement: [0x11; 48],
+            from_measurement,
             to_measurement,
             artifact_hash: [0x33; 32],
             release: release.to_string(),
@@ -231,4 +240,55 @@ fn capsule_inside_the_transport_directory_is_refused() {
     let err = execute(args).unwrap_err();
     assert!(err.to_string().contains("inside the transport"), "{err}");
     assert!(!fixture.channel().join(OFFER_FILE).exists());
+}
+
+#[test]
+fn source_does_not_publish_when_its_measurement_is_not_authorized() {
+    let fixture = Fixture::with_measurements("from", [0x11; 48], [0xFA; 48], "guest-2");
+    fixture.seal_input();
+    let (source, target) = both(&fixture, false, Duration::from_secs(1));
+    let source = source.unwrap_err().to_string();
+    assert!(
+        source.contains("source measurement is not authorized"),
+        "{source}"
+    );
+    assert!(target.unwrap_err().to_string().contains("timed out"));
+    assert!(!fixture.channel().join(ENCRYPTED_SEED_FILE).exists());
+    assert!(!fixture.output().exists());
+}
+
+#[test]
+fn a_writer_cannot_install_a_seed_the_source_did_not_attest() {
+    let fixture = Fixture::new("inject", [0xFA; 48], "guest-2");
+    fs::write(fixture.output(), b"keep-me").unwrap();
+    let transport =
+        crate::transport::DirTransport::open(&fixture.channel(), Duration::from_secs(2)).unwrap();
+    transport.source_begin().unwrap();
+    let args = fixture.args(Role::Target, true, Duration::from_secs(2));
+    let output = fixture.output();
+    let target = thread::spawn(move || execute(args));
+
+    let offer = handoff::decode_offer(&transport.wait_offer().unwrap()).unwrap();
+    let attacker = Secret::new([0xee; SEED_LEN]);
+    let transfer = handoff::encrypt_seed_for_target(
+        &attacker,
+        offer.ephemeral_pubkey,
+        offer.nonce,
+        offer.manifest_hash,
+        &mut OsRng,
+    )
+    .unwrap();
+    transport
+        .publish_encrypted_seed(&handoff::encode_transfer(&transfer))
+        .unwrap();
+    transport
+        .publish_source_attestation(b"not-a-source-report")
+        .unwrap();
+
+    let err = target.join().unwrap().unwrap_err();
+    assert!(
+        err.to_string().contains("attestation") || err.to_string().contains("report"),
+        "{err}"
+    );
+    assert_eq!(fs::read(output).unwrap(), b"keep-me");
 }

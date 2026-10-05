@@ -6,15 +6,17 @@
 //! verify target measurement
 //! unseal
 //! encrypt
+//! attest the transfer
+//! publish the transfer only if our measurement is from_measurement
 //! zeroize seed
 //! wait for receipt
 //! exit
 //! ```
 //!
-//! There is no second offer. A failed check returns before the capsule is
-//! unsealed. The sealing key is what proves this guest can open the capsule;
-//! `from_measurement` is covered by the manifest hash the target attested,
-//! and is not compared to a separate local report.
+//! There is no second offer. A failed check of the target returns before the
+//! capsule is unsealed. The transfer is published only with an attestation
+//! that binds this offer and this ciphertext, and only when that report's
+//! measurement is the manifest's `from_measurement`.
 
 use rand::rngs::OsRng;
 use tracing::info;
@@ -23,6 +25,7 @@ use zns_canon::migration::{self, MigrationOffer};
 use zns_canon::sealing::Tee;
 use zns_canon::upgrade::{self, UpgradeManifest};
 
+use crate::attest::{self, require_measurement};
 use crate::cli::Args;
 use crate::error::MigrateError;
 use crate::handoff::{self, MigrationReceipt};
@@ -50,7 +53,7 @@ pub fn run(
     let offer = handoff::decode_offer(&transport.wait_offer()?)?;
     let report = transport.wait_attestation()?;
     let expected = migration::migration_report_data(&offer);
-    let measurement = attested_measurement(&report, &expected)?;
+    let measurement = attest::measurement(&report, &expected)?;
     authorize(manifest, &offer, &measurement)?;
     info!(
         measurement = hex::encode(measurement),
@@ -71,7 +74,19 @@ pub fn run(
         drop(seed);
         transfer
     };
+    let transfer_report = handoff::transfer_report_data(&offer, &transfer);
+    let source_report = tee.get_attestation(&transfer_report)?;
+    if source_report.as_bytes().is_empty() {
+        return Err(MigrateError::transport("TEE returned an empty attestation"));
+    }
+    let source_measurement = attest::measurement(source_report.as_bytes(), &transfer_report)?;
+    require_measurement(
+        &source_measurement,
+        &manifest.from_measurement,
+        MigrateError::SourceMeasurement,
+    )?;
     transport.publish_encrypted_seed(&handoff::encode_transfer(&transfer))?;
+    transport.publish_source_attestation(source_report.as_bytes())?;
     info!("seed wrapped; plaintext dropped");
 
     let receipt = wait_receipt(transport)?;
@@ -89,12 +104,11 @@ pub(crate) fn authorize(
     offer: &MigrationOffer,
     measurement: &[u8; 48],
 ) -> Result<(), MigrateError> {
-    if measurement.iter().all(|byte| *byte == 0) {
-        return Err(MigrateError::ZeroMeasurement);
-    }
-    if measurement != &manifest.to_measurement {
-        return Err(MigrateError::Measurement);
-    }
+    require_measurement(
+        measurement,
+        &manifest.to_measurement,
+        MigrateError::Measurement,
+    )?;
     if offer.manifest_hash != upgrade::manifest_hash(manifest) {
         return Err(MigrateError::ManifestHash);
     }
@@ -108,21 +122,6 @@ fn wait_receipt(transport: &DirTransport) -> Result<MigrationReceipt, MigrateErr
             format!("{error}; encrypted seed was already written, not retrying"),
         )),
         Err(error) => Err(error),
-    }
-}
-
-fn attested_measurement(report: &[u8], expected: &[u8; 64]) -> Result<[u8; 48], MigrateError> {
-    #[cfg(feature = "fake-tee")]
-    {
-        crate::report::measurement(report, expected)
-    }
-    #[cfg(not(feature = "fake-tee"))]
-    {
-        // Parses the report, fetches the VCEK and ASK, and checks the pinned
-        // AMD ARK before report_data is accepted. A failed check aborts with
-        // the FATAL message from zns-canon.
-        let attestation = zns_canon::attestation::stored(report.to_vec(), expected);
-        Ok(attestation.measurement)
     }
 }
 

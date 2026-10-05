@@ -27,12 +27,18 @@ use secrecy::{ExposeSecret, Secret};
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
+use zns_canon::attestation::REPORT_DATA_LEN;
 use zns_canon::capsule::SEED_LEN;
 use zns_canon::migration::MigrationOffer;
 use zns_canon::upgrade::{self, UpgradeManifest};
 
 /// Domain separation for the wrap key and its AEAD associated data.
 pub const WRAP_DOMAIN: &[u8] = b"ZNS_MIGRATION_WRAP_V1";
+
+/// Domain separation for [`transfer_report_data`].
+///
+/// Distinct from `ZNS_MIGRATION_V1`, which binds only the target's offer.
+pub const TRANSFER_REPORT_DOMAIN: &[u8] = b"ZNS_MIGRATION_TRANSFER_V1";
 
 const AEAD_NONCE_LEN: usize = 24;
 const TAG_LEN: usize = 16;
@@ -256,6 +262,26 @@ pub fn decrypt_transfer(
     Ok(secret)
 }
 
+/// `BLAKE2b-512(b"ZNS_MIGRATION_TRANSFER_V1" || offer || transfer)`.
+///
+/// The source passes this to `Tee::get_attestation` after building the
+/// ciphertext. The target accepts a transfer only when its report matches
+/// these exact bytes, so a writer who encrypts some other seed to the
+/// published offer cannot reuse or omit that attestation.
+pub fn transfer_report_data(
+    offer: &MigrationOffer,
+    transfer: &EncryptedSeedTransfer,
+) -> [u8; REPORT_DATA_LEN] {
+    let offer_bytes = encode_offer(offer);
+    let transfer_bytes = encode_transfer(transfer);
+    let mut input =
+        Vec::with_capacity(TRANSFER_REPORT_DOMAIN.len() + offer_bytes.len() + transfer_bytes.len());
+    input.extend_from_slice(TRANSFER_REPORT_DOMAIN);
+    input.extend_from_slice(&offer_bytes);
+    input.extend_from_slice(&transfer_bytes);
+    blake2b_512(&input)
+}
+
 pub fn ensure_same_seed(
     left: &Secret<[u8; SEED_LEN]>,
     right: &Secret<[u8; SEED_LEN]>,
@@ -417,6 +443,17 @@ fn wrap_aad(
     aad
 }
 
+fn blake2b_512(input: &[u8]) -> [u8; REPORT_DATA_LEN] {
+    let digest = Blake2bParams::new()
+        .hash_length(REPORT_DATA_LEN)
+        .to_state()
+        .update(input)
+        .finalize();
+    let mut out = [0u8; REPORT_DATA_LEN];
+    out.copy_from_slice(digest.as_bytes());
+    out
+}
+
 fn blake2b_256(input: &[u8]) -> [u8; 32] {
     let digest = Blake2bParams::new()
         .hash_length(32)
@@ -544,6 +581,34 @@ mod tests {
         let error =
             encrypt_seed_for_target(&seed(), public, [1u8; 32], [2u8; 32], &mut rng).unwrap_err();
         assert_eq!(error, HandoffError::NonContributory);
+    }
+
+    #[test]
+    fn transfer_report_binds_the_offer_and_the_ciphertext() {
+        let offer = MigrationOffer {
+            ephemeral_pubkey: [1u8; 32],
+            nonce: [2u8; 32],
+            manifest_hash: [3u8; 32],
+        };
+        let transfer = EncryptedSeedTransfer {
+            sender_ephemeral_pubkey: [4u8; 32],
+            nonce: [5u8; AEAD_NONCE_LEN],
+            ciphertext: [6u8; CIPHERTEXT_LEN],
+        };
+        let bound = transfer_report_data(&offer, &transfer);
+        assert_ne!(bound, zns_canon::migration::migration_report_data(&offer));
+
+        let mut other_sender = transfer;
+        other_sender.sender_ephemeral_pubkey[0] ^= 1;
+        assert_ne!(transfer_report_data(&offer, &other_sender), bound);
+
+        let mut other_ciphertext = transfer;
+        other_ciphertext.ciphertext[0] ^= 1;
+        assert_ne!(transfer_report_data(&offer, &other_ciphertext), bound);
+
+        let mut other_offer = offer;
+        other_offer.nonce[0] ^= 1;
+        assert_ne!(transfer_report_data(&other_offer, &transfer), bound);
     }
 
     #[test]

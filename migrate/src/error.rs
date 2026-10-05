@@ -32,6 +32,9 @@ pub enum MigrateError {
     #[error("target measurement is not authorized")]
     Measurement,
 
+    #[error("source measurement is not authorized")]
+    SourceMeasurement,
+
     #[error("attestation measurement is all zeros")]
     ZeroMeasurement,
 
