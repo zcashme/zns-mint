@@ -270,7 +270,7 @@ pub fn decrypt_transfer(
 
 /// `BLAKE2b-512(b"ZNS_MIGRATION_TRANSFER_V1" || offer || transfer)`.
 ///
-/// The source passes this to `Tee::get_attestation` after building the
+/// The source passes this to `get_attestation` after building the
 /// ciphertext. The target accepts a transfer only when its report matches
 /// these exact bytes, so a writer who encrypts some other seed to the
 /// published offer cannot reuse or omit that attestation.
@@ -290,7 +290,7 @@ pub fn transfer_report_data(
 
 /// `BLAKE2b-512(b"ZNS_MIGRATION_RECEIPT_V1" || offer || receipt)`.
 ///
-/// The target passes this to `Tee::get_attestation` after the resealed
+/// The target passes this to `get_attestation` after the resealed
 /// capsule is on disk. The source accepts a receipt only when its report
 /// matches these exact bytes, so a writer who knows the seed fingerprint
 /// cannot finish the attempt with a receipt the target did not produce.

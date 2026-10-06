@@ -15,7 +15,7 @@ use secrecy::Secret;
 use tracing::info;
 use zns_canon::capsule::{self, SEED_LEN};
 use zns_canon::migration::{self, MigrationOffer};
-use zns_canon::sealing::Tee;
+use zns_canon::sealing::{get_attestation, SealingKey};
 use zns_canon::upgrade::{self, UpgradeManifest};
 
 use crate::attest::{self, require_measurement};
@@ -26,7 +26,7 @@ use crate::persist;
 use crate::transport::{self, DirTransport};
 
 pub fn run(
-    tee: &impl Tee,
+    sealing_key: &SealingKey,
     args: &Args,
     manifest: &UpgradeManifest,
     transport: &DirTransport,
@@ -56,7 +56,7 @@ pub fn run(
         manifest_hash,
     };
     let report_data = migration::migration_report_data(&offer);
-    let attestation = tee.get_attestation(&report_data)?;
+    let attestation = get_attestation(&report_data)?;
     if attestation.as_bytes().is_empty() {
         return Err(MigrateError::transport("TEE returned an empty attestation"));
     }
@@ -80,14 +80,18 @@ pub fn run(
         seed
     };
 
-    let capsule = capsule::seal_seed(tee, &seed, &mut rng)?;
+    let capsule = capsule::seal_seed(sealing_key, &seed, &mut rng)?;
     let bytes = capsule::serialize_capsule(&capsule)?;
     let staged = persist::stage(output, &bytes)?;
-    prove_persisted(tee, &seed, &capsule::read_capsule_file(staged.path())?)?;
+    prove_persisted(
+        sealing_key,
+        &seed,
+        &capsule::read_capsule_file(staged.path())?,
+    )?;
     staged.install(output, args.replace_after_verified_migration)?;
 
     let persisted = capsule::read_capsule_file(output)?;
-    let parsed = prove_persisted(tee, &seed, &persisted)?;
+    let parsed = prove_persisted(sealing_key, &seed, &persisted)?;
     drop(seed);
     info!(path = %output.display(), "capsule reopened");
 
@@ -97,7 +101,7 @@ pub fn run(
         seed_fingerprint: parsed.fingerprint,
     };
     let receipt_report = handoff::receipt_report_data(&offer, &receipt);
-    let receipt_attestation = tee.get_attestation(&receipt_report)?;
+    let receipt_attestation = get_attestation(&receipt_report)?;
     if receipt_attestation.as_bytes().is_empty() {
         return Err(MigrateError::transport("TEE returned an empty attestation"));
     }
@@ -118,12 +122,12 @@ pub fn run(
 }
 
 fn prove_persisted(
-    tee: &impl Tee,
+    sealing_key: &SealingKey,
     seed: &Secret<[u8; SEED_LEN]>,
     bytes: &[u8],
 ) -> Result<zns_canon::capsule::Capsule, MigrateError> {
     let parsed = capsule::parse_capsule(bytes)?;
-    let opened = capsule::unseal_seed(tee, &parsed)?;
+    let opened = capsule::unseal_seed(sealing_key, &parsed)?;
     handoff::ensure_same_seed(seed, &opened)?;
     Ok(parsed)
 }

@@ -15,16 +15,8 @@ mod source;
 mod target;
 mod transport;
 
-#[cfg(feature = "fake-tee")]
-mod report;
-
-#[cfg(all(test, feature = "fake-tee"))]
-mod flow;
-
 use cli::{Command, USAGE};
 use error::MigrateError;
-use zns_canon::sealing::Tee;
-
 fn main() {
     let code = match run(std::env::args()) {
         Ok(()) => 0,
@@ -60,20 +52,13 @@ where
 pub(crate) fn execute(args: cli::Args) -> Result<(), MigrateError> {
     let loaded = manifest::load(&args.manifest)?;
     let channel = transport::DirTransport::open(&args.transport_dir, args.timeout)?;
-    let tee = open_tee();
+    // Migration attests every step, so it runs only on the enclave: derive
+    // the hardware sealing key once and pass it through.
+    let sealing_key =
+        zns_canon::sealing::derive_sealing_key(zns_canon::capsule::CAPSULE_KEY_CONTEXT)
+            .map_err(MigrateError::Tee)?;
     match args.role {
-        cli::Role::Source => source::run(&tee, &args, &loaded, &channel),
-        cli::Role::Target => target::run(&tee, &args, &loaded, &channel),
-    }
-}
-
-fn open_tee() -> impl Tee {
-    #[cfg(feature = "fake-tee")]
-    {
-        zns_canon::sealing::FakeTee
-    }
-    #[cfg(not(feature = "fake-tee"))]
-    {
-        zns_canon::sealing::RealSnpTee
+        cli::Role::Source => source::run(&sealing_key, &args, &loaded, &channel),
+        cli::Role::Target => target::run(&sealing_key, &args, &loaded, &channel),
     }
 }

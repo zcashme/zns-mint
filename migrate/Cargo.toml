@@ -8,8 +8,6 @@ publish = false
 
 [features]
 default = []
-# Development TEE. zns-canon refuses this feature in release builds.
-fake-tee = ["dep:sha2", "zns-canon/fake-tee"]
 
 [dependencies]
 blake2b_simd = "1"
@@ -19,7 +17,6 @@ libc = "0.2"
 rand = "0.8"
 secrecy = "0.8"
 serde = { version = "1", features = ["derive"] }
-sha2 = { version = "0.10", optional = true }
 thiserror = "1"
 toml = "0.8"
 tracing = "0.1"

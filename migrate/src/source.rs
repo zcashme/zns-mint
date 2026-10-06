@@ -24,7 +24,7 @@ use rand::rngs::OsRng;
 use tracing::info;
 use zns_canon::capsule;
 use zns_canon::migration::{self, MigrationOffer};
-use zns_canon::sealing::Tee;
+use zns_canon::sealing::{get_attestation, SealingKey};
 use zns_canon::upgrade::{self, UpgradeManifest};
 
 use crate::attest::{self, require_measurement};
@@ -34,7 +34,7 @@ use crate::handoff;
 use crate::transport::{self, DirTransport};
 
 pub fn run(
-    tee: &impl Tee,
+    sealing_key: &SealingKey,
     args: &Args,
     manifest: &UpgradeManifest,
     transport: &DirTransport,
@@ -65,7 +65,7 @@ pub fn run(
     let capsule_bytes = capsule::read_capsule_file(input)?;
     let capsule = capsule::parse_capsule(&capsule_bytes)?;
     let transfer = {
-        let seed = capsule::unseal_seed(tee, &capsule)?;
+        let seed = capsule::unseal_seed(sealing_key, &capsule)?;
         let transfer = handoff::encrypt_seed_for_target(
             &seed,
             offer.ephemeral_pubkey,
@@ -77,7 +77,7 @@ pub fn run(
         transfer
     };
     let transfer_report = handoff::transfer_report_data(&offer, &transfer);
-    let source_report = tee.get_attestation(&transfer_report)?;
+    let source_report = get_attestation(&transfer_report)?;
     if source_report.as_bytes().is_empty() {
         return Err(MigrateError::transport("TEE returned an empty attestation"));
     }
