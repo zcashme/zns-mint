@@ -23,7 +23,7 @@ const OTP_READ_TIMEOUT: Duration = Duration::from_secs(180);
 ///
 /// Checks: mint logs the note in flight (not rejected / non-request /
 /// unauthorized); `zns-verify` decrypt + `cmx`; fields alice / claim /
-/// user UA / `none` / 0 / FakeTee Registry keys; the mint's `txid=` line
+/// user UA / `none` / 0 / non-tee Registry keys; the mint's `txid=` line
 /// matches the on-chain registration.
 pub async fn claim(stack: &mut Stack) -> Result<VerifiedNameNote> {
     let mark = stack.mint.log_text().len();

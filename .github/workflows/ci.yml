@@ -48,9 +48,6 @@ jobs:
       - name: clippy (regtest)
         run: cargo clippy --all-targets --features regtest -- -D warnings
 
-      - name: clippy (regtest,fake-tee)
-        run: cargo clippy --all-targets --features regtest,fake-tee -- -D warnings
-
       - name: test (default)
         run: cargo test
 
@@ -173,11 +170,13 @@ jobs:
             cargo test --test boot_completion -- --nocapture
 
   # Black-box happy path (claim → update → release) against the real
-  # regtest stack, on every PR and master push. The ceremony-tx cache is
+  # regtest stack, on every PR and master push. Runs after the test job,
+  # so a clippy or unit-test failure skips it. The ceremony-tx cache is
   # the only cloud round-trip: the regtest chain through FIXTURE_HEIGHT
   # is deterministic, so a signed ceremony replays without re-proving.
   happy-path:
     name: happy-path
+    needs: ci
     runs-on: zvs
     timeout-minutes: 20
     steps:
@@ -261,11 +260,6 @@ jobs:
           path: integration-tests/ceremony-tx.hex
           key: ceremony-tx-v2-6.3.0-${{ hashFiles('integration-tests/src/**', 'integration-tests/tests/**', 'integration-tests/Cargo.lock') }}
 
-      - name: Seal fixture capsule
-        env:
-          CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target-happy-path
-        run: cargo run --example write_fake_capsule --features fake-tee
-
       - name: Build mint for happy path
         env:
           CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target-happy-path
@@ -274,7 +268,7 @@ jobs:
             --config profile.dev.package.orchard.opt-level=3 \
             --config profile.dev.package.halo2_proofs.opt-level=3 \
             --config profile.dev.package.halo2_gadgets.opt-level=3 \
-            build --bin zns-mint --features regtest,fake-tee
+            build --bin zns-mint --features regtest
           test -x "$CARGO_TARGET_DIR/debug/zns-mint"
           echo "ZNS_MINT_BIN=$CARGO_TARGET_DIR/debug/zns-mint" >> "$GITHUB_ENV"
 
@@ -283,7 +277,6 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target-happy-path
           ZNS_MINT_DIR: ${{ github.workspace }}
-          ZNS_SEED_CAPSULE: ${{ github.workspace }}/keys/zns_seed.capsule
           ZNS_CEREMONY_TX_CACHE: ceremony-tx.hex
         run: |
           rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback \
