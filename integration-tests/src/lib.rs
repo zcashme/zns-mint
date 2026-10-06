@@ -553,11 +553,23 @@ pub fn identity_report_data() -> [u8; 64] {
     report_data
 }
 
-/// Seal the all-zero seed under the dev-escape sealing key — the
-/// fixture's `keys/zns_seed.capsule`.
+/// Seal the all-zero seed with the public test key. Boot reads this
+/// file as `keys/zns_seed.capsule`.
 pub fn seal_fixture_capsule() -> Result<Vec<u8>> {
     let key = zns_canon::sealing::dev_sealing_key(zns_canon::capsule::CAPSULE_KEY_CONTEXT);
     let capsule = zns_canon::capsule::seal_seed(&key, &Secret::new(DEV_SEED), &mut OsRng)
         .map_err(|e| anyhow!("seal capsule: {e}"))?;
     zns_canon::capsule::serialize_capsule(&capsule).map_err(|e| anyhow!("serialize capsule: {e}"))
+}
+
+/// Writes the dev capsule and points `ZNS_SEED_CAPSULE` at it.
+///
+/// The harness copies that path when it starts the mint. Keep the
+/// directory alive until `Stack::start` has returned.
+pub fn expose_fixture_capsule() -> Result<tempfile::TempDir> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("zns_seed.capsule");
+    std::fs::write(&path, seal_fixture_capsule()?)?;
+    std::env::set_var("ZNS_SEED_CAPSULE", &path);
+    Ok(dir)
 }

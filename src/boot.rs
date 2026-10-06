@@ -1089,9 +1089,9 @@ mod tests {
         assert_eq!(decoded, report);
     }
 
-    /// Dev-escape docs are self-declaring: mode dev, no report.
+    /// A local test document sets mode to dev and leaves the report empty.
     #[test]
-    fn identity_document_marks_dev_escapes() {
+    fn identity_document_for_local_tests_has_no_report() {
         let doc = dev_identity_document("regtest", "u1ua", "u1ufvk");
         let value: serde_json::Value = serde_json::from_slice(&doc).expect("valid JSON");
         assert_eq!(value["mode"], "dev");

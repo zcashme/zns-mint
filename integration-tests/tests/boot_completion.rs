@@ -1,14 +1,13 @@
-//! Boot-completion proof: the mint, linked in-process on
-//! `--no-default-features --features regtest`, completes `Boot::start()` against a real regtest
-//! Zebra holding only fixture chain facts — built through the real
-//! ownership flow. A real Zallet wallet mines and shields coinbase and
-//! pays the Treasury; the Treasury's own keys author the 40-anchor
-//! Registry ceremony; the wallet is reaped; then boot must return within
-//! a bounded deadline and the fresh FakeTee attestation must bind the
-//! fixture's identity.
+//! Boot-completion proof: the mint, linked in-process with `regtest`,
+//! completes `Boot::start()` against a real regtest Zebra holding only
+//! fixture chain facts — built through the real ownership flow. A real
+//! Zallet wallet mines and shields coinbase and pays the Treasury; the
+//! Treasury's own keys author the 40-anchor Registry ceremony; the wallet
+//! is reaped; then boot must return within a bounded deadline. Regtest
+//! selects non-tee, so the identity document is dev mode and has no report.
 //!
 //! Success is boot evidence, not elapsed sleep: a missing capsule, a
-//! boot failure, or a missing or mismatched attestation cannot pass.
+//! boot failure, or a dev document that still carries a report cannot pass.
 
 use std::time::Duration;
 
