@@ -48,8 +48,8 @@ jobs:
       - name: clippy (regtest)
         run: cargo clippy --all-targets --features regtest -- -D warnings
 
-      - name: clippy (regtest,fake-tee)
-        run: cargo clippy --all-targets --features regtest,fake-tee -- -D warnings
+      - name: clippy (regtest,non-tee)
+        run: cargo clippy --all-targets --features regtest,non-tee -- -D warnings
 
       - name: test (default)
         run: cargo test
@@ -264,7 +264,7 @@ jobs:
       - name: Seal fixture capsule
         env:
           CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target-happy-path
-        run: cargo run --example write_fake_capsule --features fake-tee
+        run: cargo run --example write_fake_capsule --features non-tee
 
       - name: Build mint for happy path
         env:
@@ -274,7 +274,7 @@ jobs:
             --config profile.dev.package.orchard.opt-level=3 \
             --config profile.dev.package.halo2_proofs.opt-level=3 \
             --config profile.dev.package.halo2_gadgets.opt-level=3 \
-            build --bin zns-mint --features regtest,fake-tee
+            build --bin zns-mint --features regtest,non-tee
           test -x "$CARGO_TARGET_DIR/debug/zns-mint"
           echo "ZNS_MINT_BIN=$CARGO_TARGET_DIR/debug/zns-mint" >> "$GITHUB_ENV"
 

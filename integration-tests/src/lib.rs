@@ -553,14 +553,11 @@ pub fn identity_report_data() -> [u8; 64] {
     report_data
 }
 
-/// Seal the all-zero seed into a FakeTee capsule — the fixture's
-/// `keys/zns_seed.capsule`.
+/// Seal the all-zero seed under the dev-escape sealing key — the
+/// fixture's `keys/zns_seed.capsule`.
 pub fn seal_fixture_capsule() -> Result<Vec<u8>> {
-    let capsule = zns_canon::capsule::seal_seed(
-        &zns_canon::sealing::FakeTee,
-        &Secret::new(DEV_SEED),
-        &mut OsRng,
-    )
-    .map_err(|e| anyhow!("seal capsule: {e}"))?;
+    let key = zns_canon::sealing::dev_sealing_key(zns_canon::capsule::CAPSULE_KEY_CONTEXT);
+    let capsule = zns_canon::capsule::seal_seed(&key, &Secret::new(DEV_SEED), &mut OsRng)
+        .map_err(|e| anyhow!("seal capsule: {e}"))?;
     zns_canon::capsule::serialize_capsule(&capsule).map_err(|e| anyhow!("serialize capsule: {e}"))
 }

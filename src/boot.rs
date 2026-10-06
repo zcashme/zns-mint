@@ -32,8 +32,29 @@ use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata};
-use zns_canon::capsule::{parse_capsule, read_capsule_file, unseal_seed};
-use zns_canon::sealing::Tee;
+use zns_canon::capsule::{parse_capsule, read_capsule_file, unseal_seed, CAPSULE_KEY_CONTEXT};
+#[cfg(feature = "non-tee")]
+use zns_canon::sealing::dev_sealing_key;
+#[cfg(not(feature = "non-tee"))]
+use zns_canon::sealing::get_attestation;
+use zns_canon::sealing::{derive_sealing_key, TeeError};
+
+/// Resolves the sealing key for `context`: the hardware key when the SNP
+/// guest device is present, or — in `non-tee` builds only — the public
+/// dev-escape key. Without the feature, no guest device is fatal.
+fn sealing_key(context: &[u8]) -> Result<[u8; 32], TeeError> {
+    let key = derive_sealing_key(context);
+    #[cfg(feature = "non-tee")]
+    {
+        // Any hardware failure (device missing, ioctl error) engages the
+        // dev-escape key. The capsule's AEAD tag still separates the two
+        // worlds: a dev-key boot cannot unseal a production capsule.
+        if key.is_err() {
+            return Ok(dev_sealing_key(context));
+        }
+    }
+    key
+}
 
 // ---------------------------------------------------------------------------
 // Boot life-cycle
@@ -181,11 +202,13 @@ const IDENTITY_DOC_FILE: &str = "zns_mint_identity.json";
 
 /// Keygen's ceremony record. The anchor txid lives only here.
 #[cfg(not(feature = "regtest"))]
+#[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 const CEREMONY_STATE_FILE: &str = "keys/ceremony_state.toml";
 
 /// Genesis facts and the hex-encoded SNP report, one file. `keys/` is
 /// read-only in production, so this stays in the working directory.
 #[cfg(not(feature = "regtest"))]
+#[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 const GENESIS_RECORD_FILE: &str = "zns_genesis_record.json";
 
 /// The conf fingerprint is not an identity pin by itself. The keygen
@@ -239,14 +262,10 @@ fn read_attestation_report(path: &std::path::Path) -> Vec<u8> {
 
 /// Reads the ceremony anchor and attests it. The seed is not an input.
 /// A missing txid, a missing birthday, or a birthday that disagrees with
-/// `keys/zns_mint.conf` refuses boot.
-#[cfg(not(feature = "regtest"))]
-fn write_genesis_statement(
-    tee: &dyn Tee,
-    capsule_hash: [u8; 32],
-    fingerprint: [u8; 32],
-    config_birthday: u32,
-) {
+/// `keys/zns_mint.conf` refuses boot. `non-tee` builds skip this: no
+/// attestation exists in dev mode.
+#[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
+fn write_genesis_statement(capsule_hash: [u8; 32], fingerprint: [u8; 32], config_birthday: u32) {
     let text = std::fs::read_to_string(CEREMONY_STATE_FILE)
         .unwrap_or_else(|error| panic!("FATAL: cannot read {CEREMONY_STATE_FILE}: {error}"));
     let (txid_hex, ceremony_birthday) =
@@ -261,8 +280,7 @@ fn write_genesis_statement(
     )
     .unwrap_or_else(|error| panic!("FATAL: {error}"));
     let report_data = zns_canon::genesis::genesis_report_data(&record);
-    let attestation = tee
-        .get_attestation(&report_data)
+    let attestation = get_attestation(&report_data)
         .expect("FATAL: failed to obtain the genesis attestation report");
     let document = genesis_document(&record, &txid_hex, attestation.as_bytes());
     // One file, like the identity document. A torn write is a partial file.
@@ -276,6 +294,7 @@ fn write_genesis_statement(
 }
 
 #[cfg(not(feature = "regtest"))]
+#[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 fn genesis_network() -> zns_canon::genesis::NetworkId {
     use zns_canon::genesis::NetworkId;
     #[cfg(feature = "testnet")]
@@ -291,6 +310,7 @@ fn genesis_network() -> zns_canon::genesis::NetworkId {
 /// The ceremony file's `txid` string, decoded as 32 bytes. That string is
 /// `Transaction::txid`'s display form.
 #[cfg(not(feature = "regtest"))]
+#[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 fn genesis_record(
     network: zns_canon::genesis::NetworkId,
     fingerprint: [u8; 32],
@@ -322,6 +342,7 @@ fn genesis_record(
 }
 
 #[cfg(not(feature = "regtest"))]
+#[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 fn ceremony_anchor(text: &str) -> Result<(String, u32), String> {
     #[derive(serde::Deserialize)]
     struct CeremonyAnchor {
@@ -342,7 +363,7 @@ fn ceremony_anchor(text: &str) -> Result<(String, u32), String> {
     Ok((txid, birthday))
 }
 
-#[cfg(not(feature = "regtest"))]
+#[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 fn genesis_document(
     record: &zns_canon::genesis::GenesisRecord,
     txid_hex: &str,
@@ -381,6 +402,12 @@ impl Boot<Network> {
         let network = boot_network();
         tracing::info!("boot: starting");
 
+        #[cfg(feature = "non-tee")]
+        tracing::warn!(
+            "boot: NON-TEE BUILD — sealing keys are public and there is no attestation; \
+             never point at production"
+        );
+
         // 1. Liveness + connect: confirm both Zebra transports, get chain client.
         let chain_client = connect_zebra().await;
 
@@ -399,17 +426,14 @@ impl Boot<Network> {
         #[cfg(feature = "regtest")]
         let mint_birthday = MINT_BIRTHDAY;
 
-        // 1b. TEE handshake: pick the enclave seam. Production = `RealSnpTee`;
-        // `fake-tee` feature = `FakeTee` for off-SNP tests. Capsule AEAD and
-        // `report_data` stay real; only the key/report source changes.
-        let tee = select_tee();
+        // 1b. TEE handshake: try to open the SNP guest. It always opens on
+        // the enclave; `non-tee` builds fall back to the dev-escape key.
 
         // Access-code root from the TEE, then HMAC to the purpose key
         // (`access-code-v1`). Issuers with that purpose key can recompute
         // codes offline; the mint never stores codes in Supabase.
         let access_code_key = {
-            let root = tee
-                .derive_sealing_key(presale::ACCESS_CODE_KEY_CONTEXT)
+            let root = sealing_key(presale::ACCESS_CODE_KEY_CONTEXT)
                 .expect("FATAL: access-code root key unavailable from the TEE");
             AccessCodeDerivationKey::from_private_key(&root)
         };
@@ -436,7 +460,9 @@ impl Boot<Network> {
                 require_keygen_attestation(&blob, &expected);
             }
             tracing::info!("boot: deriving instance-bound sealing key from the TEE");
-            let seed = unseal_seed(tee.as_ref(), &capsule)
+            let capsule_key = sealing_key(CAPSULE_KEY_CONTEXT)
+                .expect("FATAL: sealing key unavailable from the TEE");
+            let seed = unseal_seed(&capsule_key, &capsule)
                 .expect("FATAL: failed to unseal seed. Capsule tampering, wrong TEE, or wrong capsule for this instance.");
             #[cfg(not(feature = "regtest"))]
             verify_fingerprint(&seed, mint_config.expected_seed_fingerprint.trim());
@@ -455,17 +481,13 @@ impl Boot<Network> {
         tracing::info!("boot: keys derived (treasury=acct0, registry=acct1); seed wiped");
 
         // The anchor txid and birthday, attested after the seed is gone.
-        // Regtest has no ceremony file, so this binding is unused there.
-        #[cfg(not(feature = "regtest"))]
+        // Regtest has no ceremony file, so this binding is unused there;
+        // non-tee builds skip it — no attestation exists in dev mode.
+        #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
         if let Some((capsule_hash, fingerprint)) = genesis_binding {
-            write_genesis_statement(
-                tee.as_ref(),
-                capsule_hash,
-                fingerprint,
-                mint_config.birthday,
-            );
+            write_genesis_statement(capsule_hash, fingerprint, mint_config.birthday);
         }
-        #[cfg(feature = "regtest")]
+        #[cfg(any(feature = "regtest", feature = "non-tee"))]
         let _ = genesis_binding;
 
         // 3. Born complete: fetch the origin checkpoint and both
@@ -656,21 +678,20 @@ impl Boot<Network> {
         // 8. Identity. Nothing fallible is acquired after this point.
         //
         // Regtest does NOT skip attestation: regtest is a local-consensus
-        // toggle, not a TEE toggle. `--features fake-tee` (typically with
-        // `regtest,fake-tee`) is what substitutes the report source so
-        // the mint can produce a report outside SEV-SNP.
+        // toggle, not a TEE toggle. `non-tee` builds have no attestation at
+        // all; their identity doc says so.
+        #[cfg(not(feature = "non-tee"))]
         {
             let (treasury_ua, registry_ufvk) =
                 mint_identity(&network, &treasury_keys, &registry_keys);
             let report_data = identity_report_data(&treasury_ua, &registry_ufvk);
-            let attestation = tee
-                .get_attestation(&report_data)
+            let attestation = get_attestation(&report_data)
                 .expect("FATAL: failed to obtain TEE attestation report");
             let doc = identity_document(
                 NETWORK_LABEL,
                 &treasury_ua,
                 &registry_ufvk,
-                attestation.as_bytes(),
+                Some(attestation.as_bytes()),
             );
             // Regenerated every boot. A torn write is a partial file; a
             // consumer accepts the document only after the report binding checks.
@@ -679,6 +700,18 @@ impl Boot<Network> {
             tracing::info!(
                 doc_hash = %hex::encode(blake2b256(&doc)),
                 "boot: identity doc written to zns_mint_identity.json"
+            );
+        }
+        #[cfg(feature = "non-tee")]
+        {
+            let (treasury_ua, registry_ufvk) =
+                mint_identity(&network, &treasury_keys, &registry_keys);
+            let doc = identity_document(NETWORK_LABEL, &treasury_ua, &registry_ufvk, None);
+            std::fs::write(IDENTITY_DOC_FILE, &doc)
+                .expect("FATAL: failed to write identity doc to disk");
+            tracing::info!(
+                doc_hash = %hex::encode(blake2b256(&doc)),
+                "boot: DEV identity doc written (no attestation)"
             );
         }
 
@@ -772,27 +805,9 @@ async fn connect_zebra() -> ChainClient {
 // Step 2: Seed intake + verification
 // ---------------------------------------------------------------------------
 
-/// Selects the TEE seam for this build: [`zns_canon::sealing::FakeTee`]
-/// behind the `fake-tee` feature (dev-only; blocked from release by a
-/// `compile_error!` in `crate::lib`), otherwise [`zns_canon::sealing::RealSnpTee`].
-///
-/// Returned as a boxed trait object because boot doesn't specialise on
-/// which TEE it holds — the two capabilities it needs (sealing key,
-/// attestation) are exactly what the trait exposes.
-fn select_tee() -> Box<dyn Tee> {
-    #[cfg(feature = "fake-tee")]
-    {
-        tracing::warn!(
-            "boot: FAKE TEE selected — sealing key and attestation are dev-only; \
-             any real verifier rejects this report"
-        );
-        Box::new(zns_canon::sealing::FakeTee)
-    }
-    #[cfg(not(feature = "fake-tee"))]
-    {
-        Box::new(zns_canon::sealing::RealSnpTee)
-    }
-}
+// The TEE seam is compile-time: the SNP ioctls compile unconditionally —
+// the mint just tries to open the guest. The `non-tee` feature (release-
+// blocked) is the dev escape hatch: public keys, no attestation.
 
 fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
     let actual = SeedFingerprint::from_seed(seed.expose_secret())
@@ -968,8 +983,8 @@ fn mint_identity(
 ///
 /// An external verifier checks this against the published Treasury address
 /// and Registry UFVK, binding the attestation to the mint's identity.
-/// Production code path — not gated on any dev feature, so a `fake-tee`
-/// build still binds a real identity into its (unverifiable) report.
+/// Hardware builds only: `non-tee` builds have no report to bind.
+#[cfg(not(feature = "non-tee"))]
 fn identity_report_data(treasury_ua: &str, registry_ufvk: &str) -> [u8; 64] {
     let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
     hasher.update(treasury_ua.as_bytes());
@@ -982,19 +997,21 @@ fn identity_report_data(treasury_ua: &str, registry_ufvk: &str) -> [u8; 64] {
     report_data
 }
 
-/// The boot identity document: the attested identity strings and the
-/// hex-encoded 1184-byte SNP report binding them.
+/// The boot identity document: the attested identity strings, the build
+/// mode, and — on hardware builds — the hex-encoded SNP report binding
+/// them. Dev-escape docs carry no report: there is nothing to verify.
 fn identity_document(
     network: &str,
     treasury_ua: &str,
     registry_ufvk: &str,
-    report: &[u8],
+    report: Option<&[u8]>,
 ) -> Vec<u8> {
     serde_json::to_vec_pretty(&serde_json::json!({
         "network": network,
+        "mode": if report.is_some() { "hardware" } else { "dev" },
         "treasury_ua": treasury_ua,
         "registry_ufvk": registry_ufvk,
-        "report": hex::encode(report),
+        "report": report.map(hex::encode),
     }))
     .expect("FATAL: identity document serialization")
 }
@@ -1041,6 +1058,7 @@ mod tests {
     /// seam would silently accept identity confusion. The fixed vector pins
     /// the exact commitment — algorithm, separator, encoding order — that
     /// external verifiers depend on.
+    #[cfg(not(feature = "non-tee"))]
     #[test]
     fn identity_report_data_distinguishes_identities() {
         let treasury_ua = "u1treasury";
@@ -1055,21 +1073,31 @@ mod tests {
         );
     }
 
-    /// The document carries the four contract fields and the report
+    /// The document carries the contract fields and the report
     /// survives the hex round-trip.
     #[test]
     fn identity_document_round_trips() {
         let report = [7u8; 1184];
-        let doc = identity_document("testnet", "u1ua", "u1ufvk", &report);
+        let doc = identity_document("testnet", "u1ua", "u1ufvk", Some(&report));
         let value: serde_json::Value = serde_json::from_slice(&doc).expect("valid JSON");
         assert_eq!(value["network"], "testnet");
+        assert_eq!(value["mode"], "hardware");
         assert_eq!(value["treasury_ua"], "u1ua");
         assert_eq!(value["registry_ufvk"], "u1ufvk");
         let decoded = hex::decode(value["report"].as_str().expect("hex report")).expect("hex");
         assert_eq!(decoded, report);
     }
 
-    #[cfg(not(feature = "regtest"))]
+    /// Dev-escape docs are self-declaring: mode dev, no report.
+    #[test]
+    fn identity_document_marks_dev_escapes() {
+        let doc = identity_document("regtest", "u1ua", "u1ufvk", None);
+        let value: serde_json::Value = serde_json::from_slice(&doc).expect("valid JSON");
+        assert_eq!(value["mode"], "dev");
+        assert!(value["report"].is_null());
+    }
+
+    #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
     #[test]
     fn genesis_record_uses_the_ceremony_txid_and_birthday() {
         let txid = "ab".repeat(32);

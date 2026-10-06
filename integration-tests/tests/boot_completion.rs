@@ -1,5 +1,5 @@
 //! Boot-completion proof: the mint, linked in-process on
-//! `regtest,fake-tee`, completes `Boot::start()` against a real regtest
+//! `--no-default-features --features regtest`, completes `Boot::start()` against a real regtest
 //! Zebra holding only fixture chain facts — built through the real
 //! ownership flow. A real Zallet wallet mines and shields coinbase and
 //! pays the Treasury; the Treasury's own keys author the 40-anchor
@@ -12,8 +12,7 @@
 
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
-use zns_canon::sealing::Tee as _;
+use anyhow::{Context, Result};
 use zns_integration_tests::Zebrad;
 use zns_mint::boot::Boot;
 use zns_mint_integration_tests as fixture;
@@ -85,33 +84,24 @@ async fn boot_completes_on_wallet_funded_dev_ceremony() -> Result<()> {
     assert!(boot.registry.anchor_adoption_closed());
     assert!(boot.oracle.current().into_u64() > 0);
 
-    // Boot's attested identity document: network, identity strings, and
-    // hex-encoded report, verified against a fresh FakeTee recomputation
-    // from the seed alone. FakeTee output is deterministic development
-    // behavior, not SNP evidence.
-    let fresh = zns_canon::sealing::FakeTee
-        .get_attestation(&fixture::identity_report_data())
-        .context("fresh FakeTee report")?;
+    // Boot's identity document in a non-tee build is self-declaring:
+    // mode dev, no report. There is nothing to verify — that's the point.
     let doc: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string("zns_mint_identity.json")
             .context("boot must write the identity document")?,
     )
     .context("identity document is not valid JSON")?;
     let (treasury_ua, registry_ufvk) = fixture::mint_identity_strings();
+    assert_eq!(doc["mode"], "dev", "identity doc mode");
     assert_eq!(doc["network"], "regtest", "identity doc network");
     assert_eq!(doc["treasury_ua"], treasury_ua, "identity doc treasury UA");
     assert_eq!(
         doc["registry_ufvk"], registry_ufvk,
         "identity doc registry UFVK"
     );
-    let report = hex::decode(
-        doc["report"]
-            .as_str()
-            .context("identity doc has no report")?,
-    )
-    .context("identity doc report is not hex")?;
-    if report != fresh.as_bytes().to_vec() {
-        bail!("attestation does not bind the fixture identity");
-    }
+    assert!(
+        doc["report"].is_null(),
+        "dev docs must not carry an attestation report"
+    );
     Ok(())
 }
