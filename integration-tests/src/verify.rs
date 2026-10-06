@@ -14,7 +14,7 @@ use zns_verify::{zns_psi_rcm, NameNote};
 use crate::{account_usk, regtest_network, DEV_SEED};
 
 /// Whitepaper §3.5 Registry `(g_d, pk_d)` for the all-zero seed (ZIP-32 is
-/// network-independent, so an non-tee regtest matches the mainnet vector).
+/// network-independent, so a non-tee regtest matches the mainnet vector).
 pub const VECTOR_G_D: &str = "de4338f2ab9fd8300a3a1c20dd690ce27026c6001c295d7c641a067ce809b11e";
 pub const VECTOR_PK_D: &str = "6df609f5710f3b5deecd4ee4b8f0173b44af6cf8918ac00269526031ba628996";
 

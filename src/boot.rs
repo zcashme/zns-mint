@@ -41,7 +41,7 @@ use zns_canon::sealing::dev_sealing_key;
 use zns_canon::sealing::get_attestation;
 use zns_canon::sealing::{SealingKey, TeeError};
 
-/// Development builds always use the public key, even on an SNP guest.
+/// `non-tee` builds use the public test key, even on an SNP guest.
 /// Hardware builds require the guest sealing key.
 fn sealing_key(context: &[u8]) -> Result<SealingKey, TeeError> {
     #[cfg(feature = "non-tee")]
@@ -198,13 +198,11 @@ const ATTESTATION_REPORT_LEN: usize = 1184;
 const IDENTITY_DOC_FILE: &str = "zns_mint_identity.json";
 
 /// Keygen's ceremony record. The anchor txid lives only here.
-#[cfg(not(feature = "regtest"))]
 #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 const CEREMONY_STATE_FILE: &str = "keys/ceremony_state.toml";
 
 /// Genesis facts and the hex-encoded SNP report, one file. `keys/` is
 /// read-only in production, so this stays in the working directory.
-#[cfg(not(feature = "regtest"))]
 #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 const GENESIS_RECORD_FILE: &str = "zns_genesis_record.json";
 
@@ -290,7 +288,6 @@ fn write_genesis_statement(capsule_hash: [u8; 32], fingerprint: [u8; 32], config
     );
 }
 
-#[cfg(not(feature = "regtest"))]
 #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 fn genesis_network() -> zns_canon::genesis::NetworkId {
     use zns_canon::genesis::NetworkId;
@@ -306,7 +303,6 @@ fn genesis_network() -> zns_canon::genesis::NetworkId {
 
 /// The ceremony file's `txid` string, decoded as 32 bytes. That string is
 /// `Transaction::txid`'s display form.
-#[cfg(not(feature = "regtest"))]
 #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 fn genesis_record(
     network: zns_canon::genesis::NetworkId,
@@ -338,7 +334,6 @@ fn genesis_record(
     })
 }
 
-#[cfg(not(feature = "regtest"))]
 #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 fn ceremony_anchor(text: &str) -> Result<(String, u32), String> {
     #[derive(serde::Deserialize)]
@@ -431,7 +426,7 @@ impl Boot<Network> {
         // codes offline; the mint never stores codes in Supabase.
         let access_code_key = {
             let root = sealing_key(presale::ACCESS_CODE_KEY_CONTEXT)
-                .expect("FATAL: access-code root key unavailable from the TEE");
+                .expect("FATAL: sealing key unavailable");
             AccessCodeDerivationKey::from_private_key(root.expose())
         };
 
@@ -459,7 +454,7 @@ impl Boot<Network> {
             }
             tracing::info!("boot: resolving capsule sealing key");
             let capsule_key = sealing_key(CAPSULE_KEY_CONTEXT)
-                .expect("FATAL: sealing key unavailable from the TEE");
+                .expect("FATAL: sealing key unavailable");
             let seed = unseal_seed(&capsule_key, &capsule)
                 .expect("FATAL: failed to unseal seed. Capsule tampering, wrong TEE, or wrong capsule for this instance.");
             #[cfg(not(feature = "regtest"))]
