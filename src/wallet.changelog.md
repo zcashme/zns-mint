@@ -1,5 +1,20 @@
 # Wallet changelog
 
+## 2026-10-06 — Birth clamps subtree roots to the origin checkpoint
+
+- `z_getsubtreesbyindex` answers as of the chain tip; the origin
+  checkpoint describes the chain at `birthday − 101`. A root whose shard
+  completed after the origin is future history relative to the wallet's
+  anchor: `Wallet::new` now skips it, both pools, before insert. The
+  boundary is inclusive — a shard whose last leaf lands in the checkpoint
+  block is complete in the origin frontier and is kept.
+- Shards that complete above the origin are rebuilt by the scan as it
+  catches up; fetched roots matter only below the origin, where the
+  wallet never scans.
+- The two `wallet::trees` birth tests now use origins that contain the
+  roots they seed (both previously seeded roots ending above a height-0
+  origin).
+
 ## 2026-09-25 — Pruning unconsumed wallet sugar
 
 - `Wallet::ufvk_for`, `Wallet::witness`, `Wallet::anchor_at` are gone; all

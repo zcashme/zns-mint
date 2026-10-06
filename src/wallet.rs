@@ -198,9 +198,17 @@ impl<P: Parameters> Wallet<P> {
             .ironwood_tree
             .insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
 
-        // Completed shard roots behind the frontiers. A conflicting root
-        // drops the local, so a partial batch is never returned.
+        // Completed shard roots behind the origin frontiers only. A root
+        // whose shard completed after the origin checkpoint marks the
+        // frontier's own shard full, so every later append would land a
+        // whole shard above the chain's position and no witness would
+        // bind. Zebra answers `z_getsubtreesbyindex` as of the tip, not
+        // as of the origin, so the wallet clamps the response itself.
+        let origin_height = chain_state.block_height();
         for (root, index) in sapling_roots.iter().zip(0u64..) {
+            if root.subtree_end_height() > origin_height {
+                continue;
+            }
             let addr = Address::from_parts(SAPLING_SHARD_HEIGHT.into(), index);
             wallet.sapling_tree.insert(addr, *root.root_hash())?;
             wallet
@@ -208,6 +216,9 @@ impl<P: Parameters> Wallet<P> {
                 .insert(addr, root.subtree_end_height());
         }
         for (root, index) in ironwood_roots.iter().zip(0u64..) {
+            if root.subtree_end_height() > origin_height {
+                continue;
+            }
             let addr = Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index);
             wallet.ironwood_tree.insert(addr, *root.root_hash())?;
             wallet
