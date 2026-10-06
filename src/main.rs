@@ -37,7 +37,6 @@ async fn main() {
         chain,
         source,
         mut wallet,
-        cursor: mut chain_tip,
         treasury_keys,
         registry_keys,
         sapling_spend,
@@ -56,8 +55,8 @@ async fn main() {
 
     zns_mint::metrics::install();
     tracing::info!(
-        height = u32::from(chain_tip.block_height()),
-        hash = %chain_tip.block_hash(),
+        height = u32::from(wallet.tip().block_height()),
+        hash = %wallet.tip().block_hash(),
         "mint awaiting Zebra tips"
     );
 
@@ -74,7 +73,7 @@ async fn main() {
         // Compare the wallet's own cursor with Zebra at the same height.
         // If they disagree, walk backward until both name the same block;
         // no state above that common ancestor survives.
-        let mut ancestor = chain_tip.block_height().min(best_height);
+        let mut ancestor = wallet.tip().block_height().min(best_height);
         loop {
             assert!(
                 ancestor >= birthday,
@@ -126,14 +125,14 @@ async fn main() {
             ancestor = BlockHeight::from_u32(prev);
         }
 
-        if ancestor < chain_tip.block_height() {
+        if ancestor < wallet.tip().block_height() {
             // The wallet commits first. A refusal leaves the other faculties
             // where they were. They then follow the height that committed,
             // which can be the boot origin below the requested ancestor.
-            chain_tip = wallet
+            let rewound = wallet
                 .truncate_to(ancestor)
-                .expect("FATAL: wallet could not rewind to the common ancestor");
-            let rewound = chain_tip.block_height();
+                .expect("FATAL: wallet could not rewind to the common ancestor")
+                .block_height();
             assert!(
                 rewound >= birthday,
                 "FATAL: wallet rewind crossed the mint birthday"
@@ -163,7 +162,7 @@ async fn main() {
             echoes.retain(|(_, _, height)| *height <= rewound);
             tracing::warn!(
                 height = u32::from(rewound),
-                hash = %chain_tip.block_hash(),
+                hash = %wallet.tip().block_hash(),
                 "mint rewound to canonical ancestor"
             );
         }
@@ -178,8 +177,8 @@ async fn main() {
         // Apply every missing canonical block in strict order: fetch with
         // retry, verify the terminal block, call `apply_block` — the
         // application itself is the one body shared with boot.
-        while chain_tip.block_height() < best_height {
-            let from_height = chain_tip.block_height();
+        while wallet.tip().block_height() < best_height {
+            let from_height = wallet.tip().block_height();
             let next_height = from_height + 1;
 
             let from_state = loop {
@@ -232,7 +231,7 @@ async fn main() {
             // The chain may move under the fetches; a non-extending block
             // discards the cycle — the reorg's own queued tip notification
             // wakes the reconcile walk.
-            if block.header().prev_block != chain_tip.block_hash() {
+            if block.header().prev_block != wallet.tip().block_hash() {
                 tracing::warn!(
                     height = u32::from(next_height),
                     "fetched block does not extend the applied chain; re-converging"
@@ -251,7 +250,6 @@ async fn main() {
                 &mut wallet,
                 &mut registry,
                 &mut mtp,
-                &mut chain_tip,
             );
             name_notes.reconcile_seen(&network, &registry);
             for (txid, inbound, paid) in arrivals {
@@ -273,11 +271,11 @@ async fn main() {
         }
 
         tracing::info!(
-            height = u32::from(chain_tip.block_height()),
+            height = u32::from(wallet.tip().block_height()),
             "scanned to tip"
         );
-        let tip = chain_tip.block_height();
-        let tip_hash = chain_tip.block_hash();
+        let tip = wallet.tip().block_height();
+        let tip_hash = wallet.tip().block_hash();
         let target_height = tip + 1;
         let mtp_now = mtp
             .current()

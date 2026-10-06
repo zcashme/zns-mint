@@ -78,7 +78,7 @@ async fn boot_completes_on_wallet_funded_dev_ceremony() -> Result<()> {
         boot.birthday,
         zcash_protocol::consensus::BlockHeight::from_u32(100)
     );
-    assert_eq!(boot.cursor.block_height(), tip_height);
+    assert_eq!(boot.wallet.tip().block_height(), tip_height);
     assert_eq!(boot.registry.anchor_pool().len(), fixture::ANCHOR_POOL_SIZE);
     assert!(boot.registry.anchor_adoption_closed());
     assert!(boot.oracle.current().into_u64() > 0);
