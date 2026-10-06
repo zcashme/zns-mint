@@ -985,6 +985,7 @@ fn identity_report_data(treasury_ua: &str, registry_ufvk: &str) -> [u8; 64] {
     report_data
 }
 
+#[cfg(any(test, not(feature = "non-tee")))]
 fn identity_document(
     network: &str,
     treasury_ua: &str,
@@ -1001,6 +1002,7 @@ fn identity_document(
     .expect("FATAL: identity document serialization")
 }
 
+#[cfg(any(test, feature = "non-tee"))]
 fn dev_identity_document(network: &str, treasury_ua: &str, registry_ufvk: &str) -> Vec<u8> {
     serde_json::to_vec_pretty(&serde_json::json!({
         "network": network,

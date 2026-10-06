@@ -170,11 +170,13 @@ jobs:
             cargo test --test boot_completion -- --nocapture
 
   # Black-box happy path (claim → update → release) against the real
-  # regtest stack, on every PR and master push. The ceremony-tx cache is
+  # regtest stack, on every PR and master push. Runs after the test job,
+  # so a clippy or unit-test failure skips it. The ceremony-tx cache is
   # the only cloud round-trip: the regtest chain through FIXTURE_HEIGHT
   # is deterministic, so a signed ceremony replays without re-proving.
   happy-path:
     name: happy-path
+    needs: ci
     runs-on: zvs
     timeout-minutes: 20
     steps:

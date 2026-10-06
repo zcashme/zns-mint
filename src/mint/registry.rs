@@ -81,10 +81,19 @@ impl NameRecord {
         trigger_height: BlockHeight,
         mtp_now: Timestamp,
     ) -> bool {
-        !self.is_release_due(mtp_now)
-            && trigger_height > self.confirmed_height
-            && !(action.is_release() && *ua != self.ua)
-            && !(self.expires_at == Expiry::Never && term.is_some())
+        if self.is_release_due(mtp_now) {
+            return false;
+        }
+        if trigger_height <= self.confirmed_height {
+            return false;
+        }
+        if action.is_release() && *ua != self.ua {
+            return false;
+        }
+        if self.expires_at == Expiry::Never && term.is_some() {
+            return false;
+        }
+        true
     }
 
     /// This record's nullifier, when `note` still names this exact
