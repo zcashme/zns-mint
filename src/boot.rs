@@ -688,7 +688,7 @@ impl Boot<Network> {
                 NETWORK_LABEL,
                 &treasury_ua,
                 &registry_ufvk,
-                Some(attestation.as_bytes()),
+                attestation.as_bytes(),
             );
             // Regenerated every boot. A torn write is a partial file; a
             // consumer accepts the document only after the report binding checks.
@@ -703,7 +703,7 @@ impl Boot<Network> {
         {
             let (treasury_ua, registry_ufvk) =
                 mint_identity(&network, &treasury_keys, &registry_keys);
-            let doc = identity_document(NETWORK_LABEL, &treasury_ua, &registry_ufvk, None);
+            let doc = dev_identity_document(NETWORK_LABEL, &treasury_ua, &registry_ufvk);
             std::fs::write(IDENTITY_DOC_FILE, &doc)
                 .expect("FATAL: failed to write identity doc to disk");
             tracing::info!(
@@ -801,10 +801,6 @@ async fn connect_zebra() -> ChainClient {
 // ---------------------------------------------------------------------------
 // Step 2: Seed intake + verification
 // ---------------------------------------------------------------------------
-
-// The TEE seam is compile-time: the SNP ioctls compile unconditionally —
-// the mint just tries to open the guest. The `non-tee` feature (release-
-// blocked) is the dev escape hatch: public keys, no attestation.
 
 fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
     let actual = SeedFingerprint::from_seed(seed.expose_secret())
@@ -994,21 +990,29 @@ fn identity_report_data(treasury_ua: &str, registry_ufvk: &str) -> [u8; 64] {
     report_data
 }
 
-/// The boot identity document: the attested identity strings, the build
-/// mode, and — on hardware builds — the hex-encoded SNP report binding
-/// them. Dev-escape docs carry no report: there is nothing to verify.
 fn identity_document(
     network: &str,
     treasury_ua: &str,
     registry_ufvk: &str,
-    report: Option<&[u8]>,
+    report: &[u8],
 ) -> Vec<u8> {
     serde_json::to_vec_pretty(&serde_json::json!({
         "network": network,
-        "mode": if report.is_some() { "hardware" } else { "dev" },
+        "mode": "hardware",
         "treasury_ua": treasury_ua,
         "registry_ufvk": registry_ufvk,
-        "report": report.map(hex::encode),
+        "report": hex::encode(report),
+    }))
+    .expect("FATAL: identity document serialization")
+}
+
+fn dev_identity_document(network: &str, treasury_ua: &str, registry_ufvk: &str) -> Vec<u8> {
+    serde_json::to_vec_pretty(&serde_json::json!({
+        "network": network,
+        "mode": "dev",
+        "treasury_ua": treasury_ua,
+        "registry_ufvk": registry_ufvk,
+        "report": null,
     }))
     .expect("FATAL: identity document serialization")
 }
@@ -1075,7 +1079,7 @@ mod tests {
     #[test]
     fn identity_document_round_trips() {
         let report = [7u8; 1184];
-        let doc = identity_document("testnet", "u1ua", "u1ufvk", Some(&report));
+        let doc = identity_document("testnet", "u1ua", "u1ufvk", &report);
         let value: serde_json::Value = serde_json::from_slice(&doc).expect("valid JSON");
         assert_eq!(value["network"], "testnet");
         assert_eq!(value["mode"], "hardware");
@@ -1088,7 +1092,7 @@ mod tests {
     /// Dev-escape docs are self-declaring: mode dev, no report.
     #[test]
     fn identity_document_marks_dev_escapes() {
-        let doc = identity_document("regtest", "u1ua", "u1ufvk", None);
+        let doc = dev_identity_document("regtest", "u1ua", "u1ufvk");
         let value: serde_json::Value = serde_json::from_slice(&doc).expect("valid JSON");
         assert_eq!(value["mode"], "dev");
         assert!(value["report"].is_null());
