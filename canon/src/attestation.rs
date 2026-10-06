@@ -54,7 +54,7 @@ pub struct Attestation {
     pub tcb_version: String,
     /// The report_data we supplied (kept for the sanity check).
     ///
-    /// Unused on non-Linux, where `request` returns a stub report.
+    /// Unused on non-Linux, where `request` refuses to run.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub report_data: [u8; REPORT_DATA_LEN],
 }
@@ -141,13 +141,10 @@ pub fn report_data(
 pub fn request(requested_report_data: &[u8; REPORT_DATA_LEN]) -> Attestation {
     #[cfg(not(target_os = "linux"))]
     {
-        Attestation {
-            report_bytes: Vec::new(),
-            measurement: [0u8; 48],
-            guest_policy: 0,
-            tcb_version: "dev".into(),
-            report_data: *requested_report_data,
-        }
+        // No counterfeit attestations: off the enclave there is no
+        // attestation, dev mode included.
+        let _ = requested_report_data;
+        panic!("FATAL: SEV-SNP attestation requires a Linux SNP guest");
     }
     #[cfg(target_os = "linux")]
     {
@@ -175,7 +172,7 @@ pub fn request(requested_report_data: &[u8; REPORT_DATA_LEN]) -> Attestation {
 /// call the PSP again. The file lives on host-backed storage, so an earlier
 /// check is not reused.
 ///
-/// On other platforms the ceremony uses the same development stub as `request`.
+/// Panics on non-Linux: there is no dev attestation to verify.
 pub fn stored(report_bytes: Vec<u8>, expected_report_data: &[u8; REPORT_DATA_LEN]) -> Attestation {
     #[cfg(target_os = "linux")]
     {
@@ -192,14 +189,10 @@ pub fn stored(report_bytes: Vec<u8>, expected_report_data: &[u8; REPORT_DATA_LEN
     }
     #[cfg(not(target_os = "linux"))]
     {
+        // A verifier that accepts anything is worse than no verifier.
         let _ = report_bytes;
-        Attestation {
-            report_bytes: Vec::new(),
-            measurement: [0u8; 48],
-            guest_policy: 0,
-            tcb_version: "dev".into(),
-            report_data: *expected_report_data,
-        }
+        let _ = expected_report_data;
+        panic!("FATAL: SEV-SNP attestation verification requires a Linux SNP guest");
     }
 }
 

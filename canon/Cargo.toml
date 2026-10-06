@@ -6,9 +6,8 @@ rust-version = "1.88"
 publish = false
 
 [features]
-default = []
-# Dev-only FakeTee (release-blocked in lib.rs).
-fake-tee = []
+# Dev escape hatch: public sealing keys, no attestation. Release-blocked in lib.rs.
+non-tee = []
 
 [dependencies]
 attestation-verify = "0.1"

@@ -1,12 +1,11 @@
-//! The TEE seam: the two capabilities `boot` needs from the enclave.
+//! The TEE seam: the two capabilities boot needs from the enclave —
+//! a per-instance sealing key for [`crate::capsule`], and an attestation
+//! report binding the mint's identity in `report_data`.
 //!
-//! 1. A per-instance sealing key for [`crate::capsule`] (production: VCEK-rooted, SNP-derived).
-//! 2. A signed attestation report binding the mint's identity (Treasury address + Registry FVK,
-//!    in `report_data`) to the measured guest image.
-//!
-//! The trait lets integration tests swap in [`FakeTee`] and boot the same code path off SNP.
-//! `FakeTee` is `fake-tee`-gated and blocked from release by `compile_error!` in `crate::lib`;
-//! its "signature" is a SHA-256 tag over a public constant, rejected by any real verifier.
+//! Both talk to `/dev/sev-guest` and fail with [`TeeError::Unavailable`]
+//! wherever there is no SNP guest device. There is no fake: code running
+//! off the enclave either build with the `non-tee` feature and use
+//! [`dev_sealing_key`], or they have no attestation at all.
 
 use thiserror::Error;
 
@@ -21,13 +20,13 @@ pub enum TeeError {
     #[error("TEE attestation report generation failed: {0}")]
     Attestation(String),
 
-    /// The requested TEE is not available on this platform (e.g.
-    /// RealSnpTee on macOS without the fake-tee feature).
+    /// No SNP guest device on this platform. `non-tee` builds fall back to
+    /// [`dev_sealing_key`]; there is no dev attestation.
     #[error("TEE not available on this platform")]
     Unavailable,
 }
 
-/// A signed attestation report emitted by a [`Tee`].
+/// A signed attestation report from the AMD Secure Processor.
 ///
 /// The wire form (`bytes`) is what an external verifier parses; the mint
 /// treats it as opaque past this seam. `report_data` is the exact 64-byte
@@ -55,205 +54,170 @@ impl Attestation {
     }
 }
 
-/// The TEE boundary. See the module docs for the split of concerns.
-pub trait Tee: Send + Sync {
-    /// Derive a per-instance sealing key. `context` disambiguates keys
-    /// derived by the same TEE for different purposes; today the seed
-    /// capsule uses a single well-known context.
-    fn derive_sealing_key(&self, context: &[u8]) -> Result<[u8; 32], TeeError>;
+/// A sealing key: hardware-derived on the enclave, or the public
+/// dev-escape key in `non-tee` builds. Zeroized on drop; not `Clone`.
+pub struct SealingKey([u8; 32]);
 
-    /// Produce a signed attestation report whose `report_data` field
-    /// carries the given 64 bytes verbatim.
-    fn get_attestation(&self, report_data: &[u8; 64]) -> Result<Attestation, TeeError>;
+impl SealingKey {
+    /// Wraps raw key bytes. Prefer the constructors: this exists for
+    /// callers who already hold the bytes (e.g. test fixtures).
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// The key bytes, for keying an AEAD.
+    pub fn expose(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
-// ---------------------------------------------------------------------------
-// RealSnpTee — production path
-// ---------------------------------------------------------------------------
+impl core::fmt::Debug for SealingKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SealingKey(REDACTED)")
+    }
+}
 
-/// The production TEE: AMD SEV-SNP via `/dev/sev-guest`. All SNP-specific
-/// types (`Firmware`, `DerivedKey`, `GuestFieldSelect`) are contained
-/// inside this impl; boot never sees them.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct RealSnpTee;
+impl Drop for SealingKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
 
-/// Derives — never fetches — the sealing key from the SEV-SNP firmware.
-///
-/// The key is mixed from exactly two guest fields, matching the capsule
-/// creator:
+/// Domain string mixed into [`dev_sealing_key`].
+#[cfg(feature = "non-tee")]
+const DEV_SEALING_DOMAIN: &[u8] = b"ZNS_DEV/sealing-key/v1";
+
+/// Development sealing key (`non-tee` builds): deterministic SHA-256 over a public domain
+/// string and the caller's context. **Anyone can derive this key** — it
+/// exists so development builds can seal and unseal their own capsules
+/// off the enclave. A dev-key boot cannot unseal a production capsule:
+/// the AEAD tag is the boundary between the two worlds.
+#[cfg(feature = "non-tee")]
+pub fn dev_sealing_key(context: &[u8]) -> SealingKey {
+    use sha2::{Digest, Sha256};
+
+    let mut h = Sha256::new();
+    h.update(DEV_SEALING_DOMAIN);
+    h.update((context.len() as u32).to_le_bytes());
+    h.update(context);
+    SealingKey::new(h.finalize().into())
+}
+
+/// Derives the per-instance sealing key from the SEV-SNP firmware:
+/// `firmware.get_derived_key` returns a VCEK-rooted, per-chip key mixed
+/// from exactly two guest fields, matching the capsule creator:
 ///   guest_policy — launch conditions (debug, SMT, migration)
 ///   measurement  — code identity (hash of the guest image)
 ///
-/// That binding is the property migration relies on: a different measurement
-/// cannot derive the key that opens an existing capsule. `image_id` and
-/// `family_id` are excluded because they are hypervisor-supplied labels, and
-/// mixing them in would make the key depend on launch-blob drift.
-///
-/// `DerivedKey::new(false, ...)` sets `root_key_select` to 0. The `sev` crate
-/// defines 0 as the VCEK and 1 as the VMRK. VMPL, guest SVN, and TCB version
-/// are passed as 0, and the launch mitigation vector is omitted. The VCEK
-/// root is stable across reboots. The VMRK is random per launch without a
-/// Migration Agent and would make the capsule unopenable after the first
-/// reboot.
+/// `image_id` and `family_id` are deliberately excluded: they are
+/// hypervisor-supplied labels with no security content, and including
+/// them makes the key brittle to launch-blob drift. VCEK
+/// (`root_key_select = false`) is stable across reboots; VMRK is random
+/// per launch without a Migration Agent and would brick the capsule on
+/// Classifies a guest-firmware open failure. A missing `/dev/sev-guest`
+/// means "this is not an SNP guest" — [`TeeError::Unavailable`], the
+/// promised off-platform signal. Any other failure is operational for
+/// the specific operation and carries the detail.
 #[cfg(target_os = "linux")]
-impl Tee for RealSnpTee {
-    fn derive_sealing_key(&self, _context: &[u8]) -> Result<[u8; 32], TeeError> {
-        use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
+fn guest_open_error(
+    e: std::io::Error,
+    operation: &str,
+    operational: fn(String) -> TeeError,
+) -> TeeError {
+    use std::io::ErrorKind;
 
-        let mut firmware = Firmware::open()
-            .map_err(|e| TeeError::SealingKey(format!("SEV-SNP firmware open: {e}")))?;
-        let mut guest_fields = GuestFieldSelect::default();
-        guest_fields.set_guest_policy(true);
-        guest_fields.set_measurement(true);
-        let request = DerivedKey::new(false, guest_fields, 0, 0, 0, None);
-        firmware
-            .get_derived_key(Some(1), request)
-            .map_err(|e| TeeError::SealingKey(format!("SEV-SNP get_derived_key: {e}")))
+    if e.kind() == ErrorKind::NotFound {
+        TeeError::Unavailable
+    } else {
+        operational(format!("SEV-SNP {operation}: {e}"))
     }
+}
 
-    fn get_attestation(&self, report_data: &[u8; 64]) -> Result<Attestation, TeeError> {
-        use sev::firmware::guest::Firmware;
+/// first reboot.
+#[cfg(target_os = "linux")]
+pub fn derive_sealing_key(_context: &[u8]) -> Result<SealingKey, TeeError> {
+    use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
 
-        let mut firmware = Firmware::open()
-            .map_err(|e| TeeError::Attestation(format!("SEV-SNP firmware open: {e}")))?;
-        let bytes = firmware
-            .get_report(None, Some(*report_data), None)
-            .map_err(|e| TeeError::Attestation(format!("SEV-SNP get_report: {e}")))?;
-        Ok(Attestation::new(bytes, *report_data))
-    }
+    let mut firmware =
+        Firmware::open().map_err(|e| guest_open_error(e, "firmware open", TeeError::SealingKey))?;
+    let mut guest_fields = GuestFieldSelect::default();
+    guest_fields.set_guest_policy(true);
+    guest_fields.set_measurement(true);
+    let request = DerivedKey::new(false, guest_fields, 0, 0, 0, None);
+    firmware
+        .get_derived_key(Some(1), request)
+        .map(|key| SealingKey::new(key))
+        .map_err(|e| TeeError::SealingKey(format!("SEV-SNP get_derived_key: {e}")))
+}
+
+/// Requests an attestation report from the AMD Secure Processor whose
+/// `report_data` field carries the given 64 bytes verbatim.
+#[cfg(target_os = "linux")]
+pub fn get_attestation(report_data: &[u8; 64]) -> Result<Attestation, TeeError> {
+    use sev::firmware::guest::Firmware;
+
+    let mut firmware = Firmware::open()
+        .map_err(|e| guest_open_error(e, "firmware open", TeeError::Attestation))?;
+    let bytes = firmware
+        .get_report(None, Some(*report_data), None)
+        .map_err(|e| TeeError::Attestation(format!("SEV-SNP get_report: {e}")))?;
+    Ok(Attestation::new(bytes, *report_data))
+}
+
+/// Non-SNP platforms compile the same functions; they fail with
+/// [`TeeError::Unavailable`] at runtime. Development uses
+/// [`dev_sealing_key`] and simply has no attestation.
+#[cfg(not(target_os = "linux"))]
+pub fn derive_sealing_key(_context: &[u8]) -> Result<SealingKey, TeeError> {
+    Err(TeeError::Unavailable)
 }
 
 #[cfg(not(target_os = "linux"))]
-impl Tee for RealSnpTee {
-    fn derive_sealing_key(&self, _context: &[u8]) -> Result<[u8; 32], TeeError> {
-        Err(TeeError::Unavailable)
-    }
-
-    fn get_attestation(&self, _report_data: &[u8; 64]) -> Result<Attestation, TeeError> {
-        Err(TeeError::Unavailable)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FakeTee — development-only path (feature = "fake-tee")
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "fake-tee")]
-pub use fake::FakeTee;
-
-#[cfg(feature = "fake-tee")]
-mod fake {
-    use super::{Attestation, Tee, TeeError};
-    use sha2::{Digest, Sha256};
-
-    /// Domain string mixed into the sealing key derivation. Purely
-    /// dev-only: anyone can recompute this key.
-    const SEALING_DOMAIN: &[u8] = b"ZNS_FAKE_TEE/sealing-key/v1";
-
-    /// Domain string prefixed to the report body.
-    const ATTEST_DOMAIN: &[u8] = b"ZNS_FAKE_TEE/attestation/v1";
-
-    /// Fixed "measurement" value the fake TEE reports — stands in for
-    /// the SNP-measured guest image hash. Not secret.
-    const FAKE_MEASUREMENT: [u8; 48] = [0xFA; 48];
-
-    /// The hard-coded signing key. A real verifier trivially forges
-    /// reports with this key; that is the point — no fake report can
-    /// ever be mistaken for a production SNP report.
-    const FAKE_SIGNING_KEY: [u8; 32] = [
-        0xF1, 0xA2, 0xB3, 0xC4, 0xD5, 0xE6, 0xF7, 0x08, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-        0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x1F, 0x2E, 0x3D, 0x4C, 0x5B, 0x6A,
-        0x79, 0x88,
-    ];
-
-    /// Development-only [`Tee`]: deterministic sealing key from a domain
-    /// string, and a synthetic signed report that embeds the same
-    /// `report_data` and a fixed test measurement. Boots outside SEV-SNP
-    /// on macOS/Linux without `/dev/sev-guest`.
-    #[derive(Debug, Default, Clone, Copy)]
-    pub struct FakeTee;
-
-    impl Tee for FakeTee {
-        fn derive_sealing_key(&self, context: &[u8]) -> Result<[u8; 32], TeeError> {
-            // SHA256(DOMAIN || LP(context)). Length-prefixed so distinct
-            // contexts always produce distinct keys.
-            let mut h = Sha256::new();
-            h.update(SEALING_DOMAIN);
-            h.update((context.len() as u32).to_le_bytes());
-            h.update(context);
-            Ok(h.finalize().into())
-        }
-
-        fn get_attestation(&self, report_data: &[u8; 64]) -> Result<Attestation, TeeError> {
-            // Report body: DOMAIN || measurement || report_data.
-            let mut body = Vec::with_capacity(ATTEST_DOMAIN.len() + FAKE_MEASUREMENT.len() + 64);
-            body.extend_from_slice(ATTEST_DOMAIN);
-            body.extend_from_slice(&FAKE_MEASUREMENT);
-            body.extend_from_slice(report_data);
-
-            // Test-only signature slot: SHA256(FAKE_SIGNING_KEY || body).
-            // Not an HMAC — a public constant "key" is by definition
-            // forgeable. It exists so the fake report's shape (body +
-            // signature suffix) mirrors the SNP layout.
-            let mut h = Sha256::new();
-            h.update(FAKE_SIGNING_KEY);
-            h.update(&body);
-            let tag = h.finalize();
-
-            let mut bytes = Vec::with_capacity(body.len() + tag.len());
-            bytes.extend_from_slice(&body);
-            bytes.extend_from_slice(&tag);
-            Ok(Attestation::new(bytes, *report_data))
-        }
-    }
+pub fn get_attestation(_report_data: &[u8; 64]) -> Result<Attestation, TeeError> {
+    Err(TeeError::Unavailable)
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(all(test, feature = "fake-tee"))]
+#[cfg(all(test, feature = "non-tee"))]
 mod tests {
     use super::*;
 
+    /// The missing-device classification: NotFound is the promised
+    /// off-platform signal, everything else stays operational.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn fake_sealing_key_is_deterministic() {
-        let tee = FakeTee;
-        let k1 = tee.derive_sealing_key(b"ctx").unwrap();
-        let k2 = tee.derive_sealing_key(b"ctx").unwrap();
-        assert_eq!(k1, k2);
+    fn missing_guest_device_is_unavailable() {
+        use std::io::ErrorKind;
+
+        let missing = std::io::Error::from(ErrorKind::NotFound);
+        assert!(matches!(
+            guest_open_error(missing, "firmware open", TeeError::SealingKey),
+            TeeError::Unavailable
+        ));
+        let denied = std::io::Error::from(ErrorKind::PermissionDenied);
+        assert!(matches!(
+            guest_open_error(denied, "firmware open", TeeError::SealingKey),
+            TeeError::SealingKey(_)
+        ));
     }
 
     #[test]
-    fn fake_sealing_key_scoped_by_context() {
-        let tee = FakeTee;
-        let k1 = tee.derive_sealing_key(b"ctx-a").unwrap();
-        let k2 = tee.derive_sealing_key(b"ctx-b").unwrap();
-        assert_ne!(k1, k2);
-    }
-
-    /// The whole point of the attestation seam: the 64-byte identity
-    /// binding the caller passes in appears verbatim in the report and
-    /// is retrievable through `report_data()` without re-parsing.
-    #[test]
-    fn fake_attestation_carries_report_data_verbatim() {
-        let tee = FakeTee;
-        let rd = [42u8; 64];
-        let att = tee.get_attestation(&rd).unwrap();
-        assert_eq!(att.report_data(), &rd);
-        assert!(
-            att.as_bytes().windows(64).any(|w| w == rd),
-            "report_data must be embedded verbatim in the report bytes"
+    fn dev_sealing_key_is_deterministic() {
+        assert_eq!(
+            dev_sealing_key(b"ctx").expose(),
+            dev_sealing_key(b"ctx").expose()
         );
     }
 
-    /// Different `report_data` inputs yield different report bytes —
-    /// otherwise the seam would silently accept identity confusion.
     #[test]
-    fn fake_attestation_bytes_depend_on_report_data() {
-        let tee = FakeTee;
-        let a = tee.get_attestation(&[1u8; 64]).unwrap();
-        let b = tee.get_attestation(&[2u8; 64]).unwrap();
-        assert_ne!(a.as_bytes(), b.as_bytes());
+    fn dev_sealing_key_scoped_by_context() {
+        assert_ne!(
+            dev_sealing_key(b"ctx-a").expose(),
+            dev_sealing_key(b"ctx-b").expose()
+        );
     }
 }

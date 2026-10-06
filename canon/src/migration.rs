@@ -29,8 +29,7 @@ pub enum MigrationError {
 
 /// `BLAKE2b-512(b"ZNS_MIGRATION_V1" || ephemeral_pubkey || nonce || manifest_hash)`.
 ///
-/// Pass the result to [`crate::sealing::Tee::get_attestation`]. The `Tee`
-/// trait does not need a migration-specific method.
+/// Pass the result to [`crate::sealing::get_attestation`].
 pub fn migration_report_data(offer: &MigrationOffer) -> [u8; REPORT_DATA_LEN] {
     let mut input = Vec::with_capacity(MIGRATION_DOMAIN.len() + 32 + 32 + 32);
     input.extend_from_slice(MIGRATION_DOMAIN);

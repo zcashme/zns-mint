@@ -8,9 +8,9 @@
 //! for a finished ceremony and for moving that seed to a new measurement.
 //! Ceremony and migration orchestration stay outside this crate.
 
-#[cfg(all(feature = "fake-tee", not(debug_assertions)))]
+#[cfg(all(feature = "non-tee", not(debug_assertions)))]
 compile_error!(
-    "fake-tee is a development-only feature and must not be enabled in release/production builds"
+    "the non-tee feature is a development escape hatch (public sealing keys, no attestation) and must not be enabled in release/production builds"
 );
 
 pub mod attestation;
