@@ -1,12 +1,11 @@
 //! Upgrade manifest file.
 //!
-//! TODO: require maintainer signatures before this file authorizes
-//! `to_measurement`. `zns_canon::upgrade::verify_manifest_signatures` still
-//! returns `NoImpl` ("m-of-n maintainer signature verification"). Inventing
-//! that scheme here would pretend the check had happened. Until it is
-//! called, replacing this file before startup selects the guest that
-//! receives the seed. The attestation checks only show that the target
-//! matches the file.
+//! TODO: call `zns_canon::upgrade::authorize_manifest` before this file
+//! authorizes `to_measurement`. That function checks a zcashme GitHub
+//! artifact attestation of the canonical manifest bytes. This loader does
+//! not take that bundle yet. Until it does, replacing this file before
+//! startup selects the guest that receives the seed. The attestation checks
+//! only show that the target matches the file.
 //!
 //! This loader only checks that the file is a version-1 manifest with
 //! fixed-width fields.

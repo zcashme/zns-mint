@@ -31,9 +31,10 @@ Target will not overwrite an existing capsule unless
 --transport unix:<PATH> is not implemented.
 --timeout-secs <N> is how long to wait for the peer (default 120, max 86400).
 
-Maintainer signatures on the manifest are not checked: zns-canon does not
-implement that verification yet. Source requires the target report's
-measurement to equal to_measurement. Target requires the source report's
+The manifest is not passed to zns-canon's authorize_manifest yet, so a
+zcashme GitHub artifact attestation is not required. Source requires the
+target report's measurement to equal to_measurement. Target requires the
+source report's
 measurement to equal from_measurement, and that report must bind the offer
 and the ciphertext, before it installs a capsule. Source accepts the receipt
 only when receipt_attestation.bin binds that offer and that receipt, and the

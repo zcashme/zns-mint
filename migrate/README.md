@@ -30,8 +30,8 @@ receipt_attestation.bin
 
 Use a fresh directory for each attempt. The capsule stays outside that directory. Target will not replace an existing capsule unless `--replace-after-verified-migration` is set. It also will not decrypt a transfer until `source_attestation.bin` verifies against that offer and that ciphertext, and the report measurement equals the manifest's `from_measurement`. After the new capsule is linked into place, target unseals it again and only then writes the receipt. Source accepts that receipt only when `receipt_attestation.bin` binds this offer and this receipt, and the report measurement equals `to_measurement`.
 
-`zns-canon` supplies sealing, capsule parsing, the manifest hash, migration `report_data`, and — in a production build — stored SNP report verification. Maintainer signatures are not checked: `verify_manifest_signatures` in `zns-canon` is still unimplemented. Source requires the target report measurement to equal `to_measurement`, and the offer's manifest hash to match.
+`zns-canon` supplies sealing, capsule parsing, the manifest hash, migration `report_data`, and stored SNP report verification. This binary does not yet call `authorize_manifest`, so a zcashme GitHub artifact attestation of the manifest is not required. Source requires the target report measurement to equal `to_measurement`, and the offer's manifest hash to match.
 
 The X25519 seed wrap lives in this binary for now. `zns-canon` still returns `NoImpl` for ephemeral key generation, encryption, and decryption, and those functions do not bind the offer nonce or manifest hash.
 
-`zns-canon` is the git dependency on `main`. A development binary that runs without SEV-SNP is `cargo run --features fake-tee`. That feature is refused in release builds.
+`zns-canon` is the git dependency on `main`. Sealing and attestation use the SNP guest device. There is no off-enclave build.

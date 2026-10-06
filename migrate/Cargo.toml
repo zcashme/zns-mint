@@ -23,5 +23,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
-# TEMPORARY: track the zns-canon no-tee-trait branch until it merges.
-zns-canon = { git = "https://github.com/zcashme/zns-canon.git", branch = "no-tee-trait" }
+zns-canon = { git = "https://github.com/zcashme/zns-canon.git", branch = "main" }
