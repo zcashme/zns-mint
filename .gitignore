@@ -1,6 +1,6 @@
 /target
 **/target/
-Cargo.lock
+# Commit Cargo.lock. CI builds from that exact dependency set.
 **/*.rs.bk
 coverage/
 lcov.info

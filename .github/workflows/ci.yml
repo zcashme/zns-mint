@@ -1,5 +1,6 @@
 # Tests, clippy, rustfmt, docs, and coverage on PRs and master.
 # A failing test or a new clippy warning turns the PR red.
+# Cargo commands pass --locked, so a manifest change has to update Cargo.lock.
 name: CI
 
 on:
@@ -40,26 +41,26 @@ jobs:
       # clippy runs every supported combination explicitly. --all-features
       # would enable testnet and regtest together and fail by design.
       - name: clippy (default)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: clippy (testnet)
-        run: cargo clippy --all-targets --features testnet -- -D warnings
+        run: cargo clippy --locked --all-targets --features testnet -- -D warnings
 
       - name: clippy (regtest)
-        run: cargo clippy --all-targets --features regtest -- -D warnings
+        run: cargo clippy --locked --all-targets --features regtest -- -D warnings
 
       - name: test (default)
-        run: cargo test
+        run: cargo test --locked
 
       - name: test (regtest)
-        run: cargo test --features regtest
+        run: cargo test --locked --features regtest
 
       - name: docs
-        run: cargo doc --no-deps
+        run: cargo doc --locked --no-deps
 
       - name: coverage
         run: |
-          cargo llvm-cov --features regtest --html --output-dir coverage
+          cargo llvm-cov --locked --features regtest --html --output-dir coverage
           cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload coverage
@@ -159,7 +160,7 @@ jobs:
         working-directory: integration-tests
         env:
           CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: boot completion
         working-directory: integration-tests
@@ -167,7 +168,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target
         run: |
           rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback \
-            cargo test --test boot_completion -- --nocapture
+            cargo test --locked --test boot_completion -- --nocapture
 
   # Black-box happy path (claim → update → release) against the real
   # regtest stack, on every PR and master push. Runs after the test job,
@@ -268,7 +269,7 @@ jobs:
             --config profile.dev.package.orchard.opt-level=3 \
             --config profile.dev.package.halo2_proofs.opt-level=3 \
             --config profile.dev.package.halo2_gadgets.opt-level=3 \
-            build --bin zns-mint --features regtest
+            build --locked --bin zns-mint --features regtest
           test -x "$CARGO_TARGET_DIR/debug/zns-mint"
           echo "ZNS_MINT_BIN=$CARGO_TARGET_DIR/debug/zns-mint" >> "$GITHUB_ENV"
 
@@ -280,4 +281,4 @@ jobs:
           ZNS_CEREMONY_TX_CACHE: ceremony-tx.hex
         run: |
           rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback \
-            cargo test --test happy_path -- --nocapture
+            cargo test --locked --test happy_path -- --nocapture
