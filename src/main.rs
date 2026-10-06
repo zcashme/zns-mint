@@ -12,17 +12,15 @@
 
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_protocol::consensus::{BlockHeight, BranchId};
-
-use tokio::sync::mpsc;
+use zcash_protocol::consensus::BlockHeight;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::{assemble, decrypt_treasury_transaction};
+use zns_mint::mint::note::assemble;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
-use zns_mint::mint::{relay, watch_mempool, Action, MintInbound, Request, TREASURY_ACCOUNT};
-use zns_mint::zcash::{MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE};
+use zns_mint::mint::{relay, Action, MintInbound, Request, TREASURY_ACCOUNT};
+use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
 async fn main() {
@@ -67,85 +65,11 @@ async fn main() {
     // the re-read of the canonical tip that turns every wake-up into the
     // node's answer, never the announcement's promise. The orchestrator
     // holds position (the wallet) and never sees transport state.
-    // The watcher forwards Zebra's change kind and txid. The run loop owns
-    // OtpQueue and admits or invalidates requests as those events arrive.
-    let (mempool_tx, mut mempool_rx) = mpsc::channel(64);
-    tokio::spawn(watch_mempool(chain.clone(), mempool_tx));
-
     let mut connection = TipSession::open(chain).await;
     'run: loop {
-        let (best_height, _) = tokio::select! {
-            tip = connection.next_tip(&source) => match tip {
-                Ok(tip) => tip,
-                Err(error) => panic!("FATAL: Zebra returned an invalid canonical tip: {error}"),
-            },
-            Some((kind, txid)) = mempool_rx.recv() => {
-                let mtp_now = mtp.current().expect("FATAL: MTP unavailable at the applied tip");
-                challenges.prune(mtp_now);
-                match kind {
-                    MempoolChangeKind::Invalidated => challenges.invalidate(txid),
-                    MempoolChangeKind::Mined => {}
-                    MempoolChangeKind::Added => {
-                        let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
-                        match source.get_raw_transaction(branch_id, txid).await {
-                            Ok(Some(transaction)) => {
-                                for (_action_index, paid, memo) in
-                                    decrypt_treasury_transaction(&transaction, &treasury_keys)
-                                {
-                                    let MintInbound::Request(request) = MintInbound::decode(&network, &memo) else {
-                                        continue;
-                                    };
-                                    let (name, action, requested_ua, term) = match &request {
-                                        Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
-                                        Request::Release { name, ua } => (name, Action::Release, ua, None),
-                                        Request::Claim { .. } => continue,
-                                    };
-                                    let trigger_height = chain_tip.block_height() + 1;
-                                    let Some(record) = registry.authorize_challenge(
-                                        &name_notes,
-                                        name,
-                                        action,
-                                        requested_ua,
-                                        term,
-                                        trigger_height,
-                                        mtp_now,
-                                    ) else {
-                                        continue;
-                                    };
-                                    if paid < oracle.challenge_fee() {
-                                        continue;
-                                    }
-                                    let pending = OtpChallenge::issue(
-                                        name.clone(),
-                                        action,
-                                        requested_ua.clone(),
-                                        record.commitment,
-                                        term,
-                                        mtp_now,
-                                    );
-                                    let pending = challenges.admit(pending, txid);
-                                    if !challenges.is_relayed(&pending)
-                                        && relay(
-                                            &network, &mut wallet, &treasury_keys, &sapling_spend,
-                                            &sapling_output, &record.ua, &source, &pending, "mempool",
-                                        ).await
-                                    {
-                                        challenges.challenge_issued(&pending);
-                                    }
-                                }
-                            }
-                            Ok(None) => {
-                                tracing::debug!(%txid, "mempool transaction gone before fetch");
-                            }
-                            Err(error) => {
-                                tracing::warn!(%error, %txid, "mempool transaction fetch failed");
-                            }
-                        }
-                    }
-                }
-                continue;
-            }
-        };
+        let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {
+            panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
+        });
 
         // Compare the wallet's own cursor with Zebra at the same height.
         // If they disagree, walk backward until both name the same block;
@@ -502,8 +426,8 @@ async fn main() {
             }
         }
 
-        // Queue admission is independent from submission. Retry every still-
-        // requested mempool or confirmed entry once during each tip pass.
+        // Queue admission is independent from submission. Retry every
+        // requested challenge once during each tip pass.
         for pending in challenges.requested() {
             let Some(record) = registry.authorize_challenge(
                 &name_notes,
