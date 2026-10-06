@@ -453,8 +453,8 @@ impl Boot<Network> {
                 require_keygen_attestation(&blob, &expected);
             }
             tracing::info!("boot: resolving capsule sealing key");
-            let capsule_key = sealing_key(CAPSULE_KEY_CONTEXT)
-                .expect("FATAL: sealing key unavailable");
+            let capsule_key =
+                sealing_key(CAPSULE_KEY_CONTEXT).expect("FATAL: sealing key unavailable");
             let seed = unseal_seed(&capsule_key, &capsule)
                 .expect("FATAL: failed to unseal seed. Capsule tampering, wrong TEE, or wrong capsule for this instance.");
             #[cfg(not(feature = "regtest"))]
