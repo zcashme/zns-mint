@@ -85,7 +85,7 @@ pub const COINBASE_MATURITY: u32 = 100;
 /// NU6.1/6.2/6.3 activate here on regtest; boot's birthday is 100.
 pub const NU6_3_ACTIVATION_HEIGHT: u32 = 4;
 
-/// The all-zero seed: the same bytes `examples/write_fake_capsule` seals.
+/// The all-zero seed sealed by the integration fixtures.
 pub const DEV_SEED: [u8; 32] = [0u8; 32];
 
 /// One whole-ZEC transparent payment covers 42 ZIP-317 actions plus the

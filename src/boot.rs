@@ -33,27 +33,25 @@ use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata};
 use zns_canon::capsule::{parse_capsule, read_capsule_file, unseal_seed, CAPSULE_KEY_CONTEXT};
+#[cfg(not(feature = "non-tee"))]
+use zns_canon::sealing::derive_sealing_key;
 #[cfg(feature = "non-tee")]
 use zns_canon::sealing::dev_sealing_key;
 #[cfg(not(feature = "non-tee"))]
 use zns_canon::sealing::get_attestation;
-use zns_canon::sealing::{derive_sealing_key, SealingKey, TeeError};
+use zns_canon::sealing::{SealingKey, TeeError};
 
-/// Resolves the sealing key for `context`: the hardware key when the SNP
-/// guest device is present, or — in `non-tee` builds only — the public
-/// dev-escape key. Without the feature, no guest device is fatal.
+/// Development builds always use the public key, even on an SNP guest.
+/// Hardware builds require the guest sealing key.
 fn sealing_key(context: &[u8]) -> Result<SealingKey, TeeError> {
-    let key = derive_sealing_key(context);
     #[cfg(feature = "non-tee")]
     {
-        // Any hardware failure (device missing, ioctl error) engages the
-        // dev-escape key. The capsule's AEAD tag still separates the two
-        // worlds: a dev-key boot cannot unseal a production capsule.
-        if key.is_err() {
-            return Ok(dev_sealing_key(context));
-        }
+        Ok(dev_sealing_key(context))
     }
-    key
+    #[cfg(not(feature = "non-tee"))]
+    {
+        derive_sealing_key(context)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -426,10 +424,10 @@ impl Boot<Network> {
         #[cfg(feature = "regtest")]
         let mint_birthday = MINT_BIRTHDAY;
 
-        // 1b. TEE handshake: try to open the SNP guest. It always opens on
-        // the enclave; `non-tee` builds fall back to the dev-escape key.
+        // 1b. Select the build's sealing mode: public dev key for
+        // regtest/non-tee, hardware key for attested builds.
 
-        // Access-code root from the TEE, then HMAC to the purpose key
+        // Access-code root from the selected sealing mode, then HMAC to the purpose key
         // (`access-code-v1`). Issuers with that purpose key can recompute
         // codes offline; the mint never stores codes in Supabase.
         let access_code_key = {
@@ -459,7 +457,7 @@ impl Boot<Network> {
                 }
                 require_keygen_attestation(&blob, &expected);
             }
-            tracing::info!("boot: deriving instance-bound sealing key from the TEE");
+            tracing::info!("boot: resolving capsule sealing key");
             let capsule_key = sealing_key(CAPSULE_KEY_CONTEXT)
                 .expect("FATAL: sealing key unavailable from the TEE");
             let seed = unseal_seed(&capsule_key, &capsule)
@@ -677,9 +675,8 @@ impl Boot<Network> {
 
         // 8. Identity. Nothing fallible is acquired after this point.
         //
-        // Regtest does NOT skip attestation: regtest is a local-consensus
-        // toggle, not a TEE toggle. `non-tee` builds have no attestation at
-        // all; their identity doc says so.
+        // Regtest selects non-tee, so its identity document declares
+        // development mode and contains no attestation report.
         #[cfg(not(feature = "non-tee"))]
         {
             let (treasury_ua, registry_ufvk) =
