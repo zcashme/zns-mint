@@ -37,12 +37,12 @@ use zns_canon::capsule::{parse_capsule, read_capsule_file, unseal_seed, CAPSULE_
 use zns_canon::sealing::dev_sealing_key;
 #[cfg(not(feature = "non-tee"))]
 use zns_canon::sealing::get_attestation;
-use zns_canon::sealing::{derive_sealing_key, TeeError};
+use zns_canon::sealing::{derive_sealing_key, SealingKey, TeeError};
 
 /// Resolves the sealing key for `context`: the hardware key when the SNP
 /// guest device is present, or — in `non-tee` builds only — the public
 /// dev-escape key. Without the feature, no guest device is fatal.
-fn sealing_key(context: &[u8]) -> Result<[u8; 32], TeeError> {
+fn sealing_key(context: &[u8]) -> Result<SealingKey, TeeError> {
     let key = derive_sealing_key(context);
     #[cfg(feature = "non-tee")]
     {
@@ -435,7 +435,7 @@ impl Boot<Network> {
         let access_code_key = {
             let root = sealing_key(presale::ACCESS_CODE_KEY_CONTEXT)
                 .expect("FATAL: access-code root key unavailable from the TEE");
-            AccessCodeDerivationKey::from_private_key(&root)
+            AccessCodeDerivationKey::from_private_key(root.expose())
         };
 
         // 2. Seed intake + verification: read capsule, require the keygen
