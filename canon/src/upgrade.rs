@@ -5,22 +5,27 @@
 //! GitHub artifact attestation from the `zcashme` organization
 //! ([`ZCASHME_ORG_ID`]). This crate holds no maintainer key.
 //!
-//! Verification is offline, against the Sigstore public-good trust root.
-//! The bundle must be SLSA provenance v1 from `actions/attest-build-provenance`.
-//! GitHub's release predicate (`https://in-toto.io/attestation/release/v0.2`)
-//! is not accepted. The caller names the repository inside `zcashme` and the
-//! workflow that signed. The owner login and owner id are fixed. The git ref
-//! is not pinned: any ref is accepted until a release tag is fixed.
+//! Verification is offline. A GitHub artifact attestation is a Sigstore bundle,
+//! checked with `sigstore-verify` against the embedded public-good trust root
+//! in `sigstore-trust-root`. That is the log public `zcashme` releases are
+//! written to. The transparency-log check stays on: the sample that calls
+//! `skip_tlog_unsafe` is for GitHub's private-repository instance, which is a
+//! different Fulcio and is not used here.
+//!
+//! The bundle must be an in-toto statement whose predicate is SLSA provenance
+//! v1. GitHub's release predicate
+//! (`https://in-toto.io/attestation/release/v0.2`) is not accepted. The caller
+//! names the repository inside `zcashme` and the workflow path that signed.
+//! The owner login and owner id are fixed. The git ref is not pinned: any ref
+//! is accepted until a release tag is fixed.
 
 use std::sync::OnceLock;
 
-use attestation_verify::{
-    Bundle, BundleSet, CheckpointOriginPolicy, GithubPolicy, RefPolicy, RepositoryIdentity,
-    SignerPolicy, SourcePolicy, Subject, TrustStore, Verifier, WorkflowPath,
-    WorkflowRevisionPolicy,
-};
 use blake2b_simd::Params as Blake2bParams;
 use sha2::{Digest, Sha256};
+use sigstore_trust_root::{SigstoreInstance, TrustedRoot};
+use sigstore_verify::types::{Bundle, Sha256Hash, SignatureContent, Statement};
+use sigstore_verify::{SubjectAltName, VerificationPolicy, VerificationResult, Verifier};
 use thiserror::Error;
 
 /// Domain separation for [`manifest_hash`].
@@ -33,11 +38,14 @@ pub const ZCASHME_ORG: &str = "zcashme";
 /// login does not match.
 pub const ZCASHME_ORG_ID: u64 = 241_353_095;
 
-/// Signed-note origin of the public-good Rekor v1 log embedded in
-/// `attestation-verify`.
-const REKOR_V1_ORIGIN: &str = "rekor.sigstore.dev - 1193050959916656506";
+/// in-toto statement type carried by `actions/attest-build-provenance`.
+const IN_TOTO_STATEMENT_V1: &str = "https://in-toto.io/Statement/v1";
 
-const REKOR_V1_URL: &str = "https://rekor.sigstore.dev";
+/// The only predicate this check accepts.
+const SLSA_PROVENANCE_V1: &str = "https://slsa.dev/provenance/v1";
+
+/// OIDC issuer of a GitHub Actions workload certificate.
+const GITHUB_ACTIONS_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 /// One approved step from a measured guest image to the next.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,14 +150,14 @@ pub fn verify_zcashme_digest(
     release: &ZcashmeRelease<'_>,
 ) -> Result<(), UpgradeError> {
     repository_name(release.repository)?;
-    let verifier = verifier(release.repository, release.workflow)?;
-    let subject = Subject::from_digest_hex(&hex::encode(sha256)).map_err(attest)?;
+    workflow_path(release.workflow)?;
+    let verifier = verifier()?;
     let bundles = bundles(release.bundle)?;
     let mut last_error = None;
     for bundle in &bundles {
-        match verifier.verify_digest(&subject, bundle) {
-            Ok(_) => return Ok(()),
-            Err(err) => last_error = Some(attest(err)),
+        match authorize_bundle(verifier, sha256, bundle, release) {
+            Ok(()) => return Ok(()),
+            Err(err) => last_error = Some(err),
         }
     }
     Err(last_error.unwrap_or_else(|| {
@@ -219,63 +227,176 @@ fn repository_name(name: &str) -> Result<(), UpgradeError> {
     Ok(())
 }
 
+fn workflow_path(workflow: &str) -> Result<(), UpgradeError> {
+    let bad = workflow.is_empty()
+        || workflow.starts_with('/')
+        || workflow.contains('@')
+        || workflow.contains('\\')
+        || workflow.contains(char::is_whitespace)
+        || workflow
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..");
+    if bad {
+        return Err(UpgradeError::Attestation(
+            "workflow path is empty or not a relative path".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn bundles(bytes: &[u8]) -> Result<Vec<Bundle>, UpgradeError> {
-    match Bundle::from_json(bytes) {
-        Ok(bundle) => Ok(vec![bundle]),
-        Err(json_err) => match BundleSet::from_json_lines(bytes) {
-            Ok(set) => Ok(set.bundles),
-            Err(_) => Err(attest(json_err)),
-        },
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| UpgradeError::Attestation("bundle is not utf-8".into()))?;
+    if let Ok(bundle) = Bundle::from_json(text) {
+        return Ok(vec![bundle]);
+    }
+    let mut parsed = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        parsed.push(Bundle::from_json(line).map_err(attest)?);
+    }
+    if parsed.is_empty() {
+        return Err(UpgradeError::Attestation(
+            "bundle contained no attestation".into(),
+        ));
+    }
+    Ok(parsed)
+}
+
+/// Public releases chain to public-good Fulcio and are included in public
+/// Rekor. `SigstoreInstance::GitHub` is the private-repository instance; its
+/// certificates do not chain here and it has no transparency log.
+fn verifier() -> Result<&'static Verifier, UpgradeError> {
+    static SLOT: OnceLock<Result<Verifier, String>> = OnceLock::new();
+    let stored = SLOT.get_or_init(|| {
+        let root = TrustedRoot::from_embedded(SigstoreInstance::PublicGood)
+            .map_err(|err| err.to_string())?;
+        Verifier::new(&root).map_err(|err| err.to_string())
+    });
+    match stored {
+        Ok(verifier) => Ok(verifier),
+        Err(err) => Err(UpgradeError::Attestation(err.clone())),
     }
 }
 
-fn verifier(repository: &str, workflow: &str) -> Result<Verifier, UpgradeError> {
-    let source = RepositoryIdentity::new(ZCASHME_ORG, repository)
-        .map_err(attest)?
-        .with_owner_id(ZCASHME_ORG_ID);
-    let signer = RepositoryIdentity::new(ZCASHME_ORG, repository).map_err(attest)?;
-    let policy = GithubPolicy::builder()
-        .source(SourcePolicy {
-            repository: source,
-            git_ref: RefPolicy::Glob("*".to_owned()),
-            commit: None,
-        })
-        .signer(SignerPolicy {
-            repository: signer,
-            path: WorkflowPath::new(workflow).map_err(attest)?,
-            revision: WorkflowRevisionPolicy::Any,
-        })
-        .build()
-        .map_err(attest)?;
-
-    let trust = trust_store()?;
-    let rekor = trust
-        .tlogs
-        .iter()
-        .find(|log| log.base_url == REKOR_V1_URL)
-        .ok_or_else(|| {
-            UpgradeError::Attestation("embedded trust root has no rekor.sigstore.dev log".into())
-        })?;
-    let origin = CheckpointOriginPolicy::builder()
-        .allow_origin(rekor, REKOR_V1_ORIGIN)
-        .map_err(attest)?
-        .build()
-        .map_err(attest)?;
-    Verifier::builder()
-        .trust_store(trust.clone())
-        .github_policy(policy)
-        .checkpoint_origin_policy(origin)
-        .build()
-        .map_err(attest)
+fn policy() -> VerificationPolicy {
+    // `any_identity` leaves the transparency log and the SCT check on.
+    // The signer is authorized afterwards: an identity matcher is exact, and
+    // the git ref on the workflow URI is not pinned yet.
+    VerificationPolicy::any_identity().require_issuer(GITHUB_ACTIONS_ISSUER)
 }
 
-fn trust_store() -> Result<&'static TrustStore, UpgradeError> {
-    static STORE: OnceLock<Result<TrustStore, String>> = OnceLock::new();
-    let stored =
-        STORE.get_or_init(|| TrustStore::embedded_public_good().map_err(|err| err.to_string()));
-    stored
-        .as_ref()
-        .map_err(|err| UpgradeError::Attestation(err.clone()))
+fn authorize_bundle(
+    verifier: &Verifier,
+    sha256: &[u8; 32],
+    bundle: &Bundle,
+    release: &ZcashmeRelease<'_>,
+) -> Result<(), UpgradeError> {
+    let result = verifier
+        .verify(Sha256Hash::new(*sha256), bundle, &policy())
+        .map_err(attest)?;
+    require_checked(&result)?;
+    require_slsa(bundle)?;
+    require_zcashme(&result, release.repository, release.workflow)
+}
+
+fn require_checked(result: &VerificationResult) -> Result<(), UpgradeError> {
+    if result.certificate_verified()
+        && result.sct_verified()
+        && result.tlog_verified()
+        && result.identity_policy_checked()
+        && result.issuer() == Some(GITHUB_ACTIONS_ISSUER)
+    {
+        return Ok(());
+    }
+    Err(UpgradeError::Attestation(
+        "attestation was not checked against the certificate and the transparency log".into(),
+    ))
+}
+
+fn require_slsa(bundle: &Bundle) -> Result<(), UpgradeError> {
+    let SignatureContent::DsseEnvelope(envelope) = &bundle.content else {
+        return Err(UpgradeError::Attestation(
+            "bundle is not a SLSA provenance statement".into(),
+        ));
+    };
+    let statement: Statement =
+        serde_json::from_slice(envelope.payload.as_bytes()).map_err(attest)?;
+    if statement.type_ == IN_TOTO_STATEMENT_V1 && statement.predicate_type == SLSA_PROVENANCE_V1 {
+        return Ok(());
+    }
+    Err(UpgradeError::Attestation(format!(
+        "expected SLSA provenance {SLSA_PROVENANCE_V1}, found {}",
+        statement.predicate_type
+    )))
+}
+
+fn require_zcashme(
+    result: &VerificationResult,
+    repository: &str,
+    workflow: &str,
+) -> Result<(), UpgradeError> {
+    let claims = result
+        .certificate()
+        .map(|cert| &cert.ci_claims)
+        .ok_or_else(|| {
+            UpgradeError::Attestation("attestation has no signing certificate".into())
+        })?;
+    let found = source_repository(claims);
+    let expected = format!("{ZCASHME_ORG}/{repository}");
+    if found != expected {
+        return Err(UpgradeError::Attestation(format!(
+            "source repository mismatch: expected {expected}, found {found}"
+        )));
+    }
+    let owner_id = ZCASHME_ORG_ID.to_string();
+    if claims.source_repository_owner_identifier.as_deref() != Some(owner_id.as_str()) {
+        return Err(UpgradeError::Attestation(format!(
+            "source repository owner id mismatch: expected {owner_id}"
+        )));
+    }
+    let prefix = format!("https://github.com/{expected}/{workflow}@");
+    let san = result.identity().map(SubjectAltName::as_str).unwrap_or("");
+    if san
+        .strip_prefix(&prefix)
+        .is_none_or(|git_ref| git_ref.is_empty())
+    {
+        return Err(UpgradeError::Attestation(format!(
+            "workflow mismatch: expected {expected}/{workflow}"
+        )));
+    }
+    if claims
+        .build_signer_uri
+        .as_deref()
+        .is_some_and(|uri| uri != san)
+    {
+        return Err(UpgradeError::Attestation(
+            "build signer uri does not match the certificate identity".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn source_repository(claims: &sigstore_verify::crypto::FulcioCiClaims) -> String {
+    let from_uri = claims.source_repository_uri.as_deref().map(|uri| {
+        uri.strip_prefix("https://github.com/")
+            .unwrap_or(uri)
+            .to_string()
+    });
+    let from_deprecated = claims
+        .deprecated_github
+        .workflow_repository
+        .as_deref()
+        .map(str::to_string);
+    match (from_uri, from_deprecated) {
+        (Some(uri), Some(old)) if uri != old => format!("{uri} (also {old})"),
+        (Some(uri), _) => uri,
+        (None, Some(old)) => old,
+        (None, None) => "absent".to_string(),
+    }
 }
 
 fn attest(err: impl ToString) -> UpgradeError {

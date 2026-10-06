@@ -10,7 +10,6 @@ publish = false
 non-tee = []
 
 [dependencies]
-attestation-verify = "0.1"
 blake2b_simd = "1"
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 hex = "0.4"
@@ -18,8 +17,11 @@ postcard = { version = "1", default-features = false, features = ["alloc"] }
 rand = "0.8"
 secrecy = "0.8"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sev = { version = "8.0.0", default-features = false, features = ["snp", "crypto_nossl"] }
 sha2 = "0.10"
+sigstore-trust-root = { version = "0.14", default-features = false }
+sigstore-verify = "0.14"
 thiserror = "1"
 tracing = "0.1"
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
