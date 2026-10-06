@@ -1,5 +1,26 @@
 # Mint live-work design record
 
+## 2026-10-06 — The watch task fetches and reports; the timer wakes the serve (#196)
+
+- The run loop was one task with two select arms. A catch-up held the
+  loop, so mempool requests waited unseen, and the mempool arm fetched
+  and relayed inside the select, so the two lanes delayed each other.
+- The watch task now owns the mempool stream and the fetch of each
+  `Added` transaction. Each change has its own home: `added` fetches
+  and reports the transaction; `invalidated` reports the txid; `mined`
+  reports nothing — the block path owns a mined request. The task
+  holds no key material and no wallet.
+- The reports wait on two bounded channels. `MempoolNews::serve` is
+  the one home of the loop's mempool work, in one fixed order: admit
+  every sighting — the same checks, in the deciding pass's order, with
+  no await — retire every death, then relay at most `RELAYS_PER_SERVE`
+  challenges. Nothing receives outside a serve, so no report is
+  consumed and dropped. A timer arm wakes a serve every `RETRY_PAUSE`;
+  each applied block wakes one; the pass at the tip wakes one before it
+  relays, so a death lands before a dead request goes out.
+- `relay_requested` is the one relay loop: the pass at the tip calls it
+  with no limit; a serve calls it with the budget.
+
 ## 2026-09-29 — Pre-birthday blocks restore wallet history only (#239)
 
 - `apply_block` receives boot's birthday. Before it, the ordinary upstream
