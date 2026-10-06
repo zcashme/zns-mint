@@ -283,7 +283,8 @@ mod tests {
             .map(|k| sapling::Node::empty_root(Level::from(k)))
             .collect();
         // The root ends at height 1, so an origin at height 1 admits it
-        // (end heights above the origin are dropped as not-yet-frontend).
+        // (end heights above the origin are dropped as not yet behind
+        // the frontier).
         let origin = ChainState::new(
             h(1),
             BlockHash([0; 32]),
