@@ -11,6 +11,7 @@ default = []
 fake-tee = []
 
 [dependencies]
+attestation-verify = "0.1"
 blake2b_simd = "1"
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 hex = "0.4"
