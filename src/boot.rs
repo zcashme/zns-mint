@@ -157,9 +157,8 @@ fn require_established_ceremony(registry: &Registry) {
 #[cfg(feature = "regtest")]
 const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(100);
 
-/// Keygen's deployment record. The fingerprint is accepted only when the
-/// keygen attestation binds it to the capsule bytes. The birthday is the
-/// anchor's inclusion height; this report does not cover it.
+/// Keygen's deployment record. Hardware builds check the fingerprint against
+/// the keygen report. All builds check it against the unsealed seed.
 #[cfg(not(feature = "regtest"))]
 #[derive(serde::Deserialize)]
 struct MintConfig {
@@ -192,7 +191,7 @@ fn require_config_network(config: &MintConfig) {
 }
 
 /// SEV-SNP attestation report length. Any other size is not a report.
-#[cfg(not(feature = "regtest"))]
+#[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 const ATTESTATION_REPORT_LEN: usize = 1184;
 
 /// The boot identity document: written once, at attestation time.
@@ -212,7 +211,7 @@ const GENESIS_RECORD_FILE: &str = "zns_genesis_record.json";
 /// The conf fingerprint is not an identity pin by itself. The keygen
 /// report must carry `BLAKE2b-512(fingerprint ‖ capsule hash)` under the
 /// AMD signature before that fingerprint is used.
-#[cfg(not(feature = "regtest"))]
+#[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 fn require_keygen_attestation(capsule_bytes: &[u8], fingerprint: &SeedFingerprint) {
     let capsule_hash = blake2b256(capsule_bytes);
     let expected = zns_canon::attestation::report_data(fingerprint, &capsule_hash);
@@ -222,7 +221,7 @@ fn require_keygen_attestation(capsule_bytes: &[u8], fingerprint: &SeedFingerprin
 
 /// One open of the keygen report. The descriptor must be a regular file
 /// of [`ATTESTATION_REPORT_LEN`] bytes; that same descriptor is what is read.
-#[cfg(not(feature = "regtest"))]
+#[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 fn read_attestation_report(path: &std::path::Path) -> Vec<u8> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
@@ -455,6 +454,7 @@ impl Boot<Network> {
                 if expected.to_bytes() != capsule.fingerprint {
                     panic!("FATAL: capsule fingerprint does not match keys/zns_mint.conf");
                 }
+                #[cfg(not(feature = "non-tee"))]
                 require_keygen_attestation(&blob, &expected);
             }
             tracing::info!("boot: resolving capsule sealing key");
@@ -1127,7 +1127,7 @@ mod tests {
         assert_eq!(decoded, report);
     }
 
-    #[cfg(not(feature = "regtest"))]
+    #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
     #[test]
     fn genesis_record_refuses_a_birthday_mismatch() {
         let error = genesis_record(
@@ -1142,7 +1142,7 @@ mod tests {
         assert!(error.contains("does not match"));
     }
 
-    #[cfg(not(feature = "regtest"))]
+    #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
     #[test]
     fn ceremony_anchor_requires_txid_and_birthday() {
         assert!(ceremony_anchor("state = \"SEALED\"\n").is_err());
@@ -1915,7 +1915,7 @@ mod tests {
         assert_eq!(MINT_BIRTHDAY, BlockHeight::from_u32(100));
     }
 
-    #[cfg(not(feature = "regtest"))]
+    #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
     fn attestation_scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "zns-mint-{name}-{}-{}",
@@ -1930,7 +1930,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "regtest"))]
+    #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
     fn attestation_report_read_returns_the_opened_bytes() {
         let dir = attestation_scratch("report");
         let path = dir.join("report.bin");
@@ -1941,7 +1941,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "regtest"))]
+    #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
     #[should_panic(expected = "is a symlink")]
     fn attestation_report_symlink_is_refused() {
         let dir = attestation_scratch("symlink");
@@ -1953,7 +1953,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "regtest"))]
+    #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
     #[should_panic(expected = "is not a regular file")]
     fn attestation_report_directory_is_refused() {
         let dir = attestation_scratch("directory");
@@ -1961,7 +1961,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "regtest"))]
+    #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
     #[should_panic(expected = "is not a 1184-byte")]
     fn attestation_report_wrong_length_is_refused() {
         let dir = attestation_scratch("length");
