@@ -16,8 +16,8 @@ pub use time::Timestamp;
 
 pub use zcash_keys::address::UnifiedAddress;
 
-use zcash_primitives::transaction::TxId;
-use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_primitives::transaction::{Transaction, TxId};
+use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
 use zcash_protocol::memo::{Memo, MemoBytes};
 use zcash_protocol::value::Zatoshis;
 use zip32::AccountId;
@@ -29,8 +29,11 @@ use crate::wallet::Wallet;
 use crate::zcash::{CanonicalBlockSource, ChainClient, MempoolChangeKind, MempoolSession};
 use crate::TreasuryKeys;
 
+use note::NameNoteQueue;
 use presale::AccessCode;
-use treasury::{OtpChallenge, OtpCode};
+use pricing::Oracle;
+use registry::Registry;
+use treasury::{OtpChallenge, OtpCode, OtpQueue};
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
@@ -685,13 +688,306 @@ pub async fn relay<P: Parameters + Send + 'static>(
     }
 }
 
-/// Forwards Zebra's mempool changes to the run loop, which owns and updates
-/// the OTP queue. The original change kind and txid stay paired.
-pub async fn watch_mempool(chain: ChainClient, sender: mpsc::Sender<(MempoolChangeKind, TxId)>) {
-    let mut session = MempoolSession::open(chain).await;
+// ===========================================================================
+// Mempool intake
+// ===========================================================================
+
+/// The most challenges one serve of the mempool news relays. The rest
+/// wait for the retry pass at the tip. One serve must not hold the loop
+/// for a burst of relays.
+pub const RELAYS_PER_SERVE: usize = 2;
+
+/// Watches the mempool and reports what the mint can act on.
+///
+/// The node reports three changes. This task gives each change its own
+/// home:
+///
+/// * `Added` — the task gets the transaction from the node; the node
+///   checks its mempool first. It reports the transaction on the
+///   sightings channel.
+/// * `Invalidated` — the task reports the txid on the deaths channel.
+/// * `Mined` — the task reports nothing. The block path owns a mined
+///   request. An invalidation for a mined txid would retire a live
+///   entry; the mint would then relay a second code.
+///
+/// The task sends in stream order and waits for each send, so a
+/// sighting reports before the death of its own transaction. The task
+/// holds no key material and no wallet; every judgment stays with the
+/// loop.
+pub async fn watch_mempool<P: Parameters + Send + 'static>(
+    network: P,
+    chain: ChainClient,
+    sightings: mpsc::Sender<(TxId, Transaction)>,
+    deaths: mpsc::Sender<TxId>,
+) {
+    let mut session = MempoolSession::open(chain.clone()).await;
+    let source = CanonicalBlockSource::new(chain);
+    let branch_id = BranchId::for_height(&network, BlockHeight::from_u32(u32::MAX));
     loop {
-        if sender.send(session.next().await).await.is_err() {
-            return;
+        let (kind, txid) = session.next().await;
+        match kind {
+            MempoolChangeKind::Added => {
+                if !added(&source, branch_id, &sightings, txid).await {
+                    return;
+                }
+            }
+            MempoolChangeKind::Invalidated => {
+                if !invalidated(&deaths, txid).await {
+                    return;
+                }
+            }
+            MempoolChangeKind::Mined => mined(txid),
+        }
+    }
+}
+
+/// A transaction entered the node mempool: get it — the fetch is the
+/// check — and report it for the loop to admit. Returns false when the
+/// loop stopped reading; the task then stops.
+async fn added(
+    source: &CanonicalBlockSource,
+    branch_id: BranchId,
+    sightings: &mpsc::Sender<(TxId, Transaction)>,
+    txid: TxId,
+) -> bool {
+    match source.get_raw_transaction(branch_id, txid).await {
+        Ok(Some(transaction)) => sightings.send((txid, transaction)).await.is_ok(),
+        Ok(None) => {
+            tracing::debug!(%txid, "mempool transaction gone before fetch");
+            true
+        }
+        Err(error) => {
+            tracing::warn!(%error, %txid, "mempool transaction fetch failed");
+            true
+        }
+    }
+}
+
+/// A mempool transaction died: report its txid for the loop to retire
+/// the entries it stamped. Returns false when the loop stopped reading.
+async fn invalidated(deaths: &mpsc::Sender<TxId>, txid: TxId) -> bool {
+    deaths.send(txid).await.is_ok()
+}
+
+/// A mempool transaction entered a block: the block path owns it from
+/// here. The intake reports nothing — an invalidation for a mined txid
+/// would retire a live entry, and the mint would relay a second code.
+fn mined(txid: TxId) {
+    tracing::trace!(%txid, "mempool transaction mined; the block path owns it");
+}
+
+/// The loop's one home for the reports of the watch task.
+///
+/// The service owns what a reorg never replaces: the network, the node
+/// view, and the two report channels. The state a reorg does replace —
+/// the wallet, the registry, the queue — comes in with each serve, as
+/// arguments, so no borrow outlives the reorg lines.
+///
+/// Nothing in this service receives outside a serve. Every report is
+/// taken with `try_recv` inside a serve, so a report that wakes
+/// nothing is never dropped: a report waits in its channel until the
+/// next serve reads it.
+pub struct MempoolNews<P> {
+    network: P,
+    source: CanonicalBlockSource,
+    sightings: mpsc::Receiver<(TxId, Transaction)>,
+    deaths: mpsc::Receiver<TxId>,
+}
+
+impl<P: Parameters + Send + 'static> MempoolNews<P> {
+    /// Opens the service on the watch task's two report channels.
+    pub fn new(
+        network: P,
+        source: CanonicalBlockSource,
+        sightings: mpsc::Receiver<(TxId, Transaction)>,
+        deaths: mpsc::Receiver<TxId>,
+    ) -> Self {
+        Self {
+            network,
+            source,
+            sightings,
+            deaths,
+        }
+    }
+
+    /// Serves the waiting mempool news, in one fixed order:
+    ///
+    /// 1. Admit every waiting sighting — the decode, the gate, the fee
+    ///    check, and the admission, the same checks in the deciding
+    ///    pass's order. No await runs here, so the admits of one serve
+    ///    hold nothing and wait for nothing. Admission is idempotent:
+    ///    a request the block path also confirms stays one entry.
+    /// 2. Retire every waiting death, before any relay: a death that
+    ///    waits in this serve must not let its challenge go out.
+    /// 3. Relay at most [`RELAYS_PER_SERVE`] of the requested
+    ///    challenges. The retry pass at the tip relays the rest.
+    ///
+    /// The run loop calls this serve after each timer wake, after each
+    /// applied block, and once before the pass at the tip relays.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn serve(
+        &mut self,
+        wallet: &mut Wallet<P>,
+        treasury_keys: &TreasuryKeys,
+        spend_prover: &SpendParameters,
+        output_prover: &OutputParameters,
+        registry: &Registry,
+        name_notes: &NameNoteQueue,
+        oracle: &Oracle,
+        challenges: &mut OtpQueue,
+        tip: BlockHeight,
+        mtp_now: Timestamp,
+    ) {
+        challenges.prune(mtp_now);
+        let target_height = tip + 1;
+        while let Ok((txid, transaction)) = self.sightings.try_recv() {
+            admit_sighting(
+                &self.network,
+                treasury_keys,
+                registry,
+                name_notes,
+                oracle,
+                challenges,
+                target_height,
+                mtp_now,
+                txid,
+                &transaction,
+            );
+        }
+        retire_deaths(challenges, &mut self.deaths);
+        relay_requested(
+            &self.network,
+            wallet,
+            treasury_keys,
+            spend_prover,
+            output_prover,
+            &self.source,
+            registry,
+            name_notes,
+            challenges,
+            target_height,
+            mtp_now,
+            RELAYS_PER_SERVE,
+            "mempool",
+        )
+        .await;
+    }
+}
+
+/// Admits one sighted transaction: the decode with the Treasury keys,
+/// the gate, the fee check, and the admission — the same checks, in the
+/// same order, as the deciding pass. Claims stay out: the deciding pass
+/// owns them. Pure calls over loop state; no await runs here.
+#[allow(clippy::too_many_arguments)]
+fn admit_sighting<P: Parameters>(
+    network: &P,
+    treasury_keys: &TreasuryKeys,
+    registry: &Registry,
+    name_notes: &NameNoteQueue,
+    oracle: &Oracle,
+    challenges: &mut OtpQueue,
+    target_height: BlockHeight,
+    mtp_now: Timestamp,
+    txid: TxId,
+    transaction: &Transaction,
+) {
+    for (_action_index, paid, memo) in
+        note::decrypt_treasury_transaction(transaction, treasury_keys)
+    {
+        let MintInbound::Request(request) = MintInbound::decode(network, &memo) else {
+            continue;
+        };
+        let (name, action, requested_ua, term) = match &request {
+            Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
+            Request::Release { name, ua } => (name, Action::Release, ua, None),
+            Request::Claim { .. } => continue,
+        };
+        let Some(record) = registry.authorize_challenge(
+            name_notes,
+            name,
+            action,
+            requested_ua,
+            term,
+            target_height,
+            mtp_now,
+        ) else {
+            continue;
+        };
+        if paid < oracle.challenge_fee() {
+            continue;
+        }
+        let pending = OtpChallenge::issue(
+            name.clone(),
+            action,
+            requested_ua.clone(),
+            record.commitment,
+            term,
+            mtp_now,
+        );
+        challenges.admit(pending, txid);
+    }
+}
+
+/// Retires every waiting death: the queue removes the unrelayed entries
+/// the txid stamps. A relayed challenge keeps its life.
+fn retire_deaths(challenges: &mut OtpQueue, deaths: &mut mpsc::Receiver<TxId>) {
+    while let Ok(txid) = deaths.try_recv() {
+        challenges.invalidate(txid);
+    }
+}
+
+/// Relays up to `limit` of the still-requested challenges, oldest
+/// first. Each relay re-runs the gate and the commitment check against
+/// the state as it stands now; an entry whose gate fails waits for the
+/// next pass, and prune retires it at expiry. The pass at the tip calls
+/// this with no limit; a serve of the mempool news calls it with
+/// [`RELAYS_PER_SERVE`], so one serve cannot hold the loop for a burst
+/// of relays.
+#[allow(clippy::too_many_arguments)]
+pub async fn relay_requested<P: Parameters + Send + 'static>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    treasury_keys: &TreasuryKeys,
+    spend_prover: &SpendParameters,
+    output_prover: &OutputParameters,
+    source: &CanonicalBlockSource,
+    registry: &Registry,
+    name_notes: &NameNoteQueue,
+    challenges: &mut OtpQueue,
+    target_height: BlockHeight,
+    mtp_now: Timestamp,
+    limit: usize,
+    lane: &'static str,
+) {
+    for pending in challenges.requested().into_iter().take(limit) {
+        let Some(record) = registry.authorize_challenge(
+            name_notes,
+            &pending.name,
+            pending.action,
+            &pending.ua,
+            pending.term,
+            target_height,
+            mtp_now,
+        ) else {
+            continue;
+        };
+        if record.commitment != pending.tip_rcm {
+            continue;
+        }
+        if relay(
+            network,
+            wallet,
+            treasury_keys,
+            spend_prover,
+            output_prover,
+            &record.ua,
+            source,
+            &pending,
+            lane,
+        )
+        .await
+        {
+            challenges.challenge_issued(&pending);
         }
     }
 }
