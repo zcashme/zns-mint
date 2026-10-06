@@ -417,6 +417,20 @@ where
         };
         tree.append(commitment.clone(), retention)?;
     }
+
+    // Reconcile the two position authorities: the block's chain metadata
+    // declares where the tree ended up, and the mirror's own structure
+    // says where its appends landed. A wallet ever seeded or corrupted
+    // out of step with the chain diverges here — loudly, at this block —
+    // instead of at the first witness that fails to bind.
+    let expected = bundles
+        .final_tree_size()
+        .checked_sub(1)
+        .map(|size| Position::from(u64::from(size)));
+    if tree.max_leaf_position(None)? != expected {
+        return Err(WalletError::ChainDiscontinuity(height));
+    }
+
     ensure_block_checkpoint(tree, height, bundles.final_tree_size())
 }
 

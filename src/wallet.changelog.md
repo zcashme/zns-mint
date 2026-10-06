@@ -11,6 +11,10 @@
 - Shards that complete above the origin are rebuilt by the scan as it
   catches up; fetched roots matter only below the origin, where the
   wallet never scans.
+- `append_block_commitments` reconciles the mirror's post-append
+  position against the block's declared final tree size; a divergence
+  is a `ChainDiscontinuity` at that block rather than a witness failure
+  later.
 - The two `wallet::trees` birth tests now use origins that contain the
   roots they seed (both previously seeded roots ending above a height-0
   origin).
