@@ -15,7 +15,7 @@ use secrecy::Secret;
 use tracing::info;
 use zns_canon::capsule::{self, SEED_LEN};
 use zns_canon::migration::{self, MigrationOffer};
-use zns_canon::sealing::get_attestation;
+use zns_canon::sealing::{get_attestation, SealingKey};
 use zns_canon::upgrade::{self, UpgradeManifest};
 
 use crate::attest::{self, require_measurement};
@@ -26,7 +26,7 @@ use crate::persist;
 use crate::transport::{self, DirTransport};
 
 pub fn run(
-    sealing_key: &[u8; 32],
+    sealing_key: &SealingKey,
     args: &Args,
     manifest: &UpgradeManifest,
     transport: &DirTransport,
@@ -122,7 +122,7 @@ pub fn run(
 }
 
 fn prove_persisted(
-    sealing_key: &[u8; 32],
+    sealing_key: &SealingKey,
     seed: &Secret<[u8; SEED_LEN]>,
     bytes: &[u8],
 ) -> Result<zns_canon::capsule::Capsule, MigrateError> {

@@ -24,7 +24,7 @@ use rand::rngs::OsRng;
 use tracing::info;
 use zns_canon::capsule;
 use zns_canon::migration::{self, MigrationOffer};
-use zns_canon::sealing::get_attestation;
+use zns_canon::sealing::{get_attestation, SealingKey};
 use zns_canon::upgrade::{self, UpgradeManifest};
 
 use crate::attest::{self, require_measurement};
@@ -34,7 +34,7 @@ use crate::handoff;
 use crate::transport::{self, DirTransport};
 
 pub fn run(
-    sealing_key: &[u8; 32],
+    sealing_key: &SealingKey,
     args: &Args,
     manifest: &UpgradeManifest,
     transport: &DirTransport,
