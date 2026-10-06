@@ -282,8 +282,11 @@ mod tests {
         let ommers: Vec<sapling::Node> = (0..16u8)
             .map(|k| sapling::Node::empty_root(Level::from(k)))
             .collect();
+        // The root ends at height 1, so an origin at height 1 admits it
+        // (end heights above the origin are dropped as not yet behind
+        // the frontier).
         let origin = ChainState::new(
-            h(0),
+            h(1),
             BlockHash([0; 32]),
             Frontier::from_parts(Position::from(65_535), leaf, ommers).unwrap(),
             Frontier::empty(),
@@ -305,14 +308,17 @@ mod tests {
             h(11),
             orchard::tree::MerkleHashOrchard::empty_root(Level::from(5)),
         )];
-        let mut wallet = Wallet::new(
-            [],
-            &empty_origin(),
-            &sapling_roots,
-            &ironwood_roots,
-            MainNetwork,
-        )
-        .expect("empty targets cannot conflict");
+        // Roots end at heights 10 and 11: the origin must contain them,
+        // or birth correctly drops them as above-origin.
+        let origin = ChainState::new(
+            h(12),
+            BlockHash([0; 32]),
+            Frontier::empty(),
+            Frontier::empty(),
+            Frontier::empty(),
+        );
+        let mut wallet = Wallet::new([], &origin, &sapling_roots, &ironwood_roots, MainNetwork)
+            .expect("roots behind the origin cannot conflict");
 
         assert_eq!(wallet.sapling_tree_shard_end_heights.len(), 1);
         assert_eq!(
