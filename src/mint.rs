@@ -7,9 +7,6 @@ pub mod pricing;
 pub mod registry;
 pub mod treasury;
 
-/// The mint's authoritative position on the Zcash chain.
-pub use zcash_client_backend::data_api::BlockMetadata as ChainTip;
-
 // The Name Note type and its codec.
 pub use note::{decrypt_name_notes, DecryptedNameNote, Expiry, NameNote, Term};
 pub use time::Timestamp;
@@ -350,9 +347,9 @@ impl Name {
 // ---------------------------------------------------------------------------
 
 /// Applies one verified canonical successor to every faculty: scan, clock,
-/// Registry law, wallet commit, Treasury decode, Name Note storage, cursor.
+/// Registry law, wallet commit, Treasury decode, and Name Note storage.
 /// Returns Treasury arrivals for the run loop to route; boot discards them.
-/// Before birthday, applies only wallet history, clock, and cursor.
+/// Before birthday, applies only wallet history and clock.
 /// Never fetches, never broadcasts.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_block<P: Parameters + Send + 'static>(
@@ -366,7 +363,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     wallet: &mut crate::wallet::Wallet<P>,
     registry: &mut registry::Registry,
     mtp: &mut mtp::MtpTracker,
-    cursor: &mut ChainTip,
 ) -> Vec<(TxId, MintInbound, Zatoshis)> {
     use std::collections::BTreeMap;
     use std::convert::Infallible;
@@ -375,6 +371,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
     use zcash_client_backend::scanning::Nullifiers;
 
+    let cursor = wallet.tip();
     assert_eq!(
         from_state.block_height(),
         cursor.block_height(),
@@ -416,7 +413,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         batches,
         wallet.scanning_keys(),
         &nullifiers,
-        Some(&*cursor),
+        Some(&cursor),
         |_| {
             Ok::<
                 Option<(
@@ -556,7 +553,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
             (index, position)
         })
         .collect::<Vec<_>>();
-    let next_metadata = scanned.to_block_metadata();
 
     // Accepted Name Note commitments are marked at the commit — the
     // scanner cannot decrypt them, so they would otherwise enter the
@@ -601,11 +597,10 @@ pub fn apply_block<P: Parameters + Send + 'static>(
             .expect("FATAL: Name Note disagreed with applied wallet state");
     }
     *mtp = next_mtp;
-    *cursor = next_metadata;
-
+    let applied_tip = wallet.tip();
     tracing::debug!(
-        height = u32::from(cursor.block_height()),
-        hash = %cursor.block_hash(),
+        height = u32::from(applied_tip.block_height()),
+        hash = %applied_tip.block_hash(),
         "canonical block applied"
     );
     arrivals

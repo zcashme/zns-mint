@@ -29,9 +29,9 @@ use crate::mint::{OtpMemo, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCO
 use crate::wallet::Wallet;
 use crate::zcash::{self, CanonicalBlockSource, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
+use zcash_client_backend::data_api::chain::ChainState;
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_client_backend::data_api::{chain::ChainState, BlockMetadata};
 use zns_canon::capsule::{parse_capsule, read_capsule_file, unseal_seed, CAPSULE_KEY_CONTEXT};
 #[cfg(not(feature = "non-tee"))]
 use zns_canon::sealing::derive_sealing_key;
@@ -72,8 +72,6 @@ pub struct Boot<P: Parameters> {
     pub source: CanonicalBlockSource,
     /// produced: trees seeded from the verified origin
     pub wallet: Wallet<P>,
-    /// produced: the origin cursor the loop extends
-    pub cursor: BlockMetadata,
     /// produced: derived from the seed — the seed dies before this exists
     pub treasury_keys: TreasuryKeys,
     /// produced: derived from the seed
@@ -562,7 +560,6 @@ impl Boot<Network> {
         // queues: arrivals from history are balance, not instruction, so
         // each block's intake lands in a queue that falls out of scope with
         // the iteration.
-        let mut cursor = block_metadata(&origin);
         let mut registry = Registry::new();
         let (best_height, _best_hash) = source
             .exact_tip()
@@ -573,8 +570,8 @@ impl Boot<Network> {
             to = u32::from(best_height),
             "boot: syncing to chain tip"
         );
-        while cursor.block_height() < best_height {
-            let from_height = cursor.block_height();
+        while wallet.tip().block_height() < best_height {
+            let from_height = wallet.tip().block_height();
             let next_height = from_height + 1;
 
             let from_state = source
@@ -597,11 +594,10 @@ impl Boot<Network> {
                 &mut wallet,
                 &mut registry,
                 &mut mtp,
-                &mut cursor,
             );
         }
         tracing::info!(
-            height = u32::from(cursor.block_height()),
+            height = u32::from(wallet.tip().block_height()),
             "boot: synced to chain tip"
         );
 
@@ -710,7 +706,7 @@ impl Boot<Network> {
         tracing::info!(
             network = NETWORK_LABEL,
             "boot: complete at tip {}",
-            u32::from(cursor.block_height())
+            u32::from(wallet.tip().block_height())
         );
 
         Boot {
@@ -718,7 +714,6 @@ impl Boot<Network> {
             birthday: mint_birthday,
             chain: chain_client,
             source,
-            cursor,
             wallet,
             treasury_keys,
             registry_keys,
@@ -737,8 +732,6 @@ impl Boot<Network> {
         }
     }
 }
-
-use crate::wallet::block_metadata;
 
 #[cfg(feature = "regtest")]
 fn regtest_network() -> LocalNetwork {
@@ -1452,7 +1445,6 @@ mod tests {
             .unwrap();
             let mut registry = Registry::new();
             let mut mtp = MtpTracker::default();
-            let mut cursor = block_metadata(&origin);
             let mut tree_size = 0;
             for (index, (from_state, block)) in blocks.iter().enumerate() {
                 let height = first_height + u32::try_from(index).unwrap();
@@ -1470,11 +1462,10 @@ mod tests {
                     &mut wallet,
                     &mut registry,
                     &mut mtp,
-                    &mut cursor,
                 );
-                assert_eq!(cursor.block_height(), height);
-                assert_eq!(cursor.block_hash(), block.header().hash());
-                assert_eq!(cursor.ironwood_tree_size(), Some(tree_size));
+                assert_eq!(wallet.tip().block_height(), height);
+                assert_eq!(wallet.tip().block_hash(), block.header().hash());
+                assert_eq!(wallet.tip().ironwood_tree_size(), Some(tree_size));
                 assert_eq!(
                     wallet.ironwood_anchor(height).unwrap().unwrap(),
                     roots[index].into()
@@ -1826,7 +1817,6 @@ mod tests {
         .unwrap();
         let mut registry = Registry::new();
         let mut mtp = MtpTracker::default();
-        let mut cursor = block_metadata(&origin);
         let mut expected = BTreeSet::new();
         for (height, from_state, block) in [
             (first_height, &origin, &funding_block),
@@ -1845,7 +1835,6 @@ mod tests {
                 &mut wallet,
                 &mut registry,
                 &mut mtp,
-                &mut cursor,
             );
             if height == ceremony_height {
                 expected = ceremony_pool.clone();
