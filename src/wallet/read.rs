@@ -201,8 +201,7 @@ impl UpstreamAccount for FixedAccount {
 /// The largest retained checkpoint height at or below `bound`, walking down
 /// from `start`.
 ///
-/// Every applied block and the boot seed checkpoint are retained in all three
-/// trees, so the walk is bounded by the store's retained checkpoint range.
+/// Bounded by this store's own retained checkpoint range, never another tree's.
 pub(super) fn max_checkpoint_at_or_below<H, S>(
     store: &S,
     start: BlockHeight,

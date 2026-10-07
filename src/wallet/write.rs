@@ -2,14 +2,14 @@
 //! [`WalletWrite`] — plus the ZNS Name Note ingestion lane, which the
 //! upstream write surface cannot express (see [`Wallet::store_name_note`]).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::time::SystemTime;
 
 use incrementalmerkletree::{Hashable, Marking, Position, Retention};
 use secrecy::SecretVec;
 use shardtree::store::memory::MemoryShardStore;
-use shardtree::store::{Checkpoint, ShardStore, TreeState};
+use shardtree::store::ShardStore;
 use shardtree::ShardTree;
 use transparent::bundle::OutPoint;
 use zcash_client_backend::data_api::{
@@ -90,11 +90,19 @@ impl<P: Parameters> Wallet<P> {
         }
     }
 
-    /// The oldest retained checkpoint — the deepest height the trees can
-    /// still truncate to, identical across the three trees by the commit
-    /// discipline. `None` before the first applied block.
+    /// The deepest height all three trees can truncate to: the max of their
+    /// floors. `None` if any tree holds no checkpoint.
     fn retained_floor(&self) -> Option<BlockHeight> {
-        super::from_infallible(self.sapling_tree.store().min_checkpoint_id())
+        let floors = [
+            super::from_infallible(self.sapling_tree.store().min_checkpoint_id()),
+            super::from_infallible(self.orchard_tree.store().min_checkpoint_id()),
+            super::from_infallible(self.ironwood_tree.store().min_checkpoint_id()),
+        ];
+        if floors.iter().any(Option::is_none) {
+            None
+        } else {
+            floors.into_iter().flatten().max()
+        }
     }
 
     /// The deepest applied block at or below `max_height`.
@@ -346,18 +354,9 @@ where
     Ok(ShardTree::new(dst, MAX_CHECKPOINTS))
 }
 
-/// Ensures a checkpoint exists at `height` for a tree that has just appended
-/// the commitments of the block ending at that height.
-///
-/// Every accepted height is checkpointed in all three pools — including pools
-/// with no commitments in that block — so anchors remain computable at each
-/// block boundary and reorg truncation is exact.
-///
-/// The store door bypasses the ordering check that guards `ShardTree::append`,
-/// so the height must exceed every existing checkpoint id. Heights arrive
-/// monotonically through `put_blocks_marked`'s continuity checks; anything
-/// else is a chain discontinuity — refused here rather than accepted as a
-/// time-inverted checkpoint.
+/// Checkpoints `height` in this pool — every accepted height, in all three
+/// pools, so anchors stay computable per block. Uses `ShardTree::checkpoint`
+/// so checkpoints written without an append are pruned too.
 fn ensure_block_checkpoint<H, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     tree: &mut ShardTree<
         shardtree::store::memory::MemoryShardStore<H, BlockHeight>,
@@ -365,7 +364,6 @@ fn ensure_block_checkpoint<H, const DEPTH: u8, const SHARD_HEIGHT: u8>(
         SHARD_HEIGHT,
     >,
     height: BlockHeight,
-    final_tree_size: u32,
 ) -> Result<(), WalletError>
 where
     shardtree::store::memory::MemoryShardStore<H, BlockHeight>:
@@ -376,14 +374,13 @@ where
         if tree.store().max_checkpoint_id()?.as_ref() >= Some(&height) {
             return Err(WalletError::ChainDiscontinuity(height));
         }
-        let tree_state = if final_tree_size == 0 {
-            TreeState::Empty
-        } else {
-            TreeState::AtPosition(Position::from(u64::from(final_tree_size) - 1))
-        };
-        tree.store_mut()
-            .add_checkpoint(height, Checkpoint::from_parts(tree_state, BTreeSet::new()))
-            .map_err(shardtree::error::ShardTreeError::Storage)?;
+        let added = tree
+            .checkpoint(height)
+            .map_err(WalletError::CommitmentTree)?;
+        // Unreachable under the guard above; stay loud.
+        if !added {
+            return Err(WalletError::ChainDiscontinuity(height));
+        }
     }
     Ok(())
 }
@@ -431,7 +428,7 @@ where
         return Err(WalletError::ChainDiscontinuity(height));
     }
 
-    ensure_block_checkpoint(tree, height, bundles.final_tree_size())
+    ensure_block_checkpoint(tree, height)
 }
 
 impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
@@ -1678,10 +1675,10 @@ mod tests {
                 );
                 // Mirror production: every applied height is checkpointed
                 // in all three pools, including pools with no commitments
-                // (TreeState::Empty) — via the real ensure function.
-                super::ensure_block_checkpoint(&mut wallet.sapling_tree, height, 0)
+                // — via the real ensure function.
+                super::ensure_block_checkpoint(&mut wallet.sapling_tree, height)
                     .expect("empty-pool checkpoint backfill succeeds");
-                super::ensure_block_checkpoint(&mut wallet.orchard_tree, height, 0)
+                super::ensure_block_checkpoint(&mut wallet.orchard_tree, height)
                     .expect("empty-pool checkpoint backfill succeeds");
                 if h == 45 || h == 100 {
                     targets.push(ChainState::new(
@@ -2015,6 +2012,38 @@ mod tests {
             1
         );
         assert_eq!(st.wallet().get_locked_outputs(account_id).unwrap().len(), 1);
+    }
+
+    /// The #316 regression: checkpointing an empty (commitment-free) pool
+    /// every block must stay bounded at MAX_CHECKPOINTS.
+    #[test]
+    fn empty_tree_checkpoints_stay_bounded() {
+        use shardtree::store::memory::MemoryShardStore;
+        use shardtree::store::ShardStore;
+        use shardtree::ShardTree;
+
+        type QuietTree = ShardTree<
+            MemoryShardStore<sapling::Node, BlockHeight>,
+            { super::super::SAPLING_NOTE_COMMITMENT_TREE_DEPTH },
+            { super::super::SAPLING_SHARD_HEIGHT },
+        >;
+        let mut tree: QuietTree = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
+
+        let last = (MAX_CHECKPOINTS * 3 / 2) as u32; // 150 adds against a 100 budget
+        for height in 1..=last {
+            super::ensure_block_checkpoint(&mut tree, BlockHeight::from_u32(height))
+                .expect("empty-tree checkpoint succeeds");
+        }
+
+        // Pruned to the newest 100; the oldest 50 are gone.
+        assert_eq!(
+            tree.store().checkpoint_count().expect("infallible store"),
+            MAX_CHECKPOINTS
+        );
+        assert_eq!(
+            tree.store().min_checkpoint_id().expect("infallible store"),
+            Some(BlockHeight::from_u32(last - MAX_CHECKPOINTS as u32 + 1))
+        );
     }
 
     /// Below the retention window the checkpoint is gone: refuse rather
