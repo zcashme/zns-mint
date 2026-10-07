@@ -256,7 +256,7 @@ jobs:
           fi
 
       - name: Cache ceremony tx
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: integration-tests/ceremony-tx.hex
           key: ceremony-tx-v2-6.3.0-${{ hashFiles('integration-tests/src/**', 'integration-tests/tests/**', 'integration-tests/Cargo.lock') }}
