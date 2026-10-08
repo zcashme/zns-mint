@@ -6,7 +6,8 @@
 //! a sealing key is derived. The attestation must come from
 //! [`ATTESTATION_REPOSITORY`] workflow [`ATTESTATION_WORKFLOW`].
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -137,7 +138,11 @@ fn read_regular(path: &Path, max_bytes: u64) -> Result<Vec<u8>, MigrateError> {
             return Err(MigrateError::io(format!("read {}", path.display()), error));
         }
     }
-    let bytes = fs::read(path)
+    let file = File::open(path)
+        .map_err(|error| MigrateError::io(format!("read {}", path.display()), error))?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
         .map_err(|error| MigrateError::io(format!("read {}", path.display()), error))?;
     if bytes.len() as u64 > max_bytes {
         return Err(MigrateError::manifest(format!(
@@ -250,6 +255,40 @@ release = \"guest-2\"
             "{err}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_document_larger_than_the_limit_is_rejected() {
+        let manifest = load(&write("big", &sample())).unwrap();
+        let dir = manifest_dir("big");
+        let document = dir.join("upgrade.bin");
+        let bundle = dir.join("bundle.json");
+        fs::write(&document, vec![0u8; (MAX_BYTES as usize) + 1]).unwrap();
+        fs::write(&bundle, b"{}").unwrap();
+        let err = authorize(&manifest, &document, &bundle).unwrap_err();
+        assert!(err.to_string().contains("larger"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_real_deployment_release_bundle_is_accepted() {
+        // v0.1.2 attested this measurement file, not a canonical upgrade
+        // document, so `authorize` cannot accept this bundle yet. The
+        // constants below are the ones `authorize` passes to canon.
+        // TODO: when a release attests canonical upgrade bytes, replace this
+        // fixture with that document and its bundle and call `authorize`.
+        const ASSET: &[u8] = include_bytes!("testdata/v0.1.2-snp-measurement.txt");
+        const BUNDLE: &[u8] = include_bytes!("testdata/v0.1.2-snp-measurement.bundle.jsonl");
+        let release = ZcashmeRelease {
+            repository: ATTESTATION_REPOSITORY,
+            workflow: ATTESTATION_WORKFLOW,
+            bundle: BUNDLE,
+        };
+        let digest = upgrade::verify_zcashme_asset(ASSET, &release).unwrap();
+        assert_eq!(
+            hex::encode(digest),
+            "fd97164c2798585f391edf4a6445cedceb37b0cec7f1af0136f7846b52ca1e0a"
+        );
     }
 
     fn manifest_dir(name: &str) -> std::path::PathBuf {
