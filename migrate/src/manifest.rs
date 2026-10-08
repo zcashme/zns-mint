@@ -1,25 +1,26 @@
 //! Upgrade manifest file.
 //!
-//! TODO: call `zns_canon::upgrade::authorize_manifest` before this file
-//! authorizes `to_measurement`. That function checks a zcashme GitHub
-//! artifact attestation of the canonical manifest bytes. This loader does
-//! not take that bundle yet. Until it does, replacing this file before
-//! startup selects the guest that receives the seed. The attestation checks
-//! only show that the target matches the file.
-//!
-//! This loader only checks that the file is a version-1 manifest with
-//! fixed-width fields.
+//! The TOML file is the operator's view. GitHub attests
+//! [`zns_canon::upgrade::canonical_encoding`] of those same fields. Both
+//! sides call [`authorize`] on that document and its Sigstore bundle before
+//! a sealing key is derived. The attestation must come from
+//! [`ATTESTATION_REPOSITORY`] workflow [`ATTESTATION_WORKFLOW`].
 
 use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
-use zns_canon::upgrade::UpgradeManifest;
+use zns_canon::upgrade::{self, UpgradeManifest, ZcashmeRelease};
 
 use crate::error::MigrateError;
 
+pub const ATTESTATION_REPOSITORY: &str = "zns-deployment";
+
+pub const ATTESTATION_WORKFLOW: &str = ".github/workflows/release.yml";
+
 const MANIFEST_VERSION: u32 = 1;
 const MAX_BYTES: u64 = 64 * 1024;
+const MAX_BUNDLE_BYTES: u64 = 1024 * 1024;
 const MAX_RELEASE_LEN: usize = 256;
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +92,60 @@ pub fn load(path: &Path) -> Result<UpgradeManifest, MigrateError> {
         artifact_hash: decode_hex("artifact_hash", &file.artifact_hash)?,
         release,
     })
+}
+
+/// Require that `document` is the canonical encoding of `manifest` and that
+/// the zns-deployment release workflow attested those bytes.
+pub fn authorize(
+    manifest: &UpgradeManifest,
+    document: &Path,
+    bundle: &Path,
+) -> Result<(), MigrateError> {
+    let document = read_regular(document, MAX_BYTES)?;
+    let bundle = read_regular(bundle, MAX_BUNDLE_BYTES)?;
+    let release = ZcashmeRelease {
+        repository: ATTESTATION_REPOSITORY,
+        workflow: ATTESTATION_WORKFLOW,
+        bundle: &bundle,
+    };
+    upgrade::authorize_manifest(manifest, &document, &release)?;
+    Ok(())
+}
+
+fn read_regular(path: &Path, max_bytes: u64) -> Result<Vec<u8>, MigrateError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(MigrateError::manifest(format!(
+                "{} is a symlink",
+                path.display()
+            )));
+        }
+        Ok(meta) if !meta.is_file() => {
+            return Err(MigrateError::manifest(format!(
+                "{} is not a file",
+                path.display()
+            )));
+        }
+        Ok(meta) if meta.len() > max_bytes => {
+            return Err(MigrateError::manifest(format!(
+                "{} is larger than {max_bytes} bytes",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            return Err(MigrateError::io(format!("read {}", path.display()), error));
+        }
+    }
+    let bytes = fs::read(path)
+        .map_err(|error| MigrateError::io(format!("read {}", path.display()), error))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(MigrateError::manifest(format!(
+            "{} is larger than {max_bytes} bytes",
+            path.display()
+        )));
+    }
+    Ok(bytes)
 }
 
 fn decode_hex<const N: usize>(field: &str, text: &str) -> Result<[u8; N], MigrateError> {
@@ -166,5 +221,42 @@ release = \"guest-2\"
         let zeros = sample().replacen(&"22".repeat(48), &"00".repeat(48), 1);
         let path = write("zeros", &zeros);
         assert!(load(&path).unwrap_err().to_string().contains("all zeros"));
+    }
+
+    #[test]
+    fn a_document_that_is_not_canonical_is_rejected() {
+        let manifest = load(&write("auth-doc", &sample())).unwrap();
+        let dir = manifest_dir("auth-doc");
+        let document = dir.join("upgrade.bin");
+        let bundle = dir.join("bundle.json");
+        fs::write(&document, b"not-the-canonical-document").unwrap();
+        fs::write(&bundle, b"{}").unwrap();
+        let err = authorize(&manifest, &document, &bundle).unwrap_err();
+        assert!(err.to_string().contains("canonical"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_matching_document_is_rejected_without_a_real_attestation() {
+        let manifest = load(&write("auth-bundle", &sample())).unwrap();
+        let dir = manifest_dir("auth-bundle");
+        let document = dir.join("upgrade.bin");
+        let bundle = dir.join("bundle.json");
+        fs::write(&document, upgrade::canonical_encoding(&manifest)).unwrap();
+        fs::write(&bundle, b"{}").unwrap();
+        let err = authorize(&manifest, &document, &bundle).unwrap_err();
+        assert!(
+            err.to_string().contains("attestation") || err.to_string().contains("GitHub"),
+            "{err}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn manifest_dir(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "zns-migrate-manifest-{}-{}",
+            std::process::id(),
+            name
+        ))
     }
 }

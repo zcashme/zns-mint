@@ -40,6 +40,9 @@ pub enum MigrateError {
 
     #[error("migration offer is for a different manifest")]
     ManifestHash,
+
+    #[error("upgrade: {0}")]
+    Upgrade(#[from] zns_canon::upgrade::UpgradeError),
 }
 
 impl MigrateError {

@@ -2,21 +2,21 @@
 
 One-shot move of a sealed ZNS seed from the guest that holds it (`source`) to the next measured guest (`target`).
 
-```bash
-# M2, the guest that will hold the new capsule
-zns-migrate target \
-  --manifest /migration/upgrade.toml \
-  --transport-dir /migration \
-  --output-capsule /state/keys/zns_seed.capsule
+Both guests read the same three files, mounted from the host. They then talk to each other through one shared directory.
 
-# M1, the guest that holds the current capsule
-zns-migrate source \
-  --manifest /migration/upgrade.toml \
-  --transport-dir /migration \
-  --input-capsule /state/keys/zns_seed.capsule
-```
+## Files from the host
 
-Either side may start first. Target waits until source writes `source.ready`, then publishes an attested X25519 offer before source unseals the capsule. The transport directory is an untrusted channel, not state:
+`--manifest` is the upgrade TOML. It names the current measurement (`from_measurement`), the next measurement (`to_measurement`), the SHA-256 of the new initrd, and the release name. People read this file.
+
+`--upgrade-document` is the canonical form of those same fields, packed as bytes. This is the file the `zns-deployment` release workflow attests. The bytes are version, sequence, both measurements, the artifact hash, and the release name.
+
+`--attestation-bundle` is the Sigstore bundle from that release, downloaded with `gh attestation download`. It proves `.github/workflows/release.yml` in `zns-deployment` attested the canonical document.
+
+Before either guest derives a sealing key, the canonical document must match the TOML, and the bundle must verify. A change to `to_measurement` in the TOML no longer matches the bundle, so the migration stops.
+
+## The shared directory
+
+`--transport-dir` is only the channel between the two guests. Both can write there, so nothing in it authorizes the move. Use a fresh directory for each attempt. The three files above, and both capsules, stay outside it.
 
 ```text
 source.ready
@@ -28,10 +28,38 @@ receipt.bin
 receipt_attestation.bin
 ```
 
-Use a fresh directory for each attempt. The capsule stays outside that directory. Target will not replace an existing capsule unless `--replace-after-verified-migration` is set. It also will not decrypt a transfer until `source_attestation.bin` verifies against that offer and that ciphertext, and the report measurement equals the manifest's `from_measurement`. After the new capsule is linked into place, target unseals it again and only then writes the receipt. Source accepts that receipt only when `receipt_attestation.bin` binds this offer and this receipt, and the report measurement equals `to_measurement`.
+## Run
 
-`zns-canon` supplies sealing, capsule parsing, the manifest hash, migration `report_data`, and stored SNP report verification. This binary does not yet call `authorize_manifest`, so a zcashme GitHub artifact attestation of the manifest is not required. Source requires the target report measurement to equal `to_measurement`, and the offer's manifest hash to match.
+Either side may start first. Target waits until source writes `source.ready`.
+
+```bash
+# Next guest, the one that will hold the new capsule
+zns-migrate target \
+  --manifest /state/upgrade.toml \
+  --upgrade-document /state/upgrade.bin \
+  --attestation-bundle /state/upgrade.bundle.jsonl \
+  --transport-dir /migration \
+  --output-capsule /state/keys/zns_seed.capsule
+
+# Current guest, the one that holds the capsule
+zns-migrate source \
+  --manifest /state/upgrade.toml \
+  --upgrade-document /state/upgrade.bin \
+  --attestation-bundle /state/upgrade.bundle.jsonl \
+  --transport-dir /migration \
+  --input-capsule /state/keys/zns_seed.capsule
+```
+
+Target publishes an X25519 offer and an SNP report over that offer. Source checks that report's measurement against `to_measurement`, then checks its own SNP measurement against `from_measurement`. Only then does it unwrap the seed. It encrypts the seed to the target key and publishes a second report over the offer and the ciphertext.
+
+Target decrypts only when that report matches and its measurement is `from_measurement`. It seals a new capsule, reads that file back, and unseals it again. The receipt and a report over the receipt are written only when the reopened seed matches. Source accepts the receipt only when that report matches and its measurement is `to_measurement`.
+
+Target leaves an existing capsule in place unless `--replace-after-verified-migration` is set. Source leaves its original capsule on disk after it exits. A finished run copies the seed: both guests can still unseal it. Retiring the source capsule is not done yet.
+
+The attested manifest includes `sequence`. This binary does not compare it with a stored custody generation, so an older attested manifest for the same source measurement is still accepted. Guest policy is not in the manifest. The SNP report carries it, and this binary checks the measurement only.
+
+## Build
+
+`zns-canon` on `main` supplies sealing, capsule parsing, the manifest hash, migration `report_data`, stored SNP report verification, and `authorize_manifest`. Sealing and attestation use the SNP guest device. There is no off-enclave build.
 
 The X25519 seed wrap lives in this binary for now. `zns-canon` still returns `NoImpl` for ephemeral key generation, encryption, and decryption, and those functions do not bind the offer nonce or manifest hash.
-
-`zns-canon` is the git dependency on `main`. Sealing and attestation use the SNP guest device. There is no off-enclave build.

@@ -35,6 +35,12 @@ use zns_canon::upgrade::{self, UpgradeManifest};
 /// Domain separation for the wrap key and its AEAD associated data.
 pub const WRAP_DOMAIN: &[u8] = b"ZNS_MIGRATION_WRAP_V1";
 
+/// Domain separation for [`source_report_data`].
+///
+/// Distinct from the offer, transfer, and receipt domains. The source
+/// requests this report before unsealing and does not publish it.
+pub const SOURCE_REPORT_DOMAIN: &[u8] = b"ZNS_MIGRATION_SOURCE_V1";
+
 /// Domain separation for [`transfer_report_data`].
 ///
 /// Distinct from `ZNS_MIGRATION_V1`, which binds only the target's offer.
@@ -266,6 +272,20 @@ pub fn decrypt_transfer(
     let secret = Secret::new(seed);
     seed.zeroize();
     Ok(secret)
+}
+
+/// `BLAKE2b-512(b"ZNS_MIGRATION_SOURCE_V1" || offer)`.
+///
+/// The source passes this to `get_attestation` before unsealing. The
+/// report's measurement must equal `from_measurement`. This report is not
+/// written to the channel. The published source attestation is
+/// [`transfer_report_data`], which also binds the ciphertext.
+pub fn source_report_data(offer: &MigrationOffer) -> [u8; REPORT_DATA_LEN] {
+    let offer_bytes = encode_offer(offer);
+    let mut input = Vec::with_capacity(SOURCE_REPORT_DOMAIN.len() + offer_bytes.len());
+    input.extend_from_slice(SOURCE_REPORT_DOMAIN);
+    input.extend_from_slice(&offer_bytes);
+    blake2b_512(&input)
 }
 
 /// `BLAKE2b-512(b"ZNS_MIGRATION_TRANSFER_V1" || offer || transfer)`.
@@ -635,6 +655,22 @@ mod tests {
         let mut other_offer = offer;
         other_offer.nonce[0] ^= 1;
         assert_ne!(transfer_report_data(&other_offer, &transfer), bound);
+        assert_ne!(bound, source_report_data(&offer));
+    }
+
+    #[test]
+    fn source_report_binds_this_offer_and_no_ciphertext() {
+        let offer = MigrationOffer {
+            ephemeral_pubkey: [1u8; 32],
+            nonce: [2u8; 32],
+            manifest_hash: [3u8; 32],
+        };
+        let bound = source_report_data(&offer);
+        assert_ne!(bound, zns_canon::migration::migration_report_data(&offer));
+
+        let mut other_offer = offer;
+        other_offer.nonce[0] ^= 1;
+        assert_ne!(source_report_data(&other_offer), bound);
     }
 
     #[test]

@@ -332,34 +332,43 @@ fn sync_dir(dir: &Path) -> Result<(), MigrateError> {
 
 /// The capsule is trusted state. It must not be one of the channel files.
 pub fn capsule_outside_transport(capsule: &Path, transport_dir: &Path) -> Result<(), MigrateError> {
+    trusted_outside_transport(capsule, transport_dir, "capsule")
+}
+
+/// A file the operator mounts in. It must not live in the channel directory.
+pub fn trusted_outside_transport(
+    path: &Path,
+    transport_dir: &Path,
+    kind: &str,
+) -> Result<(), MigrateError> {
     let transport = fs::canonicalize(transport_dir).map_err(|error| {
         MigrateError::io(format!("canonicalize {}", transport_dir.display()), error)
     })?;
-    let parent = capsule
+    let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     if !parent.exists() {
         return Err(MigrateError::transport(format!(
-            "capsule directory {} does not exist",
+            "{kind} directory {} does not exist",
             parent.display()
         )));
     }
     let parent = fs::canonicalize(parent)
         .map_err(|error| MigrateError::io(format!("canonicalize {}", parent.display()), error))?;
-    let name = capsule.file_name().ok_or_else(|| {
-        MigrateError::transport(format!("{} has no file name", capsule.display()))
-    })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| MigrateError::transport(format!("{} has no file name", path.display())))?;
     let full = parent.join(name);
     if full.starts_with(&transport) {
         return Err(MigrateError::transport(format!(
-            "capsule {} is inside the transport directory",
-            capsule.display()
+            "{kind} {} is inside the transport directory",
+            path.display()
         )));
     }
     if PROTOCOL_FILES.contains(&name.to_str().unwrap_or("")) || name == SOURCE_READY_FILE {
         return Err(MigrateError::transport(format!(
-            "capsule file name {} is reserved by the transport",
+            "{kind} file name {} is reserved by the transport",
             name.to_string_lossy()
         )));
     }
