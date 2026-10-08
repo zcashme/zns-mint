@@ -332,35 +332,48 @@ fn sync_dir(dir: &Path) -> Result<(), MigrateError> {
 
 /// The capsule is trusted state. It must not be one of the channel files.
 pub fn capsule_outside_transport(capsule: &Path, transport_dir: &Path) -> Result<(), MigrateError> {
+    trusted_outside_transport(capsule, transport_dir, "capsule")?;
+    let name = capsule.file_name().ok_or_else(|| {
+        MigrateError::transport(format!("{} has no file name", capsule.display()))
+    })?;
+    if PROTOCOL_FILES.contains(&name.to_str().unwrap_or("")) || name == SOURCE_READY_FILE {
+        return Err(MigrateError::transport(format!(
+            "capsule file name {} is reserved by the transport",
+            name.to_string_lossy()
+        )));
+    }
+    Ok(())
+}
+
+/// A file the operator mounts in. It must not live in the channel directory.
+pub fn trusted_outside_transport(
+    path: &Path,
+    transport_dir: &Path,
+    kind: &str,
+) -> Result<(), MigrateError> {
     let transport = fs::canonicalize(transport_dir).map_err(|error| {
         MigrateError::io(format!("canonicalize {}", transport_dir.display()), error)
     })?;
-    let parent = capsule
+    let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     if !parent.exists() {
         return Err(MigrateError::transport(format!(
-            "capsule directory {} does not exist",
+            "{kind} directory {} does not exist",
             parent.display()
         )));
     }
     let parent = fs::canonicalize(parent)
         .map_err(|error| MigrateError::io(format!("canonicalize {}", parent.display()), error))?;
-    let name = capsule.file_name().ok_or_else(|| {
-        MigrateError::transport(format!("{} has no file name", capsule.display()))
-    })?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| MigrateError::transport(format!("{} has no file name", path.display())))?;
     let full = parent.join(name);
     if full.starts_with(&transport) {
         return Err(MigrateError::transport(format!(
-            "capsule {} is inside the transport directory",
-            capsule.display()
-        )));
-    }
-    if PROTOCOL_FILES.contains(&name.to_str().unwrap_or("")) || name == SOURCE_READY_FILE {
-        return Err(MigrateError::transport(format!(
-            "capsule file name {} is reserved by the transport",
-            name.to_string_lossy()
+            "{kind} {} is inside the transport directory",
+            path.display()
         )));
     }
     Ok(())
@@ -451,5 +464,22 @@ mod tests {
         );
         assert!(err.to_string().contains("not a regular file"), "{err}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reserved_names_apply_to_capsules_only() {
+        let root = scratch("names");
+        let channel = root.join("channel");
+        let state = root.join("state");
+        fs::create_dir(&channel).unwrap();
+        fs::create_dir(&state).unwrap();
+        let named = state.join(ATTESTATION_FILE);
+        let err = capsule_outside_transport(&named, &channel).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
+        trusted_outside_transport(&named, &channel, "attestation bundle").unwrap();
+        let inside = channel.join("upgrade.bin");
+        let err = trusted_outside_transport(&inside, &channel, "upgrade document").unwrap_err();
+        assert!(err.to_string().contains("inside"), "{err}");
+        let _ = fs::remove_dir_all(&root);
     }
 }

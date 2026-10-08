@@ -4,17 +4,20 @@
 //! verify manifest structure (already done by the loader)
 //! verify M2 attestation
 //! verify target measurement
+//! verify our measurement is from_measurement
 //! unseal
 //! encrypt
 //! attest the transfer
-//! publish the transfer only if our measurement is from_measurement
+//! publish the transfer only if that report's measurement is from_measurement
 //! zeroize seed
 //! wait for the receipt and the target's attestation of it
 //! exit only when that report measurement is to_measurement
 //! ```
 //!
 //! There is no second offer. A failed check of the target returns before the
-//! capsule is unsealed. The transfer is published only with an attestation
+//! capsule is unsealed. The source checks its own measurement against
+//! `from_measurement` before that unseal. The transfer is published only with
+//! an attestation
 //! that binds this offer and this ciphertext, and only when that report's
 //! measurement is the manifest's `from_measurement`. The receipt is accepted
 //! only when a target report binds this offer and this receipt, and that
@@ -61,6 +64,18 @@ pub fn run(
         measurement = hex::encode(measurement),
         "target measurement authorized"
     );
+
+    let source_identity = handoff::source_report_data(&offer);
+    let source_identity_report = get_attestation(&source_identity)?;
+    if source_identity_report.as_bytes().is_empty() {
+        return Err(MigrateError::transport("TEE returned an empty attestation"));
+    }
+    let own_measurement = attest::measurement(source_identity_report.as_bytes(), &source_identity)?;
+    require_measurement(
+        &own_measurement,
+        &manifest.from_measurement,
+        MigrateError::SourceMeasurement,
+    )?;
 
     let capsule_bytes = capsule::read_capsule_file(input)?;
     let capsule = capsule::parse_capsule(&capsule_bytes)?;

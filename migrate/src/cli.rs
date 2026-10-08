@@ -7,9 +7,12 @@ pub const USAGE: &str = "\
 zns-migrate — move a sealed ZNS seed to the next measured guest
 
 USAGE:
-    zns-migrate source --manifest <PATH> --transport-dir <DIR> --input-capsule <PATH>
-    zns-migrate target --manifest <PATH> --transport-dir <DIR> --output-capsule <PATH>
-                       [--replace-after-verified-migration]
+    zns-migrate source --manifest <TOML> --upgrade-document <BYTES> \\
+                       --attestation-bundle <BUNDLE> --transport-dir <DIR> \\
+                       --input-capsule <PATH>
+    zns-migrate target --manifest <TOML> --upgrade-document <BYTES> \\
+                       --attestation-bundle <BUNDLE> --transport-dir <DIR> \\
+                       --output-capsule <PATH> [--replace-after-verified-migration]
 
 Source and target may start in either order. Target waits until source marks
 the transport directory, then publishes an attested offer before source
@@ -31,14 +34,15 @@ Target will not overwrite an existing capsule unless
 --transport unix:<PATH> is not implemented.
 --timeout-secs <N> is how long to wait for the peer (default 120, max 86400).
 
-The manifest is not passed to zns-canon's authorize_manifest yet, so a
-zcashme GitHub artifact attestation is not required. Source requires the
-target report's measurement to equal to_measurement. Target requires the
-source report's
-measurement to equal from_measurement, and that report must bind the offer
-and the ciphertext, before it installs a capsule. Source accepts the receipt
-only when receipt_attestation.bin binds that offer and that receipt, and the
-report measurement equals to_measurement.
+The manifest TOML, the canonical upgrade document, and the Sigstore bundle
+stay outside the transport directory. Both sides require the zns-deployment
+release workflow to have attested that document before a sealing key is
+derived. Source requires the target report's measurement to equal
+to_measurement. Target requires the source report's measurement to equal
+from_measurement, and that report must bind the offer and the ciphertext,
+before it installs a capsule. Source accepts the receipt only when
+receipt_attestation.bin binds that offer and that receipt, and the report
+measurement equals to_measurement.
 ";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -54,6 +58,8 @@ pub enum Role {
 pub struct Args {
     pub role: Role,
     pub manifest: PathBuf,
+    pub upgrade_document: PathBuf,
+    pub attestation_bundle: PathBuf,
     pub transport_dir: PathBuf,
     pub input_capsule: Option<PathBuf>,
     pub output_capsule: Option<PathBuf>,
@@ -87,6 +93,8 @@ where
     };
 
     let mut manifest = None;
+    let mut upgrade_document = None;
+    let mut attestation_bundle = None;
     let mut transport_dir = None;
     let mut input_capsule = None;
     let mut output_capsule = None;
@@ -97,6 +105,16 @@ where
         match arg.as_str() {
             "-h" | "--help" => return Ok(Command::Help),
             "--manifest" => set_once(&mut manifest, "--manifest", value("--manifest", &mut args)?)?,
+            "--upgrade-document" => set_once(
+                &mut upgrade_document,
+                "--upgrade-document",
+                value("--upgrade-document", &mut args)?,
+            )?,
+            "--attestation-bundle" => set_once(
+                &mut attestation_bundle,
+                "--attestation-bundle",
+                value("--attestation-bundle", &mut args)?,
+            )?,
             "--transport-dir" => set_once(
                 &mut transport_dir,
                 "transport",
@@ -143,6 +161,10 @@ where
     }
 
     let manifest = manifest.ok_or_else(|| MigrateError::usage("--manifest is required"))?;
+    let upgrade_document =
+        upgrade_document.ok_or_else(|| MigrateError::usage("--upgrade-document is required"))?;
+    let attestation_bundle = attestation_bundle
+        .ok_or_else(|| MigrateError::usage("--attestation-bundle is required"))?;
     let transport_dir =
         transport_dir.ok_or_else(|| MigrateError::usage("--transport-dir is required"))?;
 
@@ -173,6 +195,8 @@ where
     Ok(Command::Run(Args {
         role,
         manifest: PathBuf::from(manifest),
+        upgrade_document: PathBuf::from(upgrade_document),
+        attestation_bundle: PathBuf::from(attestation_bundle),
         transport_dir: PathBuf::from(transport_dir),
         input_capsule: input_capsule.map(PathBuf::from),
         output_capsule: output_capsule.map(PathBuf::from),
@@ -229,6 +253,10 @@ mod tests {
             "source",
             "--manifest",
             "upgrade.toml",
+            "--upgrade-document",
+            "upgrade.bin",
+            "--attestation-bundle",
+            "bundle.jsonl",
             "--transport",
             "dir:/migration",
             "--input-capsule",
@@ -250,6 +278,10 @@ mod tests {
             "/state/keys/zns_seed.capsule",
             "--manifest",
             "upgrade.toml",
+            "--upgrade-document",
+            "upgrade.bin",
+            "--attestation-bundle",
+            "bundle.jsonl",
             "--transport-dir",
             "/migration",
             "--replace-after-verified-migration",
@@ -283,6 +315,10 @@ mod tests {
             "source",
             "--manifest",
             "m",
+            "--upgrade-document",
+            "d",
+            "--attestation-bundle",
+            "b",
             "--transport-dir",
             "t",
             "--input-capsule",

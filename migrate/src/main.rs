@@ -52,6 +52,14 @@ where
 pub(crate) fn execute(args: cli::Args) -> Result<(), MigrateError> {
     let loaded = manifest::load(&args.manifest)?;
     let channel = transport::DirTransport::open(&args.transport_dir, args.timeout)?;
+    for (path, kind) in [
+        (args.manifest.as_path(), "manifest"),
+        (args.upgrade_document.as_path(), "upgrade document"),
+        (args.attestation_bundle.as_path(), "attestation bundle"),
+    ] {
+        transport::trusted_outside_transport(path, channel.dir(), kind)?;
+    }
+    manifest::authorize(&loaded, &args.upgrade_document, &args.attestation_bundle)?;
     // Migration attests every step, so it runs only on the enclave: derive
     // the hardware sealing key once and pass it through.
     let sealing_key =
