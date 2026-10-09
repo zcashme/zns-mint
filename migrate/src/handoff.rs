@@ -424,6 +424,48 @@ mod tests {
     }
 
     #[test]
+    fn canonical_wrap_roundtrips_through_the_transfer_encoding() {
+        use rand::rngs::OsRng;
+        use zns_canon::migration::{self, MigrationError};
+
+        let mut rng = OsRng;
+        let keypair = migration::generate_ephemeral_keypair(&mut rng);
+        let offer = MigrationOffer {
+            ephemeral_pubkey: keypair.public,
+            nonce: [0x44; 32],
+            manifest_hash: [0x66; 32],
+        };
+        let transfer = migration::encrypt_seed(&seed(), &offer, &mut rng).unwrap();
+        let decoded = decode_transfer(&encode_transfer(&transfer)).unwrap();
+        assert_eq!(decoded, transfer);
+
+        let opened = migration::decrypt_seed(&keypair.secret, &offer, &decoded).unwrap();
+        assert_eq!(opened.expose_secret(), seed().expose_secret());
+
+        let mut other_nonce = offer;
+        other_nonce.nonce[0] ^= 1;
+        assert!(matches!(
+            migration::decrypt_seed(&keypair.secret, &other_nonce, &decoded),
+            Err(MigrationError::Decrypt)
+        ));
+
+        let mut other_hash = offer;
+        other_hash.manifest_hash[0] ^= 1;
+        assert!(matches!(
+            migration::decrypt_seed(&keypair.secret, &other_hash, &decoded),
+            Err(MigrationError::Decrypt)
+        ));
+
+        let mut tampered = encode_transfer(&transfer);
+        tampered[32 + NONCE_LEN] ^= 1;
+        let tampered = decode_transfer(&tampered).unwrap();
+        assert!(matches!(
+            migration::decrypt_seed(&keypair.secret, &offer, &tampered),
+            Err(MigrationError::Decrypt)
+        ));
+    }
+
+    #[test]
     fn receipt_must_match_manifest_fingerprint_and_a_new_capsule() {
         let manifest = manifest();
         let source = b"source-capsule-bytes";
