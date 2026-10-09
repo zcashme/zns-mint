@@ -60,6 +60,6 @@ The attested manifest includes `sequence`. This binary does not compare it with 
 
 ## Build
 
-`zns-canon` on `main` supplies sealing, capsule parsing, the manifest hash, migration `report_data`, stored SNP report verification, and `authorize_manifest`. Sealing and attestation use the SNP guest device. There is no off-enclave build.
+`zns-canon` supplies sealing, capsule parsing, the manifest hash, migration `report_data`, the offer-bound X25519 seed wrap, stored SNP report verification, and `authorize_manifest`. Sealing and attestation use the SNP guest device. There is no off-enclave build.
 
-The X25519 seed wrap lives in this binary for now. `zns-canon` still returns `NoImpl` for ephemeral key generation, encryption, and decryption, and those functions do not bind the offer nonce or manifest hash.
+The receipt checks and the source, transfer, and receipt reports stay in this binary.

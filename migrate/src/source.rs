@@ -89,13 +89,7 @@ pub fn run(
     require_source_capsule(manifest, &capsule_bytes, &capsule.fingerprint)?;
     let transfer = {
         let seed = capsule::unseal_seed(sealing_key, &capsule)?;
-        let transfer = handoff::encrypt_seed_for_target(
-            &seed,
-            offer.ephemeral_pubkey,
-            offer.nonce,
-            offer.manifest_hash,
-            &mut OsRng,
-        )?;
+        let transfer = migration::encrypt_seed(&seed, &offer, &mut OsRng)?;
         drop(seed);
         transfer
     };

@@ -29,6 +29,9 @@ pub enum MigrateError {
     #[error("handoff: {0}")]
     Handoff(#[from] HandoffError),
 
+    #[error("migration: {0}")]
+    Migration(#[from] zns_canon::migration::MigrationError),
+
     #[error("target measurement is not authorized")]
     Measurement,
 
