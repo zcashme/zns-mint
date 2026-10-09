@@ -88,36 +88,17 @@ impl std::fmt::Debug for AccessCode {
 }
 
 impl AccessCode {
-    /// The six ASCII digits.
-    pub fn digits(&self) -> [u8; 6] {
-        let mut digits = [0u8; 6];
-        let mut n = self.0;
-        for i in (0..6).rev() {
-            digits[i] = b'0' + (n % 10) as u8;
-            n /= 10;
-        }
-        digits
-    }
-
-    /// Parses six ASCII digits.
-    pub fn from_digits(digits: &[u8; 6]) -> Option<Self> {
-        if !digits.iter().all(|b| b.is_ascii_digit()) {
+    /// Parses exactly six ASCII decimal digits from a memo field.
+    pub fn parse(s: &str) -> Option<Self> {
+        let bytes = s.as_bytes();
+        if bytes.len() != 6 || !bytes.iter().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        std::str::from_utf8(digits)
+        std::str::from_utf8(bytes)
             .ok()?
             .parse::<u32>()
             .ok()
             .map(Self)
-    }
-
-    /// Parses exactly six ASCII decimal digits from a memo field.
-    pub fn parse(s: &str) -> Option<Self> {
-        let bytes = s.as_bytes();
-        if bytes.len() != 6 {
-            return None;
-        }
-        Self::from_digits(bytes.try_into().ok()?)
     }
 
     /// Constant-time equality.
@@ -125,10 +106,16 @@ impl AccessCode {
         bool::from(self.0.ct_eq(&other.0))
     }
 
-    /// Digits as a `String`; test-only.
+    /// The six ASCII digits; test-only.
     #[cfg(test)]
     pub fn expose_for_test(&self) -> [u8; 6] {
-        self.digits()
+        let mut digits = [0u8; 6];
+        let mut n = self.0;
+        for i in (0..6).rev() {
+            digits[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+        digits
     }
 }
 
