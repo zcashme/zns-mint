@@ -212,7 +212,8 @@ fn require_keygen_attestation(capsule_bytes: &[u8], fingerprint: &SeedFingerprin
     let capsule_hash = blake2b256(capsule_bytes);
     let expected = zns_canon::attestation::report_data(fingerprint, &capsule_hash);
     let bytes = read_attestation_report(std::path::Path::new("keys/zns_attestation.bin"));
-    let _checked = zns_canon::attestation::stored(bytes, &expected);
+    zns_canon::attestation::stored(bytes, &expected)
+        .expect("FATAL: keygen attestation report failed verification");
 }
 
 /// One open of the keygen report. The descriptor must be a regular file
