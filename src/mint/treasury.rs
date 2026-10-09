@@ -9,17 +9,16 @@ pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
 use std::convert::Infallible;
 use std::num::NonZeroU32;
 
-use zcash_client_backend::data_api::locking::{LockFilter, LockedInputPolicy};
+use zcash_client_backend::data_api::error::Error as ProposeError;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
 use zcash_client_backend::data_api::wallet::{
     create_proposed_transactions, propose_standard_transfer_to_address, ConfirmationsPolicy,
     CreateErrT, ProposeTransferErrT,
 };
-use zcash_client_backend::data_api::{
-    InputSource as _, MaxSpendMode, TargetValue, WalletRead as _,
-};
+use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
+use zcash_client_backend::proposal::Proposal;
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::FeeError;
@@ -45,8 +44,10 @@ type TreasuryBuildError<P> =
 /// actually moves, not on the balance behind it.
 pub const SWEEP_MINIMUM: Zatoshis = Zatoshis::const_from_u64(100_000_000);
 
-/// Amount retained as Treasury change after a sweep (0.01 ZEC): the
-/// operating float that funds the next Name Note's fee.
+/// The operating waterline (0.01 ZEC): the float that OTP relays and
+/// Name Note fees draw on. The drain moves only the surplus above the
+/// waterline and holds the float itself whole — its fee is charged to
+/// the surplus, never to the float.
 pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 
 /// The relay sends no value — the memo is the message. The
@@ -67,6 +68,8 @@ pub enum BuildFailure<ProposalError, TransactionError> {
     Heights(WalletError),
     /// Wallet note selection failed.
     Selection(WalletError),
+    /// The wallet failed to produce the balance summary.
+    Summary(WalletError),
     /// Selected note values overflowed or underflowed the monetary range.
     Balance(BalanceError),
     /// The upstream wallet API rejected transaction proposal construction.
@@ -83,6 +86,7 @@ impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::fmt
             Self::HeightsUnavailable => write!(f, "no target or anchor height"),
             Self::Heights(error) => write!(f, "target/anchor height lookup failed: {error}"),
             Self::Selection(error) => write!(f, "note selection failed: {error}"),
+            Self::Summary(error) => write!(f, "balance summary failed: {error}"),
             Self::Balance(error) => write!(f, "selected note value is invalid: {error}"),
             Self::Proposal(error) => write!(f, "proposal failed: {error:?}"),
             Self::Transaction(error) => write!(f, "transaction build failed: {error:?}"),
@@ -95,13 +99,24 @@ impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::err
 {
 }
 
-/// One sweep: all Treasury value above the operating float moves to the
-/// vault when at least `SWEEP_MINIMUM` moves. `main` gates the once-per-day
-/// cadence. The ZIP-321 amount is `total` minus `SWEEP_RESERVE`; the standard
-/// transfer helper prices ZIP-317 and the fee comes out of the float. `Ok(None)`
-/// means nothing needs moving. `Err` reports a build failure; the next daily
-/// gate tries again. A read-back miss after a successful build is FATAL — the
-/// wallet has already marked the inputs spent.
+/// One drain per day: everything above the operating waterline moves to
+/// the vault when at least `SWEEP_MINIMUM` moves. `main` gates the
+/// once-per-day cadence, so the pump fires at most daily — and most days
+/// not at all, because the pool sits at the line.
+///
+/// The drain prices its own fee from upstream's refusal: `InsufficientFunds`
+/// reports `required = payment + fee`, so the exact fee is read off the
+/// error — or off the priced proposal — and charged to the surplus, never
+/// to the float. The fee depends only on the note set and transaction
+/// shape, never on the amount, so the re-priced second attempt converges.
+/// Sub-economic notes (value at or below the marginal fee) are already
+/// classified out of `spendable_value` by the wallet's balance layer, so
+/// the arithmetic here matches what the proposer will gather.
+///
+/// `Ok(None)` means nothing needs moving: at or below the waterline, or
+/// the surplus is under `SWEEP_MINIMUM`. `Err` reports a build failure;
+/// the next daily gate tries again. A read-back miss after a successful
+/// build is FATAL — the wallet has already marked the inputs spent.
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
@@ -110,54 +125,113 @@ pub fn sweep_to_vault<P: Parameters>(
     output_prover: &sapling::circuit::OutputParameters,
 ) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
     let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
-    let (target_height, _) = match wallet.get_target_and_anchor_heights(NonZeroU32::MIN) {
-        Ok(Some(heights)) => heights,
-        Ok(None) => return Err(BuildFailure::HeightsUnavailable),
-        Err(error) => return Err(BuildFailure::Heights(error)),
-    };
 
-    let lock_policy = LockedInputPolicy::Exclude;
-    let notes = match wallet.select_spendable_notes(
-        TREASURY_ACCOUNT,
-        TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
-        &[ShieldedPool::Sapling, ShieldedPool::Ironwood],
-        target_height,
-        policy,
-        &[],
-        LockFilter::Policy(&lock_policy),
-    ) {
-        Ok(notes) if !notes.is_empty() => notes,
-        Ok(_) => {
-            tracing::debug!("vault sweep skipped: no spendable notes");
-            return Ok(None);
-        }
-        Err(error) => return Err(BuildFailure::Selection(error)),
+    // Spendable = confirmed, witnessable, unlocked, and non-economic notes
+    // excluded: the balance layer classifies notes at or below `MARGINAL_FEE`
+    // as uneconomic (`add_note_to_balance`), matching the proposer's own
+    // input pruning, so the drain's arithmetic cannot disagree with it.
+    let summary = match wallet.get_wallet_summary(policy) {
+        Ok(Some(summary)) => summary,
+        Ok(None) => return Ok(None),
+        Err(error) => return Err(BuildFailure::Summary(error)),
     };
-    let total = notes.total_value().map_err(BuildFailure::Balance)?;
-
-    let Some(payment) = (total - SWEEP_RESERVE).filter(|p| *p >= SWEEP_MINIMUM) else {
-        if total < SWEEP_RESERVE {
-            tracing::info!(
-                spendable_zats = total.into_u64(),
-                float_zats = SWEEP_RESERVE.into_u64(),
-                "vault sweep skipped: spendable below the float"
-            );
-        } else {
-            tracing::debug!(
-                spendable_zats = total.into_u64(),
-                minimum_zats = SWEEP_MINIMUM.into_u64(),
-                "vault sweep skipped: payment below the minimum"
-            );
-        }
+    let Some(balance) = summary.account_balances().get(&TREASURY_ACCOUNT) else {
+        tracing::debug!("vault drain skipped: no treasury account in summary");
         return Ok(None);
     };
+    let drainable = (balance.sapling_balance().spendable_value()
+        + balance.ironwood_balance().spendable_value())
+    .ok_or(BuildFailure::Balance(BalanceError::Overflow))?;
 
-    let proposal = propose_standard_transfer_to_address::<_, _, Infallible>(
+    // The waterline: relays and Name Note fees draw on the float, so the
+    // drain moves only the surplus above it. Most midnights end here.
+    if drainable <= SWEEP_RESERVE {
+        tracing::debug!(
+            spendable_zats = drainable.into_u64(),
+            float_zats = SWEEP_RESERVE.into_u64(),
+            "vault drain skipped: at the waterline"
+        );
+        return Ok(None);
+    }
+    let Some(payment) = drainable - SWEEP_RESERVE else {
+        return Err(BuildFailure::Balance(BalanceError::Underflow));
+    };
+    if payment < SWEEP_MINIMUM {
+        tracing::debug!(
+            surplus_zats = payment.into_u64(),
+            minimum_zats = SWEEP_MINIMUM.into_u64(),
+            "vault drain skipped: surplus below the minimum"
+        );
+        return Ok(None);
+    }
+
+    // Attempt 1: pay the vault the surplus. Two outcomes leave the float
+    // short — upstream refuses (`InsufficientFunds`), or the priced fee
+    // cannot fit above the waterline — and both measure the exact fee.
+    let fee = match propose_vault_drain::<P>(network, wallet, payment) {
+        Ok(proposal) => {
+            let balance = proposal.steps().first().balance();
+            let fee = balance.fee_required();
+            let change = (balance.total() - fee)
+                .ok_or(BuildFailure::Balance(BalanceError::Underflow))?;
+            if change >= SWEEP_RESERVE {
+                return record_vault_drain(
+                    network,
+                    wallet,
+                    treasury_keys,
+                    spend_prover,
+                    output_prover,
+                    proposal,
+                );
+            }
+            fee
+        }
+        Err(BuildFailure::Proposal(ProposeError::InsufficientFunds { required, .. })) => {
+            (required - payment).ok_or(BuildFailure::Balance(BalanceError::Underflow))?
+        }
+        Err(error) => return Err(error),
+    };
+
+    // Attempt 2: the fee charged to the surplus; the float is whole. If
+    // even the surplus cannot cover its own movement cost, defer — the
+    // next inbound payment grows the surplus faster than it grows the fee.
+    let Some(payment) = (drainable - SWEEP_RESERVE).and_then(|surplus| surplus - fee) else {
+        tracing::warn!(
+            fee_zats = fee.into_u64(),
+            "vault drain deferred: surplus cannot cover its own movement cost"
+        );
+        return Ok(None);
+    };
+    tracing::info!(fee_zats = fee.into_u64(), "vault drain re-priced from refusal");
+    let proposal = propose_vault_drain::<P>(network, wallet, payment)?;
+    record_vault_drain(
+        network,
+        wallet,
+        treasury_keys,
+        spend_prover,
+        output_prover,
+        proposal,
+    )
+}
+
+/// Proposes the vault payment itself: the standard single-payment transfer
+/// to `VAULT_ADDRESS`, unchanged. Kept as its own step so the drain can
+/// re-price — the caller reads the measured fee off either the returned
+/// proposal or the `InsufficientFunds` refusal.
+fn propose_vault_drain<P: Parameters>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    payment: Zatoshis,
+) -> Result<
+    Proposal<StandardFeeRule, NoteId>,
+    BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>,
+> {
+    propose_standard_transfer_to_address::<_, _, Infallible>(
         wallet,
         network,
         StandardFeeRule::Zip317,
         TREASURY_ACCOUNT,
-        policy,
+        ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false),
         &zcash_keys::address::Address::Transparent(VAULT_ADDRESS),
         payment,
         None,
@@ -166,8 +240,21 @@ pub fn sweep_to_vault<P: Parameters>(
         None,
         None,
     )
-    .map_err(BuildFailure::Proposal)?;
+    .map_err(BuildFailure::Proposal)
+}
 
+/// Builds, records, and reads back the drain transaction. The build stored
+/// the tx and marked its inputs spent; a miss on read-back is the wallet
+/// contradicting itself, not a skip. Stop; restart rescans.
+#[allow(clippy::too_many_arguments)]
+fn record_vault_drain<P: Parameters>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    treasury_keys: &crate::TreasuryKeys,
+    spend_prover: &sapling::circuit::SpendParameters,
+    output_prover: &sapling::circuit::OutputParameters,
+    proposal: Proposal<StandardFeeRule, NoteId>,
+) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
     let spending_keys = treasury_keys.spending_keys();
     let txids = create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
         wallet,
@@ -181,15 +268,13 @@ pub fn sweep_to_vault<P: Parameters>(
     )
     .map_err(BuildFailure::Transaction)?;
 
-    tracing::info!(txid = %txids.first(), "vault sweep built");
+    tracing::info!(txid = %txids.first(), "vault drain built");
 
-    // The build stored the tx and marked its inputs spent; a miss here is
-    // the wallet contradicting itself, not a skip. Stop; restart rescans.
     Ok(Some(
         wallet
             .get_transaction(*txids.first())
-            .expect("FATAL: vault sweep lookup failed after build")
-            .expect("FATAL: built vault sweep tx missing from wallet"),
+            .expect("FATAL: vault drain lookup failed after build")
+            .expect("FATAL: built vault drain tx missing from wallet"),
     ))
 }
 
