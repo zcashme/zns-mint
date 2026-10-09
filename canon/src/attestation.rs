@@ -180,7 +180,7 @@ pub fn request(requested_report_data: &[u8; REPORT_DATA_LEN]) -> Attestation {
         let attestation = attestation_from_report(report_bytes, &report, *requested_report_data);
         attestation
             .verify_report_data()
-            .expect("FATAL: attestation report_data mismatch");
+            .unwrap_or_else(|error| panic!("FATAL: {error}"));
         attestation
     }
 }
@@ -511,6 +511,33 @@ mod tests {
         assert_eq!(
             attestation.verify_report_data().unwrap_err(),
             AttestationError::ReportData
+        );
+    }
+
+    #[test]
+    fn zero_measurement_is_an_error() {
+        // SNP ABI: report_data is 64 bytes at 0x50, measurement is 48 bytes at 0x90.
+        const MEASUREMENT_OFFSET: usize = 0x90;
+        const MEASUREMENT_LEN: usize = 48;
+        let mut bytes = hex::decode(MILAN_REPORT_HEX).unwrap();
+        let report = AttestationReport::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            &bytes[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_LEN],
+            &report.measurement
+        );
+        assert!(report.measurement.iter().any(|byte| *byte != 0));
+        bytes[MEASUREMENT_OFFSET..MEASUREMENT_OFFSET + MEASUREMENT_LEN].fill(0);
+        let report = AttestationReport::from_bytes(&bytes).unwrap();
+        let attestation = Attestation {
+            report_bytes: bytes,
+            measurement: report.measurement,
+            guest_policy: report.policy.into(),
+            tcb_version: String::new(),
+            report_data: report.report_data,
+        };
+        assert_eq!(
+            attestation.verify_report_data().unwrap_err(),
+            AttestationError::ZeroMeasurement
         );
     }
 
