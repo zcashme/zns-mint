@@ -199,7 +199,7 @@ mod tests {
             seed_fingerprint: [0x44; 32],
             source_capsule_hash: [0x55; 32],
             artifact_hash: [0x33; 32],
-            release: "guest-2".into(),
+            release: "v0.1.2".into(),
         }
     }
 

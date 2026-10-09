@@ -201,7 +201,7 @@ to_guest_policy = 0x30000
 seed_fingerprint = \"{}\"
 source_capsule_hash = \"{}\"
 artifact_hash = \"{}\"
-release = \"guest-2\"
+release = \"v0.1.2\"
 ",
             "11".repeat(48),
             "22".repeat(48),
@@ -230,7 +230,7 @@ release = \"guest-2\"
         let manifest = load(&path).unwrap();
         assert_eq!(manifest.version, 1);
         assert_eq!(manifest.sequence, 7);
-        assert_eq!(manifest.release, "guest-2");
+        assert_eq!(manifest.release, "v0.1.2");
         assert_eq!(manifest.to_measurement, [0x22; 48]);
         assert_eq!(manifest.from_guest_policy, 0x30000);
         assert_eq!(manifest.to_guest_policy, 0x30000);
