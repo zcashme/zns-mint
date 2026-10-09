@@ -3031,7 +3031,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 [[package]]
 name = "zns-canon"
 version = "0.1.0"
-source = "git+https://github.com/zcashme/zns-canon.git?branch=main#ea8def49b3de786b7066e222312b0a7c4b36f122"
+source = "git+https://github.com/zcashme/zns-canon.git?branch=main#af6b719fe54bafc7243c44b0002c7da4dc5be2bb"
 dependencies = [
  "blake2b_simd",
  "chacha20poly1305",
@@ -3048,6 +3048,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "ureq",
+ "x25519-dalek",
  "zeroize",
  "zip32",
 ]
@@ -3057,7 +3058,6 @@ name = "zns-migrate"
 version = "0.1.0"
 dependencies = [
  "blake2b_simd",
- "chacha20poly1305",
  "hex",
  "libc",
  "rand 0.8.8",
@@ -3067,7 +3067,5 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "x25519-dalek",
- "zeroize",
  "zns-canon",
 ]

@@ -47,7 +47,7 @@ pub fn run(
     persist::guard_output(output, args.replace_after_verified_migration)?;
 
     let mut rng = OsRng;
-    let keypair = handoff::generate_ephemeral_keypair(&mut rng);
+    let keypair = migration::generate_ephemeral_keypair(&mut rng);
     let mut nonce = [0u8; 32];
     rng.fill_bytes(&mut nonce);
     let manifest_hash = upgrade::manifest_hash(manifest);
@@ -92,7 +92,7 @@ pub fn run(
         MigrateError::SourceGuestPolicy,
     )?;
     let seed = {
-        let seed = handoff::decrypt_transfer(&keypair.secret, &offer, &transfer)?;
+        let seed = migration::decrypt_seed(&keypair.secret, &offer, &transfer)?;
         drop(keypair);
         seed
     };
