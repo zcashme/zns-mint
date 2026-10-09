@@ -1,5 +1,33 @@
 # Treasury design record
 
+## 2026-10-09 — The sweep's fee comes out of the swept amount (#321)
+
+- `payment = total − SWEEP_RESERVE` charged the ZIP-317 fee to the fixed
+  0.01 ZEC float. The fee is `5,000 × actions` and grows with the note
+  count, so past ~198 notes the proposal could not close, every midnight
+  retried the same build, and the sweep — the only thing that reduces the
+  note count — never recovered.
+- `sweep_payment` now subtracts `sweep_fee_bound(input_count)` as well:
+  `MARGINAL_FEE × (inputs + 4)`, an upper bound on the fee (each input is
+  at most one action; the vault output, change, and bundle padding are
+  the four). Upstream's exact action count is crate-private, so the sweep
+  bounds it rather than reproducing it. The float is a range: the
+  overshoot stays in the Treasury, which ends the sweep at
+  `[SWEEP_RESERVE, SWEEP_RESERVE + a few marginal fees]`.
+- One proposal, no retry, no reading the fee off a refusal.
+  `InsufficientFunds.required` is the changeless fee in one branch and
+  `total_in + shortfall` in the dust-change branch, so it is not a stable
+  source for the fee.
+- This restores the 2026-09-18 arithmetic (`total − fee − SWEEP_RESERVE`),
+  which the later "total minus the float" simplification removed. Tests
+  pin the bound against `zip317::FeeRule` for every Sapling/Ironwood split
+  up to 5,000 notes.
+- Not changed: the daily gate, `SWEEP_MINIMUM`, `SWEEP_RESERVE`, the
+  `[Sapling, Ironwood]` drain set (the treasury holds no Orchard notes,
+  which `SpendPolicy::default()` would otherwise also draw on), the vault
+  payment path. Open: a set past `MAX_BLOCK_BYTES` still fails
+  `TransactionTooLarge`; an input cap is a separate change.
+
 ## 2026-10-05 — The relay sends no value (#299)
 
 - `CHALLENGE_RELAY_VALUE` is zero. The OTP memo rides a zero-value
