@@ -38,11 +38,15 @@ The manifest TOML, the canonical upgrade document, and the Sigstore bundle
 stay outside the transport directory. Both sides require the zns-deployment
 release workflow to have attested that document before a sealing key is
 derived. Source requires the target report's measurement to equal
-to_measurement. Target requires the source report's measurement to equal
-from_measurement, and that report must bind the offer and the ciphertext,
-before it installs a capsule. Source accepts the receipt only when
-receipt_attestation.bin binds that offer and that receipt, and the report
-measurement equals to_measurement.
+to_measurement and its guest policy to equal to_guest_policy. It also
+requires its own report to match from_measurement and from_guest_policy, and
+the input capsule's file hash and fingerprint to match the manifest, before
+it unseals. Target requires the source report's measurement to equal
+from_measurement and its guest policy to equal from_guest_policy, and that
+report must bind the offer and the ciphertext, before it installs a capsule.
+Source accepts the receipt only when receipt_attestation.bin binds that offer
+and that receipt, and the report measurement equals to_measurement and its
+guest policy equals to_guest_policy.
 ";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);

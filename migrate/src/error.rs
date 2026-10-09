@@ -38,6 +38,21 @@ pub enum MigrateError {
     #[error("attestation measurement is all zeros")]
     ZeroMeasurement,
 
+    #[error("target guest policy is not authorized")]
+    GuestPolicy,
+
+    #[error("source guest policy is not authorized")]
+    SourceGuestPolicy,
+
+    #[error("attestation guest policy is zero")]
+    ZeroGuestPolicy,
+
+    #[error("capsule fingerprint is not the authorized seed")]
+    SeedFingerprint,
+
+    #[error("capsule file is not the authorized source capsule")]
+    SourceCapsule,
+
     #[error("migration offer is for a different manifest")]
     ManifestHash,
 

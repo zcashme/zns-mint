@@ -6,9 +6,9 @@ Both guests read the same three files, mounted from the host. They then talk to 
 
 ## Files from the host
 
-`--manifest` is the upgrade TOML. It names the current measurement (`from_measurement`), the next measurement (`to_measurement`), the SHA-256 of the new initrd, and the release name. People read this file.
+`--manifest` is the upgrade TOML. It names the current measurement (`from_measurement`) and guest policy (`from_guest_policy`), the next measurement (`to_measurement`) and guest policy (`to_guest_policy`), the ZIP-32 seed fingerprint, the BLAKE2b-256 of the source capsule file, the SHA-256 of the new initrd, and the release tag. `release` must be the `v*` tag that workflow ran on, such as `v0.1.2`. People read this file. Guest policies are TOML integers, so `0x30000` is the usual form.
 
-`--upgrade-document` is the canonical form of those same fields, packed as bytes. This is the file the `zns-deployment` release workflow attests. The bytes are version, sequence, both measurements, the artifact hash, and the release name.
+`--upgrade-document` is the canonical form of those same fields, packed as bytes. This is the file the `zns-deployment` release workflow attests. The bytes are version, sequence, both measurements, both guest policies, the seed fingerprint, the source capsule hash, the artifact hash, and the release name.
 
 `--attestation-bundle` is the Sigstore bundle from that release, downloaded with `gh attestation download`. It proves `.github/workflows/release.yml` in `zns-deployment` attested the canonical document.
 
@@ -50,13 +50,13 @@ zns-migrate source \
   --input-capsule /state/keys/zns_seed.capsule
 ```
 
-Target publishes an X25519 offer and an SNP report over that offer. Source checks that report's measurement against `to_measurement`, then checks its own SNP measurement against `from_measurement`. Only then does it unwrap the seed. It encrypts the seed to the target key and publishes a second report over the offer and the ciphertext.
+Target publishes an X25519 offer and an SNP report over that offer. Source checks that report's measurement against `to_measurement` and its guest policy against `to_guest_policy`. It then checks its own measurement and guest policy against `from_measurement` and `from_guest_policy`, and checks that the capsule file hash and header fingerprint are the ones named in the manifest. Only then does it unwrap the seed. It encrypts the seed to the target key and publishes a second report over the offer and the ciphertext.
 
-Target decrypts only when that report matches and its measurement is `from_measurement`. It seals a new capsule, reads that file back, and unseals it again. The receipt and a report over the receipt are written only when the reopened seed matches. Source accepts the receipt only when that report matches and its measurement is `to_measurement`.
+Target decrypts only when that report matches, its measurement is `from_measurement`, and its guest policy is `from_guest_policy`. It seals a new capsule, reads that file back, and unseals it again. The receipt and a report over the receipt are written only when the reopened seed matches. Source accepts the receipt only when that report matches, its measurement is `to_measurement`, and its guest policy is `to_guest_policy`.
 
 Target leaves an existing capsule in place unless `--replace-after-verified-migration` is set. Source leaves its original capsule on disk after it exits. A finished run copies the seed: both guests can still unseal it. Retiring the source capsule is not done yet.
 
-The attested manifest includes `sequence`. This binary does not compare it with a stored custody generation, so an older attested manifest for the same source measurement is still accepted. Guest policy is not in the manifest. The SNP report carries it, and this binary checks the measurement only.
+The attested manifest includes `sequence`. This binary does not compare it with a stored custody generation, so an older attested manifest for the same source measurement is still accepted.
 
 ## Build
 

@@ -1,12 +1,13 @@
 //! M2. The attested ephemeral key is published before any seed arrives.
 //!
 //! A transfer is decrypted only after its source attestation matches this
-//! offer and this ciphertext, and that report's measurement is the manifest's
-//! `from_measurement`. After the capsule is linked into place, it is read
-//! back and unsealed. The receipt is written only when that reopened seed
-//! matches the one just decrypted. The receipt is published with an
-//! attestation that binds this offer and this receipt, and only when that
-//! report's measurement is `to_measurement`. An existing capsule is left
+//! offer and this ciphertext, and that report's measurement is
+//! `from_measurement` and its guest policy is `from_guest_policy`. After the
+//! capsule is linked into place, it is read back and unsealed. The receipt is
+//! written only when that reopened seed matches the one just decrypted. The
+//! receipt is published with an attestation that binds this offer and this
+//! receipt, and only when that report's measurement is `to_measurement` and
+//! its guest policy is `to_guest_policy`. An existing capsule is left
 //! untouched unless the operator set `--replace-after-verified-migration`.
 
 use rand::rngs::OsRng;
@@ -18,7 +19,7 @@ use zns_canon::migration::{self, MigrationOffer};
 use zns_canon::sealing::{get_attestation, SealingKey};
 use zns_canon::upgrade::{self, UpgradeManifest};
 
-use crate::attest::{self, require_measurement};
+use crate::attest::{self, require_measurement, require_policy};
 use crate::cli::Args;
 use crate::error::MigrateError;
 use crate::handoff::{self, MigrationReceipt};
@@ -60,6 +61,17 @@ pub fn run(
     if attestation.as_bytes().is_empty() {
         return Err(MigrateError::transport("TEE returned an empty attestation"));
     }
+    let offer_report = attest::verified_report(attestation.as_bytes(), &report_data)?;
+    require_measurement(
+        &offer_report.measurement,
+        &manifest.to_measurement,
+        MigrateError::Measurement,
+    )?;
+    require_policy(
+        offer_report.guest_policy,
+        manifest.to_guest_policy,
+        MigrateError::GuestPolicy,
+    )?;
     transport.publish_offer(&handoff::encode_offer(&offer))?;
     transport.publish_attestation(attestation.as_bytes())?;
     info!("offer attested");
@@ -68,11 +80,16 @@ pub fn run(
     let source_report = transport.wait_source_attestation()?;
     let transfer = handoff::decode_transfer(&transfer_bytes)?;
     let expected = handoff::transfer_report_data(&offer, &transfer);
-    let source_measurement = attest::measurement(&source_report, &expected)?;
+    let source = attest::verified_report(&source_report, &expected)?;
     require_measurement(
-        &source_measurement,
+        &source.measurement,
         &manifest.from_measurement,
         MigrateError::SourceMeasurement,
+    )?;
+    require_policy(
+        source.guest_policy,
+        manifest.from_guest_policy,
+        MigrateError::SourceGuestPolicy,
     )?;
     let seed = {
         let seed = handoff::decrypt_transfer(&keypair.secret, &offer, &transfer)?;
@@ -105,11 +122,16 @@ pub fn run(
     if receipt_attestation.as_bytes().is_empty() {
         return Err(MigrateError::transport("TEE returned an empty attestation"));
     }
-    let receipt_measurement = attest::measurement(receipt_attestation.as_bytes(), &receipt_report)?;
+    let receipt_launch = attest::verified_report(receipt_attestation.as_bytes(), &receipt_report)?;
     require_measurement(
-        &receipt_measurement,
+        &receipt_launch.measurement,
         &manifest.to_measurement,
         MigrateError::Measurement,
+    )?;
+    require_policy(
+        receipt_launch.guest_policy,
+        manifest.to_guest_policy,
+        MigrateError::GuestPolicy,
     )?;
     transport.publish_receipt(&handoff::encode_receipt(&receipt))?;
     transport.publish_receipt_attestation(receipt_attestation.as_bytes())?;
