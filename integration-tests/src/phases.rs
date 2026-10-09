@@ -262,20 +262,40 @@ async fn read_otp(stack: &mut Stack, challenge_txid: &str, ua: &str) -> Result<S
         from_height = tip.saturating_add(1);
         tokio::time::sleep(Duration::from_secs(2)).await;
     };
-    stack
-        .user
-        .zallet
-        .wait_until_synced(
-            confirmed_height,
-            deadline.saturating_duration_since(Instant::now()),
-        )
-        .await?;
-    let view = stack
-        .user
-        .zallet
-        .call("z_viewtransaction", json!([challenge_txid]))
-        .await
-        .context("z_viewtransaction challenge after wallet scan")?;
+    // Zallet learns a transaction from the mempool stream or, failing that,
+    // from the block scan, which only queues a data request: the full
+    // transaction (the memo) is fetched on the next chain tip. A challenge
+    // mined within about a second of its broadcast can miss the mempool
+    // stream, so a scan that has reached the block is not yet a view of the
+    // transaction. Keep the chain moving until the wallet can show it.
+    let mut synced_to = confirmed_height;
+    let view = loop {
+        stack
+            .user
+            .zallet
+            .wait_until_synced(
+                synced_to,
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .await?;
+        match stack
+            .user
+            .zallet
+            .call("z_viewtransaction", json!([challenge_txid]))
+            .await
+        {
+            Ok(view) => break view,
+            Err(error) if Instant::now() < deadline => {
+                eprintln!("challenge {challenge_txid} not in the wallet yet ({error}); mining another block");
+                stack.zebra.generate_blocks(1).await?;
+                synced_to += 1;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(error) => {
+                return Err(error).context("z_viewtransaction challenge after wallet scan");
+            }
+        }
+    };
     let outputs = view
         .get("outputs")
         .and_then(|o| o.as_array())
