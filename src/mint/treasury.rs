@@ -18,8 +18,8 @@ use zcash_client_backend::data_api::wallet::{
 };
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
-use zcash_client_backend::proposal::Proposal;
 use zcash_client_backend::fees::StandardFeeRule;
+use zcash_client_backend::proposal::Proposal;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_primitives::transaction::{Transaction, TxId};
@@ -172,8 +172,8 @@ pub fn sweep_to_vault<P: Parameters>(
         Ok(proposal) => {
             let balance = proposal.steps().first().balance();
             let fee = balance.fee_required();
-            let change = (balance.total() - fee)
-                .ok_or(BuildFailure::Balance(BalanceError::Underflow))?;
+            let change =
+                (balance.total() - fee).ok_or(BuildFailure::Balance(BalanceError::Underflow))?;
             if change >= SWEEP_RESERVE {
                 return record_vault_drain(
                     network,
@@ -202,7 +202,10 @@ pub fn sweep_to_vault<P: Parameters>(
         );
         return Ok(None);
     };
-    tracing::info!(fee_zats = fee.into_u64(), "vault drain re-priced from refusal");
+    tracing::info!(
+        fee_zats = fee.into_u64(),
+        "vault drain re-priced from refusal"
+    );
     let proposal = propose_vault_drain::<P>(network, wallet, payment)?;
     record_vault_drain(
         network,
