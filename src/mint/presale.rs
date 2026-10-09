@@ -88,19 +88,6 @@ impl std::fmt::Debug for AccessCode {
 }
 
 impl AccessCode {
-    /// Derive from the purpose key and name (UTF-8 bytes exactly as given).
-    ///
-    /// `digest = HMAC-SHA256(access_code_key, name)`; value is
-    /// `u32_be(digest[0..4]) mod 1_000_000`.
-    pub fn derive(access_code_key: &[u8], name: &str) -> Self {
-        let mut mac = HmacSha256::new_from_slice(access_code_key)
-            .expect("HMAC-SHA256 accepts any key length");
-        mac.update(name.as_bytes());
-        let digest = mac.finalize().into_bytes();
-        let n = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
-        Self(n % 1_000_000)
-    }
-
     /// The six ASCII digits.
     pub fn digits(&self) -> [u8; 6] {
         let mut digits = [0u8; 6];
@@ -413,16 +400,24 @@ impl AccessCodeDerivationKey {
         &self.0
     }
 
-    /// The six-digit code a protected `name` must present.
-    pub fn code_for(&self, name: &Name) -> AccessCode {
-        AccessCode::derive(self.0.as_ref(), name.as_str())
+    /// Derive the six-digit code a protected `name` must present.
+    ///
+    /// `digest = HMAC-SHA256(purpose_key, name)`; value is
+    /// `u32_be(digest[0..4]) mod 1_000_000`.
+    pub fn derive(&self, name: &Name) -> AccessCode {
+        let mut mac = HmacSha256::new_from_slice(self.0.as_ref())
+            .expect("HMAC-SHA256 accepts any key length");
+        mac.update(name.as_str().as_bytes());
+        let digest = mac.finalize().into_bytes();
+        let n = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+        AccessCode(n % 1_000_000)
     }
 
     /// Does the offered code match this key's code for `name`?
     /// A missing code never matches.
     pub fn accepts(&self, name: &Name, offered: Option<&AccessCode>) -> bool {
         match offered {
-            Some(offered) => self.code_for(name).ct_eq(offered),
+            Some(offered) => self.derive(name).ct_eq(offered),
             None => false,
         }
     }
@@ -469,11 +464,11 @@ mod tests {
             "5e2db6040cd32d2486675a3b3d60b9d4d96e9c8d4a5f862e0dfd7bd6a3f57b91"
         );
         assert_eq!(
-            AccessCode::derive(gate.as_bytes(), "alice").expose_for_test(),
+            gate.derive(&alice()).expose_for_test(),
             *b"352582"
         );
         assert_eq!(
-            AccessCode::derive(gate.as_bytes(), "bob").expose_for_test(),
+            gate.derive(&Name::parse("bob").unwrap()).expose_for_test(),
             *b"131624"
         );
     }
@@ -522,7 +517,7 @@ mod tests {
 
     #[test]
     fn the_matching_code_is_accepted() {
-        let expected = gate().code_for(&alice());
+        let expected = gate().derive(&alice());
         assert!(gate().accepts(&alice(), Some(&expected)));
     }
 
@@ -534,8 +529,8 @@ mod tests {
     }
 
     #[test]
-    fn code_for_matches_the_vector() {
-        assert_eq!(gate().code_for(&alice()).expose_for_test(), *b"352582");
+    fn derive_matches_the_vector() {
+        assert_eq!(gate().derive(&alice()).expose_for_test(), *b"352582");
     }
 
     #[test]
