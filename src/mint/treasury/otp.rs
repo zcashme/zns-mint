@@ -41,7 +41,7 @@ impl std::fmt::Debug for OtpCode {
 impl OtpCode {
     /// Uniform random six digits.
     pub fn generate() -> Self {
-        Self(rand::thread_rng().gen_range(0..1_000_000))
+        Self(rand::rngs::OsRng.gen_range(0..1_000_000))
     }
 
     /// The six ASCII digits.
