@@ -273,7 +273,10 @@ async fn read_otp(stack: &mut Stack, challenge_txid: &str, ua: &str) -> Result<S
         stack
             .user
             .zallet
-            .wait_until_synced(synced_to, deadline.saturating_duration_since(Instant::now()))
+            .wait_until_synced(
+                synced_to,
+                deadline.saturating_duration_since(Instant::now()),
+            )
             .await?;
         match stack
             .user
