@@ -28,6 +28,7 @@ use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Deserializer};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, Timestamp};
 use zeroize::{Zeroize, Zeroizing};
@@ -138,11 +139,11 @@ pub enum ProtectionStatus {
 /// as a [`Name`], `expiry_at` is RFC 3339 or null (forever). Other
 /// columns are ignored.
 #[derive(Deserialize)]
-struct ProtectedRow {
-    id: String,
-    name: String,
+pub struct ProtectedRow {
+    pub id: String,
+    pub name: String,
     #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
-    expiry_at: Option<Timestamp>,
+    pub expiry_at: Option<Timestamp>,
 }
 
 /// Deserialize `timestamptz` in the RFC 3339 shape PostgREST returns
@@ -163,8 +164,8 @@ where
 }
 
 /// The protected-names table: name → protection status. A name
-/// absent from the map is unprotected. Pure data; [`fetch`] is the
-/// only writer.
+/// absent from the map is unprotected. Pure data;
+/// [`ProtectedNames::from_rows`] is the only writer.
 #[derive(Clone, Debug)]
 pub struct ProtectedNames(BTreeMap<Name, ProtectionStatus>);
 
@@ -189,6 +190,72 @@ impl ProtectedNames {
             ProtectionStatus::WithExpiry(ts) => mtp < ts,
         }
     }
+
+    /// Validates rows into a new table, coalescing a re-purchase
+    /// into the strongest bought term: `Forever` over any expiry,
+    /// the later expiry over the earlier. All-or-nothing: one
+    /// corrupt row fails the whole batch, with
+    /// [`FetchError::CorruptRow`]; the offending row is logged
+    /// where it is seen — corruption, not a purchase; nothing
+    /// paid-for is dropped.
+    pub fn from_rows(
+        self,
+        rows: impl IntoIterator<Item = ProtectedRow>,
+    ) -> Result<Self, FetchError> {
+        let mut map = self.0;
+        for row in rows {
+            let Some(name) = Name::parse(&row.name) else {
+                tracing::warn!(
+                    name = %row.name,
+                    "pre-sale row is not a lawful name; refusing the read"
+                );
+                return Err(FetchError::CorruptRow);
+            };
+            let status = match row.expiry_at {
+                Some(ts) => ProtectionStatus::WithExpiry(ts),
+                None => ProtectionStatus::Forever,
+            };
+            match map.entry(name) {
+                Entry::Vacant(entry) => {
+                    entry.insert(status);
+                }
+                Entry::Occupied(mut entry) => {
+                    let strongest = match (*entry.get(), status) {
+                        (ProtectionStatus::Forever, _) | (_, ProtectionStatus::Forever) => {
+                            ProtectionStatus::Forever
+                        }
+                        (ProtectionStatus::WithExpiry(have), ProtectionStatus::WithExpiry(got)) => {
+                            ProtectionStatus::WithExpiry(have.max(got))
+                        }
+                        (ProtectionStatus::Unprotected, _) | (_, ProtectionStatus::Unprotected) => {
+                            unreachable!("Unprotected is never stored")
+                        }
+                    };
+                    entry.insert(strongest);
+                }
+            };
+        }
+        Ok(Self(map))
+    }
+}
+
+/// Why a pre-sale table read failed.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum FetchError {
+    /// The read did not complete — transport, timeout, status,
+    /// body, or decode. A retry may succeed.
+    #[error("read failed")]
+    Unavailable,
+    /// The read completed but its completeness could not be
+    /// confirmed — the server's row count was missing or did not
+    /// match, or the read exceeded the page ceiling.
+    #[error("read could not be confirmed complete")]
+    Unconfirmed,
+    /// A row is corrupt — its `name` is not a lawful [`Name`].
+    /// Retries fail until the table is fixed; the offending row
+    /// is logged where it is seen.
+    #[error("row is not a lawful name")]
+    CorruptRow,
 }
 
 /// Reads the whole table, `PAGE_ROWS` at a time, keyset-paginated
@@ -198,12 +265,12 @@ impl ProtectedNames {
 /// only when every counted row landed — duplicates coalesce
 /// wherever their pages arrive. Stops on a short page; refuses a
 /// read needing more than `MAX_PAGES` full pages. Any failure
-/// rejects the whole read (`None`) — a caller keeps what it has.
-pub async fn fetch() -> Option<ProtectedNames> {
+/// rejects the whole read ([`FetchError`]) — a caller keeps what
+/// it has.
+pub async fn fetch() -> Result<ProtectedNames, FetchError> {
     let client = https_client();
-    let mut rows = BTreeMap::new();
+    let mut table = ProtectedNames(BTreeMap::new());
     let mut read = 0usize;
-    let mut coalesced = 0usize;
     let mut after: Option<(String, String)> = None;
     let mut total: Option<usize> = None;
     let mut pages = 0;
@@ -216,43 +283,35 @@ pub async fn fetch() -> Option<ProtectedNames> {
                 .map(|(name, id)| (name.as_str(), id.as_str())),
             want_total,
         )
-        .await?;
+        .await
+        .ok_or(FetchError::Unavailable)?;
         pages += 1;
         if pages > MAX_PAGES && !page.is_empty() {
             tracing::warn!("pre-sale fetch exceeded the page ceiling");
-            return None;
+            return Err(FetchError::Unconfirmed);
         }
         total = total.or(counted);
         let short = page.len() < PAGE_ROWS;
         let last = page.last().map(|row| (row.name.clone(), row.id.clone()));
-        let before = rows.len();
-        let page_len = page.len();
-        read += page_len;
-        absorb(page, &mut rows)?;
-        coalesced += page_len - (rows.len() - before);
+        read += page.len();
+        table = table.from_rows(page)?;
         if short {
             return match total {
                 Some(total) if total == read => {
-                    tracing::info!(
-                        names = rows.len(),
-                        rows = read,
-                        coalesced,
-                        "pre-sale fetch: table loaded"
-                    );
-                    Some(ProtectedNames(rows))
+                    tracing::info!(rows = read, "pre-sale fetch: table loaded");
+                    Ok(table)
                 }
                 Some(total) => {
                     tracing::warn!(
                         counted = total,
                         read,
-                        installed = rows.len(),
                         "pre-sale fetch did not install every counted row"
                     );
-                    None
+                    Err(FetchError::Unconfirmed)
                 }
                 None => {
                     tracing::warn!("pre-sale fetch: row count missing");
-                    None
+                    Err(FetchError::Unconfirmed)
                 }
             };
         }
@@ -330,40 +389,6 @@ fn keyset_filter(after: Option<(&str, &str)>) -> String {
             format!("&or=(name.gt.{name},and(name.eq.{name},id.gt.{id}))")
         }
     }
-}
-
-/// Validates rows into the map, coalescing a re-purchase into the
-/// strongest bought term: `Forever` over any expiry, the later
-/// expiry over the earlier. An unlawful `name` rejects the whole
-/// read — corruption, not a purchase; nothing paid-for is dropped.
-fn absorb(rows: Vec<ProtectedRow>, map: &mut BTreeMap<Name, ProtectionStatus>) -> Option<()> {
-    for row in rows {
-        let name = Name::parse(&row.name)?;
-        let status = match row.expiry_at {
-            Some(ts) => ProtectionStatus::WithExpiry(ts),
-            None => ProtectionStatus::Forever,
-        };
-        match map.entry(name) {
-            Entry::Vacant(entry) => {
-                entry.insert(status);
-            }
-            Entry::Occupied(mut entry) => {
-                let strongest = match (*entry.get(), status) {
-                    (ProtectionStatus::Forever, _) | (_, ProtectionStatus::Forever) => {
-                        ProtectionStatus::Forever
-                    }
-                    (ProtectionStatus::WithExpiry(have), ProtectionStatus::WithExpiry(got)) => {
-                        ProtectionStatus::WithExpiry(have.max(got))
-                    }
-                    (ProtectionStatus::Unprotected, _) | (_, ProtectionStatus::Unprotected) => {
-                        unreachable!("Unprotected is never stored")
-                    }
-                };
-                entry.insert(strongest);
-            }
-        };
-    }
-    Some(())
 }
 
 /// Zeroizing holder for the boot-derived access-code key.
@@ -523,15 +548,18 @@ mod tests {
         assert!(!PRESALE_PUBLISHABLE_KEY.is_empty());
     }
 
+    /// Builds a table from rows through the public door, seeded empty.
+    fn from_rows(rows: Vec<ProtectedRow>) -> Result<ProtectedNames, FetchError> {
+        ProtectedNames(BTreeMap::new()).from_rows(rows)
+    }
+
     #[test]
-    fn absorb_builds_the_map() {
-        let mut map = BTreeMap::new();
-        let rows = vec![
+    fn from_rows_builds_the_map() {
+        let names = from_rows(vec![
             row_with("alice", Some(ts(2_000_000_000))),
             row_with("bob", None),
-        ];
-        absorb(rows, &mut map).unwrap();
-        let names = ProtectedNames(map);
+        ])
+        .unwrap();
         assert_eq!(
             names.status(&Name::parse("alice").unwrap()),
             ProtectionStatus::WithExpiry(ts(2_000_000_000))
@@ -549,56 +577,45 @@ mod tests {
     /// An expired row is stored as `WithExpiry` all the same — the
     /// lift moment is data, not a state.
     #[test]
-    fn absorb_keeps_expired_rows() {
-        let mut map = BTreeMap::new();
-        let rows = vec![row_with("alice", Some(ts(1_600_000_000)))];
-        absorb(rows, &mut map).unwrap();
+    fn from_rows_keeps_expired_rows() {
+        let table = from_rows(vec![row_with("alice", Some(ts(1_600_000_000)))]).unwrap();
         assert_eq!(
-            map.get(&Name::parse("alice").unwrap()),
-            Some(&ProtectionStatus::WithExpiry(ts(1_600_000_000)))
+            table.status(&Name::parse("alice").unwrap()),
+            ProtectionStatus::WithExpiry(ts(1_600_000_000))
         );
     }
 
     #[test]
-    fn absorb_rejects_unlawful_names() {
-        let mut map = BTreeMap::new();
+    fn from_rows_rejects_corrupt_rows() {
         let rows = vec![row_with("Not-A-Name!", None)];
-        assert_eq!(absorb(rows, &mut map), None);
-        assert!(map.is_empty());
+        assert!(matches!(from_rows(rows), Err(FetchError::CorruptRow)));
     }
 
     /// A duplicate row is a re-purchase: the name's rows coalesce
     /// to the strongest bought term.
     #[test]
-    fn absorb_coalesces_identical_rows() {
-        let mut map = BTreeMap::new();
-        let rows = vec![row_with("alice", None), row_with("alice", None)];
-        absorb(rows, &mut map).unwrap();
-        assert_eq!(map.len(), 1);
-        assert_eq!(
-            map.get(&Name::parse("alice").unwrap()),
-            Some(&ProtectionStatus::Forever)
-        );
+    fn from_rows_coalesces_identical_rows() {
+        let table = from_rows(vec![row_with("alice", None), row_with("alice", None)]).unwrap();
+        assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
     }
 
     /// Two dated terms cover the name to the later lift moment.
     #[test]
-    fn absorb_coalesces_expiries_to_the_latest() {
-        let mut map = BTreeMap::new();
-        let rows = vec![
+    fn from_rows_coalesces_expiries_to_the_latest() {
+        let table = from_rows(vec![
             row_with("alice", Some(ts(2_000_000_000))),
             row_with("alice", Some(ts(1_900_000_000))),
-        ];
-        absorb(rows, &mut map).unwrap();
+        ])
+        .unwrap();
         assert_eq!(
-            map.get(&Name::parse("alice").unwrap()),
-            Some(&ProtectionStatus::WithExpiry(ts(2_000_000_000)))
+            table.status(&alice()),
+            ProtectionStatus::WithExpiry(ts(2_000_000_000))
         );
     }
 
     /// Forever covers any expiry, in either row order.
     #[test]
-    fn absorb_coalesces_forever_over_an_expiry() {
+    fn from_rows_coalesces_forever_over_an_expiry() {
         for rows in [
             vec![
                 row_with("alice", Some(ts(2_000_000_000))),
@@ -609,21 +626,16 @@ mod tests {
                 row_with("alice", Some(ts(2_000_000_000))),
             ],
         ] {
-            let mut map = BTreeMap::new();
-            absorb(rows, &mut map).unwrap();
-            assert_eq!(
-                map.get(&Name::parse("alice").unwrap()),
-                Some(&ProtectionStatus::Forever)
-            );
+            let table = from_rows(rows).unwrap();
+            assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
         }
     }
 
     /// The reported live shape: `9` and `tom` each hold an expiry
     /// plus Forever among their re-purchases.
     #[test]
-    fn absorb_coalesces_the_reported_table_shape() {
-        let mut map = BTreeMap::new();
-        let rows = vec![
+    fn from_rows_coalesces_the_reported_table_shape() {
+        let table = from_rows(vec![
             row_with("9", Some(ts(1_795_898_400))),
             row_with("9", None),
             row_with("9", None),
@@ -632,16 +644,19 @@ mod tests {
             row_with("tom", Some(ts(1_800_563_400))),
             row_with("tom", None),
             row_with("alice", Some(ts(2_000_000_000))),
-        ];
-        absorb(rows, &mut map).unwrap();
-        assert_eq!(map.len(), 3);
+        ])
+        .unwrap();
         assert_eq!(
-            map.get(&Name::parse("9").unwrap()),
-            Some(&ProtectionStatus::Forever)
+            table.status(&Name::parse("9").unwrap()),
+            ProtectionStatus::Forever
         );
         assert_eq!(
-            map.get(&Name::parse("tom").unwrap()),
-            Some(&ProtectionStatus::Forever)
+            table.status(&Name::parse("tom").unwrap()),
+            ProtectionStatus::Forever
+        );
+        assert_eq!(
+            table.status(&Name::parse("alice").unwrap()),
+            ProtectionStatus::WithExpiry(ts(2_000_000_000))
         );
     }
 

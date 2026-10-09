@@ -21,7 +21,7 @@ use std::str::FromStr;
 
 use crate::mint::mtp::MtpTracker;
 use crate::mint::note::NameNoteQueue;
-use crate::mint::presale::{self, AccessCodeDerivationKey, ProtectedNames};
+use crate::mint::presale::{self, AccessCodeDerivationKey, FetchError, ProtectedNames};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::treasury::{OtpQueue, RequestQueue};
@@ -99,7 +99,7 @@ pub struct Boot<P: Parameters> {
     /// initialized: pending OTP echoes
     pub echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)>,
     /// initialized: no pre-sale refresh is in flight
-    pub presale_refresh: Option<tokio::task::JoinHandle<Option<ProtectedNames>>>,
+    pub presale_refresh: Option<tokio::task::JoinHandle<Result<ProtectedNames, FetchError>>>,
 }
 
 /// Network label for logging.
@@ -643,11 +643,15 @@ impl Boot<Network> {
 
         // 6b. Pre-sale table: fail-closed at birth — no table, no start.
         let protected_names = loop {
-            if let Some(names) = presale::fetch().await {
-                tracing::info!("boot: pre-sale table fetched");
-                break names;
+            match presale::fetch().await {
+                Ok(names) => {
+                    tracing::info!("boot: pre-sale table fetched");
+                    break names;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "boot: pre-sale table unavailable; retrying");
+                }
             }
-            tracing::warn!("boot: pre-sale table unavailable; retrying");
             tokio::time::sleep(crate::zcash::RETRY_PAUSE).await;
         };
 
