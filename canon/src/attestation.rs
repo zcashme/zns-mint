@@ -16,7 +16,8 @@
 //!      `Attestation::verify_report_data()` then checks `report_data` and
 //!      that the measurement is not zero. Both run before the attestation
 //!      report is written to disk. `stored()` repeats the KDS fetch and the
-//!      signature check before a report already on disk is used.
+//!      signature check before a report already on disk is used, and returns
+//!      an error instead of panicking.
 
 use blake2b_simd::Params as Blake2bParams;
 use sev::certs::snp::ca::Chain as CaChain;
@@ -28,6 +29,7 @@ use sev::firmware::host::TcbVersion;
 use sev::parser::ByteParser;
 use sev::Generation;
 use std::io::Read;
+use thiserror::Error;
 
 use zip32::fingerprint::SeedFingerprint;
 
@@ -36,6 +38,28 @@ const FINGERPRINT_LEN: usize = 32;
 /// Length of the SEV-SNP `report_data` field, and of the BLAKE2b-512 digest
 /// this module writes there.
 pub const REPORT_DATA_LEN: usize = 64;
+
+/// A stored attestation report failed verification.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum AttestationError {
+    #[error("parse SEV-SNP attestation report: {0}")]
+    Parse(String),
+
+    #[error("{0}")]
+    Endorsement(String),
+
+    #[error("{0}")]
+    Signature(String),
+
+    #[error("attestation report_data mismatch")]
+    ReportData,
+
+    #[error("attestation measurement is all zeros")]
+    ZeroMeasurement,
+
+    #[error("SEV-SNP attestation verification requires a Linux SNP guest")]
+    Unavailable,
+}
 
 /// Parsed attestation report with the fields zns-keygen needs.
 ///
@@ -65,25 +89,19 @@ impl Attestation {
     ///
     /// This is not the AMD signature check. Call `verify_vcek_report` for that.
     ///
-    /// Panics on mismatch — this is a one-shot ceremony tool, and a
-    /// mismatched attestation is worse than no attestation.
-    ///
     /// Called only on Linux, where a real PSP report is available.
+    /// [`request`] still treats a failure here as fatal. [`stored`] returns it.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub fn verify_report_data(&self) {
+    pub fn verify_report_data(&self) -> Result<(), AttestationError> {
         let report = AttestationReport::from_bytes(&self.report_bytes)
-            .expect("FATAL: parse attestation report for self-verification");
-
-        assert_eq!(
-            report.report_data, self.report_data,
-            "FATAL: attestation report_data mismatch: the PSP did not embed the report_data we requested"
-        );
-
-        // Sanity: measurement must not be all zeros (would indicate a broken launch).
-        assert!(
-            report.measurement.iter().any(|&b| b != 0),
-            "FATAL: attestation measurement is all zeros — VM may not have been properly launched"
-        );
+            .map_err(|error| AttestationError::Parse(error.to_string()))?;
+        if report.report_data != self.report_data {
+            return Err(AttestationError::ReportData);
+        }
+        if report.measurement.iter().all(|byte| *byte == 0) {
+            return Err(AttestationError::ZeroMeasurement);
+        }
+        Ok(())
     }
 }
 
@@ -159,8 +177,10 @@ pub fn request(requested_report_data: &[u8; REPORT_DATA_LEN]) -> Attestation {
         verify_vcek_report(&report, &ask, &vcek)
             .expect("FATAL: attestation signature verification");
 
-        let attestation = attestation_from_report(report_bytes, *requested_report_data);
-        attestation.verify_report_data();
+        let attestation = attestation_from_report(report_bytes, &report, *requested_report_data);
+        attestation
+            .verify_report_data()
+            .expect("FATAL: attestation report_data mismatch");
         attestation
     }
 }
@@ -172,37 +192,36 @@ pub fn request(requested_report_data: &[u8; REPORT_DATA_LEN]) -> Attestation {
 /// call the PSP again. The file lives on host-backed storage, so an earlier
 /// check is not reused.
 ///
-/// Panics on non-Linux: there is no dev attestation to verify.
-pub fn stored(report_bytes: Vec<u8>, expected_report_data: &[u8; REPORT_DATA_LEN]) -> Attestation {
+/// Returns [`AttestationError::Unavailable`] on non-Linux: there is no dev
+/// attestation to verify.
+pub fn stored(
+    report_bytes: Vec<u8>,
+    expected_report_data: &[u8; REPORT_DATA_LEN],
+) -> Result<Attestation, AttestationError> {
     #[cfg(target_os = "linux")]
     {
         let report = AttestationReport::from_bytes(&report_bytes)
-            .expect("FATAL: parse stored SEV-SNP attestation report");
-        let (ask, vcek) =
-            fetch_endorsement(&report).unwrap_or_else(|error| panic!("FATAL: {error}"));
-        verify_vcek_report(&report, &ask, &vcek)
-            .expect("FATAL: stored attestation signature verification");
-
-        let attestation = attestation_from_report(report_bytes, *expected_report_data);
-        attestation.verify_report_data();
-        attestation
+            .map_err(|error| AttestationError::Parse(error.to_string()))?;
+        let (ask, vcek) = fetch_endorsement(&report).map_err(AttestationError::Endorsement)?;
+        verify_vcek_report(&report, &ask, &vcek).map_err(AttestationError::Signature)?;
+        let attestation = attestation_from_report(report_bytes, &report, *expected_report_data);
+        attestation.verify_report_data()?;
+        Ok(attestation)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        // A verifier that accepts anything is worse than no verifier.
         let _ = report_bytes;
         let _ = expected_report_data;
-        panic!("FATAL: SEV-SNP attestation verification requires a Linux SNP guest");
+        Err(AttestationError::Unavailable)
     }
 }
 
 #[cfg(target_os = "linux")]
 fn attestation_from_report(
     report_bytes: Vec<u8>,
+    report: &AttestationReport,
     report_data: [u8; REPORT_DATA_LEN],
 ) -> Attestation {
-    let report = AttestationReport::from_bytes(&report_bytes)
-        .expect("FATAL: parse SEV-SNP attestation report");
     let tcb = report.current_tcb;
     Attestation {
         report_bytes,
@@ -465,6 +484,34 @@ mod tests {
         assert_eq!(kds_product_name(0x19, 0xA0).unwrap(), "Genoa");
         assert_eq!(kds_product_name(0x1A, 0x00).unwrap(), "Turin");
         assert!(kds_product_name(0x1A, 0x50).is_err());
+    }
+
+    #[test]
+    fn stored_rejects_bytes_that_are_not_a_report() {
+        let Err(error) = stored(b"not-a-report".to_vec(), &[0; REPORT_DATA_LEN]) else {
+            panic!("stored accepted bytes that are not a report");
+        };
+        #[cfg(target_os = "linux")]
+        assert!(matches!(error, AttestationError::Parse(_)), "{error}");
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(error, AttestationError::Unavailable);
+    }
+
+    #[test]
+    fn report_data_mismatch_is_an_error() {
+        let bytes = hex::decode(MILAN_REPORT_HEX).unwrap();
+        let report = AttestationReport::from_bytes(&bytes).unwrap();
+        let attestation = Attestation {
+            report_bytes: bytes,
+            measurement: report.measurement,
+            guest_policy: report.policy.into(),
+            tcb_version: String::new(),
+            report_data: [0; REPORT_DATA_LEN],
+        };
+        assert_eq!(
+            attestation.verify_report_data().unwrap_err(),
+            AttestationError::ReportData
+        );
     }
 
     #[test]
