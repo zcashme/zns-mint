@@ -2,6 +2,11 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-10-09 — A failed keygen report stops boot
+
+- The keygen report check must succeed. A report that fails
+  verification refuses boot.
+
 ## 2026-10-05 — Boot attests the genesis anchor
 
 - After the capsule check, and after the seed is dropped, boot reads
