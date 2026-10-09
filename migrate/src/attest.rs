@@ -15,7 +15,7 @@ pub(crate) fn verified_report(
     report: &[u8],
     expected: &[u8; 64],
 ) -> Result<VerifiedReport, MigrateError> {
-    let attestation = zns_canon::attestation::stored(report.to_vec(), expected);
+    let attestation = zns_canon::attestation::stored(report.to_vec(), expected)?;
     Ok(VerifiedReport {
         measurement: attestation.measurement,
         guest_policy: attestation.guest_policy,
