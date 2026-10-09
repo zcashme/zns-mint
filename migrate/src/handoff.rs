@@ -547,6 +547,10 @@ mod tests {
             sequence: 3,
             from_measurement: [0x11; 48],
             to_measurement: [0x22; 48],
+            from_guest_policy: 0x30000,
+            to_guest_policy: 0x30000,
+            seed_fingerprint: [0x44; 32],
+            source_capsule_hash: [0x55; 32],
             artifact_hash: [0x33; 32],
             release: "guest-2".to_string(),
         }

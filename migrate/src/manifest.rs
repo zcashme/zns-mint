@@ -31,6 +31,10 @@ struct ManifestFile {
     sequence: u64,
     from_measurement: String,
     to_measurement: String,
+    from_guest_policy: u64,
+    to_guest_policy: u64,
+    seed_fingerprint: String,
+    source_capsule_hash: String,
     artifact_hash: String,
     release: String,
 }
@@ -85,11 +89,25 @@ pub fn load(path: &Path) -> Result<UpgradeManifest, MigrateError> {
     if from_measurement == [0u8; 48] || to_measurement == [0u8; 48] {
         return Err(MigrateError::manifest("measurement must not be all zeros"));
     }
+    if file.from_guest_policy == 0 || file.to_guest_policy == 0 {
+        return Err(MigrateError::manifest("guest policy must not be zero"));
+    }
+    let seed_fingerprint = decode_hex("seed_fingerprint", &file.seed_fingerprint)?;
+    let source_capsule_hash = decode_hex("source_capsule_hash", &file.source_capsule_hash)?;
+    if seed_fingerprint == [0u8; 32] || source_capsule_hash == [0u8; 32] {
+        return Err(MigrateError::manifest(
+            "seed fingerprint and source capsule hash must not be all zeros",
+        ));
+    }
     Ok(UpgradeManifest {
         version: file.version,
         sequence: file.sequence,
         from_measurement,
         to_measurement,
+        from_guest_policy: file.from_guest_policy,
+        to_guest_policy: file.to_guest_policy,
+        seed_fingerprint,
+        source_capsule_hash,
         artifact_hash: decode_hex("artifact_hash", &file.artifact_hash)?,
         release,
     })
@@ -178,11 +196,17 @@ version = 1
 sequence = 7
 from_measurement = \"{}\"
 to_measurement = \"{}\"
+from_guest_policy = 0x30000
+to_guest_policy = 0x30000
+seed_fingerprint = \"{}\"
+source_capsule_hash = \"{}\"
 artifact_hash = \"{}\"
 release = \"guest-2\"
 ",
             "11".repeat(48),
             "22".repeat(48),
+            "44".repeat(32),
+            "55".repeat(32),
             "33".repeat(32),
         )
     }
@@ -208,6 +232,10 @@ release = \"guest-2\"
         assert_eq!(manifest.sequence, 7);
         assert_eq!(manifest.release, "guest-2");
         assert_eq!(manifest.to_measurement, [0x22; 48]);
+        assert_eq!(manifest.from_guest_policy, 0x30000);
+        assert_eq!(manifest.to_guest_policy, 0x30000);
+        assert_eq!(manifest.seed_fingerprint, [0x44; 32]);
+        assert_eq!(manifest.source_capsule_hash, [0x55; 32]);
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -226,6 +254,20 @@ release = \"guest-2\"
         let zeros = sample().replacen(&"22".repeat(48), &"00".repeat(48), 1);
         let path = write("zeros", &zeros);
         assert!(load(&path).unwrap_err().to_string().contains("all zeros"));
+
+        let policy = sample().replacen("from_guest_policy = 0x30000", "from_guest_policy = 0", 1);
+        let path = write("policy", &policy);
+        assert!(load(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("guest policy"));
+
+        let fingerprint = sample().replacen(&"44".repeat(32), &"00".repeat(32), 1);
+        let path = write("fingerprint", &fingerprint);
+        assert!(load(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("seed fingerprint"));
     }
 
     #[test]
@@ -284,7 +326,7 @@ release = \"guest-2\"
             workflow: ATTESTATION_WORKFLOW,
             bundle: BUNDLE,
         };
-        let digest = upgrade::verify_zcashme_asset(ASSET, &release).unwrap();
+        let digest = upgrade::verify_zcashme_asset(ASSET, &release, "v0.1.2").unwrap();
         assert_eq!(
             hex::encode(digest),
             "fd97164c2798585f391edf4a6445cedceb37b0cec7f1af0136f7846b52ca1e0a"
