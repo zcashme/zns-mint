@@ -50,7 +50,7 @@ zns-migrate source \
   --input-capsule /state/keys/zns_seed.capsule
 ```
 
-![Migration sequence. The host supplies the upgrade files. Source and target authorize them, then exchange the offer, ciphertext, and receipt through the shared directory. The target keeps the new capsule. The source still has the old one.](docs/migration.jpg)
+![Migration sequence. The host supplies the upgrade files. Source and target authorize them, then exchange the offer, ciphertext, and receipt through the shared directory. The target keeps the new capsule. The source still has the old one.](docs/migration.png)
 
 Target publishes an X25519 offer and an SNP report over that offer. Source checks that report's measurement against `to_measurement` and its guest policy against `to_guest_policy`. It then checks its own measurement and guest policy against `from_measurement` and `from_guest_policy`, and checks that the capsule file hash and header fingerprint are the ones named in the manifest. Only then does it unwrap the seed. It encrypts the seed to the target key and publishes a second report over the offer and the ciphertext.
 
