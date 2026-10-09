@@ -48,12 +48,22 @@ const SLSA_PROVENANCE_V1: &str = "https://slsa.dev/provenance/v1";
 const GITHUB_ACTIONS_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 /// One approved step from a measured guest image to the next.
+///
+/// `from_guest_policy` and `to_guest_policy` are the SEV-SNP guest policies
+/// of the two images. The launch measurement does not cover policy.
+/// `seed_fingerprint` is the ZIP-32 fingerprint stored in the capsule header.
+/// `source_capsule_hash` is BLAKE2b-256 of the on-disk capsule bytes, with no
+/// domain string.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpgradeManifest {
     pub version: u32,
     pub sequence: u64,
     pub from_measurement: [u8; 48],
     pub to_measurement: [u8; 48],
+    pub from_guest_policy: u64,
+    pub to_guest_policy: u64,
+    pub seed_fingerprint: [u8; 32],
+    pub source_capsule_hash: [u8; 32],
     pub artifact_hash: [u8; 32],
     pub release: String,
 }
@@ -87,18 +97,24 @@ pub enum UpgradeError {
     Attestation(String),
 }
 
-/// Suggested canonical bytes for [`manifest_hash`].
+/// Canonical bytes for [`manifest_hash`].
 ///
-/// `version || sequence || from_measurement || to_measurement || artifact_hash
-/// || release_len || release_utf8`, with integers little-endian.
+/// `version || sequence || from_measurement || to_measurement ||
+/// from_guest_policy || to_guest_policy || seed_fingerprint ||
+/// source_capsule_hash || artifact_hash || release_len || release_utf8`,
+/// with integers little-endian.
 pub fn canonical_encoding(manifest: &UpgradeManifest) -> Vec<u8> {
     let release = manifest.release.as_bytes();
     let release_len = u32::try_from(release.len()).expect("upgrade release name fits in u32 bytes");
-    let mut out = Vec::with_capacity(4 + 8 + 48 + 48 + 32 + 4 + release.len());
+    let mut out = Vec::with_capacity(4 + 8 + 48 + 48 + 8 + 8 + 32 + 32 + 32 + 4 + release.len());
     out.extend_from_slice(&manifest.version.to_le_bytes());
     out.extend_from_slice(&manifest.sequence.to_le_bytes());
     out.extend_from_slice(&manifest.from_measurement);
     out.extend_from_slice(&manifest.to_measurement);
+    out.extend_from_slice(&manifest.from_guest_policy.to_le_bytes());
+    out.extend_from_slice(&manifest.to_guest_policy.to_le_bytes());
+    out.extend_from_slice(&manifest.seed_fingerprint);
+    out.extend_from_slice(&manifest.source_capsule_hash);
     out.extend_from_slice(&manifest.artifact_hash);
     out.extend_from_slice(&release_len.to_le_bytes());
     out.extend_from_slice(release);
@@ -413,6 +429,10 @@ mod tests {
             sequence: 7,
             from_measurement: [0xA1; 48],
             to_measurement: [0xB2; 48],
+            from_guest_policy: 0x1111_1111_1111_1111,
+            to_guest_policy: 0x2222_2222_2222_2222,
+            seed_fingerprint: [0xD4; 32],
+            source_capsule_hash: [0xE5; 32],
             artifact_hash: [0xC3; 32],
             release: "guest-1".to_string(),
         }
@@ -427,11 +447,48 @@ mod tests {
     }
 
     #[test]
+    fn encoding_lays_out_the_fixed_fields() {
+        let bytes = canonical_encoding(&sample());
+        let release = b"guest-1";
+        let fixed = 4 + 8 + 48 + 48 + 8 + 8 + 32 + 32 + 32;
+        assert_eq!(bytes.len(), fixed + 4 + release.len());
+        assert_eq!(&bytes[0..4], &1u32.to_le_bytes());
+        assert_eq!(&bytes[4..12], &7u64.to_le_bytes());
+        assert_eq!(&bytes[12..60], &[0xA1; 48]);
+        assert_eq!(&bytes[60..108], &[0xB2; 48]);
+        assert_eq!(&bytes[108..116], &0x1111_1111_1111_1111u64.to_le_bytes());
+        assert_eq!(&bytes[116..124], &0x2222_2222_2222_2222u64.to_le_bytes());
+        assert_eq!(&bytes[124..156], &[0xD4; 32]);
+        assert_eq!(&bytes[156..188], &[0xE5; 32]);
+        assert_eq!(&bytes[188..220], &[0xC3; 32]);
+        let release_len = u32::try_from(release.len()).unwrap();
+        assert_eq!(&bytes[220..224], &release_len.to_le_bytes());
+        assert_eq!(&bytes[224..], release);
+    }
+
+    #[test]
     fn manifest_hash_changes_when_the_destination_measurement_changes() {
         let manifest = sample();
         let mut other = sample();
         other.to_measurement[0] ^= 0x01;
         assert_ne!(manifest_hash(&manifest), manifest_hash(&other));
+    }
+
+    #[test]
+    fn manifest_hash_covers_policy_and_the_named_capsule() {
+        let baseline = manifest_hash(&sample());
+        let mut from_policy = sample();
+        from_policy.from_guest_policy ^= 1;
+        let mut to_policy = sample();
+        to_policy.to_guest_policy ^= 1;
+        let mut fingerprint = sample();
+        fingerprint.seed_fingerprint[0] ^= 1;
+        let mut capsule = sample();
+        capsule.source_capsule_hash[0] ^= 1;
+        assert_ne!(manifest_hash(&from_policy), baseline);
+        assert_ne!(manifest_hash(&to_policy), baseline);
+        assert_ne!(manifest_hash(&fingerprint), baseline);
+        assert_ne!(manifest_hash(&capsule), baseline);
     }
 
     #[test]
