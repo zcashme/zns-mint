@@ -1635,12 +1635,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "incrementalmerkletree"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3b0c166f7f34e02988f84a7bed22be9707b1569acc6aeb3afaf34152d0e0400"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "incrementalmerkletree-testing"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ad20fb6cf815e76ce9b9eca74f347740ab99059fe4b5e4a002403d0441a02983"
 dependencies = [
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "proptest",
 ]
 
@@ -2200,7 +2209,7 @@ dependencies = [
  "halo2_poseidon",
  "halo2_proofs",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "lazy_static",
  "memuse",
  "nonempty",
@@ -3112,7 +3121,7 @@ dependencies = [
  "getset",
  "group",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "jubjub",
  "lazy_static",
  "memuse",
@@ -3376,7 +3385,19 @@ checksum = "8147447aed7be4736e271825b8c3a4432efb7182e71363169b572371ddef452e"
 dependencies = [
  "bitflags 2.13.1",
  "either",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
+ "tracing",
+]
+
+[[package]]
+name = "shardtree"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "211c5ae6ff1fda9efe2cd8b90737744b3b3989f98740319284946bf110b862ed"
+dependencies = [
+ "bitflags 2.13.1",
+ "either",
+ "incrementalmerkletree 0.9.0",
  "tracing",
 ]
 
@@ -4747,7 +4768,7 @@ dependencies = [
  "getset",
  "group",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "jubjub",
  "memuse",
  "nonempty",
@@ -4763,7 +4784,7 @@ dependencies = [
  "sapling-crypto",
  "secp256k1",
  "secrecy",
- "shardtree",
+ "shardtree 0.7.1",
  "subtle",
  "time",
  "tonic-prost-build",
@@ -4849,7 +4870,7 @@ dependencies = [
  "equihash",
  "ff",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "jubjub",
  "memuse",
  "nonempty",
@@ -4897,7 +4918,7 @@ dependencies = [
  "corez",
  "document-features",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "incrementalmerkletree-testing",
  "memuse",
  "proptest",
@@ -5134,7 +5155,7 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.8.2",
  "libc",
  "metrics",
  "metrics-exporter-prometheus",
@@ -5148,7 +5169,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "shardtree",
+ "shardtree 0.8.0",
  "subtle",
  "thiserror 1.0.69",
  "time",
