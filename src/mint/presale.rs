@@ -1,16 +1,8 @@
-//! The pre-sale protected-names table, cached in memory.
-//!
-//! `zn_names` is read once at boot and re-read once per MTP day by
-//! a background fetch whose result installs on completion; claims
-//! consult the cache synchronously — Supabase is never on a claim's
-//! path. Every row is protected; `expiry_at`
-//! (`timestamptz`, nullable) is either a lift moment, judged against
-//! the current MTP per claim, or forever. A missing row, or a lift
-//! moment the MTP has reached, is unprotected. The six-digit code is not
-//! stored in the table: it is derived in the TEE from a root key
-//! (`Tee::derive_sealing_key`) and the claim name, matching the
-//! access-code-v1 HMAC construction. Redemption is the name live in
-//! the registry; the mint never writes Supabase.
+//! The pre-sale protected-names table, cached in memory: read once
+//! at boot, refreshed once per MTP day, judged per claim against the
+//! current MTP — Supabase is never on a claim's path. A missing row,
+//! or a reached lift moment, is unprotected. Codes are derived in
+//! the TEE (`access-code-v1`); the mint never writes Supabase.
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -35,8 +27,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::mint::Name;
 
-/// Context for [`zns_canon::sealing::Tee::derive_sealing_key`]: the access-code
-/// root private key (32 bytes). Distinct from the capsule sealing context.
+/// TEE sealing context for the access-code root key.
 pub const ACCESS_CODE_KEY_CONTEXT: &[u8] = b"ZNS/access-code/root/v1";
 
 /// Supabase project HTTP origin. PostgREST only.
@@ -51,14 +42,10 @@ const PRESALE_PUBLISHABLE_KEY: &str = "sb_publishable_eRyX0Z5CY3bHm11iCFoZRA_-u2
 const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
-/// Rows per request — four requests per thousand rows. Worst-case
-/// valid rows (~137 bytes: a 63-byte name plus a 35-character RFC
-/// 3339 timestamp) keep a page at ~34 KB, half of `MAX_BODY_BYTES`.
+/// Rows per page — worst case ~34 KB, half of `MAX_BODY_BYTES`.
 const PAGE_ROWS: usize = 250;
 
-/// Page ceiling: a read needing more than this many full pages
-/// (~25,000 names) is refused — a pathological table keeps
-/// yesterday's rows, loudly.
+/// Page ceiling (~25,000 names); over it, the read is refused loudly.
 const MAX_PAGES: usize = 100;
 
 type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
@@ -89,7 +76,7 @@ impl std::fmt::Debug for AccessCode {
 }
 
 impl AccessCode {
-    /// Parses exactly six ASCII decimal digits from a memo field.
+    /// Parses exactly six ASCII digits.
     pub fn parse(s: &str) -> Option<Self> {
         let bytes = s.as_bytes();
         if bytes.len() != 6 || !bytes.iter().all(|b| b.is_ascii_digit()) {
@@ -120,24 +107,20 @@ impl AccessCode {
     }
 }
 
-/// A name's protection status. `Unprotected` is never stored — it
-/// is the flattened absence `ProtectedNames::get` returns. A
-/// finite row stays `WithExpiry` whether five minutes or five years
-/// remain; the lift moment is judged against the current MTP per
-/// claim.
+/// A name's protection. Absence is `Unprotected`; a lift moment is
+/// judged against the current MTP per claim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProtectionStatus {
-    /// Returned for an absent name; never stored.
+    /// Never stored — the flattened absence.
     Unprotected,
-    /// Protection lifts when the MTP reaches the timestamp.
+    /// Protection lifts at this timestamp.
     WithExpiry(Timestamp),
     /// Protection never lifts.
     Forever,
 }
 
-/// A row from `zn_names`: `id` keys the cursor, `name` must parse
-/// as a [`Name`], `expiry_at` is RFC 3339 or null (forever). Other
-/// columns are ignored.
+/// A `zn_names` row: `id` keys the cursor, `name` must parse as a
+/// [`Name`], `expiry_at` null means forever.
 #[derive(Deserialize)]
 pub struct ProtectedRow {
     pub id: String,
@@ -146,10 +129,8 @@ pub struct ProtectedRow {
     pub expiry_at: Option<Timestamp>,
 }
 
-/// Deserialize `timestamptz` in the RFC 3339 shape PostgREST returns
-/// (e.g. `"2027-01-01T00:00:00+00:00"`). `null` → `None`; any string
-/// that does not parse as RFC 3339 fails the deserializer, which
-/// fails the whole read.
+/// PostgREST `timestamptz` (RFC 3339); `null` → `None`, anything
+/// else fails the read.
 fn deserialize_optional_timestamp<'de, D>(deserializer: D) -> Result<Option<Timestamp>, D::Error>
 where
     D: Deserializer<'de>,
@@ -163,16 +144,13 @@ where
     Ok(Some(ts))
 }
 
-/// The protected-names table: name → protection status. A name
-/// absent from the map is unprotected. Pure data;
+/// name → protection; absent is unprotected. Pure data —
 /// [`ProtectedNames::from_rows`] is the only writer.
 #[derive(Clone, Debug)]
 pub struct ProtectedNames(BTreeMap<Name, ProtectionStatus>);
 
 impl ProtectedNames {
-    /// The name's [`ProtectionStatus`] — `Unprotected` when the table
-    /// doesn't know the name. Total by design: absence is a status,
-    /// not a lookup failure, so this never returns `Option`.
+    /// The stored fact — `Unprotected` for absent names; never `None`.
     pub fn status(&self, name: &Name) -> ProtectionStatus {
         self.0
             .get(name)
@@ -180,9 +158,8 @@ impl ProtectedNames {
             .unwrap_or(ProtectionStatus::Unprotected)
     }
 
-    /// Is the name protected at this MTP? Expiry is judged now,
-    /// never stored — protection lifts exactly on schedule. The
-    /// judged question; [`ProtectedNames::status`] is the stored fact.
+    /// The judged question: protected at this MTP? Expiry is never
+    /// stored, so protection lifts exactly on schedule.
     pub fn is_protected(&self, name: &Name, mtp: Timestamp) -> bool {
         match self.status(name) {
             ProtectionStatus::Unprotected => false,
@@ -191,13 +168,10 @@ impl ProtectedNames {
         }
     }
 
-    /// Validates rows into a new table, coalescing a re-purchase
-    /// into the strongest bought term: `Forever` over any expiry,
-    /// the later expiry over the earlier. All-or-nothing: one
-    /// corrupt row fails the whole batch, with
-    /// [`FetchError::CorruptRow`]; the offending row is logged
-    /// where it is seen — corruption, not a purchase; nothing
-    /// paid-for is dropped.
+    /// Rows in, new table out: re-purchases coalesce to the
+    /// strongest term (`Forever` over any expiry, the later expiry
+    /// wins). All-or-nothing — one corrupt row fails the batch with
+    /// [`FetchError::CorruptRow`], logged where it is seen.
     pub fn from_rows(
         self,
         rows: impl IntoIterator<Item = ProtectedRow>,
@@ -242,31 +216,23 @@ impl ProtectedNames {
 /// Why a pre-sale table read failed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FetchError {
-    /// The read did not complete — transport, timeout, status,
-    /// body, or decode. A retry may succeed.
+    /// The read did not complete; a retry may succeed.
     #[error("read failed")]
     Unavailable,
-    /// The read completed but its completeness could not be
-    /// confirmed — the server's row count was missing or did not
-    /// match, or the read exceeded the page ceiling.
+    /// The read finished but its completeness is unproven — count
+    /// missing or mismatched, or over the page ceiling.
     #[error("read could not be confirmed complete")]
     Unconfirmed,
-    /// A row is corrupt — its `name` is not a lawful [`Name`].
-    /// Retries fail until the table is fixed; the offending row
-    /// is logged where it is seen.
+    /// A row's `name` is not a lawful [`Name`]; retries fail until
+    /// the table is fixed.
     #[error("row is not a lawful name")]
     CorruptRow,
 }
 
 /// Reads the whole table, `PAGE_ROWS` at a time, keyset-paginated
-/// by the unique `(name, id)`: inserts and deletes cannot shift
-/// the window, and no row can be skipped or repeated. The first
-/// page carries the server's exact row count; the read installs
-/// only when every counted row landed — duplicates coalesce
-/// wherever their pages arrive. Stops on a short page; refuses a
-/// read needing more than `MAX_PAGES` full pages. Any failure
-/// rejects the whole read ([`FetchError`]) — a caller keeps what
-/// it has.
+/// by `(name, id)`, installing only when every counted row landed.
+/// Over `MAX_PAGES` full pages, or any failure: [`FetchError`] —
+/// the caller keeps what it has.
 pub async fn fetch() -> Result<ProtectedNames, FetchError> {
     let client = https_client();
     let mut table = ProtectedNames(BTreeMap::new());
@@ -319,10 +285,8 @@ pub async fn fetch() -> Result<ProtectedNames, FetchError> {
     }
 }
 
-/// One page of rows after `after` (the previous page's last
-/// `(name, id)`), ordered by `(name, id)`, with the server's exact
-/// row count when `want_total`. `None` on any transport, timeout,
-/// status, size, or parse failure; each is warned here. One
+/// One page after `after`, with the server's exact row count when
+/// `want_total`. `None` on any failure, each warned here. One
 /// end-to-end timeout covers the request and the body.
 async fn fetch_page(
     client: &HttpsClient,
@@ -379,9 +343,8 @@ async fn fetch_page(
     }
 }
 
-/// The filter for rows strictly after `(name, id)`: every later
-/// name, or the same name with a later id. Names are `[a-z0-9]`
-/// and ids UUID text, so no value needs escaping.
+/// Rows strictly after `(name, id)`; `[a-z0-9]` names and UUID
+/// ids need no escaping.
 fn keyset_filter(after: Option<(&str, &str)>) -> String {
     match after {
         None => String::new(),
@@ -412,10 +375,8 @@ impl AccessCodeDerivationKey {
         &self.0
     }
 
-    /// Derive the six-digit code a protected `name` must present.
-    ///
-    /// `digest = HMAC-SHA256(purpose_key, name)`; value is
-    /// `u32_be(digest[0..4]) mod 1_000_000`.
+    /// The six-digit code `name` must present:
+    /// `u32_be(HMAC-SHA256(key, name)[0..4]) mod 1_000_000`.
     pub fn derive(&self, name: &Name) -> AccessCode {
         let mut mac = HmacSha256::new_from_slice(self.0.as_ref())
             .expect("HMAC-SHA256 accepts any key length");
@@ -425,8 +386,8 @@ impl AccessCodeDerivationKey {
         AccessCode(n % 1_000_000)
     }
 
-    /// Does the offered code match this key's code for `name`?
-    /// A missing code never matches.
+    /// Does `offered` match the code for `name`? Missing never
+    /// matches.
     pub fn accepts(&self, name: &Name, offered: Option<&AccessCode>) -> bool {
         match offered {
             Some(offered) => self.derive(name).ct_eq(offered),
