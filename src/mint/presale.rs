@@ -387,8 +387,8 @@ impl AccessCodeDerivationKey {
     /// From a TEE root private key: the purpose key
     /// `HMAC-SHA256(key = root, data = "access-code-v1")`.
     pub fn from_private_key(private_key: &[u8; 32]) -> Self {
-        let mut mac = HmacSha256::new_from_slice(private_key)
-            .expect("HMAC-SHA256 accepts any key length");
+        let mut mac =
+            HmacSha256::new_from_slice(private_key).expect("HMAC-SHA256 accepts any key length");
         mac.update(b"access-code-v1");
         let out = mac.finalize().into_bytes();
         let mut key = Zeroizing::new([0u8; 32]);
@@ -463,10 +463,7 @@ mod tests {
             hex::encode(gate.as_bytes()),
             "5e2db6040cd32d2486675a3b3d60b9d4d96e9c8d4a5f862e0dfd7bd6a3f57b91"
         );
-        assert_eq!(
-            gate.derive(&alice()).expose_for_test(),
-            *b"352582"
-        );
+        assert_eq!(gate.derive(&alice()).expose_for_test(), *b"352582");
         assert_eq!(
             gate.derive(&Name::parse("bob").unwrap()).expose_for_test(),
             *b"131624"
