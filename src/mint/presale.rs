@@ -208,8 +208,10 @@ where
 pub struct ProtectedNames(BTreeMap<Name, ProtectionStatus>);
 
 impl ProtectedNames {
-    /// The name's status; `Unprotected` when absent.
-    fn get(&self, name: &Name) -> ProtectionStatus {
+    /// The name's [`ProtectionStatus`] — `Unprotected` when the table
+    /// doesn't know the name. Total by design: absence is a status,
+    /// not a lookup failure, so this never returns `Option`.
+    pub fn status(&self, name: &Name) -> ProtectionStatus {
         self.0
             .get(name)
             .copied()
@@ -217,9 +219,10 @@ impl ProtectedNames {
     }
 
     /// Is the name protected at this MTP? Expiry is judged now,
-    /// never stored — protection lifts exactly on schedule.
+    /// never stored — protection lifts exactly on schedule. The
+    /// judged question; [`ProtectedNames::status`] is the stored fact.
     pub fn is_protected(&self, name: &Name, mtp: Timestamp) -> bool {
-        match self.get(name) {
+        match self.status(name) {
             ProtectionStatus::Unprotected => false,
             ProtectionStatus::Forever => true,
             ProtectionStatus::WithExpiry(ts) => mtp < ts,
@@ -562,15 +565,15 @@ mod tests {
         absorb(rows, &mut map).unwrap();
         let names = ProtectedNames(map);
         assert_eq!(
-            names.get(&Name::parse("alice").unwrap()),
+            names.status(&Name::parse("alice").unwrap()),
             ProtectionStatus::WithExpiry(ts(2_000_000_000))
         );
         assert_eq!(
-            names.get(&Name::parse("bob").unwrap()),
+            names.status(&Name::parse("bob").unwrap()),
             ProtectionStatus::Forever
         );
         assert_eq!(
-            names.get(&Name::parse("carol").unwrap()),
+            names.status(&Name::parse("carol").unwrap()),
             ProtectionStatus::Unprotected
         );
     }
