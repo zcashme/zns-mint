@@ -632,8 +632,7 @@ impl<P: Parameters> InputSource for Wallet<P> {
         // Pools are drawn on in the caller's preference order; within a pool
         // notes are taken preferred lock tier first, then oldest, while the
         // total is still short of the target. The note that meets it is included.
-        // Notes worth no more than their marginal fee are skipped, as in
-        // `zcash_client_sqlite`.
+        // Dust is skipped, as in `zcash_client_sqlite`.
         for pool in sources {
             match pool {
                 ShieldedPool::Sapling => {

@@ -47,8 +47,7 @@ type VaultSweepProposal = Proposal<StandardFeeRule, NoteId>;
 pub const SWEEP_MINIMUM: Zatoshis = Zatoshis::const_from_u64(100_000_000);
 
 /// Amount retained as Treasury change after a sweep (0.01 ZEC): the
-/// operating float that funds the next relay and Name Note fees. The
-/// sweep's own fee comes out of the vault payment, never out of the float.
+/// operating float that funds the next Name Note's fee.
 pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 
 /// The relay sends no value — the memo is the message. The
@@ -97,11 +96,7 @@ impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::err
 {
 }
 
-/// Proposes the sweep. Upstream's send-max, run as a dry run (no locks,
-/// never built), says what the Treasury could deliver to the vault after
-/// the fee; the sweep pays that less the float, so the fee comes out of
-/// the vault payment and the float stays as change. `None` means nothing
-/// needs moving.
+/// Pays the vault what send-max could deliver, less the float.
 fn propose_vault_sweep<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
@@ -156,12 +151,7 @@ fn propose_vault_sweep<P: Parameters>(
     .map_err(BuildFailure::Proposal)
 }
 
-/// One sweep: Treasury value above the operating float moves to the vault
-/// when at least `SWEEP_MINIMUM` moves. `main` gates the once-per-day
-/// cadence. `Ok(None)` means nothing needs moving. `Err` reports a build
-/// failure; the next daily gate tries again. A read-back miss after a
-/// successful build is FATAL — the wallet has already marked the inputs
-/// spent.
+/// Builds the vault sweep. `Ok(None)` means nothing to move.
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
@@ -329,15 +319,12 @@ mod tests {
         BlockHeight::from_u32(n)
     }
 
-    /// #321: past ~198 notes the sweep fee exceeds the float. The fee comes
-    /// out of the vault payment, so the proposal closes and its change is
-    /// exactly the float. Dust is left behind.
+    /// The float survives any note count, and dust is left behind.
     #[test]
     fn sweep_proposal_leaves_exactly_the_float_at_any_note_count() {
         for note_count in [3usize, 198, 250, 400] {
             let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
                 .build::<SaplingPoolTester>();
-            // A note worth its marginal fee is dust: never selected.
             let mut values = vec![Zatoshis::const_from_u64(50_000_000); note_count];
             values.push(MARGINAL_FEE);
             st.add_notes_checking_balance([values]);
