@@ -335,7 +335,8 @@ impl<P: Parameters> Wallet<P> {
     /// Whether every unspent, spendable-scope note in `sources` is eligible
     /// under `confirmations_policy` and `lock_filter`. Used by
     /// `AllFunds(Everything)`: a leftover unconfirmed or locked note would
-    /// make a "spend all" proposal a lie.
+    /// make a "spend all" proposal a lie. Dust is never selected, so it is
+    /// never a leftover.
     fn everything_spendable(
         &self,
         account: AccountId,
@@ -363,6 +364,7 @@ impl<P: Parameters> Wallet<P> {
                         *output.account_id() == account
                             && !exclude.contains(note_id)
                             && output.recipient_key_scope().is_some()
+                            && output.note().value().inner() > u64::from(MARGINAL_FEE)
                             && !self.sapling_note_is_spent(note_id, target_height)
                             && !eligible.contains(note_id)
                     });
@@ -386,6 +388,7 @@ impl<P: Parameters> Wallet<P> {
                         *output.account_id() == account
                             && !exclude.contains(note_id)
                             && output.recipient_key_scope().is_some()
+                            && output.note().0.value().inner() > u64::from(MARGINAL_FEE)
                             && !self.ironwood_note_is_spent(note_id, target_height)
                             && !eligible.contains(note_id)
                     });

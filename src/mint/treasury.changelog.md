@@ -11,10 +11,11 @@
   `propose_send_max_transfer` to the vault, as a dry run (no locks, never
   built). The payment is that less `SWEEP_RESERVE`, proposed with
   `propose_standard_transfer_to_address`, so the fee comes out of the vault
-  payment and the float is the change. No fee arithmetic, change strategy
-  or bundle sizing lives in the mint. The change output adds no action:
-  Sapling outputs pad to two, and Ironwood change rides a bundle that
-  already pads to two.
+  payment and the Treasury keeps at least the float, as change plus any
+  economic notes the transfer leaves unspent. No fee arithmetic, change
+  strategy or bundle sizing lives in the mint. The change output adds no
+  action: Sapling outputs pad to two, and Ironwood change rides a bundle
+  that already pads to two.
 - Send-max was rejected before (2026-09-18) as the sweep itself, because
   it leaves no change. As a dry run it only prices the sweep.
 - Dust never reaches the sweep: the wallet's `select_spendable_notes`
