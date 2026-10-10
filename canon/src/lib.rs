@@ -6,6 +6,7 @@
 //!
 //! [`genesis`], [`upgrade`], and [`migration`] are the canonical statements
 //! for a finished ceremony and for moving that seed to a new measurement.
+//! [`regtest`] writes the dev `keys/` dir for regtest fixtures.
 //! Ceremony and migration orchestration stay outside this crate.
 
 #[cfg(all(feature = "non-tee", not(debug_assertions)))]
@@ -17,5 +18,7 @@ pub mod attestation;
 pub mod capsule;
 pub mod genesis;
 pub mod migration;
+#[cfg(feature = "non-tee")]
+pub mod regtest;
 pub mod sealing;
 pub mod upgrade;
