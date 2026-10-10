@@ -89,7 +89,7 @@ zcash_address = "0.13.0"
 # Transparent key types (Treasury accepts transparent payments from users).
 # The workspace crate is `zcash_transparent`, published as `transparent`.
 transparent = { package = "zcash_transparent", version = "0.10.0", default-features = false }
-zip32 = "0.2.1"
+zip32 = "0.3.0"
 
 # Block parsing
 zcash_primitives = { version = "0.30.0", default-features = false, features = ["unsafe-zns"] }
