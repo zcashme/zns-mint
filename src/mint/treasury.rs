@@ -9,36 +9,28 @@ pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
 use std::convert::Infallible;
 use std::num::NonZeroU32;
 
-use zcash_client_backend::data_api::locking::{LockFilter, LockedInputPolicy};
+use zcash_client_backend::data_api::error::Error;
+use zcash_client_backend::data_api::locking::LockedInputPolicy;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
 use zcash_client_backend::data_api::wallet::{
-    create_proposed_transactions, propose_standard_transfer_to_address, ConfirmationsPolicy,
-    CreateErrT, ProposeTransferErrT, TargetHeight,
+    create_proposed_transactions, propose_send_max_transfer, propose_standard_transfer_to_address,
+    ConfirmationsPolicy, CreateErrT, ProposeTransferErrT,
 };
-use zcash_client_backend::data_api::{
-    InputSource as _, MaxSpendMode, ReceivedNotes, TargetValue, WalletRead as _,
-};
-use zcash_client_backend::fees::orchard::EmptyBundleView;
+use zcash_client_backend::data_api::{MaxSpendMode, WalletRead as _};
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
-use zcash_client_backend::fees::{
-    ChangeError, ChangeStrategy as _, DustOutputPolicy, StandardFeeRule,
-};
+use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::proposal::Proposal;
-use zcash_client_backend::wallet::{NoteId, OvkPolicy, WalletTransparentOutput};
-use zcash_primitives::transaction::components::orchard::bundle_version_for_branch;
+use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_primitives::transaction::{Transaction, TxId};
-use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::{BalanceError, Zatoshis};
 use zcash_protocol::ShieldedPool;
 
 use crate::mint::{Request, TREASURY_ACCOUNT};
 use crate::wallet::{Wallet, WalletError};
-use orchard::bundle::BundleVersion;
-use transparent::bundle::TxOut;
-use zip32::AccountId;
 
 type TreasuryProposalError<P> = ProposeTransferErrT<
     Wallet<P>,
@@ -79,8 +71,6 @@ pub enum BuildFailure<ProposalError, TransactionError> {
     Selection(WalletError),
     /// Selected note values overflowed or underflowed the monetary range.
     Balance(BalanceError),
-    /// The change strategy could not price the sweep.
-    Fee(ChangeError<FeeError, NoteId>),
     /// The upstream wallet API rejected transaction proposal construction.
     Proposal(ProposalError),
     /// The upstream wallet API rejected transaction construction or storage.
@@ -96,7 +86,6 @@ impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::fmt
             Self::Heights(error) => write!(f, "target/anchor height lookup failed: {error}"),
             Self::Selection(error) => write!(f, "note selection failed: {error}"),
             Self::Balance(error) => write!(f, "selected note value is invalid: {error}"),
-            Self::Fee(error) => write!(f, "sweep fee computation failed: {error:?}"),
             Self::Proposal(error) => write!(f, "proposal failed: {error:?}"),
             Self::Transaction(error) => write!(f, "transaction build failed: {error:?}"),
         }
@@ -108,130 +97,44 @@ impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::err
 {
 }
 
-/// The ZIP-317 fee of sweeping `notes` to the vault, priced by the change
-/// strategy `propose_standard_transfer_to_address` uses, so it includes the
-/// change output. The fee depends on the notes and the shape, not the
-/// amount, so the vault output carries zero.
-fn sweep_fee<P: Parameters>(
-    network: &P,
-    wallet: &Wallet<P>,
-    notes: &ReceivedNotes<NoteId>,
-    target_height: TargetHeight,
-    anchor_height: BlockHeight,
-) -> Result<Zatoshis, ChangeError<FeeError, NoteId>> {
-    let change_strategy = SingleOutputChangeStrategy::<Wallet<P>>::new(
-        StandardFeeRule::Zip317,
-        None,
-        ShieldedPool::Ironwood,
-        DustOutputPolicy::default(),
-    );
-    let ironwood_version = bundle_version_for_branch(
-        BranchId::for_height(network, BlockHeight::from(target_height)),
-        orchard::ValuePool::Ironwood,
-    )
-    .unwrap_or(BundleVersion::ironwood_v3());
-
-    change_strategy
-        .compute_balance(
-            network,
-            target_height,
-            anchor_height,
-            &wallet.pool_migration_params(),
-            &[] as &[WalletTransparentOutput<AccountId>],
-            &[TxOut::new(Zatoshis::ZERO, VAULT_ADDRESS.script().into())],
-            &(
-                sapling::builder::BundleType::DEFAULT,
-                notes.sapling(),
-                &[] as &[Infallible],
-            ),
-            &EmptyBundleView,
-            &(ironwood_version, notes.ironwood(), &[] as &[Infallible]),
-            None,
-            &(),
-        )
-        .map(|balance| balance.fee_required())
-}
-
-/// The vault payment: `total` less the sweep's fee and the float, when at
-/// least `SWEEP_MINIMUM`.
-fn sweep_payment(total: Zatoshis, fee: Zatoshis) -> Option<Zatoshis> {
-    (total - fee)
-        .and_then(|sendable| sendable - SWEEP_RESERVE)
-        .filter(|payment| *payment >= SWEEP_MINIMUM)
-}
-
-/// Proposes the sweep: the vault payment is `sweep_payment` over the
-/// economic Treasury notes, so the fee comes out of the payment and the
-/// change is the float. `None` means nothing needs moving.
+/// Proposes the sweep. Upstream's send-max, run as a dry run (no locks,
+/// never built), says what the Treasury could deliver to the vault after
+/// the fee; the sweep pays that less the float, so the fee comes out of
+/// the vault payment and the float stays as change. `None` means nothing
+/// needs moving.
 fn propose_vault_sweep<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
 ) -> Result<Option<VaultSweepProposal>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>>
 {
     let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
-    let (target_height, anchor_height) = match wallet.get_target_and_anchor_heights(NonZeroU32::MIN)
-    {
-        Ok(Some(heights)) => heights,
-        Ok(None) => return Err(BuildFailure::HeightsUnavailable),
-        Err(error) => return Err(BuildFailure::Heights(error)),
+    let vault = zcash_keys::address::Address::Transparent(VAULT_ADDRESS);
+    let sendable = match propose_send_max_transfer::<_, _, _, Infallible>(
+        wallet,
+        network,
+        TREASURY_ACCOUNT,
+        &[ShieldedPool::Sapling, ShieldedPool::Ironwood],
+        &StandardFeeRule::Zip317,
+        vault.to_zcash_address(network),
+        None,
+        MaxSpendMode::MaxSpendable,
+        policy,
+        &LockedInputPolicy::Exclude,
+        None,
+    ) {
+        Ok(max) => max.steps().first().transaction_request().total(),
+        Err(Error::InsufficientFunds { .. }) => return Ok(None),
+        Err(error) => return Err(BuildFailure::Proposal(error)),
     };
+    let sendable = sendable
+        .map_err(BuildFailure::Balance)?
+        .unwrap_or(Zatoshis::ZERO);
 
-    // Uneconomic notes are named by the change strategy and left out, as
-    // upstream's selector does.
-    let lock_policy = LockedInputPolicy::Exclude;
-    let mut exclude = Vec::new();
-    let (notes, fee) = loop {
-        let notes = match wallet.select_spendable_notes(
-            TREASURY_ACCOUNT,
-            TargetValue::AllFunds(MaxSpendMode::MaxSpendable),
-            &[ShieldedPool::Sapling, ShieldedPool::Ironwood],
-            target_height,
-            policy,
-            &exclude,
-            LockFilter::Policy(&lock_policy),
-        ) {
-            Ok(notes) if !notes.is_empty() => notes,
-            Ok(_) => {
-                tracing::debug!("vault sweep skipped: no spendable notes");
-                return Ok(None);
-            }
-            Err(error) => return Err(BuildFailure::Selection(error)),
-        };
-        match sweep_fee(network, wallet, &notes, target_height, anchor_height) {
-            Ok(fee) => break (notes, fee),
-            Err(ChangeError::DustInputs {
-                sapling, ironwood, ..
-            }) => {
-                exclude.extend(sapling);
-                exclude.extend(ironwood);
-            }
-            Err(ChangeError::InsufficientFunds { available, .. }) => {
-                tracing::debug!(
-                    spendable_zats = available.into_u64(),
-                    "vault sweep skipped: spendable below its own fee"
-                );
-                return Ok(None);
-            }
-            Err(error) => return Err(BuildFailure::Fee(error)),
-        }
-    };
-    let total = notes.total_value().map_err(BuildFailure::Balance)?;
-
-    let Some(payment) = sweep_payment(total, fee) else {
-        if total < SWEEP_RESERVE {
-            tracing::info!(
-                spendable_zats = total.into_u64(),
-                float_zats = SWEEP_RESERVE.into_u64(),
-                "vault sweep skipped: spendable below the float"
-            );
-        } else {
-            tracing::debug!(
-                spendable_zats = total.into_u64(),
-                fee_zats = fee.into_u64(),
-                minimum_zats = SWEEP_MINIMUM.into_u64(),
-                "vault sweep skipped: payment below the minimum"
-            );
-        }
+    let Some(payment) = (sendable - SWEEP_RESERVE).filter(|p| *p >= SWEEP_MINIMUM) else {
+        tracing::debug!(
+            sendable_zats = sendable.into_u64(),
+            "vault sweep skipped: payment below the minimum"
+        );
         return Ok(None);
     };
 
@@ -241,7 +144,7 @@ fn propose_vault_sweep<P: Parameters>(
         StandardFeeRule::Zip317,
         TREASURY_ACCOUNT,
         policy,
-        &zcash_keys::address::Address::Transparent(VAULT_ADDRESS),
+        &vault,
         payment,
         None,
         None,
@@ -426,29 +329,18 @@ mod tests {
         BlockHeight::from_u32(n)
     }
 
-    #[test]
-    fn sweep_payment_leaves_the_float_and_the_fee() {
-        let fee = Zatoshis::const_from_u64(1_255_000);
-        let total = ((SWEEP_MINIMUM + SWEEP_RESERVE).unwrap() + fee).unwrap();
-        assert_eq!(sweep_payment(total, fee), Some(SWEEP_MINIMUM));
-        let short = (total - Zatoshis::const_from_u64(1)).unwrap();
-        assert_eq!(sweep_payment(short, fee), None);
-    }
-
-    #[test]
-    fn sweep_payment_is_none_when_the_fee_exceeds_the_total() {
-        assert_eq!(sweep_payment(SWEEP_RESERVE, SWEEP_MINIMUM), None);
-    }
-
     /// #321: past ~198 notes the sweep fee exceeds the float. The fee comes
     /// out of the vault payment, so the proposal closes and its change is
-    /// exactly the float.
+    /// exactly the float. Dust is left behind.
     #[test]
     fn sweep_proposal_leaves_exactly_the_float_at_any_note_count() {
         for note_count in [3usize, 198, 250, 400] {
             let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
                 .build::<SaplingPoolTester>();
-            st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(50_000_000); note_count]]);
+            // A note worth its marginal fee is dust: never selected.
+            let mut values = vec![Zatoshis::const_from_u64(50_000_000); note_count];
+            values.push(MARGINAL_FEE);
+            st.add_notes_checking_balance([values]);
             st.add_empty_blocks(1);
 
             let network = *st.network();

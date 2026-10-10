@@ -22,6 +22,7 @@ use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{
     Note, NoteId, OutputRef, ReceivedNote, WalletTransparentOutput,
 };
+use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
@@ -631,6 +632,8 @@ impl<P: Parameters> InputSource for Wallet<P> {
         // Pools are drawn on in the caller's preference order; within a pool
         // notes are taken preferred lock tier first, then oldest, while the
         // total is still short of the target. The note that meets it is included.
+        // Notes worth no more than their marginal fee are skipped, as in
+        // `zcash_client_sqlite`.
         for pool in sources {
             match pool {
                 ShieldedPool::Sapling => {
@@ -648,6 +651,9 @@ impl<P: Parameters> InputSource for Wallet<P> {
                         let value = note
                             .note_value()
                             .expect("Sapling note values are within valid ZEC bounds by consensus");
+                        if value <= MARGINAL_FEE {
+                            continue;
+                        }
                         accumulated = (accumulated + value).expect(
                             "selection cannot overflow MAX_MONEY; mirrors upstream Balance::total",
                         );
@@ -672,6 +678,9 @@ impl<P: Parameters> InputSource for Wallet<P> {
                         let value = note.note_value().expect(
                             "Ironwood note values are within valid ZEC bounds by consensus",
                         );
+                        if value <= MARGINAL_FEE {
+                            continue;
+                        }
                         accumulated = (accumulated + value).expect(
                             "selection cannot overflow MAX_MONEY; mirrors upstream Balance::total",
                         );

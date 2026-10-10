@@ -1,5 +1,11 @@
 # Wallet changelog
 
+## 2026-10-10 — Note selection skips dust
+
+- `select_spendable_notes` skips notes worth `MARGINAL_FEE` or less, as
+  `zcash_client_sqlite` does in SQL. Callers no longer exclude dust
+  themselves. `get_spendable_note` and the Name Note lookups are unchanged.
+
 ## 2026-10-06 — Birth clamps subtree roots to the origin checkpoint
 
 - `z_getsubtreesbyindex` answers as of the chain tip; the origin

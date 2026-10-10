@@ -7,25 +7,22 @@
   count, so past ~198 notes the proposal could not close, every midnight
   retried the same build, and the sweep — the only thing that reduces the
   note count — never recovered.
-- `sweep_fee` asks upstream for the fee: `ChangeStrategy::compute_balance`
-  on the same `SingleOutputChangeStrategy` that
-  `propose_standard_transfer_to_address` uses, over the notes the sweep
-  would spend. Action counts, padding, the change pool and the change
-  output all come from upstream; the sweep does no fee arithmetic of its
-  own. The payment is `total − fee − SWEEP_RESERVE` (`sweep_payment`), so
-  the change is the float.
-- The Treasury wallet's `select_spendable_notes` does not filter dust.
-  `compute_balance` names uneconomic notes in `ChangeError::DustInputs`;
-  the sweep excludes them and prices again, the loop upstream's selector
-  runs.
-- Not `propose_send_max_transfer`: it spends every note, which would sweep
-  the float that funds relays and Name Notes (Name Notes spend Ironwood
-  Treasury notes only). Not a fee bound: the 2026-09-17 bound and the
-  2026-09-18 guess both disagreed with the proposer's transaction.
+- The sweep asks upstream what the Treasury can deliver:
+  `propose_send_max_transfer` to the vault, as a dry run (no locks, never
+  built). The payment is that less `SWEEP_RESERVE`, proposed with
+  `propose_standard_transfer_to_address`, so the fee comes out of the vault
+  payment and the float is the change. No fee arithmetic, change strategy
+  or bundle sizing lives in the mint. The change output adds no action:
+  Sapling outputs pad to two, and Ironwood change rides a bundle that
+  already pads to two.
+- Send-max was rejected before (2026-09-18) as the sweep itself, because
+  it leaves no change. As a dry run it only prices the sweep.
+- Dust never reaches the sweep: the wallet's `select_spendable_notes`
+  skips notes worth `MARGINAL_FEE` or less, as `zcash_client_sqlite` does.
 - `sweep_proposal_leaves_exactly_the_float_at_any_note_count` funds the
   Treasury with 3 to 400 notes through the wallet test harness and asserts
-  every note is spent and the proposal's change is exactly
-  `SWEEP_RESERVE`; it fails under the old arithmetic.
+  every economic note is spent, a dust note is not, and the proposal's
+  change is exactly `SWEEP_RESERVE`; it fails under the old arithmetic.
 - Not changed: the daily gate, `SWEEP_MINIMUM`, `SWEEP_RESERVE`, the
   `[Sapling, Ironwood]` drain set, the vault payment path. Open: a set past
   `MAX_BLOCK_BYTES` still fails `TransactionTooLarge`.
