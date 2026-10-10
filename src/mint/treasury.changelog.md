@@ -1,5 +1,33 @@
 # Treasury design record
 
+## 2026-10-09 — The sweep's fee comes out of the swept amount (#321)
+
+- `payment = total − SWEEP_RESERVE` charged the ZIP-317 fee to the fixed
+  0.01 ZEC float. The fee is `5,000 × actions` and grows with the note
+  count, so past ~198 notes the proposal could not close, every midnight
+  retried the same build, and the sweep — the only thing that reduces the
+  note count — never recovered.
+- The sweep asks upstream what the Treasury can deliver:
+  `propose_send_max_transfer` to the vault, as a dry run (no locks, never
+  built). The payment is that less `SWEEP_RESERVE`, proposed with
+  `propose_standard_transfer_to_address`, so the fee comes out of the vault
+  payment and the Treasury keeps at least the float, as change plus any
+  economic notes the transfer leaves unspent. No fee arithmetic, change
+  strategy or bundle sizing lives in the mint. The change output adds no
+  action: Sapling outputs pad to two, and Ironwood change rides a bundle
+  that already pads to two.
+- Send-max was rejected before (2026-09-18) as the sweep itself, because
+  it leaves no change. As a dry run it only prices the sweep.
+- Dust never reaches the sweep: the wallet's `select_spendable_notes`
+  skips notes worth `MARGINAL_FEE` or less, as `zcash_client_sqlite` does.
+- `sweep_proposal_leaves_exactly_the_float_at_any_note_count` funds the
+  Treasury with 3 to 400 notes through the wallet test harness and asserts
+  every economic note is spent, a dust note is not, and the proposal's
+  change is exactly `SWEEP_RESERVE`; it fails under the old arithmetic.
+- Not changed: the daily gate, `SWEEP_MINIMUM`, `SWEEP_RESERVE`, the
+  `[Sapling, Ironwood]` drain set, the vault payment path. Open: a set past
+  `MAX_BLOCK_BYTES` still fails `TransactionTooLarge`.
+
 ## 2026-10-05 — The relay sends no value (#299)
 
 - `CHALLENGE_RELAY_VALUE` is zero. The OTP memo rides a zero-value
