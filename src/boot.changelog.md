@@ -2,6 +2,21 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-10-10 — The conf is read on every network
+
+- `keys/zns_mint.conf` is no longer mainnet/testnet-only: regtest reads
+  it too, so boot has one straight-line config path. `require_config_network`
+  gains the regtest arm; the fixture writes the conf via zns-canon's
+  `regtest::write_dev_keys` with the ceremony tip as the birthday.
+- Deleted: the `MINT_BIRTHDAY` constant (the fixture owns the number
+  now), the `verify_fingerprint` regtest escape that was called with an
+  empty string and skipped the check, and the regtest cfg gates around
+  the capsule-fingerprint check. Every build verifies the unsealed seed
+  against the conf fingerprint.
+- `MINT_BIRTHDAY`'s fixture-boundary knowledge (NU6.3 at 4, coinbase
+  maturity through the low hundreds) moved to the harness, which already
+  owned the mining schedule.
+
 ## 2026-10-09 — A failed keygen report stops boot
 
 - The keygen report check must succeed. A report that fails

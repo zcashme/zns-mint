@@ -63,8 +63,10 @@ async fn boot_completes_on_wallet_funded_dev_ceremony() -> Result<()> {
     let tip = fixture::publish_ceremony(&zebra).await?;
     eprintln!("fixture: ceremony confirmed at tip {tip}");
 
-    std::fs::create_dir_all("keys")?;
-    std::fs::write("keys/zns_seed.capsule", fixture::seal_fixture_capsule()?)?;
+    // The whole keys/ contract in one call: the dev capsule plus the conf
+    // boot now reads on every network. Birthday = the ceremony tip — the
+    // same fact boot checks the conf against, true by construction.
+    zns_canon::regtest::write_dev_keys("keys", tip)?;
 
     // Bounded, explicit completion. Every boot check — genesis anchors,
     // Treasury minimum, clock, initial price, proving parameters — runs
@@ -74,10 +76,7 @@ async fn boot_completes_on_wallet_funded_dev_ceremony() -> Result<()> {
         .context("boot exceeded the harness deadline")?;
 
     let tip_height = zcash_protocol::consensus::BlockHeight::from_u32(tip);
-    assert_eq!(
-        boot.birthday,
-        zcash_protocol::consensus::BlockHeight::from_u32(100)
-    );
+    assert_eq!(boot.birthday, tip_height);
     assert_eq!(boot.wallet.tip().block_height(), tip_height);
     assert_eq!(boot.registry.anchor_pool().len(), fixture::ANCHOR_POOL_SIZE);
     assert!(boot.registry.anchor_adoption_closed());

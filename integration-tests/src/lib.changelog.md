@@ -1,5 +1,17 @@
 # lib.changelog.md
 
+## 2026-10-10
+
+- `DEV_SEED` moves to zns-canon (`regtest::DEV_SEED`) — one all-zero
+  constant for every harness; this crate re-exports it.
+- `boot_completion` writes the dev `keys/` contract with canon's
+  `regtest::write_dev_keys` instead of hand-writing the capsule: the
+  conf now carries the real ceremony tip as the birthday, and the test
+  asserts `boot.birthday ==` that tip.
+- `seal_fixture_capsule` and `expose_fixture_capsule` die: the harness
+  writes the dev `keys/` contract itself (zns-integration-tests #18),
+  so the `ZNS_SEED_CAPSULE` env transport is gone. Harness pin bumped.
+
 ## 2026-10-05
 
 - `User::fund_attached` and `User::pay_ua` join the harness: a second
