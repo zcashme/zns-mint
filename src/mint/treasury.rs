@@ -30,7 +30,7 @@ use zcash_protocol::value::{BalanceError, Zatoshis};
 use zcash_protocol::ShieldedPool;
 
 use crate::mint::{Request, TREASURY_ACCOUNT};
-use crate::wallet::{Wallet, WalletError};
+use crate::wallet::Wallet;
 
 type TreasuryProposalError<P> = ProposeTransferErrT<
     Wallet<P>,
@@ -62,13 +62,7 @@ pub const VAULT_ADDRESS: transparent::address::TransparentAddress =
 /// A Treasury transaction was not built. Distinct from "nothing to do".
 #[derive(Debug)]
 pub enum BuildFailure<ProposalError, TransactionError> {
-    /// No target height or anchor was available.
-    HeightsUnavailable,
-    /// The wallet failed while reading target/anchor heights.
-    Heights(WalletError),
-    /// Wallet note selection failed.
-    Selection(WalletError),
-    /// Selected note values overflowed or underflowed the monetary range.
+    /// The sendable total overflowed the monetary range.
     Balance(BalanceError),
     /// The upstream wallet API rejected transaction proposal construction.
     Proposal(ProposalError),
@@ -81,10 +75,7 @@ impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::fmt
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::HeightsUnavailable => write!(f, "no target or anchor height"),
-            Self::Heights(error) => write!(f, "target/anchor height lookup failed: {error}"),
-            Self::Selection(error) => write!(f, "note selection failed: {error}"),
-            Self::Balance(error) => write!(f, "selected note value is invalid: {error}"),
+            Self::Balance(error) => write!(f, "sendable total is invalid: {error}"),
             Self::Proposal(error) => write!(f, "proposal failed: {error:?}"),
             Self::Transaction(error) => write!(f, "transaction build failed: {error:?}"),
         }
