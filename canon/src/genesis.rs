@@ -1,11 +1,9 @@
 //! Authenticated statement of the finished genesis ceremony.
 //!
-//! The capsule attestation in [`crate::attestation::report_data`] binds only
-//! the seed fingerprint and the capsule hash. This module binds the rest of
-//! the genesis state once the anchor transaction has a confirmed birthday.
+//! The capsule attestation binds only the seed fingerprint and the capsule
+//! hash. This module binds the rest of the genesis state once the anchor
+//! transaction has a confirmed birthday.
 //! Ceremony orchestration stays in `zns-keygen`; this is the canonical record.
-
-use blake2b_simd::Params as Blake2bParams;
 
 use crate::attestation::REPORT_DATA_LEN;
 
@@ -59,24 +57,13 @@ pub fn genesis_report_data(record: &GenesisRecord) -> [u8; REPORT_DATA_LEN] {
     let mut input = Vec::with_capacity(GENESIS_DOMAIN.len() + encoding.len());
     input.extend_from_slice(GENESIS_DOMAIN);
     input.extend_from_slice(&encoding);
-    blake2b_512(&input)
+    crate::blake2b::<REPORT_DATA_LEN>(&input)
 }
 
 fn write_bytes(out: &mut [u8], offset: &mut usize, bytes: &[u8]) {
     let end = *offset + bytes.len();
     out[*offset..end].copy_from_slice(bytes);
     *offset = end;
-}
-
-fn blake2b_512(input: &[u8]) -> [u8; REPORT_DATA_LEN] {
-    let digest = Blake2bParams::new()
-        .hash_length(REPORT_DATA_LEN)
-        .to_state()
-        .update(input)
-        .finalize();
-    let mut out = [0u8; REPORT_DATA_LEN];
-    out.copy_from_slice(digest.as_bytes());
-    out
 }
 
 #[cfg(test)]
@@ -111,7 +98,7 @@ mod tests {
         let record = sample();
         let bound = genesis_report_data(&record);
         let encoding = canonical_encoding(&record);
-        assert_ne!(bound, blake2b_512(&encoding));
+        assert_ne!(bound, crate::blake2b::<REPORT_DATA_LEN>(&encoding));
 
         let mut later = record;
         later.birthday += 1;

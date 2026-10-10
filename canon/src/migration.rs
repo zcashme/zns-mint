@@ -8,7 +8,6 @@
 //! A shared secret of all zeros is rejected. That is the contributory check
 //! from RFC 7748, so a low-order target key does not wrap the seed.
 
-use blake2b_simd::Params as Blake2bParams;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand::{CryptoRng, RngCore};
@@ -82,14 +81,7 @@ pub fn migration_report_data(offer: &MigrationOffer) -> [u8; REPORT_DATA_LEN] {
     input.extend_from_slice(&offer.ephemeral_pubkey);
     input.extend_from_slice(&offer.nonce);
     input.extend_from_slice(&offer.manifest_hash);
-    let digest = Blake2bParams::new()
-        .hash_length(REPORT_DATA_LEN)
-        .to_state()
-        .update(&input)
-        .finalize();
-    let mut out = [0u8; REPORT_DATA_LEN];
-    out.copy_from_slice(digest.as_bytes());
-    out
+    crate::blake2b::<REPORT_DATA_LEN>(&input)
 }
 
 /// Generate the M2 X25519 ephemeral keypair for one migration attempt.
@@ -258,7 +250,7 @@ fn wrap_key(
     input.extend_from_slice(target_public);
     input.extend_from_slice(offer_nonce);
     input.extend_from_slice(manifest_hash);
-    let key = blake2b_256(&input);
+    let key = crate::blake2b::<32>(&input);
     input.zeroize();
     key
 }
@@ -276,17 +268,6 @@ fn wrap_aad(
     aad.extend_from_slice(offer_nonce);
     aad.extend_from_slice(manifest_hash);
     aad
-}
-
-fn blake2b_256(input: &[u8]) -> [u8; 32] {
-    let digest = Blake2bParams::new()
-        .hash_length(32)
-        .to_state()
-        .update(input)
-        .finalize();
-    digest.as_bytes()[..32]
-        .try_into()
-        .expect("BLAKE2b-256 length")
 }
 
 fn ct_eq(left: &[u8], right: &[u8]) -> bool {

@@ -22,7 +22,6 @@
 
 use std::sync::OnceLock;
 
-use blake2b_simd::Params as Blake2bParams;
 use sha2::{Digest, Sha256};
 use sigstore_trust_root::{SigstoreInstance, TrustedRoot};
 use sigstore_verify::types::{Bundle, Sha256Hash, SignatureContent, Statement};
@@ -130,14 +129,7 @@ pub fn manifest_hash(manifest: &UpgradeManifest) -> [u8; 32] {
     let mut input = Vec::with_capacity(UPGRADE_DOMAIN.len() + body.len());
     input.extend_from_slice(UPGRADE_DOMAIN);
     input.extend_from_slice(&body);
-    let digest = Blake2bParams::new()
-        .hash_length(32)
-        .to_state()
-        .update(&input)
-        .finalize();
-    digest.as_bytes()[..32]
-        .try_into()
-        .expect("BLAKE2b-256 length")
+    crate::blake2b::<32>(&input)
 }
 
 /// Verify that a zcashme workflow attested `asset`. Returns SHA-256(`asset`).

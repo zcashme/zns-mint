@@ -244,6 +244,13 @@ pub fn unseal_seed(
     Ok(Secret::new(seed_bytes))
 }
 
+/// The capsule hash: BLAKE2b-256 of the capsule's on-disk bytes — the
+/// `capsule_hash` in attestation layouts, the genesis record, and the
+/// custody manifest.
+pub fn hash(capsule_bytes: &[u8]) -> [u8; 32] {
+    crate::blake2b(capsule_bytes)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -252,6 +259,25 @@ pub fn unseal_seed(
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
+
+    #[test]
+    fn hash_is_blake2b_256_of_the_exact_bytes() {
+        // BLAKE2b-256 of the empty input, from the BLAKE2 spec's known vectors.
+        assert_eq!(
+            hex::encode(hash(b"")),
+            "0e5751c026e543b2e8ab2eb06099daa1d1e5df47778f7787faab45cdf12fe3a8"
+        );
+        // Hashing the parsed capsule and hashing the raw bytes must agree:
+        // callers pass on-disk bytes, never a re-serialization.
+        let key = crate::sealing::SealingKey::new([0x42; 32]);
+        let blob = serialize_capsule(&seal_seed(&key, &a_seed(), &mut OsRng).expect("seal"))
+            .expect("serialize");
+        let parsed = parse_capsule(&blob).expect("parse");
+        assert_eq!(
+            hash(&blob),
+            hash(&serialize_capsule(&parsed).expect("re-serialize"))
+        );
+    }
 
     fn a_seed() -> Secret<[u8; SEED_LEN]> {
         Secret::new([7u8; SEED_LEN])
