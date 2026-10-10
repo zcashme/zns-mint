@@ -62,7 +62,6 @@ fn sealing_key(context: &[u8]) -> Result<SealingKey, TeeError> {
 pub struct GuestInfo {
     pub measurement: String,
     pub guest_policy: String,
-    pub tcb_version: String,
 }
 
 /// The boot product: constructed only after every boot check succeeds.
@@ -724,7 +723,6 @@ impl Boot<Network> {
             Some(GuestInfo {
                 measurement: hex::encode(parsed.measurement),
                 guest_policy: format!("0x{:x}", parsed.guest_policy),
-                tcb_version: parsed.tcb_version,
             })
         };
         #[cfg(feature = "non-tee")]

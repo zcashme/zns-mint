@@ -62,7 +62,7 @@ async fn main() {
     zns_mint::metrics::identity(&treasury_address, &registry_ufvk);
     zns_mint::metrics::ceremony(&seed_fingerprint, &capsule_hash);
     if let Some(guest) = &guest {
-        zns_mint::metrics::guest(&guest.measurement, &guest.guest_policy, &guest.tcb_version);
+        zns_mint::metrics::guest(&guest.measurement, &guest.guest_policy);
     }
     tracing::info!(
         height = u32::from(wallet.tip().block_height()),

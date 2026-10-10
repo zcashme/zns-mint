@@ -68,12 +68,11 @@ pub fn ceremony(seed_fingerprint: &str, capsule_hash: &str) {
 /// Set once at boot; TEE builds only — non-TEE builds have no report, and
 /// the gauge's absence is the dev-mode signal. A verifier compares the
 /// measurement against the release manifest's `tee_measurement`.
-pub fn guest(measurement: &str, guest_policy: &str, tcb_version: &str) {
+pub fn guest(measurement: &str, guest_policy: &str) {
     metrics::gauge!(
         "zns_mint_guest_info",
         "measurement" => measurement.to_owned(),
         "guest_policy" => guest_policy.to_owned(),
-        "tcb_version" => tcb_version.to_owned(),
     )
     .set(1);
 }
@@ -92,11 +91,7 @@ mod tests {
         });
         assert!(!handle.render().contains("zns_mint_guest_info"));
         metrics::with_local_recorder(&recorder, || {
-            guest(
-                "measurement",
-                "0x30000",
-                "bootloader=1 tee=2 snp=3 microcode=4",
-            );
+            guest("measurement", "0x30000");
         });
 
         let output = handle.render();
@@ -122,11 +117,7 @@ mod tests {
             ),
             (
                 "zns_mint_guest_info",
-                vec![
-                    "measurement=\"measurement\"",
-                    "guest_policy=\"0x30000\"",
-                    "tcb_version=\"bootloader=1 tee=2 snp=3 microcode=4\"",
-                ],
+                vec!["measurement=\"measurement\"", "guest_policy=\"0x30000\""],
             ),
         ] {
             let sample = samples.iter().find(|line| line.starts_with(name)).unwrap();
