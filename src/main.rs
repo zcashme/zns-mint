@@ -650,8 +650,10 @@ async fn main() {
         if let Some(handle) = presale_refresh.take() {
             if handle.is_finished() {
                 match handle.await {
-                    Ok(Some(fresh)) => protected_names = fresh,
-                    Ok(None) => tracing::warn!("pre-sale refresh failed; yesterday's rows stand"),
+                    Ok(Ok(fresh)) => protected_names = fresh,
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "pre-sale refresh failed; yesterday's rows stand")
+                    }
                     Err(error) => tracing::warn!(?error, "pre-sale refresh task failed"),
                 }
             } else {

@@ -1,16 +1,8 @@
-//! The pre-sale protected-names table, cached in memory.
-//!
-//! `zn_names` is read once at boot and re-read once per MTP day by
-//! a background fetch whose result installs on completion; claims
-//! consult the cache synchronously — Supabase is never on a claim's
-//! path. Every row is protected; `expiry_at`
-//! (`timestamptz`, nullable) is either a lift moment, judged against
-//! the current MTP per claim, or forever. A missing row, or a lift
-//! moment the MTP has reached, is unprotected. The six-digit code is not
-//! stored in the table: it is derived in the TEE from a root key
-//! (`Tee::derive_sealing_key`) and the claim name, matching the
-//! access-code-v1 HMAC construction. Redemption is the name live in
-//! the registry; the mint never writes Supabase.
+//! The pre-sale protected-names table, cached in memory: read once
+//! at boot, refreshed once per MTP day, judged per claim against the
+//! current MTP — Supabase is never on a claim's path. A missing row,
+//! or a reached lift moment, is unprotected. Codes are derived in
+//! the TEE (`access-code-v1`); the mint never writes Supabase.
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -28,14 +20,14 @@ use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Deserializer};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, Timestamp};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::mint::Name;
 
-/// Context for [`zns_canon::sealing::Tee::derive_sealing_key`]: the access-code
-/// root private key (32 bytes). Distinct from the capsule sealing context.
+/// TEE sealing context for the access-code root key.
 pub const ACCESS_CODE_KEY_CONTEXT: &[u8] = b"ZNS/access-code/root/v1";
 
 /// Supabase project HTTP origin. PostgREST only.
@@ -50,14 +42,10 @@ const PRESALE_PUBLISHABLE_KEY: &str = "sb_publishable_eRyX0Z5CY3bHm11iCFoZRA_-u2
 const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
-/// Rows per request — four requests per thousand rows. Worst-case
-/// valid rows (~137 bytes: a 63-byte name plus a 35-character RFC
-/// 3339 timestamp) keep a page at ~34 KB, half of `MAX_BODY_BYTES`.
+/// Rows per page — worst case ~34 KB, half of `MAX_BODY_BYTES`.
 const PAGE_ROWS: usize = 250;
 
-/// Page ceiling: a read needing more than this many full pages
-/// (~25,000 names) is refused — a pathological table keeps
-/// yesterday's rows, loudly.
+/// Page ceiling (~25,000 names); over it, the read is refused loudly.
 const MAX_PAGES: usize = 100;
 
 type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
@@ -88,21 +76,27 @@ impl std::fmt::Debug for AccessCode {
 }
 
 impl AccessCode {
-    /// Derive from the purpose key and name (UTF-8 bytes exactly as given).
-    ///
-    /// `digest = HMAC-SHA256(access_code_key, name)`; value is
-    /// `u32_be(digest[0..4]) mod 1_000_000`.
-    pub fn derive(access_code_key: &[u8], name: &str) -> Self {
-        let mut mac = HmacSha256::new_from_slice(access_code_key)
-            .expect("HMAC-SHA256 accepts any key length");
-        mac.update(name.as_bytes());
-        let digest = mac.finalize().into_bytes();
-        let n = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
-        Self(n % 1_000_000)
+    /// Parses exactly six ASCII digits.
+    pub fn parse(s: &str) -> Option<Self> {
+        let bytes = s.as_bytes();
+        if bytes.len() != 6 || !bytes.iter().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        std::str::from_utf8(bytes)
+            .ok()?
+            .parse::<u32>()
+            .ok()
+            .map(Self)
     }
 
-    /// The six ASCII digits.
-    pub fn digits(&self) -> [u8; 6] {
+    /// Constant-time equality.
+    pub fn ct_eq(&self, other: &Self) -> bool {
+        bool::from(self.0.ct_eq(&other.0))
+    }
+
+    /// The six ASCII digits; test-only.
+    #[cfg(test)]
+    pub fn expose_for_test(&self) -> [u8; 6] {
         let mut digits = [0u8; 6];
         let mut n = self.0;
         for i in (0..6).rev() {
@@ -111,83 +105,32 @@ impl AccessCode {
         }
         digits
     }
-
-    /// Parses six ASCII digits.
-    pub fn from_digits(digits: &[u8; 6]) -> Option<Self> {
-        if !digits.iter().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        std::str::from_utf8(digits)
-            .ok()?
-            .parse::<u32>()
-            .ok()
-            .map(Self)
-    }
-
-    /// Parses exactly six ASCII decimal digits from a memo field.
-    pub fn parse(s: &str) -> Option<Self> {
-        let bytes = s.as_bytes();
-        if bytes.len() != 6 {
-            return None;
-        }
-        Self::from_digits(bytes.try_into().ok()?)
-    }
-
-    /// Constant-time equality.
-    pub fn ct_eq(&self, other: &Self) -> bool {
-        bool::from(self.0.ct_eq(&other.0))
-    }
-
-    /// Digits as a `String`; test-only.
-    #[cfg(test)]
-    pub fn expose_for_test(&self) -> [u8; 6] {
-        self.digits()
-    }
 }
 
-/// A name's protection status. `Unprotected` is never stored — it
-/// is the flattened absence `ProtectedNames::get` returns. A
-/// finite row stays `WithExpiry` whether five minutes or five years
-/// remain; the lift moment is judged against the current MTP per
-/// claim.
+/// A name's protection. Absence is `Unprotected`; a lift moment is
+/// judged against the current MTP per claim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProtectionStatus {
-    /// Returned for an absent name; never stored.
+    /// Never stored — the flattened absence.
     Unprotected,
-    /// Protection lifts when the MTP reaches the timestamp.
+    /// Protection lifts at this timestamp.
     WithExpiry(Timestamp),
     /// Protection never lifts.
     Forever,
 }
 
-/// Derive the purpose-specific access-code key from the TEE root.
-///
-/// `HMAC-SHA256(key = private_key, data = "access-code-v1")`.
-pub fn derive_access_code_key(private_key: &[u8]) -> Zeroizing<[u8; 32]> {
-    let mut k =
-        HmacSha256::new_from_slice(private_key).expect("HMAC-SHA256 accepts any key length");
-    k.update(b"access-code-v1");
-    let out = k.finalize().into_bytes();
-    let mut key = Zeroizing::new([0u8; 32]);
-    key.copy_from_slice(&out);
-    key
-}
-
-/// A row from `zn_names`: `id` keys the cursor, `name` must parse
-/// as a [`Name`], `expiry_at` is RFC 3339 or null (forever). Other
-/// columns are ignored.
+/// A `zn_names` row: `id` keys the cursor, `name` must parse as a
+/// [`Name`], `expiry_at` null means forever.
 #[derive(Deserialize)]
-struct ProtectedRow {
-    id: String,
-    name: String,
+pub struct ProtectedRow {
+    pub id: String,
+    pub name: String,
     #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
-    expiry_at: Option<Timestamp>,
+    pub expiry_at: Option<Timestamp>,
 }
 
-/// Deserialize `timestamptz` in the RFC 3339 shape PostgREST returns
-/// (e.g. `"2027-01-01T00:00:00+00:00"`). `null` → `None`; any string
-/// that does not parse as RFC 3339 fails the deserializer, which
-/// fails the whole read.
+/// PostgREST `timestamptz` (RFC 3339); `null` → `None`, anything
+/// else fails the read.
 fn deserialize_optional_timestamp<'de, D>(deserializer: D) -> Result<Option<Timestamp>, D::Error>
 where
     D: Deserializer<'de>,
@@ -201,45 +144,99 @@ where
     Ok(Some(ts))
 }
 
-/// The protected-names table: name → protection status. A name
-/// absent from the map is unprotected. Pure data; [`fetch`] is the
-/// only writer.
+/// name → protection; absent is unprotected. Pure data —
+/// [`ProtectedNames::from_rows`] is the only writer.
 #[derive(Clone, Debug)]
 pub struct ProtectedNames(BTreeMap<Name, ProtectionStatus>);
 
 impl ProtectedNames {
-    /// The name's status; `Unprotected` when absent.
-    fn get(&self, name: &Name) -> ProtectionStatus {
+    /// The stored fact — `Unprotected` for absent names; never `None`.
+    pub fn status(&self, name: &Name) -> ProtectionStatus {
         self.0
             .get(name)
             .copied()
             .unwrap_or(ProtectionStatus::Unprotected)
     }
 
-    /// Is the name protected at this MTP? Expiry is judged now,
-    /// never stored — protection lifts exactly on schedule.
+    /// The judged question: protected at this MTP? Expiry is never
+    /// stored, so protection lifts exactly on schedule.
     pub fn is_protected(&self, name: &Name, mtp: Timestamp) -> bool {
-        match self.get(name) {
+        match self.status(name) {
             ProtectionStatus::Unprotected => false,
             ProtectionStatus::Forever => true,
             ProtectionStatus::WithExpiry(ts) => mtp < ts,
         }
     }
+
+    /// Rows in, new table out: re-purchases coalesce to the
+    /// strongest term (`Forever` over any expiry, the later expiry
+    /// wins). All-or-nothing — one corrupt row fails the batch with
+    /// [`FetchError::CorruptRow`], logged where it is seen.
+    pub fn from_rows(
+        self,
+        rows: impl IntoIterator<Item = ProtectedRow>,
+    ) -> Result<Self, FetchError> {
+        let mut map = self.0;
+        for row in rows {
+            let Some(name) = Name::parse(&row.name) else {
+                tracing::warn!(
+                    name = %row.name,
+                    "pre-sale row is not a lawful name; refusing the read"
+                );
+                return Err(FetchError::CorruptRow);
+            };
+            let status = match row.expiry_at {
+                Some(ts) => ProtectionStatus::WithExpiry(ts),
+                None => ProtectionStatus::Forever,
+            };
+            match map.entry(name) {
+                Entry::Vacant(entry) => {
+                    entry.insert(status);
+                }
+                Entry::Occupied(mut entry) => {
+                    let strongest = match (*entry.get(), status) {
+                        (ProtectionStatus::Forever, _) | (_, ProtectionStatus::Forever) => {
+                            ProtectionStatus::Forever
+                        }
+                        (ProtectionStatus::WithExpiry(have), ProtectionStatus::WithExpiry(got)) => {
+                            ProtectionStatus::WithExpiry(have.max(got))
+                        }
+                        (ProtectionStatus::Unprotected, _) | (_, ProtectionStatus::Unprotected) => {
+                            unreachable!("Unprotected is never stored")
+                        }
+                    };
+                    entry.insert(strongest);
+                }
+            };
+        }
+        Ok(Self(map))
+    }
+}
+
+/// Why a pre-sale table read failed.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum FetchError {
+    /// The read did not complete; a retry may succeed.
+    #[error("read failed")]
+    Unavailable,
+    /// The read finished but its completeness is unproven — count
+    /// missing or mismatched, or over the page ceiling.
+    #[error("read could not be confirmed complete")]
+    Unconfirmed,
+    /// A row's `name` is not a lawful [`Name`]; retries fail until
+    /// the table is fixed.
+    #[error("row is not a lawful name")]
+    CorruptRow,
 }
 
 /// Reads the whole table, `PAGE_ROWS` at a time, keyset-paginated
-/// by the unique `(name, id)`: inserts and deletes cannot shift
-/// the window, and no row can be skipped or repeated. The first
-/// page carries the server's exact row count; the read installs
-/// only when every counted row landed — duplicates coalesce
-/// wherever their pages arrive. Stops on a short page; refuses a
-/// read needing more than `MAX_PAGES` full pages. Any failure
-/// rejects the whole read (`None`) — a caller keeps what it has.
-pub async fn fetch() -> Option<ProtectedNames> {
+/// by `(name, id)`, installing only when every counted row landed.
+/// Over `MAX_PAGES` full pages, or any failure: [`FetchError`] —
+/// the caller keeps what it has.
+pub async fn fetch() -> Result<ProtectedNames, FetchError> {
     let client = https_client();
-    let mut rows = BTreeMap::new();
+    let mut table = ProtectedNames(BTreeMap::new());
     let mut read = 0usize;
-    let mut coalesced = 0usize;
     let mut after: Option<(String, String)> = None;
     let mut total: Option<usize> = None;
     let mut pages = 0;
@@ -252,43 +249,35 @@ pub async fn fetch() -> Option<ProtectedNames> {
                 .map(|(name, id)| (name.as_str(), id.as_str())),
             want_total,
         )
-        .await?;
+        .await
+        .ok_or(FetchError::Unavailable)?;
         pages += 1;
         if pages > MAX_PAGES && !page.is_empty() {
             tracing::warn!("pre-sale fetch exceeded the page ceiling");
-            return None;
+            return Err(FetchError::Unconfirmed);
         }
         total = total.or(counted);
         let short = page.len() < PAGE_ROWS;
         let last = page.last().map(|row| (row.name.clone(), row.id.clone()));
-        let before = rows.len();
-        let page_len = page.len();
-        read += page_len;
-        absorb(page, &mut rows)?;
-        coalesced += page_len - (rows.len() - before);
+        read += page.len();
+        table = table.from_rows(page)?;
         if short {
             return match total {
                 Some(total) if total == read => {
-                    tracing::info!(
-                        names = rows.len(),
-                        rows = read,
-                        coalesced,
-                        "pre-sale fetch: table loaded"
-                    );
-                    Some(ProtectedNames(rows))
+                    tracing::info!(rows = read, "pre-sale fetch: table loaded");
+                    Ok(table)
                 }
                 Some(total) => {
                     tracing::warn!(
                         counted = total,
                         read,
-                        installed = rows.len(),
                         "pre-sale fetch did not install every counted row"
                     );
-                    None
+                    Err(FetchError::Unconfirmed)
                 }
                 None => {
                     tracing::warn!("pre-sale fetch: row count missing");
-                    None
+                    Err(FetchError::Unconfirmed)
                 }
             };
         }
@@ -296,10 +285,8 @@ pub async fn fetch() -> Option<ProtectedNames> {
     }
 }
 
-/// One page of rows after `after` (the previous page's last
-/// `(name, id)`), ordered by `(name, id)`, with the server's exact
-/// row count when `want_total`. `None` on any transport, timeout,
-/// status, size, or parse failure; each is warned here. One
+/// One page after `after`, with the server's exact row count when
+/// `want_total`. `None` on any failure, each warned here. One
 /// end-to-end timeout covers the request and the body.
 async fn fetch_page(
     client: &HttpsClient,
@@ -356,9 +343,8 @@ async fn fetch_page(
     }
 }
 
-/// The filter for rows strictly after `(name, id)`: every later
-/// name, or the same name with a later id. Names are `[a-z0-9]`
-/// and ids UUID text, so no value needs escaping.
+/// Rows strictly after `(name, id)`; `[a-z0-9]` names and UUID
+/// ids need no escaping.
 fn keyset_filter(after: Option<(&str, &str)>) -> String {
     match after {
         None => String::new(),
@@ -368,64 +354,43 @@ fn keyset_filter(after: Option<(&str, &str)>) -> String {
     }
 }
 
-/// Validates rows into the map, coalescing a re-purchase into the
-/// strongest bought term: `Forever` over any expiry, the later
-/// expiry over the earlier. An unlawful `name` rejects the whole
-/// read — corruption, not a purchase; nothing paid-for is dropped.
-fn absorb(rows: Vec<ProtectedRow>, map: &mut BTreeMap<Name, ProtectionStatus>) -> Option<()> {
-    for row in rows {
-        let name = Name::parse(&row.name)?;
-        let status = match row.expiry_at {
-            Some(ts) => ProtectionStatus::WithExpiry(ts),
-            None => ProtectionStatus::Forever,
-        };
-        match map.entry(name) {
-            Entry::Vacant(entry) => {
-                entry.insert(status);
-            }
-            Entry::Occupied(mut entry) => {
-                let strongest = match (*entry.get(), status) {
-                    (ProtectionStatus::Forever, _) | (_, ProtectionStatus::Forever) => {
-                        ProtectionStatus::Forever
-                    }
-                    (ProtectionStatus::WithExpiry(have), ProtectionStatus::WithExpiry(got)) => {
-                        ProtectionStatus::WithExpiry(have.max(got))
-                    }
-                    (ProtectionStatus::Unprotected, _) | (_, ProtectionStatus::Unprotected) => {
-                        unreachable!("Unprotected is never stored")
-                    }
-                };
-                entry.insert(strongest);
-            }
-        };
-    }
-    Some(())
-}
-
 /// Zeroizing holder for the boot-derived access-code key.
 #[derive(Clone)]
 pub struct AccessCodeDerivationKey(Zeroizing<[u8; 32]>);
 
 impl AccessCodeDerivationKey {
-    /// From a TEE root private key (`ACCESS_CODE_KEY_CONTEXT`).
+    /// From a TEE root private key: the purpose key
+    /// `HMAC-SHA256(key = root, data = "access-code-v1")`.
     pub fn from_private_key(private_key: &[u8; 32]) -> Self {
-        Self(derive_access_code_key(private_key))
+        let mut mac =
+            HmacSha256::new_from_slice(private_key).expect("HMAC-SHA256 accepts any key length");
+        mac.update(b"access-code-v1");
+        let out = mac.finalize().into_bytes();
+        let mut key = Zeroizing::new([0u8; 32]);
+        key.copy_from_slice(&out);
+        Self(key)
     }
 
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
-    /// The six-digit code a protected `name` must present.
-    pub fn code_for(&self, name: &Name) -> AccessCode {
-        AccessCode::derive(self.0.as_ref(), name.as_str())
+    /// The six-digit code `name` must present:
+    /// `u32_be(HMAC-SHA256(key, name)[0..4]) mod 1_000_000`.
+    pub fn derive(&self, name: &Name) -> AccessCode {
+        let mut mac = HmacSha256::new_from_slice(self.0.as_ref())
+            .expect("HMAC-SHA256 accepts any key length");
+        mac.update(name.as_str().as_bytes());
+        let digest = mac.finalize().into_bytes();
+        let n = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+        AccessCode(n % 1_000_000)
     }
 
-    /// Does the offered code match this key's code for `name`?
-    /// A missing code never matches.
+    /// Does `offered` match the code for `name`? Missing never
+    /// matches.
     pub fn accepts(&self, name: &Name, offered: Option<&AccessCode>) -> bool {
         match offered {
-            Some(offered) => self.code_for(name).ct_eq(offered),
+            Some(offered) => self.derive(name).ct_eq(offered),
             None => false,
         }
     }
@@ -466,23 +431,15 @@ mod tests {
 
     #[test]
     fn reference_vector_alice_bob() {
-        let root = vector_private_key();
-        let key = derive_access_code_key(&root);
+        let gate = AccessCodeDerivationKey::from_private_key(&vector_private_key());
         assert_eq!(
-            hex::encode(*key),
+            hex::encode(gate.as_bytes()),
             "5e2db6040cd32d2486675a3b3d60b9d4d96e9c8d4a5f862e0dfd7bd6a3f57b91"
         );
+        assert_eq!(gate.derive(&alice()).expose_for_test(), *b"352582");
         assert_eq!(
-            AccessCode::derive(key.as_ref(), "alice").expose_for_test(),
-            *b"352582"
-        );
-        assert_eq!(
-            AccessCode::derive(key.as_ref(), "bob").expose_for_test(),
+            gate.derive(&Name::parse("bob").unwrap()).expose_for_test(),
             *b"131624"
-        );
-        assert_eq!(
-            AccessCode::derive(key.as_ref(), "alice").expose_for_test(),
-            *b"352582"
         );
     }
 
@@ -530,7 +487,7 @@ mod tests {
 
     #[test]
     fn the_matching_code_is_accepted() {
-        let expected = gate().code_for(&alice());
+        let expected = gate().derive(&alice());
         assert!(gate().accepts(&alice(), Some(&expected)));
     }
 
@@ -542,8 +499,8 @@ mod tests {
     }
 
     #[test]
-    fn code_for_matches_the_vector() {
-        assert_eq!(gate().code_for(&alice()).expose_for_test(), *b"352582");
+    fn derive_matches_the_vector() {
+        assert_eq!(gate().derive(&alice()).expose_for_test(), *b"352582");
     }
 
     #[test]
@@ -552,25 +509,28 @@ mod tests {
         assert!(!PRESALE_PUBLISHABLE_KEY.is_empty());
     }
 
+    /// Builds a table from rows through the public door, seeded empty.
+    fn from_rows(rows: Vec<ProtectedRow>) -> Result<ProtectedNames, FetchError> {
+        ProtectedNames(BTreeMap::new()).from_rows(rows)
+    }
+
     #[test]
-    fn absorb_builds_the_map() {
-        let mut map = BTreeMap::new();
-        let rows = vec![
+    fn from_rows_builds_the_map() {
+        let names = from_rows(vec![
             row_with("alice", Some(ts(2_000_000_000))),
             row_with("bob", None),
-        ];
-        absorb(rows, &mut map).unwrap();
-        let names = ProtectedNames(map);
+        ])
+        .unwrap();
         assert_eq!(
-            names.get(&Name::parse("alice").unwrap()),
+            names.status(&Name::parse("alice").unwrap()),
             ProtectionStatus::WithExpiry(ts(2_000_000_000))
         );
         assert_eq!(
-            names.get(&Name::parse("bob").unwrap()),
+            names.status(&Name::parse("bob").unwrap()),
             ProtectionStatus::Forever
         );
         assert_eq!(
-            names.get(&Name::parse("carol").unwrap()),
+            names.status(&Name::parse("carol").unwrap()),
             ProtectionStatus::Unprotected
         );
     }
@@ -578,56 +538,45 @@ mod tests {
     /// An expired row is stored as `WithExpiry` all the same — the
     /// lift moment is data, not a state.
     #[test]
-    fn absorb_keeps_expired_rows() {
-        let mut map = BTreeMap::new();
-        let rows = vec![row_with("alice", Some(ts(1_600_000_000)))];
-        absorb(rows, &mut map).unwrap();
+    fn from_rows_keeps_expired_rows() {
+        let table = from_rows(vec![row_with("alice", Some(ts(1_600_000_000)))]).unwrap();
         assert_eq!(
-            map.get(&Name::parse("alice").unwrap()),
-            Some(&ProtectionStatus::WithExpiry(ts(1_600_000_000)))
+            table.status(&Name::parse("alice").unwrap()),
+            ProtectionStatus::WithExpiry(ts(1_600_000_000))
         );
     }
 
     #[test]
-    fn absorb_rejects_unlawful_names() {
-        let mut map = BTreeMap::new();
+    fn from_rows_rejects_corrupt_rows() {
         let rows = vec![row_with("Not-A-Name!", None)];
-        assert_eq!(absorb(rows, &mut map), None);
-        assert!(map.is_empty());
+        assert!(matches!(from_rows(rows), Err(FetchError::CorruptRow)));
     }
 
     /// A duplicate row is a re-purchase: the name's rows coalesce
     /// to the strongest bought term.
     #[test]
-    fn absorb_coalesces_identical_rows() {
-        let mut map = BTreeMap::new();
-        let rows = vec![row_with("alice", None), row_with("alice", None)];
-        absorb(rows, &mut map).unwrap();
-        assert_eq!(map.len(), 1);
-        assert_eq!(
-            map.get(&Name::parse("alice").unwrap()),
-            Some(&ProtectionStatus::Forever)
-        );
+    fn from_rows_coalesces_identical_rows() {
+        let table = from_rows(vec![row_with("alice", None), row_with("alice", None)]).unwrap();
+        assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
     }
 
     /// Two dated terms cover the name to the later lift moment.
     #[test]
-    fn absorb_coalesces_expiries_to_the_latest() {
-        let mut map = BTreeMap::new();
-        let rows = vec![
+    fn from_rows_coalesces_expiries_to_the_latest() {
+        let table = from_rows(vec![
             row_with("alice", Some(ts(2_000_000_000))),
             row_with("alice", Some(ts(1_900_000_000))),
-        ];
-        absorb(rows, &mut map).unwrap();
+        ])
+        .unwrap();
         assert_eq!(
-            map.get(&Name::parse("alice").unwrap()),
-            Some(&ProtectionStatus::WithExpiry(ts(2_000_000_000)))
+            table.status(&alice()),
+            ProtectionStatus::WithExpiry(ts(2_000_000_000))
         );
     }
 
     /// Forever covers any expiry, in either row order.
     #[test]
-    fn absorb_coalesces_forever_over_an_expiry() {
+    fn from_rows_coalesces_forever_over_an_expiry() {
         for rows in [
             vec![
                 row_with("alice", Some(ts(2_000_000_000))),
@@ -638,21 +587,16 @@ mod tests {
                 row_with("alice", Some(ts(2_000_000_000))),
             ],
         ] {
-            let mut map = BTreeMap::new();
-            absorb(rows, &mut map).unwrap();
-            assert_eq!(
-                map.get(&Name::parse("alice").unwrap()),
-                Some(&ProtectionStatus::Forever)
-            );
+            let table = from_rows(rows).unwrap();
+            assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
         }
     }
 
     /// The reported live shape: `9` and `tom` each hold an expiry
     /// plus Forever among their re-purchases.
     #[test]
-    fn absorb_coalesces_the_reported_table_shape() {
-        let mut map = BTreeMap::new();
-        let rows = vec![
+    fn from_rows_coalesces_the_reported_table_shape() {
+        let table = from_rows(vec![
             row_with("9", Some(ts(1_795_898_400))),
             row_with("9", None),
             row_with("9", None),
@@ -661,16 +605,19 @@ mod tests {
             row_with("tom", Some(ts(1_800_563_400))),
             row_with("tom", None),
             row_with("alice", Some(ts(2_000_000_000))),
-        ];
-        absorb(rows, &mut map).unwrap();
-        assert_eq!(map.len(), 3);
+        ])
+        .unwrap();
         assert_eq!(
-            map.get(&Name::parse("9").unwrap()),
-            Some(&ProtectionStatus::Forever)
+            table.status(&Name::parse("9").unwrap()),
+            ProtectionStatus::Forever
         );
         assert_eq!(
-            map.get(&Name::parse("tom").unwrap()),
-            Some(&ProtectionStatus::Forever)
+            table.status(&Name::parse("tom").unwrap()),
+            ProtectionStatus::Forever
+        );
+        assert_eq!(
+            table.status(&Name::parse("alice").unwrap()),
+            ProtectionStatus::WithExpiry(ts(2_000_000_000))
         );
     }
 
