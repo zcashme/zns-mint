@@ -51,9 +51,19 @@ async fn main() {
         mut requests,
         mut echoes,
         mut presale_refresh,
+        treasury_address,
+        registry_ufvk,
+        seed_fingerprint,
+        capsule_hash,
+        guest,
     } = Boot::start().await;
 
     zns_mint::metrics::install();
+    zns_mint::metrics::identity(&treasury_address, &registry_ufvk);
+    zns_mint::metrics::ceremony(&seed_fingerprint, &capsule_hash);
+    if let Some(guest) = &guest {
+        zns_mint::metrics::guest(&guest.measurement, &guest.guest_policy);
+    }
     tracing::info!(
         height = u32::from(wallet.tip().block_height()),
         hash = %wallet.tip().block_hash(),

@@ -58,6 +58,12 @@ fn sealing_key(context: &[u8]) -> Result<SealingKey, TeeError> {
 // Boot life-cycle
 // ---------------------------------------------------------------------------
 
+/// Public launch facts extracted from the verified identity attestation.
+pub struct GuestInfo {
+    pub measurement: String,
+    pub guest_policy: String,
+}
+
 /// The boot product: constructed only after every boot check succeeds.
 /// Consumed exactly once by `main`'s exhaustive destructure — the seam
 /// contract, one criterion line per field.
@@ -100,6 +106,14 @@ pub struct Boot<P: Parameters> {
     pub echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)>,
     /// initialized: no pre-sale refresh is in flight
     pub presale_refresh: Option<tokio::task::JoinHandle<Result<ProtectedNames, FetchError>>>,
+    /// The exact encoded identity written to the boot identity document.
+    pub treasury_address: String,
+    pub registry_ufvk: String,
+    /// Verified capsule fingerprint and hash, retained after the seed is wiped.
+    pub seed_fingerprint: String,
+    pub capsule_hash: String,
+    /// Facts from the identity report; absent in development mode.
+    pub guest: Option<GuestInfo>,
 }
 
 /// Network label for logging.
@@ -432,7 +446,13 @@ impl Boot<Network> {
         // 2. Seed intake + verification: read capsule, require the keygen
         //    attestation to bind its fingerprint, unseal, then derive keys.
         //    The seed lives only inside this block — Secret's Drop wipes it.
-        let (treasury_keys, registry_keys, genesis_binding) = {
+        let (
+            treasury_keys,
+            registry_keys,
+            genesis_binding,
+            ceremony_fingerprint,
+            ceremony_capsule_hash,
+        ) = {
             tracing::info!("boot: reading seed capsule from keys/zns_seed.capsule");
             let blob = read_capsule_file("keys/zns_seed.capsule").expect(
                 "FATAL: failed to read keys/zns_seed.capsule. The mint cannot boot without the sealed seed.",
@@ -460,14 +480,17 @@ impl Boot<Network> {
             verify_fingerprint(&seed, mint_config.expected_seed_fingerprint.trim());
             #[cfg(feature = "regtest")]
             verify_fingerprint(&seed, "");
+            let capsule_hash = blake2b256(&blob);
             #[cfg(not(feature = "regtest"))]
-            let genesis_binding = Some((blake2b256(&blob), capsule.fingerprint));
+            let genesis_binding = Some((capsule_hash, capsule.fingerprint));
             #[cfg(feature = "regtest")]
             let genesis_binding: Option<([u8; 32], [u8; 32])> = None;
             (
                 TreasuryKeys::derive(&network, &seed),
                 RegistryKeys::derive(&network, &seed),
                 genesis_binding,
+                capsule.fingerprint,
+                capsule_hash,
             )
         };
         tracing::info!("boot: keys derived (treasury=acct0, registry=acct1); seed wiped");
@@ -673,16 +696,19 @@ impl Boot<Network> {
         //
         // Regtest selects non-tee, so its identity document declares
         // development mode and contains no attestation report.
+        let (treasury_address, registry_ufvk) =
+            mint_identity(&network, &treasury_keys, &registry_keys);
         #[cfg(not(feature = "non-tee"))]
-        {
-            let (treasury_ua, registry_ufvk) =
-                mint_identity(&network, &treasury_keys, &registry_keys);
-            let report_data = identity_report_data(&treasury_ua, &registry_ufvk);
+        let guest = {
+            let report_data = identity_report_data(&treasury_address, &registry_ufvk);
             let attestation = get_attestation(&report_data)
                 .expect("FATAL: failed to obtain TEE attestation report");
+            let parsed =
+                zns_canon::attestation::stored(attestation.as_bytes().to_vec(), &report_data)
+                    .expect("FATAL: failed to verify TEE identity attestation report");
             let doc = identity_document(
                 NETWORK_LABEL,
-                &treasury_ua,
+                &treasury_address,
                 &registry_ufvk,
                 attestation.as_bytes(),
             );
@@ -694,19 +720,22 @@ impl Boot<Network> {
                 doc_hash = %hex::encode(blake2b256(&doc)),
                 "boot: identity doc written to zns_mint_identity.json"
             );
-        }
+            Some(GuestInfo {
+                measurement: hex::encode(parsed.measurement),
+                guest_policy: format!("0x{:x}", parsed.guest_policy),
+            })
+        };
         #[cfg(feature = "non-tee")]
-        {
-            let (treasury_ua, registry_ufvk) =
-                mint_identity(&network, &treasury_keys, &registry_keys);
-            let doc = dev_identity_document(NETWORK_LABEL, &treasury_ua, &registry_ufvk);
+        let guest = {
+            let doc = dev_identity_document(NETWORK_LABEL, &treasury_address, &registry_ufvk);
             std::fs::write(IDENTITY_DOC_FILE, &doc)
                 .expect("FATAL: failed to write identity doc to disk");
             tracing::info!(
                 doc_hash = %hex::encode(blake2b256(&doc)),
                 "boot: DEV identity doc written (no attestation)"
             );
-        }
+            None
+        };
 
         tracing::info!(
             network = NETWORK_LABEL,
@@ -734,6 +763,11 @@ impl Boot<Network> {
             requests,
             echoes,
             presale_refresh,
+            treasury_address,
+            registry_ufvk,
+            seed_fingerprint: hex::encode(ceremony_fingerprint),
+            capsule_hash: hex::encode(ceremony_capsule_hash),
+            guest,
         }
     }
 }
