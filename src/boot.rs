@@ -16,7 +16,6 @@ use zcash_protocol::local_consensus::LocalNetwork;
 use zcash_protocol::value::Zatoshis;
 use zip32::fingerprint::SeedFingerprint;
 
-#[cfg(not(feature = "regtest"))]
 use std::str::FromStr;
 
 use crate::mint::mtp::MtpTracker;
@@ -162,16 +161,8 @@ fn require_established_ceremony(registry: &Registry) {
     );
 }
 
-/// Regtest birth: the fixture boundary. NU6.3 activates at height 4;
-/// the fixture's coinbase maturity runs through 104; nothing the mint
-/// owns is earlier. Mainnet and testnet take the birthday from
-/// `keys/zns_mint.conf`.
-#[cfg(feature = "regtest")]
-const MINT_BIRTHDAY: BlockHeight = BlockHeight::from_u32(100);
-
-/// Keygen's deployment record. Hardware builds check the fingerprint against
-/// the keygen report. All builds check it against the unsealed seed.
-#[cfg(not(feature = "regtest"))]
+/// Keygen's deployment record: the build's network, the seed's
+/// fingerprint, and the birthday — each checked against its counterpart.
 #[derive(serde::Deserialize)]
 struct MintConfig {
     network: String,
@@ -179,11 +170,18 @@ struct MintConfig {
     birthday: u32,
 }
 
-#[cfg(not(feature = "regtest"))]
 fn load_mint_config() -> MintConfig {
     let raw = std::fs::read_to_string("keys/zns_mint.conf")
         .expect("FATAL: cannot read keys/zns_mint.conf");
     toml::from_str(&raw).expect("FATAL: invalid keys/zns_mint.conf")
+}
+
+#[cfg(feature = "regtest")]
+fn require_config_network(config: &MintConfig) {
+    assert_eq!(
+        config.network, "regtest",
+        "FATAL: keys/zns_mint.conf network does not match regtest build"
+    );
 }
 
 #[cfg(feature = "testnet")]
@@ -268,10 +266,8 @@ fn read_attestation_report(path: &std::path::Path) -> Vec<u8> {
     bytes
 }
 
-/// Reads the ceremony anchor and attests it. The seed is not an input.
-/// A missing txid, a missing birthday, or a birthday that disagrees with
-/// `keys/zns_mint.conf` refuses boot. `non-tee` builds skip this: no
-/// attestation exists in dev mode.
+/// Attests the ceremony anchor after the seed is gone. `non-tee` builds
+/// skip this: no device.
 #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 fn write_genesis_statement(capsule_hash: [u8; 32], fingerprint: [u8; 32], config_birthday: u32) {
     let text = std::fs::read_to_string(CEREMONY_STATE_FILE)
@@ -420,16 +416,11 @@ impl Boot<Network> {
         // client this boot proved live.
         let source = CanonicalBlockSource::new(chain_client.clone());
 
-        // Ceremony facts: network, the seed fingerprint, and the birthday.
-        // Regtest has no ceremony file; its birthday is the fixture boundary.
-        #[cfg(not(feature = "regtest"))]
+        // Ceremony facts — one conf file, every network: keygen writes it
+        // in deployment, the fixture on regtest.
         let mint_config = load_mint_config();
-        #[cfg(not(feature = "regtest"))]
         require_config_network(&mint_config);
-        #[cfg(not(feature = "regtest"))]
         let mint_birthday = BlockHeight::from_u32(mint_config.birthday);
-        #[cfg(feature = "regtest")]
-        let mint_birthday = MINT_BIRTHDAY;
 
         // 1b. Select the build's sealing mode: public dev key for
         // regtest/non-tee, hardware key for attested builds.
@@ -460,26 +451,19 @@ impl Boot<Network> {
             let capsule = parse_capsule(&blob).expect("FATAL: failed to parse zns_seed.capsule");
             // Config, capsule field, and the attested fingerprint are one
             // value. Unseal then requires that value of the decrypted seed.
-            #[cfg(not(feature = "regtest"))]
-            {
-                let expected =
-                    SeedFingerprint::from_str(mint_config.expected_seed_fingerprint.trim())
-                        .expect("FATAL: invalid expected_seed_fingerprint in keys/zns_mint.conf");
-                if expected.to_bytes() != capsule.fingerprint {
-                    panic!("FATAL: capsule fingerprint does not match keys/zns_mint.conf");
-                }
-                #[cfg(not(feature = "non-tee"))]
-                require_keygen_attestation(&blob, &expected);
+            let expected = SeedFingerprint::from_str(mint_config.expected_seed_fingerprint.trim())
+                .expect("FATAL: invalid expected_seed_fingerprint in keys/zns_mint.conf");
+            if expected.to_bytes() != capsule.fingerprint {
+                panic!("FATAL: capsule fingerprint does not match keys/zns_mint.conf");
             }
+            #[cfg(not(feature = "non-tee"))]
+            require_keygen_attestation(&blob, &expected);
             tracing::info!("boot: resolving capsule sealing key");
             let capsule_key =
                 sealing_key(CAPSULE_KEY_CONTEXT).expect("FATAL: sealing key unavailable");
             let seed = unseal_seed(&capsule_key, &capsule)
                 .expect("FATAL: failed to unseal seed. Capsule tampering, wrong TEE, or wrong capsule for this instance.");
-            #[cfg(not(feature = "regtest"))]
             verify_fingerprint(&seed, mint_config.expected_seed_fingerprint.trim());
-            #[cfg(feature = "regtest")]
-            verify_fingerprint(&seed, "");
             let capsule_hash = blake2b256(&blob);
             #[cfg(not(feature = "regtest"))]
             let genesis_binding = Some((capsule_hash, capsule.fingerprint));
@@ -495,9 +479,8 @@ impl Boot<Network> {
         };
         tracing::info!("boot: keys derived (treasury=acct0, registry=acct1); seed wiped");
 
-        // The anchor txid and birthday, attested after the seed is gone.
-        // Regtest has no ceremony file, so this binding is unused there;
-        // non-tee builds skip it — no attestation exists in dev mode.
+        // The genesis attestation, written after the seed is wiped;
+        // `non-tee` builds have no device.
         #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
         if let Some((capsule_hash, fingerprint)) = genesis_binding {
             write_genesis_statement(capsule_hash, fingerprint, mint_config.birthday);
@@ -833,28 +816,16 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
     let actual = SeedFingerprint::from_seed(seed.expose_secret())
         .expect("seed is 32 bytes, within ZIP-32's 32..=252 range");
 
-    #[cfg(feature = "regtest")]
-    {
-        let _ = expected;
-        tracing::warn!(
-            "boot: regtest fingerprint = {} (verification skipped)",
-            actual
+    let expected_fp = SeedFingerprint::from_str(expected)
+        .expect("FATAL: invalid expected_seed_fingerprint in keys/zns_mint.conf");
+
+    if actual != expected_fp {
+        // Redacted panic: do not print either fingerprint.
+        panic!(
+            "FATAL: SEED FINGERPRINT MISMATCH — decrypted seed does not match keys/zns_mint.conf"
         );
     }
-
-    #[cfg(not(feature = "regtest"))]
-    {
-        let expected_fp = SeedFingerprint::from_str(expected)
-            .expect("FATAL: invalid expected_seed_fingerprint in keys/zns_mint.conf");
-
-        if actual != expected_fp {
-            // Redacted panic: do not print either fingerprint.
-            panic!(
-                "FATAL: SEED FINGERPRINT MISMATCH — decrypted seed does not match keys/zns_mint.conf"
-            );
-        }
-        tracing::info!("boot: seed fingerprint verified");
-    }
+    tracing::info!("boot: seed fingerprint verified");
 }
 
 // ---------------------------------------------------------------------------
@@ -1185,7 +1156,7 @@ mod tests {
         #[cfg(not(feature = "regtest"))]
         let birthday = BlockHeight::from_u32(10_000);
         #[cfg(feature = "regtest")]
-        let birthday = MINT_BIRTHDAY;
+        let birthday = BlockHeight::from_u32(100);
         #[cfg(not(feature = "regtest"))]
         let (checkpoint, first) = (birthday - 101, birthday - 100);
         #[cfg(feature = "regtest")]
@@ -1894,7 +1865,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "regtest"))]
     #[should_panic(expected = "FATAL: SEED FINGERPRINT MISMATCH")]
     fn verify_fingerprint_mismatch_is_redacted() {
         use secrecy::Secret;
@@ -1934,10 +1904,6 @@ mod tests {
         ] {
             assert_eq!(network.activation_height(upgrade), Some(four));
         }
-        // The regtest birthday sits past the NU6.3 activation and the
-        // fixture's coinbase-maturity boilerplate: the wallet's history
-        // begins at the fixture boundary.
-        assert_eq!(MINT_BIRTHDAY, BlockHeight::from_u32(100));
     }
 
     #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]

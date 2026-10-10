@@ -31,7 +31,6 @@ use blake2b_simd::Params as Blake2b;
 use orchard::builder::{Builder as OrchardBuilder, BundleType};
 use orchard::bundle::BundleVersion;
 use rand::rngs::OsRng;
-use secrecy::Secret;
 use serde::Deserialize;
 use serde_json::json;
 use transparent::builder::{
@@ -85,8 +84,8 @@ pub const COINBASE_MATURITY: u32 = 100;
 /// NU6.1/6.2/6.3 activate here on regtest; boot's birthday is 100.
 pub const NU6_3_ACTIVATION_HEIGHT: u32 = 4;
 
-/// The all-zero seed sealed by the integration fixtures.
-pub const DEV_SEED: [u8; 32] = [0u8; 32];
+/// The all-zero seed: canon owns it now (one constant, every harness).
+pub use zns_canon::regtest::DEV_SEED;
 
 /// One whole-ZEC transparent payment covers 42 ZIP-317 actions plus the
 /// 200,000-zat Treasury minimum with orders of magnitude to spare.
@@ -551,25 +550,4 @@ pub fn identity_report_data() -> [u8; 64] {
     let mut report_data = [0u8; 64];
     report_data.copy_from_slice(hash.as_bytes());
     report_data
-}
-
-/// Seal the all-zero seed with the public test key. Boot reads this
-/// file as `keys/zns_seed.capsule`.
-pub fn seal_fixture_capsule() -> Result<Vec<u8>> {
-    let key = zns_canon::sealing::dev_sealing_key(zns_canon::capsule::CAPSULE_KEY_CONTEXT);
-    let capsule = zns_canon::capsule::seal_seed(&key, &Secret::new(DEV_SEED), &mut OsRng)
-        .map_err(|e| anyhow!("seal capsule: {e}"))?;
-    zns_canon::capsule::serialize_capsule(&capsule).map_err(|e| anyhow!("serialize capsule: {e}"))
-}
-
-/// Writes the dev capsule and points `ZNS_SEED_CAPSULE` at it.
-///
-/// The harness copies that path when it starts the mint. Keep the
-/// directory alive until `Stack::start` has returned.
-pub fn expose_fixture_capsule() -> Result<tempfile::TempDir> {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("zns_seed.capsule");
-    std::fs::write(&path, seal_fixture_capsule()?)?;
-    std::env::set_var("ZNS_SEED_CAPSULE", &path);
-    Ok(dir)
 }

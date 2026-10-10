@@ -6,9 +6,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use zns_mint_integration_tests::{
-    block_txids, expose_fixture_capsule, wait_for_verified_name_note, Stack, User,
-};
+use zns_mint_integration_tests::{block_txids, wait_for_verified_name_note, Stack, User};
 
 const NAME: &str = "slotreg";
 const DUST_ZATS: u64 = 1_000;
@@ -20,7 +18,6 @@ const SYNC_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn underpaid_claims_do_not_block_a_full_price_claim_same_batch() -> Result<()> {
-    let _capsule_dir = expose_fixture_capsule()?;
     let Some(mut stack) = Stack::start(7).await? else {
         eprintln!("skipping: zebrad/zallet not present");
         return Ok(());
