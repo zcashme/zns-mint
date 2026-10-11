@@ -67,11 +67,11 @@ async fn boot_completes_on_wallet_funded_dev_ceremony() -> Result<()> {
     // boot now reads on every network. Birthday = the ceremony tip — the
     // same fact boot checks the conf against, true by construction.
     zns_canon::regtest::write_dev_keys("keys", tip)?;
-    // The ceremony record boot verifies against the chain: the anchor is
+    // The custody manifest boot verifies against the chain: the anchor is
     // the transaction mined at the birthday.
     std::fs::write(
-        "keys/ceremony_state.toml",
-        format!("txid = \"{anchor_txid}\"\nbirthday = {tip}\n"),
+        "keys/zns_custody_manifest.toml",
+        format!("anchor_txid = \"{anchor_txid}\"\nbirthday = {tip}\n"),
     )?;
 
     // Bounded, explicit completion. Every boot check — genesis anchors,
