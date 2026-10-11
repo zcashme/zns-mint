@@ -57,6 +57,7 @@ pub use zallet::Zallet;
 use zns_integration_tests::Zebrad;
 
 mod child;
+mod mint;
 mod phases;
 mod stack;
 mod user;
@@ -477,7 +478,7 @@ pub fn build_ceremony_tx(
 
 /// Broadcast the ceremony and mine a confirming block; returns the new
 /// tip. Halo2 proving is the long pole — minutes on the 42-action bundle.
-pub async fn publish_ceremony(zebra: &Zebrad) -> Result<u32> {
+pub async fn publish_ceremony(zebra: &Zebrad) -> Result<(u32, String)> {
     let network = regtest_network();
     let (taddr, child) = treasury_taddr(&network, &DEV_SEED)?;
     let treasury_usk = account_usk(&network, &DEV_SEED, 0)?;
@@ -513,7 +514,7 @@ pub async fn publish_ceremony(zebra: &Zebrad) -> Result<u32> {
         .await
         .map_err(|e| anyhow!("sendrawtransaction ceremony: {e:#}"))?;
     zebra.generate_blocks(1).await?;
-    Ok(tip + 1)
+    Ok((tip + 1, tx.txid().to_string()))
 }
 
 /// The attested identity strings: the Treasury's default shielded

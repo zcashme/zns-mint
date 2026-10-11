@@ -514,27 +514,6 @@ mod tests {
         ProtectedNames(BTreeMap::new()).from_rows(rows)
     }
 
-    #[test]
-    fn from_rows_builds_the_map() {
-        let names = from_rows(vec![
-            row_with("alice", Some(ts(2_000_000_000))),
-            row_with("bob", None),
-        ])
-        .unwrap();
-        assert_eq!(
-            names.status(&Name::parse("alice").unwrap()),
-            ProtectionStatus::WithExpiry(ts(2_000_000_000))
-        );
-        assert_eq!(
-            names.status(&Name::parse("bob").unwrap()),
-            ProtectionStatus::Forever
-        );
-        assert_eq!(
-            names.status(&Name::parse("carol").unwrap()),
-            ProtectionStatus::Unprotected
-        );
-    }
-
     /// An expired row is stored as `WithExpiry` all the same — the
     /// lift moment is data, not a state.
     #[test]

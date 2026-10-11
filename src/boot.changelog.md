@@ -25,7 +25,7 @@ Tracks design-relevant changes to `src/boot.rs`.
 ## 2026-10-05 — Boot attests the genesis anchor
 
 - After the capsule check, and after the seed is dropped, boot reads
-  the anchor txid from `keys/ceremony_state.toml`. A missing txid, a
+  the anchor txid from `keys/zns_custody_manifest.toml`. A missing txid, a
   missing birthday, or a birthday that disagrees with
   `keys/zns_mint.conf` refuses boot.
 - It writes `zns_genesis_record.json` in the working directory. The
