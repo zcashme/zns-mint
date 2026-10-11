@@ -269,13 +269,7 @@ fn read_attestation_report(path: &std::path::Path) -> Vec<u8> {
 /// skip this: no device.
 #[cfg(not(feature = "non-tee"))]
 fn write_genesis_statement(capsule_hash: [u8; 32], fingerprint: [u8; 32], anchor: &CeremonyAnchor) {
-    let record = genesis_record(
-        genesis_network(),
-        fingerprint,
-        capsule_hash,
-        anchor.birthday,
-        anchor,
-    );
+    let record = genesis_record(genesis_network(), fingerprint, capsule_hash, anchor);
     let report_data = zns_canon::genesis::genesis_report_data(&record);
     let attestation = get_attestation(&report_data)
         .expect("FATAL: failed to obtain the genesis attestation report");
@@ -309,7 +303,6 @@ fn genesis_record(
     network: zns_canon::genesis::NetworkId,
     fingerprint: [u8; 32],
     capsule_hash: [u8; 32],
-    birthday: u32,
     anchor: &CeremonyAnchor,
 ) -> zns_canon::genesis::GenesisRecord {
     zns_canon::genesis::GenesisRecord {
@@ -319,7 +312,7 @@ fn genesis_record(
         capsule_hash,
         // Display-order bytes, same as the published JSON field.
         anchor_txid: anchor.file_txid,
-        birthday,
+        birthday: anchor.birthday,
     }
 }
 
@@ -1097,13 +1090,7 @@ mod tests {
             file_txid: txid_bytes,
             birthday: 4408922,
         };
-        let record = genesis_record(
-            genesis_network(),
-            [0x11; 32],
-            [0x22; 32],
-            anchor.birthday,
-            &anchor,
-        );
+        let record = genesis_record(genesis_network(), [0x11; 32], [0x22; 32], &anchor);
         assert_eq!(record.anchor_txid, txid_bytes);
         let document = genesis_document(&record, &anchor, &[7u8; 4]);
         let value: serde_json::Value = serde_json::from_slice(&document).expect("json");
