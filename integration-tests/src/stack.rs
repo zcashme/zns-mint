@@ -5,11 +5,9 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Result};
 use serde_json::json;
 use zns_integration_tests::{miner_address, publish, FIXTURE_HEIGHT};
-use zns_integration_tests::{zebrad_bin, Zebrad};
+use zns_integration_tests::{zallet_bin, zebrad_bin, Mint, Zebrad};
 
-use crate::mint::Mint;
 use crate::user::User;
-use crate::zallet::zallet_bin;
 
 pub struct Stack {
     pub zebra: Zebrad,
@@ -69,7 +67,7 @@ impl Stack {
         let _ = coinbase;
 
         let mint_bin = mint_build.await.expect("mint build task")?;
-        let mut mint = Mint::start(mint_bin, birthday, anchor_txid)?;
+        let mut mint = Mint::start(mint_bin, birthday, anchor_txid).await?;
         mint.wait_until_live().await?;
         wait_for_first_run_loop(&mut zebra, &mut mint).await?;
 

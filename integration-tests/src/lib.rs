@@ -13,16 +13,8 @@
 //! 2. no ceremony-tx cache — the funding txid is random, so a cached
 //!    ceremony transaction cannot be reproducible across runs.
 //!
-//! `mod zallet` (with `child`) is vendored from the same rev: the wallet
-//! client there is still private to the sibling crate.
-//!
-//! The `happy_path` test binary drives the mint as a black box through
-//! claim → update → release: request memos from a real wallet, the mint's
-//! on-chain OTP challenges answered with echo payments, and every
-//! successor note verified with `zns-verify`, including the `rcm` chain
-//! linkage. The `zns-integration-tests` dep there is process plumbing
-//! only (`Zebrad`, `Mint`, the dev ceremony) — every assertion lives in
-//! this repo.
+//! Process plumbing comes from the `zns-integration-tests` harness;
+//! every assertion lives in this repo.
 
 use std::time::{Duration, Instant};
 
@@ -54,16 +46,13 @@ use zcash_protocol::local_consensus::LocalNetwork;
 use zcash_protocol::value::{ZatBalance, Zatoshis};
 use zip32::AccountId;
 
-pub use zallet::Zallet;
+pub use zns_integration_tests::Zallet;
 use zns_integration_tests::Zebrad;
 
-mod child;
-mod mint;
 mod phases;
 mod stack;
 mod user;
 mod verify;
-mod zallet;
 
 pub use phases::{claim, release, update};
 pub use stack::Stack;

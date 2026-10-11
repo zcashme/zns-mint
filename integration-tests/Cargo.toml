@@ -34,8 +34,8 @@ zns-verify = { git = "https://github.com/zcashme/zns-verify.git", tag = "v0.1.3"
 
 # The mint under test, linked in-process: regtest selects non-tee.
 zns-mint = { path = "..", features = ["regtest"] }
-# Zebra + Zallet process harness (pinned rev; bump deliberately).
-zns-integration-tests = { git = "https://github.com/zcashme/zns-integration-tests.git", rev = "f89d5b2" }
+# Zebra + Zallet process harness, tracks main.
+zns-integration-tests = { git = "https://github.com/zcashme/zns-integration-tests.git", branch = "main" }
 zns-canon = { git = "https://github.com/zcashme/zns-canon.git", branch = "main" }
 
 [patch.crates-io]
