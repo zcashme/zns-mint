@@ -2,7 +2,9 @@
 //! derivation.
 //!
 
+use orchard::note::Psi;
 use time::Timestamp;
+use zcash_address::unified::Encoding;
 use zcash_keys::address::UnifiedAddress;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -89,7 +91,7 @@ impl NameNote {
     pub fn rcm<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Scalar {
         let verb = self.action().as_str().as_bytes();
         let name = self.name().as_str().as_bytes();
-        let ua = self.ua().encode(params);
+        let ua = self.ua().encode_receiver_preserving(params);
         let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
         zns_rcm(verb, name, ua.as_bytes(), &expiry, &prev)
@@ -108,7 +110,7 @@ impl NameNote {
     pub fn psi<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Base {
         let verb = self.action().as_str().as_bytes();
         let name = self.name().as_str().as_bytes();
-        let ua = self.ua().encode(params);
+        let ua = self.ua().encode_receiver_preserving(params);
         let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
         zns_psi(verb, name, ua.as_bytes(), &expiry, &prev)
@@ -121,7 +123,7 @@ impl NameNote {
     /// `decode_controller_ua` bounds the address to known receivers, and
     /// the time crate bounds the expiry.
     pub fn encode<P: Parameters>(&self, params: &P) -> [u8; 512] {
-        let ua_field = self.ua().encode(params);
+        let ua_field = self.ua().encode_receiver_preserving(params);
         let verb = self.action().as_str();
         let hex_rcm = hex::encode(self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]));
         let expires_field = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
@@ -365,12 +367,14 @@ impl NameNote {
         }
 
         let name = Name::parse(parts[2])?;
-        // The single UA validation boundary: a memo whose ua field is not a
-        // valid ZIP 316 Unified Address for this network decodes to no note.
         let ua_str = parts[3];
-        let ua = match zcash_keys::address::Address::decode(params, ua_str)? {
-            zcash_keys::address::Address::Unified(ua) => ua,
-            _ => return None,
+        let ua = {
+            let (net, revision, container) =
+                zcash_address::unified::Address::decode(ua_str).ok()?;
+            if net != params.network_type() || revision != zcash_address::unified::Revision::R0 {
+                return None;
+            }
+            zcash_keys::address::UnifiedAddress::try_from(container).ok()?
         };
         let expires_at = Expiry::parse(parts[4])?;
 
@@ -495,7 +499,7 @@ pub fn decrypt_name_notes<P: Parameters>(
                         let note = *candidate.note();
                         let rcm =
                             orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network));
-                        let psi = payload.psi(network);
+                        let psi = Psi::from_inner(payload.psi(network));
                         let authored = match note.zns_cmx(rcm, psi) {
                             Some(computed) => computed.ct_eq(candidate.cmx()),
                             None => subtle::Choice::from(0),
@@ -714,7 +718,7 @@ mod tests {
 
     fn test_ua() -> UnifiedAddress {
         match zcash_keys::address::Address::decode(&MAIN_NETWORK, TEST_UA) {
-            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
             _ => panic!("vector is a mainnet Unified Address"),
         }
     }

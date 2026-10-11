@@ -164,6 +164,7 @@ fn boot_network() -> Network {
             nu6_1: Some(BlockHeight::from_u32(4)),
             nu6_2: Some(BlockHeight::from_u32(4)),
             nu6_3: Some(BlockHeight::from_u32(4)),
+            nu7: None,
         }
     }
 }
@@ -974,7 +975,10 @@ fn mint_identity(
         .expect("FATAL: Treasury FVK missing default address");
     (
         treasury_addr.encode(network),
-        registry_keys.fvk().encode(network),
+        registry_keys
+            .fvk()
+            .encode(network)
+            .expect("FATAL: Registry UFVK encoding failed"),
     )
 }
 
@@ -1216,7 +1220,9 @@ mod tests {
         builder: orchard::builder::Builder,
     ) -> zcash_primitives::transaction::Transaction {
         let (bundle, _) = builder
-            .build::<zcash_protocol::value::ZatBalance>(rand::rngs::OsRng)
+            .build::<zcash_protocol::value::ZatBalance>(rand::rand_core::UnwrapErr(
+                rand::rngs::SysRng,
+            ))
             .unwrap()
             .unwrap();
         let proof_size = orchard::Proof::expected_proof_size(bundle.actions().len());
@@ -1436,7 +1442,7 @@ mod tests {
                 NoteValue::ZERO,
                 payload.encode(&network),
                 orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(&network)),
-                payload.psi(&network),
+                orchard::note::Psi::from_inner(payload.psi(&network)),
             )
             .unwrap();
         claim
@@ -1822,7 +1828,7 @@ mod tests {
                 NoteValue::ZERO,
                 payload.encode(&network),
                 orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(&network)),
-                payload.psi(&network),
+                orchard::note::Psi::from_inner(payload.psi(&network)),
             )
             .unwrap();
         unbacked

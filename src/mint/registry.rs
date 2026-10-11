@@ -522,7 +522,7 @@ mod tests {
 
     fn test_ua() -> UnifiedAddress {
         match zcash_keys::address::Address::decode(&MAIN_NETWORK, TEST_UA) {
-            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
             _ => panic!("vector is a mainnet Unified Address"),
         }
     }

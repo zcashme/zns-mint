@@ -67,6 +67,10 @@ pub enum WalletError {
     /// `store_name_note` disagreed with applied wallet state (height, tx
     /// status, ZNS cmx, or a stored field).
     InvalidNameNote(&'static str),
+    /// A rescan was requested, but the in-memory projection retains no
+    /// blocks to re-scan. The process must be restarted, replaying from the
+    /// birthday.
+    RescanUnsupported,
 }
 
 impl From<shardtree::error::ShardTreeError<Infallible>> for WalletError {
@@ -93,6 +97,10 @@ impl std::fmt::Display for WalletError {
             WalletError::FixedAccountsOnly => write!(
                 f,
                 "operation is not supported by the fixed Treasury/Registry wallet"
+            ),
+            WalletError::RescanUnsupported => write!(
+                f,
+                "rescan is not supported: the wallet retains no blocks to re-scan; restart to replay from the birthday"
             ),
             WalletError::AccountUnknown(account) => {
                 write!(f, "unknown account {account:?}")
@@ -640,6 +648,33 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
                 }
             })
             .collect())
+    }
+
+    fn get_unspent_transparent_outpoints(
+        &self,
+    ) -> Result<HashMap<transparent::bundle::OutPoint, Self::AccountId>, Self::Error> {
+        // The mint never receives, stores, or spends transparent money (see
+        // `WalletWrite::put_received_transparent_utxo`): the unspent set is
+        // empty by construction, never by omission.
+        Ok(HashMap::new())
+    }
+
+    fn get_transparent_receiver_accounts(
+        &self,
+    ) -> Result<
+        HashMap<
+            transparent::address::TransparentAddress,
+            (
+                Self::AccountId,
+                Option<transparent::keys::TransparentKeyScope>,
+            ),
+        >,
+        Self::Error,
+    > {
+        // The Treasury publishes a SHIELDED-only address and the Registry's
+        // address is Orchard-only: this wallet derives no transparent
+        // receivers, so no scanned transparent output can pay it.
+        Ok(HashMap::new())
     }
 
     fn get_transparent_receivers(

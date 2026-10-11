@@ -21,6 +21,7 @@ use zcash_client_backend::data_api::{MaxSpendMode, WalletRead as _};
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::proposal::Proposal;
+use zcash_client_backend::util::SystemClock;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_primitives::transaction::{Transaction, TxId};
@@ -158,6 +159,8 @@ pub fn sweep_to_vault<P: Parameters>(
     let txids = create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
         wallet,
         network,
+        &SystemClock,
+        &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
         spend_prover,
         output_prover,
         &spending_keys,
@@ -199,7 +202,7 @@ pub fn challenge<P: Parameters>(
         StandardFeeRule::Zip317,
         TREASURY_ACCOUNT,
         ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false),
-        &zcash_keys::address::Address::Unified(controller.clone()),
+        &zcash_keys::address::Address::Unified(Box::new(controller.clone())),
         CHALLENGE_RELAY_VALUE,
         Some(memo),
         None,
@@ -220,6 +223,8 @@ pub fn challenge<P: Parameters>(
     >(
         wallet,
         network,
+        &SystemClock,
+        &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
         spend_prover,
         output_prover,
         &spending_keys,
@@ -286,7 +291,7 @@ mod tests {
 
     fn request(action: Action) -> Request {
         let ua = match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
-            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
             _ => panic!("vector is a mainnet Unified Address"),
         };
         let name = Name::parse("alice").unwrap();
@@ -372,7 +377,7 @@ mod tests {
     #[test]
     fn queue_records_every_claim_in_order() {
         let ua = match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
-            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
             _ => panic!("vector is a mainnet Unified Address"),
         };
         let alice = Name::parse("alice").unwrap();
