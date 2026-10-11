@@ -5076,7 +5076,7 @@ dependencies = [
 [[package]]
 name = "zns-integration-tests"
 version = "0.1.0"
-source = "git+https://github.com/zcashme/zns-integration-tests.git?rev=f89d5b2#f89d5b25a5aeead83cd929969e0e6a871cb9a9be"
+source = "git+https://github.com/zcashme/zns-integration-tests.git?branch=main#1e2fb86bc849322d88898173cd51c7918d1b788c"
 dependencies = [
  "anyhow",
  "hex",
