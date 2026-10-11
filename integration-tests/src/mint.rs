@@ -1,6 +1,6 @@
 //! Spawn `zns-mint` built with `--features regtest` — the local
 //! spawner, so the harness owns the whole `keys/` contract it feeds the
-//! mint: capsule, conf, and ceremony record.
+//! mint: capsule, conf, and custody manifest.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -66,12 +66,12 @@ impl Mint {
         let keys = dir.path().join("keys");
         // The dev keys/ contract, one writer.
         zns_canon::regtest::write_dev_keys(&keys, birthday).context("write dev keys/")?;
-        // The ceremony record boot verifies against the chain.
+        // The custody manifest boot verifies against the chain.
         std::fs::write(
-            keys.join("ceremony_state.toml"),
-            format!("txid = \"{txid}\"\nbirthday = {birthday}\n"),
+            keys.join("zns_custody_manifest.toml"),
+            format!("anchor_txid = \"{txid}\"\nbirthday = {birthday}\n"),
         )
-        .context("write ceremony_state.toml")?;
+        .context("write custody manifest")?;
 
         let log = dir.path().join("mint.stderr");
         let file = std::fs::File::create(&log).context("create mint.stderr")?;

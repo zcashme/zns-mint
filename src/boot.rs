@@ -206,10 +206,11 @@ const ATTESTATION_REPORT_LEN: usize = 1184;
 /// The boot identity document: written once, at attestation time.
 const IDENTITY_DOC_FILE: &str = "zns_mint_identity.json";
 
-/// Keygen's ceremony record: the anchor txid and the height it mined
-/// at. Required on every network — the anchor check verifies it against
-/// the chain; a missing file refuses boot.
-const CEREMONY_STATE_FILE: &str = "keys/ceremony_state.toml";
+/// Keygen's custody manifest: the anchor txid and the height it mined
+/// at, published at ceremony finalize. Required on every network —
+/// the anchor check verifies it against the chain; a missing file
+/// refuses boot.
+const CUSTODY_MANIFEST_FILE: &str = "keys/zns_custody_manifest.toml";
 
 /// Genesis facts and the hex-encoded SNP report, one file. `keys/` is
 /// read-only in production, so this stays in the working directory.
@@ -335,14 +336,14 @@ struct CeremonyAnchor {
     birthday: u32,
 }
 
-/// Reads `keys/ceremony_state.toml`. Missing, malformed, or a non-hex
-/// txid refuses boot: the file is the only record of which transaction
+/// Reads `keys/zns_custody_manifest.toml`. Missing, malformed, or a non-hex
+/// txid refuses boot: the manifest is the only record of which transaction
 /// anchored the mint, and a missing file must not silently skip the
 /// anchor check.
 fn load_ceremony_anchor() -> CeremonyAnchor {
     ceremony_anchor(
-        &std::fs::read_to_string(CEREMONY_STATE_FILE)
-            .unwrap_or_else(|error| panic!("FATAL: cannot read {CEREMONY_STATE_FILE}: {error}")),
+        &std::fs::read_to_string(CUSTODY_MANIFEST_FILE)
+            .unwrap_or_else(|error| panic!("FATAL: cannot read {CUSTODY_MANIFEST_FILE}: {error}")),
     )
 }
 
@@ -350,7 +351,7 @@ fn load_ceremony_anchor() -> CeremonyAnchor {
 fn require_conf_birthday(anchor: &CeremonyAnchor, config_birthday: u32) {
     assert_eq!(
         anchor.birthday, config_birthday,
-        "FATAL: {CEREMONY_STATE_FILE} birthday {} does not match keys/zns_mint.conf birthday {config_birthday}",
+        "FATAL: {CUSTODY_MANIFEST_FILE} birthday {} does not match keys/zns_mint.conf birthday {config_birthday}",
         anchor.birthday
     );
 }
@@ -379,34 +380,34 @@ async fn require_anchor_on_chain(
     );
 }
 
-/// Parses the ceremony file's text. That string is `Transaction::txid`'s
+/// Parses the custody manifest's text. That string is `Transaction::txid`'s
 /// display form.
 fn ceremony_anchor(text: &str) -> CeremonyAnchor {
     #[derive(serde::Deserialize)]
     struct RawAnchor {
         #[serde(default)]
-        txid: Option<String>,
+        anchor_txid: Option<String>,
         #[serde(default)]
         birthday: Option<u32>,
     }
     let raw: RawAnchor = toml::from_str(text)
-        .unwrap_or_else(|error| panic!("FATAL: {CEREMONY_STATE_FILE} is invalid: {error}"));
+        .unwrap_or_else(|error| panic!("FATAL: {CUSTODY_MANIFEST_FILE} is invalid: {error}"));
     let txid_hex = raw
-        .txid
+        .anchor_txid
         .filter(|txid| !txid.trim().is_empty())
-        .unwrap_or_else(|| panic!("FATAL: {CEREMONY_STATE_FILE} has no anchor txid"));
+        .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} has no anchor txid"));
     let birthday = raw
         .birthday
-        .unwrap_or_else(|| panic!("FATAL: {CEREMONY_STATE_FILE} has no birthday"));
+        .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} has no birthday"));
     #[cfg(not(feature = "non-tee"))]
     let file_txid: [u8; 32] = hex::decode(txid_hex.trim())
-        .unwrap_or_else(|_| panic!("FATAL: {CEREMONY_STATE_FILE} txid is not hex"))
+        .unwrap_or_else(|_| panic!("FATAL: {CUSTODY_MANIFEST_FILE} txid is not hex"))
         .try_into()
-        .unwrap_or_else(|_| panic!("FATAL: {CEREMONY_STATE_FILE} txid is not 32 bytes"));
+        .unwrap_or_else(|_| panic!("FATAL: {CUSTODY_MANIFEST_FILE} txid is not 32 bytes"));
     CeremonyAnchor {
         // Display form: `from_hex` inverts it, `from_bytes` would not.
         txid: TxId::from_hex(txid_hex.trim())
-            .unwrap_or_else(|| panic!("FATAL: {CEREMONY_STATE_FILE} txid is not hex")),
+            .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} txid is not hex")),
         #[cfg(not(feature = "non-tee"))]
         file_txid,
         birthday,
@@ -1113,7 +1114,7 @@ mod tests {
     fn ceremony_anchor_requires_txid_and_birthday() {
         let txid_bytes: [u8; 32] = core::array::from_fn(|i| i as u8);
         let txid = hex::encode(txid_bytes);
-        let anchor = ceremony_anchor(&format!("txid = \"{txid}\"\nbirthday = 4408922\n"));
+        let anchor = ceremony_anchor(&format!("anchor_txid = \"{txid}\"\nbirthday = 4408922\n"));
         assert_eq!(anchor.birthday, 4408922);
         assert_eq!(anchor.txid.to_string(), txid);
         #[cfg(not(feature = "non-tee"))]
@@ -1186,19 +1187,19 @@ mod tests {
     #[test]
     #[should_panic(expected = "has no anchor txid")]
     fn ceremony_anchor_refuses_a_missing_txid() {
-        ceremony_anchor("state = \"SEALED\"\n");
+        ceremony_anchor("network = \"testnet\"\n");
     }
 
     #[test]
     #[should_panic(expected = "txid is not hex")]
     fn ceremony_anchor_refuses_a_non_hex_txid() {
-        ceremony_anchor("txid = \"zz\"\nbirthday = 1\n");
+        ceremony_anchor("anchor_txid = \"zz\"\nbirthday = 1\n");
     }
 
     #[test]
     #[should_panic(expected = "has no birthday")]
     fn ceremony_anchor_refuses_a_missing_birthday() {
-        ceremony_anchor(&format!("txid = \"{}\"\n", "ab".repeat(32)));
+        ceremony_anchor(&format!("anchor_txid = \"{}\"\n", "ab".repeat(32)));
     }
 
     #[tokio::test]
