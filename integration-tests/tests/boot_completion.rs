@@ -60,13 +60,19 @@ async fn boot_completes_on_wallet_funded_dev_ceremony() -> Result<()> {
     // The wallet holds no mint authority: reap it before boot.
     drop(zallet);
 
-    let tip = fixture::publish_ceremony(&zebra).await?;
-    eprintln!("fixture: ceremony confirmed at tip {tip}");
+    let (tip, anchor_txid) = fixture::publish_ceremony(&zebra).await?;
+    eprintln!("fixture: ceremony confirmed at tip {tip}, anchor {anchor_txid}");
 
     // The whole keys/ contract in one call: the dev capsule plus the conf
     // boot now reads on every network. Birthday = the ceremony tip — the
     // same fact boot checks the conf against, true by construction.
     zns_canon::regtest::write_dev_keys("keys", tip)?;
+    // The ceremony record boot verifies against the chain: the anchor is
+    // the transaction mined at the birthday.
+    std::fs::write(
+        "keys/ceremony_state.toml",
+        format!("txid = \"{anchor_txid}\"\nbirthday = {tip}\n"),
+    )?;
 
     // Bounded, explicit completion. Every boot check — genesis anchors,
     // Treasury minimum, clock, initial price, proving parameters — runs

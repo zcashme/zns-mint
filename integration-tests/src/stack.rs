@@ -3,9 +3,11 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use serde_json::json;
 use zns_integration_tests::{miner_address, publish, FIXTURE_HEIGHT};
-use zns_integration_tests::{zebrad_bin, Mint, Zebrad};
+use zns_integration_tests::{zebrad_bin, Zebrad};
 
+use crate::mint::Mint;
 use crate::user::User;
 use crate::zallet::zallet_bin;
 
@@ -49,12 +51,25 @@ impl Stack {
         eprintln!("user miner: {}", user.miner_address);
         eprintln!("user UA: {}", user.ua);
         publish(&mut zebra).await?;
-        // The ceremony block is the mint's birthday; the harness writes
-        // it into keys/zns_mint.conf.
+        // The ceremony block is the mint's birthday; its only
+        // non-coinbase transaction is the anchor boot verifies against
+        // the chain. The fixture mines one block for the one tx it just
+        // broadcast, cached tx or not.
         let birthday = zebra.tip_height().await?;
+        let block = zebra
+            .rpc("getblock", json!([birthday.to_string(), 1]))
+            .await?;
+        let txids: Vec<String> = serde_json::from_value(block["tx"].clone())?;
+        let [coinbase, anchor_txid] = txids.as_slice() else {
+            bail!(
+                "ceremony block {birthday} holds {} txs, expected coinbase + anchor",
+                txids.len()
+            );
+        };
+        let _ = coinbase;
 
         let mint_bin = mint_build.await.expect("mint build task")?;
-        let mut mint = Mint::start(mint_bin, birthday).await?;
+        let mut mint = Mint::start(mint_bin, birthday, anchor_txid)?;
         mint.wait_until_live().await?;
         wait_for_first_run_loop(&mut zebra, &mut mint).await?;
 
