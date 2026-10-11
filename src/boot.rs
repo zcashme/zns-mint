@@ -316,26 +316,20 @@ fn genesis_record(
         network,
         seed_fingerprint: fingerprint,
         capsule_hash,
-        // The file's own display-order bytes, not the internal order:
-        // the genesis document publishes the same bytes as display hex.
+        // Display-order bytes, same as the published JSON field.
         anchor_txid: anchor.file_txid,
         birthday,
     }
 }
 
 /// Keygen's ceremony record: the anchor transaction and the height it
-/// mined at. Read on every network — the anchor check verifies it
-/// against the chain, and the genesis attestation quotes it.
+/// mined at. Read on every network.
 struct CeremonyAnchor {
-    /// The anchor in `TxId`'s internal order, for `tx.txid()` equality
-    /// in the chain check.
+    /// Internal order, for `tx.txid()` equality in the chain check.
     txid: TxId,
-    /// The anchor exactly as the file held it — display-order bytes, the
-    /// same order the genesis document publishes in JSON. The genesis
-    /// attestation quotes these bytes, so a verifier recomputing the
-    /// record from the published document reproduces it exactly.
-    /// Attested only by the genesis statement, which `non-tee` builds
-    /// (regtest included) do not write.
+    /// The file's own display-order bytes — what the genesis document
+    /// publishes and the genesis attestation quotes. `non-tee` builds
+    /// write no genesis statement.
     #[cfg(not(feature = "non-tee"))]
     file_txid: [u8; 32],
     birthday: u32,
@@ -413,9 +407,7 @@ fn ceremony_anchor(text: &str) -> CeremonyAnchor {
         .try_into()
         .unwrap_or_else(|_| panic!("FATAL: {CEREMONY_STATE_FILE} txid is not 32 bytes"));
     CeremonyAnchor {
-        // The file's hex is the display form (`tx.txid().to_string()`),
-        // byte-reversed against `TxId`'s internal order. `from_hex`
-        // inverts the display form; `from_bytes` would not.
+        // Display form: `from_hex` inverts it, `from_bytes` would not.
         txid: TxId::from_hex(txid_hex.trim())
             .unwrap_or_else(|| panic!("FATAL: {CEREMONY_STATE_FILE} txid is not hex")),
         #[cfg(not(feature = "non-tee"))]
@@ -1124,8 +1116,7 @@ mod tests {
     #[cfg(not(feature = "non-tee"))]
     #[test]
     fn genesis_record_uses_the_ceremony_txid_and_birthday() {
-        // Not a palindrome: a byte-reversed txid must not pass for the
-        // real one, so this vector pins the display/internal order.
+        // Not a palindrome: pins the display/internal order.
         let txid_bytes: [u8; 32] = core::array::from_fn(|i| i as u8);
         let txid = hex::encode(txid_bytes);
         let anchor = ceremony_anchor(&format!(
