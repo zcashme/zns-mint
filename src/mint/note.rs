@@ -2,6 +2,7 @@
 //! derivation.
 //!
 
+use orchard::note::Psi;
 use time::Timestamp;
 use zcash_keys::address::UnifiedAddress;
 use zcash_primitives::transaction::TxId;
@@ -369,7 +370,7 @@ impl NameNote {
         // valid ZIP 316 Unified Address for this network decodes to no note.
         let ua_str = parts[3];
         let ua = match zcash_keys::address::Address::decode(params, ua_str)? {
-            zcash_keys::address::Address::Unified(ua) => ua,
+            zcash_keys::address::Address::Unified(ua) => *ua,
             _ => return None,
         };
         let expires_at = Expiry::parse(parts[4])?;
@@ -495,7 +496,7 @@ pub fn decrypt_name_notes<P: Parameters>(
                         let note = *candidate.note();
                         let rcm =
                             orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network));
-                        let psi = payload.psi(network);
+                        let psi = Psi::from_inner(payload.psi(network));
                         let authored = match note.zns_cmx(rcm, psi) {
                             Some(computed) => computed.ct_eq(candidate.cmx()),
                             None => subtle::Choice::from(0),
@@ -714,7 +715,7 @@ mod tests {
 
     fn test_ua() -> UnifiedAddress {
         match zcash_keys::address::Address::decode(&MAIN_NETWORK, TEST_UA) {
-            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
             _ => panic!("vector is a mainnet Unified Address"),
         }
     }

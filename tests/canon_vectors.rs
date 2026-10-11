@@ -332,7 +332,7 @@ fn snapshot(registry: &Registry, after_event: usize) -> Snapshot {
 }
 
 fn record_snapshot(record: &zns_mint::mint::registry::NameRecord) -> RecordSnapshot {
-    let ua_str = Address::Unified(record.ua.clone()).encode(&MainNetwork);
+    let ua_str = Address::Unified(Box::new(record.ua.clone())).encode(&MainNetwork);
     let expires_at_secs = match record.expires_at {
         Expiry::Never => None,
         Expiry::At(t) => Some(t.as_seconds()),
@@ -362,7 +362,7 @@ const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h8
 
 fn parse_ua(s: &str) -> UnifiedAddress {
     match Address::decode(&MainNetwork, s) {
-        Some(Address::Unified(ua)) => ua,
+        Some(Address::Unified(ua)) => *ua,
         _ => panic!("scenario UA is not a mainnet Unified Address: {s}"),
     }
 }

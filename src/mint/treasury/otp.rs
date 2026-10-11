@@ -1,6 +1,6 @@
 //! OTP auth for locked names.
 //!
-use rand::Rng;
+use rand::RngExt;
 use subtle::ConstantTimeEq;
 use time::{Duration, Timestamp};
 use zcash_primitives::transaction::TxId;
@@ -41,7 +41,7 @@ impl std::fmt::Debug for OtpCode {
 impl OtpCode {
     /// Uniform random six digits.
     pub fn generate() -> Self {
-        Self(rand::rngs::OsRng.gen_range(0..1_000_000))
+        Self(rand::rand_core::UnwrapErr(rand::rngs::SysRng).random_range(0..1_000_000))
     }
 
     /// The six ASCII digits.
@@ -308,7 +308,7 @@ mod tests {
             &zcash_protocol::consensus::MAIN_NETWORK,
             "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
         ) {
-            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
             _ => panic!("vector is a mainnet Unified Address"),
         };
         let alice = test_name("alice");
@@ -336,7 +336,7 @@ mod tests {
     fn mainnet_ua() -> UnifiedAddress {
         let s = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
         match zcash_keys::address::Address::decode(&zcash_protocol::consensus::MAIN_NETWORK, s) {
-            Some(zcash_keys::address::Address::Unified(u)) => u,
+            Some(zcash_keys::address::Address::Unified(u)) => *u,
             _ => panic!("test UA"),
         }
     }

@@ -7,6 +7,7 @@ use std::convert::Infallible;
 use std::time::SystemTime;
 
 use incrementalmerkletree::{Hashable, Marking, Position, Retention};
+use orchard::note::Psi;
 use secrecy::SecretVec;
 use shardtree::store::memory::MemoryShardStore;
 use shardtree::store::ShardStore;
@@ -433,6 +434,17 @@ where
 
 impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
     type UtxoRef = OutPoint;
+
+    fn queue_rescan(
+        &mut self,
+        _range: std::ops::Range<BlockHeight>,
+    ) -> Result<(), WalletError> {
+        // The in-memory projection consumes each block once and retains only
+        // its derived state: there is nothing here to re-scan. A rescan
+        // request cannot be honored — the process must be restarted, replaying
+        // from the birthday. Refuse rather than pretend.
+        Err(WalletError::RescanUnsupported)
+    }
 
     fn create_account(
         &mut self,
@@ -1115,9 +1127,11 @@ impl<P: Parameters> Wallet<P> {
             .ok_or(WalletError::InvalidNameNote(
                 "no Ironwood witness at position for this height",
             ))?;
-        let cmx = note.zns_cmx(rcm, psi).ok_or(WalletError::InvalidNameNote(
-            "ZNS commitment is the identity",
-        ))?;
+        let cmx = note
+            .zns_cmx(rcm, Psi::from_inner(psi))
+            .ok_or(WalletError::InvalidNameNote(
+                "ZNS commitment is the identity",
+            ))?;
         let leaf = orchard::tree::MerkleHashOrchard::from_cmx(&cmx);
         let computed_root = path.root(leaf);
         let anchor = self
@@ -1192,6 +1206,7 @@ impl<P: Parameters> Wallet<P> {
 mod tests {
     use super::{Wallet, WalletError, MAX_CHECKPOINTS};
     use crate::mint::REGISTRY_ACCOUNT;
+    use orchard::note::Psi;
     use incrementalmerkletree::frontier::Frontier;
     use zcash_client_backend::data_api::chain::ChainState;
     use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore};
@@ -2098,10 +2113,14 @@ mod tests {
             .into_option()
             .expect("rcm");
         let psi = pasta_curves::pallas::Base::from_raw([7, 0, 0, 0]);
-        let cmx = note.zns_cmx(rcm, psi).expect("ZNS cmx");
+        let cmx = note
+            .zns_cmx(rcm, Psi::from_inner(psi))
+            .expect("ZNS cmx");
         let txid = zcash_primitives::transaction::TxId::from_bytes([8u8; 32]);
         let epk = zcash_note_encryption::EphemeralKeyBytes([9u8; 32]);
-        let nullifier = note.zns_nullifier(&fvk, rcm, psi).expect("ZNS nullifier");
+        let nullifier = note
+            .zns_nullifier(&fvk, rcm, Psi::from_inner(psi))
+            .expect("ZNS nullifier");
         assert_ne!(nullifier, note.nullifier(&fvk));
         let memo = [0u8; 512];
         let height = BlockHeight::from_u32(1);

@@ -1,6 +1,7 @@
 //! The write path: one prepare function resolves the law's NameNote
 //! against the wallet and stages, proves, and signs the transaction.
 
+use orchard::note::Psi;
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::fees::StandardFeeRule;
@@ -166,7 +167,7 @@ pub fn prepare<P: Parameters>(
     // derived from the transition content.
     let memo = note.encode(network);
     let rcm = note.rcm(network);
-    let psi = note.psi(network);
+    let psi = Psi::from_inner(note.psi(network));
     let opening = orchard::note::NoteCommitTrapdoor::from_inner(rcm);
     builder
         .add_zns_output::<FeeError>(
@@ -209,7 +210,7 @@ pub fn prepare<P: Parameters>(
             &Default::default(),
             &[],
             &[treasury_keys.orchard_ask(), registry_keys.orchard_ask()],
-            rand::rngs::OsRng,
+            rand::rand_core::UnwrapErr(rand::rngs::SysRng),
             spend_prover,
             output_prover,
             &StandardFeeRule::Zip317,
@@ -242,7 +243,7 @@ fn predecessor_opening<P: Parameters>(
 ) -> Result<
     (
         orchard::note::NoteCommitTrapdoor,
-        pasta_curves::pallas::Base,
+        Psi,
     ),
     PrepareError,
 > {
@@ -258,7 +259,7 @@ fn predecessor_opening<P: Parameters>(
     .ok_or(PrepareError::PredecessorClosed)?;
     Ok((
         orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network)),
-        payload.psi(network),
+        Psi::from_inner(payload.psi(network)),
     ))
 }
 

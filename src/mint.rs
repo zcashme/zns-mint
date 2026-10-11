@@ -44,7 +44,7 @@ pub const MAX_NAME_LEN: usize = 63;
 /// Decodes a controller UA: known receivers only, Orchard among them.
 fn decode_controller_ua<P: Parameters>(network: &P, ua_str: &str) -> Option<UnifiedAddress> {
     let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
-        zcash_keys::address::Address::Unified(ua) => ua,
+        zcash_keys::address::Address::Unified(ua) => *ua,
         _ => return None,
     };
     (ua.unknown().is_empty() && ua.orchard().is_some()).then_some(ua)
@@ -369,7 +369,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
 
     use incrementalmerkletree::Position;
     use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
-    use zcash_client_backend::scanning::Nullifiers;
+    use zcash_client_backend::scanning::SpendIdentifiers;
 
     let cursor = wallet.tip();
     assert_eq!(
@@ -404,15 +404,15 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     };
 
     let (header, batches) = decrypt_block(network, block, wallet.scanning_keys());
-    let nullifiers =
-        Nullifiers::unspent(wallet).expect("FATAL: wallet could not expose its unspent nullifiers");
+    let spend_identifiers =
+        SpendIdentifiers::unspent(wallet).expect("FATAL: wallet could not expose its unspent nullifiers");
     let scanned = scan_block(
         network,
         height,
         &header,
         batches,
         wallet.scanning_keys(),
-        &nullifiers,
+        &spend_identifiers,
         Some(&cursor),
         |_| {
             Ok::<
@@ -698,7 +698,7 @@ pub async fn watch_mempool(chain: ChainClient, sender: mpsc::Sender<(MempoolChan
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zcash_address::unified::{Address as Ua, Encoding, Receiver};
+    use zcash_address::unified::{Address as Ua, Encoding, Receiver, Revision, Uitem};
     use zcash_protocol::consensus::MainNetwork;
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
@@ -711,7 +711,7 @@ mod tests {
 
     fn test_ua() -> UnifiedAddress {
         match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
-            Some(zcash_keys::address::Address::Unified(ua)) => ua,
+            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
             _ => panic!("vector is a mainnet Unified Address"),
         }
     }
@@ -829,12 +829,12 @@ mod tests {
         let network = MainNetwork;
         // A valid UA carrying an unknown receiver — ZIP-316's
         // forward-compatibility channel, unbounded by design.
-        let ua = Ua::try_from_items(vec![
-            Receiver::Orchard([0x07; 43]),
-            Receiver::Unknown {
+        let ua = Ua::try_from_items(Revision::R0, vec![
+            Uitem::Data(Receiver::Orchard([0x07; 43])),
+            Uitem::Data(Receiver::Unknown {
                 typecode: 5,
                 data: vec![0u8; 32],
-            },
+            }),
         ])
         .expect("ZIP-316 composition rules permit it")
         .encode(&zcash_protocol::consensus::NetworkType::Main);
