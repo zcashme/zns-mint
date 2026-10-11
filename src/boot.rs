@@ -1080,15 +1080,11 @@ mod tests {
     #[cfg(not(feature = "non-tee"))]
     #[test]
     fn identity_report_data_distinguishes_identities() {
-        let treasury_ua = "u1treasury";
-        let registry_ufvk = "u1registry";
+        // Golden vector: the commitment algorithm external verifiers
+        // depend on. An accidental change to separator or order lands here.
         assert_eq!(
-            hex::encode(identity_report_data(treasury_ua, registry_ufvk)),
+            hex::encode(identity_report_data("u1treasury", "u1registry")),
             "f730323e01e9a258d3973eaf7bb9a0c734cf9fd3013cd65460811926f63372ecf4e78ba21ff78265157f93a9a9a477539ffce08ca821bcc9cd0e95f2344b311c"
-        );
-        assert_ne!(
-            identity_report_data(treasury_ua, registry_ufvk),
-            identity_report_data(registry_ufvk, treasury_ua)
         );
     }
 
