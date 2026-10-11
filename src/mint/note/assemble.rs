@@ -240,13 +240,7 @@ fn predecessor_opening<P: Parameters>(
     network: &P,
     wallet: &Wallet<P>,
     note: &ReceivedNote<NoteId, orchard::note::Note>,
-) -> Result<
-    (
-        orchard::note::NoteCommitTrapdoor,
-        Psi,
-    ),
-    PrepareError,
-> {
+) -> Result<(orchard::note::NoteCommitTrapdoor, Psi), PrepareError> {
     let memo = wallet
         .get_memo(*note.internal_note_id())
         .map_err(PrepareError::Memo)?;

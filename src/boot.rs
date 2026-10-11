@@ -164,7 +164,7 @@ fn boot_network() -> Network {
             nu6_1: Some(BlockHeight::from_u32(4)),
             nu6_2: Some(BlockHeight::from_u32(4)),
             nu6_3: Some(BlockHeight::from_u32(4)),
-            nu7: Some(BlockHeight::from_u32(4)),
+            nu7: None,
         }
     }
 }
@@ -1221,7 +1221,7 @@ mod tests {
     ) -> zcash_primitives::transaction::Transaction {
         let (bundle, _) = builder
             .build::<zcash_protocol::value::ZatBalance>(rand::rand_core::UnwrapErr(
-                rand::rngs::SysRng
+                rand::rngs::SysRng,
             ))
             .unwrap()
             .unwrap();

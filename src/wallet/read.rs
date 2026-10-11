@@ -664,7 +664,10 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
     ) -> Result<
         HashMap<
             transparent::address::TransparentAddress,
-            (Self::AccountId, Option<transparent::keys::TransparentKeyScope>),
+            (
+                Self::AccountId,
+                Option<transparent::keys::TransparentKeyScope>,
+            ),
         >,
         Self::Error,
     > {

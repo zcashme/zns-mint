@@ -378,9 +378,7 @@ impl NameNote {
         let ua = {
             let (net, revision, container) =
                 zcash_address::unified::Address::decode(ua_str).ok()?;
-            if net != params.network_type()
-                || revision != zcash_address::unified::Revision::R0
-            {
+            if net != params.network_type() || revision != zcash_address::unified::Revision::R0 {
                 return None;
             }
             zcash_keys::address::UnifiedAddress::try_from(container).ok()?

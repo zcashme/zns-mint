@@ -435,10 +435,7 @@ where
 impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
     type UtxoRef = OutPoint;
 
-    fn queue_rescan(
-        &mut self,
-        _range: std::ops::Range<BlockHeight>,
-    ) -> Result<(), WalletError> {
+    fn queue_rescan(&mut self, _range: std::ops::Range<BlockHeight>) -> Result<(), WalletError> {
         // The in-memory projection consumes each block once and retains only
         // its derived state: there is nothing here to re-scan. A rescan
         // request cannot be honored — the process must be restarted, replaying
@@ -1206,8 +1203,8 @@ impl<P: Parameters> Wallet<P> {
 mod tests {
     use super::{Wallet, WalletError, MAX_CHECKPOINTS};
     use crate::mint::REGISTRY_ACCOUNT;
-    use orchard::note::Psi;
     use incrementalmerkletree::frontier::Frontier;
+    use orchard::note::Psi;
     use zcash_client_backend::data_api::chain::ChainState;
     use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore};
     use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
@@ -2113,9 +2110,7 @@ mod tests {
             .into_option()
             .expect("rcm");
         let psi = pasta_curves::pallas::Base::from_raw([7, 0, 0, 0]);
-        let cmx = note
-            .zns_cmx(rcm, Psi::from_inner(psi))
-            .expect("ZNS cmx");
+        let cmx = note.zns_cmx(rcm, Psi::from_inner(psi)).expect("ZNS cmx");
         let txid = zcash_primitives::transaction::TxId::from_bytes([8u8; 32]);
         let epk = zcash_note_encryption::EphemeralKeyBytes([9u8; 32]);
         let nullifier = note

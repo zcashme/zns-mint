@@ -409,8 +409,8 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     };
 
     let (header, batches) = decrypt_block(network, block, wallet.scanning_keys());
-    let spend_identifiers =
-        SpendIdentifiers::unspent(wallet).expect("FATAL: wallet could not expose its unspent nullifiers");
+    let spend_identifiers = SpendIdentifiers::unspent(wallet)
+        .expect("FATAL: wallet could not expose its unspent nullifiers");
     let scanned = scan_block(
         network,
         height,
@@ -834,13 +834,16 @@ mod tests {
         let network = MainNetwork;
         // A valid UA carrying an unknown receiver — ZIP-316's
         // forward-compatibility channel, unbounded by design.
-        let ua = Ua::try_from_items(Revision::R0, vec![
-            Uitem::Data(Receiver::Orchard([0x07; 43])),
-            Uitem::Data(Receiver::Unknown {
-                typecode: 5,
-                data: vec![0u8; 32],
-            }),
-        ])
+        let ua = Ua::try_from_items(
+            Revision::R0,
+            vec![
+                Uitem::Data(Receiver::Orchard([0x07; 43])),
+                Uitem::Data(Receiver::Unknown {
+                    typecode: 5,
+                    data: vec![0u8; 32],
+                }),
+            ],
+        )
         .expect("ZIP-316 composition rules permit it")
         .encode(&zcash_protocol::consensus::NetworkType::Main);
 

@@ -30,7 +30,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use blake2b_simd::Params as Blake2b;
 use orchard::builder::{Builder as OrchardBuilder, BundleType};
 use orchard::bundle::BundleVersion;
-use rand::rngs::OsRng;
+use rand::rand_core::UnwrapErr;
+use rand::rngs::SysRng;
 use serde::Deserialize;
 use serde_json::json;
 use transparent::builder::{
@@ -107,6 +108,7 @@ pub fn regtest_network() -> LocalNetwork {
         nu6_1: Some(four),
         nu6_2: Some(four),
         nu6_3: Some(four),
+        nu7: None,
     }
 }
 
@@ -354,10 +356,10 @@ pub fn assemble_v6_transparent_ironwood<P: Parameters>(
     let ironwood = ironwood
         .create_proof(
             cached_orchard_proving_key(bundle_v.circuit_version()),
-            &mut OsRng,
+            &mut UnwrapErr(SysRng),
         )?
         .prepare(
-            OsRng,
+            UnwrapErr(SysRng),
             *signature_hash(&unauthed, &SignableInput::Shielded, &txid_parts).as_ref(),
         )
         .finalize()?;
@@ -463,7 +465,7 @@ pub fn build_ceremony_tx(
         [0; 512],
     )?;
     let (ironwood, _) = ironwood_builder
-        .build::<ZatBalance>(&mut OsRng)?
+        .build::<ZatBalance>(&mut UnwrapErr(SysRng))?
         .expect("ironwood bundle exists");
 
     assemble_v6_transparent_ironwood(
@@ -532,7 +534,9 @@ pub fn mint_identity_strings() -> (String, String) {
         .expect("treasury default address");
     (
         treasury_addr.encode(&network),
-        registry_fvk.encode(&network),
+        registry_fvk
+            .encode(&network)
+            .expect("registry UFVK encodes"),
     )
 }
 

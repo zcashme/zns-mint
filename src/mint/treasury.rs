@@ -18,10 +18,10 @@ use zcash_client_backend::data_api::wallet::{
     ConfirmationsPolicy, CreateErrT, ProposeTransferErrT,
 };
 use zcash_client_backend::data_api::{MaxSpendMode, WalletRead as _};
-use zcash_client_backend::util::SystemClock;
 use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::proposal::Proposal;
+use zcash_client_backend::util::SystemClock;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_primitives::transaction::{Transaction, TxId};
