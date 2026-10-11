@@ -123,12 +123,7 @@ impl NameNote {
     /// `decode_controller_ua` bounds the address to known receivers, and
     /// the time crate bounds the expiry.
     pub fn encode<P: Parameters>(&self, params: &P) -> [u8; 512] {
-        // The memo is the name's address of record: every receiver is
-        // preserved.
-        let ua_field = self
-            .ua()
-            .to_receiver_preserving_zcash_address(params.network_type())
-            .to_string();
+        let ua_field = self.ua().encode_receiver_preserving(params);
         let verb = self.action().as_str();
         let hex_rcm = hex::encode(self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]));
         let expires_field = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
@@ -372,8 +367,6 @@ impl NameNote {
         }
 
         let name = Name::parse(parts[2])?;
-        // The single UA validation boundary: a memo whose ua field is not a
-        // valid ZIP 316 Unified Address for this network decodes to no note.
         let ua_str = parts[3];
         let ua = {
             let (net, revision, container) =
