@@ -2,6 +2,14 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-10-11 — A resealed capsule does not have to match the keygen report
+
+- The keygen report binds the capsule hash recorded in
+  `keys/zns_custody_manifest.toml`. When the file on disk has that hash,
+  boot still requires `keys/zns_attestation.bin` to verify. When the
+  hashes differ, the report is not required to cover this file. The
+  conf fingerprint and the unseal still have to match.
+
 ## 2026-10-10 — The conf is read on every network
 
 - `keys/zns_mint.conf` is no longer mainnet/testnet-only: regtest reads
