@@ -25,7 +25,7 @@
 //! and that report's measurement is `to_measurement` and its guest policy is
 //! `to_guest_policy`.
 
-use rand::rngs::OsRng;
+use rand::rngs::SysRng;
 use tracing::info;
 use zns_canon::capsule;
 use zns_canon::migration::{self, MigrationOffer};
@@ -89,7 +89,7 @@ pub fn run(
     require_source_capsule(manifest, &capsule_bytes, &capsule.fingerprint)?;
     let transfer = {
         let seed = capsule::unseal_seed(sealing_key, &capsule)?;
-        let transfer = migration::encrypt_seed(&seed, &offer, &mut OsRng)?;
+        let transfer = migration::encrypt_seed(&seed, &offer, &mut SysRng)?;
         drop(seed);
         transfer
     };

@@ -32,6 +32,9 @@ pub enum MigrateError {
     #[error("migration: {0}")]
     Migration(#[from] zns_canon::migration::MigrationError),
 
+    #[error("random number generator failed")]
+    Rng,
+
     #[error("attestation: {0}")]
     Attestation(#[from] zns_canon::attestation::AttestationError),
 
