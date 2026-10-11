@@ -48,7 +48,7 @@ requires its own report to match from_measurement and from_guest_policy, and
 the input capsule's file hash and fingerprint to match the manifest, before
 it unseals. Target requires the source report's measurement to equal
 from_measurement and its guest policy to equal from_guest_policy, and that
-report must bind the offer and the ciphertext, before it installs a capsule.
+report must bind the offer, the ciphertext, and the ceremony files, before it installs a capsule.
 Source accepts the receipt only when receipt_attestation.bin binds that offer
 and that receipt, and the report measurement equals to_measurement and its
 guest policy equals to_guest_policy.

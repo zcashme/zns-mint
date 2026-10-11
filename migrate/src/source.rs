@@ -18,10 +18,11 @@
 //! There is no second offer. A failed check of the target returns before the
 //! capsule is unsealed. The source checks its own measurement and guest
 //! policy, then the capsule file hash and header fingerprint, before that
-//! unseal. The ceremony files beside the capsule are read before that unseal
-//! and published in the open with the transfer. The transfer is published
-//! only with an attestation that binds this offer and this ciphertext, and
-//! only when that report's measurement is
+//! unseal. The ceremony files beside the capsule are read before that unseal.
+//! Their hashes are bound into the transfer attestation, and the same bytes
+//! are published in the open with the transfer. The transfer is published
+//! only with an attestation that binds this offer, this ciphertext, and those
+//! files, and only when that report's measurement is
 //! `from_measurement` and its guest policy is `from_guest_policy`. The receipt
 //! is accepted only when a target report binds this offer and this receipt,
 //! and that report's measurement is `to_measurement` and its guest policy is
@@ -96,7 +97,15 @@ pub fn run(
         drop(seed);
         transfer
     };
-    let transfer_report = handoff::transfer_report_data(&offer, &transfer);
+    let transfer_report = handoff::transfer_report_data(
+        &offer,
+        &transfer,
+        &handoff::ceremony_binding(&[
+            ceremony[0].1.as_slice(),
+            ceremony[1].1.as_slice(),
+            ceremony[2].1.as_slice(),
+        ]),
+    );
     let source_report = get_attestation(&transfer_report)?;
     if source_report.as_bytes().is_empty() {
         return Err(MigrateError::transport("TEE returned an empty attestation"));
@@ -181,21 +190,19 @@ pub(crate) fn require_source_capsule(
 
 fn read_ceremony_files(
     capsule: &std::path::Path,
-) -> Result<Vec<(&'static str, Vec<u8>)>, MigrateError> {
-    let dir = capsule
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .ok_or_else(|| {
-            MigrateError::transport(format!("{} has no directory", capsule.display()))
-        })?;
-    transport::CEREMONY_FILES
+) -> Result<[(&'static str, Vec<u8>); 3], MigrateError> {
+    let dir = crate::persist::containing_dir(capsule);
+    let files = transport::CEREMONY_FILES
         .iter()
         .map(|name| {
             let path = dir.join(name);
             let bytes = transport::read_regular(&path, transport::CEREMONY_MAX)?;
             Ok((*name, bytes))
         })
-        .collect()
+        .collect::<Result<Vec<_>, MigrateError>>()?;
+    files.try_into().map_err(|files: Vec<_>| {
+        MigrateError::transport(format!("expected 3 ceremony files, found {}", files.len()))
+    })
 }
 
 fn wait_peer(result: Result<Vec<u8>, MigrateError>) -> Result<Vec<u8>, MigrateError> {
