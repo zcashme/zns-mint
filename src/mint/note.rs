@@ -4,6 +4,7 @@
 
 use orchard::note::Psi;
 use time::Timestamp;
+use zcash_address::unified::Encoding;
 use zcash_keys::address::UnifiedAddress;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -122,7 +123,12 @@ impl NameNote {
     /// `decode_controller_ua` bounds the address to known receivers, and
     /// the time crate bounds the expiry.
     pub fn encode<P: Parameters>(&self, params: &P) -> [u8; 512] {
-        let ua_field = self.ua().encode(params);
+        // The memo is the name's address of record: every receiver is
+        // preserved.
+        let ua_field = self
+            .ua()
+            .to_receiver_preserving_zcash_address(params.network_type())
+            .to_string();
         let verb = self.action().as_str();
         let hex_rcm = hex::encode(self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]));
         let expires_field = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
@@ -369,9 +375,15 @@ impl NameNote {
         // The single UA validation boundary: a memo whose ua field is not a
         // valid ZIP 316 Unified Address for this network decodes to no note.
         let ua_str = parts[3];
-        let ua = match zcash_keys::address::Address::decode(params, ua_str)? {
-            zcash_keys::address::Address::Unified(ua) => *ua,
-            _ => return None,
+        let ua = {
+            let (net, revision, container) =
+                zcash_address::unified::Address::decode(ua_str).ok()?;
+            if net != params.network_type()
+                || revision != zcash_address::unified::Revision::R0
+            {
+                return None;
+            }
+            zcash_keys::address::UnifiedAddress::try_from(container).ok()?
         };
         let expires_at = Expiry::parse(parts[4])?;
 

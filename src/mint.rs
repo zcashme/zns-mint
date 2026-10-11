@@ -13,6 +13,7 @@ pub use time::Timestamp;
 
 pub use zcash_keys::address::UnifiedAddress;
 
+use zcash_address::unified::{Container as _, Encoding};
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::memo::{Memo, MemoBytes};
@@ -43,10 +44,14 @@ pub const MAX_NAME_LEN: usize = 63;
 
 /// Decodes a controller UA: known receivers only, Orchard among them.
 fn decode_controller_ua<P: Parameters>(network: &P, ua_str: &str) -> Option<UnifiedAddress> {
-    let ua = match zcash_keys::address::Address::decode(network, ua_str)? {
-        zcash_keys::address::Address::Unified(ua) => *ua,
-        _ => return None,
-    };
+    let (net, revision, container) = zcash_address::unified::Address::decode(ua_str).ok()?;
+    if net != network.network_type()
+        || revision != zcash_address::unified::Revision::R0
+        || !container.metadata_items().is_empty()
+    {
+        return None;
+    }
+    let ua = UnifiedAddress::try_from(container).ok()?;
     (ua.unknown().is_empty() && ua.orchard().is_some()).then_some(ua)
 }
 
