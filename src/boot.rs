@@ -346,8 +346,7 @@ fn load_ceremony_anchor() -> CeremonyAnchor {
     )
 }
 
-/// The ceremony file and the conf may lie together, but they must lie
-/// identically: their birthdays must agree before the chain check runs.
+/// The ceremony file's birthday must equal the conf's.
 fn require_conf_birthday(anchor: &CeremonyAnchor, config_birthday: u32) {
     assert_eq!(
         anchor.birthday, config_birthday,
@@ -461,9 +460,7 @@ impl Boot<Network> {
         require_config_network(&mint_config);
         let mint_birthday = BlockHeight::from_u32(mint_config.birthday);
 
-        // The ceremony record: which transaction anchored the mint, and
-        // where. Its birthday must be the conf's — the two files may lie
-        // together, but the chain check below catches the lie.
+        // The ceremony record: the anchor txid and its height.
         let ceremony = load_ceremony_anchor();
         require_conf_birthday(&ceremony, mint_config.birthday);
 
@@ -1091,11 +1088,7 @@ mod tests {
     #[cfg(not(feature = "non-tee"))]
     #[test]
     fn genesis_record_carries_the_anchor_in_display_order() {
-        // Not a palindrome: pins the display/internal order. Field-copy
-        // and JSON round-trips are tautologies; the contract here is the
-        // byte order alone — record bytes and published hex both display
-        // order, so a verifier recomputes the record from the document.
-        // The parser contract is `ceremony_anchor_requires_txid_and_birthday`.
+        // Non-palindrome vector: pins display vs internal byte order.
         let txid_bytes: [u8; 32] = core::array::from_fn(|i| i as u8);
         let txid = hex::encode(txid_bytes);
         let anchor = CeremonyAnchor {
