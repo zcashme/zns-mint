@@ -229,7 +229,7 @@ impl OtpMemo {
             "ZNS:otp:{otp}:{}:{}:{}",
             self.name.as_str(),
             self.action.as_str(),
-            self.ua.encode(network),
+            self.ua.encode_receiver_preserving(network),
         );
         // `from_bytes` pads; the UA guard bounds the length.
         MemoBytes::from_bytes(text.as_bytes()).ok()
