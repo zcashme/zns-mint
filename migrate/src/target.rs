@@ -1,14 +1,18 @@
 //! M2. The attested ephemeral key is published before any seed arrives.
 //!
 //! A transfer is decrypted only after its source attestation matches this
-//! offer and this ciphertext, and that report's measurement is
-//! `from_measurement` and its guest policy is `from_guest_policy`. After the
-//! capsule is linked into place, it is read back and unsealed. The receipt is
-//! written only when that reopened seed matches the one just decrypted. The
+//! offer, this ciphertext, and the ceremony files, and that report's
+//! measurement is `from_measurement` and its guest policy is
+//! `from_guest_policy`. Those files are received before the capsule is
+//! linked into place. They are written beside it, and it is read back and
+//! unsealed. The receipt is written only when that reopened seed matches the
+//! one just decrypted. The
 //! receipt is published with an attestation that binds this offer and this
 //! receipt, and only when that report's measurement is `to_measurement` and
 //! its guest policy is `to_guest_policy`. An existing capsule is left
 //! untouched unless the operator set `--replace-after-verified-migration`.
+
+use std::path::{Path, PathBuf};
 
 use rand::rngs::SysRng;
 use rand::TryRng;
@@ -37,14 +41,14 @@ pub fn run(
         .as_deref()
         .ok_or_else(|| MigrateError::usage("--output-capsule is required"))?;
     transport::capsule_outside_transport(output, transport.dir())?;
-    persist::guard_output(output, args.replace_after_verified_migration)?;
+    guard_outputs(output, args.replace_after_verified_migration)?;
 
     info!(
         manifest = hex::encode(upgrade::manifest_hash(manifest)),
         "target waiting"
     );
     transport.target_begin()?;
-    persist::guard_output(output, args.replace_after_verified_migration)?;
+    guard_outputs(output, args.replace_after_verified_migration)?;
 
     let mut rng = SysRng;
     let keypair = migration::generate_ephemeral_keypair(&mut rng)?;
@@ -79,8 +83,17 @@ pub fn run(
 
     let transfer_bytes = transport.wait_encrypted_seed()?;
     let source_report = transport.wait_source_attestation()?;
+    let ceremony = receive_ceremony(transport)?;
     let transfer = handoff::decode_transfer(&transfer_bytes)?;
-    let expected = handoff::transfer_report_data(&offer, &transfer);
+    let expected = handoff::transfer_report_data(
+        &offer,
+        &transfer,
+        &handoff::ceremony_binding(&[
+            ceremony[0].as_slice(),
+            ceremony[1].as_slice(),
+            ceremony[2].as_slice(),
+        ]),
+    );
     let source = attest::verified_report(&source_report, &expected)?;
     require_measurement(
         &source.measurement,
@@ -106,7 +119,9 @@ pub fn run(
         &seed,
         &capsule::read_capsule_file(staged.path())?,
     )?;
-    staged.install(output, args.replace_after_verified_migration)?;
+    let mut pending = vec![(staged, output.to_path_buf())];
+    pending.extend(stage_ceremony(output, &ceremony)?);
+    persist::commit_files(pending, args.replace_after_verified_migration)?;
 
     let persisted = capsule::read_capsule_file(output)?;
     let parsed = prove_persisted(sealing_key, &seed, &persisted)?;
@@ -142,6 +157,43 @@ pub fn run(
         "receipt published"
     );
     Ok(())
+}
+
+fn guard_outputs(output: &Path, replace: bool) -> Result<(), MigrateError> {
+    persist::guard_output(output, replace)?;
+    let dir = persist::containing_dir(output);
+    for name in transport::CEREMONY_FILES {
+        persist::guard_output(&dir.join(name), replace)?;
+    }
+    Ok(())
+}
+
+fn receive_ceremony(transport: &DirTransport) -> Result<[Vec<u8>; 3], MigrateError> {
+    let mut files = Vec::with_capacity(transport::CEREMONY_FILES.len());
+    for name in transport::CEREMONY_FILES {
+        files.push(transport.wait_ceremony(name)?);
+    }
+    files.try_into().map_err(|files: Vec<_>| {
+        MigrateError::transport(format!("expected 3 ceremony files, found {}", files.len()))
+    })
+}
+
+fn stage_ceremony(
+    capsule: &Path,
+    files: &[Vec<u8>; 3],
+) -> Result<Vec<(persist::StagedCapsule, PathBuf)>, MigrateError> {
+    let dir = persist::containing_dir(capsule);
+    let mut staged = Vec::with_capacity(files.len());
+    for (name, bytes) in transport::CEREMONY_FILES.iter().zip(files.iter()) {
+        let dest = dir.join(name);
+        let mode = if *name == transport::CUSTODY_MANIFEST_FILE {
+            0o644
+        } else {
+            0o600
+        };
+        staged.push((persist::stage_file(&dest, bytes, mode)?, dest));
+    }
+    Ok(staged)
 }
 
 fn prove_persisted(

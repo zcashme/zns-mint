@@ -77,7 +77,7 @@ pub enum HandoffError {
 /// The source passes this to `get_attestation` before unsealing. The
 /// report's measurement must equal `from_measurement`. This report is not
 /// written to the channel. The published source attestation is
-/// [`transfer_report_data`], which also binds the ciphertext.
+/// [`transfer_report_data`], which binds the ciphertext and the ceremony files.
 pub fn source_report_data(offer: &MigrationOffer) -> [u8; REPORT_DATA_LEN] {
     let offer_bytes = encode_offer(offer);
     let mut input = Vec::with_capacity(SOURCE_REPORT_DOMAIN.len() + offer_bytes.len());
@@ -86,24 +86,36 @@ pub fn source_report_data(offer: &MigrationOffer) -> [u8; REPORT_DATA_LEN] {
     blake2b_512(&input)
 }
 
-/// `BLAKE2b-512(b"ZNS_MIGRATION_TRANSFER_V1" || offer || transfer)`.
+/// `BLAKE2b-512(b"ZNS_MIGRATION_TRANSFER_V1" || offer || transfer || ceremony)`.
 ///
-/// The source passes this to `get_attestation` after building the
-/// ciphertext. The target accepts a transfer only when its report matches
-/// these exact bytes, so a writer who encrypts some other seed to the
-/// published offer cannot reuse or omit that attestation.
+/// `ceremony` is the BLAKE2b-256 of `zns_mint.conf`, then
+/// `zns_custody_manifest.toml`, then `ceremony_state.toml`. The source
+/// passes this to `get_attestation` after building the ciphertext. The
+/// target accepts a transfer only when its report matches these exact
+/// bytes, so a writer who encrypts some other seed, or replaces a ceremony
+/// file in the channel, cannot reuse or omit that attestation.
 pub fn transfer_report_data(
     offer: &MigrationOffer,
     transfer: &EncryptedSeedTransfer,
+    ceremony: &[[u8; 32]; 3],
 ) -> [u8; REPORT_DATA_LEN] {
     let offer_bytes = encode_offer(offer);
     let transfer_bytes = encode_transfer(transfer);
-    let mut input =
-        Vec::with_capacity(TRANSFER_REPORT_DOMAIN.len() + offer_bytes.len() + transfer_bytes.len());
+    let mut input = Vec::with_capacity(
+        TRANSFER_REPORT_DOMAIN.len() + offer_bytes.len() + transfer_bytes.len() + 32 * 3,
+    );
     input.extend_from_slice(TRANSFER_REPORT_DOMAIN);
     input.extend_from_slice(&offer_bytes);
     input.extend_from_slice(&transfer_bytes);
+    for hash in ceremony {
+        input.extend_from_slice(hash);
+    }
     blake2b_512(&input)
+}
+
+/// BLAKE2b-256 of each ceremony file, in channel order.
+pub fn ceremony_binding(files: &[&[u8]; 3]) -> [[u8; 32]; 3] {
+    files.map(blake2b_256)
 }
 
 /// `BLAKE2b-512(b"ZNS_MIGRATION_RECEIPT_V1" || offer || receipt)`.
@@ -324,21 +336,44 @@ mod tests {
             nonce: [5u8; NONCE_LEN],
             ciphertext: [6u8; CIPHERTEXT_LEN],
         };
-        let bound = transfer_report_data(&offer, &transfer);
+        let ceremony = ceremony_binding(&[b"mint", b"custody", b"state"]);
+        let bound = transfer_report_data(&offer, &transfer, &ceremony);
         assert_ne!(bound, zns_canon::migration::migration_report_data(&offer));
 
         let mut other_sender = transfer;
         other_sender.sender_ephemeral_pubkey[0] ^= 1;
-        assert_ne!(transfer_report_data(&offer, &other_sender), bound);
+        assert_ne!(
+            transfer_report_data(&offer, &other_sender, &ceremony),
+            bound
+        );
 
         let mut other_ciphertext = transfer;
         other_ciphertext.ciphertext[0] ^= 1;
-        assert_ne!(transfer_report_data(&offer, &other_ciphertext), bound);
+        assert_ne!(
+            transfer_report_data(&offer, &other_ciphertext, &ceremony),
+            bound
+        );
 
         let mut other_offer = offer;
         other_offer.nonce[0] ^= 1;
-        assert_ne!(transfer_report_data(&other_offer, &transfer), bound);
+        assert_ne!(
+            transfer_report_data(&other_offer, &transfer, &ceremony),
+            bound
+        );
         assert_ne!(bound, source_report_data(&offer));
+
+        for index in 0..3 {
+            let mut changed = [
+                b"mint".as_slice(),
+                b"custody".as_slice(),
+                b"state".as_slice(),
+            ];
+            changed[index] = b"replaced";
+            assert_ne!(
+                transfer_report_data(&offer, &transfer, &ceremony_binding(&changed)),
+                bound
+            );
+        }
     }
 
     #[test]
@@ -378,7 +413,8 @@ mod tests {
                     sender_ephemeral_pubkey: [4u8; 32],
                     nonce: [5u8; NONCE_LEN],
                     ciphertext: [6u8; CIPHERTEXT_LEN],
-                }
+                },
+                &ceremony_binding(&[b"mint", b"custody", b"state"])
             )
         );
 

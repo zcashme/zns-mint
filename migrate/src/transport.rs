@@ -25,16 +25,25 @@ pub const SOURCE_ATTESTATION_FILE: &str = "source_attestation.bin";
 pub const RECEIPT_FILE: &str = "receipt.bin";
 pub const RECEIPT_ATTESTATION_FILE: &str = "receipt_attestation.bin";
 pub const SOURCE_READY_FILE: &str = "source.ready";
+pub const MINT_CONF_FILE: &str = "zns_mint.conf";
+pub const CUSTODY_MANIFEST_FILE: &str = "zns_custody_manifest.toml";
+pub const CEREMONY_STATE_FILE: &str = "ceremony_state.toml";
 
 const READY_MAGIC: &[u8] = b"ZNS_MIGRATE_READY_V1";
 const ATTESTATION_MAX: usize = 4096;
+pub const CEREMONY_MAX: usize = 1024 * 1024;
 const POLL: Duration = Duration::from_millis(20);
+
+pub const CEREMONY_FILES: &[&str] = &[MINT_CONF_FILE, CUSTODY_MANIFEST_FILE, CEREMONY_STATE_FILE];
 
 const PROTOCOL_FILES: &[&str] = &[
     OFFER_FILE,
     ATTESTATION_FILE,
     ENCRYPTED_SEED_FILE,
     SOURCE_ATTESTATION_FILE,
+    MINT_CONF_FILE,
+    CUSTODY_MANIFEST_FILE,
+    CEREMONY_STATE_FILE,
     RECEIPT_FILE,
     RECEIPT_ATTESTATION_FILE,
 ];
@@ -134,6 +143,23 @@ impl DirTransport {
 
     pub fn wait_encrypted_seed(&self) -> Result<Vec<u8>, MigrateError> {
         self.wait_file(ENCRYPTED_SEED_FILE, Some(TRANSFER_LEN), TRANSFER_LEN)
+    }
+
+    /// Copy one ceremony file in the open. The name is one of [`CEREMONY_FILES`].
+    pub fn publish_ceremony(&self, name: &str, bytes: &[u8]) -> Result<(), MigrateError> {
+        ceremony_name(name)?;
+        if bytes.is_empty() || bytes.len() > CEREMONY_MAX {
+            return Err(MigrateError::transport(format!(
+                "{name} is {} bytes",
+                bytes.len()
+            )));
+        }
+        self.write_new(name, bytes)
+    }
+
+    pub fn wait_ceremony(&self, name: &str) -> Result<Vec<u8>, MigrateError> {
+        ceremony_name(name)?;
+        self.wait_file(name, None, CEREMONY_MAX)
     }
 
     pub fn publish_receipt(&self, bytes: &[u8]) -> Result<(), MigrateError> {
@@ -240,6 +266,23 @@ impl DirTransport {
             }
         }
     }
+}
+
+fn ceremony_name(name: &str) -> Result<(), MigrateError> {
+    if CEREMONY_FILES.contains(&name) {
+        Ok(())
+    } else {
+        Err(MigrateError::transport(format!(
+            "{name} is not a ceremony file"
+        )))
+    }
+}
+
+/// Read a regular file once, without following a symlink.
+pub fn read_regular(path: &Path, max: usize) -> Result<Vec<u8>, MigrateError> {
+    let file = open_channel_file(path)?
+        .ok_or_else(|| MigrateError::transport(format!("{} does not exist", path.display())))?;
+    read_bounded(file, path, None, max)
 }
 
 fn bounded_attestation(bytes: &[u8]) -> Result<(), MigrateError> {
@@ -463,6 +506,25 @@ mod tests {
             started.elapsed()
         );
         assert!(err.to_string().contains("not a regular file"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ceremony_files_roundtrip_and_a_leftover_blocks_begin() {
+        let dir = scratch("ceremony");
+        let transport = DirTransport::open(&dir, Duration::from_millis(80)).unwrap();
+        let err = transport.publish_ceremony("notes.txt", b"no").unwrap_err();
+        assert!(err.to_string().contains("not a ceremony file"));
+
+        transport
+            .publish_ceremony(MINT_CONF_FILE, b"network = test")
+            .unwrap();
+        assert_eq!(
+            transport.wait_ceremony(MINT_CONF_FILE).unwrap(),
+            b"network = test"
+        );
+        let err = transport.source_begin().unwrap_err();
+        assert!(err.to_string().contains("already contains zns_mint.conf"));
         let _ = fs::remove_dir_all(&dir);
     }
 
