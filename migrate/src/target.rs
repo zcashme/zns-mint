@@ -3,7 +3,8 @@
 //! A transfer is decrypted only after its source attestation matches this
 //! offer and this ciphertext, and that report's measurement is
 //! `from_measurement` and its guest policy is `from_guest_policy`. After the
-//! capsule is linked into place, it is read back and unsealed. The receipt is
+//! capsule is linked into place, the ceremony files are written beside it and
+//! it is read back and unsealed. The receipt is
 //! written only when that reopened seed matches the one just decrypted. The
 //! receipt is published with an attestation that binds this offer and this
 //! receipt, and only when that report's measurement is `to_measurement` and
@@ -107,6 +108,7 @@ pub fn run(
         &capsule::read_capsule_file(staged.path())?,
     )?;
     staged.install(output, args.replace_after_verified_migration)?;
+    install_ceremony(output, transport, args.replace_after_verified_migration)?;
 
     let persisted = capsule::read_capsule_file(output)?;
     let parsed = prove_persisted(sealing_key, &seed, &persisted)?;
@@ -141,6 +143,29 @@ pub fn run(
         fingerprint = hex::encode(receipt.seed_fingerprint),
         "receipt published"
     );
+    Ok(())
+}
+
+fn install_ceremony(
+    capsule: &std::path::Path,
+    transport: &DirTransport,
+    replace: bool,
+) -> Result<(), MigrateError> {
+    let dir = capsule
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            MigrateError::transport(format!("{} has no directory", capsule.display()))
+        })?;
+    for name in transport::CEREMONY_FILES {
+        let bytes = transport.wait_ceremony(name)?;
+        let mode = if *name == transport::CUSTODY_MANIFEST_FILE {
+            0o644
+        } else {
+            0o600
+        };
+        persist::install_file(&dir.join(name), &bytes, mode, replace)?;
+    }
     Ok(())
 }
 

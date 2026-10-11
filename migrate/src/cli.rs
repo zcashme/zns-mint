@@ -23,9 +23,14 @@ unseals anything. The directory is an untrusted one-shot channel:
     attestation.bin
     encrypted_seed.bin
     source_attestation.bin
+    zns_mint.conf
+    zns_custody_manifest.toml
+    ceremony_state.toml
     receipt.bin
     receipt_attestation.bin
 
+The three ceremony files are copied in the open from the input capsule's
+directory and written beside the output capsule. The seed stays sealed.
 Use a fresh directory for each attempt. The capsule stays outside it.
 Target will not overwrite an existing capsule unless
 --replace-after-verified-migration is set.

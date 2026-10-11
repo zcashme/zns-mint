@@ -18,8 +18,10 @@
 //! There is no second offer. A failed check of the target returns before the
 //! capsule is unsealed. The source checks its own measurement and guest
 //! policy, then the capsule file hash and header fingerprint, before that
-//! unseal. The transfer is published only with an attestation that binds this
-//! offer and this ciphertext, and only when that report's measurement is
+//! unseal. The ceremony files beside the capsule are read before that unseal
+//! and published in the open with the transfer. The transfer is published
+//! only with an attestation that binds this offer and this ciphertext, and
+//! only when that report's measurement is
 //! `from_measurement` and its guest policy is `from_guest_policy`. The receipt
 //! is accepted only when a target report binds this offer and this receipt,
 //! and that report's measurement is `to_measurement` and its guest policy is
@@ -87,6 +89,7 @@ pub fn run(
     let capsule_bytes = capsule::read_capsule_file(input)?;
     let capsule = capsule::parse_capsule(&capsule_bytes)?;
     require_source_capsule(manifest, &capsule_bytes, &capsule.fingerprint)?;
+    let ceremony = read_ceremony_files(input)?;
     let transfer = {
         let seed = capsule::unseal_seed(sealing_key, &capsule)?;
         let transfer = migration::encrypt_seed(&seed, &offer, &mut SysRng)?;
@@ -111,6 +114,9 @@ pub fn run(
     )?;
     transport.publish_encrypted_seed(&handoff::encode_transfer(&transfer))?;
     transport.publish_source_attestation(source_report.as_bytes())?;
+    for (name, bytes) in &ceremony {
+        transport.publish_ceremony(name, bytes)?;
+    }
     info!("seed wrapped; plaintext dropped");
 
     let receipt = wait_peer(transport.wait_receipt())?;
@@ -171,6 +177,25 @@ pub(crate) fn require_source_capsule(
         return Err(MigrateError::SourceCapsule);
     }
     Ok(())
+}
+
+fn read_ceremony_files(
+    capsule: &std::path::Path,
+) -> Result<Vec<(&'static str, Vec<u8>)>, MigrateError> {
+    let dir = capsule
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            MigrateError::transport(format!("{} has no directory", capsule.display()))
+        })?;
+    transport::CEREMONY_FILES
+        .iter()
+        .map(|name| {
+            let path = dir.join(name);
+            let bytes = transport::read_regular(&path, transport::CEREMONY_MAX)?;
+            Ok((*name, bytes))
+        })
+        .collect()
 }
 
 fn wait_peer(result: Result<Vec<u8>, MigrateError>) -> Result<Vec<u8>, MigrateError> {
@@ -265,5 +290,29 @@ mod tests {
             require_source_capsule(&manifest, b"other", &manifest.seed_fingerprint),
             Err(MigrateError::SourceCapsule)
         ));
+    }
+
+    #[test]
+    fn ceremony_files_come_from_the_capsule_directory() {
+        let dir = std::env::temp_dir().join(format!("zns-migrate-ceremony-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(transport::MINT_CONF_FILE), b"network = test").unwrap();
+        std::fs::write(dir.join(transport::CUSTODY_MANIFEST_FILE), b"birthday = 1").unwrap();
+        std::fs::write(
+            dir.join(transport::CEREMONY_STATE_FILE),
+            b"state = \"COMPLETE\"",
+        )
+        .unwrap();
+        let files = read_ceremony_files(&dir.join("zns_seed.capsule")).unwrap();
+        assert_eq!(files[0].1, b"network = test");
+        assert_eq!(files[2].1, b"state = \"COMPLETE\"");
+
+        std::os::unix::fs::symlink(dir.join(transport::MINT_CONF_FILE), dir.join("link.conf"))
+            .unwrap();
+        let err =
+            transport::read_regular(&dir.join("link.conf"), transport::CEREMONY_MAX).unwrap_err();
+        assert!(err.to_string().contains("symlink"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

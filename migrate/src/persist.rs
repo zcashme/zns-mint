@@ -79,11 +79,28 @@ impl Drop for StagedCapsule {
 }
 
 pub fn stage(dest: &Path, bytes: &[u8]) -> Result<StagedCapsule, MigrateError> {
+    stage_mode(dest, bytes, 0o600)
+}
+
+/// Write a ceremony file beside the capsule. An existing file is left in
+/// place unless `replace` is set.
+pub fn install_file(
+    dest: &Path,
+    bytes: &[u8],
+    mode: u32,
+    replace: bool,
+) -> Result<(), MigrateError> {
+    guard_output(dest, replace)?;
+    let staged = stage_mode(dest, bytes, mode)?;
+    staged.install(dest, replace)
+}
+
+fn stage_mode(dest: &Path, bytes: &[u8], mode: u32) -> Result<StagedCapsule, MigrateError> {
     let temp = temp_sibling(dest);
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
+        .mode(mode)
         .open(&temp)
         .map_err(|error| MigrateError::io(format!("create {}", temp.display()), error))?;
     let write = (|| {
