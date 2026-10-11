@@ -91,7 +91,7 @@ impl NameNote {
     pub fn rcm<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Scalar {
         let verb = self.action().as_str().as_bytes();
         let name = self.name().as_str().as_bytes();
-        let ua = self.ua().encode(params);
+        let ua = self.ua().encode_receiver_preserving(params);
         let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
         zns_rcm(verb, name, ua.as_bytes(), &expiry, &prev)
@@ -110,7 +110,7 @@ impl NameNote {
     pub fn psi<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Base {
         let verb = self.action().as_str().as_bytes();
         let name = self.name().as_str().as_bytes();
-        let ua = self.ua().encode(params);
+        let ua = self.ua().encode_receiver_preserving(params);
         let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
         zns_psi(verb, name, ua.as_bytes(), &expiry, &prev)

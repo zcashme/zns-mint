@@ -332,7 +332,8 @@ fn snapshot(registry: &Registry, after_event: usize) -> Snapshot {
 }
 
 fn record_snapshot(record: &zns_mint::mint::registry::NameRecord) -> RecordSnapshot {
-    let ua_str = Address::Unified(Box::new(record.ua.clone())).encode(&MainNetwork);
+    let ua_str =
+        Address::Unified(Box::new(record.ua.clone())).encode_receiver_preserving(&MainNetwork);
     let expires_at_secs = match record.expires_at {
         Expiry::Never => None,
         Expiry::At(t) => Some(t.as_seconds()),
