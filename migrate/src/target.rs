@@ -10,8 +10,8 @@
 //! its guest policy is `to_guest_policy`. An existing capsule is left
 //! untouched unless the operator set `--replace-after-verified-migration`.
 
-use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::rngs::SysRng;
+use rand::TryRng;
 use secrecy::Secret;
 use tracing::info;
 use zns_canon::capsule::{self, SEED_LEN};
@@ -46,10 +46,11 @@ pub fn run(
     transport.target_begin()?;
     persist::guard_output(output, args.replace_after_verified_migration)?;
 
-    let mut rng = OsRng;
-    let keypair = migration::generate_ephemeral_keypair(&mut rng);
+    let mut rng = SysRng;
+    let keypair = migration::generate_ephemeral_keypair(&mut rng)?;
     let mut nonce = [0u8; 32];
-    rng.fill_bytes(&mut nonce);
+    rng.try_fill_bytes(&mut nonce)
+        .map_err(|_| MigrateError::Rng)?;
     let manifest_hash = upgrade::manifest_hash(manifest);
     let offer = MigrationOffer {
         ephemeral_pubkey: keypair.public,

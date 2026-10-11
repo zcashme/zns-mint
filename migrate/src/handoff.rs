@@ -425,11 +425,11 @@ mod tests {
 
     #[test]
     fn canonical_wrap_roundtrips_through_the_transfer_encoding() {
-        use rand::rngs::OsRng;
+        use rand::rngs::SysRng;
         use zns_canon::migration::{self, MigrationError};
 
-        let mut rng = OsRng;
-        let keypair = migration::generate_ephemeral_keypair(&mut rng);
+        let mut rng = SysRng;
+        let keypair = migration::generate_ephemeral_keypair(&mut rng).unwrap();
         let offer = MigrationOffer {
             ephemeral_pubkey: keypair.public,
             nonce: [0x44; 32],

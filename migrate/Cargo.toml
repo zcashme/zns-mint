@@ -13,7 +13,7 @@ default = []
 blake2b_simd = "1"
 hex = "0.4"
 libc = "0.2"
-rand = "0.8"
+rand = "0.10"
 secrecy = "0.8"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
