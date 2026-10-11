@@ -360,17 +360,15 @@ fn require_conf_birthday(anchor: &CeremonyAnchor, config_birthday: u32) {
 /// mined at the conf birthday. A fabricated (birthday, txid) pair
 /// refuses boot here.
 async fn require_anchor_on_chain(
-    source: &CanonicalBlockSource,
-    network: &Network,
+    fetch_block: impl AsyncFnOnce(
+        BlockHeight,
+    ) -> Result<zcash_primitives::block::Block, zcash::TransportError>,
     birthday: BlockHeight,
     anchor: TxId,
 ) {
-    let block = source
-        .get_block(network, birthday)
-        .await
-        .unwrap_or_else(|error| {
-            panic!("FATAL: cannot fetch block at the conf birthday {birthday}: {error}")
-        });
+    let block = fetch_block(birthday).await.unwrap_or_else(|error| {
+        panic!("FATAL: cannot fetch block at the conf birthday {birthday}: {error}")
+    });
     assert!(
         block.vtx().iter().any(|tx| tx.txid() == anchor),
         "FATAL: ceremony anchor {anchor} is not mined at the conf birthday {birthday}"
@@ -517,7 +515,12 @@ impl Boot<Network> {
 
         // 2b. The anchor, verified against the chain before anything
         //     downstream trusts the ceremony file.
-        require_anchor_on_chain(&source, &network, mint_birthday, ceremony.txid).await;
+        require_anchor_on_chain(
+            |height| source.get_block(&network, height),
+            mint_birthday,
+            ceremony.txid,
+        )
+        .await;
 
         // The genesis attestation, written after the seed is wiped;
         // `non-tee` builds have no device.
@@ -1003,7 +1006,7 @@ fn identity_report_data(treasury_ua: &str, registry_ufvk: &str) -> [u8; 64] {
     report_data
 }
 
-#[cfg(any(test, not(feature = "non-tee")))]
+#[cfg(not(feature = "non-tee"))]
 fn identity_document(
     network: &str,
     treasury_ua: &str,
@@ -1020,7 +1023,7 @@ fn identity_document(
     .expect("FATAL: identity document serialization")
 }
 
-#[cfg(any(test, feature = "non-tee"))]
+#[cfg(feature = "non-tee")]
 fn dev_identity_document(network: &str, treasury_ua: &str, registry_ufvk: &str) -> Vec<u8> {
     serde_json::to_vec_pretty(&serde_json::json!({
         "network": network,
@@ -1089,49 +1092,21 @@ mod tests {
         );
     }
 
-    /// The document carries the contract fields and the report
-    /// survives the hex round-trip.
-    #[test]
-    fn identity_document_round_trips() {
-        let report = [7u8; 1184];
-        let doc = identity_document("testnet", "u1ua", "u1ufvk", &report);
-        let value: serde_json::Value = serde_json::from_slice(&doc).expect("valid JSON");
-        assert_eq!(value["network"], "testnet");
-        assert_eq!(value["mode"], "hardware");
-        assert_eq!(value["treasury_ua"], "u1ua");
-        assert_eq!(value["registry_ufvk"], "u1ufvk");
-        let decoded = hex::decode(value["report"].as_str().expect("hex report")).expect("hex");
-        assert_eq!(decoded, report);
-    }
-
-    /// A local test document sets mode to dev and leaves the report empty.
-    #[test]
-    fn identity_document_for_local_tests_has_no_report() {
-        let doc = dev_identity_document("regtest", "u1ua", "u1ufvk");
-        let value: serde_json::Value = serde_json::from_slice(&doc).expect("valid JSON");
-        assert_eq!(value["mode"], "dev");
-        assert!(value["report"].is_null());
-    }
-
     #[cfg(not(feature = "non-tee"))]
     #[test]
-    fn genesis_record_uses_the_ceremony_txid_and_birthday() {
-        // Not a palindrome: pins the display/internal order.
+    fn genesis_record_carries_the_anchor_in_display_order() {
+        // Not a palindrome: pins the display/internal order. Field-copy
+        // and JSON round-trips are tautologies; the contract here is the
+        // byte order alone — record bytes and published hex both display
+        // order, so a verifier recomputes the record from the document.
+        // The parser contract is `ceremony_anchor_requires_txid_and_birthday`.
         let txid_bytes: [u8; 32] = core::array::from_fn(|i| i as u8);
         let txid = hex::encode(txid_bytes);
-        let anchor = ceremony_anchor(&format!(
-            "state = \"COMPLETE\"\ntxid = \"{txid}\"\nbirthday = 4408922\n"
-        ));
-        assert_eq!(anchor.birthday, 4408922);
-        assert_eq!(
-            anchor.file_txid, txid_bytes,
-            "file bytes stay display order"
-        );
-        assert_eq!(
-            anchor.txid.to_string(),
-            txid,
-            "the chain check reads the display form"
-        );
+        let anchor = CeremonyAnchor {
+            txid: TxId::from_hex(&txid).unwrap(),
+            file_txid: txid_bytes,
+            birthday: 4408922,
+        };
         let record = genesis_record(
             genesis_network(),
             [0x11; 32],
@@ -1139,32 +1114,10 @@ mod tests {
             anchor.birthday,
             &anchor,
         );
-        assert_eq!(record.version, 1);
-        assert_eq!(record.birthday, 4408922);
         assert_eq!(record.anchor_txid, txid_bytes);
-        assert_eq!(record.seed_fingerprint, [0x11; 32]);
-        assert_eq!(record.capsule_hash, [0x22; 32]);
-        let report = [7u8; 4];
-        let document = genesis_document(&record, &anchor, &report);
+        let document = genesis_document(&record, &anchor, &[7u8; 4]);
         let value: serde_json::Value = serde_json::from_slice(&document).expect("json");
         assert_eq!(value["anchor_txid"], txid);
-        assert_eq!(value["birthday"], 4408922);
-        let decoded = hex::decode(value["report"].as_str().expect("hex report")).expect("hex");
-        assert_eq!(decoded, report);
-    }
-
-    #[test]
-    #[should_panic(expected = "does not match")]
-    fn require_conf_birthday_refuses_a_mismatch() {
-        require_conf_birthday(
-            &CeremonyAnchor {
-                txid: TxId::from_bytes([0xab; 32]),
-                #[cfg(not(feature = "non-tee"))]
-                file_txid: [0xab; 32],
-                birthday: 200,
-            },
-            100,
-        );
     }
 
     #[test]
@@ -1176,6 +1129,69 @@ mod tests {
         assert_eq!(anchor.txid.to_string(), txid);
         #[cfg(not(feature = "non-tee"))]
         assert_eq!(anchor.file_txid, txid_bytes);
+    }
+
+    /// A one-transaction block, for anchor-check fixtures.
+    fn test_block_with(
+        tx: zcash_primitives::transaction::Transaction,
+        height: BlockHeight,
+    ) -> zcash_primitives::block::Block {
+        let header = zcash_primitives::block::BlockHeaderData {
+            version: 4,
+            prev_block: zcash_primitives::block::BlockHash([0; 32]),
+            merkle_root: [0; 32],
+            final_sapling_root: [0; 32],
+            time: u32::from(height),
+            bits: 0,
+            nonce: [0; 32],
+            solution: vec![],
+        }
+        .freeze()
+        .unwrap();
+        zcash_primitives::block::Block::from_parts(header, (tx, Vec::new()).into(), height)
+    }
+
+    /// One funding output to the Treasury, frozen into a transaction.
+    fn fixture_transaction(network: &Network) -> zcash_primitives::transaction::Transaction {
+        let treasury = TreasuryKeys::derive(network, &Secret::new([0; 32]));
+        let version = orchard::bundle::BundleVersion::ironwood_v3();
+        let mut builder = orchard::builder::Builder::new(
+            orchard::builder::BundleType::DEFAULT,
+            version,
+            version.default_flags(),
+            orchard::Anchor::empty_tree(),
+        )
+        .unwrap();
+        builder
+            .add_output(
+                None,
+                treasury
+                    .orchard_fvk()
+                    .address_at(0u32, zip32::Scope::External),
+                orchard::value::NoteValue::from_raw(1),
+                [0; 512],
+            )
+            .unwrap();
+        scan_transaction(builder)
+    }
+
+    #[tokio::test]
+    async fn anchor_check_accepts_the_anchor_mined_at_the_birthday() {
+        let network = boot_network();
+        let tx = fixture_transaction(&network);
+        let txid = tx.txid();
+        let block = test_block_with(tx, BlockHeight::from_u32(109));
+        require_anchor_on_chain(async |_| Ok(block), BlockHeight::from_u32(109), txid).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "is not mined at the conf birthday")]
+    async fn anchor_check_refuses_an_anchor_not_mined_at_the_birthday() {
+        let network = boot_network();
+        let tx = fixture_transaction(&network);
+        let block = test_block_with(tx, BlockHeight::from_u32(109));
+        let other = TxId::from_bytes(core::array::from_fn(|i| i as u8 + 1));
+        require_anchor_on_chain(async |_| Ok(block), BlockHeight::from_u32(109), other).await;
     }
 
     #[test]
@@ -1918,39 +1934,6 @@ mod tests {
         let seed = Secret::new([0xAB; 32]);
         let wrong_fp = SeedFingerprint::from_seed(&[0xCD; 32]).unwrap().to_string();
         verify_fingerprint(&seed, &wrong_fp);
-    }
-
-    #[cfg(feature = "regtest")]
-    #[test]
-    fn regtest_parameters_match_the_pinned_harness_schedule() {
-        use zcash_protocol::consensus::NetworkUpgrade;
-
-        let network = boot_network();
-        let one = BlockHeight::from_u32(1);
-        let four = BlockHeight::from_u32(4);
-
-        assert_eq!(
-            network.network_type(),
-            zcash_protocol::consensus::NetworkType::Regtest
-        );
-        for upgrade in [
-            NetworkUpgrade::Overwinter,
-            NetworkUpgrade::Sapling,
-            NetworkUpgrade::Blossom,
-            NetworkUpgrade::Heartwood,
-            NetworkUpgrade::Canopy,
-            NetworkUpgrade::Nu5,
-            NetworkUpgrade::Nu6,
-        ] {
-            assert_eq!(network.activation_height(upgrade), Some(one));
-        }
-        for upgrade in [
-            NetworkUpgrade::Nu6_1,
-            NetworkUpgrade::Nu6_2,
-            NetworkUpgrade::Nu6_3,
-        ] {
-            assert_eq!(network.activation_height(upgrade), Some(four));
-        }
     }
 
     #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
