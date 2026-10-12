@@ -53,6 +53,24 @@ jobs:
         run: cargo test --locked
 
       - name: test (regtest)
+        run: cargo test --locked --features regtest
+
+      - name: docs
+        run: cargo doc --locked --no-deps
+
+      - name: coverage
+        run: |
+          cargo llvm-cov --locked --features regtest --html --output-dir coverage
+          cargo llvm-cov report --lcov --output-path lcov.info
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            lcov.info
+            coverage/
+          if-no-files-found: error
 
   # Boot-to-release e2e against the real regtest stack, on every PR and
   # master push: the funder wallet pays the Treasury, the Treasury's own
