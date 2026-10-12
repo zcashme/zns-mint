@@ -1,9 +1,7 @@
-//! Boot e2e chained into the happy path: the real ownership flow (funder
-//! wallet pays the Treasury, the Treasury's own keys author the 40-anchor
-//! ceremony, the funder is reaped), `Boot::start()` in-process with its
-//! evidence assertions, then the mint binary serving claim, update,
-//! release to a live user wallet. Regtest selects non-tee, so the
-//! identity document is dev mode and has no report.
+//! Boot e2e chained into the happy path: real ownership flow (funder
+//! pays the Treasury, Treasury keys author the 40-anchor ceremony, funder
+//! reaped), in-process `Boot::start()` with its evidence assertions, then
+//! the mint binary serving claim, update, release to a live user wallet.
 
 use std::time::Duration;
 
@@ -36,34 +34,30 @@ async fn boot_then_claim_update_release() -> Result<()> {
 
     let mut zebra = Zebrad::start().await?;
 
-    // Funder coinbase first: it must be mined before the chain's first
-    // shielded tx, or the funder's retrieval queue stalls forever and its
-    // transparent balance stays zero (v0.1.0-beta.3).
+    // Funder coinbase first: mined before the chain's first shielded tx,
+    // or the funder's transparent balance never appears (zallet
+    // v0.1.0-beta.3 retrieval stall).
     let mut funder = fixture::Zallet::init(&zebra)?;
     zebra.restart_with_miner(&funder.miner_address).await?;
     zebra
         .generate_blocks(fixture::NU6_3_ACTIVATION_HEIGHT + fixture::COINBASE_MATURITY + 2)
         .await?;
 
-    // The user wallet second: its bring-up restart drops the funder's
-    // unfinalized tail, but the funder's mature coinbase is deep-finalized
-    // and only grows. The user's own shield is the chain's first shielded
-    // tx, closing its transparent window.
+    // User second: its shield is the chain's first shielded tx; its
+    // restart drops only the funder's unfinalized tail.
     let user = fixture::User::fund(&mut zebra, 7).await?;
     eprintln!("user miner: {}", user.miner_address);
     eprintln!("user UA: {}", user.ua);
 
-    // The funder's daemon starts only now — after the first shielded tx —
-    // but its retrieval queue holds only the finalized pre-shield
-    // coinbase, so it still sees every mature UTXO.
     funder.start_daemon().await?;
     let tip = zebra.tip_height().await?;
     funder.wait_until_synced(tip, SYNC_TIMEOUT).await?;
 
-    // The wallet's balance scan trails the node's mature-coinbase truth;
-    // the shield snapshots whatever it has scanned so far.
-    let truth = fixture::mature_coinbase_zats(&zebra, &funder.miner_address).await?;
-    fixture::wait_until_sees_coinbase(&funder, truth, SYNC_TIMEOUT).await?;
+    // Wait for a floor, not the node's full mature truth — the funder
+    // only needs the 1-ZEC Treasury payment, and CI's zallet credits it
+    // only its deep-finalized core.
+    fixture::wait_until_sees_coinbase(&funder, fixture::TREASURY_PAYMENT_ZATS * 2, SYNC_TIMEOUT)
+        .await?;
     funder.shield_coinbase().await?;
     zebra.generate_blocks(1).await?;
     let tip = zebra.tip_height().await?;

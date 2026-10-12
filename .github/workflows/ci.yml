@@ -72,14 +72,9 @@ jobs:
             coverage/
           if-no-files-found: error
 
-  # Boot-to-release e2e against the real regtest stack, on every PR and
-  # master push: the funder wallet pays the Treasury, the Treasury's own
-  # keys author the ceremony, the funder is reaped, boot completes
-  # in-process with its evidence assertions, and the mint binary then
-  # serves claim → update → release for a live user wallet. Runs after
-  # the test job, so a clippy or unit-test failure skips it. The ceremony
-  # is re-proved every run: the funding txid is random, so a signed
-  # ceremony cannot be cached across runs.
+  # Boot → claim → update → release in one run. Needs ci, so unit
+  # failures skip it. The ceremony is re-proved every run: a random
+  # funding txid cannot be cached.
   e2e:
     name: e2e (boot to happy path)
     needs: ci

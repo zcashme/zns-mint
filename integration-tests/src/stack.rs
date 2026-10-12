@@ -18,10 +18,9 @@ pub struct Stack {
 impl Stack {
     /// Launch the mint binary and wait for its first run loop.
     ///
-    /// `birthday` and `anchor_txid` are the real ceremony facts
-    /// `Boot::start()` verified in-process; the binary writes the same
-    /// keys/ contract into its own directory and re-verifies the anchor
-    /// against the chain on its way to the run loop.
+    /// `birthday`/`anchor_txid` are the ceremony facts `Boot::start()`
+    /// verified in-process; the binary re-verifies the anchor on its way
+    /// to the run loop.
     pub async fn launch_mint(
         zebra: &mut Zebrad,
         bin: PathBuf,
