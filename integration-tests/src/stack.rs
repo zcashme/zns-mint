@@ -1,11 +1,11 @@
-//! Bring-up: zebrad, dev ceremony, funded user, live mint.
+//! Launch the mint binary against chain facts boot already verified.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
-use serde_json::json;
-use zns_integration_tests::{miner_address, publish, FIXTURE_HEIGHT};
-use zns_integration_tests::{zallet_bin, zebrad_bin, Mint, Zebrad};
+
+use zns_integration_tests::{Mint, Zebrad};
 
 use crate::user::User;
 
@@ -16,62 +16,22 @@ pub struct Stack {
 }
 
 impl Stack {
-    /// Ceremony + mint live + `mature_user_coins` spendable user coinbases.
+    /// Launch the mint binary and wait for its first run loop.
     ///
-    /// `Ok(None)` when zebrad or zallet is missing locally (not in CI).
-    pub async fn start(mature_user_coins: u32) -> Result<Option<Self>> {
-        if zebrad_bin().is_none() {
-            if std::env::var_os("CI").is_some() {
-                bail!("zebrad required in CI — set ZEBRAD_BIN");
-            }
-            eprintln!("skipping: zebrad not found (set ZEBRAD_BIN or put zebrad on PATH)");
-            return Ok(None);
-        }
-        if zallet_bin().is_none() {
-            if std::env::var_os("CI").is_some() {
-                bail!("zallet required in CI — set ZALLET_BIN");
-            }
-            eprintln!("skipping: zallet not found (set ZALLET_BIN or put zallet-zebra on PATH)");
-            return Ok(None);
-        }
-
-        let mint_build = tokio::task::spawn_blocking(Mint::build);
-
-        // Fund the user BEFORE the ceremony: the wallet bring-up restarts
-        // zebrad, which drops zebra's volatile non-finalized blocks (~35
-        // deep). Funding after publish would erase the freshly mined
-        // ceremony block; funding first leaves the ceremony on finalized,
-        // restart-safe history.
-        let miner = miner_address()?;
-        let mut zebra = Zebrad::start_with_miner(&miner).await?;
-        zebra.generate_blocks(FIXTURE_HEIGHT).await?;
-        let user = User::fund(&mut zebra, mature_user_coins).await?;
-        eprintln!("user miner: {}", user.miner_address);
-        eprintln!("user UA: {}", user.ua);
-        publish(&mut zebra).await?;
-        // The ceremony block is the mint's birthday; its only
-        // non-coinbase transaction is the anchor boot verifies against
-        // the chain. The fixture mines one block for the one tx it just
-        // broadcast, cached tx or not.
-        let birthday = zebra.tip_height().await?;
-        let block = zebra
-            .rpc("getblock", json!([birthday.to_string(), 1]))
-            .await?;
-        let txids: Vec<String> = serde_json::from_value(block["tx"].clone())?;
-        let [coinbase, anchor_txid] = txids.as_slice() else {
-            bail!(
-                "ceremony block {birthday} holds {} txs, expected coinbase + anchor",
-                txids.len()
-            );
-        };
-        let _ = coinbase;
-
-        let mint_bin = mint_build.await.expect("mint build task")?;
-        let mut mint = Mint::start(mint_bin, birthday, anchor_txid).await?;
+    /// `birthday` and `anchor_txid` are the real ceremony facts
+    /// `Boot::start()` verified in-process; the binary writes the same
+    /// keys/ contract into its own directory and re-verifies the anchor
+    /// against the chain on its way to the run loop.
+    pub async fn launch_mint(
+        zebra: &mut Zebrad,
+        bin: PathBuf,
+        birthday: u32,
+        anchor_txid: &str,
+    ) -> Result<Mint> {
+        let mut mint = Mint::start(bin, birthday, anchor_txid).await?;
         mint.wait_until_live().await?;
-        wait_for_first_run_loop(&mut zebra, &mut mint).await?;
-
-        Ok(Some(Stack { zebra, mint, user }))
+        wait_for_first_run_loop(zebra, &mut mint).await?;
+        Ok(mint)
     }
 }
 

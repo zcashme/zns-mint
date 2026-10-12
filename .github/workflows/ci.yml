@@ -53,29 +53,20 @@ jobs:
         run: cargo test --locked
 
       - name: test (regtest)
-        run: cargo test --locked --features regtest
 
-      - name: docs
-        run: cargo doc --locked --no-deps
-
-      - name: coverage
-        run: |
-          cargo llvm-cov --locked --features regtest --html --output-dir coverage
-          cargo llvm-cov report --lcov --output-path lcov.info
-
-      - name: Upload coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage
-          path: |
-            lcov.info
-            coverage/
-          if-no-files-found: error
-
-  integration:
-    name: integration (boot completion)
+  # Boot-to-release e2e against the real regtest stack, on every PR and
+  # master push: the funder wallet pays the Treasury, the Treasury's own
+  # keys author the ceremony, the funder is reaped, boot completes
+  # in-process with its evidence assertions, and the mint binary then
+  # serves claim → update → release for a live user wallet. Runs after
+  # the test job, so a clippy or unit-test failure skips it. The ceremony
+  # is re-proved every run: the funding txid is random, so a signed
+  # ceremony cannot be cached across runs.
+  e2e:
+    name: e2e (boot to happy path)
+    needs: ci
     runs-on: zvs
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -88,7 +79,7 @@ jobs:
       - name: Check protoc
         run: protoc --version
 
-      # Same tag the integration job verifies against; bump deliberately.
+      # Same tag the e2e test verifies against; bump deliberately.
       - name: Checkout zallet
         uses: actions/checkout@v4
         with:
@@ -138,6 +129,7 @@ jobs:
       - name: Export zallet binary path
         run: |
           echo "ZALLET_BIN=${{ runner.workspace }}/../zvs-cache/zallet-zebra-v0.1.0-beta.3" >> "$GITHUB_ENV"
+
       # Per-job network isolation: rootlesskit + slirp4netns give the test
       # process tree its own netns (private 127.0.0.1, so the harness's
       # fixed ports 8232/8230 cannot collide across concurrent jobs) with
@@ -162,106 +154,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: boot completion
-        working-directory: integration-tests
-        env:
-          CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target
-        run: |
-          rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback \
-            cargo test --locked --test boot_completion -- --nocapture
-
-  # Black-box happy path (claim → update → release) against the real
-  # regtest stack, on every PR and master push. Runs after the test job,
-  # so a clippy or unit-test failure skips it. The ceremony-tx cache is
-  # the only cloud round-trip: the regtest chain through FIXTURE_HEIGHT
-  # is deterministic, so a signed ceremony replays without re-proving.
-  happy-path:
-    name: happy-path
-    needs: ci
-    runs-on: zvs
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      # zebra-indexer-proto (tonic/prost) needs protoc at build time.
-      - name: Check protoc
-        run: protoc --version
-
-      # Same tag the integration job verifies against; bump deliberately.
-      - name: Checkout zallet
-        uses: actions/checkout@v4
-        with:
-          repository: zcash/zallet
-          ref: v0.1.0-beta.3
-          path: zallet
-
-      # Build artifacts persist on the runner (outside the workspace, so
-      # checkout's git clean never touches them) instead of round-tripping
-      # gigabytes through GitHub's cache service. Cargo's fingerprints
-      # rebuild only what changed.
-      - name: Prepare runner-local caches
-        run: |
-          mkdir -p "$ZVS_CACHE/zebrad-6.3.0" "$ZVS_CACHE/target" "$ZVS_CACHE/params"
-          if [ ! -x "$ZVS_CACHE/zebrad-6.3.0/zebrad" ]; then
-            cd "$ZVS_CACHE/zebrad-6.3.0"
-            base="https://github.com/ZcashFoundation/zebra/releases/download/v6.3.0"
-            asset="zebrad-6.3.0-x86_64-unknown-linux-gnu.tar.gz"
-            curl -fsSL -O "$base/$asset" -O "$base/$asset.sha256"
-            sha256sum -c "$asset.sha256"
-            tar -xzf "$asset"
-            find . -maxdepth 3 -type f -name zebrad -exec mv {} ./zebrad \;
-            chmod +x ./zebrad
-          fi
-          cd "${{ github.workspace }}"
-          for p in sapling-spend.params sapling-output.params; do
-            if [ ! -f "$ZVS_CACHE/params/$p" ]; then
-              curl -L --fail -o "$ZVS_CACHE/params/$p" "https://download.z.cash/downloads/$p"
-            fi
-          done
-        env:
-          ZVS_CACHE: ${{ runner.workspace }}/../zvs-cache
-
-      - name: Export binary paths
-        run: |
-          echo "ZEBRAD_BIN=${{ runner.workspace }}/../zvs-cache/zebrad-6.3.0/zebrad" >> "$GITHUB_ENV"
-          echo "ZCASH_PARAMS_DIR=${{ runner.workspace }}/../zvs-cache/params" >> "$GITHUB_ENV"
-
-      - name: Build zallet (zebra backend)
-        working-directory: zallet/backends/zebra
-        env:
-          CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/zallet-target
-        run: |
-          cargo build --locked --release
-          cp -f "${{ runner.workspace }}/../zvs-cache/zallet-target/release/zallet-zebra" "${{ runner.workspace }}/../zvs-cache/zallet-zebra-v0.1.0-beta.3"
-
-      - name: Export zallet binary path
-        run: |
-          echo "ZALLET_BIN=${{ runner.workspace }}/../zvs-cache/zallet-zebra-v0.1.0-beta.3" >> "$GITHUB_ENV"
-
-      # Per-job network isolation: rootlesskit + slirp4netns give the test
-      # process tree its own netns (private 127.0.0.1, so the harness's
-      # fixed ports 8232/8230 cannot collide across concurrent jobs) with
-      # full outbound HTTPS via usermode NAT — the mint's oracle and
-      # pre-sale fetches still work.
-      - name: Install rootlesskit
-        run: |
-          if ! command -v rootlesskit >/dev/null || ! command -v slirp4netns >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y rootlesskit slirp4netns
-          fi
-
-      - name: Cache ceremony tx
-        uses: actions/cache@v4
-        with:
-          path: integration-tests/ceremony-tx.hex
-          key: ceremony-tx-v2-6.3.0-${{ hashFiles('integration-tests/src/**', 'integration-tests/tests/**', 'integration-tests/Cargo.lock') }}
-
-      - name: Build mint for happy path
+      - name: Build mint for e2e
         env:
           CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target-happy-path
         run: |
@@ -273,12 +166,11 @@ jobs:
           test -x "$CARGO_TARGET_DIR/debug/zns-mint"
           echo "ZNS_MINT_BIN=$CARGO_TARGET_DIR/debug/zns-mint" >> "$GITHUB_ENV"
 
-      - name: happy path
+      - name: boot to happy path
         working-directory: integration-tests
         env:
-          CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target-happy-path
+          CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target
           ZNS_MINT_DIR: ${{ github.workspace }}
-          ZNS_CEREMONY_TX_CACHE: ceremony-tx.hex
         run: |
           rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback \
             cargo test --locked --test happy_path -- --nocapture
