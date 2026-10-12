@@ -220,9 +220,9 @@ pub async fn wait_until_sees_coinbase(
     timeout: Duration,
 ) -> Result<()> {
     let deadline = Instant::now() + timeout;
-    let mut last = "no poll completed".to_string();
+    let mut last;
     loop {
-        match zallet.call("z_getbalances", json!([])).await {
+        last = match zallet.call("z_getbalances", json!([])).await {
             Ok(balances) => {
                 let seen = balances
                     .pointer("/accounts/0/transparent/coinbase/spendable/valueZat")
@@ -231,15 +231,18 @@ pub async fn wait_until_sees_coinbase(
                 if seen >= expected_zats {
                     return Ok(());
                 }
-                last = balances.to_string();
+                balances.to_string()
             }
-            Err(e) => last = format!("z_getbalances error: {e:#}"),
-        }
+            Err(e) => format!("z_getbalances error: {e:#}"),
+        };
         if Instant::now() >= deadline {
-            bail!("wallet never saw {expected_zats} mature coinbase zats within {timeout:?} (last: {last})");
+            break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    bail!(
+        "wallet never saw {expected_zats} mature coinbase zats within {timeout:?} (last: {last})"
+    );
 }
 
 /// Poll until account 0's spendable shielded balance reaches `min_zats`;
