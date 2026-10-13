@@ -1,5 +1,15 @@
 # `mint/presale.rs` design record
 
+## 2026-10-13 — The early-access regime denies by default (#340)
+
+- The deciding pass flips the refusal: a claim dies unless the name is
+  listed (`is_protected` at the tip MTP) and its access code matches —
+  absent and lapsed rows refuse where they once opened. Refusals log
+  three distinct stages — no access code, wrong access code, name not
+  listed; the last fires only when a valid code meets a missing or
+  stale row, the operator's signal. Payment stays kept, the queue slot
+  frees, and this module's functions are unchanged.
+
 ## 2026-09-29 — Duplicate rows coalesce; the table is deduped upstream (#243)
 
 - `zn_names` was rebuilt upstream while this change was in flight:
