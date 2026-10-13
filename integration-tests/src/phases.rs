@@ -28,7 +28,11 @@ fn access_code(name: &str) -> String {
         dev_sealing_key(ACCESS_CODE_KEY_CONTEXT).expose(),
     );
     let name = zns_mint::mint::Name::parse(name).expect("the e2e name is lawful");
-    key.derive(&name).digits().iter().map(|b| *b as char).collect()
+    key.derive(&name)
+        .digits()
+        .iter()
+        .map(|b| *b as char)
+        .collect()
 }
 
 /// Pay `ZNS:claim:<code>:forever:zcash:<ua>`, wait for mint, verify on chain.
