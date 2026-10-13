@@ -15,6 +15,12 @@
   remains the per-pass drift check, now the standing verification.
 - The `coalesced Zebra tip notification` debug line is deleted; a
   coalesced wake just means a later push carrying a fresher tip.
+- Review fix: the dead-stream branches read the tip *before*
+  resubscribing. Repair-then-read let a frame land in the fresh
+  subscription's buffer during the read; the next wake returned that
+  stale height and the run loop read it as a rollback — a false
+  rewind of a linear chain. Read-then-repair starts the stream empty,
+  so no frame can predate the read; genuine reorg pushes still pass.
 
 ## 2026-09-30 — The endpoint timeout retries as cancelled (#257)
 

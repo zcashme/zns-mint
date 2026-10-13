@@ -137,17 +137,20 @@ impl TipSession {
                     source.canonical_tip().await
                 }
             },
-            // The stream died: repair, then read — never wait for a push
-            // a change-only stream may owe only after the next block.
+            // The stream died: read the tip first, then resubscribe —
+            // the fresh stream starts empty, so no buffered frame can
+            // predate the read and fake a rewind.
             Some(Err(error)) => {
-                tracing::warn!(%error, "Zebra tip stream failed; repairing");
+                tracing::warn!(%error, "Zebra tip stream failed; reading the tip, then repairing");
+                let best = source.canonical_tip().await;
                 self.repair().await;
-                source.canonical_tip().await
+                best
             }
             None => {
-                tracing::warn!("Zebra tip stream ended; repairing");
+                tracing::warn!("Zebra tip stream ended; reading the tip, then repairing");
+                let best = source.canonical_tip().await;
                 self.repair().await;
-                source.canonical_tip().await
+                best
             }
         }
     }
