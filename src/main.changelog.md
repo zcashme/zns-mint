@@ -1,5 +1,16 @@
 # main.changelog.md
 
+## 2026-10-13 — Per-request live state on the metrics surface (#342)
+
+- `zns_mint_request_state{name,action,ua,txid}`: `1` from request intake
+  (payment decoded, any verb) until the request's Name Note is minted or
+  the request dies, `0` after. Presence is the frontend's "processing"
+  signal; the chain is the record of what happened. The labels rule is
+  amended by owner decision — per-request facts are intentional, the
+  endpoint stays host-gated, and every label is public the moment the
+  note lands. Intake emits at arrival routing; settlement at every
+  deciding-pass refusal and at NameNote submission.
+
 ## 2026-10-05 — The deciding pass is the only claim ruling site (#295)
 
 - The arrivals loop no longer rules: the `note_pending` pre-check and

@@ -9,8 +9,14 @@
 //! port (zns-deployment `launch/qemu-snp.sh`). Standing rule for this
 //! surface: labels carry public data only — account addresses, viewing
 //! keys that are public by design, and hardware-attested launch facts.
+//! Amended by owner decision (#342): per-request facts — name, action,
+//! controller, payment — are carried by `request_state`; the endpoint
+//! stays host-gated, and every one of those labels is public the moment
+//! the note lands.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::{LazyLock, Mutex};
 
 /// Scrape endpoint, reachable from the host through the QEMU forward.
 pub const METRICS_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 9464);
@@ -35,6 +41,52 @@ pub fn snapshot(
     metrics::gauge!("zns_mint_chain_tip_height").set(u32::from(tip) as f64);
     metrics::gauge!("zns_mint_treasury_zec").set(treasury_zats as f64 / 1e8);
     metrics::gauge!("zns_mint_oracle_zats_per_usd").set(oracle_zats_per_usd as f64);
+}
+
+/// Payment txid by (name, action, controller) — reuse at settlement.
+type RequestTxids = HashMap<(String, String, String), String>;
+
+/// Per-request live state: `1` from the moment the mint decodes a
+/// request payment until its Name Note is minted (or the request dies),
+/// `0` after. Presence is the "processing" signal; the chain is the
+/// record of what happened.
+static REQUEST_TXIDS: LazyLock<Mutex<RequestTxids>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The mint decoded a request payment; it is now processing.
+pub fn request_seen(name: &str, action: &str, ua: &str, txid: &str) {
+    REQUEST_TXIDS
+        .lock()
+        .expect("request txid map poisoned")
+        .insert(
+            (name.to_owned(), action.to_owned(), ua.to_owned()),
+            txid.to_owned(),
+        );
+    metrics::gauge!(
+        "zns_mint_request_state",
+        "name" => name.to_owned(),
+        "action" => action.to_owned(),
+        "ua" => ua.to_owned(),
+        "txid" => txid.to_owned(),
+    )
+    .set(1.0);
+}
+
+/// The request left processing: its Name Note was minted (the chain now
+/// carries the fact) or the request died without one. The series drops
+/// to `0`.
+pub fn request_settled(name: &str, action: &str, ua: &str) {
+    let txid = REQUEST_TXIDS
+        .lock()
+        .expect("request txid map poisoned")
+        .remove(&(name.to_owned(), action.to_owned(), ua.to_owned()));
+    metrics::gauge!(
+        "zns_mint_request_state",
+        "name" => name.to_owned(),
+        "action" => action.to_owned(),
+        "ua" => ua.to_owned(),
+        "txid" => txid.unwrap_or_default(),
+    )
+    .set(0.0);
 }
 
 /// The account identity the attestation binds. Set once at boot.
