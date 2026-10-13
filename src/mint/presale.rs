@@ -94,6 +94,17 @@ impl AccessCode {
         bool::from(self.0.ct_eq(&other.0))
     }
 
+    /// The six ASCII digits.
+    pub fn digits(&self) -> [u8; 6] {
+        let mut digits = [0u8; 6];
+        let mut n = self.0;
+        for i in (0..6).rev() {
+            digits[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+        digits
+    }
+
     /// The six ASCII digits; test-only.
     #[cfg(test)]
     pub fn expose_for_test(&self) -> [u8; 6] {

@@ -19,15 +19,36 @@ use crate::verify::{
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(600);
 const OTP_READ_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// Pay `ZNS:claim:forever:alice:<ua>`, wait for mint, verify on chain.
+/// The claimed name: a Forever row in the live pre-sale table, so the
+/// early-access gate admits it.
+const NAME: &str = "zcash";
+
+/// The dev issuer: regtest sealing is the public dev key, so the test
+/// recomputes a name's access code exactly as the mint judges it.
+fn access_code(name: &str) -> String {
+    use zns_canon::sealing::dev_sealing_key;
+    use zns_mint::mint::presale::{AccessCodeDerivationKey, ACCESS_CODE_KEY_CONTEXT};
+    let key = AccessCodeDerivationKey::from_private_key(
+        dev_sealing_key(ACCESS_CODE_KEY_CONTEXT).expose(),
+    );
+    let name = zns_mint::mint::Name::parse(name).expect("the e2e name is lawful");
+    key.derive(&name).digits().iter().map(|b| *b as char).collect()
+}
+
+/// Pay `ZNS:claim:<code>:forever:zcash:<ua>`, wait for mint, verify on chain.
 ///
 /// Checks: mint logs the note in flight (not rejected / non-request /
-/// unauthorized); `zns-verify` decrypt + `cmx`; fields alice / claim /
+/// unauthorized); `zns-verify` decrypt + `cmx`; fields zcash / claim /
 /// user UA / `none` / 0 / non-tee Registry keys; the mint's `txid=` line
 /// matches the on-chain registration.
 pub async fn claim(stack: &mut Stack) -> Result<VerifiedNameNote> {
     let mark = stack.mint.log_text().len();
-    let memo = format!("ZNS:claim:forever:alice:{}", stack.user.ua);
+    let memo = format!(
+        "ZNS:claim:{}:forever:{}:{}",
+        access_code(NAME),
+        NAME,
+        stack.user.ua
+    );
     let pay_txid = stack.user.pay_treasury(&memo).await?;
     eprintln!("claim payment txid {pay_txid}");
     // Confirm the payment, then leave the tip still so mint's
@@ -38,7 +59,7 @@ pub async fn claim(stack: &mut Stack) -> Result<VerifiedNameNote> {
     let started = Instant::now();
     let mut poked = false;
     loop {
-        let note = poll_submitted_note(stack, mark, "alice", "claim", &pay_txid).await?;
+        let note = poll_submitted_note(stack, mark, NAME, "claim", &pay_txid).await?;
         if let Some(txid) = note {
             assert_eq!(txid.action, "claim");
             assert_eq!(txid.ua, stack.user.ua);
@@ -52,7 +73,7 @@ pub async fn claim(stack: &mut Stack) -> Result<VerifiedNameNote> {
         }
         if Instant::now() >= deadline {
             bail!(
-                "mint did not register alice within 600s:\n{}",
+                "mint did not register {NAME} within 600s:\n{}",
                 stack.mint.exit_detail()
             );
         }
@@ -86,8 +107,8 @@ async fn transition(
 ) -> Result<VerifiedNameNote> {
     let ua = stack.user.ua.clone();
     let request = match action {
-        "update" => format!("ZNS:update:none:alice:{ua}"),
-        "release" => format!("ZNS:release:alice:{ua}"),
+        "update" => format!("ZNS:update:none:{NAME}:{ua}"),
+        "release" => format!("ZNS:release:{NAME}:{ua}"),
         other => bail!("unknown action {other}"),
     };
 
@@ -102,7 +123,7 @@ async fn transition(
     let code = read_otp(stack, &challenge_txid, &ua).await?;
     eprintln!("{action} otp read");
 
-    let echo = format!("ZNS:otp:{code}:alice:{action}:{ua}");
+    let echo = format!("ZNS:otp:{code}:{NAME}:{action}:{ua}");
     let echo_mark = stack.mint.log_text().len();
     let echo_txid = stack.user.pay_treasury(&echo).await?;
     eprintln!("{action} echo txid {echo_txid}");
@@ -112,7 +133,7 @@ async fn transition(
     let started = Instant::now();
     let mut poked = false;
     loop {
-        let note = poll_submitted_note(stack, echo_mark, "alice", action, &echo_txid).await?;
+        let note = poll_submitted_note(stack, echo_mark, NAME, action, &echo_txid).await?;
         if let Some(txid) = note {
             assert_eq!(txid.action, action);
             assert_eq!(txid.ua, stack.user.ua);
@@ -171,7 +192,7 @@ async fn poll_submitted_note(
     }
     if action == "claim" && tail.contains("claim not authorized") && tail.contains(name) {
         bail!(
-            "mint did not authorize alice:\n{}",
+            "mint did not authorize {name}:\n{}",
             stack.mint.exit_detail()
         );
     }
@@ -216,7 +237,7 @@ async fn wait_for_challenge(
                 stack.mint.exit_detail()
             );
         }
-        if let Some(txid) = challenge_txid(tail, "alice", action) {
+        if let Some(txid) = challenge_txid(tail, NAME, action) {
             return Ok(txid);
         }
         if Instant::now() >= deadline {
