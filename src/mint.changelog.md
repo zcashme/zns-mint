@@ -1,5 +1,12 @@
 # Mint live-work design record
 
+## 2026-10-13 — Early-access regime: claims deny by default (#340)
+
+- The deciding pass refuses every claim that lacks its name's listing
+  or its per-name access code; three refusal stages log separately
+  (no code, wrong code, not listed). Codeless claim memos still decode
+  — the wire form is unchanged; the gate is the refusing pass.
+
 ## 2026-09-29 — Pre-birthday blocks restore wallet history only (#239)
 
 - `apply_block` receives boot's birthday. Before it, the ordinary upstream

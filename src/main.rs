@@ -356,14 +356,27 @@ async fn main() {
                         // The earliest payment owns the name until its claim
                         // is observed. A later payment does not start a
                         // second Name Note.
-                        // Pre-sale gate: the table judges protection at
-                        // the tip MTP, the key judges the code.
-                        if protected_names.is_protected(name, mtp_now)
-                            && !access_code_key.accepts(name, code.as_ref())
-                        {
+                        // Early-access regime: only a listed name may claim,
+                        // and only with its per-name access code; an absent
+                        // or lapsed row refuses, payment kept.
+                        let Some(offered) = code.as_ref() else {
                             tracing::debug!(
                                 name = %name.as_str(),
-                                "pre-sale claim refused"
+                                "pre-sale claim refused: no access code"
+                            );
+                            break 'lane true;
+                        };
+                        if !access_code_key.accepts(name, Some(offered)) {
+                            tracing::debug!(
+                                name = %name.as_str(),
+                                "pre-sale claim refused: wrong access code"
+                            );
+                            break 'lane true;
+                        }
+                        if !protected_names.is_protected(name, mtp_now) {
+                            tracing::debug!(
+                                name = %name.as_str(),
+                                "pre-sale claim refused: name not listed"
                             );
                             break 'lane true;
                         }
