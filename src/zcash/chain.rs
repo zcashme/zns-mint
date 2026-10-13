@@ -118,52 +118,41 @@ impl TipSession {
         Self { client, stream }
     }
 
-    /// One wake-up, answered with the node's canonical tip; the stream
-    /// is repaired on death. A malformed announcement is dropped.
-    /// `Err` is the canonical tip's data verdict.
+    /// One tip per wake-up: the announcement, or a canonical-tip read
+    /// when the stream dies or the push is malformed.
     pub async fn next_tip(
         &mut self,
         source: &CanonicalBlockSource,
     ) -> Result<(BlockHeight, BlockHash), TransportError> {
-        let announced = match self.stream.next().await {
+        match self.stream.next().await {
+            // A push: Zebra's own state watch, read at wake time.
             Some(Ok(notification)) => match tip_height_hash(&notification) {
-                Ok(announced) => {
-                    tracing::info!(height = u32::from(announced.0), "tip notification received");
-                    Some(announced)
+                Ok(tip) => {
+                    tracing::info!(height = u32::from(tip.0), "tip notification received");
+                    Ok(tip)
                 }
+                // Bad node data: fall back to the read.
                 Err(error) => {
                     tracing::warn!(%error, "Zebra tip announcement malformed; using canonical tip");
-                    None
+                    source.canonical_tip().await
                 }
             },
+            // The stream died: read the tip first, then resubscribe —
+            // the fresh stream starts empty, so no buffered frame can
+            // predate the read and fake a rewind.
             Some(Err(error)) => {
-                tracing::warn!(%error, "Zebra tip stream failed; repairing");
+                tracing::warn!(%error, "Zebra tip stream failed; reading the tip, then repairing");
+                let best = source.canonical_tip().await;
                 self.repair().await;
-                None
+                best
             }
             None => {
-                tracing::warn!("Zebra tip stream ended; repairing");
+                tracing::warn!("Zebra tip stream ended; reading the tip, then repairing");
+                let best = source.canonical_tip().await;
                 self.repair().await;
-                None
-            }
-        };
-
-        // Truth is self-derived: the announcement may have coalesced
-        // every change since the last wake-up, so the node's answer —
-        // not the stream's promise — is what the mint acts on.
-        let best = source.canonical_tip().await?;
-        if let Some((height, hash)) = announced {
-            if best != (height, hash) {
-                tracing::debug!(
-                    announced_height = u32::from(height),
-                    announced_hash = %hash,
-                    best_height = u32::from(best.0),
-                    best_hash = %best.1,
-                    "coalesced Zebra tip notification"
-                );
+                best
             }
         }
-        Ok(best)
     }
 
     /// Pause, reopen.
