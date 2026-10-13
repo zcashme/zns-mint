@@ -104,18 +104,6 @@ impl AccessCode {
         }
         digits
     }
-
-    /// The six ASCII digits; test-only.
-    #[cfg(test)]
-    pub fn expose_for_test(&self) -> [u8; 6] {
-        let mut digits = [0u8; 6];
-        let mut n = self.0;
-        for i in (0..6).rev() {
-            digits[i] = b'0' + (n % 10) as u8;
-            n /= 10;
-        }
-        digits
-    }
 }
 
 /// A name's protection. Absence is `Unprotected`; a lift moment is
@@ -447,9 +435,9 @@ mod tests {
             hex::encode(gate.as_bytes()),
             "5e2db6040cd32d2486675a3b3d60b9d4d96e9c8d4a5f862e0dfd7bd6a3f57b91"
         );
-        assert_eq!(gate.derive(&alice()).expose_for_test(), *b"352582");
+        assert_eq!(gate.derive(&alice()).digits(), *b"352582");
         assert_eq!(
-            gate.derive(&Name::parse("bob").unwrap()).expose_for_test(),
+            gate.derive(&Name::parse("bob").unwrap()).digits(),
             *b"131624"
         );
     }
@@ -511,7 +499,7 @@ mod tests {
 
     #[test]
     fn derive_matches_the_vector() {
-        assert_eq!(gate().derive(&alice()).expose_for_test(), *b"352582");
+        assert_eq!(gate().derive(&alice()).digits(), *b"352582");
     }
 
     #[test]
