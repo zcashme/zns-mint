@@ -264,15 +264,27 @@ async fn main() {
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
-                        let (action, name, ua) = match &request {
-                            Request::Claim { name, ua, .. } => ("claim", name.as_str(), ua),
-                            Request::Update { name, ua, .. } => ("update", name.as_str(), ua),
-                            Request::Release { name, ua } => ("release", name.as_str(), ua),
+                        let (action, name, controller) = match &request {
+                            Request::Claim { name, ua, .. } => (
+                                "claim",
+                                name.as_str(),
+                                ua.encode_receiver_preserving(&network),
+                            ),
+                            Request::Update { name, ua, .. } => (
+                                "update",
+                                name.as_str(),
+                                ua.encode_receiver_preserving(&network),
+                            ),
+                            Request::Release { name, ua } => (
+                                "release",
+                                name.as_str(),
+                                ua.encode_receiver_preserving(&network),
+                            ),
                         };
                         zns_mint::metrics::request_seen(
                             name,
                             action,
-                            &ua.encode_receiver_preserving(&network),
+                            &controller,
                             &txid.to_string(),
                         );
                         requests.record(txid, request, paid, next_height);
@@ -363,7 +375,6 @@ async fn main() {
                         term,
                         code,
                     } => {
-                        let controller = ua.encode_receiver_preserving(&network);
                         // The earliest payment owns the name until its claim
                         // is observed. A later payment does not start a
                         // second Name Note.
@@ -375,7 +386,6 @@ async fn main() {
                                 name = %name.as_str(),
                                 "pre-sale claim refused: no access code"
                             );
-                            zns_mint::metrics::request_settled(name.as_str(), "claim", &controller);
                             break 'lane true;
                         };
                         if !access_code_key.accepts(name, Some(offered)) {
@@ -383,7 +393,6 @@ async fn main() {
                                 name = %name.as_str(),
                                 "pre-sale claim refused: wrong access code"
                             );
-                            zns_mint::metrics::request_settled(name.as_str(), "claim", &controller);
                             break 'lane true;
                         }
                         if !protected_names.is_protected(name, mtp_now) {
@@ -391,7 +400,6 @@ async fn main() {
                                 name = %name.as_str(),
                                 "pre-sale claim refused: name not listed"
                             );
-                            zns_mint::metrics::request_settled(name.as_str(), "claim", &controller);
                             break 'lane true;
                         }
                         // Payment gate: the quote at first sight is binding.
@@ -399,11 +407,9 @@ async fn main() {
                         // fit, is dead and silent; a new payment settles
                         // a new evaluation.
                         let Some(price) = oracle.quote(name, *term) else {
-                            zns_mint::metrics::request_settled(name.as_str(), "claim", &controller);
                             break 'lane true;
                         };
                         if paid < price {
-                            zns_mint::metrics::request_settled(name.as_str(), "claim", &controller);
                             break 'lane true;
                         }
                         let Some(claim_note) =
@@ -413,7 +419,6 @@ async fn main() {
                                 name = %name.as_str(),
                                 "claim not authorized"
                             );
-                            zns_mint::metrics::request_settled(name.as_str(), "claim", &controller);
                             break 'lane true;
                         };
                         // Enactment below resolves the anchor and broadcasts.
@@ -423,7 +428,6 @@ async fn main() {
                                 name = %name.as_str(),
                                 "transition already queued; the earlier payment owns the name"
                             );
-                            zns_mint::metrics::request_settled(name.as_str(), "claim", &controller);
                         }
                         true
                     }
@@ -433,7 +437,6 @@ async fn main() {
                             Request::Release { name, ua } => (name, Action::Release, ua, None),
                             Request::Claim { .. } => unreachable!(),
                         };
-                        let controller = requested_ua.encode_receiver_preserving(&network);
                         let Some(record) = registry.authorize_challenge(
                             &name_notes,
                             name,
@@ -443,19 +446,9 @@ async fn main() {
                             target_height,
                             mtp_now,
                         ) else {
-                            zns_mint::metrics::request_settled(
-                                name.as_str(),
-                                action.as_str(),
-                                &controller,
-                            );
                             break 'lane true;
                         };
                         if paid < oracle.challenge_fee() {
-                            zns_mint::metrics::request_settled(
-                                name.as_str(),
-                                action.as_str(),
-                                &controller,
-                            );
                             break 'lane true;
                         }
                         let pending = OtpChallenge::issue(
@@ -472,6 +465,24 @@ async fn main() {
                 }
             };
             if resolved {
+                let (action, name, controller) = match &request {
+                    Request::Claim { name, ua, .. } => (
+                        "claim",
+                        name.as_str(),
+                        ua.encode_receiver_preserving(&network),
+                    ),
+                    Request::Update { name, ua, .. } => (
+                        "update",
+                        name.as_str(),
+                        ua.encode_receiver_preserving(&network),
+                    ),
+                    Request::Release { name, ua } => (
+                        "release",
+                        name.as_str(),
+                        ua.encode_receiver_preserving(&network),
+                    ),
+                };
+                zns_mint::metrics::request_settled(name, action, &controller, &txid.to_string());
                 requests.resolved(txid);
             }
         }
@@ -514,24 +525,13 @@ async fn main() {
         // Requests run first; a voided echo leaves its challenge available.
         for (echo, paid, note_height) in std::mem::take(&mut echoes) {
             let _ = 'lane: {
-                let controller = echo.ua.encode_receiver_preserving(&network);
                 // The echo lane: an OTP response. Decided in every outcome —
                 // an echo never waits for money; the renewal or
                 // upgrade fee declines on shortfall, it does not defer.
                 let Some(record) = registry.record(&echo.name).cloned() else {
-                    zns_mint::metrics::request_settled(
-                        echo.name.as_str(),
-                        echo.action.as_str(),
-                        &controller,
-                    );
                     break 'lane true; // no record — released or unknown: no mint-issued challenge can match
                 };
                 let Some(sent) = challenges.answer(&echo, record.commitment) else {
-                    zns_mint::metrics::request_settled(
-                        echo.name.as_str(),
-                        echo.action.as_str(),
-                        &controller,
-                    );
                     break 'lane true; // no pending challenge: dead
                 };
                 // The renewal or upgrade fee, binding at first
@@ -577,11 +577,6 @@ async fn main() {
                         name = %echo.name.as_str(),
                         action = echo.action.as_str(),
                         "echo refused by the law — payment kept"
-                    );
-                    zns_mint::metrics::request_settled(
-                        echo.name.as_str(),
-                        echo.action.as_str(),
-                        &controller,
                     );
                     break 'lane true;
                 };
@@ -697,11 +692,6 @@ async fn main() {
 
             if source.submit(&transaction, "NameNote").await {
                 wallet.record_sent(&transaction, target_height, fee);
-                zns_mint::metrics::request_settled(
-                    note.name().as_str(),
-                    note.action().as_str(),
-                    &note.ua().encode_receiver_preserving(&network),
-                );
                 tracing::info!(
                     txid = %transaction.txid(),
                     name = %note.name().as_str(),
