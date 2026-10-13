@@ -118,12 +118,8 @@ impl TipSession {
         Self { client, stream }
     }
 
-    /// One wake-up, answered with the node's best tip. The announcement
-    /// is the answer — Zebra re-reads its state watch per push, including
-    /// reorg resets. Belt and suspenders: a malformed announcement or a
-    /// dead stream repairs and falls back to one `getblockchaininfo`
-    /// read, so recovery is on our clock, never the next block's.
-    /// `Err` is that tip's data verdict.
+    /// One tip per wake-up: the announcement, or a canonical-tip read
+    /// when the stream dies or the push is malformed.
     pub async fn next_tip(
         &mut self,
         source: &CanonicalBlockSource,
