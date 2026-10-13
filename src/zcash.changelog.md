@@ -1,5 +1,21 @@
 # Zcash I/O changelog
 
+## 2026-10-13 — The announcement is the answer (#344)
+
+- Upstream receipts first: Zebra's `ChainTipChange` pushes on reorgs
+  too — `TipAction::Reset` names "switching to a different best chain,
+  also known as a rollback" — and the gRPC server re-reads
+  `best_tip_height_and_hash()` from the state watch per push, so the
+  payload is the node's current best tip, not a stale promise.
+- `next_tip` is flipped: the push is the tip the mint acts on; the
+  per-wake `getblockchaininfo` read is demoted to belt and suspenders —
+  the malformed-announcement fallback and the post-repair read, so
+  recovery stays on our clock (a change-only stream may owe nothing
+  until the next block). The run loop's post-price `exact_tip` gate
+  remains the per-pass drift check, now the standing verification.
+- The `coalesced Zebra tip notification` debug line is deleted; a
+  coalesced wake just means a later push carrying a fresher tip.
+
 ## 2026-09-30 — The endpoint timeout retries as cancelled (#257)
 
 - tonic 0.14 maps the endpoint's client-side `REQUEST_TIMEOUT` to

@@ -70,10 +70,10 @@ async fn main() {
         "mint awaiting Zebra tips"
     );
 
-    // The tip session owns the stream's lifecycle — wake, repair, and
-    // the re-read of the canonical tip that turns every wake-up into the
-    // node's answer, never the announcement's promise. The orchestrator
-    // holds position (the wallet) and never sees transport state.
+    // The tip session owns the stream's lifecycle: the announcement is
+    // the answer, and a dead or malformed stream repairs and falls back
+    // to one canonical-tip read. The run loop holds position (the
+    // wallet) and never sees transport state.
     let mut connection = TipSession::open(chain).await;
     'run: loop {
         let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {
