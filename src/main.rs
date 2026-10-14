@@ -58,7 +58,7 @@ async fn main() {
         guest,
     } = Boot::start().await;
 
-    zns_mint::metrics::install();
+    let in_flight = zns_mint::metrics::install();
     zns_mint::metrics::identity(&treasury_address, &registry_ufvk);
     zns_mint::metrics::ceremony(&seed_fingerprint, &capsule_hash);
     if let Some(guest) = &guest {
@@ -77,7 +77,7 @@ async fn main() {
     'run: loop {
         // Every pass ends here, however it ended: the names the queues
         // still hold are in flight until the next tip.
-        zns_mint::metrics::requests_in_flight(
+        in_flight.publish(
             requests
                 .in_flight()
                 .chain(challenges.in_flight())
