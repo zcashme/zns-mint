@@ -1,5 +1,12 @@
 # `mint/otp.rs` design record
 
+## 2026-10-15 — The answer names its payment (#342)
+
+- `OtpQueue::answer` returns the matched challenge with the newest txid
+  backing it, so the echo lane hands the request on to its Name Note
+  order without a second lookup.
+- `in_flight` lists every request whose challenge is still open.
+
 ## 2026-09-22 — `awaiting` scopes by `tip_rcm`
 
 - `OtpQueue::awaiting` now binds `tip_rcm`, symmetric with `pending`

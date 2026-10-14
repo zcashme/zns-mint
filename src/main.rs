@@ -75,6 +75,15 @@ async fn main() {
     // transport state.
     let mut connection = TipSession::open(chain).await;
     'run: loop {
+        // Every pass ends here, however it ended: the queues as they
+        // stand are the requests still in flight until the next tip.
+        zns_mint::metrics::requests_in_flight(
+            &network,
+            requests
+                .in_flight()
+                .chain(challenges.in_flight())
+                .chain(name_notes.in_flight()),
+        );
         let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {
             panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
         });
@@ -264,29 +273,6 @@ async fn main() {
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
-                        let (action, name, controller) = match &request {
-                            Request::Claim { name, ua, .. } => (
-                                "claim",
-                                name.as_str(),
-                                ua.encode_receiver_preserving(&network),
-                            ),
-                            Request::Update { name, ua, .. } => (
-                                "update",
-                                name.as_str(),
-                                ua.encode_receiver_preserving(&network),
-                            ),
-                            Request::Release { name, ua } => (
-                                "release",
-                                name.as_str(),
-                                ua.encode_receiver_preserving(&network),
-                            ),
-                        };
-                        zns_mint::metrics::request_seen(
-                            name,
-                            action,
-                            &controller,
-                            &txid.to_string(),
-                        );
                         requests.record(txid, request, paid, next_height);
                     }
                     MintInbound::Echo(echo) => echoes.push((echo, paid, next_height)),
@@ -422,7 +408,7 @@ async fn main() {
                             break 'lane true;
                         };
                         // Enactment below resolves the anchor and broadcasts.
-                        if !name_notes.admit(note_height, claim_note) {
+                        if !name_notes.admit_request(note_height, claim_note, txid) {
                             tracing::debug!(
                                 %txid,
                                 name = %name.as_str(),
@@ -465,24 +451,6 @@ async fn main() {
                 }
             };
             if resolved {
-                let (action, name, controller) = match &request {
-                    Request::Claim { name, ua, .. } => (
-                        "claim",
-                        name.as_str(),
-                        ua.encode_receiver_preserving(&network),
-                    ),
-                    Request::Update { name, ua, .. } => (
-                        "update",
-                        name.as_str(),
-                        ua.encode_receiver_preserving(&network),
-                    ),
-                    Request::Release { name, ua } => (
-                        "release",
-                        name.as_str(),
-                        ua.encode_receiver_preserving(&network),
-                    ),
-                };
-                zns_mint::metrics::request_settled(name, action, &controller, &txid.to_string());
                 requests.resolved(txid);
             }
         }
@@ -531,7 +499,7 @@ async fn main() {
                 let Some(record) = registry.record(&echo.name).cloned() else {
                     break 'lane true; // no record — released or unknown: no mint-issued challenge can match
                 };
-                let Some(sent) = challenges.answer(&echo, record.commitment) else {
+                let Some((sent, request_txid)) = challenges.answer(&echo, record.commitment) else {
                     break 'lane true; // no pending challenge: dead
                 };
                 // The renewal or upgrade fee, binding at first
@@ -592,7 +560,7 @@ async fn main() {
                         "voluntary release authorized"
                     );
                 }
-                name_notes.admit(note_height, transition_note);
+                name_notes.admit_request(note_height, transition_note, request_txid);
                 true
             };
         }

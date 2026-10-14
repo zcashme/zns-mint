@@ -1,15 +1,25 @@
 # main.changelog.md
 
-## 2026-10-13 — Per-request live state on the metrics surface (#342)
+## 2026-10-15 — The requests in flight are on the metrics page (#342)
 
-- `zns_mint_request_state{name,action,ua,txid}`: `1` from request intake
-  (payment decoded, any verb) until the request's Name Note is minted or
-  the request dies, `0` after. Presence is the frontend's "processing"
-  signal; the chain is the record of what happened. The labels rule is
-  amended by owner decision — per-request facts are intentional, the
-  endpoint stays host-gated, and every label is public the moment the
-  note lands. Intake emits at arrival routing; settlement at every
-  deciding-pass refusal and at NameNote submission.
+- `zns_mint_request_state{name,action,ua,txid} 1` for every request the
+  mint is still working on: awaiting its decision, its challenge open
+  (awaiting relay or echo), or its Name Note not yet seen on chain. A
+  finished request is absent — presence is processing; the chain is the
+  record of what became of it.
+- Derived, not evented: each pass ends by handing the queues' in-flight
+  sets to `metrics::requests_in_flight`. Every way a request dies —
+  refusal, drop, stale predecessor, challenge expiry or retirement, reorg,
+  restart — is covered by its absence from the queues, with no call site
+  on any of those paths. A reorg that unsees a note brings its request
+  back.
+- The lines never enter the recorder, which keeps every series it has
+  seen: the mint serves `/metrics` itself (hyper, same address, same
+  `/health`) and prints the set beside the recorder's text. The exporter's
+  `http-listener` feature is dropped.
+- The labels rule is amended by owner decision: the endpoint stays
+  host-gated, and a request's labels are public once its note lands.
+  Prometheus keeps each request's series for its retention window.
 
 ## 2026-10-05 — The deciding pass is the only claim ruling site (#295)
 

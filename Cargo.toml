@@ -19,7 +19,7 @@ path = "src/main.rs"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
 subtle = "2.5"
 secrecy = "0.8"
@@ -43,7 +43,9 @@ time = { version = "0.3", features = ["parsing"] }
 # TEE). All five crates are already compiled via tonic/gRPC — listing them as
 # direct deps just makes them importable. No TLS, no reqwest, no ring.
 tonic = "0.14"
-hyper = { version = "1", features = ["client", "http1"] }
+# `server` serves the metrics page (src/metrics.rs); the exporter's own
+# listener compiled the same feature.
+hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "webpki-roots"] }
 # ureq (the AMD KDS fetch) enables rustls/ring and hyper-rustls enables
@@ -112,7 +114,7 @@ zcash_client_backend = { version = "=0.25.0-pre.1", default-features = false, fe
 orchard = { version = "0.16.0", default-features = false, features = ["unsafe-zns", "circuit", "multicore"] }
 shardtree = "0.8"
 metrics = "0.24.6"
-metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener"] }
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 
 
 # Also redirect `zcash_primitives` to the ZNS fork so the transaction

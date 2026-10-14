@@ -621,10 +621,11 @@ pub enum NameNoteState {
 
 /// Name Notes remain tracked from authorization through canonical
 /// confirmation. Reorgs rewind seen orders; orphaned authorizations are
-/// removed by their origin height.
+/// removed by their origin height. An order a Treasury request started
+/// keeps that request's payment txid; a lifecycle release has none.
 #[derive(Clone, Debug, Default)]
 pub struct NameNoteQueue {
-    orders: Vec<(NameNote, BlockHeight, NameNoteState)>,
+    orders: Vec<(NameNote, BlockHeight, NameNoteState, Option<TxId>)>,
 }
 
 impl NameNoteQueue {
@@ -632,10 +633,21 @@ impl NameNoteQueue {
     /// name. Admission order decides which transition owns that name; a
     /// confirmed transition no longer reserves it.
     pub fn admit(&mut self, origin: BlockHeight, note: NameNote) -> bool {
+        self.push(origin, note, None)
+    }
+
+    /// [`Self::admit`] for the order a Treasury request started, paid
+    /// by `txid`.
+    pub fn admit_request(&mut self, origin: BlockHeight, note: NameNote, txid: TxId) -> bool {
+        self.push(origin, note, Some(txid))
+    }
+
+    fn push(&mut self, origin: BlockHeight, note: NameNote, txid: Option<TxId>) -> bool {
         if self.note_pending(note.name()) {
             return false;
         }
-        self.orders.push((note, origin, NameNoteState::Authorized));
+        self.orders
+            .push((note, origin, NameNoteState::Authorized, txid));
         true
     }
 
@@ -643,7 +655,7 @@ impl NameNoteQueue {
     /// order's origin. Earlier matches may belong to an older incarnation
     /// of a deterministic note commitment.
     pub fn reconcile_seen<P: Parameters>(&mut self, network: &P, registry: &Registry) {
-        for (note, origin, state) in &mut self.orders {
+        for (note, origin, state, _) in &mut self.orders {
             let commitment = note.commitment(network);
             if registry
                 .record_history(note.name())
@@ -656,7 +668,7 @@ impl NameNoteQueue {
         // A different transition may have made an unresolved order's
         // predecessor stale. It no longer owns the name; keep Seen entries
         // so a reorg can rewind the transition we actually observed.
-        self.orders.retain(|(note, _, state)| {
+        self.orders.retain(|(note, _, state, _)| {
             if *state == NameNoteState::Seen || note.action().is_claim() {
                 return true;
             }
@@ -669,8 +681,8 @@ impl NameNoteQueue {
     /// Reorg: drop orders admitted above the common ancestor and
     /// reauthorize seen orders whose confirmation is gone.
     pub fn rewind_to(&mut self, ancestor: BlockHeight) {
-        self.orders.retain(|(_, origin, _)| *origin <= ancestor);
-        for (_, _, state) in &mut self.orders {
+        self.orders.retain(|(_, origin, _, _)| *origin <= ancestor);
+        for (_, _, state, _) in &mut self.orders {
             if *state == NameNoteState::Seen {
                 *state = NameNoteState::Authorized;
             }
@@ -682,15 +694,15 @@ impl NameNoteQueue {
     pub fn note_pending(&self, name: &Name) -> bool {
         self.orders
             .iter()
-            .any(|(note, _, state)| *state != NameNoteState::Seen && note.name() == name)
+            .any(|(note, _, state, _)| *state != NameNoteState::Seen && note.name() == name)
     }
 
     /// Outstanding authorized orders, in admission order.
     pub fn authorized_notes(&self) -> Vec<NameNote> {
         self.orders
             .iter()
-            .filter(|(_, _, state)| *state == NameNoteState::Authorized)
-            .map(|(note, _, _)| note.clone())
+            .filter(|(_, _, state, _)| *state == NameNoteState::Authorized)
+            .map(|(note, _, _, _)| note.clone())
             .collect()
     }
 
@@ -699,9 +711,21 @@ impl NameNoteQueue {
         let index = self
             .orders
             .iter()
-            .position(|(note, _, state)| *state != NameNoteState::Seen && note.name() == name)
+            .position(|(note, _, state, _)| *state != NameNoteState::Seen && note.name() == name)
             .expect("FATAL: no unresolved order owns this name");
         self.orders.remove(index);
+    }
+
+    /// Every request whose Name Note is not yet seen on chain.
+    pub fn in_flight(&self) -> impl Iterator<Item = (TxId, &Name, Action, &UnifiedAddress)> {
+        self.orders
+            .iter()
+            .filter_map(|(note, _, state, txid)| match (state, txid) {
+                (NameNoteState::Authorized, Some(txid)) => {
+                    Some((*txid, note.name(), note.action(), note.ua()))
+                }
+                _ => None,
+            })
     }
 }
 
@@ -1128,6 +1152,42 @@ mod tests {
         queue.reconcile_seen(&MAIN_NETWORK, &registry);
         assert!(queue.note_pending(release.name()));
         assert_eq!(queue.authorized_notes().len(), 1);
+    }
+
+    /// A request's order is in flight until its note is seen, again
+    /// once a rewind undoes the sighting, and not after it is dropped.
+    /// The note names the request; a lifecycle release names none.
+    #[test]
+    fn an_order_is_in_flight_until_its_note_is_seen() {
+        let (mut registry, release, _) = registry_with_claim_release_reclaim();
+        let height = |n| BlockHeight::from_u32(n);
+        let txid = TxId::from_bytes([7; 32]);
+        let in_flight =
+            |queue: &NameNoteQueue| queue.in_flight().map(|(txid, ..)| txid).collect::<Vec<_>>();
+
+        let mut queue = NameNoteQueue::default();
+        assert!(queue.admit_request(height(105), release.clone(), txid));
+        assert_eq!(in_flight(&queue), [txid]);
+        let (_, name, action, ua) = queue.in_flight().next().unwrap();
+        assert_eq!(
+            (name, action, ua),
+            (release.name(), Action::Release, release.ua())
+        );
+
+        queue.reconcile_seen(&MAIN_NETWORK, &registry);
+        assert!(in_flight(&queue).is_empty());
+
+        queue.rewind_to(height(110));
+        registry.truncate_to_height(height(110));
+        queue.reconcile_seen(&MAIN_NETWORK, &registry);
+        assert_eq!(in_flight(&queue), [txid]);
+
+        queue.drop_note(release.name());
+        assert!(in_flight(&queue).is_empty());
+
+        assert!(queue.admit(height(110), release.clone()));
+        assert!(queue.note_pending(release.name()));
+        assert!(in_flight(&queue).is_empty());
     }
 
     #[test]

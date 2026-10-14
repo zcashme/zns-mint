@@ -1,5 +1,14 @@
 # `mint/note.rs` design record
 
+## 2026-10-15 — An order keeps the payment that asked for it (#342)
+
+- Orders carry `Option<TxId>`: the Treasury request's payment for orders
+  admitted through `admit_request`; `None` for lifecycle releases, which
+  `admit` still takes. The note already carries the request's name,
+  action and UA — a release's UA is the requester's, by
+  `authorize_release` — so the txid is the only thing added.
+- `in_flight` lists the requests whose note is not yet seen.
+
 ## 2026-09-28 — Outstanding orders retry through wallet expiry (#202, #225)
 
 - `NameNoteState` retains `Authorized` and `Seen`; `Submitted` and
