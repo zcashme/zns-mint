@@ -19,14 +19,13 @@ use crate::verify::{
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(600);
 const OTP_READ_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// The dev issuer: regtest sealing is the public dev key, so the test
-/// recomputes a name's access code exactly as the mint judges it.
+/// The dev issuer: the mint derives the access-code key from the dev
+/// capsule's all-zero seed, so the test recomputes a name's access code
+/// exactly as the mint judges it.
 fn access_code(name: &str) -> String {
-    use zns_canon::sealing::dev_sealing_key;
-    use zns_mint::mint::presale::{AccessCodeDerivationKey, ACCESS_CODE_KEY_CONTEXT};
-    let key = AccessCodeDerivationKey::from_private_key(
-        dev_sealing_key(ACCESS_CODE_KEY_CONTEXT).expose(),
-    );
+    use zns_canon::regtest::DEV_SEED;
+    use zns_mint::mint::presale::AccessCodeDerivationKey;
+    let key = AccessCodeDerivationKey::from_seed(&DEV_SEED);
     let name = zns_mint::mint::Name::parse(name).expect("the e2e name is lawful");
     key.derive(&name)
         .digits()
