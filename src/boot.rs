@@ -486,11 +486,8 @@ impl Boot<Network> {
         // 2. Seed intake + verification: read capsule, require the keygen
         //    report when this file is the recorded capsule, unseal, then
         //    derive keys. The seed lives only inside this block — Secret's
-        //    Drop wipes it. The unseal also yields the ceremony's access-code
-        //    key, sealed inside the same envelope; its purpose key
-        //    (`access-code-v1`) is what claim memos are judged against, and
-        //    issuers holding the same key recompute codes offline. The mint
-        //    never stores codes in Supabase.
+        //    Drop wipes it. The access-code key derives from the seed: an
+        //    X25519 scalar agreed with the issuer's public key.
         let (
             treasury_keys,
             registry_keys,
@@ -517,11 +514,9 @@ impl Boot<Network> {
             tracing::info!("boot: resolving capsule sealing key");
             let capsule_key =
                 sealing_key(CAPSULE_KEY_CONTEXT).expect("FATAL: sealing key unavailable");
-            let opened = unseal_seed(&capsule_key, &capsule)
+            let seed = unseal_seed(&capsule_key, &capsule)
                 .expect("FATAL: failed to unseal seed. Capsule tampering, wrong TEE, or wrong capsule for this instance.");
-            let seed = opened.seed;
-            let access_code_key =
-                AccessCodeDerivationKey::from_private_key(opened.access_code_key.expose_secret());
+            let access_code_key = AccessCodeDerivationKey::from_seed(seed.expose_secret());
             verify_fingerprint(&seed, ceremony.seed_fingerprint.trim());
             let sealed_hash = capsule_hash(&blob);
             (

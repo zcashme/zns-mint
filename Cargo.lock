@@ -5139,7 +5139,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 [[package]]
 name = "zns-canon"
 version = "0.1.0"
-source = "git+https://github.com/zcashme/zns-canon.git?branch=main#6260c4bc1e7b700bbf4089f809e6117ac5398748"
+source = "git+https://github.com/zcashme/zns-canon.git?branch=main#fdcd854e8fae0053781194e3dc92b1ec7f8f1d23"
 dependencies = [
  "blake2b_simd",
  "chacha20poly1305 0.10.1",
@@ -5199,6 +5199,7 @@ dependencies = [
  "tonic",
  "tracing",
  "tracing-subscriber",
+ "x25519-dalek",
  "zcash_address",
  "zcash_client_backend",
  "zcash_keys",
