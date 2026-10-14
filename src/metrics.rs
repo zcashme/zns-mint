@@ -11,14 +11,14 @@
 //! surface: labels carry public data only — account addresses, viewing
 //! keys that are public by design, and hardware-attested launch facts.
 //! Amended by owner decision for `zns_mint_request_state` (#342): it
-//! names the requests in flight — public once their Name Note lands;
-//! the endpoint stays host-gated.
+//! names every name with a request in flight — public once its Name
+//! Note lands; the endpoint stays host-gated.
 //!
 //! The requests in flight never enter the recorder. The recorder keeps
-//! every series it has seen, and a series per request would grow with
-//! every request ever made; instead the loop hands over the whole set
+//! every series it has seen, and a series per name would grow with
+//! every name ever requested; instead the loop hands over the whole set
 //! once per pass and the listener prints it beside the recorder's text.
-//! A finished request is absent: presence is processing.
+//! A name with nothing pending is absent: presence is processing.
 
 use std::collections::BTreeSet;
 use std::convert::Infallible;
@@ -34,10 +34,8 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use metrics_exporter_prometheus::PrometheusHandle;
-use zcash_primitives::transaction::TxId;
-use zcash_protocol::consensus::Parameters;
 
-use crate::mint::{Action, Name, UnifiedAddress};
+use crate::mint::Name;
 
 /// Scrape endpoint, reachable from the host through the QEMU forward.
 pub const METRICS_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 9464);
@@ -82,42 +80,28 @@ pub fn snapshot(
     metrics::gauge!("zns_mint_oracle_zats_per_usd").set(oracle_zats_per_usd as f64);
 }
 
-/// Replaces the requests in flight. Called once per pass with every
-/// request the queues still hold, each named by the payment that
-/// carried it.
-pub fn requests_in_flight<'a, P: Parameters>(
-    network: &P,
-    requests: impl IntoIterator<Item = (TxId, &'a Name, Action, &'a UnifiedAddress)>,
-) {
-    let lines = in_flight_lines(network, requests);
+/// Replaces the names in flight. Called once per pass with the name of
+/// every request the queues still hold.
+pub fn requests_in_flight<'a>(names: impl IntoIterator<Item = &'a Name>) {
+    let lines = in_flight_lines(names);
     *IN_FLIGHT
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = lines;
 }
 
-/// One `zns_mint_request_state` sample per request, sorted, each once:
-/// a scrape with a repeated series is rejected whole. Label values need
-/// no escaping — names are `[a-z0-9]`, UAs bech32m, txids hex.
-fn in_flight_lines<'a, P: Parameters>(
-    network: &P,
-    requests: impl IntoIterator<Item = (TxId, &'a Name, Action, &'a UnifiedAddress)>,
-) -> String {
-    let samples: BTreeSet<String> = requests
-        .into_iter()
-        .map(|(txid, name, action, ua)| {
-            format!(
-                "zns_mint_request_state{{name=\"{}\",action=\"{}\",ua=\"{}\",txid=\"{txid}\"}} 1\n",
-                name.as_str(),
-                action.as_str(),
-                ua.encode_receiver_preserving(network),
-            )
-        })
-        .collect();
+/// One `zns_mint_request_state` sample per name, sorted, each once: a
+/// name in several queues is still one request in flight, and a scrape
+/// with a repeated series is rejected whole. Names are `[a-z0-9]` and
+/// need no escaping.
+fn in_flight_lines<'a>(names: impl IntoIterator<Item = &'a Name>) -> String {
+    let samples: BTreeSet<&str> = names.into_iter().map(Name::as_str).collect();
     if samples.is_empty() {
         return String::new();
     }
     let mut lines = String::from("# TYPE zns_mint_request_state gauge\n");
-    lines.extend(samples);
+    for name in samples {
+        lines.push_str(&format!("zns_mint_request_state{{name=\"{name}\"}} 1\n"));
+    }
     lines
 }
 
@@ -210,58 +194,24 @@ pub fn guest(measurement: &str, guest_policy: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zcash_protocol::consensus::MAIN_NETWORK;
 
-    const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
-
-    fn test_ua() -> UnifiedAddress {
-        match zcash_keys::address::Address::decode(&MAIN_NETWORK, TEST_UA) {
-            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
-            _ => panic!("vector is a mainnet Unified Address"),
-        }
-    }
-
-    fn txid(n: u8) -> TxId {
-        TxId::from_bytes([n; 32])
-    }
-
-    /// One sample per request, sorted, a repeat printed once; nothing at
-    /// all when no request is in flight.
+    /// One sample per name, sorted, a name in several queues printed
+    /// once; nothing at all when no name is in flight.
     #[test]
-    fn requests_in_flight_print_once_each() {
-        let ua = test_ua();
+    fn names_in_flight_print_once_each() {
         let alice = Name::parse("alice").unwrap();
         let bob = Name::parse("bob").unwrap();
-        let lines = in_flight_lines(
-            &MAIN_NETWORK,
-            [
-                (txid(2), &bob, Action::Release, &ua),
-                (txid(1), &alice, Action::Claim, &ua),
-                (txid(2), &bob, Action::Release, &ua),
-            ],
-        );
-        let ua = ua.encode_receiver_preserving(&MAIN_NETWORK);
         assert_eq!(
-            lines,
-            format!(
-                "# TYPE zns_mint_request_state gauge\n\
-                 zns_mint_request_state{{name=\"alice\",action=\"claim\",ua=\"{ua}\",txid=\"{}\"}} 1\n\
-                 zns_mint_request_state{{name=\"bob\",action=\"release\",ua=\"{ua}\",txid=\"{}\"}} 1\n",
-                txid(1),
-                txid(2),
-            )
+            in_flight_lines([&bob, &alice, &bob]),
+            "# TYPE zns_mint_request_state gauge\n\
+             zns_mint_request_state{name=\"alice\"} 1\n\
+             zns_mint_request_state{name=\"bob\"} 1\n"
         );
-        assert_eq!(
-            in_flight_lines(
-                &MAIN_NETWORK,
-                std::iter::empty::<(TxId, &Name, Action, &UnifiedAddress)>()
-            ),
-            ""
-        );
+        assert_eq!(in_flight_lines(std::iter::empty::<&Name>()), "");
     }
 
     /// The listener answers zns-supervise's probe — those exact bytes —
-    /// with 200 and the page: the recorder's text, then the requests in
+    /// with 200 and the page: the recorder's text, then the names in
     /// flight. `/health` stays `OK`.
     #[tokio::test]
     async fn the_page_answers_the_supervisor_probe() {
@@ -282,9 +232,8 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             metrics::gauge!("zns_mint_chain_tip_height").set(7.0);
         });
-        let ua = test_ua();
         let alice = Name::parse("alice").unwrap();
-        requests_in_flight(&MAIN_NETWORK, [(txid(1), &alice, Action::Claim, &ua)]);
+        requests_in_flight([&alice]);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -298,12 +247,10 @@ mod tests {
         let (_, body) = reply.split_once("\r\n\r\n").unwrap();
         assert!(body.contains("zns_mint_chain_tip_height 7\n"), "{body}");
         assert!(
-            body.ends_with(&format!(
+            body.ends_with(
                 "\n# TYPE zns_mint_request_state gauge\n\
-                 zns_mint_request_state{{name=\"alice\",action=\"claim\",ua=\"{}\",txid=\"{}\"}} 1\n",
-                ua.encode_receiver_preserving(&MAIN_NETWORK),
-                txid(1),
-            )),
+                 zns_mint_request_state{name=\"alice\"} 1\n"
+            ),
             "{body}"
         );
 

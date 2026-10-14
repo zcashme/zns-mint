@@ -1,12 +1,15 @@
 # main.changelog.md
 
-## 2026-10-15 — The requests in flight are on the metrics page (#342)
+## 2026-10-15 — The names in flight are on the metrics page (#342)
 
-- `zns_mint_request_state{name,action,ua,txid} 1` for every request the
-  mint is still working on: awaiting its decision, its challenge open
+- `zns_mint_request_state{name} 1` for every name the mint has anything
+  pending for: a request awaiting its decision, its challenge open
   (awaiting relay or echo), or its Name Note not yet seen on chain. A
-  finished request is absent — presence is processing; the chain is the
-  record of what became of it.
+  name with nothing pending is absent — presence is processing; the
+  chain is the record of what became of it.
+- Keyed by name alone: the frontend asks after a name, and the queues
+  already hold it at every stage, so no payment txid is carried from
+  one queue to the next. A name in several queues is printed once.
 - Derived, not evented: each pass ends by handing the queues' in-flight
   sets to `metrics::requests_in_flight`. Every way a request dies —
   refusal, drop, stale predecessor, challenge expiry or retirement, reorg,
@@ -18,8 +21,9 @@
   `/health`) and prints the set beside the recorder's text. The exporter's
   `http-listener` feature is dropped.
 - The labels rule is amended by owner decision: the endpoint stays
-  host-gated, and a request's labels are public once its note lands.
-  Prometheus keeps each request's series for its retention window.
+  host-gated, and a name is public once its note lands. A refused
+  request never lands; only its name is exposed, never who asked.
+  Prometheus keeps each name's series for its retention window.
 
 ## 2026-10-05 — The deciding pass is the only claim ruling site (#295)
 

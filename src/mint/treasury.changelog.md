@@ -2,7 +2,7 @@
 
 ## 2026-10-15 — `RequestQueue::in_flight` (#342)
 
-- Lists every request still awaiting its decision, named by its payment.
+- Names every request still awaiting its decision.
 
 ## 2026-10-09 — The sweep's fee comes out of the swept amount (#321)
 

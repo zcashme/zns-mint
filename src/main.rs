@@ -75,10 +75,9 @@ async fn main() {
     // transport state.
     let mut connection = TipSession::open(chain).await;
     'run: loop {
-        // Every pass ends here, however it ended: the queues as they
-        // stand are the requests still in flight until the next tip.
+        // Every pass ends here, however it ended: the names the queues
+        // still hold are in flight until the next tip.
         zns_mint::metrics::requests_in_flight(
-            &network,
             requests
                 .in_flight()
                 .chain(challenges.in_flight())
@@ -408,7 +407,7 @@ async fn main() {
                             break 'lane true;
                         };
                         // Enactment below resolves the anchor and broadcasts.
-                        if !name_notes.admit_request(note_height, claim_note, txid) {
+                        if !name_notes.admit(note_height, claim_note) {
                             tracing::debug!(
                                 %txid,
                                 name = %name.as_str(),
@@ -499,7 +498,7 @@ async fn main() {
                 let Some(record) = registry.record(&echo.name).cloned() else {
                     break 'lane true; // no record — released or unknown: no mint-issued challenge can match
                 };
-                let Some((sent, request_txid)) = challenges.answer(&echo, record.commitment) else {
+                let Some(sent) = challenges.answer(&echo, record.commitment) else {
                     break 'lane true; // no pending challenge: dead
                 };
                 // The renewal or upgrade fee, binding at first
@@ -560,7 +559,7 @@ async fn main() {
                         "voluntary release authorized"
                     );
                 }
-                name_notes.admit_request(note_height, transition_note, request_txid);
+                name_notes.admit(note_height, transition_note);
                 true
             };
         }

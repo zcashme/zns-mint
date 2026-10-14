@@ -219,15 +219,10 @@ impl OtpQueue {
             .retain(|(request, _, _, _)| mtp < request.expires_at);
     }
 
-    /// The relayed challenge an echo answers when its code is right,
-    /// with the newest payment backing it; a wrong code counts one
-    /// attempt against the transition the echo names and retires it at
-    /// [`MAX_ATTEMPTS`].
-    pub fn answer(
-        &mut self,
-        returned: &OtpMemo,
-        tip_rcm: NameCommitment,
-    ) -> Option<(OtpChallenge, TxId)> {
+    /// The relayed challenge an echo answers when its code is right;
+    /// a wrong code counts one attempt against the transition the
+    /// echo names and retires it at [`MAX_ATTEMPTS`].
+    pub fn answer(&mut self, returned: &OtpMemo, tip_rcm: NameCommitment) -> Option<OtpChallenge> {
         let index = self.challenges.iter().position(|(request, state, _, _)| {
             matches!(state, ChallengeState::Relayed)
                 && request.name == returned.name
@@ -235,9 +230,9 @@ impl OtpQueue {
                 && request.ua == returned.ua
                 && request.tip_rcm == tip_rcm
         })?;
-        let (request, _, txid, attempts) = &mut self.challenges[index];
+        let (request, _, _, attempts) = &mut self.challenges[index];
         if bool::from(request.code.0.ct_eq(&returned.code.0)) {
-            return Some((request.clone(), *txid));
+            return Some(request.clone());
         }
         if attempts.count() {
             self.challenges.remove(index);
@@ -260,12 +255,12 @@ impl OtpQueue {
         self.challenges.len() != before
     }
 
-    /// Every request whose challenge is still open — awaiting relay, or
-    /// relayed and awaiting its echo — named by its newest payment.
-    pub fn in_flight(&self) -> impl Iterator<Item = (TxId, &Name, Action, &UnifiedAddress)> {
-        self.challenges.iter().map(|(challenge, _, txid, _)| {
-            (*txid, &challenge.name, challenge.action, &challenge.ua)
-        })
+    /// The name of every challenge still open — awaiting relay, or
+    /// relayed and awaiting its echo.
+    pub fn in_flight(&self) -> impl Iterator<Item = &Name> {
+        self.challenges
+            .iter()
+            .map(|(challenge, _, _, _)| &challenge.name)
     }
 }
 
@@ -402,13 +397,13 @@ mod tests {
 
         // The echo picked up at the new tip resolves to the new-tip
         // pending — its term is Years(5), not Years(1).
-        let (matched, _) = q.answer(&echo, new_rcm).expect("new-tip pending");
+        let matched = q.answer(&echo, new_rcm).expect("new-tip pending");
         assert_eq!(matched.term, Some(Term::Years(5)));
         assert_eq!(matched.tip_rcm, new_rcm);
 
         // And re-scoping to the old commitment resolves to the old
         // pending, not the new one — the two are strictly separated.
-        let (matched, _) = q.answer(&echo, old_rcm).expect("old-tip pending");
+        let matched = q.answer(&echo, old_rcm).expect("old-tip pending");
         assert_eq!(matched.term, Some(Term::Years(1)));
         assert_eq!(matched.tip_rcm, old_rcm);
 
@@ -418,28 +413,15 @@ mod tests {
         assert!(q.answer(&echo, stale).is_none());
     }
 
-    /// An open challenge keeps its request in flight, named by the
-    /// newest payment backing it, until the challenge is pruned.
+    /// An open challenge keeps its name in flight, once per transition,
+    /// until the challenge is pruned.
     #[test]
-    fn an_open_challenge_keeps_its_request_in_flight() {
+    fn an_open_challenge_keeps_its_name_in_flight() {
         let mut q = OtpQueue::new();
         let challenge = transition_challenge(1, *b"111111");
         q.admit(challenge.clone(), test_txid(1));
         q.admit(transition_challenge(1, *b"222222"), test_txid(2));
-        let in_flight: Vec<_> = q
-            .in_flight()
-            .map(|(txid, name, action, ua)| (txid, name.clone(), action, ua.clone()))
-            .collect();
-        assert_eq!(
-            in_flight,
-            [(
-                test_txid(2),
-                challenge.name.clone(),
-                challenge.action,
-                challenge.ua.clone()
-            )]
-        );
-
+        assert_eq!(q.in_flight().collect::<Vec<_>>(), [&challenge.name]);
         q.prune(challenge.expires_at);
         assert_eq!(q.in_flight().count(), 0);
     }
@@ -477,9 +459,8 @@ mod tests {
             ua: ua.clone(),
         };
 
-        let (matched, txid) = q.answer(&echo, rcm).expect("live pending");
+        let matched = q.answer(&echo, rcm).expect("live pending");
         assert_eq!(matched.tip_rcm, rcm);
-        assert_eq!(txid, test_txid(1));
 
         assert!(q.consume(&matched));
         assert!(q.answer(&echo, rcm).is_none());
@@ -527,9 +508,7 @@ mod tests {
                 .is_none());
         }
         let right = echo_for(&pending, *b"111111");
-        let (answered, backing) = q.answer(&right, check_in.tip_rcm).expect("still answers");
-        // The hit names the repeat request: the newest payment backing it.
-        assert_eq!(backing, test_txid(2));
+        let answered = q.answer(&right, check_in.tip_rcm).expect("still answers");
 
         // The hit burns exactly once — and only the entry it answered:
         // the neighbor that shares its txid stands.
