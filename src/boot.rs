@@ -483,20 +483,21 @@ impl Boot<Network> {
         // 1b. Select the build's sealing mode: public dev key for
         // regtest/non-tee, hardware key for attested builds.
 
-        // Access-code root from the selected sealing mode, then HMAC to the purpose key
-        // (`access-code-v1`). Issuers with that purpose key can recompute
-        // codes offline; the mint never stores codes in Supabase.
-        let access_code_key = {
-            let root = sealing_key(presale::ACCESS_CODE_KEY_CONTEXT)
-                .expect("FATAL: sealing key unavailable");
-            AccessCodeDerivationKey::from_private_key(root.expose())
-        };
-
         // 2. Seed intake + verification: read capsule, require the keygen
         //    report when this file is the recorded capsule, unseal, then
         //    derive keys. The seed lives only inside this block — Secret's
-        //    Drop wipes it.
-        let (treasury_keys, registry_keys, ceremony_fingerprint, ceremony_capsule_hash) = {
+        //    Drop wipes it. The unseal also yields the ceremony's access-code
+        //    key, sealed inside the same envelope; its purpose key
+        //    (`access-code-v1`) is what claim memos are judged against, and
+        //    issuers holding the same key recompute codes offline. The mint
+        //    never stores codes in Supabase.
+        let (
+            treasury_keys,
+            registry_keys,
+            ceremony_fingerprint,
+            ceremony_capsule_hash,
+            access_code_key,
+        ) = {
             tracing::info!("boot: reading seed capsule from keys/zns_seed.capsule");
             let blob = read_capsule_file("keys/zns_seed.capsule").expect(
                 "FATAL: failed to read keys/zns_seed.capsule. The mint cannot boot without the sealed seed.",
@@ -516,8 +517,11 @@ impl Boot<Network> {
             tracing::info!("boot: resolving capsule sealing key");
             let capsule_key =
                 sealing_key(CAPSULE_KEY_CONTEXT).expect("FATAL: sealing key unavailable");
-            let seed = unseal_seed(&capsule_key, &capsule)
+            let opened = unseal_seed(&capsule_key, &capsule)
                 .expect("FATAL: failed to unseal seed. Capsule tampering, wrong TEE, or wrong capsule for this instance.");
+            let seed = opened.seed;
+            let access_code_key =
+                AccessCodeDerivationKey::from_private_key(opened.access_code_key.expose_secret());
             verify_fingerprint(&seed, ceremony.seed_fingerprint.trim());
             let sealed_hash = capsule_hash(&blob);
             (
@@ -525,6 +529,7 @@ impl Boot<Network> {
                 RegistryKeys::derive(&network, &seed),
                 capsule.fingerprint,
                 sealed_hash,
+                access_code_key,
             )
         };
         tracing::info!("boot: keys derived (treasury=acct0, registry=acct1); seed wiped");

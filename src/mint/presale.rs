@@ -27,9 +27,6 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::mint::Name;
 
-/// TEE sealing context for the access-code root key.
-pub const ACCESS_CODE_KEY_CONTEXT: &[u8] = b"ZNS/access-code/root/v1";
-
 /// Supabase project HTTP origin. PostgREST only.
 const PRESALE_HOST: &str = "https://cclrkfymckyjfufvqedr.supabase.co";
 
@@ -358,8 +355,10 @@ fn keyset_filter(after: Option<(&str, &str)>) -> String {
 pub struct AccessCodeDerivationKey(Zeroizing<[u8; 32]>);
 
 impl AccessCodeDerivationKey {
-    /// From a TEE root private key: the purpose key
-    /// `HMAC-SHA256(key = root, data = "access-code-v1")`.
+    /// From the ceremony's access-code key, sealed inside the seed capsule:
+    /// the purpose key `HMAC-SHA256(key = access-code key, data =
+    /// "access-code-v1")`. Issuers hold the same access-code key and derive
+    /// the same purpose key offline.
     pub fn from_private_key(private_key: &[u8; 32]) -> Self {
         let mut mac =
             HmacSha256::new_from_slice(private_key).expect("HMAC-SHA256 accepts any key length");
