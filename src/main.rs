@@ -58,7 +58,8 @@ async fn main() {
         guest,
     } = Boot::start().await;
 
-    let in_flight = zns_mint::metrics::install();
+    let (in_flight, page) = zns_mint::metrics::in_flight();
+    zns_mint::metrics::install(page);
     zns_mint::metrics::identity(&treasury_address, &registry_ufvk);
     zns_mint::metrics::ceremony(&seed_fingerprint, &capsule_hash);
     if let Some(guest) = &guest {
