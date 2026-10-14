@@ -20,8 +20,7 @@ pub use zns_canon::migration::TRANSFER_LEN;
 /// requests this report before unsealing and does not publish it.
 pub const SOURCE_REPORT_DOMAIN: &[u8] = b"ZNS_MIGRATION_SOURCE_V1";
 
-/// Domain separation for [`transfer_report_data`] and
-/// [`three_file_transfer_report_data`].
+/// Domain separation for [`transfer_report_data`].
 ///
 /// Distinct from `ZNS_MIGRATION_V1`, which binds only the target's offer.
 pub const TRANSFER_REPORT_DOMAIN: &[u8] = b"ZNS_MIGRATION_TRANSFER_V1";
@@ -105,35 +104,6 @@ pub fn transfer_report_data(
     input.extend_from_slice(&transfer_bytes);
     input.extend_from_slice(&blake2b_256(custody_manifest));
     blake2b_512(&input)
-}
-
-/// `BLAKE2b-512(b"ZNS_MIGRATION_TRANSFER_V1" || offer || transfer || ceremony)`,
-/// for a source that sends the three ceremony files: `zns_mint.conf`, then
-/// the custody manifest, then `ceremony_state.toml`, each BLAKE2b-256.
-/// Different input length from [`transfer_report_data`], so they never
-/// share report data.
-pub fn three_file_transfer_report_data(
-    offer: &MigrationOffer,
-    transfer: &EncryptedSeedTransfer,
-    ceremony: &[[u8; 32]; 3],
-) -> [u8; REPORT_DATA_LEN] {
-    let offer_bytes = encode_offer(offer);
-    let transfer_bytes = encode_transfer(transfer);
-    let mut input = Vec::with_capacity(
-        TRANSFER_REPORT_DOMAIN.len() + offer_bytes.len() + transfer_bytes.len() + 32 * 3,
-    );
-    input.extend_from_slice(TRANSFER_REPORT_DOMAIN);
-    input.extend_from_slice(&offer_bytes);
-    input.extend_from_slice(&transfer_bytes);
-    for hash in ceremony {
-        input.extend_from_slice(hash);
-    }
-    blake2b_512(&input)
-}
-
-/// BLAKE2b-256 of each of the three ceremony files, in channel order.
-pub fn ceremony_binding(files: &[&[u8]; 3]) -> [[u8; 32]; 3] {
-    files.map(blake2b_256)
 }
 
 /// `BLAKE2b-512(b"ZNS_MIGRATION_RECEIPT_V1" || offer || receipt)`.

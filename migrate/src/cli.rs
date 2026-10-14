@@ -23,17 +23,14 @@ unseals anything. The directory is an untrusted one-shot channel:
     attestation.bin
     encrypted_seed.bin
     source_attestation.bin
-    zns_mint.conf
     zns_custody_manifest.toml
-    ceremony_state.toml
     receipt.bin
     receipt_attestation.bin
 
 Source copies the custody manifest in the open from the input capsule's
-directory. An older source publishes three ceremony files instead
-(zns_mint.conf, the manifest, ceremony_state.toml); target accepts either,
-checks what it received against the source report, and writes only the
-custody manifest beside the output capsule. The seed stays sealed.
+directory and publishes it beside the ciphertext; it is the only ceremony
+file on the channel. A leftover zns_mint.conf or ceremony_state.toml in
+the channel blocks the attempt from starting. The seed stays sealed.
 Use a fresh directory for each attempt. The capsule stays outside it.
 Target will not overwrite an existing capsule unless
 --replace-after-verified-migration is set.
@@ -51,8 +48,8 @@ requires its own report to match from_measurement and from_guest_policy, and
 the input capsule's file hash and fingerprint to match the manifest, before
 it unseals. Target requires the source report's measurement to equal
 from_measurement and its guest policy to equal from_guest_policy, and that
-report must bind the offer, the ciphertext, and the ceremony files, before it installs a capsule.
-Source binds the offer, the ciphertext, and the custody manifest.
+report must bind the offer, the ciphertext, and the custody manifest,
+before it installs a capsule.
 Source accepts the receipt only when receipt_attestation.bin binds that offer
 and that receipt, and the report measurement equals to_measurement and its
 guest policy equals to_guest_policy.

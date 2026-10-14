@@ -28,16 +28,10 @@ pub const SOURCE_READY_FILE: &str = "source.ready";
 pub const MINT_CONF_FILE: &str = "zns_mint.conf";
 pub const CUSTODY_MANIFEST_FILE: &str = "zns_custody_manifest.toml";
 pub const CEREMONY_STATE_FILE: &str = "ceremony_state.toml";
-
 const READY_MAGIC: &[u8] = b"ZNS_MIGRATE_READY_V1";
 const ATTESTATION_MAX: usize = 4096;
 pub const CEREMONY_MAX: usize = 1024 * 1024;
 const POLL: Duration = Duration::from_millis(20);
-
-/// The three ceremony files an older source publishes in the open, in this
-/// order. A target receiving them installs only the custody manifest.
-pub const THREE_CEREMONY_FILES: &[&str] =
-    &[MINT_CONF_FILE, CUSTODY_MANIFEST_FILE, CEREMONY_STATE_FILE];
 
 const PROTOCOL_FILES: &[&str] = &[
     OFFER_FILE,
@@ -148,8 +142,8 @@ impl DirTransport {
         self.wait_file(ENCRYPTED_SEED_FILE, Some(TRANSFER_LEN), TRANSFER_LEN)
     }
 
-    /// Copy one ceremony file in the open. The name is one of
-    /// [`THREE_CEREMONY_FILES`]; a source publishes only the custody manifest.
+    /// Copy the custody manifest in the open. The name must be
+    /// [`CUSTODY_MANIFEST_FILE`]; it is the only ceremony file on the channel.
     pub fn publish_ceremony(&self, name: &str, bytes: &[u8]) -> Result<(), MigrateError> {
         ceremony_name(name)?;
         if bytes.is_empty() || bytes.len() > CEREMONY_MAX {
@@ -164,12 +158,6 @@ impl DirTransport {
     pub fn wait_ceremony(&self, name: &str) -> Result<Vec<u8>, MigrateError> {
         ceremony_name(name)?;
         self.wait_file(name, None, CEREMONY_MAX)
-    }
-
-    /// Is this ceremony file in the channel now? Does not wait.
-    pub fn has_ceremony(&self, name: &str) -> Result<bool, MigrateError> {
-        ceremony_name(name)?;
-        Ok(open_channel_file(&self.dir.join(name))?.is_some())
     }
 
     pub fn publish_receipt(&self, bytes: &[u8]) -> Result<(), MigrateError> {
@@ -279,7 +267,7 @@ impl DirTransport {
 }
 
 fn ceremony_name(name: &str) -> Result<(), MigrateError> {
-    if THREE_CEREMONY_FILES.contains(&name) {
+    if name == CUSTODY_MANIFEST_FILE {
         Ok(())
     } else {
         Err(MigrateError::transport(format!(
@@ -526,15 +514,25 @@ mod tests {
         let err = transport.publish_ceremony("notes.txt", b"no").unwrap_err();
         assert!(err.to_string().contains("not a ceremony file"));
 
-        transport
+        // The custody manifest is the only ceremony file on the channel.
+        let err = transport
             .publish_ceremony(MINT_CONF_FILE, b"network = test")
+            .unwrap_err();
+        assert!(err.to_string().contains("not a ceremony file"));
+        let err = transport
+            .publish_ceremony(CEREMONY_STATE_FILE, b"state = 1")
+            .unwrap_err();
+        assert!(err.to_string().contains("not a ceremony file"));
+        transport
+            .publish_ceremony(CUSTODY_MANIFEST_FILE, b"birthday = 1")
             .unwrap();
         assert_eq!(
-            transport.wait_ceremony(MINT_CONF_FILE).unwrap(),
-            b"network = test"
+            transport.wait_ceremony(CUSTODY_MANIFEST_FILE).unwrap(),
+            b"birthday = 1"
         );
-        assert!(transport.has_ceremony(MINT_CONF_FILE).unwrap());
-        assert!(!transport.has_ceremony(CUSTODY_MANIFEST_FILE).unwrap());
+
+        // A planted legacy file still blocks the attempt from starting.
+        fs::write(dir.join(MINT_CONF_FILE), b"network = test").unwrap();
         let err = transport.source_begin().unwrap_err();
         assert!(err.to_string().contains("already contains zns_mint.conf"));
         let _ = fs::remove_dir_all(&dir);

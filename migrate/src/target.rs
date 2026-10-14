@@ -1,13 +1,11 @@
 //! M2. The attested ephemeral key is published before any seed arrives.
 //!
-//! A source publishes the custody manifest and binds it; an older source
-//! publishes three ceremony files, `zns_mint.conf` first, and binds all
-//! three. Presence of `zns_mint.conf` selects the binding. Either way the
-//! source report must match this offer, the ciphertext, and those files,
-//! with measurement `from_measurement` and the manifest's guest policy.
-//! Only the custody manifest is installed beside the new capsule. The
-//! receipt is published only after the resealed capsule unseals to the same
-//! seed, attested for `to_measurement`.
+//! A source publishes the custody manifest and binds it. The source report
+//! must match this offer, the ciphertext, and that manifest, with
+//! measurement `from_measurement` and the manifest's guest policy. Only the
+//! custody manifest is installed beside the new capsule. The receipt is
+//! published only after the resealed capsule unseals to the same seed,
+//! attested for `to_measurement`.
 
 use std::path::{Path, PathBuf};
 
@@ -82,20 +80,7 @@ pub fn run(
     let source_report = transport.wait_source_attestation()?;
     let custody_manifest = transport.wait_ceremony(transport::CUSTODY_MANIFEST_FILE)?;
     let transfer = handoff::decode_transfer(&transfer_bytes)?;
-    // A three-file source publishes zns_mint.conf first; a manifest-only
-    // source never does. A planted conf only selects a binding that the
-    // source report then fails.
-    let expected = if transport.has_ceremony(transport::MINT_CONF_FILE)? {
-        let mint_conf = transport.wait_ceremony(transport::MINT_CONF_FILE)?;
-        let ceremony_state = transport.wait_ceremony(transport::CEREMONY_STATE_FILE)?;
-        handoff::three_file_transfer_report_data(
-            &offer,
-            &transfer,
-            &handoff::ceremony_binding(&[&mint_conf, &custody_manifest, &ceremony_state]),
-        )
-    } else {
-        handoff::transfer_report_data(&offer, &transfer, &custody_manifest)
-    };
+    let expected = handoff::transfer_report_data(&offer, &transfer, &custody_manifest);
     let source = attest::verified_report(&source_report, &expected)?;
     require_measurement(
         &source.measurement,
