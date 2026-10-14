@@ -83,11 +83,7 @@ async fn main() {
         in_flight.publish(
             decisions
                 .iter()
-                .map(|(_, request, _, _)| match request {
-                    Request::Claim { name, .. }
-                    | Request::Update { name, .. }
-                    | Request::Release { name, .. } => name,
-                })
+                .map(|(_, request, _, _)| request.name())
                 .chain(challenges.in_flight())
                 .chain(orders.iter().map(|note| note.name())),
         );

@@ -142,6 +142,15 @@ pub enum Request {
 }
 
 impl Request {
+    /// The name every variant carries.
+    pub fn name(&self) -> &Name {
+        match self {
+            Request::Claim { name, .. }
+            | Request::Update { name, .. }
+            | Request::Release { name, .. } => name,
+        }
+    }
+
     /// Parses a request memo:
     ///
     /// - `ZNS:claim:<term>:<name>:<ua>`, or with a six-digit pre-sale
