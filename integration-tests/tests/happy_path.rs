@@ -73,11 +73,7 @@ async fn boot_then_claim_update_release() -> Result<()> {
 
     let (birthday, anchor_txid) = fixture::publish_ceremony(&zebra).await?;
 
-    zns_canon::regtest::write_dev_keys("keys", birthday)?;
-    std::fs::write(
-        "keys/zns_custody_manifest.toml",
-        format!("anchor_txid = \"{anchor_txid}\"\nbirthday = {birthday}\n"),
-    )?;
+    zns_canon::regtest::write_dev_keys("keys", birthday, &anchor_txid)?;
 
     let boot = tokio::time::timeout(BOOT_TIMEOUT, Boot::start())
         .await
