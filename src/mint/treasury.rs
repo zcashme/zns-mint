@@ -30,7 +30,7 @@ use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::{BalanceError, Zatoshis};
 use zcash_protocol::ShieldedPool;
 
-use crate::mint::{Name, Request, TREASURY_ACCOUNT};
+use crate::mint::{Request, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
 type TreasuryProposalError<P> = ProposeTransferErrT<
@@ -275,17 +275,6 @@ impl RequestQueue {
         self.requests
             .retain(|(_, _, _, height)| *height <= ancestor);
     }
-
-    /// The name of every request still awaiting its decision.
-    pub fn in_flight(&self) -> impl Iterator<Item = &Name> {
-        self.requests
-            .iter()
-            .map(|(_, request, _, _)| match request {
-                Request::Claim { name, .. }
-                | Request::Update { name, .. }
-                | Request::Release { name, .. } => name,
-            })
-    }
 }
 
 #[cfg(test)]
@@ -324,24 +313,6 @@ mod tests {
 
     fn h(n: u32) -> BlockHeight {
         BlockHeight::from_u32(n)
-    }
-
-    /// A request is in flight from its block until it is decided or
-    /// its block is orphaned.
-    #[test]
-    fn requests_are_in_flight_until_decided_or_orphaned() {
-        let txid = |n: u8| TxId::from_bytes([n; 32]);
-        let in_flight = |queue: &RequestQueue| queue.in_flight().count();
-        let mut queue = RequestQueue::default();
-        queue.record(txid(1), request(Action::Claim), Zatoshis::ZERO, h(10));
-        queue.record(txid(2), request(Action::Update), Zatoshis::ZERO, h(11));
-        queue.record(txid(3), request(Action::Release), Zatoshis::ZERO, h(12));
-        assert!(queue.in_flight().all(|name| name.as_str() == "alice"));
-        assert_eq!(in_flight(&queue), 3);
-
-        queue.resolved(txid(1));
-        queue.truncate_to(h(11));
-        assert_eq!(in_flight(&queue), 1);
     }
 
     /// The float survives any note count, and dust is left behind.

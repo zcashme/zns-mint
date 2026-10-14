@@ -703,14 +703,6 @@ impl NameNoteQueue {
             .expect("FATAL: no unresolved order owns this name");
         self.orders.remove(index);
     }
-
-    /// The name of every order whose Name Note is not yet seen on chain.
-    pub fn in_flight(&self) -> impl Iterator<Item = &Name> {
-        self.orders
-            .iter()
-            .filter(|(_, _, state)| *state != NameNoteState::Seen)
-            .map(|(note, _, _)| note.name())
-    }
 }
 
 #[cfg(test)]
@@ -1136,27 +1128,6 @@ mod tests {
         queue.reconcile_seen(&MAIN_NETWORK, &registry);
         assert!(queue.note_pending(release.name()));
         assert_eq!(queue.authorized_notes().len(), 1);
-    }
-
-    /// An order keeps its name in flight until its note is seen, again
-    /// once a rewind undoes the sighting, and not after it is dropped.
-    #[test]
-    fn an_order_is_in_flight_until_its_note_is_seen() {
-        let (mut registry, release, _) = registry_with_claim_release_reclaim();
-        let height = |n| BlockHeight::from_u32(n);
-        let in_flight = |queue: &NameNoteQueue| queue.in_flight().cloned().collect::<Vec<_>>();
-        let mut queue = NameNoteQueue::default();
-        assert!(queue.admit(height(105), release.clone()));
-        assert_eq!(in_flight(&queue), [release.name().clone()]);
-        queue.reconcile_seen(&MAIN_NETWORK, &registry);
-        assert!(in_flight(&queue).is_empty());
-
-        queue.rewind_to(height(110));
-        registry.truncate_to_height(height(110));
-        queue.reconcile_seen(&MAIN_NETWORK, &registry);
-        assert_eq!(in_flight(&queue), [release.name().clone()]);
-        queue.drop_note(release.name());
-        assert!(in_flight(&queue).is_empty());
     }
 
     #[test]

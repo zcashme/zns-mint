@@ -78,11 +78,18 @@ async fn main() {
     'run: loop {
         // Every pass ends here, however it ended: the names the queues
         // still hold are in flight until the next tip.
+        let decisions = requests.pending();
+        let orders = name_notes.authorized_notes();
         in_flight.publish(
-            requests
-                .in_flight()
+            decisions
+                .iter()
+                .map(|(_, request, _, _)| match request {
+                    Request::Claim { name, .. }
+                    | Request::Update { name, .. }
+                    | Request::Release { name, .. } => name,
+                })
                 .chain(challenges.in_flight())
-                .chain(name_notes.in_flight()),
+                .chain(orders.iter().map(|note| note.name())),
         );
         let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {
             panic!("FATAL: Zebra returned an invalid canonical tip: {error}")

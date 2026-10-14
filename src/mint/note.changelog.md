@@ -1,10 +1,5 @@
 # `mint/note.rs` design record
 
-## 2026-10-15 — `NameNoteQueue::in_flight` (#342)
-
-- Names every order whose note is not yet seen on chain, lifecycle
-  releases included: anything pending for a name keeps it in flight.
-
 ## 2026-09-28 — Outstanding orders retry through wallet expiry (#202, #225)
 
 - `NameNoteState` retains `Authorized` and `Seen`; `Submitted` and

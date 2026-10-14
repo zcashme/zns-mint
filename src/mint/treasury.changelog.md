@@ -1,9 +1,5 @@
 # Treasury design record
 
-## 2026-10-15 — `RequestQueue::in_flight` (#342)
-
-- Names every request still awaiting its decision.
-
 ## 2026-10-09 — The sweep's fee comes out of the swept amount (#321)
 
 - `payment = total − SWEEP_RESERVE` charged the ZIP-317 fee to the fixed
