@@ -15,18 +15,8 @@
 //! exit only when that report matches the target measurement and policy
 //! ```
 //!
-//! There is no second offer. A failed check of the target returns before the
-//! capsule is unsealed. The source checks its own measurement and guest
-//! policy, then the capsule file hash and header fingerprint, before that
-//! unseal. The ceremony files beside the capsule are read before that unseal.
-//! Their hashes are bound into the transfer attestation, and the same bytes
-//! are published in the open with the transfer. The transfer is published
-//! only with an attestation that binds this offer, this ciphertext, and those
-//! files, and only when that report's measurement is
-//! `from_measurement` and its guest policy is `from_guest_policy`. The receipt
-//! is accepted only when a target report binds this offer and this receipt,
-//! and that report's measurement is `to_measurement` and its guest policy is
-//! `to_guest_policy`.
+//! There is no second offer: any failed check returns before the seed is
+//! unsealed.
 
 use rand::rngs::SysRng;
 use tracing::info;
@@ -90,22 +80,14 @@ pub fn run(
     let capsule_bytes = capsule::read_capsule_file(input)?;
     let capsule = capsule::parse_capsule(&capsule_bytes)?;
     require_source_capsule(manifest, &capsule_bytes, &capsule.fingerprint)?;
-    let ceremony = read_ceremony_files(input)?;
+    let custody_manifest = read_custody_manifest(input)?;
     let transfer = {
         let seed = capsule::unseal_seed(sealing_key, &capsule)?;
         let transfer = migration::encrypt_seed(&seed, &offer, &mut SysRng)?;
         drop(seed);
         transfer
     };
-    let transfer_report = handoff::transfer_report_data(
-        &offer,
-        &transfer,
-        &handoff::ceremony_binding(&[
-            ceremony[0].1.as_slice(),
-            ceremony[1].1.as_slice(),
-            ceremony[2].1.as_slice(),
-        ]),
-    );
+    let transfer_report = handoff::transfer_report_data(&offer, &transfer, &custody_manifest);
     let source_report = get_attestation(&transfer_report)?;
     if source_report.as_bytes().is_empty() {
         return Err(MigrateError::transport("TEE returned an empty attestation"));
@@ -123,9 +105,7 @@ pub fn run(
     )?;
     transport.publish_encrypted_seed(&handoff::encode_transfer(&transfer))?;
     transport.publish_source_attestation(source_report.as_bytes())?;
-    for (name, bytes) in &ceremony {
-        transport.publish_ceremony(name, bytes)?;
-    }
+    transport.publish_ceremony(transport::CUSTODY_MANIFEST_FILE, &custody_manifest)?;
     info!("seed wrapped; plaintext dropped");
 
     let receipt = wait_peer(transport.wait_receipt())?;
@@ -188,21 +168,10 @@ pub(crate) fn require_source_capsule(
     Ok(())
 }
 
-fn read_ceremony_files(
-    capsule: &std::path::Path,
-) -> Result<[(&'static str, Vec<u8>); 3], MigrateError> {
-    let dir = crate::persist::containing_dir(capsule);
-    let files = transport::CEREMONY_FILES
-        .iter()
-        .map(|name| {
-            let path = dir.join(name);
-            let bytes = transport::read_regular(&path, transport::CEREMONY_MAX)?;
-            Ok((*name, bytes))
-        })
-        .collect::<Result<Vec<_>, MigrateError>>()?;
-    files.try_into().map_err(|files: Vec<_>| {
-        MigrateError::transport(format!("expected 3 ceremony files, found {}", files.len()))
-    })
+/// The custody manifest beside the capsule: the mint's only ceremony input.
+fn read_custody_manifest(capsule: &std::path::Path) -> Result<Vec<u8>, MigrateError> {
+    let path = crate::persist::containing_dir(capsule).join(transport::CUSTODY_MANIFEST_FILE);
+    transport::read_regular(&path, transport::CEREMONY_MAX)
 }
 
 fn wait_peer(result: Result<Vec<u8>, MigrateError>) -> Result<Vec<u8>, MigrateError> {
@@ -300,25 +269,22 @@ mod tests {
     }
 
     #[test]
-    fn ceremony_files_come_from_the_capsule_directory() {
+    fn the_custody_manifest_comes_from_the_capsule_directory() {
         let dir = std::env::temp_dir().join(format!("zns-migrate-ceremony-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(transport::MINT_CONF_FILE), b"network = test").unwrap();
         std::fs::write(dir.join(transport::CUSTODY_MANIFEST_FILE), b"birthday = 1").unwrap();
-        std::fs::write(
-            dir.join(transport::CEREMONY_STATE_FILE),
-            b"state = \"COMPLETE\"",
+        // Only the manifest is read: no zns_mint.conf or ceremony_state.toml beside it.
+        let manifest = read_custody_manifest(&dir.join("zns_seed.capsule")).unwrap();
+        assert_eq!(manifest, b"birthday = 1");
+
+        std::os::unix::fs::symlink(
+            dir.join(transport::CUSTODY_MANIFEST_FILE),
+            dir.join("link.toml"),
         )
         .unwrap();
-        let files = read_ceremony_files(&dir.join("zns_seed.capsule")).unwrap();
-        assert_eq!(files[0].1, b"network = test");
-        assert_eq!(files[2].1, b"state = \"COMPLETE\"");
-
-        std::os::unix::fs::symlink(dir.join(transport::MINT_CONF_FILE), dir.join("link.conf"))
-            .unwrap();
         let err =
-            transport::read_regular(&dir.join("link.conf"), transport::CEREMONY_MAX).unwrap_err();
+            transport::read_regular(&dir.join("link.toml"), transport::CEREMONY_MAX).unwrap_err();
         assert!(err.to_string().contains("symlink"));
         let _ = std::fs::remove_dir_all(&dir);
     }

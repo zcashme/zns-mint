@@ -34,7 +34,10 @@ const ATTESTATION_MAX: usize = 4096;
 pub const CEREMONY_MAX: usize = 1024 * 1024;
 const POLL: Duration = Duration::from_millis(20);
 
-pub const CEREMONY_FILES: &[&str] = &[MINT_CONF_FILE, CUSTODY_MANIFEST_FILE, CEREMONY_STATE_FILE];
+/// The three ceremony files an older source publishes in the open, in this
+/// order. A target receiving them installs only the custody manifest.
+pub const THREE_CEREMONY_FILES: &[&str] =
+    &[MINT_CONF_FILE, CUSTODY_MANIFEST_FILE, CEREMONY_STATE_FILE];
 
 const PROTOCOL_FILES: &[&str] = &[
     OFFER_FILE,
@@ -145,7 +148,8 @@ impl DirTransport {
         self.wait_file(ENCRYPTED_SEED_FILE, Some(TRANSFER_LEN), TRANSFER_LEN)
     }
 
-    /// Copy one ceremony file in the open. The name is one of [`CEREMONY_FILES`].
+    /// Copy one ceremony file in the open. The name is one of
+    /// [`THREE_CEREMONY_FILES`]; a source publishes only the custody manifest.
     pub fn publish_ceremony(&self, name: &str, bytes: &[u8]) -> Result<(), MigrateError> {
         ceremony_name(name)?;
         if bytes.is_empty() || bytes.len() > CEREMONY_MAX {
@@ -160,6 +164,12 @@ impl DirTransport {
     pub fn wait_ceremony(&self, name: &str) -> Result<Vec<u8>, MigrateError> {
         ceremony_name(name)?;
         self.wait_file(name, None, CEREMONY_MAX)
+    }
+
+    /// Is this ceremony file in the channel now? Does not wait.
+    pub fn has_ceremony(&self, name: &str) -> Result<bool, MigrateError> {
+        ceremony_name(name)?;
+        Ok(open_channel_file(&self.dir.join(name))?.is_some())
     }
 
     pub fn publish_receipt(&self, bytes: &[u8]) -> Result<(), MigrateError> {
@@ -269,7 +279,7 @@ impl DirTransport {
 }
 
 fn ceremony_name(name: &str) -> Result<(), MigrateError> {
-    if CEREMONY_FILES.contains(&name) {
+    if THREE_CEREMONY_FILES.contains(&name) {
         Ok(())
     } else {
         Err(MigrateError::transport(format!(
@@ -523,6 +533,8 @@ mod tests {
             transport.wait_ceremony(MINT_CONF_FILE).unwrap(),
             b"network = test"
         );
+        assert!(transport.has_ceremony(MINT_CONF_FILE).unwrap());
+        assert!(!transport.has_ceremony(CUSTODY_MANIFEST_FILE).unwrap());
         let err = transport.source_begin().unwrap_err();
         assert!(err.to_string().contains("already contains zns_mint.conf"));
         let _ = fs::remove_dir_all(&dir);
