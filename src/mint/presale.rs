@@ -23,10 +23,10 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, Timestamp};
-use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::mint::Name;
+use zns_canon::access_code::purpose_key;
 
 /// Supabase project HTTP origin. PostgREST only.
 const PRESALE_HOST: &str = "https://cclrkfymckyjfufvqedr.supabase.co";
@@ -351,41 +351,16 @@ fn keyset_filter(after: Option<(&str, &str)>) -> String {
     }
 }
 
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Zeroizing<[u8; 32]> {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(data);
-    let out = mac.finalize().into_bytes();
-    let mut digest = Zeroizing::new([0u8; 32]);
-    digest.copy_from_slice(&out);
-    digest
-}
-
-/// Mirrors `SCALAR_DOMAIN` in zns-keygen.
-pub const ACCESS_CODE_SCALAR_DOMAIN: &[u8] = b"ZNS/access-code/x25519/v1";
-
-/// Mirrors `ISSUER_PUBKEY` in zns-keygen.
-pub const ISSUER_PUBLIC_KEY: [u8; 32] = [
-    0xfb, 0xd1, 0x2e, 0xed, 0x08, 0xb8, 0xc1, 0xe3, 0x43, 0xab, 0x4b, 0x98, 0x22, 0x82, 0x1d, 0x51,
-    0x13, 0xb0, 0xe3, 0xa7, 0x11, 0x00, 0x1d, 0x81, 0xed, 0xb8, 0xd5, 0xcf, 0xa3, 0x4e, 0xab, 0x52,
-];
-
 /// Zeroizing holder for the boot-derived access-code key.
 #[derive(Clone)]
 pub struct AccessCodeDerivationKey(Zeroizing<[u8; 32]>);
 
 impl AccessCodeDerivationKey {
-    /// From the unsealed ceremony seed: the seed-derived X25519 scalar
-    /// agrees with `ISSUER_PUBLIC_KEY`; this is that shared secret's
-    /// purpose key.
+    /// From the unsealed ceremony seed, via `zns_canon::access_code`:
+    /// the seed-derived X25519 scalar agrees with the issuer's public
+    /// key; this is that shared secret's purpose key.
     pub fn from_seed(seed: &[u8; 32]) -> Self {
-        let scalar = hmac_sha256(seed, ACCESS_CODE_SCALAR_DOMAIN);
-        let secret = StaticSecret::from(*scalar);
-        let shared = secret.diffie_hellman(&PublicKey::from(ISSUER_PUBLIC_KEY));
-        assert!(
-            shared.was_contributory(),
-            "FATAL: the issuer public key is not a contributory X25519 point"
-        );
-        Self::from_private_key(&shared.to_bytes())
+        Self(purpose_key(seed))
     }
 
     /// The purpose key of a shared secret (or a test-vector key):
@@ -469,31 +444,6 @@ mod tests {
         assert_eq!(
             gate.derive(&Name::parse("bob").unwrap()).digits(),
             *b"131624"
-        );
-    }
-
-    /// zns-keygen pins this vector for the same domains; a mismatch means
-    /// the two repos diverged.
-    #[test]
-    fn seed_scalar_matches_keygens_vector() {
-        let seed = [0x11u8; 32];
-        let scalar = hmac_sha256(&seed, ACCESS_CODE_SCALAR_DOMAIN);
-        assert_eq!(
-            *scalar,
-            [
-                0xcf, 0x57, 0x84, 0xab, 0xd3, 0x8e, 0x10, 0xd8, 0xde, 0x32, 0xaa, 0x90, 0x52, 0x5d,
-                0x15, 0xf4, 0xf5, 0x53, 0x84, 0xdf, 0xa5, 0xe1, 0x07, 0xe3, 0xf1, 0xcc, 0x26, 0x5f,
-                0xc3, 0x72, 0x50, 0x9e,
-            ]
-        );
-        let public = PublicKey::from(&StaticSecret::from(*scalar));
-        assert_eq!(
-            public.to_bytes(),
-            [
-                0x2a, 0x65, 0x82, 0xc9, 0x96, 0x4d, 0x89, 0x08, 0xf1, 0x55, 0x74, 0x12, 0xe8, 0xb8,
-                0xed, 0xd2, 0x7e, 0x94, 0xd2, 0x51, 0x26, 0xf2, 0x35, 0xc8, 0x4f, 0xbf, 0x01, 0xb1,
-                0xa8, 0x87, 0x94, 0x25,
-            ]
         );
     }
 
