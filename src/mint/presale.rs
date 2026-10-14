@@ -369,9 +369,10 @@ impl AccessCodeDerivationKey {
         let mut mac =
             HmacSha256::new_from_slice(private_key).expect("HMAC-SHA256 accepts any key length");
         mac.update(b"access-code-v1");
-        let out = mac.finalize().into_bytes();
+        let mut out = mac.finalize().into_bytes();
         let mut key = Zeroizing::new([0u8; 32]);
         key.copy_from_slice(&out);
+        out.zeroize();
         Self(key)
     }
 
