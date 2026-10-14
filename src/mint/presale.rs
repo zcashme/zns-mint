@@ -462,6 +462,20 @@ mod tests {
         );
     }
 
+    /// Known-answer vector generated independently of this crate
+    /// (Python: HMAC-SHA256 seed scalar, X25519 against the issuer
+    /// public key, purpose step, "alice"). Catches a wrong issuer key
+    /// or a divergent derivation that self-consistent tests would miss.
+    #[test]
+    fn issuer_known_answer_vector() {
+        let key = AccessCodeDerivationKey::from_seed(&[0x22u8; 32]);
+        assert_eq!(
+            hex::encode(key.as_bytes()),
+            "bcd2c0e1ffa22fdd3756b5ec81a4b7c2d252c14251a44552aea3324d5d41d3f0"
+        );
+        assert_eq!(key.derive(&alice()).digits(), *b"549703");
+    }
+
     fn table_of(rows: &[(&str, ProtectionStatus)]) -> ProtectedNames {
         let mut map = BTreeMap::new();
         for (name, status) in rows {
