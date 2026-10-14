@@ -26,9 +26,7 @@ use time::{OffsetDateTime, Timestamp};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::mint::Name;
-
-/// TEE sealing context for the access-code root key.
-pub const ACCESS_CODE_KEY_CONTEXT: &[u8] = b"ZNS/access-code/root/v1";
+use zns_canon::access_code::purpose_key;
 
 /// Supabase project HTTP origin. PostgREST only.
 const PRESALE_HOST: &str = "https://cclrkfymckyjfufvqedr.supabase.co";
@@ -358,15 +356,23 @@ fn keyset_filter(after: Option<(&str, &str)>) -> String {
 pub struct AccessCodeDerivationKey(Zeroizing<[u8; 32]>);
 
 impl AccessCodeDerivationKey {
-    /// From a TEE root private key: the purpose key
-    /// `HMAC-SHA256(key = root, data = "access-code-v1")`.
+    /// From the unsealed ceremony seed, via `zns_canon::access_code`:
+    /// the seed-derived X25519 scalar agrees with the issuer's public
+    /// key; this is that shared secret's purpose key.
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        Self(purpose_key(seed))
+    }
+
+    /// The purpose key of a shared secret (or a test-vector key):
+    /// `HMAC-SHA256(key, "access-code-v1")`.
     pub fn from_private_key(private_key: &[u8; 32]) -> Self {
         let mut mac =
             HmacSha256::new_from_slice(private_key).expect("HMAC-SHA256 accepts any key length");
         mac.update(b"access-code-v1");
-        let out = mac.finalize().into_bytes();
+        let mut out = mac.finalize().into_bytes();
         let mut key = Zeroizing::new([0u8; 32]);
         key.copy_from_slice(&out);
+        out.zeroize();
         Self(key)
     }
 
@@ -440,6 +446,34 @@ mod tests {
             gate.derive(&Name::parse("bob").unwrap()).digits(),
             *b"131624"
         );
+    }
+
+    #[test]
+    fn from_seed_is_deterministic() {
+        let seed = [0x33u8; 32];
+        let name = Name::parse("alice").unwrap();
+        assert_eq!(
+            AccessCodeDerivationKey::from_seed(&seed)
+                .derive(&name)
+                .digits(),
+            AccessCodeDerivationKey::from_seed(&seed)
+                .derive(&name)
+                .digits()
+        );
+    }
+
+    /// Known-answer vector generated independently of this crate
+    /// (Python: HMAC-SHA256 seed scalar, X25519 against the issuer
+    /// public key, purpose step, "alice"). Catches a wrong issuer key
+    /// or a divergent derivation that self-consistent tests would miss.
+    #[test]
+    fn issuer_known_answer_vector() {
+        let key = AccessCodeDerivationKey::from_seed(&[0x22u8; 32]);
+        assert_eq!(
+            hex::encode(key.as_bytes()),
+            "bcd2c0e1ffa22fdd3756b5ec81a4b7c2d252c14251a44552aea3324d5d41d3f0"
+        );
+        assert_eq!(key.derive(&alice()).digits(), *b"549703");
     }
 
     fn table_of(rows: &[(&str, ProtectionStatus)]) -> ProtectedNames {
