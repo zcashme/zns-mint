@@ -178,25 +178,10 @@ fn require_established_ceremony(registry: &Registry) {
     );
 }
 
-/// Keygen's deployment record: the build's network, the seed's
-/// fingerprint, and the birthday — each checked against its counterpart.
-#[derive(serde::Deserialize)]
-struct MintConfig {
-    network: String,
-    expected_seed_fingerprint: String,
-    birthday: u32,
-}
-
-fn load_mint_config() -> MintConfig {
-    let raw = std::fs::read_to_string("keys/zns_mint.conf")
-        .expect("FATAL: cannot read keys/zns_mint.conf");
-    toml::from_str(&raw).expect("FATAL: invalid keys/zns_mint.conf")
-}
-
-fn require_config_network(config: &MintConfig) {
+fn require_ceremony_network(ceremony: &CeremonyAnchor) {
     assert_eq!(
-        config.network, NETWORK_LABEL,
-        "FATAL: keys/zns_mint.conf network does not match {NETWORK_LABEL} build"
+        ceremony.network, NETWORK_LABEL,
+        "FATAL: {CUSTODY_MANIFEST_FILE} network does not match {NETWORK_LABEL} build"
     );
 }
 
@@ -207,10 +192,10 @@ const ATTESTATION_REPORT_LEN: usize = 1184;
 /// The boot identity document: written once, at attestation time.
 const IDENTITY_DOC_FILE: &str = "zns_mint_identity.json";
 
-/// Keygen's custody manifest: the anchor txid and the height it mined
-/// at, published at ceremony finalize. Required on every network —
-/// the anchor check verifies it against the chain; a missing file
-/// refuses boot.
+/// Keygen's custody manifest: the network, the seed fingerprint, the
+/// anchor txid, and the height it mined at, published at ceremony
+/// finalize. Required on every network — the anchor check verifies it
+/// against the chain; a missing file refuses boot.
 const CUSTODY_MANIFEST_FILE: &str = "keys/zns_custody_manifest.toml";
 
 /// Genesis facts and the hex-encoded SNP report, one file. `keys/` is
@@ -351,9 +336,12 @@ fn genesis_record(
     }
 }
 
-/// Keygen's ceremony record: the anchor transaction and the height it
-/// mined at. Read on every network.
+/// Keygen's ceremony record: the build's network, the seed's fingerprint,
+/// the anchor transaction, and the height it mined at. Read on every
+/// network.
 struct CeremonyAnchor {
+    network: String,
+    seed_fingerprint: String,
     /// Internal order, for `tx.txid()` equality in the chain check.
     txid: TxId,
     /// The file's own display-order bytes — what the genesis document
@@ -375,17 +363,8 @@ fn load_ceremony_anchor() -> CeremonyAnchor {
     )
 }
 
-/// The ceremony file's birthday must equal the conf's.
-fn require_conf_birthday(anchor: &CeremonyAnchor, config_birthday: u32) {
-    assert_eq!(
-        anchor.birthday, config_birthday,
-        "FATAL: {CUSTODY_MANIFEST_FILE} birthday {} does not match keys/zns_mint.conf birthday {config_birthday}",
-        anchor.birthday
-    );
-}
-
 /// The anchor, verified against the chain: the stored txid must be
-/// mined at the conf birthday. A fabricated (birthday, txid) pair
+/// mined at the manifest birthday. A fabricated (birthday, txid) pair
 /// refuses boot here.
 async fn require_anchor_on_chain(
     fetch_block: impl AsyncFnOnce(
@@ -395,11 +374,11 @@ async fn require_anchor_on_chain(
     anchor: TxId,
 ) {
     let block = fetch_block(birthday).await.unwrap_or_else(|error| {
-        panic!("FATAL: cannot fetch block at the conf birthday {birthday}: {error}")
+        panic!("FATAL: cannot fetch block at the manifest birthday {birthday}: {error}")
     });
     assert!(
         block.vtx().iter().any(|tx| tx.txid() == anchor),
-        "FATAL: ceremony anchor {anchor} is not mined at the conf birthday {birthday}"
+        "FATAL: ceremony anchor {anchor} is not mined at the manifest birthday {birthday}"
     );
     tracing::info!(
         txid = %anchor,
@@ -417,6 +396,10 @@ fn ceremony_anchor(text: &str) -> CeremonyAnchor {
         anchor_txid: Option<String>,
         #[serde(default)]
         birthday: Option<u32>,
+        #[serde(default)]
+        network: Option<String>,
+        #[serde(default)]
+        seed_fingerprint: Option<String>,
     }
     let raw: RawAnchor = toml::from_str(text)
         .unwrap_or_else(|error| panic!("FATAL: {CUSTODY_MANIFEST_FILE} is invalid: {error}"));
@@ -427,12 +410,20 @@ fn ceremony_anchor(text: &str) -> CeremonyAnchor {
     let birthday = raw
         .birthday
         .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} has no birthday"));
+    let network = raw
+        .network
+        .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} has no network"));
+    let seed_fingerprint = raw
+        .seed_fingerprint
+        .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} has no seed fingerprint"));
     #[cfg(not(feature = "non-tee"))]
     let file_txid: [u8; 32] = hex::decode(txid_hex.trim())
         .unwrap_or_else(|_| panic!("FATAL: {CUSTODY_MANIFEST_FILE} txid is not hex"))
         .try_into()
         .unwrap_or_else(|_| panic!("FATAL: {CUSTODY_MANIFEST_FILE} txid is not 32 bytes"));
     CeremonyAnchor {
+        network,
+        seed_fingerprint,
         // Display form: `from_hex` inverts it, `from_bytes` would not.
         txid: TxId::from_hex(txid_hex.trim())
             .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} txid is not hex")),
@@ -483,15 +474,11 @@ impl Boot<Network> {
         // client this boot proved live.
         let source = CanonicalBlockSource::new(chain_client.clone());
 
-        // Ceremony facts — one conf file, every network: keygen writes it
-        // in deployment, the fixture on regtest.
-        let mint_config = load_mint_config();
-        require_config_network(&mint_config);
-        let mint_birthday = BlockHeight::from_u32(mint_config.birthday);
-
-        // The ceremony record: the anchor txid and its height.
+        // Ceremony facts — the custody manifest, every network: keygen
+        // writes it in deployment, the fixture on regtest.
         let ceremony = load_ceremony_anchor();
-        require_conf_birthday(&ceremony, mint_config.birthday);
+        require_ceremony_network(&ceremony);
+        let mint_birthday = BlockHeight::from_u32(ceremony.birthday);
 
         // 1b. Select the build's sealing mode: public dev key for
         // regtest/non-tee, hardware key for attested builds.
@@ -515,12 +502,14 @@ impl Boot<Network> {
                 "FATAL: failed to read keys/zns_seed.capsule. The mint cannot boot without the sealed seed.",
             );
             let capsule = parse_capsule(&blob).expect("FATAL: failed to parse zns_seed.capsule");
-            // Config, capsule field, and the attested fingerprint are one
+            // Manifest, capsule field, and the attested fingerprint are one
             // value. Unseal then requires that value of the decrypted seed.
-            let expected = SeedFingerprint::from_str(mint_config.expected_seed_fingerprint.trim())
-                .expect("FATAL: invalid expected_seed_fingerprint in keys/zns_mint.conf");
+            let expected = SeedFingerprint::from_str(ceremony.seed_fingerprint.trim())
+                .unwrap_or_else(|_| {
+                    panic!("FATAL: invalid seed_fingerprint in {CUSTODY_MANIFEST_FILE}")
+                });
             if expected.to_bytes() != capsule.fingerprint {
-                panic!("FATAL: capsule fingerprint does not match keys/zns_mint.conf");
+                panic!("FATAL: capsule fingerprint does not match {CUSTODY_MANIFEST_FILE}");
             }
             #[cfg(not(feature = "non-tee"))]
             require_keygen_attestation(&blob, &expected);
@@ -529,7 +518,7 @@ impl Boot<Network> {
                 sealing_key(CAPSULE_KEY_CONTEXT).expect("FATAL: sealing key unavailable");
             let seed = unseal_seed(&capsule_key, &capsule)
                 .expect("FATAL: failed to unseal seed. Capsule tampering, wrong TEE, or wrong capsule for this instance.");
-            verify_fingerprint(&seed, mint_config.expected_seed_fingerprint.trim());
+            verify_fingerprint(&seed, ceremony.seed_fingerprint.trim());
             let sealed_hash = capsule_hash(&blob);
             (
                 TreasuryKeys::derive(&network, &seed),
@@ -862,12 +851,12 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
         .expect("seed is 32 bytes, within ZIP-32's 32..=252 range");
 
     let expected_fp = SeedFingerprint::from_str(expected)
-        .expect("FATAL: invalid expected_seed_fingerprint in keys/zns_mint.conf");
+        .unwrap_or_else(|_| panic!("FATAL: invalid seed_fingerprint in {CUSTODY_MANIFEST_FILE}"));
 
     if actual != expected_fp {
         // Redacted panic: do not print either fingerprint.
         panic!(
-            "FATAL: SEED FINGERPRINT MISMATCH — decrypted seed does not match keys/zns_mint.conf"
+            "FATAL: SEED FINGERPRINT MISMATCH — decrypted seed does not match {CUSTODY_MANIFEST_FILE}"
         );
     }
     tracing::info!("boot: seed fingerprint verified");
@@ -1125,6 +1114,8 @@ mod tests {
         let txid_bytes: [u8; 32] = core::array::from_fn(|i| i as u8);
         let txid = hex::encode(txid_bytes);
         let anchor = CeremonyAnchor {
+            network: NETWORK_LABEL.to_string(),
+            seed_fingerprint: String::new(),
             txid: TxId::from_hex(&txid).unwrap(),
             file_txid: txid_bytes,
             birthday: 4408922,
@@ -1137,10 +1128,14 @@ mod tests {
     }
 
     #[test]
-    fn ceremony_anchor_requires_txid_and_birthday() {
+    fn ceremony_anchor_reads_the_manifest_fields() {
         let txid_bytes: [u8; 32] = core::array::from_fn(|i| i as u8);
         let txid = hex::encode(txid_bytes);
-        let anchor = ceremony_anchor(&format!("anchor_txid = \"{txid}\"\nbirthday = 4408922\n"));
+        let anchor = ceremony_anchor(&format!(
+            "network = \"testnet\"\nseed_fingerprint = \"zip32seedfp1x\"\nanchor_txid = \"{txid}\"\nbirthday = 4408922\n"
+        ));
+        assert_eq!(anchor.network, "testnet");
+        assert_eq!(anchor.seed_fingerprint, "zip32seedfp1x");
         assert_eq!(anchor.birthday, 4408922);
         assert_eq!(anchor.txid.to_string(), txid);
         #[cfg(not(feature = "non-tee"))]
@@ -1212,7 +1207,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "is not mined at the conf birthday")]
+    #[should_panic(expected = "is not mined at the manifest birthday")]
     async fn anchor_check_refuses_an_anchor_not_mined_at_the_birthday() {
         let network = boot_network();
         let tx = fixture_transaction(&network);
@@ -1230,13 +1225,33 @@ mod tests {
     #[test]
     #[should_panic(expected = "txid is not hex")]
     fn ceremony_anchor_refuses_a_non_hex_txid() {
-        ceremony_anchor("anchor_txid = \"zz\"\nbirthday = 1\n");
+        ceremony_anchor(
+            "network = \"testnet\"\nseed_fingerprint = \"x\"\nanchor_txid = \"zz\"\nbirthday = 1\n",
+        );
     }
 
     #[test]
     #[should_panic(expected = "has no birthday")]
     fn ceremony_anchor_refuses_a_missing_birthday() {
         ceremony_anchor(&format!("anchor_txid = \"{}\"\n", "ab".repeat(32)));
+    }
+
+    #[test]
+    #[should_panic(expected = "has no network")]
+    fn ceremony_anchor_refuses_a_missing_network() {
+        ceremony_anchor(&format!(
+            "anchor_txid = \"{}\"\nbirthday = 1\nseed_fingerprint = \"x\"\n",
+            "ab".repeat(32)
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "has no seed fingerprint")]
+    fn ceremony_anchor_refuses_a_missing_seed_fingerprint() {
+        ceremony_anchor(&format!(
+            "anchor_txid = \"{}\"\nbirthday = 1\nnetwork = \"testnet\"\n",
+            "ab".repeat(32)
+        ));
     }
 
     #[tokio::test]
