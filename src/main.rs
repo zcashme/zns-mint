@@ -82,8 +82,14 @@ async fn main() {
                 .pending()
                 .iter()
                 .map(|(_, request, _, _)| request.name())
-                .chain(challenges.open())
+                .chain(
+                    challenges
+                        .requested()
+                        .iter()
+                        .map(|challenge| &challenge.name),
+                )
                 .chain(name_notes.authorized_notes().iter().map(|note| note.name())),
+            challenges.relayed(),
         );
         let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {
             panic!("FATAL: Zebra returned an invalid canonical tip: {error}")

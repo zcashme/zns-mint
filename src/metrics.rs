@@ -18,9 +18,10 @@
 //! every series it has seen, and a series per name would grow with
 //! every name ever requested; instead the loop hands over the whole set
 //! once per pass and the listener prints it beside the recorder's text.
-//! A name with nothing pending is absent: presence is processing.
+//! A name with nothing pending is absent; `1` while the mint holds the
+//! next move, `2` while a relayed challenge awaits the owner's echo.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::LazyLock;
@@ -82,19 +83,30 @@ pub fn snapshot(
     metrics::gauge!("zns_mint_oracle_zats_per_usd").set(oracle_zats_per_usd as f64);
 }
 
-/// Replaces the names in flight. Called once per pass with the name of
-/// every request the queues still hold.
-pub fn requests_in_flight<'a>(names: impl IntoIterator<Item = &'a Name>) {
+/// Replaces the names in flight. Called once per pass: `working` names
+/// every request the mint holds the next move on, `awaiting_echo` every
+/// relayed challenge.
+pub fn requests_in_flight<'a>(
+    working: impl IntoIterator<Item = &'a Name>,
+    awaiting_echo: impl IntoIterator<Item = &'a Name>,
+) {
     // One `zns_mint_request_state` sample per name, sorted, each once: a
     // name in several queues is still one request in flight, and a scrape
-    // with a repeated series is rejected whole. Names are `[a-z0-9]` and
-    // need no escaping.
-    let names: BTreeSet<&str> = names.into_iter().map(Name::as_str).collect();
+    // with a repeated series is rejected whole. The mint's move wins: a
+    // working name overwrites its `2`. Names are `[a-z0-9]` and need no
+    // escaping.
+    let mut states: BTreeMap<&str, u8> = awaiting_echo
+        .into_iter()
+        .map(|name| (name.as_str(), 2))
+        .collect();
+    states.extend(working.into_iter().map(|name| (name.as_str(), 1)));
     let mut exposition = String::new();
-    if !names.is_empty() {
+    if !states.is_empty() {
         exposition.push_str("# TYPE zns_mint_request_state gauge\n");
-        for name in names {
-            exposition.push_str(&format!("zns_mint_request_state{{name=\"{name}\"}} 1\n"));
+        for (name, state) in states {
+            exposition.push_str(&format!(
+                "zns_mint_request_state{{name=\"{name}\"}} {state}\n"
+            ));
         }
     }
     IN_FLIGHT.send_replace(exposition);
@@ -212,7 +224,8 @@ mod tests {
         });
         let alice = Name::parse("alice").unwrap();
         let bob = Name::parse("bob").unwrap();
-        requests_in_flight([&bob, &alice, &bob]);
+        let carol = Name::parse("carol").unwrap();
+        requests_in_flight([&bob, &alice, &bob], [&carol, &alice]);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -229,12 +242,13 @@ mod tests {
             body.ends_with(
                 "\n# TYPE zns_mint_request_state gauge\n\
                  zns_mint_request_state{name=\"alice\"} 1\n\
-                 zns_mint_request_state{name=\"bob\"} 1\n"
+                 zns_mint_request_state{name=\"bob\"} 1\n\
+                 zns_mint_request_state{name=\"carol\"} 2\n"
             ),
             "{body}"
         );
 
-        requests_in_flight(std::iter::empty::<&Name>());
+        requests_in_flight(std::iter::empty::<&Name>(), std::iter::empty::<&Name>());
         let reply = get(addr, "/metrics").await;
         assert!(!reply.contains("zns_mint_request_state"), "{reply}");
 

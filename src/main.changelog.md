@@ -2,11 +2,14 @@
 
 ## 2026-10-15 — The names in flight are on the metrics page (#342)
 
-- `zns_mint_request_state{name} 1` for every name the mint has anything
-  pending for: a request awaiting its decision, its challenge open
-  (awaiting relay or echo), or its Name Note not yet seen on chain. A
-  name with nothing pending is absent — presence is processing; the
-  chain is the record of what became of it.
+- `zns_mint_request_state{name}` for every name the mint has anything
+  pending for. `1` while the mint holds the next move: a request
+  awaiting its decision, a challenge awaiting relay, or a Name Note not
+  yet seen on chain. `2` while a relayed challenge awaits the owner's
+  echo and nothing else holds the name. A name with nothing pending is
+  absent; the chain is the record of what became of it. An update or
+  release reads `2` → `1` → absent on the happy path; a rejected echo
+  leaves it at `2`, since anyone can send one.
 - Keyed by name alone: the frontend asks after a name, and the queues
   already hold it at every stage, so no payment txid is carried from
   one queue to the next. A name in several queues is printed once.

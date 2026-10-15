@@ -255,11 +255,11 @@ impl OtpQueue {
         self.challenges.len() != before
     }
 
-    /// The name of every challenge still open — awaiting relay, or
-    /// relayed and awaiting its echo.
-    pub fn open(&self) -> impl Iterator<Item = &Name> {
+    /// The name of every relayed challenge, awaiting its echo.
+    pub fn relayed(&self) -> impl Iterator<Item = &Name> {
         self.challenges
             .iter()
+            .filter(|(_, state, _, _)| matches!(state, ChallengeState::Relayed))
             .map(|(challenge, _, _, _)| &challenge.name)
     }
 }
@@ -413,17 +413,24 @@ mod tests {
         assert!(q.answer(&echo, stale).is_none());
     }
 
-    /// An open challenge keeps its name in flight, once per transition,
-    /// until the challenge is pruned.
+    /// Only a relayed challenge names its name as awaiting an echo; an
+    /// unrelayed one stays with `requested`. Pruning clears both.
     #[test]
-    fn an_open_challenge_names_its_name_until_pruned() {
+    fn a_relayed_challenge_names_its_name_until_pruned() {
         let mut q = OtpQueue::new();
-        let challenge = transition_challenge(1, *b"111111");
-        q.admit(challenge.clone(), test_txid(1));
-        q.admit(transition_challenge(1, *b"222222"), test_txid(2));
-        assert_eq!(q.open().collect::<Vec<_>>(), [&challenge.name]);
-        q.prune(challenge.expires_at);
-        assert_eq!(q.open().count(), 0);
+        let sent = transition_challenge(1, *b"111111");
+        let unsent = transition_challenge(2, *b"222222");
+        q.admit(sent.clone(), test_txid(1));
+        q.admit(unsent.clone(), test_txid(2));
+        assert_eq!(q.relayed().count(), 0);
+        assert!(q.challenge_issued(&sent));
+        assert_eq!(q.relayed().collect::<Vec<_>>(), [&sent.name]);
+        let requested = q.requested();
+        assert_eq!(requested.len(), 1);
+        assert!(requested[0].tip_rcm == unsent.tip_rcm);
+        q.prune(sent.expires_at);
+        assert_eq!(q.relayed().count(), 0);
+        assert!(q.requested().is_empty());
     }
 
     /// A relayed challenge burns exactly once: `answer` finds it,
