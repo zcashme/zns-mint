@@ -1,5 +1,42 @@
 # main.changelog.md
 
+## 2026-10-15 — The names in flight are on the metrics page (#342)
+
+- `zns_mint_request_state{name}` for every name the mint has anything
+  pending for. `1` while the mint holds the next move: a request
+  awaiting its decision, a challenge awaiting relay, or a Name Note not
+  yet seen on chain. `2` while a relayed challenge awaits the owner's
+  echo and nothing else holds the name. A name with nothing pending is
+  absent; the chain is the record of what became of it. An update or
+  release reads `2` → `1` → absent on the happy path; a rejected echo
+  leaves it at `2`, since anyone can send one. `MAX_ATTEMPTS` wrong
+  codes retire the challenge, and the name goes absent. A mined echo
+  the pass has not yet processed counts as `1`: the mint holds the move.
+- The names come from borrowed accessors — `RequestQueue::names`,
+  `OtpQueue::unrelayed` and `relayed`, `NameNoteQueue::authorized_names`
+  — so a pass clones no queue, and no OTP code, to publish them.
+- The listener renders the page in `spawn_blocking`, as the exporter's
+  did, arms hyper's header-read timeout with `TokioTimer`, and pauses
+  one second after a failed accept instead of spinning on descriptor
+  exhaustion.
+- Keyed by name alone: the frontend asks after a name, and the queues
+  already hold it at every stage, so no payment txid is carried from
+  one queue to the next. A name in several queues is printed once.
+- Derived, not evented: each pass ends by handing the queues' in-flight
+  sets to `metrics::requests_in_flight`. Every way a request dies —
+  refusal, drop, stale predecessor, challenge expiry or retirement, reorg,
+  restart — is covered by its absence from the queues, with no call site
+  on any of those paths. A reorg that unsees a note brings its request
+  back.
+- The lines never enter the recorder, which keeps every series it has
+  seen: the mint serves `/metrics` itself (hyper, same address, same
+  `/health`) and prints the set beside the recorder's text. The exporter's
+  `http-listener` feature is dropped.
+- The labels rule is amended by owner decision: the endpoint stays
+  host-gated, and a name is public once its note lands. A refused
+  request never lands; only its name is exposed, never who asked.
+  Prometheus keeps each name's series for its retention window.
+
 ## 2026-10-05 — The deciding pass is the only claim ruling site (#295)
 
 - The arrivals loop no longer rules: the `note_pending` pre-check and

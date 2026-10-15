@@ -254,6 +254,22 @@ impl OtpQueue {
         });
         self.challenges.len() != before
     }
+
+    /// The name of every challenge still awaiting relay, borrowed.
+    pub fn unrelayed(&self) -> impl Iterator<Item = &Name> {
+        self.challenges
+            .iter()
+            .filter(|(_, state, _, _)| matches!(state, ChallengeState::Requested))
+            .map(|(challenge, _, _, _)| &challenge.name)
+    }
+
+    /// The name of every relayed challenge, awaiting its echo.
+    pub fn relayed(&self) -> impl Iterator<Item = &Name> {
+        self.challenges
+            .iter()
+            .filter(|(_, state, _, _)| matches!(state, ChallengeState::Relayed))
+            .map(|(challenge, _, _, _)| &challenge.name)
+    }
 }
 
 #[cfg(test)]
@@ -403,6 +419,25 @@ mod tests {
         // even though the code and other fields all match a live entry.
         let stale = commitment(3);
         assert!(q.answer(&echo, stale).is_none());
+    }
+
+    /// A challenge names its name as unrelayed until it is relayed, and
+    /// as relayed after. Pruning clears both.
+    #[test]
+    fn a_relayed_challenge_names_its_name_until_pruned() {
+        let mut q = OtpQueue::new();
+        let sent = transition_challenge(1, *b"111111");
+        let unsent = transition_challenge(2, *b"222222");
+        q.admit(sent.clone(), test_txid(1));
+        q.admit(unsent.clone(), test_txid(2));
+        assert_eq!(q.relayed().count(), 0);
+        assert_eq!(q.unrelayed().count(), 2);
+        assert!(q.challenge_issued(&sent));
+        assert_eq!(q.relayed().collect::<Vec<_>>(), [&sent.name]);
+        assert_eq!(q.unrelayed().collect::<Vec<_>>(), [&unsent.name]);
+        q.prune(sent.expires_at);
+        assert_eq!(q.relayed().count(), 0);
+        assert_eq!(q.unrelayed().count(), 0);
     }
 
     /// A relayed challenge burns exactly once: `answer` finds it,

@@ -75,6 +75,16 @@ async fn main() {
     // transport state.
     let mut connection = TipSession::open(chain).await;
     'run: loop {
+        // Every pass ends here, however it ended: the names the queues
+        // still hold are in flight until the next tip.
+        zns_mint::metrics::requests_in_flight(
+            requests
+                .names()
+                .chain(challenges.unrelayed())
+                .chain(echoes.iter().map(|(echo, _, _)| &echo.name))
+                .chain(name_notes.authorized_names()),
+            challenges.relayed(),
+        );
         let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {
             panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
         });

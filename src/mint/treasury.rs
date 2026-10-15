@@ -30,7 +30,7 @@ use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::{BalanceError, Zatoshis};
 use zcash_protocol::ShieldedPool;
 
-use crate::mint::{Request, TREASURY_ACCOUNT};
+use crate::mint::{Name, Request, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
 type TreasuryProposalError<P> = ProposeTransferErrT<
@@ -263,6 +263,13 @@ impl RequestQueue {
     /// Every request pending decision, in queue order.
     pub fn pending(&self) -> Vec<(TxId, Request, Zatoshis, BlockHeight)> {
         self.requests.clone()
+    }
+
+    /// The name of every request pending decision, borrowed.
+    pub fn names(&self) -> impl Iterator<Item = &Name> {
+        self.requests
+            .iter()
+            .map(|(_, request, _, _)| request.name())
     }
 
     /// The request is decided. The only removal besides reorg truncation.

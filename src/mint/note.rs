@@ -694,6 +694,14 @@ impl NameNoteQueue {
             .collect()
     }
 
+    /// The name of every outstanding authorized order, borrowed.
+    pub fn authorized_names(&self) -> impl Iterator<Item = &Name> {
+        self.orders
+            .iter()
+            .filter(|(_, _, state)| *state == NameNoteState::Authorized)
+            .map(|(note, _, _)| note.name())
+    }
+
     /// Removes the unresolved order owning this name.
     pub fn drop_note(&mut self, name: &Name) {
         let index = self
@@ -1279,6 +1287,8 @@ mod tests {
             .map(|note| note.name().as_str().to_string())
             .collect();
         assert_eq!(names, ["alice", "carol"]);
+        let borrowed: Vec<&str> = queue.authorized_names().map(Name::as_str).collect();
+        assert_eq!(borrowed, ["alice", "carol"]);
     }
 
     #[test]
