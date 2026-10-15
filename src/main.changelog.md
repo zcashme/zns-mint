@@ -10,7 +10,8 @@
   absent; the chain is the record of what became of it. An update or
   release reads `2` → `1` → absent on the happy path; a rejected echo
   leaves it at `2`, since anyone can send one. `MAX_ATTEMPTS` wrong
-  codes retire the challenge, and the name goes absent.
+  codes retire the challenge, and the name goes absent. A mined echo
+  the pass has not yet processed counts as `1`: the mint holds the move.
 - The names come from borrowed accessors — `RequestQueue::names`,
   `OtpQueue::unrelayed` and `relayed`, `NameNoteQueue::authorized_names`
   — so a pass clones no queue, and no OTP code, to publish them.

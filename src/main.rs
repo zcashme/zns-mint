@@ -81,6 +81,7 @@ async fn main() {
             requests
                 .names()
                 .chain(challenges.unrelayed())
+                .chain(echoes.iter().map(|(echo, _, _)| &echo.name))
                 .chain(name_notes.authorized_names()),
             challenges.relayed(),
         );
