@@ -23,7 +23,7 @@
 use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Mutex;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use http_body_util::Full;
@@ -34,6 +34,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use metrics_exporter_prometheus::PrometheusHandle;
+use tokio::sync::watch;
 
 use crate::mint::Name;
 
@@ -44,7 +45,8 @@ pub const METRICS_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPEC
 const UPKEEP_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The requests in flight at the last pass, as exposition lines.
-static IN_FLIGHT: Mutex<String> = Mutex::new(String::new());
+static IN_FLIGHT: LazyLock<watch::Sender<String>> =
+    LazyLock::new(|| watch::channel(String::new()).0);
 
 /// Installs the global recorder and the HTTP listener. Must be called
 /// inside the tokio runtime; spawns the listener and upkeep tasks.
@@ -95,9 +97,7 @@ pub fn requests_in_flight<'a>(names: impl IntoIterator<Item = &'a Name>) {
             exposition.push_str(&format!("zns_mint_request_state{{name=\"{name}\"}} 1\n"));
         }
     }
-    *IN_FLIGHT
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = exposition;
+    IN_FLIGHT.send_replace(exposition);
 }
 
 /// Answers every connection like the exporter's own listener did:
@@ -138,11 +138,7 @@ async fn serve(listener: tokio::net::TcpListener, handle: PrometheusHandle) {
 /// The recorder's text, then the requests in flight.
 fn page(handle: &PrometheusHandle) -> String {
     let mut page = handle.render();
-    page.push_str(
-        &IN_FLIGHT
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-    );
+    page.push_str(&IN_FLIGHT.borrow());
     page
 }
 
