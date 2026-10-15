@@ -84,7 +84,7 @@ async fn main() {
             decisions
                 .iter()
                 .map(|(_, request, _, _)| request.name())
-                .chain(challenges.in_flight())
+                .chain(challenges.open())
                 .chain(orders.iter().map(|note| note.name())),
         );
         let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {

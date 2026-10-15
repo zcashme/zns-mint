@@ -257,7 +257,7 @@ impl OtpQueue {
 
     /// The name of every challenge still open — awaiting relay, or
     /// relayed and awaiting its echo.
-    pub fn in_flight(&self) -> impl Iterator<Item = &Name> {
+    pub fn open(&self) -> impl Iterator<Item = &Name> {
         self.challenges
             .iter()
             .map(|(challenge, _, _, _)| &challenge.name)
@@ -416,14 +416,14 @@ mod tests {
     /// An open challenge keeps its name in flight, once per transition,
     /// until the challenge is pruned.
     #[test]
-    fn an_open_challenge_keeps_its_name_in_flight() {
+    fn an_open_challenge_names_its_name_until_pruned() {
         let mut q = OtpQueue::new();
         let challenge = transition_challenge(1, *b"111111");
         q.admit(challenge.clone(), test_txid(1));
         q.admit(transition_challenge(1, *b"222222"), test_txid(2));
-        assert_eq!(q.in_flight().collect::<Vec<_>>(), [&challenge.name]);
+        assert_eq!(q.open().collect::<Vec<_>>(), [&challenge.name]);
         q.prune(challenge.expires_at);
-        assert_eq!(q.in_flight().count(), 0);
+        assert_eq!(q.open().count(), 0);
     }
 
     /// A relayed challenge burns exactly once: `answer` finds it,

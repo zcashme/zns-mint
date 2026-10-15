@@ -1,6 +1,6 @@
 # `mint/otp.rs` design record
 
-## 2026-10-15 — `OtpQueue::in_flight` (#342)
+## 2026-10-15 — `OtpQueue::open` (#342)
 
 - Names every challenge still open, awaiting relay or echo.
 
