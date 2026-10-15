@@ -58,8 +58,7 @@ async fn main() {
         guest,
     } = Boot::start().await;
 
-    let (in_flight, page) = zns_mint::metrics::in_flight();
-    zns_mint::metrics::install(page);
+    zns_mint::metrics::install();
     zns_mint::metrics::identity(&treasury_address, &registry_ufvk);
     zns_mint::metrics::ceremony(&seed_fingerprint, &capsule_hash);
     if let Some(guest) = &guest {
@@ -78,14 +77,13 @@ async fn main() {
     'run: loop {
         // Every pass ends here, however it ended: the names the queues
         // still hold are in flight until the next tip.
-        let decisions = requests.pending();
-        let orders = name_notes.authorized_notes();
-        in_flight.publish(
-            decisions
+        zns_mint::metrics::requests_in_flight(
+            requests
+                .pending()
                 .iter()
                 .map(|(_, request, _, _)| request.name())
                 .chain(challenges.open())
-                .chain(orders.iter().map(|note| note.name())),
+                .chain(name_notes.authorized_notes().iter().map(|note| note.name())),
         );
         let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {
             panic!("FATAL: Zebra returned an invalid canonical tip: {error}")

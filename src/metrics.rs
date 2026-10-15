@@ -23,6 +23,7 @@
 use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use http_body_util::Full;
@@ -33,7 +34,6 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use metrics_exporter_prometheus::PrometheusHandle;
-use tokio::sync::watch;
 
 use crate::mint::Name;
 
@@ -43,11 +43,13 @@ pub const METRICS_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPEC
 /// Histogram drain interval; the exporter's own default.
 const UPKEEP_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Installs the global recorder and the HTTP listener, which prints
-/// `page` after the recorder's text. Must be called inside the tokio
-/// runtime; spawns the listener and upkeep tasks. Panics on bind
-/// failure: an unmonitored mint should not boot.
-pub fn install(page: InFlightPage) {
+/// The requests in flight at the last pass, as exposition lines.
+static IN_FLIGHT: Mutex<String> = Mutex::new(String::new());
+
+/// Installs the global recorder and the HTTP listener. Must be called
+/// inside the tokio runtime; spawns the listener and upkeep tasks.
+/// Panics on bind failure: an unmonitored mint should not boot.
+pub fn install() {
     let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
         .install_recorder()
         .expect("FATAL: metrics recorder install failed");
@@ -57,7 +59,7 @@ pub fn install(page: InFlightPage) {
             tokio::net::TcpListener::from_std(listener)
         })
         .expect("FATAL: metrics endpoint bind failed");
-    tokio::spawn(serve(listener, handle.clone(), page));
+    tokio::spawn(serve(listener, handle.clone()));
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(UPKEEP_INTERVAL).await;
@@ -78,26 +80,13 @@ pub fn snapshot(
     metrics::gauge!("zns_mint_oracle_zats_per_usd").set(oracle_zats_per_usd as f64);
 }
 
-/// The names in flight: the loop publishes them through [`InFlight`],
-/// the listener reads the latest through [`InFlightPage`] at each scrape.
-pub fn in_flight() -> (InFlight, InFlightPage) {
-    let (sender, receiver) = watch::channel(String::new());
-    (InFlight(sender), InFlightPage(receiver))
-}
-
-/// The loop's end of the names in flight. Only its holder can change them.
-pub struct InFlight(watch::Sender<String>);
-
-/// The listener's end of the names in flight.
-#[derive(Clone)]
-pub struct InFlightPage(watch::Receiver<String>);
-
-impl InFlight {
-    /// Replaces the names in flight. Called once per pass with the name
-    /// of every request the queues still hold.
-    pub fn publish<'a>(&self, names: impl IntoIterator<Item = &'a Name>) {
-        self.0.send_replace(in_flight_lines(names));
-    }
+/// Replaces the names in flight. Called once per pass with the name of
+/// every request the queues still hold.
+pub fn requests_in_flight<'a>(names: impl IntoIterator<Item = &'a Name>) {
+    let lines = in_flight_lines(names);
+    *IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = lines;
 }
 
 /// One `zns_mint_request_state` sample per name, sorted, each once: a
@@ -118,11 +107,7 @@ fn in_flight_lines<'a>(names: impl IntoIterator<Item = &'a Name>) -> String {
 
 /// Answers every connection like the exporter's own listener did:
 /// `/health` is `OK`, any other path is the page.
-async fn serve(
-    listener: tokio::net::TcpListener,
-    handle: PrometheusHandle,
-    in_flight: InFlightPage,
-) {
+async fn serve(listener: tokio::net::TcpListener, handle: PrometheusHandle) {
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -132,13 +117,12 @@ async fn serve(
             }
         };
         let handle = handle.clone();
-        let in_flight = in_flight.clone();
         tokio::spawn(async move {
             let service = service_fn(move |request: Request<Incoming>| {
                 let body = if request.uri().path() == "/health" {
                     String::from("OK")
                 } else {
-                    page(&handle, &in_flight)
+                    page(&handle)
                 };
                 let mut response = Response::new(Full::new(Bytes::from(body)));
                 response
@@ -156,10 +140,14 @@ async fn serve(
     }
 }
 
-/// The recorder's text, then the names in flight.
-fn page(handle: &PrometheusHandle, in_flight: &InFlightPage) -> String {
+/// The recorder's text, then the requests in flight.
+fn page(handle: &PrometheusHandle) -> String {
     let mut page = handle.render();
-    page.push_str(&in_flight.0.borrow());
+    page.push_str(
+        &IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    );
     page
 }
 
@@ -245,12 +233,11 @@ mod tests {
             metrics::gauge!("zns_mint_chain_tip_height").set(7.0);
         });
         let alice = Name::parse("alice").unwrap();
-        let (in_flight, page) = in_flight();
-        in_flight.publish([&alice]);
+        requests_in_flight([&alice]);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve(listener, handle, page));
+        tokio::spawn(serve(listener, handle));
 
         let reply = get(addr, "/metrics").await;
         assert!(

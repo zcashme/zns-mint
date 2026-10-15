@@ -20,10 +20,6 @@
   seen: the mint serves `/metrics` itself (hyper, same address, same
   `/health`) and prints the set beside the recorder's text. The exporter's
   `http-listener` feature is dropped.
-- The set reaches the listener over a `tokio::sync::watch` channel:
-  `metrics::in_flight` makes both ends, the loop keeps the `InFlight`
-  sender and `metrics::install` takes the `InFlightPage` receiver, so
-  only the loop publishes. No global, no lock.
 - The labels rule is amended by owner decision: the endpoint stays
   host-gated, and a name is public once its note lands. A refused
   request never lands; only its name is exposed, never who asked.
