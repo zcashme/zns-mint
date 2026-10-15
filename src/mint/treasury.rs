@@ -56,10 +56,10 @@ pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 pub const CHALLENGE_RELAY_VALUE: Zatoshis = Zatoshis::ZERO;
 
 /// The project vault's mainnet Unified Address.
-pub const MAINNET_VAULT_ADDRESS: &str = "u1eqcql0r460xjqk49maglfxa02mfuetaed4h0nkf0lum4m6ay6t9gjpuxhuuygfeuz3d9sfgcjpz7uev2gsk5nnpf6g0uh0rn2uq0gz44";
+const MAINNET_VAULT_ADDRESS: &str = "u1eqcql0r460xjqk49maglfxa02mfuetaed4h0nkf0lum4m6ay6t9gjpuxhuuygfeuz3d9sfgcjpz7uev2gsk5nnpf6g0uh0rn2uq0gz44";
 
 /// The project vault's testnet Unified Address (also used on regtest).
-pub const TESTNET_VAULT_ADDRESS: &str = "utest1v5p9lqxsshgrhdcj3gsg60vglxlkhwmhpvhtv3884pgwxktas9s95ws5qvypv4qyxadd5gjhzp4vczpd95flh307x42ssrynp9az3j4fyhz8knacwkzf8xk2f9726480ym2ntmv3ftk9z7gy5a8tarndrm0p992dx7gsczewsglqnpxg";
+const TESTNET_VAULT_ADDRESS: &str = "utest1v5p9lqxsshgrhdcj3gsg60vglxlkhwmhpvhtv3884pgwxktas9s95ws5qvypv4qyxadd5gjhzp4vczpd95flh307x42ssrynp9az3j4fyhz8knacwkzf8xk2f9726480ym2ntmv3ftk9z7gy5a8tarndrm0p992dx7gsczewsglqnpxg";
 
 fn vault_address<P: Parameters>(network: &P) -> zcash_keys::address::Address {
     match network.network_type() {
@@ -70,7 +70,7 @@ fn vault_address<P: Parameters>(network: &P) -> zcash_keys::address::Address {
             zcash_keys::address::Address::decode(&TestNetwork, TESTNET_VAULT_ADDRESS)
         }
     }
-    .expect("the configured vault Unified Address is valid for its network")
+    .expect("FATAL: the configured vault Unified Address is invalid for its network")
 }
 
 /// A Treasury transaction was not built. Distinct from "nothing to do".
