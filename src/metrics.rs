@@ -83,26 +83,21 @@ pub fn snapshot(
 /// Replaces the names in flight. Called once per pass with the name of
 /// every request the queues still hold.
 pub fn requests_in_flight<'a>(names: impl IntoIterator<Item = &'a Name>) {
-    let lines = in_flight_lines(names);
+    // One `zns_mint_request_state` sample per name, sorted, each once: a
+    // name in several queues is still one request in flight, and a scrape
+    // with a repeated series is rejected whole. Names are `[a-z0-9]` and
+    // need no escaping.
+    let names: BTreeSet<&str> = names.into_iter().map(Name::as_str).collect();
+    let mut exposition = String::new();
+    if !names.is_empty() {
+        exposition.push_str("# TYPE zns_mint_request_state gauge\n");
+        for name in names {
+            exposition.push_str(&format!("zns_mint_request_state{{name=\"{name}\"}} 1\n"));
+        }
+    }
     *IN_FLIGHT
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = lines;
-}
-
-/// One `zns_mint_request_state` sample per name, sorted, each once: a
-/// name in several queues is still one request in flight, and a scrape
-/// with a repeated series is rejected whole. Names are `[a-z0-9]` and
-/// need no escaping.
-fn in_flight_lines<'a>(names: impl IntoIterator<Item = &'a Name>) -> String {
-    let samples: BTreeSet<&str> = names.into_iter().map(Name::as_str).collect();
-    if samples.is_empty() {
-        return String::new();
-    }
-    let mut lines = String::from("# TYPE zns_mint_request_state gauge\n");
-    for name in samples {
-        lines.push_str(&format!("zns_mint_request_state{{name=\"{name}\"}} 1\n"));
-    }
-    lines
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = exposition;
 }
 
 /// Answers every connection like the exporter's own listener did:
@@ -195,24 +190,11 @@ pub fn guest(measurement: &str, guest_policy: &str) {
 mod tests {
     use super::*;
 
-    /// One sample per name, sorted, a name in several queues printed
-    /// once; nothing at all when no name is in flight.
-    #[test]
-    fn names_in_flight_print_once_each() {
-        let alice = Name::parse("alice").unwrap();
-        let bob = Name::parse("bob").unwrap();
-        assert_eq!(
-            in_flight_lines([&bob, &alice, &bob]),
-            "# TYPE zns_mint_request_state gauge\n\
-             zns_mint_request_state{name=\"alice\"} 1\n\
-             zns_mint_request_state{name=\"bob\"} 1\n"
-        );
-        assert_eq!(in_flight_lines(std::iter::empty::<&Name>()), "");
-    }
-
     /// The listener answers zns-supervise's probe — those exact bytes —
     /// with 200 and the page: the recorder's text, then the names in
-    /// flight. `/health` stays `OK`.
+    /// flight — one sample per name, sorted, a name in several queues
+    /// printed once, nothing at all when none is in flight. `/health`
+    /// stays `OK`. The only test that publishes: the names are global.
     #[tokio::test]
     async fn the_page_answers_the_supervisor_probe() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -233,7 +215,8 @@ mod tests {
             metrics::gauge!("zns_mint_chain_tip_height").set(7.0);
         });
         let alice = Name::parse("alice").unwrap();
-        requests_in_flight([&alice]);
+        let bob = Name::parse("bob").unwrap();
+        requests_in_flight([&bob, &alice, &bob]);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -249,10 +232,15 @@ mod tests {
         assert!(
             body.ends_with(
                 "\n# TYPE zns_mint_request_state gauge\n\
-                 zns_mint_request_state{name=\"alice\"} 1\n"
+                 zns_mint_request_state{name=\"alice\"} 1\n\
+                 zns_mint_request_state{name=\"bob\"} 1\n"
             ),
             "{body}"
         );
+
+        requests_in_flight(std::iter::empty::<&Name>());
+        let reply = get(addr, "/metrics").await;
+        assert!(!reply.contains("zns_mint_request_state"), "{reply}");
 
         let health = get(addr, "/health").await;
         assert!(health.starts_with("HTTP/1.1 200") || health.starts_with("HTTP/1.0 200"));
