@@ -25,7 +25,7 @@ use zcash_client_backend::util::SystemClock;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::FeeError;
 use zcash_primitives::transaction::{Transaction, TxId};
-use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkType, Parameters, TestNetwork};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::{BalanceError, Zatoshis};
 use zcash_protocol::ShieldedPool;
@@ -55,10 +55,23 @@ pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 /// transaction's ZIP-317 fee is calculated separately.
 pub const CHALLENGE_RELAY_VALUE: Zatoshis = Zatoshis::ZERO;
 
-/// The project vault's P2PKH address (placeholder pending final approved
-/// address).
-pub const VAULT_ADDRESS: transparent::address::TransparentAddress =
-    transparent::address::TransparentAddress::PublicKeyHash([0x42; 20]);
+/// The project vault's mainnet Unified Address.
+pub const MAINNET_VAULT_ADDRESS: &str = "u1eqcql0r460xjqk49maglfxa02mfuetaed4h0nkf0lum4m6ay6t9gjpuxhuuygfeuz3d9sfgcjpz7uev2gsk5nnpf6g0uh0rn2uq0gz44";
+
+/// The project vault's testnet Unified Address (also used on regtest).
+pub const TESTNET_VAULT_ADDRESS: &str = "utest1v5p9lqxsshgrhdcj3gsg60vglxlkhwmhpvhtv3884pgwxktas9s95ws5qvypv4qyxadd5gjhzp4vczpd95flh307x42ssrynp9az3j4fyhz8knacwkzf8xk2f9726480ym2ntmv3ftk9z7gy5a8tarndrm0p992dx7gsczewsglqnpxg";
+
+fn vault_address<P: Parameters>(network: &P) -> zcash_keys::address::Address {
+    match network.network_type() {
+        NetworkType::Main => {
+            zcash_keys::address::Address::decode(&MainNetwork, MAINNET_VAULT_ADDRESS)
+        }
+        NetworkType::Test | NetworkType::Regtest => {
+            zcash_keys::address::Address::decode(&TestNetwork, TESTNET_VAULT_ADDRESS)
+        }
+    }
+    .expect("the configured vault Unified Address is valid for its network")
+}
 
 /// A Treasury transaction was not built. Distinct from "nothing to do".
 #[derive(Debug)]
@@ -95,7 +108,7 @@ fn propose_vault_sweep<P: Parameters>(
 ) -> Result<Option<VaultSweepProposal>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>>
 {
     let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
-    let vault = zcash_keys::address::Address::Transparent(VAULT_ADDRESS);
+    let vault = vault_address(network);
     let sendable = match propose_send_max_transfer::<_, _, _, Infallible>(
         wallet,
         network,
@@ -320,6 +333,28 @@ mod tests {
 
     fn h(n: u32) -> BlockHeight {
         BlockHeight::from_u32(n)
+    }
+
+    #[test]
+    fn vault_addresses_match_the_network() {
+        for (vault, encoded) in [
+            (
+                vault_address(&MainNetwork).to_receiver_preserving_zcash_address(&MainNetwork),
+                MAINNET_VAULT_ADDRESS,
+            ),
+            (
+                vault_address(&TestNetwork).to_receiver_preserving_zcash_address(&TestNetwork),
+                TESTNET_VAULT_ADDRESS,
+            ),
+        ] {
+            assert_eq!(vault.to_string(), encoded);
+        }
+        assert!(
+            zcash_keys::address::Address::decode(&MainNetwork, TESTNET_VAULT_ADDRESS).is_none()
+        );
+        assert!(
+            zcash_keys::address::Address::decode(&TestNetwork, MAINNET_VAULT_ADDRESS).is_none()
+        );
     }
 
     /// The float survives any note count, and dust is left behind.
