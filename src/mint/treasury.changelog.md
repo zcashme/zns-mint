@@ -1,5 +1,10 @@
 # Treasury design record
 
+## 2026-10-15 — `RequestQueue::names` (#342)
+
+- Names every request pending decision, borrowed, for the request state
+  metric; `pending` still clones the entries the deciding pass consumes.
+
 ## 2026-10-09 — The sweep's fee comes out of the swept amount (#321)
 
 - `payment = total − SWEEP_RESERVE` charged the ZIP-317 fee to the fixed

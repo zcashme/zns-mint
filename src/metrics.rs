@@ -33,7 +33,7 @@ use hyper::header::{HeaderValue, CONTENT_TYPE};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::sync::watch;
 
@@ -44,6 +44,11 @@ pub const METRICS_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPEC
 
 /// Histogram drain interval; the exporter's own default.
 const UPKEEP_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Pause after a failed accept. Descriptor exhaustion fails every accept
+/// until a connection closes; retrying at once would spin and flood the
+/// log.
+const ACCEPT_RETRY_PAUSE: Duration = Duration::from_secs(1);
 
 /// The requests in flight at the last pass, as exposition lines.
 static IN_FLIGHT: LazyLock<watch::Sender<String>> =
@@ -113,31 +118,41 @@ pub fn requests_in_flight<'a>(
 }
 
 /// Answers every connection like the exporter's own listener did:
-/// `/health` is `OK`, any other path is the page.
+/// `/health` is `OK`, any other path is the page, rendered off the
+/// runtime's workers. The timer arms hyper's header-read timeout, so a
+/// connection that never sends its request is closed, not held.
 async fn serve(listener: tokio::net::TcpListener, handle: PrometheusHandle) {
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
             Err(error) => {
                 tracing::warn!(%error, "metrics connection not accepted");
+                tokio::time::sleep(ACCEPT_RETRY_PAUSE).await;
                 continue;
             }
         };
         let handle = handle.clone();
         tokio::spawn(async move {
             let service = service_fn(move |request: Request<Incoming>| {
-                let body = if request.uri().path() == "/health" {
-                    String::from("OK")
-                } else {
-                    page(&handle)
-                };
-                let mut response = Response::new(Full::new(Bytes::from(body)));
-                response
-                    .headers_mut()
-                    .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-                async move { Ok::<_, Infallible>(response) }
+                let health = request.uri().path() == "/health";
+                let handle = handle.clone();
+                async move {
+                    let body = if health {
+                        String::from("OK")
+                    } else {
+                        tokio::task::spawn_blocking(move || page(&handle))
+                            .await
+                            .expect("metrics page render panicked")
+                    };
+                    let mut response = Response::new(Full::new(Bytes::from(body)));
+                    response
+                        .headers_mut()
+                        .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+                    Ok::<_, Infallible>(response)
+                }
             });
             if let Err(error) = http1::Builder::new()
+                .timer(TokioTimer::new())
                 .serve_connection(TokioIo::new(stream), service)
                 .await
             {

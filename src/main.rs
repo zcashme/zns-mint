@@ -79,16 +79,9 @@ async fn main() {
         // still hold are in flight until the next tip.
         zns_mint::metrics::requests_in_flight(
             requests
-                .pending()
-                .iter()
-                .map(|(_, request, _, _)| request.name())
-                .chain(
-                    challenges
-                        .requested()
-                        .iter()
-                        .map(|challenge| &challenge.name),
-                )
-                .chain(name_notes.authorized_notes().iter().map(|note| note.name())),
+                .names()
+                .chain(challenges.unrelayed())
+                .chain(name_notes.authorized_names()),
             challenges.relayed(),
         );
         let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {

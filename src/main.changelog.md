@@ -9,7 +9,15 @@
   echo and nothing else holds the name. A name with nothing pending is
   absent; the chain is the record of what became of it. An update or
   release reads `2` → `1` → absent on the happy path; a rejected echo
-  leaves it at `2`, since anyone can send one.
+  leaves it at `2`, since anyone can send one. `MAX_ATTEMPTS` wrong
+  codes retire the challenge, and the name goes absent.
+- The names come from borrowed accessors — `RequestQueue::names`,
+  `OtpQueue::unrelayed` and `relayed`, `NameNoteQueue::authorized_names`
+  — so a pass clones no queue, and no OTP code, to publish them.
+- The listener renders the page in `spawn_blocking`, as the exporter's
+  did, arms hyper's header-read timeout with `TokioTimer`, and pauses
+  one second after a failed accept instead of spinning on descriptor
+  exhaustion.
 - Keyed by name alone: the frontend asks after a name, and the queues
   already hold it at every stage, so no payment txid is carried from
   one queue to the next. A name in several queues is printed once.

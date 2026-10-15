@@ -1,10 +1,11 @@
 # `mint/otp.rs` design record
 
-## 2026-10-15 — `OtpQueue::relayed` (#342)
+## 2026-10-15 — `OtpQueue::relayed` and `unrelayed` (#342)
 
-- Names every relayed challenge, awaiting its echo. Unrelayed
-  challenges come from `requested`, so the metric tells the mint's move
-  from the owner's.
+- `relayed` names every relayed challenge, awaiting its echo;
+  `unrelayed` every challenge still awaiting relay. Both borrow, so the
+  metric tells the mint's move from the owner's without cloning a
+  challenge or its code.
 
 ## 2026-09-22 — `awaiting` scopes by `tip_rcm`
 

@@ -1,5 +1,11 @@
 # `mint/note.rs` design record
 
+## 2026-10-15 — `NameNoteQueue::authorized_names` (#342)
+
+- Names every outstanding authorized order, borrowed, for the request
+  state metric; `authorized_notes` still clones the orders the
+  enactment loop builds from.
+
 ## 2026-09-28 — Outstanding orders retry through wallet expiry (#202, #225)
 
 - `NameNoteState` retains `Authorized` and `Seen`; `Submitted` and
