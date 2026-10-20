@@ -45,7 +45,7 @@ async fn boot_then_claim_update_release() -> Result<()> {
 
     // User second: its shield is the chain's first shielded tx; its
     // restart drops only the funder's unfinalized tail.
-    let user = fixture::User::fund(&mut zebra, 7).await?;
+    let user = fixture::User::fund(&mut zebra, 14).await?;
     eprintln!("user miner: {}", user.miner_address);
     eprintln!("user UA: {}", user.ua);
 
@@ -110,6 +110,14 @@ async fn boot_then_claim_update_release() -> Result<()> {
     let mint = Stack::launch_mint(&mut zebra, mint_bin, birthday, &anchor_txid).await?;
     let mut stack = Stack { zebra, mint, user };
 
+    let claim_note = claim(&mut stack).await?;
+    let update_note = update(&mut stack, &claim_note).await?;
+    release(&mut stack, &update_note).await?;
+
+    // The released name again, now under a Sapling-only controller: the
+    // mint relays each OTP challenge to its Sapling receiver.
+    stack.user.use_sapling_controller().await?;
+    eprintln!("sapling controller UA: {}", stack.user.ua);
     let claim_note = claim(&mut stack).await?;
     let update_note = update(&mut stack, &claim_note).await?;
     release(&mut stack, &update_note).await?;

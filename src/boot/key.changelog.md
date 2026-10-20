@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/boot/key.rs`.
 
+## 2026-10-20 — Treasury Sapling viewing key (#365)
+
+- `TreasuryKeys::sapling_dfvk` exposes the Treasury's Sapling viewing key
+  for the Sapling memo intake. Treasury-only: the Registry never receives
+  Sapling.
+
 ## 2026-09-29 — Account authority belongs to boot (#231)
 
 - Moved the private key implementation under boot, which re-exports only

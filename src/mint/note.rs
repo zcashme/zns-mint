@@ -535,77 +535,121 @@ pub fn decrypt_name_notes<P: Parameters>(
     candidates
 }
 
-/// Trial-decrypts the block's Ironwood actions sent to the Treasury's
-/// external address, exposing each `(txid, action index, memo)`. The
-/// upstream scanner deliberately drops note plaintexts; request memos
+/// Trial-decrypts the block's Sapling outputs and Ironwood actions sent to
+/// the Treasury's external addresses, exposing each `(txid, paid, memo)`.
+/// The upstream scanner deliberately drops note plaintexts; request memos
 /// arrive through this pass instead.
-pub fn decrypt_treasury_memos(
+pub fn decrypt_treasury_memos<P: Parameters>(
+    network: &P,
     block: &Block,
+    height: BlockHeight,
     treasury_keys: &crate::TreasuryKeys,
 ) -> Vec<(
     zcash_primitives::transaction::TxId,
-    usize,
     zcash_protocol::value::Zatoshis,
     zcash_protocol::memo::MemoBytes,
 )> {
+    let ivks = TreasuryIvks::new(treasury_keys);
+    let zip212 =
+        zcash_primitives::transaction::components::sapling::zip212_enforcement(network, height);
     let mut memos = Vec::new();
     for tx in block.vtx() {
-        for (action_index, paid, memo) in
-            decrypt_treasury_tx_with_fvk(tx, &treasury_keys.orchard_fvk())
-        {
-            memos.push((tx.txid(), action_index, paid, memo));
+        for (paid, memo) in ivks.decrypt(tx, zip212) {
+            memos.push((tx.txid(), paid, memo));
         }
     }
     memos
 }
 
-/// Trial-decrypts one transaction's Ironwood actions using the Treasury's
-/// viewing capability. Intended for mempool transactions, whose memos are
-/// not yet available through block scanning.
-pub fn decrypt_treasury_transaction(
+/// Trial-decrypts one transaction's Sapling outputs and Ironwood actions
+/// using the Treasury's viewing capability. Intended for mempool
+/// transactions, whose memos are not yet available through block scanning;
+/// `target_height` is the height the transaction would be mined at.
+pub fn decrypt_treasury_transaction<P: Parameters>(
+    network: &P,
     tx: &zcash_primitives::transaction::Transaction,
+    target_height: BlockHeight,
     treasury_keys: &crate::TreasuryKeys,
 ) -> Vec<(
-    usize,
     zcash_protocol::value::Zatoshis,
     zcash_protocol::memo::MemoBytes,
 )> {
-    decrypt_treasury_tx_with_fvk(tx, &treasury_keys.orchard_fvk())
+    TreasuryIvks::new(treasury_keys).decrypt(
+        tx,
+        zcash_primitives::transaction::components::sapling::zip212_enforcement(
+            network,
+            target_height,
+        ),
+    )
 }
 
-/// The viewing-key implementation shared by block and mempool memo scans.
-fn decrypt_treasury_tx_with_fvk(
-    tx: &zcash_primitives::transaction::Transaction,
-    treasury_fvk: &orchard::keys::FullViewingKey,
-) -> Vec<(
-    usize,
-    zcash_protocol::value::Zatoshis,
-    zcash_protocol::memo::MemoBytes,
-)> {
-    let ivk = treasury_fvk
-        .to_ivk(orchard::keys::Scope::External)
-        .prepare();
+/// The Treasury's external-scope incoming viewing keys, prepared once and
+/// shared by block and mempool memo scans.
+struct TreasuryIvks {
+    sapling: sapling::keys::PreparedIncomingViewingKey,
+    ironwood: orchard::keys::PreparedIncomingViewingKey,
+}
 
-    let mut memos = Vec::new();
-    let Some(bundle) = tx.ironwood_bundle() else {
-        return memos;
-    };
-    if bundle.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3() {
-        return memos;
-    }
-    for (action_index, action) in bundle.actions().iter().enumerate() {
-        let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
-        if let Some((note, _recipient, memo)) =
-            zcash_note_encryption::try_note_decryption(&domain, &ivk, action)
-        {
-            let paid = zcash_protocol::value::Zatoshis::from_u64(note.value().inner())
-                .expect("note values are consensus-bounded");
-            let memo = zcash_protocol::memo::MemoBytes::from_bytes(&memo)
-                .expect("a decrypted memo is 512 bytes");
-            memos.push((action_index, paid, memo));
+impl TreasuryIvks {
+    fn new(treasury_keys: &crate::TreasuryKeys) -> Self {
+        Self {
+            sapling: sapling::keys::PreparedIncomingViewingKey::new(
+                &treasury_keys.sapling_dfvk().to_ivk(zip32::Scope::External),
+            ),
+            ironwood: treasury_keys
+                .orchard_fvk()
+                .to_ivk(orchard::keys::Scope::External)
+                .prepare(),
         }
     }
-    memos
+
+    /// Sapling outputs first, then Ironwood actions, each in bundle order.
+    /// `zip212` is the note-plaintext rule at the transaction's height.
+    fn decrypt(
+        &self,
+        tx: &zcash_primitives::transaction::Transaction,
+        zip212: sapling::note_encryption::Zip212Enforcement,
+    ) -> Vec<(
+        zcash_protocol::value::Zatoshis,
+        zcash_protocol::memo::MemoBytes,
+    )> {
+        let arrival = |value: u64, memo: [u8; 512]| {
+            (
+                zcash_protocol::value::Zatoshis::from_u64(value)
+                    .expect("note values are consensus-bounded"),
+                zcash_protocol::memo::MemoBytes::from_bytes(&memo)
+                    .expect("a decrypted memo is 512 bytes"),
+            )
+        };
+
+        let mut memos = Vec::new();
+        if let Some(bundle) = tx.sapling_bundle() {
+            for output in bundle.shielded_outputs() {
+                if let Some((note, _recipient, memo)) =
+                    sapling::note_encryption::try_sapling_note_decryption(
+                        &self.sapling,
+                        output,
+                        zip212,
+                    )
+                {
+                    memos.push(arrival(note.value().inner(), memo));
+                }
+            }
+        }
+        if let Some(bundle) = tx.ironwood_bundle() {
+            if bundle.bundle_version() == orchard::bundle::BundleVersion::ironwood_v3() {
+                for action in bundle.actions() {
+                    let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
+                    if let Some((note, _recipient, memo)) =
+                        zcash_note_encryption::try_note_decryption(&domain, &self.ironwood, action)
+                    {
+                        memos.push(arrival(note.value().inner(), memo));
+                    }
+                }
+            }
+        }
+        memos
+    }
 }
 
 // ---------------------------------------------------------------------------

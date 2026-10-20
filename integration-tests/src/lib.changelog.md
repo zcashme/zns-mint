@@ -1,5 +1,16 @@
 # lib.changelog.md
 
+## 2026-10-20
+
+- `mint_identity_strings` derives the Treasury address with
+  `zns_mint::boot::TREASURY_ADDRESS_REQUEST`.
+- `User::use_sapling_controller` switches the controller UA to a
+  Sapling-only address. Requests stay paid to the Treasury UA: on regtest
+  the chain is inside ZIP 212's grace period, and Zallet's PCZT builder
+  refuses Sapling outputs there.
+- The OTP read matches the challenge by its memo's UA rather than the
+  output's listed address, which may be a Sapling receiver.
+
 ## 2026-10-10
 
 - `DEV_SEED` moves to zns-canon (`regtest::DEV_SEED`) — one all-zero
