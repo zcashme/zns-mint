@@ -3,7 +3,6 @@
 use rand::RngExt;
 use subtle::ConstantTimeEq;
 use time::{Duration, Timestamp};
-use zcash_primitives::transaction::TxId;
 use zeroize::Zeroize;
 
 use crate::mint::{Action, Name, NameCommitment, OtpMemo, Term, UnifiedAddress};
@@ -113,6 +112,21 @@ impl OtpChallenge {
             ua: self.ua.clone(),
         }
     }
+
+    /// Whether this challenge is for the given transition: the name,
+    /// the verb, and the requested address. A challenge is identified
+    /// by its transition; `tip_rcm` and `code` are what it verifies.
+    fn is_for(&self, name: &Name, action: Action, ua: &UnifiedAddress) -> bool {
+        self.name == *name && self.action == action && self.ua == *ua
+    }
+
+    fn same_transition(&self, other: &OtpChallenge) -> bool {
+        self.is_for(&other.name, other.action, &other.ua)
+    }
+
+    fn answered_by(&self, echo: &OtpMemo) -> bool {
+        self.is_for(&echo.name, echo.action, &echo.ua)
+    }
 }
 
 /// Lifecycle state for a pending challenge entry.
@@ -124,10 +138,32 @@ pub enum ChallengeState {
     Relayed,
 }
 
+/// One queued challenge and where it stands.
+#[derive(Clone)]
+struct Entry {
+    challenge: OtpChallenge,
+    state: ChallengeState,
+    attempts: Attempts,
+}
+
+impl Entry {
+    fn new(challenge: OtpChallenge) -> Self {
+        Self {
+            challenge,
+            state: ChallengeState::Requested,
+            attempts: Attempts::default(),
+        }
+    }
+
+    fn is_relayed(&self) -> bool {
+        self.state == ChallengeState::Relayed
+    }
+}
+
 /// Issued challenges, in order.
 #[derive(Clone)]
 pub struct OtpQueue {
-    challenges: Vec<(OtpChallenge, ChallengeState, TxId, Attempts)>,
+    challenges: Vec<Entry>,
 }
 
 impl Default for OtpQueue {
@@ -143,115 +179,88 @@ impl OtpQueue {
         }
     }
 
-    /// One live entry per pending transition: a repeat request
-    /// receives the existing entry, stamped with the newest txid.
-    pub fn admit(&mut self, request: OtpChallenge, txid: TxId) -> OtpChallenge {
-        if let Some((existing, _, entry_txid, _)) =
-            self.challenges.iter_mut().find(|(existing, _, _, _)| {
-                existing.name == request.name
-                    && existing.action == request.action
-                    && existing.ua == request.ua
-                    && existing.tip_rcm == request.tip_rcm
-            })
+    /// One live entry per pending transition. A repeat request — the
+    /// same transition against the same record — receives the existing
+    /// entry: same code, same deadline, attempts kept. A request against
+    /// a newer record finds the entry stale and replaces it: the old
+    /// challenge could neither be relayed nor answered any more.
+    pub fn admit(&mut self, request: OtpChallenge) -> OtpChallenge {
+        match self
+            .challenges
+            .iter_mut()
+            .find(|entry| entry.challenge.same_transition(&request))
         {
-            *entry_txid = txid;
-            return existing.clone();
+            Some(entry) if entry.challenge.tip_rcm == request.tip_rcm => entry.challenge.clone(),
+            Some(entry) => {
+                *entry = Entry::new(request.clone());
+                request
+            }
+            None => {
+                self.challenges.push(Entry::new(request.clone()));
+                request
+            }
         }
-        self.challenges.push((
-            request.clone(),
-            ChallengeState::Requested,
-            txid,
-            Attempts::default(),
-        ));
-        request
-    }
-
-    /// Removes a challenge whose request transaction was invalidated,
-    /// unless already relayed. Follows the newest backing txid.
-    pub fn invalidate(&mut self, txid: TxId) {
-        self.challenges.retain(|(_, state, existing_txid, _)| {
-            *existing_txid != txid || matches!(state, ChallengeState::Relayed)
-        });
     }
 
     /// Marks a request as relayed after the node accepts its challenge.
     pub fn challenge_issued(&mut self, request: &OtpChallenge) -> bool {
-        if let Some((_, state, _, _)) = self.challenges.iter_mut().find(|(existing, _, _, _)| {
-            existing.name == request.name
-                && existing.action == request.action
-                && existing.ua == request.ua
-                && existing.term == request.term
-                && existing.tip_rcm == request.tip_rcm
-                && existing.code == request.code
-        }) {
-            if matches!(state, ChallengeState::Requested) {
-                *state = ChallengeState::Relayed;
-                return true;
+        match self
+            .challenges
+            .iter_mut()
+            .find(|entry| entry.challenge.same_transition(request))
+        {
+            Some(entry) if entry.state == ChallengeState::Requested => {
+                entry.state = ChallengeState::Relayed;
+                true
             }
+            _ => false,
         }
-        false
-    }
-
-    pub fn is_relayed(&self, request: &OtpChallenge) -> bool {
-        self.challenges.iter().any(|(existing, state, _, _)| {
-            existing.name == request.name
-                && existing.action == request.action
-                && existing.ua == request.ua
-                && existing.term == request.term
-                && existing.tip_rcm == request.tip_rcm
-                && existing.code == request.code
-                && matches!(state, ChallengeState::Relayed)
-        })
     }
 
     /// Returns queued requests that still need a challenge submission.
     pub fn requested(&self) -> Vec<OtpChallenge> {
         self.challenges
             .iter()
-            .filter(|(_, state, _, _)| matches!(state, ChallengeState::Requested))
-            .map(|(request, _, _, _)| request.clone())
+            .filter(|entry| entry.state == ChallengeState::Requested)
+            .map(|entry| entry.challenge.clone())
             .collect()
     }
 
     /// Drops expired challenges. The run loop calls this each wake-up.
     pub fn prune(&mut self, mtp: Timestamp) {
         self.challenges
-            .retain(|(request, _, _, _)| mtp < request.expires_at);
+            .retain(|entry| mtp < entry.challenge.expires_at);
     }
 
-    /// The relayed challenge an echo answers when its code is right;
-    /// a wrong code counts one attempt against the transition the
-    /// echo names and retires it at [`MAX_ATTEMPTS`].
+    /// The relayed challenge an echo answers when its code is right.
+    /// The entry must have been issued against the current record
+    /// (`tip_rcm`); a stale one answers nothing and counts nothing. A
+    /// wrong code counts one attempt against the transition the echo
+    /// names and retires it at [`MAX_ATTEMPTS`].
     pub fn answer(&mut self, returned: &OtpMemo, tip_rcm: NameCommitment) -> Option<OtpChallenge> {
-        let index = self.challenges.iter().position(|(request, state, _, _)| {
-            matches!(state, ChallengeState::Relayed)
-                && request.name == returned.name
-                && request.action == returned.action
-                && request.ua == returned.ua
-                && request.tip_rcm == tip_rcm
-        })?;
-        let (request, _, _, attempts) = &mut self.challenges[index];
-        if bool::from(request.code.0.ct_eq(&returned.code.0)) {
-            return Some(request.clone());
+        let index = self
+            .challenges
+            .iter()
+            .position(|entry| entry.is_relayed() && entry.challenge.answered_by(returned))?;
+        let entry = &mut self.challenges[index];
+        if entry.challenge.tip_rcm != tip_rcm {
+            return None;
         }
-        if attempts.count() {
+        if bool::from(entry.challenge.code.0.ct_eq(&returned.code.0)) {
+            return Some(entry.challenge.clone());
+        }
+        if entry.attempts.count() {
             self.challenges.remove(index);
         }
         None
     }
 
-    /// Consumes the answered challenge: one code, one use. The
-    /// transition is the key — a txid can back several challenges,
-    /// and consuming one must not evict its neighbors.
+    /// Consumes the answered challenge: one code, one use. Only the
+    /// entry for that transition goes; its neighbours stand.
     pub fn consume(&mut self, answered: &OtpChallenge) -> bool {
         let before = self.challenges.len();
-        self.challenges.retain(|(existing, state, _, _)| {
-            !(matches!(state, ChallengeState::Relayed)
-                && existing.name == answered.name
-                && existing.action == answered.action
-                && existing.ua == answered.ua
-                && existing.tip_rcm == answered.tip_rcm)
-        });
+        self.challenges
+            .retain(|entry| !(entry.is_relayed() && entry.challenge.same_transition(answered)));
         self.challenges.len() != before
     }
 
@@ -259,16 +268,16 @@ impl OtpQueue {
     pub fn unrelayed(&self) -> impl Iterator<Item = &Name> {
         self.challenges
             .iter()
-            .filter(|(_, state, _, _)| matches!(state, ChallengeState::Requested))
-            .map(|(challenge, _, _, _)| &challenge.name)
+            .filter(|entry| entry.state == ChallengeState::Requested)
+            .map(|entry| &entry.challenge.name)
     }
 
     /// The name of every relayed challenge, awaiting its echo.
     pub fn relayed(&self) -> impl Iterator<Item = &Name> {
         self.challenges
             .iter()
-            .filter(|(_, state, _, _)| matches!(state, ChallengeState::Relayed))
-            .map(|(challenge, _, _, _)| &challenge.name)
+            .filter(|entry| entry.is_relayed())
+            .map(|entry| &entry.challenge.name)
     }
 }
 
@@ -289,21 +298,21 @@ mod tests {
         NameCommitment::from_bytes(&bytes).unwrap()
     }
 
-    fn test_txid(seed: u8) -> TxId {
-        let mut bytes = [0u8; 32];
-        bytes[0] = seed;
-        TxId::from_bytes(bytes)
+    fn t0() -> Timestamp {
+        Timestamp::from_seconds(1_700_000_000).unwrap()
     }
 
-    fn transition_challenge(seed: u8, code: [u8; 6]) -> OtpChallenge {
+    /// A challenge for alice, `action`, the test UA, issued against
+    /// `commitment(seed)` with `code`.
+    fn challenge(action: Action, seed: u8, code: [u8; 6]) -> OtpChallenge {
         OtpChallenge {
             name: test_name("alice"),
-            action: Action::Update,
+            action,
             ua: mainnet_ua(),
             term: None,
             tip_rcm: commitment(seed),
             code: OtpCode::for_test(code),
-            expires_at: Timestamp::from_seconds(1_700_000_000).unwrap() + Duration::seconds(D_OTP),
+            expires_at: t0() + Duration::seconds(D_OTP),
         }
     }
 
@@ -320,18 +329,17 @@ mod tests {
 
     #[test]
     fn the_birth_shares_one_code_and_expires_after_d_otp() {
-        let ua = match zcash_keys::address::Address::decode(
-            &zcash_protocol::consensus::MAIN_NETWORK,
-            "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
-        ) {
-            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
-            _ => panic!("vector is a mainnet Unified Address"),
-        };
         let alice = test_name("alice");
         let rcm = commitment(1);
-        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
 
-        let pending = OtpChallenge::issue(alice, Action::Update, ua, rcm, Some(Term::Years(1)), t0);
+        let pending = OtpChallenge::issue(
+            alice,
+            Action::Update,
+            mainnet_ua(),
+            rcm,
+            Some(Term::Years(1)),
+            t0(),
+        );
 
         // One code in two bodies: the memo is the controller's whole
         // view of the record — four fields, nothing private.
@@ -357,68 +365,78 @@ mod tests {
         }
     }
 
-    /// Two challenges share a code across a commitment change:
-    /// `answer` must resolve by `tip_rcm`, not just by code.
+    /// The record moved on under a live challenge: a request for the
+    /// same transition against the new record replaces the stale entry
+    /// — new code, new deadline — and the old code answers nothing.
     #[test]
-    fn answer_scopes_by_tip_rcm() {
+    fn a_request_against_a_newer_record_replaces_the_stale_challenge() {
         let mut q = OtpQueue::new();
-        let alice = test_name("alice");
-        let ua = mainnet_ua();
-        let old_rcm = commitment(1);
-        let new_rcm = commitment(2);
-        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
-        let shared = OtpCode::for_test(*b"123456");
+        let mut old = challenge(Action::Update, 1, *b"111111");
+        old.term = Some(Term::Years(1));
+        let mut new = challenge(Action::Update, 2, *b"222222");
+        new.term = Some(Term::Years(5));
+        new.expires_at = old.expires_at + Duration::seconds(60);
 
-        q.admit(
-            OtpChallenge {
-                name: alice.clone(),
-                action: Action::Update,
-                ua: ua.clone(),
-                term: Some(Term::Years(1)),
-                tip_rcm: old_rcm,
-                code: shared.clone(),
-                expires_at: t0 + Duration::seconds(D_OTP),
-            },
-            test_txid(1),
-        );
-        q.challenges[0].1 = ChallengeState::Relayed;
-        q.admit(
-            OtpChallenge {
-                name: alice.clone(),
-                action: Action::Update,
-                ua: ua.clone(),
-                term: Some(Term::Years(5)),
-                tip_rcm: new_rcm,
-                code: shared.clone(),
-                expires_at: t0 + Duration::seconds(D_OTP),
-            },
-            test_txid(2),
-        );
-        q.challenges[1].1 = ChallengeState::Relayed;
+        q.admit(old.clone());
+        assert!(q.challenge_issued(&old));
 
-        let echo = OtpMemo {
-            code: shared.clone(),
-            name: alice.clone(),
-            action: Action::Update,
-            ua: ua.clone(),
-        };
+        // Same transition, newer record: the stale entry is replaced,
+        // and the replacement starts over — unrelayed.
+        let admitted = q.admit(new.clone());
+        assert_eq!(admitted.code, new.code);
+        assert_eq!(admitted.term, Some(Term::Years(5)));
+        assert_eq!(admitted.expires_at, new.expires_at);
+        assert_eq!(q.challenges.len(), 1);
+        assert_eq!(q.requested().len(), 1);
+        assert!(q.challenge_issued(&new));
 
-        // The echo picked up at the new tip resolves to the new-tip
-        // pending — its term is Years(5), not Years(1).
-        let matched = q.answer(&echo, new_rcm).expect("new-tip pending");
+        // The old code is dead against the new record; the new code
+        // answers, but only against the record it was issued for.
+        assert!(q
+            .answer(&echo_for(&old, *b"111111"), commitment(2))
+            .is_none());
+        assert!(q
+            .answer(&echo_for(&new, *b"222222"), commitment(1))
+            .is_none());
+        let matched = q
+            .answer(&echo_for(&new, *b"222222"), commitment(2))
+            .expect("the live challenge answers");
         assert_eq!(matched.term, Some(Term::Years(5)));
-        assert_eq!(matched.tip_rcm, new_rcm);
+        assert_eq!(matched.tip_rcm, commitment(2));
+    }
 
-        // And re-scoping to the old commitment resolves to the old
-        // pending, not the new one — the two are strictly separated.
-        let matched = q.answer(&echo, old_rcm).expect("old-tip pending");
-        assert_eq!(matched.term, Some(Term::Years(1)));
-        assert_eq!(matched.tip_rcm, old_rcm);
+    /// A repeat request — same transition, same record — receives the
+    /// existing entry: its code, its deadline, and its attempt count.
+    #[test]
+    fn a_repeat_keeps_the_code_the_deadline_and_the_attempts() {
+        let mut q = OtpQueue::new();
+        let first = challenge(Action::Update, 1, *b"111111");
+        q.admit(first.clone());
+        assert!(q.challenge_issued(&first));
 
-        // A commitment that never issued a challenge finds nothing,
-        // even though the code and other fields all match a live entry.
-        let stale = commitment(3);
-        assert!(q.answer(&echo, stale).is_none());
+        // Two wrong echoes are charged to the entry.
+        for wrong in [*b"000001", *b"000002"] {
+            assert!(q.answer(&echo_for(&first, wrong), first.tip_rcm).is_none());
+        }
+
+        // The repeat arrives with a fresh code and a later deadline;
+        // neither replaces what stands.
+        let mut again = challenge(Action::Update, 1, *b"222222");
+        again.expires_at = first.expires_at + Duration::seconds(60);
+        let received = q.admit(again);
+        assert_eq!(received.code, first.code);
+        assert_eq!(received.expires_at, first.expires_at);
+        assert_eq!(q.challenges.len(), 1);
+        assert_eq!(q.requested().len(), 0, "a relayed entry stays relayed");
+
+        // The budget carried over: four more wrong echoes retire it.
+        for wrong in [*b"000003", *b"000004", *b"000005", *b"000006"] {
+            assert!(q.answer(&echo_for(&first, wrong), first.tip_rcm).is_none());
+        }
+        assert!(q
+            .answer(&echo_for(&first, *b"111111"), first.tip_rcm)
+            .is_none());
+        assert!(q.challenges.is_empty());
     }
 
     /// A challenge names its name as unrelayed until it is relayed, and
@@ -426,10 +444,10 @@ mod tests {
     #[test]
     fn a_relayed_challenge_names_its_name_until_pruned() {
         let mut q = OtpQueue::new();
-        let sent = transition_challenge(1, *b"111111");
-        let unsent = transition_challenge(2, *b"222222");
-        q.admit(sent.clone(), test_txid(1));
-        q.admit(unsent.clone(), test_txid(2));
+        let sent = challenge(Action::Update, 1, *b"111111");
+        let unsent = challenge(Action::Release, 1, *b"222222");
+        q.admit(sent.clone());
+        q.admit(unsent.clone());
         assert_eq!(q.relayed().count(), 0);
         assert_eq!(q.unrelayed().count(), 2);
         assert!(q.challenge_issued(&sent));
@@ -446,72 +464,44 @@ mod tests {
     #[test]
     fn respond_burns_once_and_then_nothing() {
         let mut q = OtpQueue::new();
-        let alice = test_name("alice");
-        let ua = mainnet_ua();
-        let rcm = commitment(1);
-        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
-        let code = OtpCode::for_test(*b"123456");
+        let pending = challenge(Action::Update, 1, *b"123456");
+        q.admit(pending.clone());
+        q.challenges[0].state = ChallengeState::Relayed;
 
-        q.admit(
-            OtpChallenge {
-                name: alice.clone(),
-                action: Action::Update,
-                ua: ua.clone(),
-                term: Some(Term::Years(1)),
-                tip_rcm: rcm,
-                code: code.clone(),
-                expires_at: t0 + Duration::seconds(D_OTP),
-            },
-            test_txid(1),
-        );
-        q.challenges[0].1 = ChallengeState::Relayed;
-
-        let echo = OtpMemo {
-            code: code.clone(),
-            name: alice.clone(),
-            action: Action::Update,
-            ua: ua.clone(),
-        };
-
-        let matched = q.answer(&echo, rcm).expect("live pending");
-        assert_eq!(matched.tip_rcm, rcm);
+        let echo = echo_for(&pending, *b"123456");
+        let matched = q.answer(&echo, pending.tip_rcm).expect("live pending");
+        assert_eq!(matched.tip_rcm, pending.tip_rcm);
 
         assert!(q.consume(&matched));
-        assert!(q.answer(&echo, rcm).is_none());
+        assert!(q.answer(&echo, pending.tip_rcm).is_none());
         assert!(!q.consume(&matched));
     }
 
     /// The queue's contract in one walk: one live entry per pending
-    /// transition; a repeat request receives it and cannot be retired
-    /// by an invalidated earlier request; five wrong echoes are
-    /// tolerated and the sixth retires the entry they name, alone;
-    /// and a hit burns exactly once.
+    /// transition; a repeat request receives it; a different transition
+    /// opens its own entry with its own code; five wrong echoes are
+    /// tolerated and the sixth retires the entry they name, alone; and
+    /// a hit burns exactly once.
     #[test]
     fn a_challenge_survives_a_repeat_and_retires_at_six() {
         let mut q = OtpQueue::new();
 
         // A first request opens one entry for its transition.
-        let check_in = transition_challenge(1, *b"111111");
-        let pending = q.admit(check_in.clone(), test_txid(1));
+        let check_in = challenge(Action::Update, 1, *b"111111");
+        let pending = q.admit(check_in.clone());
 
-        // A repeat request receives the same entry — same code — and
-        // moves it to the newest txid: invalidating the first request
-        // cannot retire the challenge the second backs. Proven while
-        // the entry is still Requested — invalidate removes only
-        // Requested entries — by relaying after the invalidation.
-        let again = q.admit(transition_challenge(1, *b"222222"), test_txid(2));
+        // A repeat request receives the same entry — same code.
+        let again = q.admit(challenge(Action::Update, 1, *b"222222"));
         assert_eq!(again.code, pending.code);
-        q.invalidate(test_txid(1));
         assert!(q.challenge_issued(&pending));
-        assert!(q.is_relayed(&pending));
 
-        // A different transition opens its own entry, its own code —
-        // here under the same txid, as one transaction carrying two
-        // requests would produce.
-        let rebind = transition_challenge(2, *b"333333");
-        let other = q.admit(rebind.clone(), test_txid(2));
+        // A different transition — here the release of the same name —
+        // opens its own entry, its own code.
+        let release = challenge(Action::Release, 1, *b"333333");
+        let other = q.admit(release.clone());
         assert!(q.challenge_issued(&other));
         assert_ne!(other.code, pending.code);
+        assert_eq!(q.challenges.len(), 2);
 
         // Five wrong echoes against the check-in are tolerated: its
         // right code still answers.
@@ -525,19 +515,22 @@ mod tests {
         let answered = q.answer(&right, check_in.tip_rcm).expect("still answers");
 
         // The hit burns exactly once — and only the entry it answered:
-        // the neighbor that shares its txid stands.
+        // the neighbour stands.
         assert!(q.consume(&answered));
         assert!(q.answer(&right, check_in.tip_rcm).is_none());
-        assert!(q.is_relayed(&other));
+        assert_eq!(q.relayed().collect::<Vec<_>>(), [&other.name]);
 
         // Six wrong echoes retire the entry they name, and only it.
         for n in 1..=MAX_ATTEMPTS {
             let wrong: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();
-            assert!(q.answer(&echo_for(&other, wrong), rebind.tip_rcm).is_none());
+            assert!(q
+                .answer(&echo_for(&other, wrong), release.tip_rcm)
+                .is_none());
         }
         assert!(q
-            .answer(&echo_for(&other, *b"333333"), rebind.tip_rcm)
+            .answer(&echo_for(&other, *b"333333"), release.tip_rcm)
             .is_none());
+        assert!(q.challenges.is_empty());
     }
 
     /// Freshness is the owner's prune, not the scans': an expired
@@ -546,36 +539,14 @@ mod tests {
     #[test]
     fn prune_is_owner_invoked() {
         let mut q = OtpQueue::new();
-        let alice = test_name("alice");
-        let ua = mainnet_ua();
-        let rcm = commitment(1);
-        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
-        let code = OtpCode::for_test(*b"123456");
+        let pending = challenge(Action::Update, 1, *b"123456");
+        q.admit(pending.clone());
+        q.challenges[0].state = ChallengeState::Relayed;
 
-        q.admit(
-            OtpChallenge {
-                name: alice.clone(),
-                action: Action::Update,
-                ua: ua.clone(),
-                term: None,
-                tip_rcm: rcm,
-                code: code.clone(),
-                expires_at: t0 + Duration::seconds(D_OTP),
-            },
-            test_txid(1),
-        );
-        q.challenges[0].1 = ChallengeState::Relayed;
-
-        let echo = OtpMemo {
-            code: code.clone(),
-            name: alice.clone(),
-            action: Action::Update,
-            ua: ua.clone(),
-        };
-
-        assert!(q.answer(&echo, rcm).is_some());
-        q.prune(t0 + Duration::seconds(D_OTP + 1));
-        assert!(q.answer(&echo, rcm).is_none());
+        let echo = echo_for(&pending, *b"123456");
+        assert!(q.answer(&echo, pending.tip_rcm).is_some());
+        q.prune(t0() + Duration::seconds(D_OTP + 1));
+        assert!(q.answer(&echo, pending.tip_rcm).is_none());
     }
 
     /// `consume` burns only relayed challenges: a key to a never-relayed
@@ -583,24 +554,11 @@ mod tests {
     #[test]
     fn respond_never_burns_an_unrelayed_entry() {
         let mut q = OtpQueue::new();
-        let alice = test_name("alice");
-        let ua = mainnet_ua();
-        let rcm = commitment(1);
-        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
-
-        let challenge = OtpChallenge {
-            name: alice.clone(),
-            action: Action::Update,
-            ua: ua.clone(),
-            term: None,
-            tip_rcm: rcm,
-            code: OtpCode::for_test(*b"123456"),
-            expires_at: t0 + Duration::seconds(D_OTP),
-        };
-        q.admit(challenge.clone(), test_txid(1));
+        let pending = challenge(Action::Update, 1, *b"123456");
+        q.admit(pending.clone());
         // Still `Requested`: the challenge memo was never accepted.
 
-        assert!(!q.consume(&challenge));
+        assert!(!q.consume(&pending));
         assert_eq!(q.requested().len(), 1);
     }
 }

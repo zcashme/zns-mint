@@ -218,7 +218,9 @@ impl Request {
     }
 }
 
-/// A mint-issued challenge to a wallet, proving that the wallet controls a name via shielded-memos.
+/// The OTP memo as it travels, relay and echo alike: the code, the name,
+/// the verb, and the requested address. The record version the challenge
+/// was issued against never travels; the mint supplies it at echo time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OtpMemo {
     pub code: OtpCode,

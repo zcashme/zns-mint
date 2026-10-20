@@ -446,7 +446,7 @@ async fn main() {
                             term,
                             mtp_now,
                         );
-                        challenges.admit(pending, txid);
+                        challenges.admit(pending);
                         true
                     }
                 }

@@ -1,5 +1,23 @@
 # `mint/otp.rs` design record
 
+## 2026-10-20 — A challenge is its transition; a stale entry is replaced (#368)
+
+- `OtpQueue` finds an entry by its transition — name, verb, requested
+  address — in one place, `OtpChallenge::is_for`. Five hand-written
+  comparisons, two of them also matching `term` and `code`, are gone.
+- `tip_rcm` leaves the key. It is the record version the challenge was
+  issued against: stored, checked by `answer` against the current record
+  and by the registry's laws, but not what tells entries apart. A request
+  against a newer record replaces the stale entry — new code, new
+  deadline, attempts reset — instead of sitting beside it until expiry;
+  the stale entry could neither be relayed nor answered. A repeat against
+  the same record still receives the existing entry, code, deadline and
+  attempts kept.
+- `invalidate` and `is_relayed` had no caller; gone, with the request
+  txid the entry carried for them. `admit` takes the challenge alone.
+- The `(OtpChallenge, ChallengeState, TxId, Attempts)` tuple is an
+  `Entry` struct.
+
 ## 2026-10-15 — `OtpQueue::relayed` and `unrelayed` (#342)
 
 - `relayed` names every relayed challenge, awaiting its echo;
