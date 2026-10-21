@@ -326,7 +326,7 @@ async fn fetch_rows(client: &HttpsClient) -> Option<(Vec<ProtectedRow>, Option<u
         match serde_json::from_slice(&body) {
             Ok(rows) => Some((rows, total)),
             Err(error) => {
-                tracing::warn!(?error, "pre-sale fetch: json parse failed");
+                tracing::warn!(%error, "pre-sale fetch: json parse failed");
                 None
             }
         }

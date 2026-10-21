@@ -2,6 +2,7 @@
 //! against the wallet and stages, proves, and signs the transaction.
 
 use orchard::note::Psi;
+use thiserror::Error;
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_client_backend::fees::StandardFeeRule;
@@ -21,45 +22,36 @@ use crate::{RegistryKeys, TreasuryKeys};
 /// Why a Name Note transaction was not built. The caller retries next tip.
 /// Only [`PrepareError::FeeUnfunded`] means the Treasury could not cover
 /// the fee; the other variants are a different fact.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum PrepareError {
     /// The claim anchor or predecessor is not spendable at this tip.
+    #[error("authority note is not spendable")]
     AuthorityUnavailable,
     /// Treasury notes cannot cover the ZIP-317 fee.
+    #[error("Treasury cannot cover the fee")]
     FeeUnfunded,
     /// The note is in the wallet and has no witness at the applied tip.
+    #[error("owned note has no witness at the applied tip")]
     WitnessUnavailable,
     /// The applied tip has no Ironwood anchor.
+    #[error("no Ironwood anchor at the applied tip")]
     AnchorUnavailable,
     /// An update or release predecessor memo does not open its Name Note.
+    #[error("predecessor memo does not open its Name Note")]
     PredecessorClosed,
     /// A note-commitment tree operation failed.
-    Tree(TreeError),
+    #[error("note commitment tree error: {0}")]
+    Tree(#[source] TreeError),
     /// The ZIP-317 fee rule could not calculate the required fee.
+    #[error("ZIP-317 fee calculation failed: {0}")]
     Fee(FeeError),
     /// The wallet could not retrieve the predecessor memo.
-    Memo(WalletError),
+    #[error("predecessor memo lookup failed: {0}")]
+    Memo(#[source] WalletError),
     /// The transaction builder or prover rejected the transaction.
-    Builder(builder::Error<FeeError>),
+    #[error("Name Note transaction build failed: {0}")]
+    Builder(#[source] builder::Error<FeeError>),
 }
-
-impl std::fmt::Display for PrepareError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AuthorityUnavailable => write!(f, "authority note is not spendable"),
-            Self::FeeUnfunded => write!(f, "Treasury cannot cover the fee"),
-            Self::WitnessUnavailable => write!(f, "owned note has no witness at the applied tip"),
-            Self::AnchorUnavailable => write!(f, "no Ironwood anchor at the applied tip"),
-            Self::PredecessorClosed => write!(f, "predecessor memo does not open its Name Note"),
-            Self::Tree(error) => write!(f, "note commitment tree error: {error}"),
-            Self::Fee(error) => write!(f, "ZIP-317 fee calculation failed: {error}"),
-            Self::Memo(error) => write!(f, "predecessor memo lookup failed: {error}"),
-            Self::Builder(error) => write!(f, "Name Note transaction build failed: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for PrepareError {}
 
 /// Builds a Name Note transaction and its fee without recording a send.
 /// `authority_nf` is the claim anchor or the predecessor; Treasury fee

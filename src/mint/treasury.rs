@@ -9,7 +9,8 @@ pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
 use std::convert::Infallible;
 use std::num::NonZeroU32;
 
-use zcash_client_backend::data_api::error::Error;
+use thiserror::Error;
+use zcash_client_backend::data_api::error;
 use zcash_client_backend::data_api::locking::LockedInputPolicy;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
@@ -74,31 +75,20 @@ fn vault_address<P: Parameters>(network: &P) -> zcash_keys::address::Address {
 }
 
 /// A Treasury transaction was not built. Distinct from "nothing to do".
-#[derive(Debug)]
+///
+/// The upstream errors print with `Debug`: their `Display` requires a
+/// `Display` note reference, and upstream's `NoteId` has none.
+#[derive(Debug, Error)]
 pub enum BuildFailure<ProposalError, TransactionError> {
     /// The sendable total overflowed the monetary range.
-    Balance(BalanceError),
+    #[error("sendable total is invalid: {0}")]
+    Balance(#[source] BalanceError),
     /// The upstream wallet API rejected transaction proposal construction.
+    #[error("proposal failed: {0:?}")]
     Proposal(ProposalError),
     /// The upstream wallet API rejected transaction construction or storage.
+    #[error("transaction build failed: {0:?}")]
     Transaction(TransactionError),
-}
-
-impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::fmt::Display
-    for BuildFailure<ProposalError, TransactionError>
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Balance(error) => write!(f, "sendable total is invalid: {error}"),
-            Self::Proposal(error) => write!(f, "proposal failed: {error:?}"),
-            Self::Transaction(error) => write!(f, "transaction build failed: {error:?}"),
-        }
-    }
-}
-
-impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::error::Error
-    for BuildFailure<ProposalError, TransactionError>
-{
 }
 
 /// Pays the vault what send-max could deliver, less the float.
@@ -123,7 +113,7 @@ fn propose_vault_sweep<P: Parameters>(
         None,
     ) {
         Ok(max) => max.steps().first().transaction_request().total(),
-        Err(Error::InsufficientFunds { .. }) => return Ok(None),
+        Err(error::Error::InsufficientFunds { .. }) => return Ok(None),
         Err(error) => return Err(BuildFailure::Proposal(error)),
     };
     let sendable = sendable
