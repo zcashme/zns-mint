@@ -6,8 +6,8 @@ Tracks design-relevant changes to `src/boot.rs`.
 
 - `Boot` no longer carries `presale_refresh`: the run loop reads the
   table on every tip pass. It carries `presale_client` instead, the
-  one client the boot read and every pass read share. The boot read is unchanged — no table, no
-  start.
+  one client the boot read and every pass read share. The boot read
+  is unchanged — no table, no start.
 
 ## 2026-10-11 — A resealed capsule does not have to match the keygen report
 

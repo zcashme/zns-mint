@@ -1,8 +1,9 @@
 //! The pre-sale protected-names table, cached in memory: read at
 //! boot and again on every tip pass before the deciding pass, judged
 //! per claim against the current MTP. A failed read keeps the last
-//! table. A missing row, or a reached lift moment, is unprotected. Codes are derived in
-//! the TEE (`access-code-v1`); the mint never writes Supabase.
+//! table. A missing row, or a reached lift moment, is unprotected.
+//! Codes are derived in the TEE (`access-code-v1`); the mint never
+//! writes Supabase.
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -301,19 +302,17 @@ async fn fetch_rows(client: &HttpsClient) -> Option<(Vec<ProtectedRow>, Option<u
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.rsplit('/').next())
             .and_then(|value| value.parse::<usize>().ok());
-        let body = match Limited::new(response.into_body(), MAX_BODY_BYTES)
+        let body = Limited::new(response.into_body(), MAX_BODY_BYTES)
             .collect()
             .await
-        {
-            Ok(body) => body.to_bytes(),
-            Err(error) => {
+            .inspect_err(|error| {
                 tracing::warn!(
                     ?error,
                     "pre-sale fetch: body unreadable or over the size cap"
-                );
-                return None;
-            }
-        };
+                )
+            })
+            .ok()?
+            .to_bytes();
         match serde_json::from_slice(&body) {
             Ok(rows) => Some((rows, total)),
             Err(error) => {
@@ -323,13 +322,10 @@ async fn fetch_rows(client: &HttpsClient) -> Option<(Vec<ProtectedRow>, Option<u
         }
     })
     .await;
-    match read {
-        Ok(read) => read,
-        Err(_) => {
-            tracing::warn!("pre-sale fetch: timed out");
-            None
-        }
-    }
+    read.unwrap_or_else(|_| {
+        tracing::warn!("pre-sale fetch: timed out");
+        None
+    })
 }
 
 /// Zeroizing holder for the boot-derived access-code key.
