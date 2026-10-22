@@ -409,7 +409,9 @@ async fn main() {
                             break 'lane true;
                         };
                         // Enactment below resolves the anchor and broadcasts.
-                        if !name_notes.admit(note_height, claim_note) {
+                        if name_notes.admit(note_height, claim_note) {
+                            challenges.drop_challenges(name);
+                        } else {
                             tracing::debug!(
                                 %txid,
                                 name = %name.as_str(),
@@ -418,35 +420,17 @@ async fn main() {
                         }
                         true
                     }
-                    request @ (Request::Update { .. } | Request::Release { .. }) => {
-                        let (name, action, requested_ua, term) = match request {
-                            Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
-                            Request::Release { name, ua } => (name, Action::Release, ua, None),
-                            Request::Claim { .. } => unreachable!(),
-                        };
-                        let Some(record) = registry.authorize_challenge(
-                            &name_notes,
-                            name,
-                            action,
-                            requested_ua,
-                            term,
-                            target_height,
-                            mtp_now,
-                        ) else {
+                    Request::Update { .. } | Request::Release { .. } => {
+                        if registry
+                            .authorize_challenge(&name_notes, &request, target_height, mtp_now)
+                            .is_none()
+                        {
                             break 'lane true;
-                        };
+                        }
                         if paid < oracle.challenge_fee() {
                             break 'lane true;
                         }
-                        let pending = OtpChallenge::issue(
-                            name.clone(),
-                            action,
-                            requested_ua.clone(),
-                            record.commitment,
-                            term,
-                            mtp_now,
-                        );
-                        challenges.admit(pending, txid);
+                        challenges.admit(OtpChallenge::issue(request.clone(), mtp_now));
                         true
                     }
                 }
@@ -459,20 +443,11 @@ async fn main() {
         // Queue admission is independent from submission. Retry every
         // requested challenge once during each tip pass.
         for pending in challenges.requested() {
-            let Some(record) = registry.authorize_challenge(
-                &name_notes,
-                &pending.name,
-                pending.action,
-                &pending.ua,
-                pending.term,
-                target_height,
-                mtp_now,
-            ) else {
+            let Some(record) =
+                registry.authorize_challenge(&name_notes, &pending.request, target_height, mtp_now)
+            else {
                 continue;
             };
-            if record.commitment != pending.tip_rcm {
-                continue;
-            }
             if relay(
                 &network,
                 &mut wallet,
@@ -497,17 +472,17 @@ async fn main() {
                 // The echo lane: an OTP response. Decided in every outcome —
                 // an echo never waits for money; the renewal or
                 // upgrade fee declines on shortfall, it does not defer.
-                let Some(record) = registry.record(&echo.name).cloned() else {
-                    break 'lane true; // no record — released or unknown: no mint-issued challenge can match
-                };
-                let Some(sent) = challenges.answer(&echo, record.commitment) else {
+                let Some(sent) = challenges.answer(&echo) else {
                     break 'lane true; // no pending challenge: dead
                 };
                 // The renewal or upgrade fee, binding at first
                 // sight: a shortfall voids the attempt and never
                 // consumes — the challenge stands, retryable with
                 // the same OTP inside D_OTP.
-                if let Some(term) = sent.term {
+                if let Request::Update {
+                    term: Some(term), ..
+                } = sent.request
+                {
                     let Some(price) = oracle.quote(&echo.name, term) else {
                         tracing::debug!(
                             name = %echo.name.as_str(),
@@ -561,7 +536,9 @@ async fn main() {
                         "voluntary release authorized"
                     );
                 }
-                name_notes.admit(note_height, transition_note);
+                if name_notes.admit(note_height, transition_note) {
+                    challenges.drop_challenges(&echo.name);
+                }
                 true
             };
         }
@@ -575,7 +552,9 @@ async fn main() {
                 continue;
             }
             tracing::info!(name = %name.as_str(), "lifecycle release authorized");
-            name_notes.admit(tip, release_note);
+            if name_notes.admit(tip, release_note) {
+                challenges.drop_challenges(&name);
+            }
         }
 
         for note in name_notes.authorized_notes() {

@@ -2,6 +2,15 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-10-22 — The challenge laws read the request (#368)
+
+- `authorize_challenge` and `allows_challenge` take the `Request`;
+  `authorize_update` and `authorize_release` match its variant instead
+  of checking an `action` field. A claim is never challenged.
+- The laws no longer compare `record.commitment` with the challenge's
+  `tip_rcm`: the OTP queue drops a name's challenges whenever a
+  transition for it is admitted, so none can be stale.
+
 ## 2026-10-03 — The request gate joins the authorize family
 
 - `Registry::authorize_challenge` is the request-side twin of
