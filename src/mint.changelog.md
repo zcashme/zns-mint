@@ -1,5 +1,17 @@
 # Mint live-work design record
 
+## 2026-10-20 — Controllers need any shielded receiver (#365)
+
+- `decode_controller_ua` accepts a UA with a Sapling or an Orchard
+  receiver; it no longer requires Orchard. The relay lane challenges a
+  Sapling-only controller at its Sapling receiver (the backend routes a
+  UA payment Orchard, else Sapling), and the echo returns through the
+  Treasury's Sapling intake. Unknown receivers, metadata items, and
+  revisions other than R0 stay refused; an R0 UA is never
+  transparent-only, and the explicit shielded check holds for R2 (#358).
+- Existing records are unchanged: every UA admitted before is admitted
+  now, and `NameNote::decode` never required Orchard.
+
 ## 2026-10-13 — Early-access regime: claims deny by default (#340)
 
 - The deciding pass refuses every claim that lacks its name's listing

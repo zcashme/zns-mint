@@ -32,7 +32,7 @@ use transparent::builder::{
 use transparent::bundle::OutPoint;
 use transparent::keys::{IncomingViewingKey, NonHardenedChildIndex};
 use zcash_keys::encoding::encode_transparent_address_p;
-use zcash_keys::keys::{UnifiedAddressRequest, UnifiedSpendingKey};
+use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_primitives::transaction::builder::cached_orchard_proving_key;
 use zcash_primitives::transaction::components::orchard::bundle_version_for_branch;
 use zcash_primitives::transaction::fees::transparent::InputSize;
@@ -527,7 +527,7 @@ pub fn mint_identity_strings() -> (String, String) {
         .expect("registry usk")
         .to_unified_full_viewing_key();
     let (treasury_addr, _) = treasury_fvk
-        .default_address(UnifiedAddressRequest::SHIELDED)
+        .default_address(zns_mint::boot::TREASURY_ADDRESS_REQUEST)
         .expect("treasury default address");
     (
         treasury_addr.encode(&network),

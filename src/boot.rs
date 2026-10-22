@@ -984,6 +984,15 @@ fn load_sapling_output_params() -> OutputParameters {
 // Step 5: Attestation
 // ---------------------------------------------------------------------------
 
+/// The Treasury's published address shape: Orchard and Sapling receivers,
+/// never transparent. `SHIELDED` only allows Sapling, and drops it whenever
+/// diversifier index 0 is not a valid Sapling diversifier; requiring both
+/// takes the first index valid for each.
+pub const TREASURY_ADDRESS_REQUEST: zcash_keys::keys::UnifiedAddressRequest = {
+    use zcash_keys::keys::ReceiverRequirement::{Omit, Require};
+    zcash_keys::keys::UnifiedAddressRequest::unsafe_custom(Require, Require, Omit)
+};
+
 /// The mint's public identity: the Treasury's shielded default address and
 /// the Registry's UFVK, in exactly the encoded form the attestation binds.
 fn mint_identity(
@@ -991,11 +1000,9 @@ fn mint_identity(
     treasury_keys: &TreasuryKeys,
     registry_keys: &RegistryKeys,
 ) -> (String, String) {
-    use zcash_keys::keys::UnifiedAddressRequest;
-
     let (treasury_addr, _) = treasury_keys
         .fvk()
-        .default_address(UnifiedAddressRequest::SHIELDED)
+        .default_address(TREASURY_ADDRESS_REQUEST)
         .expect("FATAL: Treasury FVK missing default address");
     (
         treasury_addr.encode(network),
@@ -1062,13 +1069,22 @@ fn dev_identity_document(network: &str, treasury_ua: &str, registry_ufvk: &str) 
 mod tests {
     use super::*;
 
-    /// The identity strings come from the same SHIELDED default-address
-    /// derivation the attestation binds; the Treasury receiver must never
-    /// be transparent.
+    /// The identity strings come from the same default-address derivation
+    /// the attestation binds: an Orchard and a Sapling receiver, never a
+    /// transparent one. Seed 0x42's mainnet index 0 is not a Sapling
+    /// diversifier, so `SHIELDED` would drop its Sapling receiver.
     #[test]
     fn mint_identity_is_shielded_only() {
         let seed = Secret::new([0x42u8; 32]);
         let network = boot_network();
+        #[cfg(not(any(feature = "testnet", feature = "regtest")))]
+        {
+            let (shielded, _) = TreasuryKeys::derive(&network, &seed)
+                .fvk()
+                .default_address(zcash_keys::keys::UnifiedAddressRequest::SHIELDED)
+                .unwrap();
+            assert!(shielded.sapling().is_none());
+        }
         let treasury_keys = TreasuryKeys::derive(&network, &seed);
         let (treasury_ua, _) = mint_identity(
             &network,
@@ -1085,6 +1101,10 @@ mod tests {
         assert!(
             ua.orchard().is_some(),
             "identity UA lacks an Orchard receiver"
+        );
+        assert!(
+            ua.sapling().is_some(),
+            "identity UA lacks a Sapling receiver"
         );
         assert!(
             ua.transparent().is_none(),
@@ -1195,6 +1215,108 @@ mod tests {
             )
             .unwrap();
         scan_transaction(builder)
+    }
+
+    /// One Sapling payment to `to`, frozen into a transaction with
+    /// placeholder proofs and signatures: intake only trial-decrypts.
+    fn sapling_transaction(
+        to: sapling::PaymentAddress,
+        value: u64,
+        memo: [u8; 512],
+    ) -> zcash_primitives::transaction::Transaction {
+        let mut builder = sapling::builder::Builder::new(
+            sapling::note_encryption::Zip212Enforcement::On,
+            sapling::builder::BundleType::DEFAULT,
+            sapling::Anchor::empty_tree(),
+        );
+        builder
+            .add_output(None, to, sapling::value::NoteValue::from_raw(value), memo)
+            .unwrap();
+        let (bundle, _) = builder
+            .build::<sapling::circuit::SpendParameters, sapling::circuit::OutputParameters, _, zcash_protocol::value::ZatBalance>(
+                &[],
+                rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+            )
+            .unwrap()
+            .unwrap();
+        let bundle = bundle.map_authorization(
+            (),
+            |_, _| unreachable!("the payment spends nothing"),
+            |_, _| [0u8; 192],
+            |_, _| unreachable!("the payment spends nothing"),
+            |_, _| sapling::bundle::Authorized {
+                binding_sig: [0u8; 64].into(),
+            },
+        );
+        zcash_primitives::transaction::TransactionData::from_parts_v6(
+            zcash_protocol::consensus::BranchId::Nu6_3,
+            0,
+            BlockHeight::from_u32(0),
+            None,
+            Some(bundle),
+            None,
+            None,
+        )
+        .freeze()
+        .unwrap()
+    }
+
+    /// Request memos arrive from both shielded pools: a payment to the
+    /// Treasury's Sapling receiver is read like one to its Ironwood
+    /// receiver, and a Sapling payment to anyone else is not.
+    #[test]
+    fn treasury_memos_arrive_through_sapling_and_ironwood() {
+        let network = boot_network();
+        let treasury = TreasuryKeys::derive(&network, &Secret::new([0; 32]));
+        let stranger = TreasuryKeys::derive(&network, &Secret::new([1; 32]));
+        let memo = |text: &str| {
+            *zcash_protocol::memo::MemoBytes::from_bytes(text.as_bytes())
+                .unwrap()
+                .as_array()
+        };
+        let sapling_paid = sapling_transaction(
+            treasury.sapling_dfvk().default_address().1,
+            60_000,
+            memo("sapling"),
+        );
+        let elsewhere = sapling_transaction(
+            stranger.sapling_dfvk().default_address().1,
+            70_000,
+            memo("elsewhere"),
+        );
+        let ironwood_paid = fixture_transaction(&network);
+        let txids = [sapling_paid.txid(), ironwood_paid.txid()];
+
+        let header = zcash_primitives::block::BlockHeaderData {
+            version: 4,
+            prev_block: zcash_primitives::block::BlockHash([0; 32]),
+            merkle_root: [0; 32],
+            final_sapling_root: [0; 32],
+            time: 0,
+            bits: 0,
+            nonce: [0; 32],
+            solution: vec![],
+        }
+        .freeze()
+        .unwrap();
+        let block = zcash_primitives::block::Block::from_parts(
+            header,
+            (sapling_paid, vec![elsewhere, ironwood_paid]).into(),
+            BlockHeight::from_u32(1),
+        );
+
+        let height = network
+            .activation_height(zcash_protocol::consensus::NetworkUpgrade::Nu6_3)
+            .unwrap();
+        let arrivals: Vec<_> =
+            crate::mint::note::decrypt_treasury_memos(&network, &block, height, &treasury)
+                .into_iter()
+                .map(|(txid, paid, memo)| (txid, paid.into_u64(), *memo.as_array()))
+                .collect();
+        assert_eq!(
+            arrivals,
+            vec![(txids[0], 60_000, memo("sapling")), (txids[1], 1, [0; 512]),]
+        );
     }
 
     #[tokio::test]

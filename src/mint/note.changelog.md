@@ -1,5 +1,20 @@
 # `mint/note.rs` design record
 
+## 2026-10-20 — Treasury memos arrive from both shielded pools (#365)
+
+- `decrypt_treasury_memos` and `decrypt_treasury_transaction` read the
+  Treasury's Sapling outputs as well as its Ironwood actions. The
+  Treasury UA has always advertised a Sapling receiver; a request paid
+  there was swept as balance and never read.
+- Sapling outputs decrypt under the ZIP 212 rule at the block's (or the
+  mempool transaction's target) height: past the grace period on mainnet
+  and testnet, but not yet on regtest, which activates Canopy near
+  genesis. Both ivks are prepared once per block or mempool transaction
+  (`TreasuryIvks`), External scope only, so Treasury change is never read
+  as a request.
+- Arrivals lose their action index. Nothing read it, and Sapling output
+  indices would collide with Ironwood action indices.
+
 ## 2026-10-15 — `NameNoteQueue::authorized_names` (#342)
 
 - Names every outstanding authorized order, borrowed, for the request
