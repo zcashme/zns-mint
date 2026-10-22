@@ -2,9 +2,10 @@
 
 ## 2026-10-22
 
-- After release, `open_claim` registers `e2eopenclaim`, a name no
-  `zn_names` row holds, with a code-free memo (#360). `claim` keeps the
-  protected `zcash` claim with its access code; both share `claim_name`.
+- The happy path claims `alice` with a code-free memo, as before #341:
+  `alice` holds no `zn_names` row, so open registration (#360) lets it
+  through. Update and release follow on `alice`; the access-code helper
+  is gone.
 
 ## 2026-10-12
 

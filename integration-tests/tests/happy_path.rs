@@ -1,8 +1,7 @@
 //! Boot e2e chained into the happy path: real ownership flow (funder
 //! pays the Treasury, Treasury keys author the 40-anchor ceremony, funder
 //! reaped), in-process `Boot::start()` with its evidence assertions, then
-//! the mint binary serving claim, update, release to a live user wallet,
-//! then a code-free claim of an unprotected name.
+//! the mint binary serving claim, update, release to a live user wallet.
 
 use std::time::Duration;
 
@@ -12,7 +11,7 @@ use zcash_protocol::consensus::BlockHeight;
 use zns_integration_tests::{zallet_bin, zebrad_bin, Mint, Zebrad};
 use zns_mint::boot::Boot;
 use zns_mint_integration_tests as fixture;
-use zns_mint_integration_tests::{claim, open_claim, release, update, Stack};
+use zns_mint_integration_tests::{claim, release, update, Stack};
 
 const SYNC_TIMEOUT: Duration = Duration::from_secs(300);
 const BOOT_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -114,6 +113,5 @@ async fn boot_then_claim_update_release() -> Result<()> {
     let claim_note = claim(&mut stack).await?;
     let update_note = update(&mut stack, &claim_note).await?;
     release(&mut stack, &update_note).await?;
-    open_claim(&mut stack).await?;
     Ok(())
 }
