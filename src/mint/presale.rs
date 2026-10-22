@@ -240,6 +240,15 @@ pub async fn fetch(client: &HttpsClient) -> Result<ProtectedNames, FetchError> {
     complete(rows, total)
 }
 
+/// Reads the table into `names`. A failed read warns and keeps the
+/// last table.
+pub async fn refresh(client: &HttpsClient, names: &mut ProtectedNames) {
+    match fetch(client).await {
+        Ok(fresh) => *names = fresh,
+        Err(error) => tracing::warn!(%error, "pre-sale read failed; the last table stands"),
+    }
+}
+
 /// Rows in, table out, only when the server's exact count matches the
 /// rows read: past the project's Max Rows, PostgREST truncates the
 /// reply silently.

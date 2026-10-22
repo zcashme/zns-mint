@@ -308,12 +308,11 @@ async fn main() {
         // The price round and the pre-sale table are read together, so
         // the tip check below covers both. A failed table read keeps the
         // last table; claims never wait past the fetch timeout.
-        let (round, table) = tokio::join!(fetch_round(), presale::fetch(&presale_client));
+        let (round, ()) = tokio::join!(
+            fetch_round(),
+            presale::refresh(&presale_client, &mut protected_names),
+        );
         oracle.accumulate(round, today, mtp_now);
-        match table {
-            Ok(fresh) => protected_names = fresh,
-            Err(error) => tracing::warn!(%error, "pre-sale read failed; the last table stands"),
-        }
         // Transient or unusable tip data → skip this rule pass and wait
         // for another notification; a chain race re-converges.
         let exact_tip = match source.canonical_tip().await {
