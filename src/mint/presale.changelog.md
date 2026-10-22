@@ -8,10 +8,8 @@
   `count=exact` stays: past Max Rows PostgREST truncates silently, so
   `complete` refuses a read whose rows fall short of the count.
 - Every read goes through one client built at boot, so consecutive
-  passes share a connection (`POOL_IDLE_TIMEOUT` 120 s, past one
-  pass). A closed connection is replaced on the next request; a read
-  that times out drops its connection, and the next read opens a
-  fresh one — at worst a pass or two on the last table.
+  passes share a connection (`POOL_IDLE_TIMEOUT` 120 s). A read that
+  times out drops its connection; the next read opens a fresh one.
 - One end-to-end timeout, 3 s, covers the request and the body.
   `MAX_BODY_BYTES` is 4 MiB (~30,000 worst-case rows; the table is
   ~214 KB today); over it, the read is refused.
