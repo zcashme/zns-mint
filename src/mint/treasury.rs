@@ -13,35 +13,35 @@ use zcash_client_backend::data_api::error::Error;
 use zcash_client_backend::data_api::locking::LockedInputPolicy;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
+use zcash_client_backend::data_api::wallet::input_selection::SpendPolicy;
 use zcash_client_backend::data_api::wallet::{
-    create_proposed_transactions, propose_send_max_transfer, propose_standard_transfer_to_address,
-    ConfirmationsPolicy, CreateErrT, ProposeTransferErrT,
+    create_proposed_transactions, propose_send_max_transfer, propose_transfer, ConfirmationsPolicy,
+    CreateErrT, ProposeTransferErrT,
 };
 use zcash_client_backend::data_api::{MaxSpendMode, WalletRead as _};
-use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
-use zcash_client_backend::fees::StandardFeeRule;
+use zcash_client_backend::fees::zip317::SingleOutputChangeStrategy;
+use zcash_client_backend::fees::DustOutputPolicy;
 use zcash_client_backend::proposal::Proposal;
 use zcash_client_backend::util::SystemClock;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
-use zcash_primitives::transaction::fees::zip317::FeeError;
+use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule as Zip317FeeRule};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkType, Parameters, TestNetwork};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::{BalanceError, Zatoshis};
 use zcash_protocol::ShieldedPool;
+use zip321::{Payment, TransactionRequest};
 
 use crate::mint::{Name, Request, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
+use crate::zcash::fee_rule;
 
-type TreasuryProposalError<P> = ProposeTransferErrT<
-    Wallet<P>,
-    Infallible,
-    GreedyInputSelector<Wallet<P>>,
-    SingleOutputChangeStrategy<Wallet<P>>,
->;
+type TreasuryChange<P> = SingleOutputChangeStrategy<Zip317FeeRule, Wallet<P>>;
+type TreasuryProposalError<P> =
+    ProposeTransferErrT<Wallet<P>, Infallible, GreedyInputSelector<Wallet<P>>, TreasuryChange<P>>;
 type TreasuryBuildError<P> =
-    CreateErrT<Wallet<P>, GreedyInputSelectorError, StandardFeeRule, FeeError, NoteId>;
-type VaultSweepProposal = Proposal<StandardFeeRule, NoteId>;
+    CreateErrT<Wallet<P>, GreedyInputSelectorError, Zip317FeeRule, FeeError, NoteId>;
+type VaultSweepProposal = Proposal<Zip317FeeRule, NoteId>;
 
 /// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
 /// actually moves, not on the balance behind it.
@@ -101,6 +101,47 @@ impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::err
 {
 }
 
+/// Pays `amount` from the Treasury with the node's ZIP 317 fee rule.
+fn propose_payment<P: Parameters>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    fee_rule: &Zip317FeeRule,
+    to: &zcash_keys::address::Address,
+    amount: Zatoshis,
+    memo: Option<MemoBytes>,
+    fallback_change_pool: ShieldedPool,
+) -> Result<Proposal<Zip317FeeRule, NoteId>, TreasuryProposalError<P>> {
+    let request = TransactionRequest::new(vec![Payment::new(
+        to.to_zcash_address(network),
+        Some(amount),
+        memo,
+        None,
+        None,
+        vec![],
+    )
+    .map_err(Error::Payment)?])
+    .expect("one shielded payment satisfies a ZIP 321 request");
+    let input_selector = GreedyInputSelector::<Wallet<P>>::new();
+    let change_strategy = SingleOutputChangeStrategy::new(
+        fee_rule.clone(),
+        None,
+        fallback_change_pool,
+        DustOutputPolicy::default(),
+    );
+    propose_transfer(
+        wallet,
+        network,
+        TREASURY_ACCOUNT,
+        &input_selector,
+        &change_strategy,
+        request,
+        ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false),
+        &SpendPolicy::default(),
+        None,
+        None,
+    )
+}
+
 /// Pays the vault what send-max could deliver, less the float.
 fn propose_vault_sweep<P: Parameters>(
     network: &P,
@@ -109,12 +150,13 @@ fn propose_vault_sweep<P: Parameters>(
 {
     let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
     let vault = vault_address(network);
+    let fee_rule = fee_rule(wallet.marginal_fee());
     let sendable = match propose_send_max_transfer::<_, _, _, Infallible>(
         wallet,
         network,
         TREASURY_ACCOUNT,
         &[ShieldedPool::Sapling, ShieldedPool::Ironwood],
-        &StandardFeeRule::Zip317,
+        &fee_rule,
         vault.to_zcash_address(network),
         None,
         MaxSpendMode::MaxSpendable,
@@ -138,19 +180,14 @@ fn propose_vault_sweep<P: Parameters>(
         return Ok(None);
     };
 
-    propose_standard_transfer_to_address::<_, _, Infallible>(
-        wallet,
+    propose_payment(
         network,
-        StandardFeeRule::Zip317,
-        TREASURY_ACCOUNT,
-        policy,
+        wallet,
+        &fee_rule,
         &vault,
         payment,
         None,
-        None,
         ShieldedPool::Ironwood,
-        None,
-        None,
     )
     .map(Some)
     .map_err(BuildFailure::Proposal)
@@ -209,19 +246,14 @@ pub fn challenge<P: Parameters>(
     controller: &zcash_keys::address::UnifiedAddress,
     memo: MemoBytes,
 ) -> Result<Transaction, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
-    let proposal = propose_standard_transfer_to_address::<_, _, Infallible>(
-        wallet,
+    let proposal = propose_payment(
         network,
-        StandardFeeRule::Zip317,
-        TREASURY_ACCOUNT,
-        ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false),
+        wallet,
+        &fee_rule(wallet.marginal_fee()),
         &zcash_keys::address::Address::Unified(Box::new(controller.clone())),
         CHALLENGE_RELAY_VALUE,
         Some(memo),
-        None,
         ShieldedPool::Ironwood,
-        None,
-        None,
     )
     .map_err(BuildFailure::Proposal)?;
 
@@ -230,7 +262,7 @@ pub fn challenge<P: Parameters>(
         Wallet<P>,
         P,
         GreedyInputSelectorError,
-        StandardFeeRule,
+        Zip317FeeRule,
         FeeError,
         NoteId,
     >(

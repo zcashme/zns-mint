@@ -9,8 +9,11 @@
 //! it is the SEV-SNP measurement of the image this process lives in.
 
 pub mod chain;
+pub mod fee;
 pub mod mempool;
 pub mod submit;
+
+pub(crate) use fee::fee_rule;
 
 pub use chain::{BlockchainInfo, ChainClient, TipSession};
 pub use mempool::MempoolSession;
@@ -208,6 +211,11 @@ impl RpcError {
     /// Bitcoin Core / Zebra RPC error -27: transaction already in chain.
     pub fn is_tx_already_in_chain(&self) -> bool {
         self.code == -27
+    }
+
+    /// JSON-RPC -32601: the node has no method by that name.
+    pub fn is_method_missing(&self) -> bool {
+        self.code == -32601
     }
 
     /// The node already has this transaction in its mempool. The message

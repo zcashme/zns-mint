@@ -4,7 +4,6 @@
 use orchard::note::Psi;
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{NoteId, ReceivedNote};
 use zcash_primitives::transaction::builder::{self, BuildConfig, Builder, BundlePadding};
 use zcash_primitives::transaction::fees::zip317::FeeError;
@@ -16,6 +15,7 @@ use zcash_protocol::value::Zatoshis;
 use super::NameNote;
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::{TreeError, Wallet, WalletError};
+use crate::zcash::fee_rule;
 use crate::{RegistryKeys, TreasuryKeys};
 
 /// Why a Name Note transaction was not built. The caller retries next tip.
@@ -77,6 +77,7 @@ pub fn prepare<P: Parameters>(
     tip: BlockHeight,
     target_height: BlockHeight,
 ) -> Result<(Transaction, Zatoshis), PrepareError> {
+    let marginal = wallet.marginal_fee();
     let authority = wallet
         .unspent_ironwood_note_by_nullifier(REGISTRY_ACCOUNT, authority_nf, TargetHeight::from(tip))
         .ok_or(PrepareError::AuthorityUnavailable)?;
@@ -98,7 +99,7 @@ pub fn prepare<P: Parameters>(
     let mut fee_funding = Zatoshis::ZERO;
     let transaction_fee = loop {
         let action_count = (fixed_spends + fee_notes.len()).max(fixed_outputs).max(2);
-        let f = fee(network, target_height, action_count)?;
+        let f = fee(network, target_height, action_count, marginal)?;
         if fee_funding >= f {
             break f;
         }
@@ -213,7 +214,7 @@ pub fn prepare<P: Parameters>(
             rand::rand_core::UnwrapErr(rand::rngs::SysRng),
             spend_prover,
             output_prover,
-            &StandardFeeRule::Zip317,
+            &fee_rule(marginal),
         )
         .map_err(PrepareError::Builder)?;
     Ok((built.transaction().clone(), transaction_fee))
@@ -261,8 +262,9 @@ fn fee<P: Parameters>(
     network: &P,
     target_height: BlockHeight,
     ironwood_actions: usize,
+    marginal_fee: Zatoshis,
 ) -> Result<Zatoshis, PrepareError> {
-    StandardFeeRule::Zip317
+    fee_rule(marginal_fee)
         .fee_required(
             network,
             target_height,

@@ -1,5 +1,11 @@
 # Wallet changelog
 
+## 2026-10-22 — Dust follows the node's marginal fee
+
+- A note at or below the wallet's marginal fee is uneconomic. The fee
+  starts at the ZIP 317 constant and changes when the node reports a
+  standard fee.
+
 ## 2026-10-10 — Note selection skips dust
 
 - `select_spendable_notes` skips notes worth `MARGINAL_FEE` or less, as

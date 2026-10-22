@@ -88,6 +88,18 @@ async fn main() {
         let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {
             panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
         });
+        match source.standard_fee().await {
+            Ok(fee) => {
+                if wallet.set_marginal_fee(fee.marginal) {
+                    tracing::info!(
+                        zats_per_action = fee.marginal.into_u64(),
+                        version = fee.version,
+                        "standard fee"
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(%error, "standard fee unchanged"),
+        }
 
         // Compare the wallet's own cursor with Zebra at the same height.
         // If they disagree, walk backward until both name the same block;

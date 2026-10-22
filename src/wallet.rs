@@ -118,6 +118,11 @@ pub struct Wallet<P: Parameters> {
     /// Advisory locks use upstream `OutputRef` and `LockOwner` values directly.
     locks: BTreeMap<OutputRef, (LockOwner, BlockHeight)>,
 
+    /// The node's ZIP 317 marginal fee, in zatoshis per logical action.
+    /// A note that does not exceed it is dust. The ZIP 317 constant stands
+    /// until `getstandardfee` answers.
+    marginal_fee: Zatoshis,
+
     sapling_tree: ShardTree<
         MemoryShardStore<sapling::Node, BlockHeight>,
         SAPLING_NOTE_COMMITMENT_TREE_DEPTH,
@@ -139,6 +144,20 @@ pub struct Wallet<P: Parameters> {
 }
 
 impl<P: Parameters> Wallet<P> {
+    /// Replaces the marginal fee. Returns whether the rate changed.
+    pub fn set_marginal_fee(&mut self, marginal_fee: Zatoshis) -> bool {
+        if self.marginal_fee == marginal_fee {
+            return false;
+        }
+        self.marginal_fee = marginal_fee;
+        true
+    }
+
+    /// The marginal fee dust selection and transaction construction use.
+    pub fn marginal_fee(&self) -> Zatoshis {
+        self.marginal_fee
+    }
+
     /// Born complete: the origin frontiers plus every completed
     /// subtree root behind them, or nothing.
     pub fn new(
@@ -174,6 +193,7 @@ impl<P: Parameters> Wallet<P> {
             ironwood_nullifiers: BTreeMap::new(),
             sent_outputs: BTreeMap::new(),
             locks: BTreeMap::new(),
+            marginal_fee: zcash_primitives::transaction::fees::zip317::MARGINAL_FEE,
             sapling_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),
             sapling_tree_shard_end_heights: BTreeMap::new(),
             orchard_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),
