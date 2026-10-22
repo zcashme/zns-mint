@@ -1,7 +1,7 @@
-//! The pre-sale protected-names table, cached in memory: read once
-//! at boot, refreshed once per MTP day, judged per claim against the
-//! current MTP — Supabase is never on a claim's path. A missing row,
-//! or a reached lift moment, is unprotected. Codes are derived in
+//! The pre-sale protected-names table, cached in memory: read at
+//! boot and again on every tip pass before the deciding pass, judged
+//! per claim against the current MTP. A failed read keeps the last
+//! table. A missing row, or a reached lift moment, is unprotected. Codes are derived in
 //! the TEE (`access-code-v1`); the mint never writes Supabase.
 
 use std::collections::btree_map::Entry;
@@ -37,25 +37,32 @@ const PRESALE_TABLE: &str = "zn_names";
 /// Public Supabase publishable key (`apikey` for PostgREST).
 const PRESALE_PUBLISHABLE_KEY: &str = "sb_publishable_eRyX0Z5CY3bHm11iCFoZRA_-u2WgStF";
 
-const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_BODY_BYTES: usize = 64 * 1024;
+/// One end-to-end bound on the whole read, request and body.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Rows per page — worst case ~34 KB, half of `MAX_BODY_BYTES`.
-const PAGE_ROWS: usize = 250;
+/// The whole table in one body: ~214 KB at 2,559 rows; the cap holds
+/// ~30,000 worst-case rows (~137 B each). Over it, the read is refused.
+const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
-/// Page ceiling (~25,000 names); over it, the read is refused loudly.
-const MAX_PAGES: usize = 100;
+/// How long an idle connection stays pooled: past one tip pass
+/// (~75 s), so consecutive reads share a connection.
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
+pub type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
 type HmacSha256 = Hmac<Sha256>;
 
-fn https_client() -> HttpsClient {
+/// The one client every read goes through, built at boot. A closed
+/// connection is replaced on the next request; a read that times out
+/// drops its connection, so the next read opens a fresh one.
+pub fn https_client() -> HttpsClient {
     let connector = HttpsConnectorBuilder::new()
         .with_webpki_roots()
         .https_only()
         .enable_http1()
         .build();
-    Client::builder(TokioExecutor::new()).build(connector)
+    Client::builder(TokioExecutor::new())
+        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .build(connector)
 }
 
 fn presale_rest_url() -> String {
@@ -116,11 +123,10 @@ pub enum ProtectionStatus {
     Forever,
 }
 
-/// A `zn_names` row: `id` keys the cursor, `name` must parse as a
-/// [`Name`], `expiry_at` null means forever.
+/// A `zn_names` row: `name` must parse as a [`Name`], `expiry_at`
+/// null means forever.
 #[derive(Deserialize)]
 pub struct ProtectedRow {
-    pub id: String,
     pub name: String,
     #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
     pub expiry_at: Option<Timestamp>,
@@ -217,7 +223,7 @@ pub enum FetchError {
     #[error("read failed")]
     Unavailable,
     /// The read finished but its completeness is unproven — count
-    /// missing or mismatched, or over the page ceiling.
+    /// missing or mismatched.
     #[error("read could not be confirmed complete")]
     Unconfirmed,
     /// A row's `name` is not a lawful [`Name`]; retries fail until
@@ -226,85 +232,54 @@ pub enum FetchError {
     CorruptRow,
 }
 
-/// Reads the whole table, `PAGE_ROWS` at a time, keyset-paginated
-/// by `(name, id)`, installing only when every counted row landed.
-/// Over `MAX_PAGES` full pages, or any failure: [`FetchError`] —
-/// the caller keeps what it has.
-pub async fn fetch() -> Result<ProtectedNames, FetchError> {
-    let client = https_client();
-    let mut table = ProtectedNames(BTreeMap::new());
-    let mut read = 0usize;
-    let mut after: Option<(String, String)> = None;
-    let mut total: Option<usize> = None;
-    let mut pages = 0;
-    loop {
-        let want_total = total.is_none();
-        let (page, counted) = fetch_page(
-            &client,
-            after
-                .as_ref()
-                .map(|(name, id)| (name.as_str(), id.as_str())),
-            want_total,
-        )
-        .await
-        .ok_or(FetchError::Unavailable)?;
-        pages += 1;
-        if pages > MAX_PAGES && !page.is_empty() {
-            tracing::warn!("pre-sale fetch exceeded the page ceiling");
-            return Err(FetchError::Unconfirmed);
+/// Reads the whole table in one request, installing only when every
+/// counted row landed. Any failure: [`FetchError`] — the caller keeps
+/// what it has.
+pub async fn fetch(client: &HttpsClient) -> Result<ProtectedNames, FetchError> {
+    let (rows, total) = fetch_rows(client).await.ok_or(FetchError::Unavailable)?;
+    complete(rows, total)
+}
+
+/// Rows in, table out, only when the server's exact count matches the
+/// rows read: past the project's Max Rows, PostgREST truncates the
+/// reply silently.
+fn complete(rows: Vec<ProtectedRow>, total: Option<usize>) -> Result<ProtectedNames, FetchError> {
+    let read = rows.len();
+    match total {
+        Some(total) if total == read => {
+            let table = ProtectedNames(BTreeMap::new()).from_rows(rows)?;
+            tracing::debug!(rows = read, "pre-sale fetch: table loaded");
+            Ok(table)
         }
-        total = total.or(counted);
-        let short = page.len() < PAGE_ROWS;
-        let last = page.last().map(|row| (row.name.clone(), row.id.clone()));
-        read += page.len();
-        table = table.from_rows(page)?;
-        if short {
-            return match total {
-                Some(total) if total == read => {
-                    tracing::info!(rows = read, "pre-sale fetch: table loaded");
-                    Ok(table)
-                }
-                Some(total) => {
-                    tracing::warn!(
-                        counted = total,
-                        read,
-                        "pre-sale fetch did not install every counted row"
-                    );
-                    Err(FetchError::Unconfirmed)
-                }
-                None => {
-                    tracing::warn!("pre-sale fetch: row count missing");
-                    Err(FetchError::Unconfirmed)
-                }
-            };
+        Some(total) => {
+            tracing::warn!(
+                counted = total,
+                read,
+                "pre-sale fetch did not return every counted row"
+            );
+            Err(FetchError::Unconfirmed)
         }
-        after = last;
+        None => {
+            tracing::warn!("pre-sale fetch: row count missing");
+            Err(FetchError::Unconfirmed)
+        }
     }
 }
 
-/// One page after `after`, with the server's exact row count when
-/// `want_total`. `None` on any failure, each warned here. One
-/// end-to-end timeout covers the request and the body.
-async fn fetch_page(
-    client: &HttpsClient,
-    after: Option<(&str, &str)>,
-    want_total: bool,
-) -> Option<(Vec<ProtectedRow>, Option<usize>)> {
-    let filter = keyset_filter(after);
-    let url = format!(
-        "{}?select=id,name,expiry_at&order=name.asc,id.asc&limit={PAGE_ROWS}{filter}",
-        presale_rest_url(),
-    );
+/// Every row, with the server's exact row count. `None` on any
+/// failure, each warned here. One end-to-end timeout covers the
+/// request and the body.
+async fn fetch_rows(client: &HttpsClient) -> Option<(Vec<ProtectedRow>, Option<usize>)> {
+    let url = format!("{}?select=name,expiry_at", presale_rest_url());
     let uri: Uri = url.parse().ok()?;
-    let mut builder = Request::builder()
+    let request = Request::builder()
         .uri(uri)
         .header("accept", "application/json")
-        .header("apikey", PRESALE_PUBLISHABLE_KEY);
-    if want_total {
-        builder = builder.header("prefer", "count=exact");
-    }
-    let request = builder.body(Empty::<Bytes>::default()).ok()?;
-    let page = tokio::time::timeout(FETCH_TIMEOUT, async {
+        .header("apikey", PRESALE_PUBLISHABLE_KEY)
+        .header("prefer", "count=exact")
+        .body(Empty::<Bytes>::default())
+        .ok()?;
+    let read = tokio::time::timeout(FETCH_TIMEOUT, async {
         let response = client.request(request).await.ok()?;
         let status = response.status();
         if !status.is_success() {
@@ -317,11 +292,19 @@ async fn fetch_page(
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.rsplit('/').next())
             .and_then(|value| value.parse::<usize>().ok());
-        let body = Limited::new(response.into_body(), MAX_BODY_BYTES)
+        let body = match Limited::new(response.into_body(), MAX_BODY_BYTES)
             .collect()
             .await
-            .ok()?
-            .to_bytes();
+        {
+            Ok(body) => body.to_bytes(),
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "pre-sale fetch: body unreadable or over the size cap"
+                );
+                return None;
+            }
+        };
         match serde_json::from_slice(&body) {
             Ok(rows) => Some((rows, total)),
             Err(error) => {
@@ -331,22 +314,11 @@ async fn fetch_page(
         }
     })
     .await;
-    match page {
-        Ok(page) => page,
+    match read {
+        Ok(read) => read,
         Err(_) => {
             tracing::warn!("pre-sale fetch: timed out");
             None
-        }
-    }
-}
-
-/// Rows strictly after `(name, id)`; `[a-z0-9]` names and UUID
-/// ids need no escaping.
-fn keyset_filter(after: Option<(&str, &str)>) -> String {
-    match after {
-        None => String::new(),
-        Some((name, id)) => {
-            format!("&or=(name.gt.{name},and(name.eq.{name},id.gt.{id}))")
         }
     }
 }
@@ -428,7 +400,6 @@ mod tests {
 
     fn row_with(name: &str, expiry_at: Option<Timestamp>) -> ProtectedRow {
         ProtectedRow {
-            id: format!("id-{name}"),
             name: name.to_string(),
             expiry_at,
         }
@@ -633,8 +604,8 @@ mod tests {
         );
     }
 
-    /// Columns Supabase may return beyond the three the mint reads
-    /// (`id`, `name`, `expiry_at`) do not prevent decoding — serde
+    /// Columns Supabase may return beyond the two the mint reads
+    /// (`name`, `expiry_at`) do not prevent decoding — serde
     /// ignores unknown fields, so schema evolution on unused columns
     /// is safe.
     #[test]
@@ -669,14 +640,27 @@ mod tests {
         assert!(rows.is_err(), "malformed timestamp must not deserialize");
     }
 
-    /// The cursor filter is the pagination contract: strictly after
-    /// `(name, id)`, in either dimension.
+    /// The read installs only when every counted row arrived.
     #[test]
-    fn keyset_filter_continues_strictly_after() {
-        assert_eq!(keyset_filter(None), "");
-        assert_eq!(
-            keyset_filter(Some(("9", "abc"))),
-            "&or=(name.gt.9,and(name.eq.9,id.gt.abc))"
-        );
+    fn complete_installs_when_the_count_matches() {
+        let table = complete(vec![row_with("alice", None)], Some(1)).unwrap();
+        assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
+    }
+
+    /// A reply cut short by the server's Max Rows is refused, never
+    /// installed as a smaller table.
+    #[test]
+    fn complete_refuses_a_truncated_read() {
+        let rows = vec![row_with("alice", None)];
+        assert!(matches!(
+            complete(rows, Some(2)),
+            Err(FetchError::Unconfirmed)
+        ));
+    }
+
+    #[test]
+    fn complete_refuses_a_missing_count() {
+        let rows = vec![row_with("alice", None)];
+        assert!(matches!(complete(rows, None), Err(FetchError::Unconfirmed)));
     }
 }

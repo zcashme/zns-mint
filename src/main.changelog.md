@@ -1,5 +1,14 @@
 # main.changelog.md
 
+## 2026-10-22 — The pre-sale table is read beside the price round (#371)
+
+- Every tip pass awaits `presale::fetch` jointly with `fetch_round`,
+  before the tip check and the deciding pass, so the check covers both
+  reads and claims are judged against a table read moments earlier. A
+  failed read warns and keeps the last table.
+- The daily background refresh (`presale_refresh`) is gone; a new MTP
+  day only sweeps the Treasury.
+
 ## 2026-10-15 — The names in flight are on the metrics page (#342)
 
 - `zns_mint_request_state{name}` for every name the mint has anything

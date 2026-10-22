@@ -16,6 +16,7 @@ use zcash_protocol::consensus::BlockHeight;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
+use zns_mint::mint::presale;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
@@ -46,11 +47,11 @@ async fn main() {
         mut challenges,
         access_code_key,
         mut protected_names,
+        presale_client,
         mut registry,
         mut name_notes,
         mut requests,
         mut echoes,
-        mut presale_refresh,
         treasury_address,
         registry_ufvk,
         seed_fingerprint,
@@ -304,7 +305,15 @@ async fn main() {
         let today = mtp
             .current_day()
             .expect("FATAL: MTP unavailable at the applied tip");
-        oracle.accumulate(fetch_round().await, today, mtp_now);
+        // The price round and the pre-sale table are read together, so
+        // the tip check below covers both. A failed table read keeps the
+        // last table; claims never wait past the fetch timeout.
+        let (round, table) = tokio::join!(fetch_round(), presale::fetch(&presale_client));
+        oracle.accumulate(round, today, mtp_now);
+        match table {
+            Ok(fresh) => protected_names = fresh,
+            Err(error) => tracing::warn!(%error, "pre-sale read failed; the last table stands"),
+        }
         // Transient or unusable tip data → skip this rule pass and wait
         // for another notification; a chain race re-converges.
         let exact_tip = match source.canonical_tip().await {
@@ -677,29 +686,8 @@ async fn main() {
             }
         }
 
-        // A completed background pre-sale fetch installs now; an
-        // unfinished one keeps waiting off the loop's path.
-        if let Some(handle) = presale_refresh.take() {
-            if handle.is_finished() {
-                match handle.await {
-                    Ok(Ok(fresh)) => protected_names = fresh,
-                    Ok(Err(error)) => {
-                        tracing::warn!(%error, "pre-sale refresh failed; yesterday's rows stand")
-                    }
-                    Err(error) => tracing::warn!(?error, "pre-sale refresh task failed"),
-                }
-            } else {
-                presale_refresh = Some(handle);
-            }
-        }
-
-        // A new MTP day refreshes the pre-sale table in the
-        // background and sweeps the Treasury to the vault once. No
-        // claim ever waits on the fetch.
+        // A new MTP day sweeps the Treasury to the vault once.
         if today > previous_day {
-            if presale_refresh.is_none() {
-                presale_refresh = Some(tokio::spawn(zns_mint::mint::presale::fetch()));
-            }
             match treasury::sweep_to_vault(
                 &network,
                 &mut wallet,

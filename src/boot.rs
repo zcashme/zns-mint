@@ -23,7 +23,7 @@ use std::str::FromStr;
 
 use crate::mint::mtp::MtpTracker;
 use crate::mint::note::NameNoteQueue;
-use crate::mint::presale::{self, AccessCodeDerivationKey, FetchError, ProtectedNames};
+use crate::mint::presale::{self, AccessCodeDerivationKey, HttpsClient, ProtectedNames};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::treasury::{OtpQueue, RequestQueue};
@@ -100,6 +100,8 @@ pub struct Boot<P: Parameters> {
     pub access_code_key: AccessCodeDerivationKey,
     /// must not: fail-closed at birth — the table or no start
     pub protected_names: ProtectedNames,
+    /// initialized: the one client every pre-sale read goes through
+    pub presale_client: HttpsClient,
     /// produced: scanned and verified during boot sync
     pub registry: Registry,
     /// initialized: pending Name Note authorizations
@@ -108,8 +110,6 @@ pub struct Boot<P: Parameters> {
     pub requests: RequestQueue,
     /// initialized: pending OTP echoes
     pub echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)>,
-    /// initialized: no pre-sale refresh is in flight
-    pub presale_refresh: Option<tokio::task::JoinHandle<Result<ProtectedNames, FetchError>>>,
     /// The exact encoded identity written to the boot identity document.
     pub treasury_address: String,
     pub registry_ufvk: String,
@@ -703,8 +703,9 @@ impl Boot<Network> {
         );
 
         // 6b. Pre-sale table: fail-closed at birth — no table, no start.
+        let presale_client = presale::https_client();
         let protected_names = loop {
-            match presale::fetch().await {
+            match presale::fetch(&presale_client).await {
                 Ok(names) => {
                     tracing::info!("boot: pre-sale table fetched");
                     break names;
@@ -722,7 +723,6 @@ impl Boot<Network> {
         let name_notes = NameNoteQueue::default();
         let requests = RequestQueue::default();
         let echoes = Vec::new();
-        let presale_refresh = None;
 
         // 7. Sapling proving parameters. Loading and hash verification happen
         // before attestation: a mint that produces a report can also prove
@@ -796,11 +796,11 @@ impl Boot<Network> {
             challenges,
             access_code_key,
             protected_names,
+            presale_client,
             registry,
             name_notes,
             requests,
             echoes,
-            presale_refresh,
             treasury_address,
             registry_ufvk,
             seed_fingerprint: hex::encode(ceremony_fingerprint),
