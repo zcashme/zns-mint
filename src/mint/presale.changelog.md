@@ -1,5 +1,11 @@
 # `mint/presale.rs` design record
 
+## 2026-10-22 — The early-access regime ends (#360)
+
+- The gate is `is_protected && !accepts` again: protection binds only
+  listed names at the tip MTP, and every other name claims without a
+  code. This module's functions are unchanged.
+
 ## 2026-10-13 — The early-access regime denies by default (#340)
 
 - The deciding pass flips the refusal: a claim dies unless the name is

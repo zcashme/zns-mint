@@ -1,5 +1,12 @@
 # happy_path.changelog.md
 
+## 2026-10-22
+
+- The happy path claims `alice` with a code-free memo, as before #341:
+  `alice` holds no `zn_names` row, so open registration (#360) lets it
+  through. Update and release follow on `alice`; the access-code helper
+  is gone.
+
 ## 2026-10-12
 
 - Merged `boot_completion.rs` + `happy_path.rs` into one boot-to-release
