@@ -1,9 +1,6 @@
-//! The pre-sale protected-names table, cached in memory: read at
-//! boot and again on every tip pass before the deciding pass, judged
-//! per claim against the current MTP. A failed read keeps the last
-//! table. A missing row, or a reached lift moment, is unprotected.
-//! Codes are derived in the TEE (`access-code-v1`); the mint never
-//! writes Supabase.
+//! The pre-sale protected-names table, cached in memory and read on
+//! every tip pass. Claims are judged against the current MTP; a
+//! failed read keeps the last table. Codes are derived in the TEE.
 
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
@@ -38,23 +35,19 @@ const PRESALE_TABLE: &str = "zn_names";
 /// Public Supabase publishable key (`apikey` for PostgREST).
 const PRESALE_PUBLISHABLE_KEY: &str = "sb_publishable_eRyX0Z5CY3bHm11iCFoZRA_-u2WgStF";
 
-/// One end-to-end bound on the whole read, request and body.
+/// Bounds the whole read, request and body.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// The whole table in one body: ~214 KB at 2,559 rows; the cap holds
-/// ~30,000 worst-case rows (~137 B each). Over it, the read is refused.
+/// Whole-table body cap; over it, the read is refused.
 const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
-/// How long an idle connection stays pooled: past one tip pass
-/// (~75 s), so consecutive reads share a connection.
+/// Keeps the connection pooled across tip passes.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
 type HmacSha256 = Hmac<Sha256>;
 
-/// The one client every read goes through, built at boot. A closed
-/// connection is replaced on the next request; a read that times out
-/// drops its connection, so the next read opens a fresh one.
+/// The one client every read goes through, built at boot.
 pub(crate) fn https_client() -> HttpsClient {
     let connector = HttpsConnectorBuilder::new()
         .with_webpki_roots()
@@ -233,16 +226,13 @@ pub enum FetchError {
     CorruptRow,
 }
 
-/// Reads the whole table in one request, installing only when every
-/// counted row landed. Any failure: [`FetchError`] — the caller keeps
-/// what it has.
+/// Reads the whole table; installs only when every counted row landed.
 pub async fn fetch(client: &HttpsClient) -> Result<ProtectedNames, FetchError> {
     let (rows, total) = fetch_rows(client).await.ok_or(FetchError::Unavailable)?;
     complete(rows, total)
 }
 
-/// Reads the table into `names`. A failed read warns and keeps the
-/// last table.
+/// Reads into `names`; a failed read keeps the last table.
 pub async fn refresh(client: &HttpsClient, names: &mut ProtectedNames) {
     match fetch(client).await {
         Ok(fresh) => *names = fresh,
@@ -250,9 +240,7 @@ pub async fn refresh(client: &HttpsClient, names: &mut ProtectedNames) {
     }
 }
 
-/// Rows in, table out, only when the server's exact count matches the
-/// rows read: past the project's Max Rows, PostgREST truncates the
-/// reply silently.
+/// Installs only when the exact count matches the rows read.
 fn complete(rows: Vec<ProtectedRow>, total: Option<usize>) -> Result<ProtectedNames, FetchError> {
     let read = rows.len();
     match total {
@@ -276,9 +264,7 @@ fn complete(rows: Vec<ProtectedRow>, total: Option<usize>) -> Result<ProtectedNa
     }
 }
 
-/// Every row, with the server's exact row count. `None` on any
-/// failure, each warned here. One end-to-end timeout covers the
-/// request and the body.
+/// Every row and the exact count; `None` on any failure, each warned.
 async fn fetch_rows(client: &HttpsClient) -> Option<(Vec<ProtectedRow>, Option<usize>)> {
     let url = format!("{}?select=name,expiry_at", presale_rest_url());
     let uri: Uri = url.parse().ok()?;
@@ -652,8 +638,7 @@ mod tests {
         assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
     }
 
-    /// A reply cut short by the server's Max Rows is refused, never
-    /// installed as a smaller table.
+    /// A reply cut short by Max Rows is refused, not installed.
     #[test]
     fn complete_refuses_a_truncated_read() {
         let rows = vec![row_with("alice", None)];
