@@ -1,13 +1,16 @@
 //! Treasury wallet view and Treasury policy for the mint: the vault
 //! sweep, the challenge relay builder, the request queue, and refunds
-//! of underpaid claims.
+//! of underpaid payments.
 //!
 
 mod otp;
 mod refund;
 
 pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
-pub use refund::{payment_against_quote, refund_output, PaymentAgainstQuote, Refund, RefundQueue};
+pub use refund::{
+    access_code_penalty, payment_against_quote, refund_output, PaymentAgainstQuote, Refund,
+    RefundQueue,
+};
 
 use std::convert::Infallible;
 use std::num::NonZeroU32;
@@ -35,7 +38,7 @@ use zcash_protocol::value::{BalanceError, Zatoshis};
 use zcash_protocol::ShieldedPool;
 use zip321::{Payment, TransactionRequest};
 
-use crate::mint::{Name, Request, TREASURY_ACCOUNT};
+use crate::mint::{Name, Request, UnifiedAddress, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 use crate::zcash::fee::{fee_rule, single_action_fee};
 
@@ -162,15 +165,17 @@ pub enum RefundPlan {
     Wait,
 }
 
-/// A proposal that spends `note` and pays `to` the remainder of `paid`.
+/// A proposal that spends `note` and pays `to` what remains of `paid`.
 ///
-/// The note is the whole input, so the Treasury adds nothing. A fee that
-/// does not match that shape is tried once more; a second miss waits.
+/// `penalty` stays as change. The note is the whole input, so the
+/// Treasury adds nothing. A fee that does not match that shape is tried
+/// once more; a second miss waits.
 pub fn plan_refund<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
     note: NoteId,
     paid: Zatoshis,
+    penalty: Zatoshis,
     to: &zcash_keys::address::Address,
 ) -> Result<RefundPlan, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
     let Some(value) = wallet.spendable_note_value(TREASURY_ACCOUNT, note) else {
@@ -184,6 +189,9 @@ pub fn plan_refund<P: Parameters>(
         );
         return Ok(RefundPlan::Wait);
     }
+    let Some(returning) = paid - penalty else {
+        return Ok(RefundPlan::Dust);
+    };
     let Some(mut fee) = single_action_fee(wallet.marginal_fee()) else {
         return Ok(RefundPlan::Wait);
     };
@@ -191,13 +199,13 @@ pub fn plan_refund<P: Parameters>(
     // when the output pool is not the note's pool. One revision settles
     // a stable shape; a third guess waits for the next tip.
     for _ in 0..2 {
-        if paid <= fee {
+        if returning <= fee {
             return Ok(RefundPlan::Dust);
         }
-        let amount = (paid - fee).expect("paid exceeds the fee");
+        let amount = (returning - fee).expect("the remainder exceeds the fee");
         match propose_one_note(network, wallet, note, to, amount) {
             Ok(proposal) => {
-                if refund_settles(&proposal, note, paid) {
+                if refund_settles(&proposal, note, paid, penalty) {
                     return Ok(RefundPlan::Send(Box::new(proposal)));
                 }
                 fee = proposal.steps().first().balance().fee_required();
@@ -242,9 +250,14 @@ fn propose_one_note<P: Parameters>(
     result
 }
 
-/// The proposal spends `note` alone and returns `paid` minus its fee,
-/// with nothing left as change.
-fn refund_settles(proposal: &TreasuryProposal, note: NoteId, paid: Zatoshis) -> bool {
+/// The proposal spends `note` alone, leaves `penalty` as change, and
+/// pays out `paid` minus that minus the fee.
+fn refund_settles(
+    proposal: &TreasuryProposal,
+    note: NoteId,
+    paid: Zatoshis,
+    penalty: Zatoshis,
+) -> bool {
     let step = proposal.steps().first();
     let Some(inputs) = step.shielded_inputs() else {
         return false;
@@ -261,13 +274,143 @@ fn refund_settles(proposal: &TreasuryProposal, note: NoteId, paid: Zatoshis) -> 
     else {
         return false;
     };
-    if change != Zatoshis::ZERO {
+    if change != penalty {
         return false;
     }
     let Ok(Some(sent)) = step.transaction_request().total() else {
         return false;
     };
-    (sent + step.balance().fee_required()) == Some(paid)
+    (sent + step.balance().fee_required() + penalty) == Some(paid)
+}
+
+/// When `paid` is below `price`, keeps it or admits a refund to `recipient`.
+///
+/// Returns `true` when the payment does not cover `price`.
+#[allow(clippy::too_many_arguments)]
+pub fn refund_underpaid<P: Parameters>(
+    refunds: &mut RefundQueue,
+    wallet: &mut Wallet<P>,
+    txid: TxId,
+    output_index: Option<u16>,
+    paid: Zatoshis,
+    price: Zatoshis,
+    recipient: &UnifiedAddress,
+    name: &Name,
+    height: BlockHeight,
+    kind: &'static str,
+) -> bool {
+    match payment_against_quote(paid, price, wallet.marginal_fee()) {
+        PaymentAgainstQuote::Covers => false,
+        PaymentAgainstQuote::BelowFee | PaymentAgainstQuote::Remainder(_) => {
+            admit_refund(
+                refunds,
+                wallet,
+                txid,
+                output_index,
+                paid,
+                Zatoshis::ZERO,
+                recipient,
+                name,
+                height,
+                kind,
+                "underpaid",
+            );
+            true
+        }
+    }
+}
+
+/// Refunds `paid` minus `penalty` minus the refund fee. `penalty` is left
+/// as change. Returns whether a refund was admitted.
+#[allow(clippy::too_many_arguments)]
+pub fn refund_keeping<P: Parameters>(
+    refunds: &mut RefundQueue,
+    wallet: &mut Wallet<P>,
+    txid: TxId,
+    output_index: Option<u16>,
+    paid: Zatoshis,
+    penalty: Zatoshis,
+    recipient: &UnifiedAddress,
+    name: &Name,
+    height: BlockHeight,
+    kind: &'static str,
+    reason: &'static str,
+) -> bool {
+    admit_refund(
+        refunds,
+        wallet,
+        txid,
+        output_index,
+        paid,
+        penalty,
+        recipient,
+        name,
+        height,
+        kind,
+        reason,
+    )
+}
+
+/// Admits the refund, or logs that the payment is kept when `paid` minus
+/// `penalty` does not exceed the refund fee.
+#[allow(clippy::too_many_arguments)]
+fn admit_refund<P: Parameters>(
+    refunds: &mut RefundQueue,
+    wallet: &mut Wallet<P>,
+    txid: TxId,
+    output_index: Option<u16>,
+    paid: Zatoshis,
+    penalty: Zatoshis,
+    recipient: &UnifiedAddress,
+    name: &Name,
+    height: BlockHeight,
+    kind: &'static str,
+    reason: &'static str,
+) -> bool {
+    let kept = || {
+        tracing::info!(
+            %txid,
+            name = %name.as_str(),
+            kind,
+            reason,
+            paid = paid.into_u64(),
+            penalty = penalty.into_u64(),
+            "payment kept"
+        );
+    };
+    let Some(net) = paid - penalty else {
+        kept();
+        return false;
+    };
+    let Some(output) = refund_output(net, wallet.marginal_fee()) else {
+        kept();
+        return false;
+    };
+    let Some(index) = output_index else {
+        kept();
+        return false;
+    };
+    let note = NoteId::new(txid, ShieldedPool::Ironwood, index);
+    tracing::info!(
+        %txid,
+        name = %name.as_str(),
+        kind,
+        reason,
+        paid = paid.into_u64(),
+        penalty = penalty.into_u64(),
+        refund = output.into_u64(),
+        "payment refund"
+    );
+    refunds.admit(Refund::new(
+        note,
+        recipient.clone(),
+        paid,
+        penalty,
+        name.clone(),
+        height,
+    ));
+    lock_refund_note(wallet, note);
+    true
 }
 
 /// Holds `note` until the refund is sent or given up. The expiry is the
@@ -820,11 +963,19 @@ mod tests {
             .internal_note_id();
         let to = vault_address(&network);
 
-        let proposal =
-            match plan_refund(&network, st.wallet_mut(), payment, paid, &to).expect("plan") {
-                RefundPlan::Send(proposal) => proposal,
-                other => panic!("refund plan was not send: {other:?}"),
-            };
+        let proposal = match plan_refund(
+            &network,
+            st.wallet_mut(),
+            payment,
+            paid,
+            Zatoshis::ZERO,
+            &to,
+        )
+        .expect("plan")
+        {
+            RefundPlan::Send(proposal) => proposal,
+            other => panic!("refund plan was not send: {other:?}"),
+        };
         let step = proposal.steps().first();
         let inputs = step.shielded_inputs().expect("one shielded input");
         assert_eq!(inputs.notes().len(), 1);
@@ -854,9 +1005,45 @@ mod tests {
             Zatoshis::ZERO
         );
 
+        let penalty = Zatoshis::const_from_u64(20_000);
+        let penalized = match plan_refund(&network, st.wallet_mut(), payment, paid, penalty, &to)
+            .expect("penalized plan")
+        {
+            RefundPlan::Send(proposal) => proposal,
+            other => panic!("penalized refund plan was not send: {other:?}"),
+        };
+        let penalized_step = penalized.steps().first();
+        let penalized_sent = penalized_step
+            .transaction_request()
+            .total()
+            .expect("total")
+            .expect("the payment has an amount");
+        assert_eq!(
+            (penalized_sent + penalized_step.balance().fee_required() + penalty).unwrap(),
+            paid
+        );
+        assert_eq!(
+            penalized_step
+                .balance()
+                .proposed_change()
+                .iter()
+                .map(|change| change.value())
+                .sum::<Option<Zatoshis>>()
+                .expect("change"),
+            penalty
+        );
+
         assert!(lock_refund_note(st.wallet_mut(), payment));
         assert!(matches!(
-            plan_refund(&network, st.wallet_mut(), payment, paid, &to).expect("retry"),
+            plan_refund(
+                &network,
+                st.wallet_mut(),
+                payment,
+                paid,
+                Zatoshis::ZERO,
+                &to
+            )
+            .expect("retry"),
             RefundPlan::Send(_)
         ));
 

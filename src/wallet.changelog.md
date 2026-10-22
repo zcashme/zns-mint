@@ -3,8 +3,9 @@
 ## 2026-10-22 — A refund can spend its locked payment note
 
 - Selection can be limited to one note, and that selection sees through
-  the note's lock. Other proposals do not. A rejected unmined spend
-  can be dropped so the same note can be spent on the next tip.
+  the note's lock. Other proposals do not. A rejected or expired unmined
+  spend can be dropped so the same note can be spent on the next tip.
+- A stored refund transaction is mined, still valid, or expired.
 
 ## 2026-10-22 — Dust follows the node's marginal fee
 

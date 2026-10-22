@@ -106,8 +106,8 @@ pub struct Boot<P: Parameters> {
     pub name_notes: NameNoteQueue,
     /// initialized: pending Treasury requests
     pub requests: RequestQueue,
-    /// initialized: pending OTP echoes
-    pub echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)>,
+    /// initialized: pending OTP echoes, each with its payment note
+    pub echoes: Vec<(TxId, Option<u16>, OtpMemo, Zatoshis, BlockHeight)>,
     /// initialized: no pre-sale refresh is in flight
     pub presale_refresh: Option<tokio::task::JoinHandle<Result<ProtectedNames, FetchError>>>,
     /// The exact encoded identity written to the boot identity document.

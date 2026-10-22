@@ -12,18 +12,16 @@
 
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_client_backend::wallet::NoteId;
 use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::ShieldedPool;
+use zcash_protocol::value::Zatoshis;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury;
-use zns_mint::mint::treasury::{
-    OtpChallenge, OtpQueue, PaymentAgainstQuote, Refund, RefundPlan, RefundQueue,
-};
+use zns_mint::mint::treasury::{OtpChallenge, OtpQueue, RefundPlan, RefundQueue};
 use zns_mint::mint::{relay, Action, MintInbound, Request, TREASURY_ACCOUNT};
+use zns_mint::wallet::RefundTxStatus;
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
@@ -87,9 +85,14 @@ async fn main() {
         zns_mint::metrics::requests_in_flight(
             requests
                 .names()
-                .chain(refunds.names())
+                .chain(refunds.names(|txid| {
+                    matches!(
+                        wallet.refund_tx_status(txid, wallet.tip().block_height()),
+                        RefundTxStatus::Mined
+                    )
+                }))
                 .chain(challenges.unrelayed())
-                .chain(echoes.iter().map(|(echo, _, _)| &echo.name))
+                .chain(echoes.iter().map(|(_, _, echo, _, _)| &echo.name))
                 .chain(name_notes.authorized_names()),
             challenges.relayed(),
         );
@@ -201,7 +204,7 @@ async fn main() {
             for note in refunds.truncate_to(rewound) {
                 treasury::unlock_refund_note(&mut wallet, note);
             }
-            echoes.retain(|(_, _, height)| *height <= rewound);
+            echoes.retain(|(_, _, _, _, height)| *height <= rewound);
             tracing::warn!(
                 height = u32::from(rewound),
                 hash = %wallet.tip().block_hash(),
@@ -303,7 +306,13 @@ async fn main() {
                         }
                         requests.record(txid, output_index, request, paid, next_height);
                     }
-                    MintInbound::Echo(echo) => echoes.push((echo, paid, next_height)),
+                    MintInbound::Echo(echo) => {
+                        let output_index = u16::try_from(output_index).ok();
+                        if output_index.is_none() {
+                            tracing::error!(%txid, "treasury output index does not fit a note id");
+                        }
+                        echoes.push((txid, output_index, echo, paid, next_height));
+                    }
                     MintInbound::Unrecognized => {
                         tracing::info!(
                             txid = %txid,
@@ -393,8 +402,9 @@ async fn main() {
                         // is observed. A later payment does not start a
                         // second Name Note.
                         // Early-access regime: only a listed name may claim,
-                        // and only with its per-name access code; an absent
-                        // or lapsed row refuses, payment kept.
+                        // and only with its per-name access code. No code,
+                        // or a name that is not listed, keeps the payment.
+                        // A wrong code keeps 1% of the quote, then the fee.
                         let Some(offered) = code.as_ref() else {
                             tracing::debug!(
                                 name = %name.as_str(),
@@ -403,9 +413,25 @@ async fn main() {
                             break 'lane true;
                         };
                         if !access_code_key.accepts(name, Some(offered)) {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                "pre-sale claim refused: wrong access code"
+                            let Some(price) = oracle.quote(name, *term) else {
+                                tracing::debug!(
+                                    name = %name.as_str(),
+                                    "wrong access code; quote does not fit"
+                                );
+                                break 'lane true;
+                            };
+                            treasury::refund_keeping(
+                                &mut refunds,
+                                &mut wallet,
+                                txid,
+                                output_index,
+                                paid,
+                                treasury::access_code_penalty(price),
+                                ua,
+                                name,
+                                note_height,
+                                Action::Claim.as_str(),
+                                "wrong access code",
                             );
                             break 'lane true;
                         }
@@ -424,56 +450,45 @@ async fn main() {
                         let Some(price) = oracle.quote(name, *term) else {
                             break 'lane true;
                         };
-                        match treasury::payment_against_quote(paid, price, wallet.marginal_fee()) {
-                            PaymentAgainstQuote::Covers => {}
-                            PaymentAgainstQuote::BelowFee => {
-                                tracing::info!(
-                                    %txid,
-                                    name = %name.as_str(),
-                                    paid = paid.into_u64(),
-                                    quote = price.into_u64(),
-                                    "underpaid claim kept"
-                                );
-                                break 'lane true;
-                            }
-                            PaymentAgainstQuote::Remainder(output) => {
-                                let Some(index) = output_index else {
-                                    tracing::info!(
-                                        %txid,
-                                        name = %name.as_str(),
-                                        paid = paid.into_u64(),
-                                        quote = price.into_u64(),
-                                        "underpaid claim kept"
-                                    );
-                                    break 'lane true;
-                                };
-                                let note = NoteId::new(txid, ShieldedPool::Ironwood, index);
-                                tracing::info!(
-                                    %txid,
-                                    name = %name.as_str(),
-                                    paid = paid.into_u64(),
-                                    quote = price.into_u64(),
-                                    refund = output.into_u64(),
-                                    "underpaid claim"
-                                );
-                                refunds.admit(Refund::new(
-                                    note,
-                                    ua.clone(),
-                                    paid,
-                                    name.clone(),
-                                    note_height,
-                                ));
-                                treasury::lock_refund_note(&mut wallet, note);
-                                break 'lane true;
-                            }
+                        if treasury::refund_underpaid(
+                            &mut refunds,
+                            &mut wallet,
+                            txid,
+                            output_index,
+                            paid,
+                            price,
+                            ua,
+                            name,
+                            note_height,
+                            Action::Claim.as_str(),
+                        ) {
+                            break 'lane true;
                         }
+                        // A name that already has a record is refunded.
+                        // Any other refusal keeps the payment.
                         let Some(claim_note) =
                             registry.authorize_claim(name.clone(), ua.clone(), *term, mtp_now)
                         else {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                "claim not authorized"
-                            );
+                            if !registry.is_available(name) {
+                                treasury::refund_keeping(
+                                    &mut refunds,
+                                    &mut wallet,
+                                    txid,
+                                    output_index,
+                                    paid,
+                                    Zatoshis::ZERO,
+                                    ua,
+                                    name,
+                                    note_height,
+                                    Action::Claim.as_str(),
+                                    "registered name",
+                                );
+                            } else {
+                                tracing::debug!(
+                                    name = %name.as_str(),
+                                    "claim not authorized"
+                                );
+                            }
                             break 'lane true;
                         };
                         // Enactment below resolves the anchor and broadcasts.
@@ -503,7 +518,18 @@ async fn main() {
                         ) else {
                             break 'lane true;
                         };
-                        if paid < oracle.challenge_fee() {
+                        if treasury::refund_underpaid(
+                            &mut refunds,
+                            &mut wallet,
+                            txid,
+                            output_index,
+                            paid,
+                            oracle.challenge_fee(),
+                            requested_ua,
+                            name,
+                            note_height,
+                            action.as_str(),
+                        ) {
                             break 'lane true;
                         }
                         let pending = OtpChallenge::issue(
@@ -560,21 +586,17 @@ async fn main() {
 
         // Confirmed OTP responses wait in the run loop until the tip pass.
         // Requests run first; a voided echo leaves its challenge available.
-        for (echo, paid, note_height) in std::mem::take(&mut echoes) {
+        for (txid, output_index, echo, paid, note_height) in std::mem::take(&mut echoes) {
             let _ = 'lane: {
-                // The echo lane: an OTP response. Decided in every outcome —
-                // an echo never waits for money; the renewal or
-                // upgrade fee declines on shortfall, it does not defer.
+                // An OTP response is decided on this pass. It never waits
+                // for money. A renewal or upgrade below its quote does
+                // not consume the challenge.
                 let Some(record) = registry.record(&echo.name).cloned() else {
                     break 'lane true; // no record — released or unknown: no mint-issued challenge can match
                 };
                 let Some(sent) = challenges.answer(&echo, record.commitment) else {
-                    break 'lane true; // no pending challenge: dead
+                    break 'lane true; // no match, including a wrong code: payment kept
                 };
-                // The renewal or upgrade fee, binding at first
-                // sight: a shortfall voids the attempt and never
-                // consumes — the challenge stands, retryable with
-                // the same OTP inside D_OTP.
                 if let Some(term) = sent.term {
                     let Some(price) = oracle.quote(&echo.name, term) else {
                         tracing::debug!(
@@ -583,12 +605,18 @@ async fn main() {
                         );
                         break 'lane true;
                     };
-                    if paid < price {
-                        tracing::debug!(
-                            name = %echo.name.as_str(),
-                            paid = paid.into_u64(),
-                            "update response underpaid — attempt void, challenge stands"
-                        );
+                    if treasury::refund_underpaid(
+                        &mut refunds,
+                        &mut wallet,
+                        txid,
+                        output_index,
+                        paid,
+                        price,
+                        &echo.ua,
+                        &echo.name,
+                        note_height,
+                        echo.action.as_str(),
+                    ) {
                         break 'lane true;
                     }
                 }
@@ -761,10 +789,39 @@ async fn main() {
             }
         }
 
-        // Refunds go out before the sweep. A note still owed stays
-        // locked, so the sweep cannot spend it.
+        // Refunds go out before the sweep. A submitted refund is
+        // rebroadcast until it is mined. After it expires unmined, its
+        // note is locked and planned again, so the sweep cannot take it.
         for owed in refunds.due() {
             let note = owed.note();
+            if let Some(txid) = owed.sent() {
+                match wallet.refund_tx_status(txid, tip) {
+                    RefundTxStatus::Mined => continue,
+                    RefundTxStatus::Pending => {
+                        match wallet.get_transaction(txid) {
+                            Ok(Some(tx)) => {
+                                source.submit(&tx, "refund").await;
+                            }
+                            Ok(None) => tracing::warn!(
+                                %txid,
+                                name = %owed.name().as_str(),
+                                "refund transaction missing; will retry"
+                            ),
+                            Err(error) => tracing::warn!(
+                                %error,
+                                %txid,
+                                name = %owed.name().as_str(),
+                                "refund transaction unreadable"
+                            ),
+                        }
+                        continue;
+                    }
+                    RefundTxStatus::Expired => {
+                        treasury::refund_rejected(&mut wallet, txid, note);
+                        refunds.clear_sent(note);
+                    }
+                }
+            }
             if !treasury::lock_refund_note(&mut wallet, note) {
                 tracing::warn!(
                     txid = %note.txid(),
@@ -773,7 +830,14 @@ async fn main() {
                 );
             }
             let to = zcash_keys::address::Address::Unified(Box::new(owed.recipient().clone()));
-            match treasury::plan_refund(&network, &mut wallet, note, owed.paid(), &to) {
+            match treasury::plan_refund(
+                &network,
+                &mut wallet,
+                note,
+                owed.paid(),
+                owed.penalty(),
+                &to,
+            ) {
                 Ok(RefundPlan::Wait) => {}
                 Ok(RefundPlan::Dust) => {
                     treasury::unlock_refund_note(&mut wallet, note);
@@ -782,7 +846,7 @@ async fn main() {
                         txid = %note.txid(),
                         name = %owed.name().as_str(),
                         paid = owed.paid().into_u64(),
-                        "underpaid claim kept"
+                        "payment kept"
                     );
                 }
                 Ok(RefundPlan::Send(proposal)) => {
@@ -800,9 +864,9 @@ async fn main() {
                                     txid = %tx.txid(),
                                     name = %owed.name().as_str(),
                                     paid = owed.paid().into_u64(),
-                                    "underpaid claim refunded"
+                                    "refund submitted"
                                 );
-                                refunds.sent(note);
+                                refunds.mark_sent(note, tx.txid());
                             } else {
                                 treasury::refund_rejected(&mut wallet, tx.txid(), note);
                                 tracing::warn!(

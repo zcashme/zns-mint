@@ -167,12 +167,12 @@ impl<P: Parameters> Wallet<P> {
         self.refund_note = note;
     }
 
-    /// Drops an unmined transaction the node rejected, so its inputs can
-    /// be selected again. A mined transaction is left in place.
+    /// Drops an unmined transaction, so its inputs can be selected again.
+    /// A mined transaction is left in place.
     pub(crate) fn release_rejected_spend(&mut self, txid: TxId) {
         if !matches!(
             self.transaction_statuses.get(&txid),
-            Some(TransactionStatus::NotInMainChain)
+            Some(TransactionStatus::NotInMainChain | TransactionStatus::TxidNotRecognized)
         ) {
             return;
         }
@@ -358,6 +358,20 @@ impl<P: Parameters> Wallet<P> {
         )
     }
 
+    /// Where a stored refund transaction stands at `tip`.
+    pub fn refund_tx_status(&self, txid: TxId, tip: BlockHeight) -> RefundTxStatus {
+        if matches!(
+            self.transaction_statuses.get(&txid),
+            Some(TransactionStatus::Mined(_))
+        ) {
+            return RefundTxStatus::Mined;
+        }
+        if self.expired_unmined_at(txid, tip) || !self.transactions.contains_key(&txid) {
+            return RefundTxStatus::Expired;
+        }
+        RefundTxStatus::Pending
+    }
+
     /// True when `txid` is known, unmined, and past expiry at
     /// `network_tip`. Unknown `txid`: false.
     pub fn expired_unmined_at(&self, txid: TxId, network_tip: BlockHeight) -> bool {
@@ -380,6 +394,17 @@ impl<P: Parameters> Wallet<P> {
         self.block_metadata_at(height)
             .ok_or(WalletError::TruncationTargetUnavailable(height))
     }
+}
+
+/// Where a refund transaction stands relative to the chain tip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefundTxStatus {
+    /// Mined in a block the wallet still has.
+    Mined,
+    /// Accepted, unmined, and not yet expired.
+    Pending,
+    /// Expired unmined, or not stored.
+    Expired,
 }
 
 /// Scan-cursor metadata implied by a [`ChainState`]: height, hash, tree sizes.

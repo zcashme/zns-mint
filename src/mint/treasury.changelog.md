@@ -1,13 +1,17 @@
 # Treasury design record
 
-## 2026-10-22 — Underpaid claims are refunded
+## 2026-10-22 — Underpaid payments are refunded
 
-- An underpaid claim goes back to the memo's UA, funded by that
-  payment note minus the fee at the current standard rate. A payment
-  that does not exceed the fee is kept.
-- The note stays locked until the refund is sent or given up, so no
-  other spend can take it. A rejection retries next tip. A restart
-  forgets an unsent refund; a reorg drops an orphaned one.
+- An underpaid claim, update, or release, and a claim for a name
+  already registered, go back to the memo's UA minus the refund fee.
+  A payment that does not exceed the fee is kept. An underpaid
+  renewal or upgrade is refunded the same way; its challenge stays.
+- A wrong access code keeps 1% of the quote, then the refund fee,
+  and returns the rest. A wrong OTP and an unparsed memo are kept.
+- The note stays locked until a refund transaction is built. That
+  transaction is rebroadcast until it is mined, then planned again if
+  it expires unmined. A restart forgets the queue; a reorg of the
+  payment drops the refund.
 
 ## 2026-10-15 — `RequestQueue::names` (#342)
 
