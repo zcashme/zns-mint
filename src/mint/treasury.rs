@@ -1,16 +1,19 @@
 //! Treasury wallet view and Treasury policy for the mint: the vault
-//! sweep, the challenge relay builder, and the request queue.
+//! sweep, the challenge relay builder, the request queue, and refunds
+//! of underpaid claims.
 //!
 
 mod otp;
+mod refund;
 
 pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
+pub use refund::{payment_against_quote, refund_output, PaymentAgainstQuote, Refund, RefundQueue};
 
 use std::convert::Infallible;
 use std::num::NonZeroU32;
 
 use zcash_client_backend::data_api::error::Error;
-use zcash_client_backend::data_api::locking::LockedInputPolicy;
+use zcash_client_backend::data_api::locking::{LockOwner, LockedInputPolicy, OutputLockStore};
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
 use zcash_client_backend::data_api::wallet::input_selection::SpendPolicy;
@@ -23,7 +26,7 @@ use zcash_client_backend::fees::zip317::SingleOutputChangeStrategy;
 use zcash_client_backend::fees::DustOutputPolicy;
 use zcash_client_backend::proposal::Proposal;
 use zcash_client_backend::util::SystemClock;
-use zcash_client_backend::wallet::{NoteId, OvkPolicy};
+use zcash_client_backend::wallet::{NoteId, OutputRef, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule as Zip317FeeRule};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkType, Parameters, TestNetwork};
@@ -34,14 +37,20 @@ use zip321::{Payment, TransactionRequest};
 
 use crate::mint::{Name, Request, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
-use crate::zcash::fee_rule;
+use crate::zcash::fee::{fee_rule, single_action_fee};
 
 type TreasuryChange<P> = SingleOutputChangeStrategy<Zip317FeeRule, Wallet<P>>;
 type TreasuryProposalError<P> =
     ProposeTransferErrT<Wallet<P>, Infallible, GreedyInputSelector<Wallet<P>>, TreasuryChange<P>>;
 type TreasuryBuildError<P> =
     CreateErrT<Wallet<P>, GreedyInputSelectorError, Zip317FeeRule, FeeError, NoteId>;
-type VaultSweepProposal = Proposal<Zip317FeeRule, NoteId>;
+type TreasuryProposal = Proposal<Zip317FeeRule, NoteId>;
+
+/// Lock owner for a payment note a refund still has to spend.
+const REFUND_LOCK: LockOwner = LockOwner::new([
+    b'z', b'n', b's', b'-', b'm', b'i', b'n', b't', b' ', b'r', b'e', b'f', b'u', b'n', b'd', 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+]);
 
 /// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
 /// actually moves, not on the balance behind it.
@@ -142,11 +151,192 @@ fn propose_payment<P: Parameters>(
     )
 }
 
+/// What a refund attempt can do this tip.
+#[derive(Debug)]
+pub enum RefundPlan {
+    /// Build and broadcast this proposal.
+    Send(Box<TreasuryProposal>),
+    /// The payment does not cover the fee the proposal would charge.
+    Dust,
+    /// The note is not spendable yet, or the fee did not settle.
+    Wait,
+}
+
+/// A proposal that spends `note` and pays `to` the remainder of `paid`.
+///
+/// The note is the whole input, so the Treasury adds nothing. A fee that
+/// does not match that shape is tried once more; a second miss waits.
+pub fn plan_refund<P: Parameters>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    note: NoteId,
+    paid: Zatoshis,
+    to: &zcash_keys::address::Address,
+) -> Result<RefundPlan, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
+    let Some(value) = wallet.spendable_note_value(TREASURY_ACCOUNT, note) else {
+        return Ok(RefundPlan::Wait);
+    };
+    if value != paid {
+        tracing::warn!(
+            paid = paid.into_u64(),
+            note = value.into_u64(),
+            "refund note value disagrees with the payment"
+        );
+        return Ok(RefundPlan::Wait);
+    }
+    let Some(mut fee) = single_action_fee(wallet.marginal_fee()) else {
+        return Ok(RefundPlan::Wait);
+    };
+    // The first guess is one shielded action. The built fee can be higher
+    // when the output pool is not the note's pool. One revision settles
+    // a stable shape; a third guess waits for the next tip.
+    for _ in 0..2 {
+        if paid <= fee {
+            return Ok(RefundPlan::Dust);
+        }
+        let amount = (paid - fee).expect("paid exceeds the fee");
+        match propose_one_note(network, wallet, note, to, amount) {
+            Ok(proposal) => {
+                if refund_settles(&proposal, note, paid) {
+                    return Ok(RefundPlan::Send(Box::new(proposal)));
+                }
+                fee = proposal.steps().first().balance().fee_required();
+            }
+            Err(Error::InsufficientFunds {
+                required,
+                available,
+            }) if available == paid => {
+                let Some(wanted) = required - amount else {
+                    return Ok(RefundPlan::Wait);
+                };
+                fee = wanted;
+            }
+            Err(Error::ScanRequired) | Err(Error::InsufficientFunds { .. }) => {
+                return Ok(RefundPlan::Wait);
+            }
+            Err(error) => return Err(BuildFailure::Proposal(error)),
+        }
+    }
+    Ok(RefundPlan::Wait)
+}
+
+/// Spends `note` and no other. The limit is cleared before this returns.
+fn propose_one_note<P: Parameters>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    note: NoteId,
+    to: &zcash_keys::address::Address,
+    amount: Zatoshis,
+) -> Result<TreasuryProposal, TreasuryProposalError<P>> {
+    wallet.set_refund_note(Some(note));
+    let result = propose_payment(
+        network,
+        wallet,
+        &fee_rule(wallet.marginal_fee()),
+        to,
+        amount,
+        None,
+        ShieldedPool::Ironwood,
+    );
+    wallet.set_refund_note(None);
+    result
+}
+
+/// The proposal spends `note` alone and returns `paid` minus its fee,
+/// with nothing left as change.
+fn refund_settles(proposal: &TreasuryProposal, note: NoteId, paid: Zatoshis) -> bool {
+    let step = proposal.steps().first();
+    let Some(inputs) = step.shielded_inputs() else {
+        return false;
+    };
+    if inputs.notes().len() != 1 || *inputs.notes().first().internal_note_id() != note {
+        return false;
+    }
+    let Some(change) = step
+        .balance()
+        .proposed_change()
+        .iter()
+        .map(|change| change.value())
+        .sum::<Option<Zatoshis>>()
+    else {
+        return false;
+    };
+    if change != Zatoshis::ZERO {
+        return false;
+    }
+    let Ok(Some(sent)) = step.transaction_request().total() else {
+        return false;
+    };
+    (sent + step.balance().fee_required()) == Some(paid)
+}
+
+/// Holds `note` until the refund is sent or given up. The expiry is the
+/// top of the height space, so a tip cannot outgrow it.
+pub fn lock_refund_note<P: Parameters>(wallet: &mut Wallet<P>, note: NoteId) -> bool {
+    wallet
+        .lock_outputs(
+            &[OutputRef::from(note)],
+            REFUND_LOCK,
+            BlockHeight::from_u32(u32::MAX),
+        )
+        .is_ok()
+}
+
+/// Releases the refund lock. The sweep may then select the note.
+pub fn unlock_refund_note<P: Parameters>(wallet: &mut Wallet<P>, note: NoteId) {
+    wallet
+        .unlock_output(&OutputRef::from(note), REFUND_LOCK)
+        .expect("FATAL: wallet rejected an unlock");
+}
+
+/// Drops a rejected refund transaction and locks its input again.
+pub fn refund_rejected<P: Parameters>(wallet: &mut Wallet<P>, txid: TxId, note: NoteId) {
+    wallet.release_rejected_spend(txid);
+    lock_refund_note(wallet, note);
+}
+
+/// Builds `proposal`. The wallet records the spend; a rejected broadcast
+/// undoes that with [`refund_rejected`].
+pub fn build_refund<P: Parameters>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    treasury_keys: &crate::TreasuryKeys,
+    spend_prover: &sapling::circuit::SpendParameters,
+    output_prover: &sapling::circuit::OutputParameters,
+    proposal: &TreasuryProposal,
+) -> Result<Transaction, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
+    let spending_keys = treasury_keys.spending_keys();
+    let txids = create_proposed_transactions::<
+        Wallet<P>,
+        P,
+        GreedyInputSelectorError,
+        Zip317FeeRule,
+        FeeError,
+        NoteId,
+    >(
+        wallet,
+        network,
+        &SystemClock,
+        &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+        spend_prover,
+        output_prover,
+        &spending_keys,
+        OvkPolicy::Sender,
+        proposal,
+        None,
+    )
+    .map_err(BuildFailure::Transaction)?;
+    Ok(wallet
+        .get_transaction(*txids.first())
+        .expect("FATAL: refund transaction lookup failed")
+        .expect("FATAL: refund transaction was not recorded"))
+}
+
 /// Pays the vault what send-max could deliver, less the float.
 fn propose_vault_sweep<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
-) -> Result<Option<VaultSweepProposal>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>>
+) -> Result<Option<TreasuryProposal>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>>
 {
     let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
     let vault = vault_address(network);
@@ -290,23 +480,32 @@ pub fn challenge<P: Parameters>(
 // ---------------------------------------------------------------------------
 
 /// Treasury requests decoded once at block application: what each memo
-/// said, what it paid, the block that carried it. Entries are queued at
-/// block application and leave by decision (`resolved`) or by reorg
-/// (`truncate_to`); nothing else removes them.
+/// said, what it paid, which output carried it, the block. Entries are
+/// queued at block application and leave by decision (`resolved`) or by
+/// reorg (`truncate_to`); nothing else removes them.
 #[derive(Clone, Debug, Default)]
 pub struct RequestQueue {
-    requests: Vec<(TxId, Request, Zatoshis, BlockHeight)>,
+    requests: Vec<(TxId, Option<u16>, Request, Zatoshis, BlockHeight)>,
 }
 
 impl RequestQueue {
     /// A recognized request, routed after block application. Admission
     /// records facts in transaction order; the deciding pass rules.
-    pub fn record(&mut self, txid: TxId, request: Request, paid: Zatoshis, height: BlockHeight) {
-        self.requests.push((txid, request, paid, height));
+    /// `output_index` names the shielded output the payment arrived on.
+    pub fn record(
+        &mut self,
+        txid: TxId,
+        output_index: Option<u16>,
+        request: Request,
+        paid: Zatoshis,
+        height: BlockHeight,
+    ) {
+        self.requests
+            .push((txid, output_index, request, paid, height));
     }
 
     /// Every request pending decision, in queue order.
-    pub fn pending(&self) -> Vec<(TxId, Request, Zatoshis, BlockHeight)> {
+    pub fn pending(&self) -> Vec<(TxId, Option<u16>, Request, Zatoshis, BlockHeight)> {
         self.requests.clone()
     }
 
@@ -314,28 +513,29 @@ impl RequestQueue {
     pub fn names(&self) -> impl Iterator<Item = &Name> {
         self.requests
             .iter()
-            .map(|(_, request, _, _)| request.name())
+            .map(|(_, _, request, _, _)| request.name())
     }
 
     /// The request is decided. The only removal besides reorg truncation.
     pub fn resolved(&mut self, txid: TxId) {
-        self.requests.retain(|(queued, _, _, _)| *queued != txid);
+        self.requests.retain(|(queued, _, _, _, _)| *queued != txid);
     }
 
     /// Reorg: entries whose block was orphaned fall with it.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
         self.requests
-            .retain(|(_, _, _, height)| *height <= ancestor);
+            .retain(|(_, _, _, _, height)| *height <= ancestor);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mint::{Action, Name, Term};
+    use crate::mint::{Action, Name, Term, TREASURY_ACCOUNT};
     use crate::wallet::testing::{Cache, Factory};
     use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
     use zcash_client_backend::data_api::testing::sapling::SaplingPoolTester;
+    use zcash_client_backend::data_api::wallet::TargetHeight;
     use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
     use zcash_protocol::consensus::MainNetwork;
 
@@ -430,12 +630,14 @@ mod tests {
 
         queue.record(
             TxId::from_bytes([1; 32]),
+            Some(0),
             request(Action::Claim),
             Zatoshis::ZERO,
             h(100),
         );
         queue.record(
             TxId::from_bytes([2; 32]),
+            Some(0),
             request(Action::Update),
             Zatoshis::ZERO,
             h(101),
@@ -444,8 +646,8 @@ mod tests {
         let pending = queue.pending();
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].0, TxId::from_bytes([1; 32]));
-        assert_eq!(pending[0].3, h(100));
-        assert_eq!(pending[1].3, h(101));
+        assert_eq!(pending[0].4, h(100));
+        assert_eq!(pending[1].4, h(101));
     }
 
     #[test]
@@ -460,6 +662,7 @@ mod tests {
 
         queue.record(
             TxId::from_bytes([1; 32]),
+            Some(0),
             Request::Claim {
                 name: alice.clone(),
                 ua: ua.clone(),
@@ -471,6 +674,7 @@ mod tests {
         );
         queue.record(
             TxId::from_bytes([2; 32]),
+            Some(0),
             Request::Claim {
                 name: alice.clone(),
                 ua: ua.clone(),
@@ -482,6 +686,7 @@ mod tests {
         );
         queue.record(
             TxId::from_bytes([3; 32]),
+            Some(0),
             Request::Claim {
                 name: bob,
                 ua,
@@ -499,11 +704,11 @@ mod tests {
         assert_eq!(pending[1].0, TxId::from_bytes([2; 32]));
         assert_eq!(pending[2].0, TxId::from_bytes([3; 32]));
         assert!(matches!(
-            pending[0].1,
+            pending[0].2,
             Request::Claim { ref name, .. } if name.as_str() == "alice"
         ));
         assert!(matches!(
-            pending[1].1,
+            pending[1].2,
             Request::Claim { ref name, .. } if name.as_str() == "alice"
         ));
     }
@@ -513,18 +718,21 @@ mod tests {
         let mut queue = RequestQueue::default();
         queue.record(
             TxId::from_bytes([1; 32]),
+            Some(0),
             request(Action::Claim),
             Zatoshis::ZERO,
             h(100),
         );
         queue.record(
             TxId::from_bytes([2; 32]),
+            Some(0),
             request(Action::Update),
             Zatoshis::ZERO,
             h(101),
         );
         queue.record(
             TxId::from_bytes([3; 32]),
+            Some(0),
             request(Action::Release),
             Zatoshis::ZERO,
             h(102),
@@ -536,14 +744,20 @@ mod tests {
         // The neighbors kept their relative order.
         assert_eq!(pending[0].0, TxId::from_bytes([1; 32]));
         assert_eq!(pending[1].0, TxId::from_bytes([3; 32]));
-        assert!(matches!(pending[1].1, Request::Release { .. }));
-        assert_eq!(pending[1].3, h(102));
+        assert!(matches!(pending[1].2, Request::Release { .. }));
+        assert_eq!(pending[1].4, h(102));
     }
 
     #[test]
     fn resolved_unknown_txid_is_a_no_op() {
         let mut queue = RequestQueue::default();
-        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
+        queue.record(
+            TxId::NULL,
+            Some(0),
+            request(Action::Claim),
+            Zatoshis::ZERO,
+            h(100),
+        );
 
         queue.resolved(TxId::from_bytes([9; 32]));
         assert_eq!(queue.pending().len(), 1);
@@ -552,14 +766,113 @@ mod tests {
     #[test]
     fn queue_truncate_drops_only_orphaned_heights() {
         let mut queue = RequestQueue::default();
-        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
-        queue.record(TxId::NULL, request(Action::Update), Zatoshis::ZERO, h(150));
-        queue.record(TxId::NULL, request(Action::Release), Zatoshis::ZERO, h(200));
+        queue.record(
+            TxId::NULL,
+            Some(0),
+            request(Action::Claim),
+            Zatoshis::ZERO,
+            h(100),
+        );
+        queue.record(
+            TxId::NULL,
+            Some(0),
+            request(Action::Update),
+            Zatoshis::ZERO,
+            h(150),
+        );
+        queue.record(
+            TxId::NULL,
+            Some(0),
+            request(Action::Release),
+            Zatoshis::ZERO,
+            h(200),
+        );
 
         queue.truncate_to(h(120));
         let pending = queue.pending();
         assert_eq!(pending.len(), 1);
-        assert!(matches!(pending[0].1, Request::Claim { .. }));
-        assert_eq!(pending[0].3, h(100));
+        assert!(matches!(pending[0].2, Request::Claim { .. }));
+        assert_eq!(pending[0].4, h(100));
+    }
+
+    /// The payment note funds the refund. While it is owed, the sweep
+    /// spends the other notes and a later attempt still selects it.
+    #[test]
+    fn an_underpaid_note_is_refunded_and_stays_out_of_the_sweep() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        st.add_notes_checking_balance([
+            vec![Zatoshis::const_from_u64(100_000)],
+            vec![Zatoshis::const_from_u64(80_000_000)],
+            vec![Zatoshis::const_from_u64(80_000_000)],
+        ]);
+        st.add_empty_blocks(1);
+
+        let network = *st.network();
+        let tip = TargetHeight::from(st.wallet().tip().block_height() + 1);
+        let paid = Zatoshis::const_from_u64(100_000);
+        let payment = *st
+            .wallet()
+            .unspent_sapling_notes(TREASURY_ACCOUNT, tip)
+            .iter()
+            .find(|note| note.note_value().unwrap() == paid)
+            .expect("payment note")
+            .internal_note_id();
+        let to = vault_address(&network);
+
+        let proposal =
+            match plan_refund(&network, st.wallet_mut(), payment, paid, &to).expect("plan") {
+                RefundPlan::Send(proposal) => proposal,
+                other => panic!("refund plan was not send: {other:?}"),
+            };
+        let step = proposal.steps().first();
+        let inputs = step.shielded_inputs().expect("one shielded input");
+        assert_eq!(inputs.notes().len(), 1);
+        assert_eq!(*inputs.notes().first().internal_note_id(), payment);
+        let sent = step
+            .transaction_request()
+            .total()
+            .expect("total")
+            .expect("the payment has an amount");
+        assert_eq!((sent + step.balance().fee_required()).unwrap(), paid);
+        assert_eq!(
+            step.transaction_request()
+                .payments()
+                .values()
+                .next()
+                .expect("one payment")
+                .recipient_address(),
+            &to.to_zcash_address(&network)
+        );
+        assert_eq!(
+            step.balance()
+                .proposed_change()
+                .iter()
+                .map(|change| change.value())
+                .sum::<Option<Zatoshis>>()
+                .expect("change"),
+            Zatoshis::ZERO
+        );
+
+        assert!(lock_refund_note(st.wallet_mut(), payment));
+        assert!(matches!(
+            plan_refund(&network, st.wallet_mut(), payment, paid, &to).expect("retry"),
+            RefundPlan::Send(_)
+        ));
+
+        let sweep = propose_vault_sweep(&network, st.wallet_mut())
+            .expect("sweep")
+            .expect("the other notes clear the minimum");
+        let spent: Vec<_> = sweep
+            .steps()
+            .first()
+            .shielded_inputs()
+            .expect("sweep inputs")
+            .notes()
+            .iter()
+            .map(|note| *note.internal_note_id())
+            .collect();
+        assert_eq!(spent.len(), 2);
+        assert!(!spent.contains(&payment));
     }
 }

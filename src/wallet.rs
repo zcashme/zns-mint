@@ -123,6 +123,10 @@ pub struct Wallet<P: Parameters> {
     /// until `getstandardfee` answers.
     marginal_fee: Zatoshis,
 
+    /// When set, selection returns this note alone and sees through its
+    /// lock. Every other proposal leaves it unset.
+    refund_note: Option<NoteId>,
+
     sapling_tree: ShardTree<
         MemoryShardStore<sapling::Node, BlockHeight>,
         SAPLING_NOTE_COMMITMENT_TREE_DEPTH,
@@ -156,6 +160,28 @@ impl<P: Parameters> Wallet<P> {
     /// The marginal fee dust selection and transaction construction use.
     pub fn marginal_fee(&self) -> Zatoshis {
         self.marginal_fee
+    }
+
+    /// Restricts selection to the refund's note, or clears the restriction.
+    pub(crate) fn set_refund_note(&mut self, note: Option<NoteId>) {
+        self.refund_note = note;
+    }
+
+    /// Drops an unmined transaction the node rejected, so its inputs can
+    /// be selected again. A mined transaction is left in place.
+    pub(crate) fn release_rejected_spend(&mut self, txid: TxId) {
+        if !matches!(
+            self.transaction_statuses.get(&txid),
+            Some(TransactionStatus::NotInMainChain)
+        ) {
+            return;
+        }
+        self.transactions.remove(&txid);
+        self.transaction_statuses.remove(&txid);
+        self.sent_outputs.remove(&txid);
+        self.memos.retain(|note_id, _| note_id.txid() != &txid);
+        self.sapling_note_spends.retain(|_, spend| *spend != txid);
+        self.ironwood_note_spends.retain(|_, spend| *spend != txid);
     }
 
     /// Born complete: the origin frontiers plus every completed
@@ -194,6 +220,7 @@ impl<P: Parameters> Wallet<P> {
             sent_outputs: BTreeMap::new(),
             locks: BTreeMap::new(),
             marginal_fee: zcash_primitives::transaction::fees::zip317::MARGINAL_FEE,
+            refund_note: None,
             sapling_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),
             sapling_tree_shard_end_heights: BTreeMap::new(),
             orchard_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),

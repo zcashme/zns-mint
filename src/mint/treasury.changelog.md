@@ -1,5 +1,14 @@
 # Treasury design record
 
+## 2026-10-22 — Underpaid claims are refunded
+
+- An underpaid claim goes back to the memo's UA, funded by that
+  payment note minus the fee at the current standard rate. A payment
+  that does not exceed the fee is kept.
+- The note stays locked until the refund is sent or given up, so no
+  other spend can take it. A rejection retries next tip. A restart
+  forgets an unsent refund; a reorg drops an orphaned one.
+
 ## 2026-10-15 — `RequestQueue::names` (#342)
 
 - Names every request pending decision, borrowed, for the request state

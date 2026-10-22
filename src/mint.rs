@@ -377,7 +377,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     wallet: &mut crate::wallet::Wallet<P>,
     registry: &mut registry::Registry,
     mtp: &mut mtp::MtpTracker,
-) -> Vec<(TxId, MintInbound, Zatoshis)> {
+) -> Vec<(TxId, usize, MintInbound, Zatoshis)> {
     use std::collections::BTreeMap;
     use std::convert::Infallible;
 
@@ -591,7 +591,14 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     // records nothing — this pass stays the only intake.
     let arrivals = treasury_memos
         .into_iter()
-        .map(|(txid, _action_index, paid, memo)| (txid, MintInbound::decode(network, &memo), paid))
+        .map(|(txid, action_index, paid, memo)| {
+            (
+                txid,
+                action_index,
+                MintInbound::decode(network, &memo),
+                paid,
+            )
+        })
         .collect();
     for (index, position) in accepted_name_notes {
         let candidate = &candidates[index];

@@ -1617,7 +1617,7 @@ mod tests {
                 } else {
                     assert!(matches!(
                         arrivals.as_slice(),
-                        [(txid, crate::mint::MintInbound::Request(request), paid)]
+                        [(txid, _, crate::mint::MintInbound::Request(request), paid)]
                             if *txid == ceremony_txid && request == &expected_request
                                 && paid.into_u64() == 50_000
                     ));

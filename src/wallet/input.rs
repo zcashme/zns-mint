@@ -31,6 +31,83 @@ use zip32::{AccountId, Scope};
 use super::{read::WalletError, Wallet};
 
 impl<P: Parameters> Wallet<P> {
+    /// The note's value when it can be spent at the next height, even
+    /// while locked. `None` when it is unconfirmed, spent, or absent.
+    pub(crate) fn spendable_note_value(
+        &self,
+        account: AccountId,
+        note_id: NoteId,
+    ) -> Option<Zatoshis> {
+        if self.blocks.is_empty() {
+            return None;
+        }
+        let target = TargetHeight::from(super::read::next_height(self.tip().block_height()));
+        let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
+        let value = match note_id.protocol() {
+            ShieldedPool::Sapling => self
+                .eligible_sapling(account, target, Some(policy), &[], LockFilter::Unfiltered)
+                .into_iter()
+                .find(|note| note.internal_note_id() == &note_id)?
+                .note_value()
+                .ok()?,
+            ShieldedPool::Ironwood => self
+                .eligible_ironwood(account, target, Some(policy), &[], LockFilter::Unfiltered)
+                .into_iter()
+                .find(|note| note.internal_note_id() == &note_id)?
+                .note_value()
+                .ok()?,
+            ShieldedPool::Orchard => return None,
+        };
+        Some(value)
+    }
+
+    /// Selection restricted to `note_id`, ignoring its lock.
+    fn refund_note_matches(
+        &self,
+        account: AccountId,
+        note_id: NoteId,
+        sources: &[ShieldedPool],
+        target_height: TargetHeight,
+        confirmations_policy: ConfirmationsPolicy,
+    ) -> ReceivedNotes<NoteId> {
+        let keep = |value: Zatoshis| value > self.marginal_fee;
+        match note_id.protocol() {
+            ShieldedPool::Sapling if sources.contains(&ShieldedPool::Sapling) => {
+                let notes = self
+                    .eligible_sapling(
+                        account,
+                        target_height,
+                        Some(confirmations_policy),
+                        &[],
+                        LockFilter::Unfiltered,
+                    )
+                    .into_iter()
+                    .filter(|note| note.internal_note_id() == &note_id)
+                    .filter(|note| note.note_value().ok().is_some_and(keep))
+                    .collect();
+                ReceivedNotes::new(notes, Vec::new(), Vec::new())
+            }
+            ShieldedPool::Ironwood if sources.contains(&ShieldedPool::Ironwood) => {
+                let notes = self
+                    .eligible_ironwood(
+                        account,
+                        target_height,
+                        Some(confirmations_policy),
+                        &[],
+                        LockFilter::Unfiltered,
+                    )
+                    .into_iter()
+                    .filter(|note| note.internal_note_id() == &note_id)
+                    .filter(|note| note.note_value().ok().is_some_and(keep))
+                    .collect();
+                ReceivedNotes::new(Vec::new(), Vec::new(), notes)
+            }
+            ShieldedPool::Sapling | ShieldedPool::Ironwood | ShieldedPool::Orchard => {
+                ReceivedNotes::new(Vec::new(), Vec::new(), Vec::new())
+            }
+        }
+    }
+
     /// Whether the Sapling note identified by `note_id` is spent as of
     /// `target_height`.
     ///
@@ -612,6 +689,17 @@ impl<P: Parameters> InputSource for Wallet<P> {
     ) -> Result<ReceivedNotes<Self::NoteRef>, Self::Error> {
         if !self.ufvks.contains_key(&account) {
             return Err(WalletError::AccountUnknown(account));
+        }
+        // The payment note stays locked while a refund is owed, so other
+        // proposals skip it. This selection spends that note.
+        if let Some(note_id) = self.refund_note {
+            return Ok(self.refund_note_matches(
+                account,
+                note_id,
+                sources,
+                target_height,
+                confirmations_policy,
+            ));
         }
         if matches!(
             target_value,

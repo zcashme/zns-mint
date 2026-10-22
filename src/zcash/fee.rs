@@ -77,6 +77,28 @@ pub(crate) fn fee_rule(marginal: Zatoshis) -> FeeRule {
     .expect("ZIP 317 standard input and output sizes are non-zero")
 }
 
+/// Fee for a refund: one shielded spend and one shielded output.
+///
+/// That shape is one logical action. Grace actions raise it to the
+/// ZIP 317 minimum, two actions at the marginal rate.
+pub(crate) fn single_action_fee(marginal: Zatoshis) -> Option<Zatoshis> {
+    use zcash_primitives::transaction::fees::FeeRule as _;
+    use zcash_protocol::consensus::{BlockHeight, MainNetwork};
+
+    fee_rule(marginal)
+        .fee_required(
+            &MainNetwork,
+            BlockHeight::from_u32(1),
+            std::iter::empty(),
+            std::iter::empty(),
+            0,
+            0,
+            0,
+            1,
+        )
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use zcash_primitives::transaction::fees::FeeRule as _;
