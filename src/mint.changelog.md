@@ -1,5 +1,15 @@
 # Mint live-work design record
 
+## 2026-10-22 — Claims open without an access code (#360)
+
+- The deciding pass refuses a claim only when its name is protected at
+  the tip MTP and the memo lacks that name's access code. An absent or
+  lapsed row is open to the first sufficient payment, and a code on an
+  unprotected name is ignored. This reopens what #340 closed for the
+  early-access period; price, payment, availability and earliest-
+  payment ordering are unchanged. One refusal log replaces the three
+  early-access stages.
+
 ## 2026-10-13 — Early-access regime: claims deny by default (#340)
 
 - The deciding pass refuses every claim that lacks its name's listing

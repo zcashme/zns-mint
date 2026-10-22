@@ -1,5 +1,11 @@
 # happy_path.changelog.md
 
+## 2026-10-22
+
+- After release, `open_claim` registers `e2eopenclaim`, a name no
+  `zn_names` row holds, with a code-free memo (#360). `claim` keeps the
+  protected `zcash` claim with its access code; both share `claim_name`.
+
 ## 2026-10-12
 
 - Merged `boot_completion.rs` + `happy_path.rs` into one boot-to-release

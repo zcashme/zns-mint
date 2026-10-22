@@ -54,7 +54,7 @@ mod stack;
 mod user;
 mod verify;
 
-pub use phases::{claim, release, update};
+pub use phases::{claim, open_claim, release, update};
 pub use stack::Stack;
 pub use user::User;
 pub use verify::{

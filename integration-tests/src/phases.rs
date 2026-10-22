@@ -34,21 +34,38 @@ fn access_code(name: &str) -> String {
         .collect()
 }
 
-/// Pay `ZNS:claim:<code>:forever:zcash:<ua>`, wait for mint, verify on chain.
-///
-/// Checks: mint logs the note in flight (not rejected / non-request /
-/// unauthorized); `zns-verify` decrypt + `cmx`; fields zcash / claim /
-/// user UA / `none` / 0 / non-tee Registry keys; the mint's `txid=` line
-/// matches the on-chain registration.
+/// A name no `zn_names` row will ever hold: the open-claim phase needs
+/// one the live table leaves unprotected.
+const OPEN_NAME: &str = "e2eopenclaim";
+
+/// Pay `ZNS:claim:<code>:forever:zcash:<ua>` for a protected name, wait
+/// for mint, verify on chain.
 pub async fn claim(stack: &mut Stack) -> Result<VerifiedNameNote> {
-    let mark = stack.mint.log_text().len();
     let memo = format!(
         "ZNS:claim:{}:forever:zcash:{}",
         access_code("zcash"),
         stack.user.ua
     );
-    let pay_txid = stack.user.pay_treasury(&memo).await?;
-    eprintln!("claim payment txid {pay_txid}");
+    claim_name(stack, "zcash", &memo).await
+}
+
+/// Pay `ZNS:claim:forever:<name>:<ua>` with no access code for an
+/// unprotected name, wait for mint, verify on chain.
+pub async fn open_claim(stack: &mut Stack) -> Result<VerifiedNameNote> {
+    let memo = format!("ZNS:claim:forever:{OPEN_NAME}:{}", stack.user.ua);
+    claim_name(stack, OPEN_NAME, &memo).await
+}
+
+/// Pay a claim memo, wait for mint, verify on chain.
+///
+/// Checks: mint logs the note in flight (not rejected / non-request /
+/// unauthorized); `zns-verify` decrypt + `cmx`; fields name / claim /
+/// user UA / `none` / 0 / non-tee Registry keys; the mint's `txid=` line
+/// matches the on-chain registration.
+async fn claim_name(stack: &mut Stack, name: &str, memo: &str) -> Result<VerifiedNameNote> {
+    let mark = stack.mint.log_text().len();
+    let pay_txid = stack.user.pay_treasury(memo).await?;
+    eprintln!("{name} claim payment txid {pay_txid}");
     // Confirm the payment, then leave the tip still so mint's
     // `exact_tip == cursor` gate can run intake (a racing tip skips it).
     stack.zebra.generate_blocks(1).await?;
@@ -57,7 +74,7 @@ pub async fn claim(stack: &mut Stack) -> Result<VerifiedNameNote> {
     let started = Instant::now();
     let mut poked = false;
     loop {
-        let note = poll_submitted_note(stack, mark, "zcash", "claim", &pay_txid).await?;
+        let note = poll_submitted_note(stack, mark, name, "claim", &pay_txid).await?;
         if let Some(txid) = note {
             assert_eq!(txid.action, "claim");
             assert_eq!(txid.ua, stack.user.ua);
@@ -71,7 +88,7 @@ pub async fn claim(stack: &mut Stack) -> Result<VerifiedNameNote> {
         }
         if Instant::now() >= deadline {
             bail!(
-                "mint did not register zcash within 600s:\n{}",
+                "mint did not register {name} within 600s:\n{}",
                 stack.mint.exit_detail()
             );
         }
