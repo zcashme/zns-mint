@@ -48,13 +48,13 @@ const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 /// (~75 s), so consecutive reads share a connection.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
+pub(crate) type HttpsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
 type HmacSha256 = Hmac<Sha256>;
 
 /// The one client every read goes through, built at boot. A closed
 /// connection is replaced on the next request; a read that times out
 /// drops its connection, so the next read opens a fresh one.
-pub fn https_client() -> HttpsClient {
+pub(crate) fn https_client() -> HttpsClient {
     let connector = HttpsConnectorBuilder::new()
         .with_webpki_roots()
         .https_only()
