@@ -1,5 +1,16 @@
 # main.changelog.md
 
+## 2026-10-22 — The pre-sale table is read beside the price round (#371)
+
+- Every tip pass starts `presale::PendingRead` when the tip arrives,
+  so the read runs during the ancestor walk and block application. It
+  is awaited beside `fetch_round` once the scan reaches the tip, before
+  the tip check; only the unspent part of its 3 s timeout can delay the
+  pass. A failed read warns and keeps the last table; a pass that
+  re-converges aborts it.
+- The daily background refresh (`presale_refresh`) is gone; a new MTP
+  day only sweeps the Treasury.
+
 ## 2026-10-15 — The names in flight are on the metrics page (#342)
 
 - `zns_mint_request_state{name}` for every name the mint has anything
