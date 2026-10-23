@@ -14,8 +14,9 @@
   `MAX_BODY_BYTES` is 4 MiB (~30,000 worst-case rows; the table is
   ~214 KB today); over it, the read is refused.
 - The table is read on every tip pass instead of once per MTP day, so
-  a row added before a pass binds that pass's claims. A failed read
-  keeps the last table.
+  a row added before a pass binds that pass's claims. `PendingRead`
+  spawns the read ahead of the pass and aborts it if dropped
+  uninstalled; a failed read keeps the last table.
 
 ## 2026-10-13 — The early-access regime denies by default (#340)
 

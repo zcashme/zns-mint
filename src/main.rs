@@ -89,6 +89,9 @@ async fn main() {
         let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {
             panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
         });
+        // The pre-sale read runs while the blocks below are fetched and
+        // applied. If this pass restarts, the read is cancelled.
+        let presale_read = presale::PendingRead::start(&presale_client);
 
         // Compare the wallet's own cursor with Zebra at the same height.
         // If they disagree, walk backward until both name the same block;
@@ -305,13 +308,9 @@ async fn main() {
         let today = mtp
             .current_day()
             .expect("FATAL: MTP unavailable at the applied tip");
-        // The price round and the pre-sale table are read together, so
-        // the tip check below covers both. A failed table read keeps the
-        // last table; claims never wait past the fetch timeout.
-        let (round, ()) = tokio::join!(
-            fetch_round(),
-            presale::refresh(&presale_client, &mut protected_names),
-        );
+        // The tip check below covers the price round and the pre-sale
+        // read alike. Only the read's unspent timeout can delay the pass.
+        let (round, ()) = tokio::join!(fetch_round(), presale_read.install(&mut protected_names));
         oracle.accumulate(round, today, mtp_now);
         // Transient or unusable tip data → skip this rule pass and wait
         // for another notification; a chain race re-converges.

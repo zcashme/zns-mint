@@ -21,6 +21,7 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, Timestamp};
+use tokio::task::JoinHandle;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::mint::Name;
@@ -232,11 +233,31 @@ pub async fn fetch(client: &HttpsClient) -> Result<ProtectedNames, FetchError> {
     complete(rows, total)
 }
 
-/// Reads into `names`; a failed read keeps the last table.
-pub async fn refresh(client: &HttpsClient, names: &mut ProtectedNames) {
-    match fetch(client).await {
-        Ok(fresh) => *names = fresh,
-        Err(error) => tracing::warn!(%error, "pre-sale read failed; the last table stands"),
+/// A table read running in the background, started before the tip
+/// pass needs it. Dropping it before `install` cancels the read.
+pub struct PendingRead(JoinHandle<Result<ProtectedNames, FetchError>>);
+
+impl PendingRead {
+    pub fn start(client: &HttpsClient) -> Self {
+        let client = client.clone();
+        Self(tokio::spawn(async move { fetch(&client).await }))
+    }
+
+    /// Waits out the read into `names`; a failed read keeps the last table.
+    pub async fn install(mut self, names: &mut ProtectedNames) {
+        match (&mut self.0)
+            .await
+            .expect("FATAL: pre-sale read task panicked")
+        {
+            Ok(fresh) => *names = fresh,
+            Err(error) => tracing::warn!(%error, "pre-sale read failed; the last table stands"),
+        }
+    }
+}
+
+impl Drop for PendingRead {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
