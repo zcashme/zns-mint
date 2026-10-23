@@ -114,8 +114,8 @@ impl Refund {
 }
 
 /// Refunds owed, in admission order. A reorg drops those whose payment
-/// block was orphaned. Finding the payment no longer covers the fee is
-/// the other removal. A submitted transaction stays until it expires.
+/// block was orphaned. A payment that no longer covers the fee is
+/// removed, and so is a refund mined at or below the rewind floor.
 #[derive(Clone, Debug, Default)]
 pub struct RefundQueue {
     owed: Vec<Refund>,
@@ -172,7 +172,27 @@ impl RefundQueue {
         self.owed.retain(|refund| refund.note != note);
     }
 
-    /// Drops refunds whose payment was orphaned. The caller unlocks them.
+    /// Drops refunds whose transaction was mined at or below `floor`.
+    /// The caller releases those notes.
+    pub fn prune_buried(
+        &mut self,
+        floor: BlockHeight,
+        mined_at: impl Fn(TxId) -> Option<BlockHeight>,
+    ) -> Vec<NoteId> {
+        let mut dropped = Vec::new();
+        self.owed.retain(|refund| {
+            let buried = refund
+                .sent
+                .is_some_and(|txid| mined_at(txid).is_some_and(|height| height <= floor));
+            if buried {
+                dropped.push(refund.note);
+            }
+            !buried
+        });
+        dropped
+    }
+
+    /// Drops refunds whose payment was orphaned. The caller releases them.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) -> Vec<NoteId> {
         let mut dropped = Vec::new();
         self.owed.retain(|refund| {
@@ -287,5 +307,54 @@ mod tests {
         queue.clear_sent(note);
         assert_eq!(queue.due()[0].sent(), None);
         assert_eq!(queue.names(|_| true).count(), 1);
+    }
+
+    #[test]
+    fn a_mined_refund_leaves_once_it_is_at_or_below_the_rewind_floor() {
+        use zcash_protocol::ShieldedPool;
+
+        let buried_note = NoteId::new(TxId::from_bytes([1; 32]), ShieldedPool::Ironwood, 0);
+        let recent_note = NoteId::new(TxId::from_bytes([3; 32]), ShieldedPool::Ironwood, 0);
+        let unsent_note = NoteId::new(TxId::from_bytes([4; 32]), ShieldedPool::Ironwood, 0);
+        let ua = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
+        let ua = match zcash_keys::address::Address::decode(
+            &zcash_protocol::consensus::MAIN_NETWORK,
+            ua,
+        ) {
+            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
+            _ => panic!("test UA"),
+        };
+        let mut queue = RefundQueue::new();
+        for (note, height) in [(buried_note, 10), (recent_note, 30), (unsent_note, 30)] {
+            queue.admit(Refund::new(
+                note,
+                ua.clone(),
+                zats(50_000),
+                Zatoshis::ZERO,
+                Name::parse("alice").unwrap(),
+                BlockHeight::from_u32(height),
+            ));
+        }
+        let buried_tx = TxId::from_bytes([2; 32]);
+        let recent_tx = TxId::from_bytes([5; 32]);
+        queue.mark_sent(buried_note, buried_tx);
+        queue.mark_sent(recent_note, recent_tx);
+        let floor = BlockHeight::from_u32(20);
+        let dropped = queue.prune_buried(floor, |txid| {
+            if txid == buried_tx {
+                Some(BlockHeight::from_u32(20))
+            } else if txid == recent_tx {
+                Some(BlockHeight::from_u32(21))
+            } else {
+                None
+            }
+        });
+        assert_eq!(dropped, vec![buried_note]);
+        let left: Vec<_> = queue
+            .due()
+            .into_iter()
+            .map(|refund| refund.note())
+            .collect();
+        assert_eq!(left, vec![recent_note, unsent_note]);
     }
 }

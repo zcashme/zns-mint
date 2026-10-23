@@ -798,7 +798,8 @@ impl<P: consensus::Parameters> Wallet<P> {
             .iter()
             .filter(move |(_, output)| *output.account_id() == account)
             .filter(|(note_id, _)| {
-                !self.sapling_note_is_spent(note_id, tip)
+                !self.refund_blocks(note_id)
+                    && !self.sapling_note_is_spent(note_id, tip)
                     && self.lock_admits(
                         &OutputRef::from(**note_id),
                         tip,
@@ -822,7 +823,8 @@ impl<P: consensus::Parameters> Wallet<P> {
             .iter()
             .filter(move |(_, output)| *output.account_id() == account)
             .filter(|(note_id, _)| {
-                !self.ironwood_note_is_spent(note_id, tip)
+                !self.refund_blocks(note_id)
+                    && !self.ironwood_note_is_spent(note_id, tip)
                     && self.lock_admits(
                         &OutputRef::from(**note_id),
                         tip,
@@ -842,6 +844,7 @@ impl<P: consensus::Parameters> Wallet<P> {
     ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
         let output = self.ironwood_notes.get(&note_id)?;
         (*output.account_id() == account
+            && !self.refund_blocks(&note_id)
             && !self.ironwood_note_is_spent(&note_id, tip)
             && self.lock_admits(
                 &OutputRef::from(note_id),

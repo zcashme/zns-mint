@@ -123,9 +123,12 @@ pub struct Wallet<P: Parameters> {
     /// until `getstandardfee` answers.
     marginal_fee: Zatoshis,
 
-    /// When set, selection returns this note alone and sees through its
-    /// lock. Every other proposal leaves it unset.
+    /// When set, selection returns this note alone. Every other proposal
+    /// leaves it unset, and skips notes in `refund_reserved`.
     refund_note: Option<NoteId>,
+
+    /// Payment notes a refund still has to spend.
+    refund_reserved: BTreeSet<NoteId>,
 
     sapling_tree: ShardTree<
         MemoryShardStore<sapling::Node, BlockHeight>,
@@ -165,6 +168,21 @@ impl<P: Parameters> Wallet<P> {
     /// Restricts selection to the refund's note, or clears the restriction.
     pub(crate) fn set_refund_note(&mut self, note: Option<NoteId>) {
         self.refund_note = note;
+    }
+
+    /// Holds `note` until its refund is finished. Other selections skip it.
+    pub(crate) fn reserve_refund(&mut self, note: NoteId) {
+        self.refund_reserved.insert(note);
+    }
+
+    /// The refund no longer needs `note`.
+    pub(crate) fn release_refund(&mut self, note: NoteId) {
+        self.refund_reserved.remove(&note);
+    }
+
+    /// A refund holds `note`, and this selection is not that refund.
+    pub(super) fn refund_blocks(&self, note: &NoteId) -> bool {
+        self.refund_note != Some(*note) && self.refund_reserved.contains(note)
     }
 
     /// Drops an unmined transaction, so its inputs can be selected again.
@@ -221,6 +239,7 @@ impl<P: Parameters> Wallet<P> {
             locks: BTreeMap::new(),
             marginal_fee: zcash_primitives::transaction::fees::zip317::MARGINAL_FEE,
             refund_note: None,
+            refund_reserved: BTreeSet::new(),
             sapling_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),
             sapling_tree_shard_end_heights: BTreeMap::new(),
             orchard_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),

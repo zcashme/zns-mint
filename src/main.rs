@@ -202,7 +202,7 @@ async fn main() {
             name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
             for note in refunds.truncate_to(rewound) {
-                treasury::unlock_refund_note(&mut wallet, note);
+                treasury::release_refund(&mut wallet, note);
             }
             echoes.retain(|(_, _, _, _, height)| *height <= rewound);
             tracing::warn!(
@@ -464,8 +464,9 @@ async fn main() {
                         ) {
                             break 'lane true;
                         }
-                        // A name that already has a record is refunded.
-                        // Any other refusal keeps the payment.
+                        // A name that already has a record, or a Name Note
+                        // already queued, is refunded. Any other refusal
+                        // keeps the payment.
                         let Some(claim_note) =
                             registry.authorize_claim(name.clone(), ua.clone(), *term, mtp_now)
                         else {
@@ -493,10 +494,18 @@ async fn main() {
                         };
                         // Enactment below resolves the anchor and broadcasts.
                         if !name_notes.admit(note_height, claim_note) {
-                            tracing::debug!(
-                                %txid,
-                                name = %name.as_str(),
-                                "transition already queued; the earlier payment owns the name"
+                            treasury::refund_keeping(
+                                &mut refunds,
+                                &mut wallet,
+                                txid,
+                                output_index,
+                                paid,
+                                Zatoshis::ZERO,
+                                ua,
+                                name,
+                                note_height,
+                                Action::Claim.as_str(),
+                                "queued name",
                             );
                         }
                         true
@@ -550,42 +559,9 @@ async fn main() {
             }
         }
 
-        // Queue admission is independent from submission. Retry every
-        // requested challenge once during each tip pass.
-        for pending in challenges.requested() {
-            let Some(record) = registry.authorize_challenge(
-                &name_notes,
-                &pending.name,
-                pending.action,
-                &pending.ua,
-                pending.term,
-                target_height,
-                mtp_now,
-            ) else {
-                continue;
-            };
-            if record.commitment != pending.tip_rcm {
-                continue;
-            }
-            if relay(
-                &network,
-                &mut wallet,
-                &treasury_keys,
-                &sapling_spend,
-                &sapling_output,
-                &record.ua,
-                &source,
-                &pending,
-                "tip",
-            )
-            .await
-            {
-                challenges.challenge_issued(&pending);
-            }
-        }
-
-        // Confirmed OTP responses wait in the run loop until the tip pass.
-        // Requests run first; a voided echo leaves its challenge available.
+        // OTP responses are decided before relays. An underpaid renewal
+        // is reserved here, so a relay on this tip cannot spend its note.
+        // A voided echo leaves its challenge available.
         for (txid, output_index, echo, paid, note_height) in std::mem::take(&mut echoes) {
             let _ = 'lane: {
                 // An OTP response is decided on this pass. It never waits
@@ -660,6 +636,40 @@ async fn main() {
                 name_notes.admit(note_height, transition_note);
                 true
             };
+        }
+
+        // Queue admission is independent from submission. Retry every
+        // requested challenge once during each tip pass.
+        for pending in challenges.requested() {
+            let Some(record) = registry.authorize_challenge(
+                &name_notes,
+                &pending.name,
+                pending.action,
+                &pending.ua,
+                pending.term,
+                target_height,
+                mtp_now,
+            ) else {
+                continue;
+            };
+            if record.commitment != pending.tip_rcm {
+                continue;
+            }
+            if relay(
+                &network,
+                &mut wallet,
+                &treasury_keys,
+                &sapling_spend,
+                &sapling_output,
+                &record.ua,
+                &source,
+                &pending,
+                "tip",
+            )
+            .await
+            {
+                challenges.challenge_issued(&pending);
+            }
         }
 
         // Lifecycle releases, §4.5: the registry owns the clocks and
@@ -789,9 +799,10 @@ async fn main() {
             }
         }
 
-        // Refunds go out before the sweep. A submitted refund is
-        // rebroadcast until it is mined. After it expires unmined, its
-        // note is locked and planned again, so the sweep cannot take it.
+        // The note stays reserved until the refund is mined past the rewind
+        // window, or the payment is kept. An accepted refund is rebroadcast
+        // until it is mined, and planned again if it expires unmined.
+        treasury::prune_buried_refunds(&mut refunds, &mut wallet);
         for owed in refunds.due() {
             let note = owed.note();
             if let Some(txid) = owed.sent() {
@@ -817,17 +828,10 @@ async fn main() {
                         continue;
                     }
                     RefundTxStatus::Expired => {
-                        treasury::refund_rejected(&mut wallet, txid, note);
+                        treasury::refund_rejected(&mut wallet, txid);
                         refunds.clear_sent(note);
                     }
                 }
-            }
-            if !treasury::lock_refund_note(&mut wallet, note) {
-                tracing::warn!(
-                    txid = %note.txid(),
-                    name = %owed.name().as_str(),
-                    "refund note could not be locked"
-                );
             }
             let to = zcash_keys::address::Address::Unified(Box::new(owed.recipient().clone()));
             match treasury::plan_refund(
@@ -840,7 +844,7 @@ async fn main() {
             ) {
                 Ok(RefundPlan::Wait) => {}
                 Ok(RefundPlan::Dust) => {
-                    treasury::unlock_refund_note(&mut wallet, note);
+                    treasury::release_refund(&mut wallet, note);
                     refunds.release(note);
                     tracing::info!(
                         txid = %note.txid(),
@@ -868,7 +872,7 @@ async fn main() {
                                 );
                                 refunds.mark_sent(note, tx.txid());
                             } else {
-                                treasury::refund_rejected(&mut wallet, tx.txid(), note);
+                                treasury::refund_rejected(&mut wallet, tx.txid());
                                 tracing::warn!(
                                     txid = %tx.txid(),
                                     name = %owed.name().as_str(),

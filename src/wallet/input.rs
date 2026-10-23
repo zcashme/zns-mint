@@ -633,7 +633,8 @@ impl<P: Parameters> InputSource for Wallet<P> {
         let note_id = NoteId::new(*txid, protocol, index);
         match protocol {
             ShieldedPool::Sapling => {
-                if self.sapling_note_is_spent(&note_id, target_height)
+                if self.refund_blocks(&note_id)
+                    || self.sapling_note_is_spent(&note_id, target_height)
                     || !self.lock_admits(&OutputRef::from(note_id), target_height, lock_filter)
                     || self.mined_height(txid).is_none()
                 {
@@ -644,7 +645,8 @@ impl<P: Parameters> InputSource for Wallet<P> {
                     .map(|note| note.map_note(Note::Sapling)))
             }
             ShieldedPool::Ironwood => {
-                if self.ironwood_note_is_spent(&note_id, target_height)
+                if self.refund_blocks(&note_id)
+                    || self.ironwood_note_is_spent(&note_id, target_height)
                     || !self.lock_admits(&OutputRef::from(note_id), target_height, lock_filter)
                     || self.mined_height(txid).is_none()
                 {
@@ -690,8 +692,8 @@ impl<P: Parameters> InputSource for Wallet<P> {
         if !self.ufvks.contains_key(&account) {
             return Err(WalletError::AccountUnknown(account));
         }
-        // The payment note stays locked while a refund is owed, so other
-        // proposals skip it. This selection spends that note.
+        // A note in the refund queue is skipped by every other selection.
+        // This selection spends that note.
         if let Some(note_id) = self.refund_note {
             return Ok(self.refund_note_matches(
                 account,
@@ -733,6 +735,9 @@ impl<P: Parameters> InputSource for Wallet<P> {
                         exclude,
                         lock_filter,
                     ) {
+                        if self.refund_blocks(note.internal_note_id()) {
+                            continue;
+                        }
                         let take = match target_value {
                             TargetValue::AtLeast(target) => accumulated < target,
                             TargetValue::AllFunds(_) => true,
@@ -760,6 +765,9 @@ impl<P: Parameters> InputSource for Wallet<P> {
                         exclude,
                         lock_filter,
                     ) {
+                        if self.refund_blocks(note.internal_note_id()) {
+                            continue;
+                        }
                         let take = match target_value {
                             TargetValue::AtLeast(target) => accumulated < target,
                             TargetValue::AllFunds(_) => true,
@@ -820,6 +828,8 @@ impl<P: Parameters> InputSource for Wallet<P> {
                 ShieldedPool::Orchard => {}
             }
         }
+        sapling.retain(|note| !self.refund_blocks(note.internal_note_id()));
+        ironwood.retain(|note| !self.refund_blocks(note.internal_note_id()));
         Ok(ReceivedNotes::new(sapling, Vec::new(), ironwood))
     }
 

@@ -1,5 +1,17 @@
 # Treasury design record
 
+## 2026-10-23 — A refund note stays reserved until the refund is finished
+
+- The queue is the reservation. Relays, Name Note fees, and the sweep
+  skip a note while a refund of it is owed, including after the refund
+  transaction is built and after that transaction expires.
+- Echoes are decided before relays, so an underpaid renewal is reserved
+  before another spend can take its note.
+- A penalty below the marginal fee is valid change on a refund.
+- A refund mined at or below the wallet's rewind floor leaves the queue.
+- A second claim for a name that already has a Name Note queued is
+  refunded, less the fee.
+
 ## 2026-10-22 — Underpaid payments are refunded
 
 - An underpaid claim, update, or release, and a claim for a name

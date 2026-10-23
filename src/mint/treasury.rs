@@ -16,7 +16,7 @@ use std::convert::Infallible;
 use std::num::NonZeroU32;
 
 use zcash_client_backend::data_api::error::Error;
-use zcash_client_backend::data_api::locking::{LockOwner, LockedInputPolicy, OutputLockStore};
+use zcash_client_backend::data_api::locking::LockedInputPolicy;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector;
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
 use zcash_client_backend::data_api::wallet::input_selection::SpendPolicy;
@@ -26,10 +26,10 @@ use zcash_client_backend::data_api::wallet::{
 };
 use zcash_client_backend::data_api::{MaxSpendMode, WalletRead as _};
 use zcash_client_backend::fees::zip317::SingleOutputChangeStrategy;
-use zcash_client_backend::fees::DustOutputPolicy;
+use zcash_client_backend::fees::{DustAction, DustOutputPolicy};
 use zcash_client_backend::proposal::Proposal;
 use zcash_client_backend::util::SystemClock;
-use zcash_client_backend::wallet::{NoteId, OutputRef, OvkPolicy};
+use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule as Zip317FeeRule};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkType, Parameters, TestNetwork};
@@ -48,12 +48,6 @@ type TreasuryProposalError<P> =
 type TreasuryBuildError<P> =
     CreateErrT<Wallet<P>, GreedyInputSelectorError, Zip317FeeRule, FeeError, NoteId>;
 type TreasuryProposal = Proposal<Zip317FeeRule, NoteId>;
-
-/// Lock owner for a payment note a refund still has to spend.
-const REFUND_LOCK: LockOwner = LockOwner::new([
-    b'z', b'n', b's', b'-', b'm', b'i', b'n', b't', b' ', b'r', b'e', b'f', b'u', b'n', b'd', 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-]);
 
 /// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
 /// actually moves, not on the balance behind it.
@@ -121,7 +115,7 @@ fn propose_payment<P: Parameters>(
     to: &zcash_keys::address::Address,
     amount: Zatoshis,
     memo: Option<MemoBytes>,
-    fallback_change_pool: ShieldedPool,
+    dust: DustOutputPolicy,
 ) -> Result<Proposal<Zip317FeeRule, NoteId>, TreasuryProposalError<P>> {
     let request = TransactionRequest::new(vec![Payment::new(
         to.to_zcash_address(network),
@@ -134,12 +128,8 @@ fn propose_payment<P: Parameters>(
     .map_err(Error::Payment)?])
     .expect("one shielded payment satisfies a ZIP 321 request");
     let input_selector = GreedyInputSelector::<Wallet<P>>::new();
-    let change_strategy = SingleOutputChangeStrategy::new(
-        fee_rule.clone(),
-        None,
-        fallback_change_pool,
-        DustOutputPolicy::default(),
-    );
+    let change_strategy =
+        SingleOutputChangeStrategy::new(fee_rule.clone(), None, ShieldedPool::Ironwood, dust);
     propose_transfer(
         wallet,
         network,
@@ -237,6 +227,8 @@ fn propose_one_note<P: Parameters>(
     amount: Zatoshis,
 ) -> Result<TreasuryProposal, TreasuryProposalError<P>> {
     wallet.set_refund_note(Some(note));
+    // A penalty below the marginal fee is still the change. The sweep and
+    // the relays keep the default dust rule.
     let result = propose_payment(
         network,
         wallet,
@@ -244,7 +236,7 @@ fn propose_one_note<P: Parameters>(
         to,
         amount,
         None,
-        ShieldedPool::Ironwood,
+        DustOutputPolicy::new(DustAction::AllowDustChange, None),
     );
     wallet.set_refund_note(None);
     result
@@ -409,37 +401,33 @@ fn admit_refund<P: Parameters>(
         name.clone(),
         height,
     ));
-    lock_refund_note(wallet, note);
+    wallet.reserve_refund(note);
     true
 }
 
-/// Holds `note` until the refund is sent or given up. The expiry is the
-/// top of the height space, so a tip cannot outgrow it.
-pub fn lock_refund_note<P: Parameters>(wallet: &mut Wallet<P>, note: NoteId) -> bool {
-    wallet
-        .lock_outputs(
-            &[OutputRef::from(note)],
-            REFUND_LOCK,
-            BlockHeight::from_u32(u32::MAX),
-        )
-        .is_ok()
+/// The refund no longer holds `note`. The sweep may select it.
+pub fn release_refund<P: Parameters>(wallet: &mut Wallet<P>, note: NoteId) {
+    wallet.release_refund(note);
 }
 
-/// Releases the refund lock. The sweep may then select the note.
-pub fn unlock_refund_note<P: Parameters>(wallet: &mut Wallet<P>, note: NoteId) {
-    wallet
-        .unlock_output(&OutputRef::from(note), REFUND_LOCK)
-        .expect("FATAL: wallet rejected an unlock");
+/// Drops refunds mined at or below the wallet's rewind floor, and releases
+/// their notes. A reorg can still unmine anything above that floor.
+pub fn prune_buried_refunds<P: Parameters>(refunds: &mut RefundQueue, wallet: &mut Wallet<P>) {
+    let Some(floor) = wallet.rewind_floor() else {
+        return;
+    };
+    for note in refunds.prune_buried(floor, |txid| wallet.mined_height(&txid)) {
+        wallet.release_refund(note);
+    }
 }
 
-/// Drops a rejected refund transaction and locks its input again.
-pub fn refund_rejected<P: Parameters>(wallet: &mut Wallet<P>, txid: TxId, note: NoteId) {
+/// Drops a rejected or expired refund transaction. The note stays reserved.
+pub fn refund_rejected<P: Parameters>(wallet: &mut Wallet<P>, txid: TxId) {
     wallet.release_rejected_spend(txid);
-    lock_refund_note(wallet, note);
 }
 
-/// Builds `proposal`. The wallet records the spend; a rejected broadcast
-/// undoes that with [`refund_rejected`].
+/// Builds `proposal`. The wallet records the spend. A rejected broadcast
+/// drops that spend; the note stays reserved.
 pub fn build_refund<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
@@ -520,7 +508,7 @@ fn propose_vault_sweep<P: Parameters>(
         &vault,
         payment,
         None,
-        ShieldedPool::Ironwood,
+        DustOutputPolicy::default(),
     )
     .map(Some)
     .map_err(BuildFailure::Proposal)
@@ -586,7 +574,7 @@ pub fn challenge<P: Parameters>(
         &zcash_keys::address::Address::Unified(Box::new(controller.clone())),
         CHALLENGE_RELAY_VALUE,
         Some(memo),
-        ShieldedPool::Ironwood,
+        DustOutputPolicy::default(),
     )
     .map_err(BuildFailure::Proposal)?;
 
@@ -1033,7 +1021,35 @@ mod tests {
             penalty
         );
 
-        assert!(lock_refund_note(st.wallet_mut(), payment));
+        let dust_penalty = Zatoshis::const_from_u64(1_000);
+        let dust = match plan_refund(&network, st.wallet_mut(), payment, paid, dust_penalty, &to)
+            .expect("dust penalty plan")
+        {
+            RefundPlan::Send(proposal) => proposal,
+            other => panic!("dust-penalty refund plan was not send: {other:?}"),
+        };
+        let dust_step = dust.steps().first();
+        let dust_sent = dust_step
+            .transaction_request()
+            .total()
+            .expect("total")
+            .expect("the payment has an amount");
+        assert_eq!(
+            (dust_sent + dust_step.balance().fee_required() + dust_penalty).unwrap(),
+            paid
+        );
+        assert_eq!(
+            dust_step
+                .balance()
+                .proposed_change()
+                .iter()
+                .map(|change| change.value())
+                .sum::<Option<Zatoshis>>()
+                .expect("change"),
+            dust_penalty
+        );
+
+        st.wallet_mut().reserve_refund(payment);
         assert!(matches!(
             plan_refund(
                 &network,

@@ -1,5 +1,11 @@
 # Wallet changelog
 
+## 2026-10-23 — A refund reserves its payment note
+
+- Notes a refund still owes are skipped by selection and by the unspent
+  note reads Name Note fees use. The refund's own selection still
+  returns that note. The reservation ends when the refund leaves the queue.
+
 ## 2026-10-22 — A refund can spend its locked payment note
 
 - Selection can be limited to one note, and that selection sees through
