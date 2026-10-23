@@ -14,7 +14,7 @@ use hyper::body::Bytes;
 use hyper::Request;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
-use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 use serde::{Deserialize, Deserializer};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -55,8 +55,11 @@ pub(crate) fn https_client() -> HttpsClient {
         .https_only()
         .enable_http1()
         .build();
+    // The idle timeout never fires without a timer: nothing wakes the
+    // pool to evict the connection.
     Client::builder(TokioExecutor::new())
         .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .pool_timer(TokioTimer::new())
         .build(connector)
 }
 
@@ -673,5 +676,46 @@ mod tests {
     fn complete_refuses_a_missing_count() {
         let rows = vec![row_with("alice", None)];
         assert!(matches!(complete(rows, None), Err(FetchError::Unconfirmed)));
+    }
+
+    /// `install` takes the table the read returned. A name only the
+    /// previous table held is gone.
+    #[tokio::test]
+    async fn install_replaces_the_table() {
+        let mut names = table_of(&[("alice", ProtectionStatus::Forever)]);
+        let fresh = table_of(&[("bob", ProtectionStatus::Forever)]);
+        let pending = PendingRead(tokio::spawn(async move { Ok(fresh) }));
+        pending.install(&mut names).await;
+        assert_eq!(names.status(&alice()), ProtectionStatus::Unprotected);
+        assert_eq!(
+            names.status(&Name::parse("bob").unwrap()),
+            ProtectionStatus::Forever
+        );
+    }
+
+    /// A failed read is not installed. The protections already held stand.
+    #[tokio::test]
+    async fn a_failed_read_keeps_the_table() {
+        let mut names = table_of(&[("alice", ProtectionStatus::Forever)]);
+        let pending = PendingRead(tokio::spawn(async { Err(FetchError::Unavailable) }));
+        pending.install(&mut names).await;
+        assert_eq!(names.status(&alice()), ProtectionStatus::Forever);
+    }
+
+    /// A read dropped before `install` is cancelled, even after it has started.
+    #[tokio::test]
+    async fn dropping_an_unfinished_read_cancels_it() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let pending = PendingRead(tokio::spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+            let _ = finished_tx.send(());
+            Err(FetchError::Unavailable)
+        }));
+        started_rx.await.unwrap();
+        drop(pending);
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(1), finished_rx).await;
+        assert!(matches!(finished, Ok(Err(_))));
     }
 }
