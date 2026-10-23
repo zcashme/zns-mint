@@ -2,6 +2,18 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-10-23 — An update is authorized at its confirmation time
+
+- `authorize_update` and an update challenge read the term and the
+  liveness deadline at the latest median time the confirming block
+  can carry: the expiry window at the 75-second spacing, plus the
+  two-hour limit on a block timestamp.
+- A deadline inside that gap is refused before the note is signed.
+  Confirmation reads those same clocks, and a note signed on the
+  early side of the deadline would be released when it landed.
+- A release challenge still reads the tip. A release stays legal
+  after the deadline.
+
 ## 2026-10-03 — The request gate joins the authorize family
 
 - `Registry::authorize_challenge` is the request-side twin of

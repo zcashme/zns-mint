@@ -10,7 +10,7 @@ use crate::mint::note::NameNoteQueue;
 use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
-use time::Timestamp;
+use time::{Duration, Timestamp};
 use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
@@ -157,6 +157,11 @@ impl Registry {
     }
 
     /// The update law: action, commitment, clocks, term. `None` means unlawful.
+    ///
+    /// Both §4.5 clocks are read at [`Self::confirmation_mtp`], the latest
+    /// median time the block that includes this note can carry.
+    /// Confirmation reads the same clocks, so a deadline in that gap is
+    /// refused here.
     pub fn authorize_update(&self, pending: &OtpChallenge, mtp: Timestamp) -> Option<NameNote> {
         let record = self.record(&pending.name).cloned()?;
         if pending.action != Action::Update {
@@ -165,7 +170,7 @@ impl Registry {
         if record.commitment != pending.tip_rcm {
             return None;
         }
-        if record.is_release_due(mtp) {
+        if record.is_release_due(Self::confirmation_mtp(mtp)) {
             return None;
         }
         let expires_at = record.expires_at.extend(pending.term, mtp)?;
@@ -196,10 +201,11 @@ impl Registry {
         })
     }
 
-    /// The request gate, the authorize family's twin: the note
-    /// unspoken-for, both §4.5 clocks live at `mtp_now`, the request
-    /// newer than the record, forever names taking no term. The record,
-    /// when a challenge may proceed; the paying lanes add the fee.
+    /// The request gate. The note is unspoken-for, the request is newer
+    /// than the record, and a forever name takes no term. An update
+    /// reads both §4.5 clocks at [`Self::confirmation_mtp`], the same
+    /// instant as [`Self::authorize_update`]. A release reads them at
+    /// the tip. Returns the record when a challenge may proceed.
     #[allow(clippy::too_many_arguments)]
     pub fn authorize_challenge(
         &self,
@@ -215,9 +221,30 @@ impl Registry {
         if name_notes.note_pending(name) {
             return None;
         }
+        let clock = if action == Action::Update {
+            Self::confirmation_mtp(mtp_now)
+        } else {
+            mtp_now
+        };
         record
-            .allows_challenge(action, requested_ua, term, trigger_height, mtp_now)
+            .allows_challenge(action, requested_ua, term, trigger_height, clock)
             .then(|| record.clone())
+    }
+
+    /// Latest median time a note sent at `tip_mtp` can confirm under.
+    ///
+    /// The transaction can be mined through the standard expiry window,
+    /// one block interval apart, and a block time may sit two hours
+    /// ahead of the node. Confirmation judges the term and the liveness
+    /// deadline at that block's median time. A chain that stops for
+    /// longer than this can still arrive later.
+    fn confirmation_mtp(tip_mtp: Timestamp) -> Timestamp {
+        const BLOCK_SPACING: i64 = 75;
+        const MAX_FUTURE_BLOCK_TIME: i64 = 2 * 60 * 60;
+        let slack = i64::from(DEFAULT_TX_EXPIRY_DELTA) * BLOCK_SPACING + MAX_FUTURE_BLOCK_TIME;
+        tip_mtp
+            .checked_add(Duration::seconds(slack))
+            .expect("confirmation MTP fits Timestamp")
     }
 
     /// The record for a name at the applied tip. Released names are absent.
@@ -775,10 +802,11 @@ mod tests {
         assert!(!term_live.allows_challenge(Action::Release, &ua, None, above, ts(1_500_000_000)));
     }
 
-    /// The gate and the law answer the liveness clock with one
-    /// verdict, through the same public twin: before the deadline a
-    /// request both passes and authorizes; at the deadline
-    /// `authorize_challenge` refuses what `authorize_update` voids.
+    /// The gate and the update law share the confirmation median time.
+    /// Well clear of the deadline both allow the update. One second
+    /// before the deadline the tip is still live, and both refuse,
+    /// because confirmation would be past it. At the deadline both
+    /// refuse.
     #[test]
     fn the_gate_and_the_update_law_agree_on_the_liveness_clock() {
         use crate::mint::note::NameNoteQueue;
@@ -806,15 +834,27 @@ mod tests {
             expires_at: ts(mtp + D_OTP),
         };
 
-        let before = ts(deadline - 1);
+        // Seconds confirmation_mtp adds past the tip.
+        let slack = Registry::confirmation_mtp(ts(0)).as_seconds();
+        // Tip whose confirming block is still one second before the deadline.
+        let clear = ts(deadline - slack - 1);
+        // Tip one second before the deadline; confirmation is past it.
+        let gap = ts(deadline - 1);
         let after = ts(deadline);
         let above = BlockHeight::from_u32(101);
         let term = Some(Term::Years(1));
 
         assert!(r
-            .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, before)
+            .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, clear)
             .is_some());
-        assert!(r.authorize_update(&pending(deadline - 1), before).is_some());
+        assert!(r
+            .authorize_update(&pending(deadline - slack - 1), clear)
+            .is_some());
+
+        assert!(r
+            .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, gap)
+            .is_none());
+        assert!(r.authorize_update(&pending(deadline - 1), gap).is_none());
 
         assert!(r
             .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, after)
