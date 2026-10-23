@@ -2,6 +2,13 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-10-23 — Boot checks the pinned block, then each header's time
+
+- Before the scan, boot requires the node to serve the pinned block.
+  Regtest has no pinned block.
+- Each synced block's time has to be after the previous median, at
+  most 90 minutes past it, and at most two hours ahead of the mint.
+
 ## 2026-10-22 — No pre-sale refresh handle (#371)
 
 - `Boot` no longer carries `presale_refresh`: the run loop reads the

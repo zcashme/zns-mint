@@ -1,5 +1,11 @@
 # main.changelog.md
 
+## 2026-10-23 — The run loop refuses a header outside the time window
+
+- Before a block is applied, its time has to be after the previous
+  median, at most 90 minutes past it, and at most two hours ahead of
+  the mint.
+
 ## 2026-10-23 — A queued update is dropped when the tip median would release it
 
 - Before echoes and the lifecycle releases, an update still waiting to
