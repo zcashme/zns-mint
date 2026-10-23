@@ -1433,6 +1433,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_refund_reservation_is_locked_until_it_is_released() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        let fvk = SaplingPoolTester::test_account_fvk(&st);
+        let value = Zatoshis::const_from_u64(50_000);
+        let (h, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
+        st.scan_cached_blocks(h, 1);
+        st.wallet_mut().update_chain_tip(h).unwrap();
+
+        let account_id = st.test_account().unwrap().id();
+        let note = *st.wallet().sapling_notes.keys().next().expect("note");
+        let summary = st
+            .wallet()
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .unwrap()
+            .unwrap();
+        let balance = summary.account_balances().get(&account_id).unwrap();
+        assert_eq!(balance.sapling_balance().spendable_value(), value);
+        assert_eq!(balance.sapling_balance().locked_value(), Zatoshis::ZERO);
+
+        st.wallet_mut().reserve_refund(note);
+        let summary = st
+            .wallet()
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .unwrap()
+            .unwrap();
+        let balance = summary.account_balances().get(&account_id).unwrap();
+        assert_eq!(balance.sapling_balance().spendable_value(), Zatoshis::ZERO);
+        assert_eq!(balance.sapling_balance().locked_value(), value);
+
+        st.wallet_mut().release_refund(note);
+        let summary = st
+            .wallet()
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .unwrap()
+            .unwrap();
+        let balance = summary.account_balances().get(&account_id).unwrap();
+        assert_eq!(balance.sapling_balance().spendable_value(), value);
+        assert_eq!(balance.sapling_balance().locked_value(), Zatoshis::ZERO);
+    }
+
     /// Truncation must drop notes created on the abandoned branch and clear
     /// scanned-only spends of surviving notes; otherwise balances show phantom
     /// pending value and reorged spends freeze notes forever.

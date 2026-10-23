@@ -412,6 +412,13 @@ async fn main() {
                             );
                             break 'lane true;
                         };
+                        if !protected_names.is_protected(name, mtp_now) {
+                            tracing::debug!(
+                                name = %name.as_str(),
+                                "pre-sale claim refused: name not listed"
+                            );
+                            break 'lane true;
+                        }
                         if !access_code_key.accepts(name, Some(offered)) {
                             let Some(price) = oracle.quote(name, *term) else {
                                 tracing::debug!(
@@ -432,13 +439,6 @@ async fn main() {
                                 note_height,
                                 Action::Claim.as_str(),
                                 "wrong access code",
-                            );
-                            break 'lane true;
-                        }
-                        if !protected_names.is_protected(name, mtp_now) {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                "pre-sale claim refused: name not listed"
                             );
                             break 'lane true;
                         }
@@ -596,13 +596,21 @@ async fn main() {
                         break 'lane true;
                     }
                 }
-                // A transition already admitted for this current Name Note
-                // owns its predecessor. Do not consume this OTP response.
+                // A Name Note already queued owns this name. The payment
+                // goes back minus the fee, and the challenge stays.
                 if name_notes.note_pending(&echo.name) {
-                    tracing::debug!(
-                        name = %echo.name.as_str(),
-                        action = echo.action.as_str(),
-                        "transition already queued; OTP response does not replace it"
+                    treasury::refund_keeping(
+                        &mut refunds,
+                        &mut wallet,
+                        txid,
+                        output_index,
+                        paid,
+                        Zatoshis::ZERO,
+                        &echo.ua,
+                        &echo.name,
+                        note_height,
+                        echo.action.as_str(),
+                        "queued name",
                     );
                     break 'lane true;
                 }

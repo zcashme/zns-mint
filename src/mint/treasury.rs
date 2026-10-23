@@ -413,12 +413,20 @@ pub fn release_refund<P: Parameters>(wallet: &mut Wallet<P>, note: NoteId) {
 /// Drops refunds mined at or below the wallet's rewind floor, and releases
 /// their notes. A reorg can still unmine anything above that floor.
 pub fn prune_buried_refunds<P: Parameters>(refunds: &mut RefundQueue, wallet: &mut Wallet<P>) {
+    let tip = wallet.tip().block_height();
     let Some(floor) = wallet.rewind_floor() else {
+        refunds.prune_orphaned(|txid| wallet.expired_unmined_at(txid, tip));
         return;
     };
     for note in refunds.prune_buried(floor, |txid| wallet.mined_height(&txid)) {
         wallet.release_refund(note);
     }
+    refunds.prune_orphaned(|txid| {
+        wallet
+            .mined_height(&txid)
+            .is_some_and(|height| height <= floor)
+            || wallet.expired_unmined_at(txid, tip)
+    });
 }
 
 /// Drops a rejected or expired refund transaction. The note stays reserved.

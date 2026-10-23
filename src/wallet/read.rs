@@ -282,10 +282,12 @@ impl<P: consensus::Parameters> Wallet<P> {
         };
         let required = self.required_confirmations(note_id.txid(), is_change, policy);
         let confirmed = target_height.saturating_sub(u32::from(required)) >= *mined_height;
-        let locked = self
-            .locks
-            .get(&OutputRef::from(*note_id))
-            .is_some_and(|(_, expiry)| *expiry >= BlockHeight::from(target_height));
+        // A refund reservation holds the note the same way a lock does.
+        let locked = self.refund_reserved.contains(note_id)
+            || self
+                .locks
+                .get(&OutputRef::from(*note_id))
+                .is_some_and(|(_, expiry)| *expiry >= BlockHeight::from(target_height));
 
         if !confirmed {
             with_pool(&mut |pool_balance| {

@@ -1,5 +1,10 @@
 # Wallet changelog
 
+## 2026-10-23 — A reserved refund note is locked balance
+
+- A note held for a refund counts as locked. Releasing the reservation
+  returns it to spendable when no lock applies.
+
 ## 2026-10-23 — A refund reserves its payment note
 
 - Notes a refund still owes are skipped by selection and by the unspent

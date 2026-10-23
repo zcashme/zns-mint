@@ -114,22 +114,32 @@ impl Refund {
 }
 
 /// Refunds owed, in admission order. A reorg drops those whose payment
-/// block was orphaned. A payment that no longer covers the fee is
-/// removed, and so is a refund mined at or below the rewind floor.
+/// block was orphaned, and keeps a submitted transaction id so a replay
+/// of that note can restore it. A payment that no longer covers the fee
+/// is removed, and so is a refund mined at or below the rewind floor.
 #[derive(Clone, Debug, Default)]
 pub struct RefundQueue {
     owed: Vec<Refund>,
+    /// Submitted refunds whose payment was orphaned.
+    orphaned: Vec<Refund>,
 }
 
 impl RefundQueue {
     pub fn new() -> Self {
-        Self { owed: Vec::new() }
+        Self {
+            owed: Vec::new(),
+            orphaned: Vec::new(),
+        }
     }
 
-    /// Records `refund` unless that note is already owed.
-    pub fn admit(&mut self, refund: Refund) {
+    /// Records `refund` unless that note is already owed. A replay of an
+    /// orphaned note keeps the refund transaction that spent it.
+    pub fn admit(&mut self, mut refund: Refund) {
         if self.owed.iter().any(|owed| owed.note == refund.note) {
             return;
+        }
+        if let Some(i) = self.orphaned.iter().position(|old| old.note == refund.note) {
+            refund.sent = self.orphaned.remove(i).sent;
         }
         self.owed.push(refund);
     }
@@ -192,17 +202,29 @@ impl RefundQueue {
         dropped
     }
 
-    /// Drops refunds whose payment was orphaned. The caller releases them.
+    /// Drops stashed refund transactions for which `done` is true.
+    pub fn prune_orphaned(&mut self, done: impl Fn(TxId) -> bool) {
+        self.orphaned
+            .retain(|refund| refund.sent.is_none_or(|txid| !done(txid)));
+    }
+
+    /// Drops refunds whose payment was orphaned. A submitted transaction
+    /// id is kept for a replay of that note. The caller releases them.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) -> Vec<NoteId> {
         let mut dropped = Vec::new();
-        self.owed.retain(|refund| {
+        let mut still_owed = Vec::new();
+        for refund in self.owed.drain(..) {
             if refund.height <= ancestor {
-                true
+                still_owed.push(refund);
             } else {
                 dropped.push(refund.note);
-                false
+                if refund.sent.is_some() {
+                    self.orphaned.retain(|old| old.note != refund.note);
+                    self.orphaned.push(refund);
+                }
             }
-        });
+        }
+        self.owed = still_owed;
         dropped
     }
 }
@@ -356,5 +378,44 @@ mod tests {
             .map(|refund| refund.note())
             .collect();
         assert_eq!(left, vec![recent_note, unsent_note]);
+    }
+
+    #[test]
+    fn a_replayed_payment_keeps_the_refund_transaction() {
+        use zcash_protocol::ShieldedPool;
+
+        let note = NoteId::new(TxId::from_bytes([1; 32]), ShieldedPool::Ironwood, 0);
+        let ua = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
+        let ua = match zcash_keys::address::Address::decode(
+            &zcash_protocol::consensus::MAIN_NETWORK,
+            ua,
+        ) {
+            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
+            _ => panic!("test UA"),
+        };
+        let mut queue = RefundQueue::new();
+        queue.admit(Refund::new(
+            note,
+            ua.clone(),
+            zats(50_000),
+            Zatoshis::ZERO,
+            Name::parse("alice").unwrap(),
+            BlockHeight::from_u32(30),
+        ));
+        let txid = TxId::from_bytes([2; 32]);
+        queue.mark_sent(note, txid);
+        assert_eq!(queue.truncate_to(BlockHeight::from_u32(20)), vec![note]);
+        assert!(queue.due().is_empty());
+        queue.admit(Refund::new(
+            note,
+            ua,
+            zats(50_000),
+            Zatoshis::ZERO,
+            Name::parse("alice").unwrap(),
+            BlockHeight::from_u32(40),
+        ));
+        assert_eq!(queue.due()[0].sent(), Some(txid));
+        queue.prune_orphaned(|_| true);
+        assert_eq!(queue.due()[0].sent(), Some(txid));
     }
 }

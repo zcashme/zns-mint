@@ -1,5 +1,14 @@
 # Treasury design record
 
+## 2026-10-23 — A replayed payment keeps its refund
+
+- An unlisted name is kept, including when the access code is wrong.
+  A wrong code on a listed name still keeps 1% and returns the rest.
+- A reorg keeps the refund transaction id. A replay of that payment
+  restores it, so the queue does not wait on a note the refund spent.
+- An update or release whose Name Note is already queued is refunded,
+  less the fee. The challenge is not consumed.
+
 ## 2026-10-23 — A refund note stays reserved until the refund is finished
 
 - The queue is the reservation. Relays, Name Note fees, and the sweep
