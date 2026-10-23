@@ -1,5 +1,14 @@
 # Treasury design record
 
+## 2026-10-23 — Treasury payments take the fee rule (#357)
+
+- `sweep_to_vault` and `challenge` take the node's `FeeRule`.
+  `propose_payment` is upstream's `propose_standard_transfer_to_address`
+  with that rule in place of `StandardFeeRule::Zip317`.
+- Dust stays the wallet's: notes at or below `zip317::MARGINAL_FEE` are
+  skipped by selection, as `zcash_client_sqlite` does. The change
+  strategy flags inputs that are dust at the node's rate.
+
 ## 2026-10-15 — `RequestQueue::names` (#342)
 
 - Names every request pending decision, borrowed, for the request state

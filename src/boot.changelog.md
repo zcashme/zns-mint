@@ -2,6 +2,11 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-10-23 — The fee rate or no start (#357)
+
+- Boot reads the node's fee rate after the price fetch and hands it to
+  the run loop as `Boot::fee_rule`. An unusable answer stops boot.
+
 ## 2026-10-22 — No pre-sale refresh handle (#371)
 
 - `Boot` no longer carries `presale_refresh`: the run loop reads the

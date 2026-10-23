@@ -34,6 +34,7 @@ use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::chain::ChainState;
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
+use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zns_canon::capsule::{
     hash as capsule_hash, parse_capsule, read_capsule_file, unseal_seed, CAPSULE_KEY_CONTEXT,
 };
@@ -102,6 +103,8 @@ pub struct Boot<P: Parameters> {
     pub protected_names: ProtectedNames,
     /// initialized: the one client every pre-sale read goes through
     pub presale_client: HttpsClient,
+    /// must not: fail-closed at birth — the node's fee rate or no start
+    pub fee_rule: FeeRule,
     /// produced: scanned and verified during boot sync
     pub registry: Registry,
     /// initialized: pending Name Note authorizations
@@ -702,6 +705,16 @@ impl Boot<Network> {
             "boot: initial price ingested"
         );
 
+        // 6a. Fee rate: the node's `getstandardfee`, or no start.
+        let fee_rule = source
+            .standard_fee()
+            .await
+            .expect("FATAL: getstandardfee unavailable; restart when the node answers");
+        tracing::info!(
+            zats_per_action = fee_rule.marginal_fee().into_u64(),
+            "boot: fee rate read"
+        );
+
         // 6b. Pre-sale table: fail-closed at birth — no table, no start.
         let presale_client = presale::https_client();
         let protected_names = loop {
@@ -797,6 +810,7 @@ impl Boot<Network> {
             access_code_key,
             protected_names,
             presale_client,
+            fee_rule,
             registry,
             name_notes,
             requests,
