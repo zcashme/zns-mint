@@ -4,15 +4,14 @@ Tracks design-relevant changes to `src/registry.rs`.
 
 ## 2026-10-23 — An update is authorized at its confirmation time
 
-- `authorize_update` and an update challenge read the term and the
-  liveness deadline at the latest median time the confirming block
-  can carry: the expiry window at the 75-second spacing, plus the
-  two-hour limit on a block timestamp.
-- A deadline inside that gap is refused before the note is signed.
-  Confirmation reads those same clocks, and a note signed on the
-  early side of the deadline would be released when it landed.
-- A release challenge still reads the tip. A release stays legal
-  after the deadline.
+- `authorize_update` and an update challenge read both §4.5 clocks at
+  the highest median the expiry window can reach when each block arrives
+  on the 75-second spacing. A block time may sit ninety minutes ahead of
+  the previous median and two hours ahead of the wall clock.
+- The reach widens when the tip median lags the wall clock. A deadline
+  inside it is refused before the note is signed.
+- A release challenge still reads the tip. A release stays legal after
+  the deadline. A chain slower than the target spacing can confirm later.
 
 ## 2026-10-03 — The request gate joins the authorize family
 

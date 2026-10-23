@@ -1,5 +1,11 @@
 # main.changelog.md
 
+## 2026-10-23 — A queued update is dropped when confirmation would release it
+
+- Before echoes and the lifecycle sweep, an update still waiting to be
+  signed is dropped when both §4.5 clocks have fired at the confirmation
+  median. The sweep can then release the name on this tip.
+
 ## 2026-10-22 — The pre-sale table is read beside the price round (#371)
 
 - Every tip pass starts `presale::PendingRead` when the tip arrives,

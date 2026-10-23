@@ -20,7 +20,7 @@ use zns_mint::mint::presale;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
-use zns_mint::mint::{relay, Action, MintInbound, Request, TREASURY_ACCOUNT};
+use zns_mint::mint::{relay, Action, MintInbound, Request, Timestamp, TREASURY_ACCOUNT};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
@@ -303,6 +303,8 @@ async fn main() {
         let mtp_now = mtp
             .current()
             .expect("FATAL: MTP unavailable at the applied tip");
+        let wall_now = Timestamp::from_seconds(time::OffsetDateTime::now_utc().unix_timestamp())
+            .expect("wall clock fits Timestamp");
         challenges.prune(mtp_now);
 
         let today = mtp
@@ -439,6 +441,7 @@ async fn main() {
                             term,
                             target_height,
                             mtp_now,
+                            wall_now,
                         ) else {
                             break 'lane true;
                         };
@@ -474,6 +477,7 @@ async fn main() {
                 pending.term,
                 target_height,
                 mtp_now,
+                wall_now,
             ) else {
                 continue;
             };
@@ -494,6 +498,21 @@ async fn main() {
             .await
             {
                 challenges.challenge_issued(&pending);
+            }
+        }
+
+        // Drop an update whose confirmation median would release the name.
+        // An echo for that name can then be decided, and the sweep below can
+        // release it when the tip clock has fired.
+        for note in name_notes.authorized_notes() {
+            if note.action().is_update()
+                && registry.update_confirms_released(note.name(), mtp_now, wall_now)
+            {
+                tracing::info!(
+                    name = %note.name().as_str(),
+                    "update dropped: confirmation would release the name"
+                );
+                name_notes.drop_note(note.name());
             }
         }
 
@@ -542,7 +561,7 @@ async fn main() {
                     break 'lane true;
                 }
                 let authorized = match echo.action {
-                    Action::Update => registry.authorize_update(&sent, mtp_now),
+                    Action::Update => registry.authorize_update(&sent, mtp_now, wall_now),
                     Action::Release => registry.authorize_release(&sent),
                     // Challenges never claim, and `OtpMemo::decode` refuses
                     // the verb; treat a claim echo as a dead memo regardless.

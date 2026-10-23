@@ -10,7 +10,7 @@ use crate::mint::note::NameNoteQueue;
 use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
-use time::{Duration, Timestamp};
+use time::Timestamp;
 use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
@@ -158,11 +158,14 @@ impl Registry {
 
     /// The update law: action, commitment, clocks, term. `None` means unlawful.
     ///
-    /// Both §4.5 clocks are read at [`Self::confirmation_mtp`], the latest
-    /// median time the block that includes this note can carry.
-    /// Confirmation reads the same clocks, so a deadline in that gap is
-    /// refused here.
-    pub fn authorize_update(&self, pending: &OtpChallenge, mtp: Timestamp) -> Option<NameNote> {
+    /// Both §4.5 clocks are read at [`Self::confirmation_mtp`]. Confirmation
+    /// reads the same clocks, so a deadline inside that reach is refused here.
+    pub fn authorize_update(
+        &self,
+        pending: &OtpChallenge,
+        mtp: Timestamp,
+        wall: Timestamp,
+    ) -> Option<NameNote> {
         let record = self.record(&pending.name).cloned()?;
         if pending.action != Action::Update {
             return None;
@@ -170,7 +173,7 @@ impl Registry {
         if record.commitment != pending.tip_rcm {
             return None;
         }
-        if record.is_release_due(Self::confirmation_mtp(mtp)) {
+        if record.is_release_due(Self::confirmation_mtp(mtp, wall)) {
             return None;
         }
         let expires_at = record.expires_at.extend(pending.term, mtp)?;
@@ -216,13 +219,14 @@ impl Registry {
         term: Option<Term>,
         trigger_height: BlockHeight,
         mtp_now: Timestamp,
+        wall: Timestamp,
     ) -> Option<NameRecord> {
         let record = self.records.get(name)?;
         if name_notes.note_pending(name) {
             return None;
         }
         let clock = if action == Action::Update {
-            Self::confirmation_mtp(mtp_now)
+            Self::confirmation_mtp(mtp_now, wall)
         } else {
             mtp_now
         };
@@ -231,20 +235,60 @@ impl Registry {
             .then(|| record.clone())
     }
 
-    /// Latest median time a note sent at `tip_mtp` can confirm under.
+    /// Whether confirmation would release an update of `name`.
     ///
-    /// The transaction can be mined through the standard expiry window,
-    /// one block interval apart, and a block time may sit two hours
-    /// ahead of the node. Confirmation judges the term and the liveness
-    /// deadline at that block's median time. A chain that stops for
-    /// longer than this can still arrive later.
-    fn confirmation_mtp(tip_mtp: Timestamp) -> Timestamp {
+    /// The queued note was lawful when it was admitted. A later tip builds
+    /// a fresh transaction, so the clocks are read again at that tip.
+    pub fn update_confirms_released(
+        &self,
+        name: &Name,
+        tip_mtp: Timestamp,
+        wall: Timestamp,
+    ) -> bool {
+        self.record(name)
+            .is_some_and(|record| record.is_release_due(Self::confirmation_mtp(tip_mtp, wall)))
+    }
+
+    /// Highest median an update sent now can confirm under when each of the
+    /// next expiry-window blocks arrives on the target spacing.
+    ///
+    /// A block time may sit ninety minutes ahead of the previous median and
+    /// two hours ahead of `wall`. A slower chain can confirm later.
+    fn confirmation_mtp(tip_mtp: Timestamp, wall: Timestamp) -> Timestamp {
         const BLOCK_SPACING: i64 = 75;
-        const MAX_FUTURE_BLOCK_TIME: i64 = 2 * 60 * 60;
-        let slack = i64::from(DEFAULT_TX_EXPIRY_DELTA) * BLOCK_SPACING + MAX_FUTURE_BLOCK_TIME;
-        tip_mtp
-            .checked_add(Duration::seconds(slack))
-            .expect("confirmation MTP fits Timestamp")
+        const MAX_AHEAD_OF_MEDIAN: i64 = 90 * 60;
+        const MAX_AHEAD_OF_WALL: i64 = 2 * 60 * 60;
+
+        fn median(window: &[i64; 11]) -> i64 {
+            let mut sorted = *window;
+            sorted.sort_unstable();
+            sorted[sorted.len() / 2]
+        }
+
+        let median_now = tip_mtp.as_seconds();
+        let mut wall_at = wall.as_seconds();
+        let high = (median_now + MAX_AHEAD_OF_MEDIAN)
+            .min(wall_at + MAX_AHEAD_OF_WALL)
+            .max(median_now);
+        // Five newest stamps already at the cap, so the median can climb immediately.
+        let mut window = [median_now; 11];
+        for slot in window.iter_mut().skip(6) {
+            *slot = high;
+        }
+
+        let mut peak = median(&window);
+        for _ in 0..DEFAULT_TX_EXPIRY_DELTA {
+            wall_at += BLOCK_SPACING;
+            let prev = median(&window);
+            let stamp = (prev + MAX_AHEAD_OF_MEDIAN).min(wall_at + MAX_AHEAD_OF_WALL);
+            if stamp <= prev {
+                continue;
+            }
+            window.copy_within(1.., 0);
+            window[10] = stamp;
+            peak = peak.max(median(&window));
+        }
+        Timestamp::from_seconds(peak).expect("confirmation MTP fits Timestamp")
     }
 
     /// The record for a name at the applied tip. Released names are absent.
@@ -692,7 +736,7 @@ mod tests {
             code: OtpCode::for_test(*b"123456"),
             expires_at: ts(1_700_000_000 + D_OTP),
         };
-        assert!(r.authorize_update(&pending, mtp).is_none());
+        assert!(r.authorize_update(&pending, mtp, mtp).is_none());
     }
 
     /// The laws are action-typed: a release-shaped pending cannot feed
@@ -723,7 +767,7 @@ mod tests {
             code: OtpCode::for_test(*b"123456"),
             expires_at: ts(1_700_000_000),
         };
-        assert!(r.authorize_update(&release_pending, mtp).is_none());
+        assert!(r.authorize_update(&release_pending, mtp, mtp).is_none());
         assert!(r.authorize_release(&update_pending).is_none());
     }
 
@@ -834,8 +878,8 @@ mod tests {
             expires_at: ts(mtp + D_OTP),
         };
 
-        // Seconds confirmation_mtp adds past the tip.
-        let slack = Registry::confirmation_mtp(ts(0)).as_seconds();
+        // Seconds the confirmation median adds when the wall clock matches the tip.
+        let slack = Registry::confirmation_mtp(ts(0), ts(0)).as_seconds();
         // Tip whose confirming block is still one second before the deadline.
         let clear = ts(deadline - slack - 1);
         // Tip one second before the deadline; confirmation is past it.
@@ -845,21 +889,118 @@ mod tests {
         let term = Some(Term::Years(1));
 
         assert!(r
-            .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, clear)
+            .authorize_challenge(
+                &queue,
+                &name,
+                Action::Update,
+                &ua,
+                term,
+                above,
+                clear,
+                clear
+            )
             .is_some());
         assert!(r
-            .authorize_update(&pending(deadline - slack - 1), clear)
+            .authorize_update(&pending(deadline - slack - 1), clear, clear)
             .is_some());
+        assert!(!r.update_confirms_released(&name, clear, clear));
 
         assert!(r
-            .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, gap)
+            .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, gap, gap)
             .is_none());
-        assert!(r.authorize_update(&pending(deadline - 1), gap).is_none());
+        assert!(r
+            .authorize_update(&pending(deadline - 1), gap, gap)
+            .is_none());
+        assert!(r.update_confirms_released(&name, gap, gap));
 
         assert!(r
-            .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, after)
+            .authorize_challenge(
+                &queue,
+                &name,
+                Action::Update,
+                &ua,
+                term,
+                above,
+                after,
+                after
+            )
             .is_none());
-        assert!(r.authorize_update(&pending(deadline), after).is_none());
+        assert!(r
+            .authorize_update(&pending(deadline), after, after)
+            .is_none());
+    }
+
+    /// A tip an hour behind the wall clock refuses an update whose
+    /// liveness deadline is still ahead of the tip. The same tip allows
+    /// it when the wall clock matches.
+    #[test]
+    fn an_hour_of_clock_lag_refuses_before_the_tip_deadline() {
+        use crate::mint::note::NameNoteQueue;
+        use crate::mint::treasury::{OtpChallenge, OtpCode, D_OTP};
+
+        let mut r = Registry::new();
+        let name = test_name();
+        let ua = test_ua();
+        let deadline = 1_500_000_000_i64;
+        r.set_record(record(
+            Action::Claim,
+            Expiry::At(ts(2_000_000_000)),
+            deadline,
+            1,
+        ));
+        let queue = NameNoteQueue::default();
+        // One second beyond the expiry window at the target spacing, plus
+        // the two-hour limit on a block timestamp.
+        let tip = deadline - (40 * 75 + 2 * 60 * 60) - 1;
+        let pending = OtpChallenge {
+            name: name.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            term: Some(Term::Years(1)),
+            tip_rcm: commitment(1),
+            code: OtpCode::for_test(*b"123456"),
+            expires_at: ts(tip + D_OTP),
+        };
+        let above = BlockHeight::from_u32(101);
+        let term = Some(Term::Years(1));
+        let aligned = ts(tip);
+        let behind = ts(tip + 60 * 60);
+
+        assert_eq!(
+            Registry::confirmation_mtp(aligned, aligned).as_seconds(),
+            tip + 9_825
+        );
+        assert_eq!(
+            Registry::confirmation_mtp(aligned, behind).as_seconds(),
+            tip + 13_425
+        );
+        assert!(r
+            .authorize_challenge(
+                &queue,
+                &name,
+                Action::Update,
+                &ua,
+                term,
+                above,
+                aligned,
+                aligned
+            )
+            .is_some());
+        assert!(r.authorize_update(&pending, aligned, aligned).is_some());
+        assert!(r
+            .authorize_challenge(
+                &queue,
+                &name,
+                Action::Update,
+                &ua,
+                term,
+                above,
+                aligned,
+                behind
+            )
+            .is_none());
+        assert!(r.authorize_update(&pending, aligned, behind).is_none());
+        assert!(r.update_confirms_released(&name, aligned, behind));
     }
 
     /// A name with a transition already admitted cannot buy a
@@ -885,7 +1026,8 @@ mod tests {
                 &test_ua(),
                 None,
                 BlockHeight::from_u32(101),
-                ts(1_000_000_000)
+                ts(1_000_000_000),
+                ts(1_000_000_000),
             )
             .is_none());
     }
