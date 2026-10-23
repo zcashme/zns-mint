@@ -12,6 +12,7 @@
 
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
+use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
 
 use zns_mint::boot::Boot;
@@ -497,9 +498,12 @@ async fn main() {
             }
         }
 
+        // A broadcast order whose expiry height has passed can be signed
+        // again, or dropped below once the tip median would release it.
+        name_notes.expire_sent(tip);
         // Drop an update the tip median would already release. An echo
-        // for that name can then be decided, and the sweep below can
-        // release it.
+        // for that name can then be decided, and a release note can be
+        // admitted below. A broadcast still inside its expiry window stays.
         for note in name_notes.authorized_notes() {
             if note.action().is_update()
                 && registry
@@ -591,7 +595,7 @@ async fn main() {
         }
 
         // Lifecycle releases, §4.5: the registry owns the clocks and
-        // their plural; the sweep moves the batch out each tip.
+        // their plural; each tip admits the release notes.
         // `releases_due` re-derives the same notes per tip, so
         // admission is idempotent.
         for (name, release_note) in registry.releases_due(mtp_now) {
@@ -685,6 +689,7 @@ async fn main() {
 
             if source.submit(&transaction, "NameNote").await {
                 wallet.record_sent(&transaction, target_height, fee);
+                name_notes.mark_sent(note.name(), target_height + DEFAULT_TX_EXPIRY_DELTA);
                 tracing::info!(
                     txid = %transaction.txid(),
                     name = %note.name().as_str(),

@@ -2,9 +2,11 @@
 
 ## 2026-10-23 — A queued update is dropped when the tip median would release it
 
-- Before echoes and the lifecycle sweep, an update still waiting to be
-  signed is dropped when both §4.5 clocks have fired at the tip median.
-  The sweep can then release the name on this tip.
+- Before echoes and the lifecycle releases, an update still waiting to
+  be signed is dropped when the purchased term or the liveness deadline
+  has passed at the tip median. A broadcast order stays until its expiry
+  height and keeps the name reserved, so no release note is admitted
+  while that transaction can still confirm.
 
 ## 2026-10-22 — The pre-sale table is read beside the price round (#371)
 

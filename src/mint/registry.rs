@@ -156,10 +156,11 @@ impl Registry {
         })
     }
 
-    /// The update law: action, commitment, clocks, term. `None` means unlawful.
+    /// The update law: action, commitment, term, liveness. `None` means unlawful.
     ///
-    /// Both §4.5 clocks are read at the applied tip. A confirmed update
-    /// renews even when the confirming block's median is later.
+    /// The purchased term and the liveness deadline are read at the applied
+    /// tip. A confirmed update renews even when the confirming block's
+    /// median is later.
     pub fn authorize_update(&self, pending: &OtpChallenge, mtp: Timestamp) -> Option<NameNote> {
         let record = self.record(&pending.name).cloned()?;
         if pending.action != Action::Update {
@@ -200,10 +201,10 @@ impl Registry {
     }
 
     /// The request gate. The note is unspoken-for, the request is newer
-    /// than the record, and a forever name takes no term. Both §4.5 clocks
-    /// are read at the applied tip, the same instant as
-    /// [`Self::authorize_update`]. Returns the record when a challenge may
-    /// proceed.
+    /// than the record, and a forever name takes no term. The purchased
+    /// term and the liveness deadline are read at the applied tip, the
+    /// same instant as [`Self::authorize_update`]. Returns the record
+    /// when a challenge may proceed.
     #[allow(clippy::too_many_arguments)]
     pub fn authorize_challenge(
         &self,
@@ -330,9 +331,8 @@ impl Registry {
     }
 
     /// Offers a confirmed update candidate; true when the transaction
-    /// spent this name's current note. The §4.5 clocks are not read
-    /// again: a signed update renews, and the new liveness deadline
-    /// starts at this block's median.
+    /// spent this name's current note. A signed update renews, and the
+    /// new liveness deadline starts at this block's median.
     pub fn accept_update<P: Parameters>(
         &mut self,
         params: &P,

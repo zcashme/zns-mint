@@ -4,13 +4,13 @@ Tracks design-relevant changes to `src/registry.rs`.
 
 ## 2026-10-23 — An update is signed at the tip and renews when it confirms
 
-- `authorize_update` and an update challenge read both §4.5 clocks at
-  the applied tip. A deadline the tip has reached is refused before the
-  note is signed.
+- `authorize_update` and an update challenge read the purchased term
+  and the liveness deadline at the applied tip. A deadline the tip has
+  reached is refused before the note is signed.
 - A confirmed update that spends the predecessor renews. The confirming
   block's median starts the new liveness deadline and is not read again
   for the old one.
-- A release stays legal after either clock.
+- A release stays legal after the term and after the liveness deadline.
 
 ## 2026-10-03 — The request gate joins the authorize family
 
