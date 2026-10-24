@@ -12,12 +12,6 @@
   send-max assume the wallet never offers dust: a pruned note shrinks
   the selected total, and the selector reports `InsufficientFunds`.
 
-## 2026-10-22 — A rejected refund spend can be dropped
-
-- A rejected or expired unmined spend can be dropped so the same note
-  can be spent on the next tip.
-- A stored refund transaction is mined, still valid, or expired.
-
 ## 2026-10-10 — Note selection skips dust
 
 - `select_spendable_notes` skips notes worth `MARGINAL_FEE` or less, as

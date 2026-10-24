@@ -1,5 +1,17 @@
 # Treasury design record
 
+## 2026-10-24 — A refund is built like the sweep
+
+- `treasury::refund` builds every refund owed on the pass after its
+  payment's block, as a Name Note is, and removes it from the queue. The
+  wallet owns the transaction from there, as it owns a sweep: one that
+  expires unmined is kept, and the next sweep moves the money.
+- The queue is a `Vec` of what is owed: `admit`, `due`, `paid`,
+  `owed_total`, `truncate_to`. The sent, orphaned and pruned states, the
+  rewind floor and the refund's rebroadcast are gone.
+- The wallet is master's again: `release_rejected_spend`,
+  `refund_tx_status` and `rewind_floor` are gone.
+
 ## 2026-10-24 — A refund's amount is fixed at admission
 
 - `RefundQueue::admit` computes `paid − penalty − withheld` once, keeps

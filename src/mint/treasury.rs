@@ -94,41 +94,24 @@ pub enum BuildFailure<ProposalError, TransactionError> {
     Transaction(TransactionError),
 }
 
-/// What a refund attempt can do this tip.
-#[derive(Debug)]
-pub enum RefundPlan {
-    /// Build and broadcast this proposal.
-    Send(Box<TreasuryProposal>),
-    /// The payment can still be reorged out, the Treasury cannot fund the
-    /// refund yet, or its fee would exceed what the payer covers.
-    Wait,
-}
-
-/// A Treasury payment to `to` of `amount`, which already withholds the
-/// refund fee. Any Treasury notes fund it. The proposal's fee must fit in
-/// the withheld fee, so the payer always covers it. Nothing is proposed
-/// until the payment at `payment_height` is at or below the rewind floor,
-/// where no reorg can remove it.
-pub fn plan_refund<P: Parameters>(
+/// Proposes one Treasury payment of the refund's amount to its recipient,
+/// funded from any Treasury notes with the sweep's change rule. The payer
+/// covers the fee: `None` when the proposal's fee exceeds the withheld
+/// amount, or when the Treasury cannot fund the refund yet.
+fn propose_refund<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
     fee_rule: &FeeRule,
-    payment_height: BlockHeight,
-    amount: Zatoshis,
-    to: &zcash_keys::address::Address,
-) -> Result<RefundPlan, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
-    if !wallet
-        .rewind_floor()
-        .is_some_and(|floor| payment_height <= floor)
-    {
-        return Ok(RefundPlan::Wait);
-    }
+    refund: &Refund,
+) -> Result<Option<TreasuryProposal>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>>
+{
     let Some(withheld) = fee_rule.marginal_fee() * REFUND_FEE_ACTIONS else {
-        return Ok(RefundPlan::Wait);
+        return Ok(None);
     };
+    let to = Address::Unified(Box::new(refund.recipient().clone()));
     let request = TransactionRequest::new(vec![Payment::without_memo(
         to.to_zcash_address(network),
-        amount,
+        refund.amount(),
     )])
     .expect("one payment is a valid ZIP 321 request");
     let proposal = match propose_transfer::<_, _, _, _, Infallible>(
@@ -150,80 +133,94 @@ pub fn plan_refund<P: Parameters>(
     ) {
         Ok(proposal) => proposal,
         Err(error::Error::InsufficientFunds { .. }) | Err(error::Error::ScanRequired) => {
-            return Ok(RefundPlan::Wait);
+            return Ok(None);
         }
         Err(error) => return Err(BuildFailure::Proposal(error)),
     };
     let fee = proposal.steps().first().balance().fee_required();
     if fee > withheld {
         tracing::warn!(
+            txid = %refund.payment(),
             fee = fee.into_u64(),
             withheld = withheld.into_u64(),
             "refund fee exceeds what the payer covers; waiting"
         );
-        return Ok(RefundPlan::Wait);
+        return Ok(None);
     }
-    Ok(RefundPlan::Send(Box::new(proposal)))
+    Ok(Some(proposal))
 }
 
-/// Drops refunds mined at or below the wallet's rewind floor. A reorg can
-/// still unmine anything above that floor.
-pub fn prune_buried_refunds<P: Parameters>(refunds: &mut RefundQueue, wallet: &mut Wallet<P>) {
-    let tip = wallet.tip().block_height();
-    let Some(floor) = wallet.rewind_floor() else {
-        refunds.prune_orphaned(|txid| wallet.expired_unmined_at(txid, tip));
-        return;
-    };
-    refunds.prune_buried(floor, |txid| wallet.mined_height(&txid));
-    refunds.prune_orphaned(|txid| {
-        wallet
-            .mined_height(&txid)
-            .is_some_and(|height| height <= floor)
-            || wallet.expired_unmined_at(txid, tip)
-    });
-}
-
-/// Drops a rejected or expired refund transaction, so its inputs can be
-/// spent again. The refund stays owed.
-pub fn refund_rejected<P: Parameters>(wallet: &mut Wallet<P>, txid: TxId) {
-    wallet.release_rejected_spend(txid);
-}
-
-/// Builds `proposal`. The wallet records the spend. A rejected broadcast
-/// drops that spend; the refund stays owed.
-pub fn build_refund<P: Parameters>(
+/// Builds every refund owed. A built refund leaves the queue, and the
+/// wallet owns it from there, as it owns a sweep: one that expires unmined
+/// is kept, and the next sweep moves the money. One the Treasury cannot
+/// pay yet stays owed. Returns the built transactions for broadcast.
+pub fn refund<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
     treasury_keys: &crate::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
-    proposal: &TreasuryProposal,
-) -> Result<Transaction, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
-    let spending_keys = treasury_keys.spending_keys();
-    let txids = create_proposed_transactions::<
-        Wallet<P>,
-        P,
-        GreedyInputSelectorError,
-        FeeRule,
-        FeeError,
-        NoteId,
-    >(
-        wallet,
-        network,
-        &SystemClock,
-        &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
-        spend_prover,
-        output_prover,
-        &spending_keys,
-        OvkPolicy::Sender,
-        proposal,
-        None,
-    )
-    .map_err(BuildFailure::Transaction)?;
-    Ok(wallet
-        .get_transaction(*txids.first())
-        .expect("FATAL: refund transaction lookup failed")
-        .expect("FATAL: refund transaction was not recorded"))
+    fee_rule: &FeeRule,
+    refunds: &mut RefundQueue,
+) -> Vec<Transaction> {
+    let mut built = Vec::new();
+    for refund in refunds.due() {
+        let proposal = match propose_refund(network, wallet, fee_rule, &refund) {
+            Ok(Some(proposal)) => proposal,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    txid = %refund.payment(),
+                    name = %refund.name().as_str(),
+                    "refund not proposed"
+                );
+                continue;
+            }
+        };
+        let spending_keys = treasury_keys.spending_keys();
+        let txids =
+            match create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
+                wallet,
+                network,
+                &SystemClock,
+                &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                spend_prover,
+                output_prover,
+                &spending_keys,
+                OvkPolicy::Sender,
+                &proposal,
+                None,
+            ) {
+                Ok(txids) => txids,
+                Err(error) => {
+                    tracing::warn!(
+                        error = ?error,
+                        txid = %refund.payment(),
+                        name = %refund.name().as_str(),
+                        "refund not built"
+                    );
+                    continue;
+                }
+            };
+        tracing::info!(
+            txid = %txids.first(),
+            payment = %refund.payment(),
+            name = %refund.name().as_str(),
+            amount = refund.amount().into_u64(),
+            "refund built"
+        );
+        // The build stored the tx and marked its inputs spent; a miss here
+        // is the wallet contradicting itself. Stop; restart rescans.
+        built.push(
+            wallet
+                .get_transaction(*txids.first())
+                .expect("FATAL: refund lookup failed after build")
+                .expect("FATAL: built refund tx missing from wallet"),
+        );
+        refunds.paid(refund.payment());
+    }
+    built
 }
 
 /// Pays the vault what send-max could deliver, less the float and what
@@ -716,26 +713,23 @@ mod tests {
         assert_eq!(pending[0].3, h(100));
     }
 
-    /// A payment a reorg could still remove is not refunded yet.
-    #[test]
-    fn a_refund_waits_until_its_payment_is_buried() {
-        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
-            .build::<SaplingPoolTester>();
-        st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(80_000_000)]]);
-        st.add_empty_blocks(1);
-
-        let network = *st.network();
-        let floor = st
-            .wallet()
-            .rewind_floor()
-            .expect("the trees hold a checkpoint");
-        let to = vault_address(&network);
-        let amount = Zatoshis::const_from_u64(50_000);
-        let plan = |st: &mut _, height| {
-            plan_refund(&network, st, &FeeRule::standard(), height, amount, &to).expect("plan")
+    /// Owes 50,000 zats for a 100,000-zat payment to the vault's address.
+    fn owed<P: Parameters>(network: &P) -> Refund {
+        let Address::Unified(ua) = vault_address(network) else {
+            panic!("the vault address is unified");
         };
-        assert!(matches!(plan(st.wallet_mut(), floor + 1), RefundPlan::Wait));
-        assert!(matches!(plan(st.wallet_mut(), floor), RefundPlan::Send(_)));
+        let mut queue = RefundQueue::new();
+        queue.admit(
+            &FeeRule::standard(),
+            TxId::from_bytes([1; 32]),
+            &ua,
+            &Name::parse("alice").unwrap(),
+            BlockHeight::from_u32(10),
+            Zatoshis::const_from_u64(100_000),
+            Zatoshis::ZERO,
+            "underpaid",
+        );
+        queue.due().remove(0)
     }
 
     /// The refund pays its amount from any Treasury notes. Its fee fits in
@@ -748,41 +742,23 @@ mod tests {
         st.add_empty_blocks(1);
 
         let network = *st.network();
-        let floor = st
-            .wallet()
-            .rewind_floor()
-            .expect("the trees hold a checkpoint");
-        let to = vault_address(&network);
-        let withheld = (MARGINAL_FEE * REFUND_FEE_ACTIONS).unwrap();
-
-        for amount in [
-            Zatoshis::const_from_u64(50_000),
-            Zatoshis::const_from_u64(30_000),
-        ] {
-            let proposal = match plan_refund(
-                &network,
-                st.wallet_mut(),
-                &FeeRule::standard(),
-                floor,
-                amount,
-                &to,
-            )
-            .expect("plan")
-            {
-                RefundPlan::Send(proposal) => proposal,
-                other => panic!("refund plan was not send: {other:?}"),
-            };
-            let step = proposal.steps().first();
-            let payment = step
-                .transaction_request()
-                .payments()
-                .values()
-                .next()
-                .expect("one payment");
-            assert_eq!(payment.recipient_address(), &to.to_zcash_address(&network));
-            assert_eq!(payment.amount(), Some(amount));
-            assert!(step.balance().fee_required() <= withheld);
-        }
+        let refund = owed(&network);
+        let proposal = propose_refund(&network, st.wallet_mut(), &FeeRule::standard(), &refund)
+            .expect("the proposal closes")
+            .expect("the Treasury funds the refund");
+        let step = proposal.steps().first();
+        let payment = step
+            .transaction_request()
+            .payments()
+            .values()
+            .next()
+            .expect("one payment");
+        assert_eq!(
+            payment.recipient_address(),
+            &vault_address(&network).to_zcash_address(&network)
+        );
+        assert_eq!(payment.amount(), Some(refund.amount()));
+        assert!(step.balance().fee_required() <= (MARGINAL_FEE * REFUND_FEE_ACTIONS).unwrap());
     }
 
     /// A Treasury that cannot fund the refund waits.
@@ -794,23 +770,11 @@ mod tests {
         st.add_empty_blocks(1);
 
         let network = *st.network();
-        let floor = st
-            .wallet()
-            .rewind_floor()
-            .expect("the trees hold a checkpoint");
-        let to = vault_address(&network);
-        let amount = Zatoshis::const_from_u64(50_000);
-        assert!(matches!(
-            plan_refund(
-                &network,
-                st.wallet_mut(),
-                &FeeRule::standard(),
-                floor,
-                amount,
-                &to
-            )
-            .expect("plan"),
-            RefundPlan::Wait
-        ));
+        let refund = owed(&network);
+        assert!(
+            propose_refund(&network, st.wallet_mut(), &FeeRule::standard(), &refund)
+                .expect("the proposal closes")
+                .is_none()
+        );
     }
 }

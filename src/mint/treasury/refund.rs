@@ -1,11 +1,11 @@
 //! Refunds owed by the run loop.
 //!
-//! A refund is a Treasury payment, funded from any Treasury notes once the
-//! payment it returns is buried. Its amount is fixed when it is admitted:
-//! the payment less any penalty and the withheld fee, `REFUND_FEE_ACTIONS`
-//! at the node's rate, so the payer covers the fee. A wrong access code
-//! also keeps 1% of the quote. The queue is memory: a restart forgets a
-//! refund that has not been mined.
+//! A refund is a Treasury payment, built once from any Treasury notes and
+//! the wallet's from there, like a sweep. Its amount is fixed when it is
+//! admitted: the payment less any penalty and the withheld fee,
+//! `REFUND_FEE_ACTIONS` at the node's rate, so the payer covers the fee.
+//! A wrong access code also keeps 1% of the quote. The queue is memory: a
+//! restart forgets a refund that has not been built.
 
 use std::num::NonZeroU64;
 
@@ -31,7 +31,7 @@ pub fn access_code_penalty(price: Zatoshis) -> Zatoshis {
     price / NonZeroU64::new(100).expect("100 is non-zero")
 }
 
-/// One refund the Treasury still has to send.
+/// One refund the Treasury still has to build.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refund {
     payment: TxId,
@@ -41,28 +41,9 @@ pub struct Refund {
     amount: Zatoshis,
     name: Name,
     height: BlockHeight,
-    /// The refund transaction, once the node has accepted one.
-    sent: Option<TxId>,
 }
 
 impl Refund {
-    fn new(
-        payment: TxId,
-        recipient: UnifiedAddress,
-        amount: Zatoshis,
-        name: Name,
-        height: BlockHeight,
-    ) -> Self {
-        Self {
-            payment,
-            recipient,
-            amount,
-            name,
-            height,
-            sent: None,
-        }
-    }
-
     /// The transaction that carried the payment.
     pub fn payment(&self) -> TxId {
         self.payment
@@ -79,34 +60,19 @@ impl Refund {
     pub fn name(&self) -> &Name {
         &self.name
     }
-
-    /// The height of the block that mined the payment.
-    pub fn height(&self) -> BlockHeight {
-        self.height
-    }
-
-    pub fn sent(&self) -> Option<TxId> {
-        self.sent
-    }
 }
 
-/// Refunds owed, in admission order. A reorg drops those whose payment
-/// block was orphaned, and keeps a submitted transaction id so a replay
-/// of that payment can restore it. A refund mined at or below the rewind
-/// floor is removed.
+/// Refunds owed, in admission order. An entry leaves when its refund is
+/// built (`paid`) or when a reorg orphans its payment's block
+/// (`truncate_to`); nothing else removes it.
 #[derive(Clone, Debug, Default)]
 pub struct RefundQueue {
     owed: Vec<Refund>,
-    /// Submitted refunds whose payment was orphaned.
-    orphaned: Vec<Refund>,
 }
 
 impl RefundQueue {
     pub fn new() -> Self {
-        Self {
-            owed: Vec::new(),
-            orphaned: Vec::new(),
-        }
+        Self { owed: Vec::new() }
     }
 
     /// Owes `recipient` what `paid` leaves after `penalty` and the withheld
@@ -144,30 +110,14 @@ impl RefundQueue {
             refund = amount.into_u64(),
             "payment refund"
         );
-        self.record(Refund::new(
-            txid,
-            recipient.clone(),
+        self.owed.push(Refund {
+            payment: txid,
+            recipient: recipient.clone(),
             amount,
-            name.clone(),
+            name: name.clone(),
             height,
-        ));
+        });
         true
-    }
-
-    /// Records `refund` unless that payment is already owed. A replay of an
-    /// orphaned payment keeps the refund transaction that paid it back.
-    fn record(&mut self, mut refund: Refund) {
-        if self.owed.iter().any(|owed| owed.payment == refund.payment) {
-            return;
-        }
-        if let Some(i) = self
-            .orphaned
-            .iter()
-            .position(|old| old.payment == refund.payment)
-        {
-            refund.sent = self.orphaned.remove(i).sent;
-        }
-        self.owed.push(refund);
     }
 
     /// Every refund still owed, in admission order.
@@ -175,97 +125,25 @@ impl RefundQueue {
         self.owed.clone()
     }
 
-    /// What the refunds not yet sent will pay out. The sweep leaves this
-    /// in the Treasury. An overflow holds back everything.
+    /// The refund for `payment` is built. The only removal besides reorg
+    /// truncation.
+    pub fn paid(&mut self, payment: TxId) {
+        self.owed.retain(|refund| refund.payment != payment);
+    }
+
+    /// What the refunds owed will pay out. The sweep leaves this in the
+    /// Treasury. An overflow holds back everything.
     pub fn owed_total(&self) -> Zatoshis {
         self.owed
             .iter()
-            .filter(|refund| refund.sent.is_none())
             .map(|refund| refund.amount)
             .sum::<Option<Zatoshis>>()
             .unwrap_or(Zatoshis::const_from_u64(MAX_MONEY))
     }
 
-    /// Names still waiting on a refund. A mined refund transaction is omitted.
-    pub fn names<'a>(
-        &'a self,
-        mined: impl Fn(TxId) -> bool + 'a,
-    ) -> impl Iterator<Item = &'a Name> + 'a {
-        self.owed
-            .iter()
-            .filter(move |refund| match refund.sent {
-                Some(txid) => !mined(txid),
-                None => true,
-            })
-            .map(|refund| &refund.name)
-    }
-
-    /// Records the refund transaction the node accepted. The entry stays.
-    pub fn mark_sent(&mut self, payment: TxId, txid: TxId) {
-        if let Some(refund) = self
-            .owed
-            .iter_mut()
-            .find(|refund| refund.payment == payment)
-        {
-            refund.sent = Some(txid);
-        }
-    }
-
-    /// Forgets a refund transaction that expired unmined. The entry stays.
-    pub fn clear_sent(&mut self, payment: TxId) {
-        if let Some(refund) = self
-            .owed
-            .iter_mut()
-            .find(|refund| refund.payment == payment)
-        {
-            refund.sent = None;
-        }
-    }
-
-    /// Drops refunds whose transaction was mined at or below `floor`, and
-    /// returns their payments.
-    pub fn prune_buried(
-        &mut self,
-        floor: BlockHeight,
-        mined_at: impl Fn(TxId) -> Option<BlockHeight>,
-    ) -> Vec<TxId> {
-        let mut dropped = Vec::new();
-        self.owed.retain(|refund| {
-            let buried = refund
-                .sent
-                .is_some_and(|txid| mined_at(txid).is_some_and(|height| height <= floor));
-            if buried {
-                dropped.push(refund.payment);
-            }
-            !buried
-        });
-        dropped
-    }
-
-    /// Drops stashed refund transactions for which `done` is true.
-    pub fn prune_orphaned(&mut self, done: impl Fn(TxId) -> bool) {
-        self.orphaned
-            .retain(|refund| refund.sent.is_none_or(|txid| !done(txid)));
-    }
-
-    /// Drops refunds whose payment was orphaned. A submitted transaction
-    /// id is kept for a replay of that payment. Returns the dropped payments.
-    pub fn truncate_to(&mut self, ancestor: BlockHeight) -> Vec<TxId> {
-        let mut dropped = Vec::new();
-        let mut still_owed = Vec::new();
-        for refund in self.owed.drain(..) {
-            if refund.height <= ancestor {
-                still_owed.push(refund);
-            } else {
-                dropped.push(refund.payment);
-                if refund.sent.is_some() {
-                    self.orphaned.retain(|old| old.payment != refund.payment);
-                    self.orphaned.push(refund);
-                }
-            }
-        }
-        self.owed = still_owed;
-        dropped
+    /// Reorg: entries whose payment's block was orphaned fall with it.
+    pub fn truncate_to(&mut self, ancestor: BlockHeight) {
+        self.owed.retain(|refund| refund.height <= ancestor);
     }
 }
 
@@ -295,39 +173,33 @@ mod tests {
         }
     }
 
-    fn owed(payment: TxId, height: u32) -> Refund {
-        Refund::new(
+    /// Owes 50,000 zats for a 100,000-zat payment at `height`.
+    fn admit(queue: &mut RefundQueue, payment: TxId, height: u32) -> bool {
+        queue.admit(
+            &FeeRule::standard(),
             payment,
-            ua(),
-            zats(50_000),
-            alice(),
+            &ua(),
+            &alice(),
             BlockHeight::from_u32(height),
+            zats(100_000),
+            Zatoshis::ZERO,
+            "underpaid",
         )
     }
 
     #[test]
     fn an_admitted_refund_is_the_payment_less_the_penalty_and_the_fee() {
-        let standard = FeeRule::standard();
         let txid = TxId::from_bytes([1; 32]);
         let mut queue = RefundQueue::new();
-        assert!(queue.admit(
-            &standard,
-            txid,
-            &ua(),
-            &alice(),
-            BlockHeight::from_u32(10),
-            zats(80_000),
-            Zatoshis::ZERO,
-            "underpaid",
-        ));
-        assert_eq!(queue.owed_total(), (zats(80_000) - withheld()).unwrap());
-        assert_eq!(queue.due()[0].amount(), zats(30_000));
+        assert!(admit(&mut queue, txid, 10));
+        assert_eq!(queue.owed_total(), (zats(100_000) - withheld()).unwrap());
+        assert_eq!(queue.due()[0].amount(), zats(50_000));
 
         let mut queue = RefundQueue::new();
         let price = zats(100_000);
         let penalty = access_code_penalty(price);
         assert!(queue.admit(
-            &standard,
+            &FeeRule::standard(),
             txid,
             &ua(),
             &alice(),
@@ -394,68 +266,21 @@ mod tests {
     }
 
     #[test]
-    fn a_submitted_refund_stays_until_its_transaction_is_cleared() {
-        let payment = TxId::from_bytes([1; 32]);
+    fn a_refund_leaves_when_built_or_when_its_payment_is_orphaned() {
+        let kept = TxId::from_bytes([1; 32]);
+        let orphaned = TxId::from_bytes([2; 32]);
         let mut queue = RefundQueue::new();
-        queue.record(owed(payment, 10));
-        assert_eq!(queue.owed_total(), zats(50_000));
-        let txid = TxId::from_bytes([2; 32]);
-        queue.mark_sent(payment, txid);
-        assert_eq!(queue.owed_total(), Zatoshis::ZERO);
-        assert_eq!(queue.due().len(), 1);
-        assert_eq!(queue.due()[0].sent(), Some(txid));
-        assert_eq!(queue.names(|_| false).count(), 1);
-        assert_eq!(queue.names(|_| true).count(), 0);
-        queue.clear_sent(payment);
-        assert_eq!(queue.due()[0].sent(), None);
-        assert_eq!(queue.names(|_| true).count(), 1);
-        assert_eq!(queue.owed_total(), zats(50_000));
-    }
+        assert!(admit(&mut queue, kept, 10));
+        assert!(admit(&mut queue, orphaned, 30));
+        assert_eq!(queue.owed_total(), zats(100_000));
 
-    #[test]
-    fn a_mined_refund_leaves_once_it_is_at_or_below_the_rewind_floor() {
-        let buried = TxId::from_bytes([1; 32]);
-        let recent = TxId::from_bytes([3; 32]);
-        let unsent = TxId::from_bytes([4; 32]);
-        let mut queue = RefundQueue::new();
-        for (payment, height) in [(buried, 10), (recent, 30), (unsent, 30)] {
-            queue.record(owed(payment, height));
-        }
-        let buried_tx = TxId::from_bytes([2; 32]);
-        let recent_tx = TxId::from_bytes([5; 32]);
-        queue.mark_sent(buried, buried_tx);
-        queue.mark_sent(recent, recent_tx);
-        let floor = BlockHeight::from_u32(20);
-        let dropped = queue.prune_buried(floor, |txid| {
-            if txid == buried_tx {
-                Some(BlockHeight::from_u32(20))
-            } else if txid == recent_tx {
-                Some(BlockHeight::from_u32(21))
-            } else {
-                None
-            }
-        });
-        assert_eq!(dropped, vec![buried]);
-        let left: Vec<_> = queue
-            .due()
-            .into_iter()
-            .map(|refund| refund.payment())
-            .collect();
-        assert_eq!(left, vec![recent, unsent]);
-    }
+        queue.truncate_to(BlockHeight::from_u32(20));
+        let left: Vec<_> = queue.due().iter().map(Refund::payment).collect();
+        assert_eq!(left, vec![kept]);
+        assert_eq!(queue.owed_total(), zats(50_000));
 
-    #[test]
-    fn a_replayed_payment_keeps_the_refund_transaction() {
-        let payment = TxId::from_bytes([1; 32]);
-        let mut queue = RefundQueue::new();
-        queue.record(owed(payment, 30));
-        let txid = TxId::from_bytes([2; 32]);
-        queue.mark_sent(payment, txid);
-        assert_eq!(queue.truncate_to(BlockHeight::from_u32(20)), vec![payment]);
+        queue.paid(kept);
         assert!(queue.due().is_empty());
-        queue.record(owed(payment, 40));
-        assert_eq!(queue.due()[0].sent(), Some(txid));
-        queue.prune_orphaned(|_| true);
-        assert_eq!(queue.due()[0].sent(), Some(txid));
+        assert_eq!(queue.owed_total(), Zatoshis::ZERO);
     }
 }

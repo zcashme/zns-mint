@@ -91,12 +91,6 @@ impl<P: Parameters> Wallet<P> {
         }
     }
 
-    /// The oldest checkpoint every tree still holds. A refund mined at or
-    /// below this height cannot be unmined.
-    pub(crate) fn rewind_floor(&self) -> Option<BlockHeight> {
-        self.retained_floor()
-    }
-
     /// The deepest height all three trees can truncate to: the max of their
     /// floors. `None` if any tree holds no checkpoint.
     fn retained_floor(&self) -> Option<BlockHeight> {

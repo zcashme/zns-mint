@@ -20,9 +20,8 @@ use zns_mint::mint::note::assemble;
 use zns_mint::mint::presale;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury;
-use zns_mint::mint::treasury::{OtpChallenge, OtpQueue, RefundPlan, RefundQueue};
+use zns_mint::mint::treasury::{OtpChallenge, OtpQueue, RefundQueue};
 use zns_mint::mint::{relay, Action, MintInbound, Request, TREASURY_ACCOUNT};
-use zns_mint::wallet::RefundTxStatus;
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
@@ -78,8 +77,9 @@ async fn main() {
     // failures repair and read the canonical tip. The loop never sees
     // transport state.
     let mut connection = TipSession::open(chain).await;
-    // Unsent refunds live here. A restart forgets them, as it forgets an
-    // unsent challenge; boot does not re-decide historical payments.
+    // Refunds not yet built live here. A restart forgets them, as it
+    // forgets an unsent challenge; boot does not re-decide historical
+    // payments.
     let mut refunds = RefundQueue::new();
     'run: loop {
         // Every pass ends here, however it ended: the names the queues
@@ -87,12 +87,6 @@ async fn main() {
         zns_mint::metrics::requests_in_flight(
             requests
                 .names()
-                .chain(refunds.names(|txid| {
-                    matches!(
-                        wallet.refund_tx_status(txid, wallet.tip().block_height()),
-                        RefundTxStatus::Mined
-                    )
-                }))
                 .chain(challenges.unrelayed())
                 .chain(echoes.iter().map(|(_, echo, _, _)| &echo.name))
                 .chain(name_notes.authorized_names()),
@@ -804,87 +798,18 @@ async fn main() {
             }
         }
 
-        // A refund is planned once its payment is past the rewind window,
-        // and stays owed until the refund is past it too, or the payment is
-        // kept. An accepted refund is rebroadcast until it is mined, and
-        // planned again if it expires unmined.
-        treasury::prune_buried_refunds(&mut refunds, &mut wallet);
-        for owed in refunds.due() {
-            let payment = owed.payment();
-            if let Some(txid) = owed.sent() {
-                match wallet.refund_tx_status(txid, tip) {
-                    RefundTxStatus::Mined => continue,
-                    RefundTxStatus::Pending => {
-                        match wallet.get_transaction(txid) {
-                            Ok(Some(tx)) => {
-                                source.submit(&tx, "refund").await;
-                            }
-                            Ok(None) => tracing::warn!(
-                                %txid,
-                                name = %owed.name().as_str(),
-                                "refund transaction missing; will retry"
-                            ),
-                            Err(error) => tracing::warn!(
-                                %error,
-                                %txid,
-                                name = %owed.name().as_str(),
-                                "refund transaction unreadable"
-                            ),
-                        }
-                        continue;
-                    }
-                    RefundTxStatus::Expired => {
-                        treasury::refund_rejected(&mut wallet, txid);
-                        refunds.clear_sent(payment);
-                    }
-                }
-            }
-            let to = zcash_keys::address::Address::Unified(Box::new(owed.recipient().clone()));
-            match treasury::plan_refund(
-                &network,
-                &mut wallet,
-                &fee_rule,
-                owed.height(),
-                owed.amount(),
-                &to,
-            ) {
-                Ok(RefundPlan::Wait) => {}
-                Ok(RefundPlan::Send(proposal)) => {
-                    match treasury::build_refund(
-                        &network,
-                        &mut wallet,
-                        &treasury_keys,
-                        &sapling_spend,
-                        &sapling_output,
-                        &proposal,
-                    ) {
-                        Ok(tx) => {
-                            if source.submit(&tx, "refund").await {
-                                tracing::info!(
-                                    txid = %tx.txid(),
-                                    name = %owed.name().as_str(),
-                                    amount = owed.amount().into_u64(),
-                                    "refund submitted"
-                                );
-                                refunds.mark_sent(payment, tx.txid());
-                            } else {
-                                treasury::refund_rejected(&mut wallet, tx.txid());
-                                tracing::warn!(
-                                    txid = %tx.txid(),
-                                    name = %owed.name().as_str(),
-                                    "refund rejected; will retry"
-                                );
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, name = %owed.name().as_str(), "refund not built");
-                        }
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, name = %owed.name().as_str(), "refund not planned");
-                }
-            }
+        // A refund is built on the pass after its payment's block, like a
+        // Name Note. The wallet owns it from there, like a sweep.
+        for tx in treasury::refund(
+            &network,
+            &mut wallet,
+            &treasury_keys,
+            &sapling_spend,
+            &sapling_output,
+            &fee_rule,
+            &mut refunds,
+        ) {
+            source.submit(&tx, "refund").await;
         }
 
         // A new MTP day sweeps the Treasury to the vault once. What the
