@@ -9,7 +9,7 @@ mod refund;
 pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
 pub use refund::{
     access_code_penalty, payment_against_quote, refund_output, PaymentAgainstQuote, Refund,
-    RefundQueue,
+    RefundQueue, REFUND_FEE_ACTIONS,
 };
 
 use std::convert::Infallible;
@@ -112,26 +112,23 @@ impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::err
 pub enum RefundPlan {
     /// Build and broadcast this proposal.
     Send(Box<TreasuryProposal>),
-    /// The payment does not cover the fee the proposal would charge.
+    /// The payment does not cover the withheld fee. It is kept.
     Dust,
-    /// The payment can still be reorged out, the note is not spendable
-    /// yet, or the fee did not settle.
+    /// The payment can still be reorged out, the Treasury cannot fund the
+    /// refund yet, or its fee would exceed what the payer covers.
     Wait,
 }
 
-/// A proposal that spends `note` and pays `to` what remains of `paid`.
-///
-/// `penalty` stays as change. The note is the whole input, so the
-/// Treasury adds nothing. A fee that does not match that shape is tried
-/// once more; a second miss waits. Nothing is proposed until the payment
-/// at `payment_height` is at or below the rewind floor, where no reorg
-/// can remove it.
+/// A Treasury payment to `to` of `paid` less `penalty` and the withheld
+/// fee. Any Treasury notes fund it. The proposal's fee must fit in the
+/// withheld fee, so the payer always covers it. Nothing is proposed until
+/// the payment at `payment_height` is at or below the rewind floor, where
+/// no reorg can remove it.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_refund<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
     fee_rule: &FeeRule,
-    note: NoteId,
     payment_height: BlockHeight,
     paid: Zatoshis,
     penalty: Zatoshis,
@@ -143,126 +140,50 @@ pub fn plan_refund<P: Parameters>(
     {
         return Ok(RefundPlan::Wait);
     }
-    let Some(value) = wallet.spendable_note_value(TREASURY_ACCOUNT, note) else {
-        return Ok(RefundPlan::Wait);
-    };
-    if value != paid {
-        tracing::warn!(
-            paid = paid.into_u64(),
-            note = value.into_u64(),
-            "refund note value disagrees with the payment"
-        );
-        return Ok(RefundPlan::Wait);
-    }
-    let Some(returning) = paid - penalty else {
+    let Some(amount) = (paid - penalty).and_then(|net| refund_output(net, fee_rule)) else {
         return Ok(RefundPlan::Dust);
     };
-    let Some(mut fee) = fee_rule.marginal_fee() * fee_rule.grace_actions() else {
+    let Some(withheld) = fee_rule.marginal_fee() * REFUND_FEE_ACTIONS else {
         return Ok(RefundPlan::Wait);
     };
-    // The first guess is one shielded action. The built fee can be higher
-    // when the output pool is not the note's pool. One revision settles
-    // a stable shape; a third guess waits for the next tip.
-    for _ in 0..2 {
-        if returning <= fee {
-            return Ok(RefundPlan::Dust);
-        }
-        let amount = (returning - fee).expect("the remainder exceeds the fee");
-        match propose_one_note(network, wallet, fee_rule, note, to, amount) {
-            Ok(proposal) => {
-                if refund_settles(&proposal, note, paid, penalty) {
-                    return Ok(RefundPlan::Send(Box::new(proposal)));
-                }
-                fee = proposal.steps().first().balance().fee_required();
-            }
-            Err(Error::InsufficientFunds {
-                required,
-                available,
-            }) if available == paid => {
-                let Some(wanted) = required - amount else {
-                    return Ok(RefundPlan::Wait);
-                };
-                fee = wanted;
-            }
-            Err(Error::ScanRequired) | Err(Error::InsufficientFunds { .. }) => {
-                return Ok(RefundPlan::Wait);
-            }
-            Err(error) => return Err(BuildFailure::Proposal(error)),
-        }
-    }
-    Ok(RefundPlan::Wait)
-}
-
-/// Spends `note` and no other. The limit is cleared before this returns.
-fn propose_one_note<P: Parameters>(
-    network: &P,
-    wallet: &mut Wallet<P>,
-    fee_rule: &FeeRule,
-    note: NoteId,
-    to: &zcash_keys::address::Address,
-    amount: Zatoshis,
-) -> Result<TreasuryProposal, TreasuryProposalError<P>> {
-    wallet.set_refund_note(Some(note));
-    // A penalty below the marginal fee is still the change. The sweep and
-    // the relays reject change at or below `MARGINAL_FEE`.
     let request = TransactionRequest::new(vec![Payment::without_memo(
         to.to_zcash_address(network),
         amount,
     )])
-    .expect("one shielded payment satisfies a ZIP 321 request");
-    let change_strategy = SingleOutputChangeStrategy::new(
-        fee_rule.clone(),
-        None,
-        ShieldedPool::Ironwood,
-        DustOutputPolicy::new(DustAction::AllowDustChange, None),
-    );
-    let result = propose_transfer(
+    .expect("one payment is a valid ZIP 321 request");
+    let proposal = match propose_transfer::<_, _, _, _, Infallible>(
         wallet,
         network,
         TREASURY_ACCOUNT,
         &GreedyInputSelector::new(),
-        &change_strategy,
+        &SingleOutputChangeStrategy::new(
+            fee_rule.clone(),
+            None,
+            ShieldedPool::Ironwood,
+            DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE)),
+        ),
         request,
         crate::wallet::CONFIRMATIONS,
         &SpendPolicy::default(),
         None,
         None,
-    );
-    wallet.set_refund_note(None);
-    result
-}
-
-/// The proposal spends `note` alone, leaves `penalty` as change, and
-/// pays out `paid` minus that minus the fee.
-fn refund_settles(
-    proposal: &TreasuryProposal,
-    note: NoteId,
-    paid: Zatoshis,
-    penalty: Zatoshis,
-) -> bool {
-    let step = proposal.steps().first();
-    let Some(inputs) = step.shielded_inputs() else {
-        return false;
+    ) {
+        Ok(proposal) => proposal,
+        Err(Error::InsufficientFunds { .. }) | Err(Error::ScanRequired) => {
+            return Ok(RefundPlan::Wait);
+        }
+        Err(error) => return Err(BuildFailure::Proposal(error)),
     };
-    if inputs.notes().len() != 1 || *inputs.notes().first().internal_note_id() != note {
-        return false;
+    let fee = proposal.steps().first().balance().fee_required();
+    if fee > withheld {
+        tracing::warn!(
+            fee = fee.into_u64(),
+            withheld = withheld.into_u64(),
+            "refund fee exceeds what the payer covers; waiting"
+        );
+        return Ok(RefundPlan::Wait);
     }
-    let Some(change) = step
-        .balance()
-        .proposed_change()
-        .iter()
-        .map(|change| change.value())
-        .sum::<Option<Zatoshis>>()
-    else {
-        return false;
-    };
-    if change != penalty {
-        return false;
-    }
-    let Ok(Some(sent)) = step.transaction_request().total() else {
-        return false;
-    };
-    (sent + step.balance().fee_required() + penalty) == Some(paid)
+    Ok(RefundPlan::Send(Box::new(proposal)))
 }
 
 /// When `paid` is below `price`, keeps it or admits a refund to `recipient`.
@@ -703,12 +624,11 @@ impl RequestQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mint::{Action, Name, Term, TREASURY_ACCOUNT};
+    use crate::mint::{Action, Name, Term};
     use crate::wallet::testing::{Cache, Factory};
     use crate::zcash::fees::fee_rule;
     use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
     use zcash_client_backend::data_api::testing::sapling::SaplingPoolTester;
-    use zcash_client_backend::data_api::wallet::TargetHeight;
     use zcash_protocol::consensus::MainNetwork;
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
@@ -1003,7 +923,7 @@ mod tests {
     fn a_refund_waits_until_its_payment_is_buried() {
         let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
             .build::<SaplingPoolTester>();
-        st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(100_000)]]);
+        st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(80_000_000)]]);
         st.add_empty_blocks(1);
 
         let network = *st.network();
@@ -1011,24 +931,13 @@ mod tests {
             .wallet()
             .rewind_floor()
             .expect("the trees hold a checkpoint");
-        let tip = TargetHeight::from(st.wallet().tip().block_height() + 1);
-        let paid = Zatoshis::const_from_u64(100_000);
-        let payment = *st
-            .wallet()
-            .unspent_sapling_notes(TREASURY_ACCOUNT, tip)
-            .iter()
-            .find(|note| note.note_value().unwrap() == paid)
-            .expect("payment note")
-            .internal_note_id();
-        st.wallet_mut().reserve_refund(payment);
         let to = vault_address(&network);
-
+        let paid = Zatoshis::const_from_u64(100_000);
         let plan = |st: &mut _, height| {
             plan_refund(
                 &network,
                 st,
                 &FeeRule::standard(),
-                payment,
                 height,
                 paid,
                 Zatoshis::ZERO,
@@ -1040,17 +949,13 @@ mod tests {
         assert!(matches!(plan(st.wallet_mut(), floor), RefundPlan::Send(_)));
     }
 
-    /// The payment note funds the refund. While it is owed, the sweep
-    /// spends the other notes and a later attempt still selects it.
+    /// The refund pays `paid` less the penalty and the withheld fee, from
+    /// any Treasury notes. Its fee fits in what was withheld.
     #[test]
-    fn an_underpaid_note_is_refunded_and_stays_out_of_the_sweep() {
+    fn a_refund_is_a_treasury_payment_less_the_withheld_fee() {
         let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
             .build::<SaplingPoolTester>();
-        st.add_notes_checking_balance([
-            vec![Zatoshis::const_from_u64(100_000)],
-            vec![Zatoshis::const_from_u64(80_000_000)],
-            vec![Zatoshis::const_from_u64(80_000_000)],
-        ]);
+        st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(80_000_000)]]);
         st.add_empty_blocks(1);
 
         let network = *st.network();
@@ -1058,169 +963,76 @@ mod tests {
             .wallet()
             .rewind_floor()
             .expect("the trees hold a checkpoint");
-        let tip = TargetHeight::from(st.wallet().tip().block_height() + 1);
-        let paid = Zatoshis::const_from_u64(100_000);
-        let payment = *st
-            .wallet()
-            .unspent_sapling_notes(TREASURY_ACCOUNT, tip)
-            .iter()
-            .find(|note| note.note_value().unwrap() == paid)
-            .expect("payment note")
-            .internal_note_id();
         let to = vault_address(&network);
+        let paid = Zatoshis::const_from_u64(100_000);
+        let withheld = (MARGINAL_FEE * REFUND_FEE_ACTIONS).unwrap();
 
-        let proposal = match plan_refund(
-            &network,
-            st.wallet_mut(),
-            &FeeRule::standard(),
-            payment,
-            floor,
-            paid,
-            Zatoshis::ZERO,
-            &to,
-        )
-        .expect("plan")
-        {
-            RefundPlan::Send(proposal) => proposal,
-            other => panic!("refund plan was not send: {other:?}"),
-        };
-        let step = proposal.steps().first();
-        let inputs = step.shielded_inputs().expect("one shielded input");
-        assert_eq!(inputs.notes().len(), 1);
-        assert_eq!(*inputs.notes().first().internal_note_id(), payment);
-        let sent = step
-            .transaction_request()
-            .total()
-            .expect("total")
-            .expect("the payment has an amount");
-        assert_eq!((sent + step.balance().fee_required()).unwrap(), paid);
-        assert_eq!(
-            step.transaction_request()
-                .payments()
-                .values()
-                .next()
-                .expect("one payment")
-                .recipient_address(),
-            &to.to_zcash_address(&network)
-        );
-        assert_eq!(
-            step.balance()
-                .proposed_change()
-                .iter()
-                .map(|change| change.value())
-                .sum::<Option<Zatoshis>>()
-                .expect("change"),
-            Zatoshis::ZERO
-        );
-
-        let penalty = Zatoshis::const_from_u64(20_000);
-        let penalized = match plan_refund(
-            &network,
-            st.wallet_mut(),
-            &FeeRule::standard(),
-            payment,
-            floor,
-            paid,
-            penalty,
-            &to,
-        )
-        .expect("penalized plan")
-        {
-            RefundPlan::Send(proposal) => proposal,
-            other => panic!("penalized refund plan was not send: {other:?}"),
-        };
-        let penalized_step = penalized.steps().first();
-        let penalized_sent = penalized_step
-            .transaction_request()
-            .total()
-            .expect("total")
-            .expect("the payment has an amount");
-        assert_eq!(
-            (penalized_sent + penalized_step.balance().fee_required() + penalty).unwrap(),
-            paid
-        );
-        assert_eq!(
-            penalized_step
-                .balance()
-                .proposed_change()
-                .iter()
-                .map(|change| change.value())
-                .sum::<Option<Zatoshis>>()
-                .expect("change"),
-            penalty
-        );
-
-        let dust_penalty = Zatoshis::const_from_u64(1_000);
-        let dust = match plan_refund(
-            &network,
-            st.wallet_mut(),
-            &FeeRule::standard(),
-            payment,
-            floor,
-            paid,
-            dust_penalty,
-            &to,
-        )
-        .expect("dust penalty plan")
-        {
-            RefundPlan::Send(proposal) => proposal,
-            other => panic!("dust-penalty refund plan was not send: {other:?}"),
-        };
-        let dust_step = dust.steps().first();
-        let dust_sent = dust_step
-            .transaction_request()
-            .total()
-            .expect("total")
-            .expect("the payment has an amount");
-        assert_eq!(
-            (dust_sent + dust_step.balance().fee_required() + dust_penalty).unwrap(),
-            paid
-        );
-        assert_eq!(
-            dust_step
-                .balance()
-                .proposed_change()
-                .iter()
-                .map(|change| change.value())
-                .sum::<Option<Zatoshis>>()
-                .expect("change"),
-            dust_penalty
-        );
-
-        st.wallet_mut().reserve_refund(payment);
-        assert!(matches!(
-            plan_refund(
+        for penalty in [Zatoshis::ZERO, Zatoshis::const_from_u64(20_000)] {
+            let proposal = match plan_refund(
                 &network,
                 st.wallet_mut(),
                 &FeeRule::standard(),
-                payment,
                 floor,
                 paid,
-                Zatoshis::ZERO,
-                &to
+                penalty,
+                &to,
             )
-            .expect("retry"),
-            RefundPlan::Send(_)
-        ));
+            .expect("plan")
+            {
+                RefundPlan::Send(proposal) => proposal,
+                other => panic!("refund plan was not send: {other:?}"),
+            };
+            let step = proposal.steps().first();
+            let payment = step
+                .transaction_request()
+                .payments()
+                .values()
+                .next()
+                .expect("one payment");
+            assert_eq!(payment.recipient_address(), &to.to_zcash_address(&network));
+            assert_eq!(
+                payment.amount(),
+                Some(((paid - penalty) - withheld).unwrap())
+            );
+            assert!(step.balance().fee_required() <= withheld);
+        }
+    }
 
-        let sweep = propose_vault_sweep(
-            &network,
-            st.wallet_mut(),
-            &FeeRule::standard(),
-            Zatoshis::ZERO,
-        )
-        .expect("sweep")
-        .expect("the other notes clear the minimum");
-        let spent: Vec<_> = sweep
-            .steps()
-            .first()
-            .shielded_inputs()
-            .expect("sweep inputs")
-            .notes()
-            .iter()
-            .map(|note| *note.internal_note_id())
-            .collect();
-        assert_eq!(spent.len(), 2);
-        assert!(!spent.contains(&payment));
+    /// A payment that does not cover the penalty and the withheld fee is
+    /// kept, and a Treasury that cannot fund the refund waits.
+    #[test]
+    fn a_refund_is_kept_when_small_and_waits_when_unfunded() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(20_000)]]);
+        st.add_empty_blocks(1);
+
+        let network = *st.network();
+        let floor = st
+            .wallet()
+            .rewind_floor()
+            .expect("the trees hold a checkpoint");
+        let to = vault_address(&network);
+        let plan = |st: &mut _, paid, penalty| {
+            plan_refund(
+                &network,
+                st,
+                &FeeRule::standard(),
+                floor,
+                paid,
+                penalty,
+                &to,
+            )
+            .expect("plan")
+        };
+        let paid = Zatoshis::const_from_u64(100_000);
+        assert!(matches!(
+            plan(st.wallet_mut(), paid, Zatoshis::const_from_u64(60_000)),
+            RefundPlan::Dust
+        ));
+        assert!(matches!(
+            plan(st.wallet_mut(), paid, Zatoshis::ZERO),
+            RefundPlan::Wait
+        ));
     }
 }

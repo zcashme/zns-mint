@@ -1,5 +1,16 @@
 # Treasury design record
 
+## 2026-10-24 — A refund is a plain Treasury payment
+
+- `plan_refund` proposes one payment of `paid − penalty − withheld` to
+  the memo's UA, funded from any Treasury notes, with the same change
+  rule as the sweep and the relay. `withheld` is `REFUND_FEE_ACTIONS`
+  (10) at the node's rate. A proposal whose fee exceeds it waits, so the
+  payer always covers the fee and the Treasury never adds to it.
+- The penalty is not change any more; the Treasury keeps it by paying
+  back less. The refund-or-keep line is the withheld fee.
+- `propose_one_note`, `refund_settles` and the fee-guess loop are gone.
+
 ## 2026-10-24 — A refund waits until its payment is buried
 
 - `plan_refund` takes the payment's height and waits until it is at or
@@ -50,7 +61,6 @@
   transaction is built and after that transaction expires.
 - Echoes are decided before relays, so an underpaid renewal is reserved
   before another spend can take its note.
-- A penalty below the marginal fee is valid change on a refund.
 - A refund mined at or below the wallet's rewind floor leaves the queue.
 - A second claim for a name that already has a Name Note queued is
   refunded, less the fee.

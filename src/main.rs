@@ -871,7 +871,6 @@ async fn main() {
                 &network,
                 &mut wallet,
                 &fee_rule,
-                note,
                 owed.height(),
                 owed.paid(),
                 owed.penalty(),

@@ -1,9 +1,10 @@
 //! Refunds owed by the run loop.
 //!
-//! The payment note funds the refund, fee included. A wrong access code
-//! also leaves 1% of the quote as change. The queue is memory: a restart
-//! forgets a refund that has not been mined, and the next sweep may take
-//! the note.
+//! A refund is a Treasury payment, funded from any Treasury notes once the
+//! payment it returns is buried. The payer covers its fee: the refund
+//! withholds `REFUND_FEE_ACTIONS` at the node's rate. A wrong access code
+//! also keeps 1% of the quote. The queue is memory: a restart forgets a
+//! refund that has not been mined.
 
 use std::num::NonZeroU64;
 
@@ -14,6 +15,10 @@ use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::{Zatoshis, MAX_MONEY};
 
 use crate::mint::{Name, UnifiedAddress};
+
+/// Actions' worth of fee withheld from every refund. The Treasury never
+/// adds to a refund's fee; a proposal that would charge more waits.
+pub const REFUND_FEE_ACTIONS: usize = 10;
 
 /// How `paid` stands against the quote and the refund fee.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,9 +47,9 @@ pub fn payment_against_quote(
     }
 }
 
-/// `paid` minus the one-action fee, when that remainder is positive.
+/// `paid` minus the withheld refund fee, when that remainder is positive.
 pub fn refund_output(paid: Zatoshis, fee_rule: &FeeRule) -> Option<Zatoshis> {
-    let fee = (fee_rule.marginal_fee() * fee_rule.grace_actions())?;
+    let fee = (fee_rule.marginal_fee() * REFUND_FEE_ACTIONS)?;
     (paid - fee).filter(|output| *output > Zatoshis::ZERO)
 }
 
@@ -249,7 +254,12 @@ impl RefundQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
+    use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
+
+    /// The standard rate's withheld fee: 50,000 zats.
+    fn withheld() -> Zatoshis {
+        (MARGINAL_FEE * REFUND_FEE_ACTIONS).unwrap()
+    }
 
     fn zats(n: u64) -> Zatoshis {
         Zatoshis::const_from_u64(n)
@@ -257,8 +267,8 @@ mod tests {
 
     #[test]
     fn an_underpaid_claim_refunds_the_payment_minus_the_fee() {
-        let fee = MINIMUM_FEE;
-        let paid = zats(50_000);
+        let fee = withheld();
+        let paid = zats(80_000);
         assert_eq!(
             payment_against_quote(paid, zats(100_000), &FeeRule::standard()),
             PaymentAgainstQuote::Remainder((paid - fee).unwrap())
@@ -267,7 +277,7 @@ mod tests {
 
     #[test]
     fn a_payment_that_does_not_exceed_the_fee_is_kept() {
-        let fee = MINIMUM_FEE;
+        let fee = withheld();
         assert_eq!(
             payment_against_quote(fee, zats(100_000), &FeeRule::standard()),
             PaymentAgainstQuote::BelowFee
@@ -286,7 +296,7 @@ mod tests {
     fn a_wrong_access_code_keeps_one_percent_then_the_fee() {
         let price = zats(100_000);
         let penalty = zats(1_000);
-        let fee = MINIMUM_FEE;
+        let fee = withheld();
         let paid = price;
         assert_eq!(access_code_penalty(price), penalty);
         let net = (paid - penalty).unwrap();
@@ -297,7 +307,7 @@ mod tests {
     fn a_payment_that_does_not_cover_the_penalty_and_the_fee_is_kept() {
         let price = zats(100_000);
         let penalty = access_code_penalty(price);
-        let fee = MINIMUM_FEE;
+        let fee = withheld();
         let covers_the_penalty = (penalty + fee).unwrap();
         assert_eq!(
             refund_output(
@@ -324,9 +334,9 @@ mod tests {
 
     #[test]
     fn a_lower_node_rate_refunds_a_payment_the_standard_rate_keeps() {
-        let paid = zats(5_000);
+        let paid = zats(20_000);
         let node = crate::zcash::fees::fee_rule(zats(1_000));
-        assert_eq!(refund_output(paid, &node), Some(zats(3_000)));
+        assert_eq!(refund_output(paid, &node), Some(zats(10_000)));
         assert_eq!(refund_output(paid, &FeeRule::standard()), None);
     }
 
