@@ -94,7 +94,7 @@ async fn main() {
                     )
                 }))
                 .chain(challenges.unrelayed())
-                .chain(echoes.iter().map(|(_, _, echo, _, _)| &echo.name))
+                .chain(echoes.iter().map(|(_, echo, _, _)| &echo.name))
                 .chain(name_notes.authorized_names()),
             challenges.relayed(),
         );
@@ -195,7 +195,7 @@ async fn main() {
             name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
             refunds.truncate_to(rewound);
-            echoes.retain(|(_, _, _, _, height)| *height <= rewound);
+            echoes.retain(|(_, _, _, height)| *height <= rewound);
             tracing::warn!(
                 height = u32::from(rewound),
                 hash = %wallet.tip().block_hash(),
@@ -293,21 +293,13 @@ async fn main() {
                 &mut mtp,
             );
             name_notes.reconcile_seen(&network, &registry);
-            for (txid, output_index, inbound, paid) in arrivals {
+            for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
-                        let output_index = u16::try_from(output_index).ok();
-                        if output_index.is_none() {
-                            tracing::error!(%txid, "treasury output index does not fit a note id");
-                        }
-                        requests.record(txid, output_index, request, paid, next_height);
+                        requests.record(txid, request, paid, next_height);
                     }
                     MintInbound::Echo(echo) => {
-                        let output_index = u16::try_from(output_index).ok();
-                        if output_index.is_none() {
-                            tracing::error!(%txid, "treasury output index does not fit a note id");
-                        }
-                        echoes.push((txid, output_index, echo, paid, next_height));
+                        echoes.push((txid, echo, paid, next_height));
                     }
                     MintInbound::Unrecognized => {
                         tracing::info!(
@@ -402,7 +394,7 @@ async fn main() {
         // exactly once, in queue order. A resolved entry leaves the
         // queue — refused by a gate, or handed to the queue that owns
         // its retries. Nothing defers; nothing is re-read.
-        for (txid, output_index, request, paid, note_height) in requests.pending() {
+        for (txid, request, paid, note_height) in requests.pending() {
             let resolved = 'lane: {
                 match &request {
                     Request::Claim {
@@ -444,7 +436,6 @@ async fn main() {
                                 &mut refunds,
                                 &fee_rule,
                                 txid,
-                                output_index,
                                 paid,
                                 treasury::access_code_penalty(price),
                                 ua,
@@ -467,7 +458,6 @@ async fn main() {
                             &mut refunds,
                             &fee_rule,
                             txid,
-                            output_index,
                             paid,
                             price,
                             ua,
@@ -488,7 +478,6 @@ async fn main() {
                                     &mut refunds,
                                     &fee_rule,
                                     txid,
-                                    output_index,
                                     paid,
                                     Zatoshis::ZERO,
                                     ua,
@@ -511,7 +500,6 @@ async fn main() {
                                 &mut refunds,
                                 &fee_rule,
                                 txid,
-                                output_index,
                                 paid,
                                 Zatoshis::ZERO,
                                 ua,
@@ -544,7 +532,6 @@ async fn main() {
                             &mut refunds,
                             &fee_rule,
                             txid,
-                            output_index,
                             paid,
                             oracle.challenge_fee(),
                             requested_ua,
@@ -595,7 +582,7 @@ async fn main() {
         // OTP responses are decided before relays. An underpaid renewal is
         // queued for a refund here. A voided echo leaves its challenge
         // available.
-        for (txid, output_index, echo, paid, note_height) in std::mem::take(&mut echoes) {
+        for (txid, echo, paid, note_height) in std::mem::take(&mut echoes) {
             let _ = 'lane: {
                 // An OTP response is decided on this pass. It never waits
                 // for money. A renewal or upgrade below its quote does
@@ -618,7 +605,6 @@ async fn main() {
                         &mut refunds,
                         &fee_rule,
                         txid,
-                        output_index,
                         paid,
                         price,
                         &echo.ua,
@@ -636,7 +622,6 @@ async fn main() {
                         &mut refunds,
                         &fee_rule,
                         txid,
-                        output_index,
                         paid,
                         Zatoshis::ZERO,
                         &echo.ua,
@@ -833,7 +818,7 @@ async fn main() {
         // planned again if it expires unmined.
         treasury::prune_buried_refunds(&mut refunds, &mut wallet);
         for owed in refunds.due() {
-            let note = owed.note();
+            let payment = owed.payment();
             if let Some(txid) = owed.sent() {
                 match wallet.refund_tx_status(txid, tip) {
                     RefundTxStatus::Mined => continue,
@@ -858,7 +843,7 @@ async fn main() {
                     }
                     RefundTxStatus::Expired => {
                         treasury::refund_rejected(&mut wallet, txid);
-                        refunds.clear_sent(note);
+                        refunds.clear_sent(payment);
                     }
                 }
             }
@@ -874,9 +859,9 @@ async fn main() {
             ) {
                 Ok(RefundPlan::Wait) => {}
                 Ok(RefundPlan::Dust) => {
-                    refunds.release(note);
+                    refunds.release(payment);
                     tracing::info!(
-                        txid = %note.txid(),
+                        txid = %payment,
                         name = %owed.name().as_str(),
                         paid = owed.paid().into_u64(),
                         "payment kept"
@@ -899,7 +884,7 @@ async fn main() {
                                     paid = owed.paid().into_u64(),
                                     "refund submitted"
                                 );
-                                refunds.mark_sent(note, tx.txid());
+                                refunds.mark_sent(payment, tx.txid());
                             } else {
                                 treasury::refund_rejected(&mut wallet, tx.txid());
                                 tracing::warn!(

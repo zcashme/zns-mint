@@ -110,8 +110,8 @@ pub struct Boot<P: Parameters> {
     pub name_notes: NameNoteQueue,
     /// initialized: pending Treasury requests
     pub requests: RequestQueue,
-    /// initialized: pending OTP echoes, each with its payment note
-    pub echoes: Vec<(TxId, Option<u16>, OtpMemo, Zatoshis, BlockHeight)>,
+    /// initialized: pending OTP echoes, each with its payment txid
+    pub echoes: Vec<(TxId, OtpMemo, Zatoshis, BlockHeight)>,
     /// The exact encoded identity written to the boot identity document.
     pub treasury_address: String,
     pub registry_ufvk: String,
@@ -1638,7 +1638,7 @@ mod tests {
                 } else {
                     assert!(matches!(
                         arrivals.as_slice(),
-                        [(txid, _, crate::mint::MintInbound::Request(request), paid)]
+                        [(txid, crate::mint::MintInbound::Request(request), paid)]
                             if *txid == ceremony_txid && request == &expected_request
                                 && paid.into_u64() == 50_000
                     ));

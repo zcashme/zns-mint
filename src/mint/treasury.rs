@@ -184,7 +184,6 @@ pub fn refund_underpaid(
     refunds: &mut RefundQueue,
     fee_rule: &FeeRule,
     txid: TxId,
-    output_index: Option<u16>,
     paid: Zatoshis,
     price: Zatoshis,
     recipient: &UnifiedAddress,
@@ -199,7 +198,6 @@ pub fn refund_underpaid(
                 refunds,
                 fee_rule,
                 txid,
-                output_index,
                 paid,
                 Zatoshis::ZERO,
                 recipient,
@@ -220,7 +218,6 @@ pub fn refund_keeping(
     refunds: &mut RefundQueue,
     fee_rule: &FeeRule,
     txid: TxId,
-    output_index: Option<u16>,
     paid: Zatoshis,
     penalty: Zatoshis,
     recipient: &UnifiedAddress,
@@ -230,17 +227,7 @@ pub fn refund_keeping(
     reason: &'static str,
 ) -> bool {
     admit_refund(
-        refunds,
-        fee_rule,
-        txid,
-        output_index,
-        paid,
-        penalty,
-        recipient,
-        name,
-        height,
-        kind,
-        reason,
+        refunds, fee_rule, txid, paid, penalty, recipient, name, height, kind, reason,
     )
 }
 
@@ -251,7 +238,6 @@ fn admit_refund(
     refunds: &mut RefundQueue,
     fee_rule: &FeeRule,
     txid: TxId,
-    output_index: Option<u16>,
     paid: Zatoshis,
     penalty: Zatoshis,
     recipient: &UnifiedAddress,
@@ -279,11 +265,6 @@ fn admit_refund(
         kept();
         return false;
     };
-    let Some(index) = output_index else {
-        kept();
-        return false;
-    };
-    let note = NoteId::new(txid, ShieldedPool::Ironwood, index);
     tracing::info!(
         %txid,
         name = %name.as_str(),
@@ -295,7 +276,7 @@ fn admit_refund(
         "payment refund"
     );
     refunds.admit(Refund::new(
-        note,
+        txid,
         recipient.clone(),
         paid,
         penalty,
@@ -551,32 +532,23 @@ pub fn challenge<P: Parameters>(
 // ---------------------------------------------------------------------------
 
 /// Treasury requests decoded once at block application: what each memo
-/// said, what it paid, which output carried it, the block. Entries are
-/// queued at block application and leave by decision (`resolved`) or by
-/// reorg (`truncate_to`); nothing else removes them.
+/// said, what it paid, the block that carried it. Entries are queued at
+/// block application and leave by decision (`resolved`) or by reorg
+/// (`truncate_to`); nothing else removes them.
 #[derive(Clone, Debug, Default)]
 pub struct RequestQueue {
-    requests: Vec<(TxId, Option<u16>, Request, Zatoshis, BlockHeight)>,
+    requests: Vec<(TxId, Request, Zatoshis, BlockHeight)>,
 }
 
 impl RequestQueue {
     /// A recognized request, routed after block application. Admission
     /// records facts in transaction order; the deciding pass rules.
-    /// `output_index` names the shielded output the payment arrived on.
-    pub fn record(
-        &mut self,
-        txid: TxId,
-        output_index: Option<u16>,
-        request: Request,
-        paid: Zatoshis,
-        height: BlockHeight,
-    ) {
-        self.requests
-            .push((txid, output_index, request, paid, height));
+    pub fn record(&mut self, txid: TxId, request: Request, paid: Zatoshis, height: BlockHeight) {
+        self.requests.push((txid, request, paid, height));
     }
 
     /// Every request pending decision, in queue order.
-    pub fn pending(&self) -> Vec<(TxId, Option<u16>, Request, Zatoshis, BlockHeight)> {
+    pub fn pending(&self) -> Vec<(TxId, Request, Zatoshis, BlockHeight)> {
         self.requests.clone()
     }
 
@@ -584,18 +556,18 @@ impl RequestQueue {
     pub fn names(&self) -> impl Iterator<Item = &Name> {
         self.requests
             .iter()
-            .map(|(_, _, request, _, _)| request.name())
+            .map(|(_, request, _, _)| request.name())
     }
 
     /// The request is decided. The only removal besides reorg truncation.
     pub fn resolved(&mut self, txid: TxId) {
-        self.requests.retain(|(queued, _, _, _, _)| *queued != txid);
+        self.requests.retain(|(queued, _, _, _)| *queued != txid);
     }
 
     /// Reorg: entries whose block was orphaned fall with it.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
         self.requests
-            .retain(|(_, _, _, _, height)| *height <= ancestor);
+            .retain(|(_, _, _, height)| *height <= ancestor);
     }
 }
 
@@ -731,14 +703,12 @@ mod tests {
 
         queue.record(
             TxId::from_bytes([1; 32]),
-            Some(0),
             request(Action::Claim),
             Zatoshis::ZERO,
             h(100),
         );
         queue.record(
             TxId::from_bytes([2; 32]),
-            Some(0),
             request(Action::Update),
             Zatoshis::ZERO,
             h(101),
@@ -747,8 +717,8 @@ mod tests {
         let pending = queue.pending();
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].0, TxId::from_bytes([1; 32]));
-        assert_eq!(pending[0].4, h(100));
-        assert_eq!(pending[1].4, h(101));
+        assert_eq!(pending[0].3, h(100));
+        assert_eq!(pending[1].3, h(101));
     }
 
     #[test]
@@ -763,7 +733,6 @@ mod tests {
 
         queue.record(
             TxId::from_bytes([1; 32]),
-            Some(0),
             Request::Claim {
                 name: alice.clone(),
                 ua: ua.clone(),
@@ -775,7 +744,6 @@ mod tests {
         );
         queue.record(
             TxId::from_bytes([2; 32]),
-            Some(0),
             Request::Claim {
                 name: alice.clone(),
                 ua: ua.clone(),
@@ -787,7 +755,6 @@ mod tests {
         );
         queue.record(
             TxId::from_bytes([3; 32]),
-            Some(0),
             Request::Claim {
                 name: bob,
                 ua,
@@ -805,11 +772,11 @@ mod tests {
         assert_eq!(pending[1].0, TxId::from_bytes([2; 32]));
         assert_eq!(pending[2].0, TxId::from_bytes([3; 32]));
         assert!(matches!(
-            pending[0].2,
+            pending[0].1,
             Request::Claim { ref name, .. } if name.as_str() == "alice"
         ));
         assert!(matches!(
-            pending[1].2,
+            pending[1].1,
             Request::Claim { ref name, .. } if name.as_str() == "alice"
         ));
     }
@@ -819,21 +786,18 @@ mod tests {
         let mut queue = RequestQueue::default();
         queue.record(
             TxId::from_bytes([1; 32]),
-            Some(0),
             request(Action::Claim),
             Zatoshis::ZERO,
             h(100),
         );
         queue.record(
             TxId::from_bytes([2; 32]),
-            Some(0),
             request(Action::Update),
             Zatoshis::ZERO,
             h(101),
         );
         queue.record(
             TxId::from_bytes([3; 32]),
-            Some(0),
             request(Action::Release),
             Zatoshis::ZERO,
             h(102),
@@ -845,20 +809,14 @@ mod tests {
         // The neighbors kept their relative order.
         assert_eq!(pending[0].0, TxId::from_bytes([1; 32]));
         assert_eq!(pending[1].0, TxId::from_bytes([3; 32]));
-        assert!(matches!(pending[1].2, Request::Release { .. }));
-        assert_eq!(pending[1].4, h(102));
+        assert!(matches!(pending[1].1, Request::Release { .. }));
+        assert_eq!(pending[1].3, h(102));
     }
 
     #[test]
     fn resolved_unknown_txid_is_a_no_op() {
         let mut queue = RequestQueue::default();
-        queue.record(
-            TxId::NULL,
-            Some(0),
-            request(Action::Claim),
-            Zatoshis::ZERO,
-            h(100),
-        );
+        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
 
         queue.resolved(TxId::from_bytes([9; 32]));
         assert_eq!(queue.pending().len(), 1);
@@ -867,33 +825,15 @@ mod tests {
     #[test]
     fn queue_truncate_drops_only_orphaned_heights() {
         let mut queue = RequestQueue::default();
-        queue.record(
-            TxId::NULL,
-            Some(0),
-            request(Action::Claim),
-            Zatoshis::ZERO,
-            h(100),
-        );
-        queue.record(
-            TxId::NULL,
-            Some(0),
-            request(Action::Update),
-            Zatoshis::ZERO,
-            h(150),
-        );
-        queue.record(
-            TxId::NULL,
-            Some(0),
-            request(Action::Release),
-            Zatoshis::ZERO,
-            h(200),
-        );
+        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
+        queue.record(TxId::NULL, request(Action::Update), Zatoshis::ZERO, h(150));
+        queue.record(TxId::NULL, request(Action::Release), Zatoshis::ZERO, h(200));
 
         queue.truncate_to(h(120));
         let pending = queue.pending();
         assert_eq!(pending.len(), 1);
-        assert!(matches!(pending[0].2, Request::Claim { .. }));
-        assert_eq!(pending[0].4, h(100));
+        assert!(matches!(pending[0].1, Request::Claim { .. }));
+        assert_eq!(pending[0].3, h(100));
     }
 
     /// A payment a reorg could still remove is not refunded yet.

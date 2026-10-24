@@ -8,7 +8,6 @@
 
 use std::num::NonZeroU64;
 
-use zcash_client_backend::wallet::NoteId;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
@@ -61,7 +60,7 @@ pub fn access_code_penalty(price: Zatoshis) -> Zatoshis {
 /// One refund the Treasury still has to send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refund {
-    note: NoteId,
+    payment: TxId,
     recipient: UnifiedAddress,
     paid: Zatoshis,
     /// Change the Treasury keeps. Zero, except a wrong access code keeps
@@ -75,7 +74,7 @@ pub struct Refund {
 
 impl Refund {
     pub fn new(
-        note: NoteId,
+        payment: TxId,
         recipient: UnifiedAddress,
         paid: Zatoshis,
         penalty: Zatoshis,
@@ -83,7 +82,7 @@ impl Refund {
         height: BlockHeight,
     ) -> Self {
         Self {
-            note,
+            payment,
             recipient,
             paid,
             penalty,
@@ -93,8 +92,9 @@ impl Refund {
         }
     }
 
-    pub fn note(&self) -> NoteId {
-        self.note
+    /// The transaction that carried the payment.
+    pub fn payment(&self) -> TxId {
+        self.payment
     }
 
     pub fn recipient(&self) -> &UnifiedAddress {
@@ -125,7 +125,7 @@ impl Refund {
 
 /// Refunds owed, in admission order. A reorg drops those whose payment
 /// block was orphaned, and keeps a submitted transaction id so a replay
-/// of that note can restore it. A payment that no longer covers the fee
+/// of that payment can restore it. A payment that no longer covers the fee
 /// is removed, and so is a refund mined at or below the rewind floor.
 #[derive(Clone, Debug, Default)]
 pub struct RefundQueue {
@@ -142,13 +142,17 @@ impl RefundQueue {
         }
     }
 
-    /// Records `refund` unless that note is already owed. A replay of an
-    /// orphaned note keeps the refund transaction that spent it.
+    /// Records `refund` unless that payment is already owed. A replay of an
+    /// orphaned payment keeps the refund transaction that paid it back.
     pub fn admit(&mut self, mut refund: Refund) {
-        if self.owed.iter().any(|owed| owed.note == refund.note) {
+        if self.owed.iter().any(|owed| owed.payment == refund.payment) {
             return;
         }
-        if let Some(i) = self.orphaned.iter().position(|old| old.note == refund.note) {
+        if let Some(i) = self
+            .orphaned
+            .iter()
+            .position(|old| old.payment == refund.payment)
+        {
             refund.sent = self.orphaned.remove(i).sent;
         }
         self.owed.push(refund);
@@ -186,38 +190,46 @@ impl RefundQueue {
     }
 
     /// Records the refund transaction the node accepted. The entry stays.
-    pub fn mark_sent(&mut self, note: NoteId, txid: TxId) {
-        if let Some(refund) = self.owed.iter_mut().find(|refund| refund.note == note) {
+    pub fn mark_sent(&mut self, payment: TxId, txid: TxId) {
+        if let Some(refund) = self
+            .owed
+            .iter_mut()
+            .find(|refund| refund.payment == payment)
+        {
             refund.sent = Some(txid);
         }
     }
 
     /// Forgets a refund transaction that expired unmined. The entry stays.
-    pub fn clear_sent(&mut self, note: NoteId) {
-        if let Some(refund) = self.owed.iter_mut().find(|refund| refund.note == note) {
+    pub fn clear_sent(&mut self, payment: TxId) {
+        if let Some(refund) = self
+            .owed
+            .iter_mut()
+            .find(|refund| refund.payment == payment)
+        {
             refund.sent = None;
         }
     }
 
     /// The payment no longer covers a refund; it is kept.
-    pub fn release(&mut self, note: NoteId) {
-        self.owed.retain(|refund| refund.note != note);
+    pub fn release(&mut self, payment: TxId) {
+        self.owed.retain(|refund| refund.payment != payment);
     }
 
     /// Drops refunds whose transaction was mined at or below `floor`, and
-    /// returns their notes.
+    /// returns their payments.
     pub fn prune_buried(
         &mut self,
         floor: BlockHeight,
         mined_at: impl Fn(TxId) -> Option<BlockHeight>,
-    ) -> Vec<NoteId> {
+    ) -> Vec<TxId> {
         let mut dropped = Vec::new();
         self.owed.retain(|refund| {
             let buried = refund
                 .sent
                 .is_some_and(|txid| mined_at(txid).is_some_and(|height| height <= floor));
             if buried {
-                dropped.push(refund.note);
+                dropped.push(refund.payment);
             }
             !buried
         });
@@ -231,17 +243,17 @@ impl RefundQueue {
     }
 
     /// Drops refunds whose payment was orphaned. A submitted transaction
-    /// id is kept for a replay of that note. Returns the dropped notes.
-    pub fn truncate_to(&mut self, ancestor: BlockHeight) -> Vec<NoteId> {
+    /// id is kept for a replay of that payment. Returns the dropped payments.
+    pub fn truncate_to(&mut self, ancestor: BlockHeight) -> Vec<TxId> {
         let mut dropped = Vec::new();
         let mut still_owed = Vec::new();
         for refund in self.owed.drain(..) {
             if refund.height <= ancestor {
                 still_owed.push(refund);
             } else {
-                dropped.push(refund.note);
+                dropped.push(refund.payment);
                 if refund.sent.is_some() {
-                    self.orphaned.retain(|old| old.note != refund.note);
+                    self.orphaned.retain(|old| old.payment != refund.payment);
                     self.orphaned.push(refund);
                 }
             }
@@ -342,9 +354,7 @@ mod tests {
 
     #[test]
     fn a_submitted_refund_stays_until_its_transaction_is_cleared() {
-        use zcash_protocol::ShieldedPool;
-
-        let note = NoteId::new(TxId::from_bytes([1; 32]), ShieldedPool::Ironwood, 0);
+        let payment = TxId::from_bytes([1; 32]);
         let ua = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
         let ua = match zcash_keys::address::Address::decode(
             &zcash_protocol::consensus::MAIN_NETWORK,
@@ -355,7 +365,7 @@ mod tests {
         };
         let mut queue = RefundQueue::new();
         queue.admit(Refund::new(
-            note,
+            payment,
             ua,
             zats(50_000),
             Zatoshis::ZERO,
@@ -364,13 +374,13 @@ mod tests {
         ));
         assert_eq!(queue.owed_total(), zats(50_000));
         let txid = TxId::from_bytes([2; 32]);
-        queue.mark_sent(note, txid);
+        queue.mark_sent(payment, txid);
         assert_eq!(queue.owed_total(), Zatoshis::ZERO);
         assert_eq!(queue.due().len(), 1);
         assert_eq!(queue.due()[0].sent(), Some(txid));
         assert_eq!(queue.names(|_| false).count(), 1);
         assert_eq!(queue.names(|_| true).count(), 0);
-        queue.clear_sent(note);
+        queue.clear_sent(payment);
         assert_eq!(queue.due()[0].sent(), None);
         assert_eq!(queue.names(|_| true).count(), 1);
         assert_eq!(queue.owed_total(), zats(50_000));
@@ -378,11 +388,9 @@ mod tests {
 
     #[test]
     fn a_mined_refund_leaves_once_it_is_at_or_below_the_rewind_floor() {
-        use zcash_protocol::ShieldedPool;
-
-        let buried_note = NoteId::new(TxId::from_bytes([1; 32]), ShieldedPool::Ironwood, 0);
-        let recent_note = NoteId::new(TxId::from_bytes([3; 32]), ShieldedPool::Ironwood, 0);
-        let unsent_note = NoteId::new(TxId::from_bytes([4; 32]), ShieldedPool::Ironwood, 0);
+        let buried = TxId::from_bytes([1; 32]);
+        let recent = TxId::from_bytes([3; 32]);
+        let unsent = TxId::from_bytes([4; 32]);
         let ua = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
         let ua = match zcash_keys::address::Address::decode(
             &zcash_protocol::consensus::MAIN_NETWORK,
@@ -392,9 +400,9 @@ mod tests {
             _ => panic!("test UA"),
         };
         let mut queue = RefundQueue::new();
-        for (note, height) in [(buried_note, 10), (recent_note, 30), (unsent_note, 30)] {
+        for (payment, height) in [(buried, 10), (recent, 30), (unsent, 30)] {
             queue.admit(Refund::new(
-                note,
+                payment,
                 ua.clone(),
                 zats(50_000),
                 Zatoshis::ZERO,
@@ -404,8 +412,8 @@ mod tests {
         }
         let buried_tx = TxId::from_bytes([2; 32]);
         let recent_tx = TxId::from_bytes([5; 32]);
-        queue.mark_sent(buried_note, buried_tx);
-        queue.mark_sent(recent_note, recent_tx);
+        queue.mark_sent(buried, buried_tx);
+        queue.mark_sent(recent, recent_tx);
         let floor = BlockHeight::from_u32(20);
         let dropped = queue.prune_buried(floor, |txid| {
             if txid == buried_tx {
@@ -416,20 +424,18 @@ mod tests {
                 None
             }
         });
-        assert_eq!(dropped, vec![buried_note]);
+        assert_eq!(dropped, vec![buried]);
         let left: Vec<_> = queue
             .due()
             .into_iter()
-            .map(|refund| refund.note())
+            .map(|refund| refund.payment())
             .collect();
-        assert_eq!(left, vec![recent_note, unsent_note]);
+        assert_eq!(left, vec![recent, unsent]);
     }
 
     #[test]
     fn a_replayed_payment_keeps_the_refund_transaction() {
-        use zcash_protocol::ShieldedPool;
-
-        let note = NoteId::new(TxId::from_bytes([1; 32]), ShieldedPool::Ironwood, 0);
+        let payment = TxId::from_bytes([1; 32]);
         let ua = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
         let ua = match zcash_keys::address::Address::decode(
             &zcash_protocol::consensus::MAIN_NETWORK,
@@ -440,7 +446,7 @@ mod tests {
         };
         let mut queue = RefundQueue::new();
         queue.admit(Refund::new(
-            note,
+            payment,
             ua.clone(),
             zats(50_000),
             Zatoshis::ZERO,
@@ -448,11 +454,11 @@ mod tests {
             BlockHeight::from_u32(30),
         ));
         let txid = TxId::from_bytes([2; 32]);
-        queue.mark_sent(note, txid);
-        assert_eq!(queue.truncate_to(BlockHeight::from_u32(20)), vec![note]);
+        queue.mark_sent(payment, txid);
+        assert_eq!(queue.truncate_to(BlockHeight::from_u32(20)), vec![payment]);
         assert!(queue.due().is_empty());
         queue.admit(Refund::new(
-            note,
+            payment,
             ua,
             zats(50_000),
             Zatoshis::ZERO,

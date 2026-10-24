@@ -1,5 +1,12 @@
 # Treasury design record
 
+## 2026-10-24 — A refund is keyed by its payment's txid
+
+- `Refund` names the transaction that carried the payment, as a request
+  does. The `NoteId` and the output index it needed are gone: `apply_block`,
+  `RequestQueue` and the echo list return to master's shapes, with the
+  echo keeping the txid the refund needs.
+
 ## 2026-10-24 — A refund is a plain Treasury payment
 
 - `plan_refund` proposes one payment of `paid − penalty − withheld` to
