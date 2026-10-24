@@ -10,7 +10,6 @@
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
-use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
@@ -49,6 +48,7 @@ async fn main() {
         access_code_key,
         mut protected_names,
         presale_client,
+        mut fee_rule,
         mut registry,
         mut name_notes,
         mut requests,
@@ -343,10 +343,24 @@ async fn main() {
             );
             continue;
         }
+        // The node's fee rate for every transaction this pass builds. A
+        // failed read keeps the last rate the node gave.
+        match source.standard_fee().await {
+            Ok(rule) => {
+                if rule.marginal_fee() != fee_rule.marginal_fee() {
+                    tracing::info!(
+                        zats_per_action = rule.marginal_fee().into_u64(),
+                        "fee rate changed"
+                    );
+                }
+                fee_rule = rule;
+            }
+            Err(error) => tracing::warn!(%error, "fee rate unavailable; keeping the last rate"),
+        }
 
         // The three gauges: chain level, money level, price level.
         let treasury_zats = wallet
-            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .get_wallet_summary(zns_mint::wallet::CONFIRMATIONS)
             .expect("FATAL: balance summary failed")
             .expect("FATAL: chain knowledge missing before gauge")
             .account_balances()
@@ -487,6 +501,7 @@ async fn main() {
                 &treasury_keys,
                 &sapling_spend,
                 &sapling_output,
+                &fee_rule,
                 &record.ua,
                 &source,
                 &pending,
@@ -654,6 +669,7 @@ async fn main() {
                 &registry_keys,
                 &sapling_spend,
                 &sapling_output,
+                &fee_rule,
                 note.clone(),
                 authority_nf,
                 tip,
@@ -714,6 +730,7 @@ async fn main() {
                 &treasury_keys,
                 &sapling_spend,
                 &sapling_output,
+                &fee_rule,
             ) {
                 Ok(Some(tx)) => {
                     source.submit(&tx, "vault sweep").await;

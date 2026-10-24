@@ -1,5 +1,11 @@
 # main.changelog.md
 
+## 2026-10-23 — Transactions pay the node's fee rate (#357)
+
+- Each tip pass reads `getstandardfee` once the tip is confirmed and
+  passes the rule to the challenge relay, Name Note assembly, and the
+  vault sweep. A failed read keeps the last rate the node gave.
+
 ## 2026-10-23 — A queued update is dropped when the tip median would release it
 
 - Before echoes and the lifecycle releases, an update still waiting to
