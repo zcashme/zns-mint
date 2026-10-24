@@ -1,23 +1,17 @@
 # Treasury design record
 
-## 2026-10-24 — Dust at the node's rate (#357)
+## 2026-10-24 — Treasury payments pay the node's fee rate (#357)
 
-- Supersedes the dust bullet below: selection hands every note to the
-  change strategy, which drops inputs that are dust at the node's rate.
+- `sweep_to_vault` and `challenge` take the node's `FeeRule`.
+  `propose_payment` is upstream's `propose_standard_transfer_to_address`
+  with that rule in place of `StandardFeeRule::Zip317`.
+- Dust is judged at the node's rate: selection hands every note to the
+  change strategy, which drops inputs worth no more than one action.
 - A note smaller than the float is not needed by the sweep and stays in
   the Treasury. Send-max counted it net of one action's fee, so the
   float note plus that note hold `SWEEP_RESERVE` plus one action's fee.
 - Send-max and the payment pass `wallet::CONFIRMATIONS`, so both halves
   of a sweep see the same notes.
-
-## 2026-10-23 — Treasury payments take the fee rule (#357)
-
-- `sweep_to_vault` and `challenge` take the node's `FeeRule`.
-  `propose_payment` is upstream's `propose_standard_transfer_to_address`
-  with that rule in place of `StandardFeeRule::Zip317`.
-- Dust stays the wallet's: notes at or below `zip317::MARGINAL_FEE` are
-  skipped by selection, as `zcash_client_sqlite` does. The change
-  strategy flags inputs that are dust at the node's rate.
 
 ## 2026-10-15 — `RequestQueue::names` (#342)
 

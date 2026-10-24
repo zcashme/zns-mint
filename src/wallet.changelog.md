@@ -1,13 +1,6 @@
 # Wallet changelog
 
-## 2026-10-24 — `CONFIRMATIONS` is the mint's one policy (#357)
-
-- One confirmation for every note, trusted or not (`ConfirmationsPolicy::MIN`).
-  The library's calls require a policy argument; every caller passes this
-  one: the Treasury balance reads in boot and the run loop, the sweep's
-  send-max and payment, and the challenge relay.
-
-## 2026-10-24 — Dust is judged at the node's fee rate (#357)
+## 2026-10-24 — Dust at the node's fee rate; one confirmation policy (#357)
 
 - `select_spendable_notes`, the `AllFunds(Everything)` precheck and the
   balance no longer apply the fixed `MARGINAL_FEE` cutoff. The caller's
@@ -16,6 +9,11 @@
 - A fixed cutoff above the node's rate stranded change: the change
   strategy created notes the wallet would never select. The balance now
   counts every unspent note.
+- `CONFIRMATIONS` (`ConfirmationsPolicy::MIN`) is one confirmation for
+  every note, trusted or not. The library's calls require a policy
+  argument; every caller passes this one: the Treasury balance reads in
+  boot and the run loop, the sweep's send-max and payment, and the
+  challenge relay.
 
 ## 2026-10-10 — Note selection skips dust
 
