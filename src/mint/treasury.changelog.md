@@ -1,5 +1,12 @@
 # Treasury design record
 
+## 2026-10-24 — A refund waits until its payment is buried
+
+- `plan_refund` takes the payment's height and waits until it is at or
+  below the wallet's rewind floor. A reorg can remove a payment above
+  that floor, and the queue drops its refund; once the Treasury pays
+  back, the payment it pays back for cannot vanish.
+
 ## 2026-10-24 — The sweep leaves what refunds still owe
 
 - `sweep_to_vault` takes the queue's `owed_total`: each refund not yet

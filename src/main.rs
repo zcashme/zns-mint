@@ -832,7 +832,8 @@ async fn main() {
         }
 
         // The note stays reserved until the refund is mined past the rewind
-        // window, or the payment is kept. An accepted refund is rebroadcast
+        // window, or the payment is kept. A refund is planned once its
+        // payment is past that window too. An accepted refund is rebroadcast
         // until it is mined, and planned again if it expires unmined.
         treasury::prune_buried_refunds(&mut refunds, &mut wallet);
         for owed in refunds.due() {
@@ -871,6 +872,7 @@ async fn main() {
                 &mut wallet,
                 &fee_rule,
                 note,
+                owed.height(),
                 owed.paid(),
                 owed.penalty(),
                 &to,

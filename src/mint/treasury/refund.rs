@@ -108,6 +108,11 @@ impl Refund {
         &self.name
     }
 
+    /// The height of the block that mined the payment.
+    pub fn height(&self) -> BlockHeight {
+        self.height
+    }
+
     pub fn sent(&self) -> Option<TxId> {
         self.sent
     }

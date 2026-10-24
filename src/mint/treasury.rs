@@ -114,7 +114,8 @@ pub enum RefundPlan {
     Send(Box<TreasuryProposal>),
     /// The payment does not cover the fee the proposal would charge.
     Dust,
-    /// The note is not spendable yet, or the fee did not settle.
+    /// The payment can still be reorged out, the note is not spendable
+    /// yet, or the fee did not settle.
     Wait,
 }
 
@@ -122,16 +123,26 @@ pub enum RefundPlan {
 ///
 /// `penalty` stays as change. The note is the whole input, so the
 /// Treasury adds nothing. A fee that does not match that shape is tried
-/// once more; a second miss waits.
+/// once more; a second miss waits. Nothing is proposed until the payment
+/// at `payment_height` is at or below the rewind floor, where no reorg
+/// can remove it.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_refund<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
     fee_rule: &FeeRule,
     note: NoteId,
+    payment_height: BlockHeight,
     paid: Zatoshis,
     penalty: Zatoshis,
     to: &zcash_keys::address::Address,
 ) -> Result<RefundPlan, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
+    if !wallet
+        .rewind_floor()
+        .is_some_and(|floor| payment_height <= floor)
+    {
+        return Ok(RefundPlan::Wait);
+    }
     let Some(value) = wallet.spendable_note_value(TREASURY_ACCOUNT, note) else {
         return Ok(RefundPlan::Wait);
     };
@@ -987,6 +998,48 @@ mod tests {
         assert_eq!(pending[0].4, h(100));
     }
 
+    /// A payment a reorg could still remove is not refunded yet.
+    #[test]
+    fn a_refund_waits_until_its_payment_is_buried() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(100_000)]]);
+        st.add_empty_blocks(1);
+
+        let network = *st.network();
+        let floor = st
+            .wallet()
+            .rewind_floor()
+            .expect("the trees hold a checkpoint");
+        let tip = TargetHeight::from(st.wallet().tip().block_height() + 1);
+        let paid = Zatoshis::const_from_u64(100_000);
+        let payment = *st
+            .wallet()
+            .unspent_sapling_notes(TREASURY_ACCOUNT, tip)
+            .iter()
+            .find(|note| note.note_value().unwrap() == paid)
+            .expect("payment note")
+            .internal_note_id();
+        st.wallet_mut().reserve_refund(payment);
+        let to = vault_address(&network);
+
+        let plan = |st: &mut _, height| {
+            plan_refund(
+                &network,
+                st,
+                &FeeRule::standard(),
+                payment,
+                height,
+                paid,
+                Zatoshis::ZERO,
+                &to,
+            )
+            .expect("plan")
+        };
+        assert!(matches!(plan(st.wallet_mut(), floor + 1), RefundPlan::Wait));
+        assert!(matches!(plan(st.wallet_mut(), floor), RefundPlan::Send(_)));
+    }
+
     /// The payment note funds the refund. While it is owed, the sweep
     /// spends the other notes and a later attempt still selects it.
     #[test]
@@ -1001,6 +1054,10 @@ mod tests {
         st.add_empty_blocks(1);
 
         let network = *st.network();
+        let floor = st
+            .wallet()
+            .rewind_floor()
+            .expect("the trees hold a checkpoint");
         let tip = TargetHeight::from(st.wallet().tip().block_height() + 1);
         let paid = Zatoshis::const_from_u64(100_000);
         let payment = *st
@@ -1017,6 +1074,7 @@ mod tests {
             st.wallet_mut(),
             &FeeRule::standard(),
             payment,
+            floor,
             paid,
             Zatoshis::ZERO,
             &to,
@@ -1061,6 +1119,7 @@ mod tests {
             st.wallet_mut(),
             &FeeRule::standard(),
             payment,
+            floor,
             paid,
             penalty,
             &to,
@@ -1097,6 +1156,7 @@ mod tests {
             st.wallet_mut(),
             &FeeRule::standard(),
             payment,
+            floor,
             paid,
             dust_penalty,
             &to,
@@ -1134,6 +1194,7 @@ mod tests {
                 st.wallet_mut(),
                 &FeeRule::standard(),
                 payment,
+                floor,
                 paid,
                 Zatoshis::ZERO,
                 &to
