@@ -389,11 +389,17 @@ impl Oracle {
     /// Registration quote in zats at the published rate. `None` when the
     /// product does not fit a zat amount.
     pub fn quote(&self, name: &Name, term: Term) -> Option<Zatoshis> {
+        Self::quote_at(self.current(), name, term)
+    }
+
+    /// Registration quote in zats at `rate` zats per USD. `None` when
+    /// the product does not fit a zat amount.
+    pub fn quote_at(rate: Zatoshis, name: &Name, term: Term) -> Option<Zatoshis> {
         let usd = match term {
             Term::Forever => forever_usd(name),
             Term::Years(years) => annual_usd(name) * years,
         };
-        let zats = usd.checked_mul(self.current().into_u64())?;
+        let zats = usd.checked_mul(rate.into_u64())?;
         Zatoshis::from_u64(zats).ok()
     }
 
@@ -402,8 +408,14 @@ impl Oracle {
     /// rounded up to the next 100_000-zat increment. Anti-spam pricing,
     /// not revenue: the deciding pass refuses underpaid relay requests outright.
     pub fn challenge_fee(&self) -> Zatoshis {
+        Self::challenge_fee_at(self.current())
+    }
+
+    /// The challenge fee at `rate` zats per USD: one dollar, rounded
+    /// up to the next 100_000-zat increment.
+    pub fn challenge_fee_at(rate: Zatoshis) -> Zatoshis {
         const GRID: u64 = 100_000;
-        let rate = self.current().into_u64();
+        let rate = rate.into_u64();
         // Checked so the grid step cannot wrap.
         let zats = rate
             .div_ceil(GRID)
@@ -461,6 +473,48 @@ mod tests {
         let long = Name::parse("purple").unwrap();
         assert_eq!(quoted(&oracle, &long, Term::Years(1)), 2_000_000);
         assert_eq!(quoted(&oracle, &long, Term::Forever), 6_000_000);
+    }
+
+    /// A payment priced at the rate in force when it was queued still
+    /// meets that quote after a later day publishes a higher rate.
+    #[test]
+    fn a_stored_rate_prices_the_payment_after_rollover() {
+        let mut oracle = Oracle::new(Decimal::from(1_000), 0, Timestamp::from_seconds(0).unwrap());
+        let sighted = oracle.current();
+        let name = Name::parse("purple").unwrap();
+        let paid = Oracle::quote_at(sighted, &name, Term::Years(1)).unwrap();
+        let sighted_fee = Oracle::challenge_fee_at(sighted);
+
+        // A zero-length interval moves the spot to $500 without billing
+        // the opening price. The rest of the day is $500, and the next
+        // day's rollover publishes it: 200_000 zats per USD.
+        oracle.accumulate(
+            Some(Decimal::from(500)),
+            0,
+            Timestamp::from_seconds(0).unwrap(),
+        );
+        oracle.accumulate(
+            Some(Decimal::from(500)),
+            0,
+            Timestamp::from_seconds(3_600).unwrap(),
+        );
+        oracle.accumulate(
+            Some(Decimal::from(500)),
+            1,
+            Timestamp::from_seconds(86_400).unwrap(),
+        );
+        assert_eq!(oracle.current().into_u64(), 200_000);
+
+        assert_eq!(paid.into_u64(), 2_000_000);
+        assert_eq!(
+            Oracle::quote_at(sighted, &name, Term::Years(1))
+                .unwrap()
+                .into_u64(),
+            paid.into_u64()
+        );
+        assert!(paid < oracle.quote(&name, Term::Years(1)).unwrap());
+        assert_eq!(sighted_fee.into_u64(), 100_000);
+        assert!(sighted_fee < oracle.challenge_fee());
     }
 
     /// The registration quote follows the term: N annuals for `Ny`, three

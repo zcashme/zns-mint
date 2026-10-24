@@ -1,5 +1,11 @@
 # main.changelog.md
 
+## 2026-10-24 — A payment is priced at the rate recorded with it
+
+- A claim, a challenge fee, and a term-carrying echo are priced at
+  the zats-per-USD rate stored when the payment was queued. A later
+  daily publish does not reprice a payment already in hand.
+
 ## 2026-10-23 — Transactions pay the node's fee rate (#357)
 
 - Each tip pass reads `getstandardfee` once the tip is confirmed and
