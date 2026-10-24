@@ -8,7 +8,7 @@ use sapling::Node as SaplingNode;
 use serde::Deserialize;
 use time::Timestamp;
 use zcash_client_backend::data_api::chain::{ChainState, CommitmentTreeRoot};
-use zcash_primitives::block::{Block, BlockHash};
+use zcash_primitives::block::{Block, BlockHash, BlockHeader};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::constants::MAX_BLOCK_BYTES;
@@ -328,6 +328,40 @@ impl JsonRpc {
             }
         }
     }
+
+    /// The raw header at `height`, hashed locally. Verbose JSON is not
+    /// used: the hash is the header's own bytes.
+    pub async fn header_at(&self, height: BlockHeight) -> Result<BlockHeader, TransportError> {
+        loop {
+            let result: Result<_, TransportError> = async {
+                let hex_header: String = self
+                    .send_request("getblockheader", (u32::from(height).to_string(), false))
+                    .await
+                    .map_err(not_on_best_chain)?
+                    .ok_or(TransportError::BadNodeData("getblockheader returned null"))?;
+                let bytes = hex::decode(hex_header.trim())
+                    .map_err(|_| TransportError::BadNodeData("getblockheader hex"))?;
+                BlockHeader::read(std::io::Cursor::new(bytes))
+                    .map_err(|_| TransportError::BadNodeData("getblockheader parse"))
+            }
+            .await;
+
+            match result {
+                Ok(header) => return Ok(header),
+                Err(error)
+                    if error.is_retryable() || matches!(&error, TransportError::NotOnBestChain) =>
+                {
+                    tracing::warn!(
+                        %error,
+                        height = u32::from(height),
+                        "block header unavailable or unusable; retrying"
+                    );
+                    tokio::time::sleep(RETRY_PAUSE).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
 }
 
 impl super::CanonicalBlockSource {
@@ -402,6 +436,14 @@ impl super::CanonicalBlockSource {
         height: BlockHeight,
     ) -> Result<(BlockHash, BlockHeight, Timestamp), TransportError> {
         self.rpc.get_block_header(height).await
+    }
+
+    /// The raw header at `height` (see [`JsonRpc::header_at`]).
+    pub async fn header_at(
+        &self,
+        height: BlockHeight,
+    ) -> Result<zcash_primitives::block::BlockHeader, TransportError> {
+        self.rpc.header_at(height).await
     }
 }
 

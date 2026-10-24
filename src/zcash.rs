@@ -8,6 +8,7 @@
 //! but never sees transport state. The node's identity is not on the wire:
 //! it is the SEV-SNP measurement of the image this process lives in.
 
+pub mod adopt;
 pub mod chain;
 pub mod fees;
 pub mod mempool;
@@ -26,6 +27,7 @@ use hyper::Request;
 use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
 use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use zcash_protocol::constants::MAX_BLOCK_BYTES;
 
 /// The wait between retries of a retryable transport call.
@@ -190,20 +192,13 @@ struct RpcResponse<T> {
 }
 
 /// A JSON-RPC error object, as answered by the node.
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Error)]
+#[error("RPC error {code}: {message}")]
 pub struct RpcError {
     code: i64,
     message: String,
     data: Option<serde_json::Value>,
 }
-
-impl fmt::Display for RpcError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "RPC error {}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for RpcError {}
 
 impl RpcError {
     /// Bitcoin Core / Zebra RPC error -27: transaction already in chain.
@@ -234,7 +229,7 @@ pub(crate) fn not_on_best_chain(error: TransportError) -> TransportError {
 }
 
 /// Everything that can go wrong talking to the node, classified once.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum TransportError {
     #[error("hyper-util client error: {0}")]
     Client(#[from] hyper_util::client::legacy::Error),

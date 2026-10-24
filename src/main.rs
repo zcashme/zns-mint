@@ -274,6 +274,11 @@ async fn main() {
                 );
                 continue 'run;
             }
+            let wall = time::OffsetDateTime::now_utc().unix_timestamp();
+            mtp.header_time_ok(block.header().time, wall)
+                .unwrap_or_else(|reason| {
+                    panic!("FATAL: {reason} at height {}", u32::from(next_height))
+                });
 
             let arrivals = zns_mint::mint::apply_block(
                 &network,

@@ -55,6 +55,9 @@ impl MtpTracker {
         for h in start..=till_u32 {
             let height = BlockHeight::from_u32(h);
             let timestamp = fetch(height).await?;
+            let wall = time::OffsetDateTime::now_utc().unix_timestamp();
+            self.header_time_ok(timestamp, wall)
+                .unwrap_or_else(|reason| panic!("FATAL: {reason} at height {h}"));
             self.update(height, timestamp);
         }
 
@@ -90,6 +93,18 @@ impl MtpTracker {
         Some(
             Timestamp::from_seconds(stamps[stamps.len() / 2] as i64)
                 .expect("block timestamp is a valid u32, always fits in Timestamp"),
+        )
+    }
+
+    /// Whether `timestamp` can be the next header. The 90-minute bound
+    /// applies once eleven times are recorded. Before that, the bound
+    /// is the mint's time.
+    pub fn header_time_ok(&self, timestamp: u32, wall: i64) -> Result<(), &'static str> {
+        crate::zcash::adopt::block_time_ok(
+            self.current().map(|stamp| stamp.as_seconds()),
+            timestamp,
+            wall,
+            self.blocktimes.len() >= MTP_WINDOW,
         )
     }
 
@@ -194,6 +209,20 @@ mod tests {
 
         tracker.truncate_to(h(4));
         assert_eq!(tracker.current_day(), Some(0));
+    }
+
+    #[test]
+    fn the_ninety_minute_bound_starts_when_the_window_is_full() {
+        let mut tracker = born();
+        let wall = 2_000_000;
+        assert!(tracker.header_time_ok(1_500_000, wall).is_ok());
+        for i in 0..11 {
+            tracker.update(h(i), 1_000_000);
+        }
+        assert!(tracker.header_time_ok(1_000_000 + 90 * 60, wall).is_ok());
+        assert!(tracker
+            .header_time_ok(1_000_000 + 90 * 60 + 1, wall)
+            .is_err());
     }
 
     #[tokio::test]

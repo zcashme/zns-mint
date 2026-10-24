@@ -7,6 +7,14 @@
   zero, out-of-range, or null answers are refused. No fixed rate stands
   in for a refused answer: the mint runs its own node.
 
+## 2026-10-23 — A header is adopted only inside the time window
+
+- The node has to serve one pinned block, hashed locally. Regtest
+  has no pinned block.
+- Each adopted header's time has to be after the previous median and
+  at most 90 minutes past it, once eleven times are recorded, and at
+  most two hours ahead of the mint.
+
 ## 2026-10-13 — The announcement is the answer (#344)
 
 - Upstream receipts first: Zebra's `ChainTipChange` pushes on reorgs
