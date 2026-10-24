@@ -11,7 +11,7 @@ use zcash_client_backend::wallet::NoteId;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::value::Zatoshis;
+use zcash_protocol::value::{Zatoshis, MAX_MONEY};
 
 use crate::mint::{Name, UnifiedAddress};
 
@@ -147,6 +147,18 @@ impl RefundQueue {
     /// Every refund still owed, in admission order.
     pub fn due(&self) -> Vec<Refund> {
         self.owed.clone()
+    }
+
+    /// What the refunds not yet sent will pay out: each payment less its
+    /// penalty. The sweep leaves this in the Treasury. An overflow holds
+    /// back everything.
+    pub fn owed_total(&self) -> Zatoshis {
+        self.owed
+            .iter()
+            .filter(|refund| refund.sent.is_none())
+            .map(|refund| (refund.paid - refund.penalty).unwrap_or(Zatoshis::ZERO))
+            .sum::<Option<Zatoshis>>()
+            .unwrap_or(Zatoshis::const_from_u64(MAX_MONEY))
     }
 
     /// Names still waiting on a refund. A mined refund transaction is omitted.
@@ -335,8 +347,10 @@ mod tests {
             Name::parse("alice").unwrap(),
             BlockHeight::from_u32(10),
         ));
+        assert_eq!(queue.owed_total(), zats(50_000));
         let txid = TxId::from_bytes([2; 32]);
         queue.mark_sent(note, txid);
+        assert_eq!(queue.owed_total(), Zatoshis::ZERO);
         assert_eq!(queue.due().len(), 1);
         assert_eq!(queue.due()[0].sent(), Some(txid));
         assert_eq!(queue.names(|_| false).count(), 1);
@@ -344,6 +358,7 @@ mod tests {
         queue.clear_sent(note);
         assert_eq!(queue.due()[0].sent(), None);
         assert_eq!(queue.names(|_| true).count(), 1);
+        assert_eq!(queue.owed_total(), zats(50_000));
     }
 
     #[test]

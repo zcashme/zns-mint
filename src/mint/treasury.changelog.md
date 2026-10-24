@@ -1,5 +1,11 @@
 # Treasury design record
 
+## 2026-10-24 — The sweep leaves what refunds still owe
+
+- `sweep_to_vault` takes the queue's `owed_total`: each refund not yet
+  sent, at its payment less its penalty. The sweep pays the vault
+  `sendable − SWEEP_RESERVE − owed`, so a refund never waits on a sweep.
+
 ## 2026-10-24 — Refunds pay the node's fee rate
 
 - `plan_refund` and refund admission take the run loop's `FeeRule`, as
