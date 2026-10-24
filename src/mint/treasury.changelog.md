@@ -1,5 +1,66 @@
 # Treasury design record
 
+## 2026-10-24 — A refund is built like the sweep
+
+- `treasury::refund` builds every refund owed on the pass after its
+  payment's block, as a Name Note is, and removes it from the queue. The
+  wallet owns the transaction from there, as it owns a sweep: one that
+  expires unmined is kept, and the next sweep moves the money.
+- The queue is a `Vec` of what is owed: `admit`, `due`, `paid`,
+  `owed_total`, `truncate_to`. The sent, orphaned and pruned states, the
+  rewind floor and the refund's rebroadcast are gone.
+- The wallet is master's again: `release_rejected_spend`,
+  `refund_tx_status` and `rewind_floor` are gone.
+
+## 2026-10-24 — A refund's amount is fixed at admission
+
+- `RefundQueue::admit` computes `paid − penalty − withheld` once, keeps
+  the payment when that is nothing, and queues the amount. Nothing is
+  released later: a queued refund is always payable in full.
+- `refund_underpaid`, `refund_keeping`, `admit_refund` and
+  `payment_against_quote` are gone. The run loop checks `paid < price`
+  and calls `admit`.
+- `plan_refund` takes the amount; `RefundPlan::Dust` is gone.
+
+## 2026-10-24 — A refund is keyed by its payment's txid
+
+- `Refund` names the transaction that carried the payment, as a request
+  does. The `NoteId` and the output index it needed are gone: `apply_block`,
+  `RequestQueue` and the echo list return to master's shapes, with the
+  echo keeping the txid the refund needs.
+
+## 2026-10-24 — A refund is a plain Treasury payment
+
+- `plan_refund` proposes one payment of `paid − penalty − withheld` to
+  the memo's UA, funded from any Treasury notes, with the same change
+  rule as the sweep and the relay. `withheld` is `REFUND_FEE_ACTIONS`
+  (10) at the node's rate. A proposal whose fee exceeds it waits, so the
+  payer always covers the fee and the Treasury never adds to it.
+- The penalty is not change any more; the Treasury keeps it by paying
+  back less. The refund-or-keep line is the withheld fee.
+- `propose_one_note`, `refund_settles` and the fee-guess loop are gone.
+- No note is held for a refund. The queue's owed total keeps the money
+  in the Treasury, and the wallet's selection knows nothing of refunds.
+
+## 2026-10-24 — A refund waits until its payment is buried
+
+- `plan_refund` takes the payment's height and waits until it is at or
+  below the wallet's rewind floor. A reorg can remove a payment above
+  that floor, and the queue drops its refund; once the Treasury pays
+  back, the payment it pays back for cannot vanish.
+
+## 2026-10-24 — The sweep leaves what refunds still owe
+
+- `sweep_to_vault` takes the queue's `owed_total`: each refund not yet
+  sent, at its payment less its penalty. The sweep pays the vault
+  `sendable − SWEEP_RESERVE − owed`, so a refund never waits on a sweep.
+
+## 2026-10-24 — Refunds pay the node's fee rate
+
+- `plan_refund` and refund admission take the run loop's `FeeRule`, as
+  the sweep and the relay do. The first fee guess, and the line between
+  a refund and a kept payment, is that rule's two-action minimum.
+
 ## 2026-10-24 — Treasury payments pay the node's fee rate (#357)
 
 - `sweep_to_vault` and `challenge` take the node's `FeeRule` and call
@@ -14,6 +75,35 @@
   is nearly empty.
 - Send-max and the payment pass `wallet::CONFIRMATIONS`, so both halves
   of a sweep see the same notes.
+
+## 2026-10-23 — A replayed payment keeps its refund
+
+- An unlisted name is kept, including when the access code is wrong.
+  A wrong code on a listed name still keeps 1% and returns the rest.
+- A reorg keeps the refund transaction id. A replay of that payment
+  restores it, so the queue does not wait on a note the refund spent.
+- An update or release whose Name Note is already queued is refunded,
+  less the fee. The challenge is not consumed.
+
+## 2026-10-23 — A refund stays owed until it is buried
+
+- Echoes are decided before relays.
+- A refund mined at or below the wallet's rewind floor leaves the queue.
+- A second claim for a name that already has a Name Note queued is
+  refunded, less the fee.
+
+## 2026-10-22 — Underpaid payments are refunded
+
+- An underpaid claim, update, or release, and a claim for a name
+  already registered, go back to the memo's UA minus the refund fee.
+  A payment that does not exceed the fee is kept. An underpaid
+  renewal or upgrade is refunded the same way; its challenge stays.
+- A wrong access code keeps 1% of the quote, then the refund fee,
+  and returns the rest. A wrong OTP and an unparsed memo are kept.
+- The note stays locked until a refund transaction is built. That
+  transaction is rebroadcast until it is mined, then planned again if
+  it expires unmined. A restart forgets the queue; a reorg of the
+  payment drops the refund.
 
 ## 2026-10-15 — `RequestQueue::names` (#342)
 

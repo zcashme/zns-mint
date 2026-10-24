@@ -1,10 +1,13 @@
 //! Treasury wallet view and Treasury policy for the mint: the vault
-//! sweep, the challenge relay builder, and the request queue.
+//! sweep, the challenge relay builder, the request queue, and refunds
+//! of underpaid payments.
 //!
 
 mod otp;
+mod refund;
 
 pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
+pub use refund::{access_code_penalty, refund_output, Refund, RefundQueue, REFUND_FEE_ACTIONS};
 
 use std::convert::Infallible;
 
@@ -91,11 +94,142 @@ pub enum BuildFailure<ProposalError, TransactionError> {
     Transaction(TransactionError),
 }
 
-/// Pays the vault what send-max could deliver, less the float.
+/// Proposes one Treasury payment of the refund's amount to its recipient,
+/// funded from any Treasury notes with the sweep's change rule. The payer
+/// covers the fee: `None` when the proposal's fee exceeds the withheld
+/// amount, or when the Treasury cannot fund the refund yet.
+fn propose_refund<P: Parameters>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    fee_rule: &FeeRule,
+    refund: &Refund,
+) -> Result<Option<TreasuryProposal>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>>
+{
+    let Some(withheld) = fee_rule.marginal_fee() * REFUND_FEE_ACTIONS else {
+        return Ok(None);
+    };
+    let to = Address::Unified(Box::new(refund.recipient().clone()));
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(network),
+        refund.amount(),
+    )])
+    .expect("one payment is a valid ZIP 321 request");
+    let proposal = match propose_transfer::<_, _, _, _, Infallible>(
+        wallet,
+        network,
+        TREASURY_ACCOUNT,
+        &GreedyInputSelector::new(),
+        &SingleOutputChangeStrategy::new(
+            fee_rule.clone(),
+            None,
+            ShieldedPool::Ironwood,
+            DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE)),
+        ),
+        request,
+        crate::wallet::CONFIRMATIONS,
+        &SpendPolicy::default(),
+        None,
+        None,
+    ) {
+        Ok(proposal) => proposal,
+        Err(error::Error::InsufficientFunds { .. }) | Err(error::Error::ScanRequired) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(BuildFailure::Proposal(error)),
+    };
+    let fee = proposal.steps().first().balance().fee_required();
+    if fee > withheld {
+        tracing::warn!(
+            txid = %refund.payment(),
+            fee = fee.into_u64(),
+            withheld = withheld.into_u64(),
+            "refund fee exceeds what the payer covers; waiting"
+        );
+        return Ok(None);
+    }
+    Ok(Some(proposal))
+}
+
+/// Builds every refund owed. A built refund leaves the queue, and the
+/// wallet owns it from there, as it owns a sweep: one that expires unmined
+/// is kept, and the next sweep moves the money. One the Treasury cannot
+/// pay yet stays owed. Returns the built transactions for broadcast.
+pub fn refund<P: Parameters>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    treasury_keys: &crate::TreasuryKeys,
+    spend_prover: &sapling::circuit::SpendParameters,
+    output_prover: &sapling::circuit::OutputParameters,
+    fee_rule: &FeeRule,
+    refunds: &mut RefundQueue,
+) -> Vec<Transaction> {
+    let mut built = Vec::new();
+    for refund in refunds.due() {
+        let proposal = match propose_refund(network, wallet, fee_rule, &refund) {
+            Ok(Some(proposal)) => proposal,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    txid = %refund.payment(),
+                    name = %refund.name().as_str(),
+                    "refund not proposed"
+                );
+                continue;
+            }
+        };
+        let spending_keys = treasury_keys.spending_keys();
+        let txids =
+            match create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
+                wallet,
+                network,
+                &SystemClock,
+                &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+                spend_prover,
+                output_prover,
+                &spending_keys,
+                OvkPolicy::Sender,
+                &proposal,
+                None,
+            ) {
+                Ok(txids) => txids,
+                Err(error) => {
+                    tracing::warn!(
+                        error = ?error,
+                        txid = %refund.payment(),
+                        name = %refund.name().as_str(),
+                        "refund not built"
+                    );
+                    continue;
+                }
+            };
+        tracing::info!(
+            txid = %txids.first(),
+            payment = %refund.payment(),
+            name = %refund.name().as_str(),
+            amount = refund.amount().into_u64(),
+            "refund built"
+        );
+        // The build stored the tx and marked its inputs spent; a miss here
+        // is the wallet contradicting itself. Stop; restart rescans.
+        built.push(
+            wallet
+                .get_transaction(*txids.first())
+                .expect("FATAL: refund lookup failed after build")
+                .expect("FATAL: built refund tx missing from wallet"),
+        );
+        refunds.paid(refund.payment());
+    }
+    built
+}
+
+/// Pays the vault what send-max could deliver, less the float and what
+/// the Treasury still owes in refunds.
 fn propose_vault_sweep<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
     fee_rule: &FeeRule,
+    owed: Zatoshis,
 ) -> Result<Option<TreasuryProposal>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>>
 {
     let vault = vault_address(network);
@@ -120,9 +254,10 @@ fn propose_vault_sweep<P: Parameters>(
         .map_err(BuildFailure::Balance)?
         .unwrap_or(Zatoshis::ZERO);
 
-    let Some(payment) = (sendable - SWEEP_RESERVE).filter(|p| *p >= SWEEP_MINIMUM) else {
+    let Some(payment) = ((sendable - SWEEP_RESERVE) - owed).filter(|p| *p >= SWEEP_MINIMUM) else {
         tracing::debug!(
             sendable_zats = sendable.into_u64(),
+            owed_zats = owed.into_u64(),
             "vault sweep skipped: payment below the minimum"
         );
         return Ok(None);
@@ -154,7 +289,8 @@ fn propose_vault_sweep<P: Parameters>(
     .map_err(BuildFailure::Proposal)
 }
 
-/// Builds the vault sweep. `Ok(None)` means nothing to move.
+/// Builds the vault sweep, leaving `owed` for refunds. `Ok(None)` means
+/// nothing to move.
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
@@ -162,8 +298,9 @@ pub fn sweep_to_vault<P: Parameters>(
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
     fee_rule: &FeeRule,
+    owed: Zatoshis,
 ) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
-    let Some(proposal) = propose_vault_sweep(network, wallet, fee_rule)? else {
+    let Some(proposal) = propose_vault_sweep(network, wallet, fee_rule, owed)? else {
         return Ok(None);
     };
 
@@ -386,9 +523,10 @@ mod tests {
             st.add_empty_blocks(1);
 
             let network = *st.network();
-            let proposal = propose_vault_sweep(&network, st.wallet_mut(), &fee_rule)
-                .expect("the sweep proposal closes")
-                .expect("the surplus is far above the minimum");
+            let proposal =
+                propose_vault_sweep(&network, st.wallet_mut(), &fee_rule, Zatoshis::ZERO)
+                    .expect("the sweep proposal closes")
+                    .expect("the surplus is far above the minimum");
 
             let step = proposal.steps().first();
             assert_eq!(
@@ -399,6 +537,31 @@ mod tests {
             assert_eq!(change(step), SWEEP_RESERVE, "float at {note_count} notes");
             assert!(step.balance().fee_required() > fee_rule.marginal_fee());
         }
+    }
+
+    /// Refunds still owed stay in the Treasury with the float.
+    #[test]
+    fn sweep_leaves_what_refunds_still_owe() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(50_000_000); 4]]);
+        st.add_empty_blocks(1);
+
+        let network = *st.network();
+        let owed = Zatoshis::const_from_u64(30_000_000);
+        let proposal = propose_vault_sweep(&network, st.wallet_mut(), &FeeRule::standard(), owed)
+            .expect("the sweep proposal closes")
+            .expect("the surplus is far above the minimum");
+        let step = proposal.steps().first();
+        assert_eq!(change(step), (SWEEP_RESERVE + owed).unwrap());
+
+        let everything = Zatoshis::const_from_u64(200_000_000);
+        assert!(
+            propose_vault_sweep(&network, st.wallet_mut(), &FeeRule::standard(), everything)
+                .expect("no proposal error")
+                .is_none(),
+            "nothing is swept while refunds owe the whole balance"
+        );
     }
 
     fn change(step: &zcash_client_backend::proposal::Step<NoteId>) -> Zatoshis {
@@ -548,5 +711,70 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert!(matches!(pending[0].1, Request::Claim { .. }));
         assert_eq!(pending[0].3, h(100));
+    }
+
+    /// Owes 50,000 zats for a 100,000-zat payment to the vault's address.
+    fn owed<P: Parameters>(network: &P) -> Refund {
+        let Address::Unified(ua) = vault_address(network) else {
+            panic!("the vault address is unified");
+        };
+        let mut queue = RefundQueue::new();
+        queue.admit(
+            &FeeRule::standard(),
+            TxId::from_bytes([1; 32]),
+            &ua,
+            &Name::parse("alice").unwrap(),
+            BlockHeight::from_u32(10),
+            Zatoshis::const_from_u64(100_000),
+            Zatoshis::ZERO,
+            "underpaid",
+        );
+        queue.due().remove(0)
+    }
+
+    /// The refund pays its amount from any Treasury notes. Its fee fits in
+    /// what was withheld.
+    #[test]
+    fn a_refund_is_a_treasury_payment_of_its_amount() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(80_000_000)]]);
+        st.add_empty_blocks(1);
+
+        let network = *st.network();
+        let refund = owed(&network);
+        let proposal = propose_refund(&network, st.wallet_mut(), &FeeRule::standard(), &refund)
+            .expect("the proposal closes")
+            .expect("the Treasury funds the refund");
+        let step = proposal.steps().first();
+        let payment = step
+            .transaction_request()
+            .payments()
+            .values()
+            .next()
+            .expect("one payment");
+        assert_eq!(
+            payment.recipient_address(),
+            &vault_address(&network).to_zcash_address(&network)
+        );
+        assert_eq!(payment.amount(), Some(refund.amount()));
+        assert!(step.balance().fee_required() <= (MARGINAL_FEE * REFUND_FEE_ACTIONS).unwrap());
+    }
+
+    /// A Treasury that cannot fund the refund waits.
+    #[test]
+    fn a_refund_waits_when_the_treasury_cannot_fund_it() {
+        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+            .build::<SaplingPoolTester>();
+        st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(20_000)]]);
+        st.add_empty_blocks(1);
+
+        let network = *st.network();
+        let refund = owed(&network);
+        assert!(
+            propose_refund(&network, st.wallet_mut(), &FeeRule::standard(), &refund)
+                .expect("the proposal closes")
+                .is_none()
+        );
     }
 }
