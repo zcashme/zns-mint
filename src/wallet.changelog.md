@@ -1,19 +1,16 @@
 # Wallet changelog
 
-## 2026-10-24 — Dust at the node's fee rate; one confirmation policy (#357)
+## 2026-10-24 — One confirmation policy (#357)
 
-- `select_spendable_notes`, the `AllFunds(Everything)` precheck and the
-  balance no longer apply the fixed `MARGINAL_FEE` cutoff. The caller's
-  change strategy drops inputs worth no more than one action at the fee
-  rule it was given, so a note is dust only at the node's rate.
-- A fixed cutoff above the node's rate stranded change: the change
-  strategy created notes the wallet would never select. The balance now
-  counts every unspent note.
 - `CONFIRMATIONS` (`ConfirmationsPolicy::MIN`) is one confirmation for
   every note, trusted or not. The library's calls require a policy
   argument; every caller passes this one: the Treasury balance reads in
   boot and the run loop, the sweep's send-max and payment, and the
   challenge relay.
+- Dust stays at the fixed `MARGINAL_FEE`, as in `zcash_client_sqlite`,
+  whatever rate the node charges. Upstream's greedy selector and
+  send-max assume the wallet never offers dust: a pruned note shrinks
+  the selected total, and the selector reports `InsufficientFunds`.
 
 ## 2026-10-10 — Note selection skips dust
 

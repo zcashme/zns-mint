@@ -6,11 +6,12 @@
   upstream's `propose_transfer` with a `SingleOutputChangeStrategy` over
   it. `propose_standard_transfer_to_address` takes only
   `StandardFeeRule::Zip317`, so it is no longer used.
-- Dust is judged at the node's rate: selection hands every note to the
-  change strategy, which drops inputs worth no more than one action.
-- A note smaller than the float is not needed by the sweep and stays in
-  the Treasury. Send-max counted it net of one action's fee, so the
-  float note plus that note hold `SWEEP_RESERVE` plus one action's fee.
+- Change follows the wallet's dust line:
+  `DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE))`. At a
+  rate below 5,000 the default threshold would let the change strategy
+  create change the wallet never selects. Name Note change is built by
+  hand and keeps no such rule; it is that small only when the Treasury
+  is nearly empty.
 - Send-max and the payment pass `wallet::CONFIRMATIONS`, so both halves
   of a sweep see the same notes.
 
