@@ -8,7 +8,7 @@
 use std::num::NonZeroU64;
 
 use zcash_client_backend::wallet::NoteId;
-use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
+use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
@@ -28,19 +28,24 @@ pub enum PaymentAgainstQuote {
 
 /// `Covers` when `paid` meets `price`. Otherwise the positive remainder
 /// after the refund fee, or `BelowFee` when that remainder is zero.
-pub fn payment_against_quote(paid: Zatoshis, price: Zatoshis) -> PaymentAgainstQuote {
+pub fn payment_against_quote(
+    paid: Zatoshis,
+    price: Zatoshis,
+    fee_rule: &FeeRule,
+) -> PaymentAgainstQuote {
     if paid >= price {
         return PaymentAgainstQuote::Covers;
     }
-    match refund_output(paid) {
+    match refund_output(paid, fee_rule) {
         Some(output) => PaymentAgainstQuote::Remainder(output),
         None => PaymentAgainstQuote::BelowFee,
     }
 }
 
 /// `paid` minus the one-action fee, when that remainder is positive.
-pub fn refund_output(paid: Zatoshis) -> Option<Zatoshis> {
-    (paid - MINIMUM_FEE).filter(|output| *output > Zatoshis::ZERO)
+pub fn refund_output(paid: Zatoshis, fee_rule: &FeeRule) -> Option<Zatoshis> {
+    let fee = (fee_rule.marginal_fee() * fee_rule.grace_actions())?;
+    (paid - fee).filter(|output| *output > Zatoshis::ZERO)
 }
 
 /// One percent of `price`, rounded down to a zat.
@@ -227,6 +232,7 @@ impl RefundQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
 
     fn zats(n: u64) -> Zatoshis {
         Zatoshis::const_from_u64(n)
@@ -237,7 +243,7 @@ mod tests {
         let fee = MINIMUM_FEE;
         let paid = zats(50_000);
         assert_eq!(
-            payment_against_quote(paid, zats(100_000)),
+            payment_against_quote(paid, zats(100_000), &FeeRule::standard()),
             PaymentAgainstQuote::Remainder((paid - fee).unwrap())
         );
     }
@@ -246,11 +252,15 @@ mod tests {
     fn a_payment_that_does_not_exceed_the_fee_is_kept() {
         let fee = MINIMUM_FEE;
         assert_eq!(
-            payment_against_quote(fee, zats(100_000)),
+            payment_against_quote(fee, zats(100_000), &FeeRule::standard()),
             PaymentAgainstQuote::BelowFee
         );
         assert_eq!(
-            payment_against_quote((fee - zats(1)).unwrap(), zats(100_000)),
+            payment_against_quote(
+                (fee - zats(1)).unwrap(),
+                zats(100_000),
+                &FeeRule::standard()
+            ),
             PaymentAgainstQuote::BelowFee
         );
     }
@@ -263,7 +273,7 @@ mod tests {
         let paid = price;
         assert_eq!(access_code_penalty(price), penalty);
         let net = (paid - penalty).unwrap();
-        assert_eq!(refund_output(net), net - fee);
+        assert_eq!(refund_output(net, &FeeRule::standard()), net - fee);
     }
 
     #[test]
@@ -272,7 +282,13 @@ mod tests {
         let penalty = access_code_penalty(price);
         let fee = MINIMUM_FEE;
         let covers_the_penalty = (penalty + fee).unwrap();
-        assert_eq!(refund_output((covers_the_penalty - penalty).unwrap()), None);
+        assert_eq!(
+            refund_output(
+                (covers_the_penalty - penalty).unwrap(),
+                &FeeRule::standard()
+            ),
+            None
+        );
         assert!((penalty - zats(1) - penalty).is_none());
     }
 
@@ -280,13 +296,21 @@ mod tests {
     fn a_fully_paid_claim_is_not_refunded() {
         let price = zats(100_000);
         assert_eq!(
-            payment_against_quote(price, price),
+            payment_against_quote(price, price, &FeeRule::standard()),
             PaymentAgainstQuote::Covers
         );
         assert_eq!(
-            payment_against_quote(zats(100_001), price),
+            payment_against_quote(zats(100_001), price, &FeeRule::standard()),
             PaymentAgainstQuote::Covers
         );
+    }
+
+    #[test]
+    fn a_lower_node_rate_refunds_a_payment_the_standard_rate_keeps() {
+        let paid = zats(5_000);
+        let node = crate::zcash::fees::fee_rule(zats(1_000));
+        assert_eq!(refund_output(paid, &node), Some(zats(3_000)));
+        assert_eq!(refund_output(paid, &FeeRule::standard()), None);
     }
 
     #[test]

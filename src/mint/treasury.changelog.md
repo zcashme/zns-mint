@@ -1,5 +1,11 @@
 # Treasury design record
 
+## 2026-10-24 — Refunds pay the node's fee rate
+
+- `plan_refund` and refund admission take the run loop's `FeeRule`, as
+  the sweep and the relay do. The first fee guess, and the line between
+  a refund and a kept payment, is that rule's two-action minimum.
+
 ## 2026-10-24 — Treasury payments pay the node's fee rate (#357)
 
 - `sweep_to_vault` and `challenge` take the node's `FeeRule` and call

@@ -30,7 +30,7 @@ use zcash_client_backend::proposal::Proposal;
 use zcash_client_backend::util::SystemClock;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_keys::address::Address;
-use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule, MARGINAL_FEE, MINIMUM_FEE};
+use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule, MARGINAL_FEE};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkType, Parameters, TestNetwork};
 use zcash_protocol::memo::MemoBytes;
@@ -126,6 +126,7 @@ pub enum RefundPlan {
 pub fn plan_refund<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
+    fee_rule: &FeeRule,
     note: NoteId,
     paid: Zatoshis,
     penalty: Zatoshis,
@@ -145,7 +146,9 @@ pub fn plan_refund<P: Parameters>(
     let Some(returning) = paid - penalty else {
         return Ok(RefundPlan::Dust);
     };
-    let mut fee = MINIMUM_FEE;
+    let Some(mut fee) = fee_rule.marginal_fee() * fee_rule.grace_actions() else {
+        return Ok(RefundPlan::Wait);
+    };
     // The first guess is one shielded action. The built fee can be higher
     // when the output pool is not the note's pool. One revision settles
     // a stable shape; a third guess waits for the next tip.
@@ -154,7 +157,7 @@ pub fn plan_refund<P: Parameters>(
             return Ok(RefundPlan::Dust);
         }
         let amount = (returning - fee).expect("the remainder exceeds the fee");
-        match propose_one_note(network, wallet, note, to, amount) {
+        match propose_one_note(network, wallet, fee_rule, note, to, amount) {
             Ok(proposal) => {
                 if refund_settles(&proposal, note, paid, penalty) {
                     return Ok(RefundPlan::Send(Box::new(proposal)));
@@ -183,20 +186,21 @@ pub fn plan_refund<P: Parameters>(
 fn propose_one_note<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
+    fee_rule: &FeeRule,
     note: NoteId,
     to: &zcash_keys::address::Address,
     amount: Zatoshis,
 ) -> Result<TreasuryProposal, TreasuryProposalError<P>> {
     wallet.set_refund_note(Some(note));
     // A penalty below the marginal fee is still the change. The sweep and
-    // the relays keep the default dust rule.
+    // the relays reject change at or below `MARGINAL_FEE`.
     let request = TransactionRequest::new(vec![Payment::without_memo(
         to.to_zcash_address(network),
         amount,
     )])
     .expect("one shielded payment satisfies a ZIP 321 request");
     let change_strategy = SingleOutputChangeStrategy::new(
-        FeeRule::standard(),
+        fee_rule.clone(),
         None,
         ShieldedPool::Ironwood,
         DustOutputPolicy::new(DustAction::AllowDustChange, None),
@@ -257,6 +261,7 @@ fn refund_settles(
 pub fn refund_underpaid<P: Parameters>(
     refunds: &mut RefundQueue,
     wallet: &mut Wallet<P>,
+    fee_rule: &FeeRule,
     txid: TxId,
     output_index: Option<u16>,
     paid: Zatoshis,
@@ -266,12 +271,13 @@ pub fn refund_underpaid<P: Parameters>(
     height: BlockHeight,
     kind: &'static str,
 ) -> bool {
-    match payment_against_quote(paid, price) {
+    match payment_against_quote(paid, price, fee_rule) {
         PaymentAgainstQuote::Covers => false,
         PaymentAgainstQuote::BelowFee | PaymentAgainstQuote::Remainder(_) => {
             admit_refund(
                 refunds,
                 wallet,
+                fee_rule,
                 txid,
                 output_index,
                 paid,
@@ -293,6 +299,7 @@ pub fn refund_underpaid<P: Parameters>(
 pub fn refund_keeping<P: Parameters>(
     refunds: &mut RefundQueue,
     wallet: &mut Wallet<P>,
+    fee_rule: &FeeRule,
     txid: TxId,
     output_index: Option<u16>,
     paid: Zatoshis,
@@ -306,6 +313,7 @@ pub fn refund_keeping<P: Parameters>(
     admit_refund(
         refunds,
         wallet,
+        fee_rule,
         txid,
         output_index,
         paid,
@@ -324,6 +332,7 @@ pub fn refund_keeping<P: Parameters>(
 fn admit_refund<P: Parameters>(
     refunds: &mut RefundQueue,
     wallet: &mut Wallet<P>,
+    fee_rule: &FeeRule,
     txid: TxId,
     output_index: Option<u16>,
     paid: Zatoshis,
@@ -349,7 +358,7 @@ fn admit_refund<P: Parameters>(
         kept();
         return false;
     };
-    let Some(output) = refund_output(net) else {
+    let Some(output) = refund_output(net, fee_rule) else {
         kept();
         return false;
     };
@@ -975,6 +984,7 @@ mod tests {
         let proposal = match plan_refund(
             &network,
             st.wallet_mut(),
+            &FeeRule::standard(),
             payment,
             paid,
             Zatoshis::ZERO,
@@ -1015,8 +1025,16 @@ mod tests {
         );
 
         let penalty = Zatoshis::const_from_u64(20_000);
-        let penalized = match plan_refund(&network, st.wallet_mut(), payment, paid, penalty, &to)
-            .expect("penalized plan")
+        let penalized = match plan_refund(
+            &network,
+            st.wallet_mut(),
+            &FeeRule::standard(),
+            payment,
+            paid,
+            penalty,
+            &to,
+        )
+        .expect("penalized plan")
         {
             RefundPlan::Send(proposal) => proposal,
             other => panic!("penalized refund plan was not send: {other:?}"),
@@ -1043,8 +1061,16 @@ mod tests {
         );
 
         let dust_penalty = Zatoshis::const_from_u64(1_000);
-        let dust = match plan_refund(&network, st.wallet_mut(), payment, paid, dust_penalty, &to)
-            .expect("dust penalty plan")
+        let dust = match plan_refund(
+            &network,
+            st.wallet_mut(),
+            &FeeRule::standard(),
+            payment,
+            paid,
+            dust_penalty,
+            &to,
+        )
+        .expect("dust penalty plan")
         {
             RefundPlan::Send(proposal) => proposal,
             other => panic!("dust-penalty refund plan was not send: {other:?}"),
@@ -1075,6 +1101,7 @@ mod tests {
             plan_refund(
                 &network,
                 st.wallet_mut(),
+                &FeeRule::standard(),
                 payment,
                 paid,
                 Zatoshis::ZERO,

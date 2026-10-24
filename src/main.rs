@@ -440,6 +440,7 @@ async fn main() {
                             treasury::refund_keeping(
                                 &mut refunds,
                                 &mut wallet,
+                                &fee_rule,
                                 txid,
                                 output_index,
                                 paid,
@@ -463,6 +464,7 @@ async fn main() {
                         if treasury::refund_underpaid(
                             &mut refunds,
                             &mut wallet,
+                            &fee_rule,
                             txid,
                             output_index,
                             paid,
@@ -484,6 +486,7 @@ async fn main() {
                                 treasury::refund_keeping(
                                     &mut refunds,
                                     &mut wallet,
+                                    &fee_rule,
                                     txid,
                                     output_index,
                                     paid,
@@ -507,6 +510,7 @@ async fn main() {
                             treasury::refund_keeping(
                                 &mut refunds,
                                 &mut wallet,
+                                &fee_rule,
                                 txid,
                                 output_index,
                                 paid,
@@ -540,6 +544,7 @@ async fn main() {
                         if treasury::refund_underpaid(
                             &mut refunds,
                             &mut wallet,
+                            &fee_rule,
                             txid,
                             output_index,
                             paid,
@@ -614,6 +619,7 @@ async fn main() {
                     if treasury::refund_underpaid(
                         &mut refunds,
                         &mut wallet,
+                        &fee_rule,
                         txid,
                         output_index,
                         paid,
@@ -632,6 +638,7 @@ async fn main() {
                     treasury::refund_keeping(
                         &mut refunds,
                         &mut wallet,
+                        &fee_rule,
                         txid,
                         output_index,
                         paid,
@@ -862,6 +869,7 @@ async fn main() {
             match treasury::plan_refund(
                 &network,
                 &mut wallet,
+                &fee_rule,
                 note,
                 owed.paid(),
                 owed.penalty(),
