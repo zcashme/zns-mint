@@ -5,9 +5,8 @@ Tracks design-relevant changes to `src/boot.rs`.
 ## 2026-10-24 — The fee rate or no start (#357)
 
 - Boot reads the node's fee rate after the price fetch and hands it to
-  the run loop as `Boot::fee_rule`. A failed read retries after
-  `RETRY_PAUSE`, as the pre-sale table does; boot does not start without
-  a usable rate.
+  the run loop as `Boot::fee_rule`. Like every other node read in boot,
+  it is tried once and a failure is fatal.
 
 ## 2026-10-22 — No pre-sale refresh handle (#371)
 

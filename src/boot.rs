@@ -704,22 +704,15 @@ impl Boot<Network> {
             "boot: initial price ingested"
         );
 
-        // 6a. Fee rate: fail-closed at birth — no `getstandardfee`, no start.
-        let fee_rule = loop {
-            match source.standard_fee().await {
-                Ok(rule) => {
-                    tracing::info!(
-                        zats_per_action = rule.marginal_fee().into_u64(),
-                        "boot: fee rate read"
-                    );
-                    break rule;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "boot: fee rate unavailable; retrying");
-                }
-            }
-            tokio::time::sleep(crate::zcash::RETRY_PAUSE).await;
-        };
+        // 6a. The node's fee rate.
+        let fee_rule = source
+            .standard_fee()
+            .await
+            .expect("FATAL: fee rate unavailable from Zebra");
+        tracing::info!(
+            zats_per_action = fee_rule.marginal_fee().into_u64(),
+            "boot: fee rate read"
+        );
 
         // 6b. Pre-sale table: fail-closed at birth — no table, no start.
         let presale_client = presale::https_client();
