@@ -23,6 +23,7 @@ use zcash_client_backend::wallet::{NoteId, OutputRef, ReceivedNote, TransparentA
 use zcash_keys::address::{Address, UnifiedAddress};
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_primitives::block::BlockHash;
+use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{self, BlockHeight};
 use zcash_protocol::memo::Memo;
@@ -261,10 +262,10 @@ impl<P: consensus::Parameters> Wallet<P> {
             ShieldedPool::Ironwood => balance.with_ironwood_balance_mut(|b| f(b)),
         };
 
-        // Notes at or below the node's marginal fee are uneconomic: they do
+        // Notes at or below the ZIP 317 marginal fee are uneconomic: they do
         // not contribute to `Balance::total` or spendable, and can only be
         // spent as grace inputs.
-        if value <= self.marginal_fee {
+        if value <= MARGINAL_FEE {
             return with_pool(&mut |pool_balance| Ok(pool_balance.add_uneconomic_value(value)?));
         }
 
