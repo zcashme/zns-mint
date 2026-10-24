@@ -12,6 +12,7 @@ use std::convert::Infallible;
 
 use incrementalmerkletree::{Address, Marking, Retention};
 use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTree};
+use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::scanning::ScanningKeys;
 use zcash_client_backend::{
     data_api::chain::{ChainState, CommitmentTreeRoot},
@@ -32,6 +33,11 @@ use zcash_protocol::{
 use zip32::AccountId;
 
 use crate::mint::TREASURY_ACCOUNT;
+
+/// One confirmation for every note, trusted or not. The mint never varies
+/// it: every library call that takes a policy passes this one, so balance
+/// reads, send-max and payments all see the same notes.
+pub const CONFIRMATIONS: ConfirmationsPolicy = ConfirmationsPolicy::MIN;
 
 /// The shard store's error type is [`Infallible`]. Callers use this so a
 /// store failure is not read as a missing checkpoint.

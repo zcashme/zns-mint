@@ -13,7 +13,6 @@ pub use refund::{
 };
 
 use std::convert::Infallible;
-use std::num::NonZeroU32;
 
 use zcash_client_backend::data_api::error::Error;
 use zcash_client_backend::data_api::locking::LockedInputPolicy;
@@ -21,16 +20,17 @@ use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
 use zcash_client_backend::data_api::wallet::input_selection::SpendPolicy;
 use zcash_client_backend::data_api::wallet::{
-    create_proposed_transactions, propose_send_max_transfer, propose_standard_transfer_to_address,
-    propose_transfer, ConfirmationsPolicy, CreateErrT, ProposeTransferErrT,
+    create_proposed_transactions, propose_send_max_transfer, propose_transfer, CreateErrT,
+    ProposeTransferErrT,
 };
 use zcash_client_backend::data_api::{MaxSpendMode, WalletRead as _};
-use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
-use zcash_client_backend::fees::{DustAction, DustOutputPolicy, StandardFeeRule};
+use zcash_client_backend::fees::zip317::SingleOutputChangeStrategy;
+use zcash_client_backend::fees::{DustAction, DustOutputPolicy};
 use zcash_client_backend::proposal::Proposal;
 use zcash_client_backend::util::SystemClock;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
-use zcash_primitives::transaction::fees::zip317::{FeeError, MINIMUM_FEE};
+use zcash_keys::address::Address;
+use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule, MARGINAL_FEE, MINIMUM_FEE};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkType, Parameters, TestNetwork};
 use zcash_protocol::memo::MemoBytes;
@@ -45,11 +45,11 @@ type TreasuryProposalError<P> = ProposeTransferErrT<
     Wallet<P>,
     Infallible,
     GreedyInputSelector<Wallet<P>>,
-    SingleOutputChangeStrategy<Wallet<P>>,
+    SingleOutputChangeStrategy<FeeRule, Wallet<P>>,
 >;
 type TreasuryBuildError<P> =
-    CreateErrT<Wallet<P>, GreedyInputSelectorError, StandardFeeRule, FeeError, NoteId>;
-type TreasuryProposal = Proposal<StandardFeeRule, NoteId>;
+    CreateErrT<Wallet<P>, GreedyInputSelectorError, FeeRule, FeeError, NoteId>;
+type TreasuryProposal = Proposal<FeeRule, NoteId>;
 
 /// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
 /// actually moves, not on the balance behind it.
@@ -69,13 +69,11 @@ const MAINNET_VAULT_ADDRESS: &str = "u1eqcql0r460xjqk49maglfxa02mfuetaed4h0nkf0l
 /// The project vault's testnet Unified Address (also used on regtest).
 const TESTNET_VAULT_ADDRESS: &str = "utest1v5p9lqxsshgrhdcj3gsg60vglxlkhwmhpvhtv3884pgwxktas9s95ws5qvypv4qyxadd5gjhzp4vczpd95flh307x42ssrynp9az3j4fyhz8knacwkzf8xk2f9726480ym2ntmv3ftk9z7gy5a8tarndrm0p992dx7gsczewsglqnpxg";
 
-fn vault_address<P: Parameters>(network: &P) -> zcash_keys::address::Address {
+fn vault_address<P: Parameters>(network: &P) -> Address {
     match network.network_type() {
-        NetworkType::Main => {
-            zcash_keys::address::Address::decode(&MainNetwork, MAINNET_VAULT_ADDRESS)
-        }
+        NetworkType::Main => Address::decode(&MainNetwork, MAINNET_VAULT_ADDRESS),
         NetworkType::Test | NetworkType::Regtest => {
-            zcash_keys::address::Address::decode(&TestNetwork, TESTNET_VAULT_ADDRESS)
+            Address::decode(&TestNetwork, TESTNET_VAULT_ADDRESS)
         }
     }
     .expect("FATAL: the configured vault Unified Address is invalid for its network")
@@ -198,7 +196,7 @@ fn propose_one_note<P: Parameters>(
     )])
     .expect("one shielded payment satisfies a ZIP 321 request");
     let change_strategy = SingleOutputChangeStrategy::new(
-        StandardFeeRule::Zip317,
+        FeeRule::standard(),
         None,
         ShieldedPool::Ironwood,
         DustOutputPolicy::new(DustAction::AllowDustChange, None),
@@ -210,7 +208,7 @@ fn propose_one_note<P: Parameters>(
         &GreedyInputSelector::new(),
         &change_strategy,
         request,
-        ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false),
+        crate::wallet::CONFIRMATIONS,
         &SpendPolicy::default(),
         None,
         None,
@@ -426,7 +424,7 @@ pub fn build_refund<P: Parameters>(
         Wallet<P>,
         P,
         GreedyInputSelectorError,
-        StandardFeeRule,
+        FeeRule,
         FeeError,
         NoteId,
     >(
@@ -452,20 +450,20 @@ pub fn build_refund<P: Parameters>(
 fn propose_vault_sweep<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
+    fee_rule: &FeeRule,
 ) -> Result<Option<TreasuryProposal>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>>
 {
-    let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
     let vault = vault_address(network);
     let sendable = match propose_send_max_transfer::<_, _, _, Infallible>(
         wallet,
         network,
         TREASURY_ACCOUNT,
         &[ShieldedPool::Sapling, ShieldedPool::Ironwood],
-        &StandardFeeRule::Zip317,
+        fee_rule,
         vault.to_zcash_address(network),
         None,
         MaxSpendMode::MaxSpendable,
-        policy,
+        crate::wallet::CONFIRMATIONS,
         &LockedInputPolicy::Exclude,
         None,
     ) {
@@ -485,17 +483,25 @@ fn propose_vault_sweep<P: Parameters>(
         return Ok(None);
     };
 
-    propose_standard_transfer_to_address::<_, _, Infallible>(
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        vault.to_zcash_address(network),
+        payment,
+    )])
+    .expect("one payment is a valid ZIP 321 request");
+    propose_transfer::<_, _, _, _, Infallible>(
         wallet,
         network,
-        StandardFeeRule::Zip317,
         TREASURY_ACCOUNT,
-        policy,
-        &vault,
-        payment,
-        None,
-        None,
-        ShieldedPool::Ironwood,
+        &GreedyInputSelector::new(),
+        &SingleOutputChangeStrategy::new(
+            fee_rule.clone(),
+            None,
+            ShieldedPool::Ironwood,
+            DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE)),
+        ),
+        request,
+        crate::wallet::CONFIRMATIONS,
+        &SpendPolicy::default(),
         None,
         None,
     )
@@ -510,8 +516,9 @@ pub fn sweep_to_vault<P: Parameters>(
     treasury_keys: &crate::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
+    fee_rule: &FeeRule,
 ) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
-    let Some(proposal) = propose_vault_sweep(network, wallet)? else {
+    let Some(proposal) = propose_vault_sweep(network, wallet, fee_rule)? else {
         return Ok(None);
     };
 
@@ -553,20 +560,35 @@ pub fn challenge<P: Parameters>(
     treasury_keys: &crate::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
+    fee_rule: &FeeRule,
     controller: &zcash_keys::address::UnifiedAddress,
     memo: MemoBytes,
 ) -> Result<Transaction, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
-    let proposal = propose_standard_transfer_to_address::<_, _, Infallible>(
-        wallet,
-        network,
-        StandardFeeRule::Zip317,
-        TREASURY_ACCOUNT,
-        ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false),
-        &zcash_keys::address::Address::Unified(Box::new(controller.clone())),
-        CHALLENGE_RELAY_VALUE,
+    let payment = Payment::new(
+        Address::Unified(Box::new(controller.clone())).to_zcash_address(network),
+        Some(CHALLENGE_RELAY_VALUE),
         Some(memo),
         None,
-        ShieldedPool::Ironwood,
+        None,
+        vec![],
+    )
+    .map_err(|error| BuildFailure::Proposal(Error::Payment(error)))?;
+    let request =
+        TransactionRequest::new(vec![payment]).expect("one payment is a valid ZIP 321 request");
+    let proposal = propose_transfer::<_, _, _, _, Infallible>(
+        wallet,
+        network,
+        TREASURY_ACCOUNT,
+        &GreedyInputSelector::new(),
+        &SingleOutputChangeStrategy::new(
+            fee_rule.clone(),
+            None,
+            ShieldedPool::Ironwood,
+            DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE)),
+        ),
+        request,
+        crate::wallet::CONFIRMATIONS,
+        &SpendPolicy::default(),
         None,
         None,
     )
@@ -577,7 +599,7 @@ pub fn challenge<P: Parameters>(
         Wallet<P>,
         P,
         GreedyInputSelectorError,
-        StandardFeeRule,
+        FeeRule,
         FeeError,
         NoteId,
     >(
@@ -658,10 +680,10 @@ mod tests {
     use super::*;
     use crate::mint::{Action, Name, Term, TREASURY_ACCOUNT};
     use crate::wallet::testing::{Cache, Factory};
+    use crate::zcash::fees::fee_rule;
     use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
     use zcash_client_backend::data_api::testing::sapling::SaplingPoolTester;
     use zcash_client_backend::data_api::wallet::TargetHeight;
-    use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
     use zcash_protocol::consensus::MainNetwork;
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
@@ -714,19 +736,22 @@ mod tests {
         );
     }
 
-    /// The float survives any note count, and dust is left behind.
+    /// The float survives any note count and fee rate.
     #[test]
     fn sweep_proposal_leaves_exactly_the_float_at_any_note_count() {
-        for note_count in [3usize, 198, 250, 400] {
+        for (note_count, fee_rule) in [3usize, 198, 250, 400].into_iter().flat_map(|count| {
+            [
+                (count, FeeRule::standard()),
+                (count, fee_rule(Zatoshis::const_from_u64(1_000))),
+            ]
+        }) {
             let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
                 .build::<SaplingPoolTester>();
-            let mut values = vec![Zatoshis::const_from_u64(50_000_000); note_count];
-            values.push(MARGINAL_FEE);
-            st.add_notes_checking_balance([values]);
+            st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(50_000_000); note_count]]);
             st.add_empty_blocks(1);
 
             let network = *st.network();
-            let proposal = propose_vault_sweep(&network, st.wallet_mut())
+            let proposal = propose_vault_sweep(&network, st.wallet_mut(), &fee_rule)
                 .expect("the sweep proposal closes")
                 .expect("the surplus is far above the minimum");
 
@@ -736,16 +761,18 @@ mod tests {
                     .map_or(0, |inputs| inputs.notes().len()),
                 note_count
             );
-            let change = step
-                .balance()
-                .proposed_change()
-                .iter()
-                .map(|change| change.value())
-                .sum::<Option<Zatoshis>>()
-                .expect("change fits in the monetary range");
-            assert_eq!(change, SWEEP_RESERVE, "float at {note_count} notes");
-            assert!(step.balance().fee_required() > MARGINAL_FEE);
+            assert_eq!(change(step), SWEEP_RESERVE, "float at {note_count} notes");
+            assert!(step.balance().fee_required() > fee_rule.marginal_fee());
         }
+    }
+
+    fn change(step: &zcash_client_backend::proposal::Step<NoteId>) -> Zatoshis {
+        step.balance()
+            .proposed_change()
+            .iter()
+            .map(|change| change.value())
+            .sum::<Option<Zatoshis>>()
+            .expect("change fits in the monetary range")
     }
 
     #[test]
@@ -1057,7 +1084,7 @@ mod tests {
             RefundPlan::Send(_)
         ));
 
-        let sweep = propose_vault_sweep(&network, st.wallet_mut())
+        let sweep = propose_vault_sweep(&network, st.wallet_mut(), &FeeRule::standard())
             .expect("sweep")
             .expect("the other notes clear the minimum");
         let spent: Vec<_> = sweep

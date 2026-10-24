@@ -4,10 +4,9 @@
 use orchard::note::Psi;
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{NoteId, ReceivedNote};
 use zcash_primitives::transaction::builder::{self, BuildConfig, Builder, BundlePadding};
-use zcash_primitives::transaction::fees::zip317::FeeError;
+use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule};
 use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -63,7 +62,7 @@ impl std::error::Error for PrepareError {}
 
 /// Builds a Name Note transaction and its fee without recording a send.
 /// `authority_nf` is the claim anchor or the predecessor; Treasury fee
-/// notes cover the fee.
+/// notes cover the fee at the node's rate, `fee_rule`.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare<P: Parameters>(
     network: &P,
@@ -72,6 +71,7 @@ pub fn prepare<P: Parameters>(
     registry_keys: &RegistryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
+    fee_rule: &FeeRule,
     note: NameNote,
     authority_nf: orchard::note::Nullifier,
     tip: BlockHeight,
@@ -98,7 +98,7 @@ pub fn prepare<P: Parameters>(
     let mut fee_funding = Zatoshis::ZERO;
     let transaction_fee = loop {
         let action_count = (fixed_spends + fee_notes.len()).max(fixed_outputs).max(2);
-        let f = fee(network, target_height, action_count)?;
+        let f = fee(network, fee_rule, target_height, action_count)?;
         if fee_funding >= f {
             break f;
         }
@@ -213,7 +213,7 @@ pub fn prepare<P: Parameters>(
             rand::rand_core::UnwrapErr(rand::rngs::SysRng),
             spend_prover,
             output_prover,
-            &StandardFeeRule::Zip317,
+            fee_rule,
         )
         .map_err(PrepareError::Builder)?;
     Ok((built.transaction().clone(), transaction_fee))
@@ -259,10 +259,11 @@ fn predecessor_opening<P: Parameters>(
 
 fn fee<P: Parameters>(
     network: &P,
+    fee_rule: &FeeRule,
     target_height: BlockHeight,
     ironwood_actions: usize,
 ) -> Result<Zatoshis, PrepareError> {
-    StandardFeeRule::Zip317
+    fee_rule
         .fee_required(
             network,
             target_height,

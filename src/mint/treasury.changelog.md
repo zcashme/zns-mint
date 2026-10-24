@@ -1,5 +1,20 @@
 # Treasury design record
 
+## 2026-10-24 — Treasury payments pay the node's fee rate (#357)
+
+- `sweep_to_vault` and `challenge` take the node's `FeeRule` and call
+  upstream's `propose_transfer` with a `SingleOutputChangeStrategy` over
+  it. `propose_standard_transfer_to_address` takes only
+  `StandardFeeRule::Zip317`, so it is no longer used.
+- Change follows the wallet's dust line:
+  `DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE))`. At a
+  rate below 5,000 the default threshold would let the change strategy
+  create change the wallet never selects. Name Note change is built by
+  hand and keeps no such rule; it is that small only when the Treasury
+  is nearly empty.
+- Send-max and the payment pass `wallet::CONFIRMATIONS`, so both halves
+  of a sweep see the same notes.
+
 ## 2026-10-23 — A replayed payment keeps its refund
 
 - An unlisted name is kept, including when the access code is wrong.
