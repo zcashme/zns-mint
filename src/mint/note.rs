@@ -612,10 +612,16 @@ fn decrypt_treasury_tx_with_fvk(
 // NameNoteQueue — Name Notes through canonical resolution
 // ---------------------------------------------------------------------------
 
-/// An outstanding authorization or its canonical observation.
+/// An outstanding authorization, a broadcast still inside its expiry
+/// window, or the canonical observation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NameNoteState {
     Authorized,
+    /// Submitted. The transaction can confirm while the applied tip is
+    /// below `expiry`.
+    Sent {
+        expiry: BlockHeight,
+    },
     Seen,
 }
 
@@ -677,6 +683,32 @@ impl NameNoteQueue {
         }
     }
 
+    /// Records that `name`'s authorized order was broadcast, valid below
+    /// `expiry`.
+    pub fn mark_sent(&mut self, name: &Name, expiry: BlockHeight) {
+        let state = self
+            .orders
+            .iter_mut()
+            .find_map(|(note, _, state)| {
+                (*state == NameNoteState::Authorized && note.name() == name).then_some(state)
+            })
+            .expect("FATAL: no authorized order owns this name");
+        *state = NameNoteState::Sent { expiry };
+    }
+
+    /// Returns a broadcast order to [`NameNoteState::Authorized`] once the
+    /// applied tip can no longer mine it. The last valid block is the one
+    /// before `expiry`.
+    pub fn expire_sent(&mut self, tip: BlockHeight) {
+        for (_, _, state) in &mut self.orders {
+            if let NameNoteState::Sent { expiry } = *state {
+                if tip + 1 >= expiry {
+                    *state = NameNoteState::Authorized;
+                }
+            }
+        }
+    }
+
     /// Whether an unresolved order owns this name. `Seen` orders
     /// remain for reorg tracking but no longer reserve the name.
     pub fn note_pending(&self, name: &Name) -> bool {
@@ -694,11 +726,12 @@ impl NameNoteQueue {
             .collect()
     }
 
-    /// The name of every outstanding authorized order, borrowed.
+    /// The name of every order not yet seen, borrowed. A broadcast order
+    /// is included.
     pub fn authorized_names(&self) -> impl Iterator<Item = &Name> {
         self.orders
             .iter()
-            .filter(|(_, _, state)| *state == NameNoteState::Authorized)
+            .filter(|(_, _, state)| *state != NameNoteState::Seen)
             .map(|(note, _, _)| note.name())
     }
 
@@ -1289,6 +1322,31 @@ mod tests {
         assert_eq!(names, ["alice", "carol"]);
         let borrowed: Vec<&str> = queue.authorized_names().map(Name::as_str).collect();
         assert_eq!(borrowed, ["alice", "carol"]);
+    }
+
+    /// A broadcast order is not built or dropped while its transaction can
+    /// still confirm. Past the expiry height it is authorized again.
+    #[test]
+    fn a_sent_order_stays_until_its_expiry_height() {
+        let claim = NameNote::Claim {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+        let mut queue = NameNoteQueue::default();
+        let expiry = BlockHeight::from_u32(51);
+        queue.admit(BlockHeight::from_u32(10), claim.clone());
+        queue.mark_sent(claim.name(), expiry);
+
+        assert!(queue.authorized_notes().is_empty());
+        assert!(queue.note_pending(claim.name()));
+        assert_eq!(queue.authorized_names().count(), 1);
+
+        queue.expire_sent(BlockHeight::from_u32(49));
+        assert!(queue.authorized_notes().is_empty());
+
+        queue.expire_sent(BlockHeight::from_u32(50));
+        assert_eq!(queue.authorized_notes(), vec![claim]);
     }
 
     #[test]

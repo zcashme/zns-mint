@@ -14,6 +14,7 @@ pub use time::Timestamp;
 pub use zcash_keys::address::UnifiedAddress;
 
 use zcash_address::unified::{Container as _, Encoding};
+use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::memo::{Memo, MemoBytes};
@@ -633,6 +634,7 @@ pub async fn relay<P: Parameters + Send + 'static>(
     treasury_keys: &TreasuryKeys,
     spend_prover: &SpendParameters,
     output_prover: &OutputParameters,
+    fee_rule: &FeeRule,
     controller_ua: &UnifiedAddress,
     source: &CanonicalBlockSource,
     request: &OtpChallenge,
@@ -659,6 +661,7 @@ pub async fn relay<P: Parameters + Send + 'static>(
         treasury_keys,
         spend_prover,
         output_prover,
+        fee_rule,
         controller_ua,
         memo,
     ) {

@@ -1,5 +1,19 @@
 # main.changelog.md
 
+## 2026-10-23 — Transactions pay the node's fee rate (#357)
+
+- Each tip pass reads `getstandardfee` once the tip is confirmed and
+  passes the rule to the challenge relay, Name Note assembly, and the
+  vault sweep. A failed read keeps the last rate the node gave.
+
+## 2026-10-23 — A queued update is dropped when the tip median would release it
+
+- Before echoes and the lifecycle releases, an update still waiting to
+  be signed is dropped when the purchased term or the liveness deadline
+  has passed at the tip median. A broadcast order stays until its expiry
+  height and keeps the name reserved, so no release note is admitted
+  while that transaction can still confirm.
+
 ## 2026-10-22 — The pre-sale table is read beside the price round (#371)
 
 - Every tip pass starts `presale::PendingRead` when the tip arrives,

@@ -156,7 +156,11 @@ impl Registry {
         })
     }
 
-    /// The update law: action, commitment, clocks, term. `None` means unlawful.
+    /// The update law: action, commitment, term, liveness. `None` means unlawful.
+    ///
+    /// The purchased term and the liveness deadline are read at the applied
+    /// tip. A confirmed update renews even when the confirming block's
+    /// median is later.
     pub fn authorize_update(&self, pending: &OtpChallenge, mtp: Timestamp) -> Option<NameNote> {
         let record = self.record(&pending.name).cloned()?;
         if pending.action != Action::Update {
@@ -196,10 +200,11 @@ impl Registry {
         })
     }
 
-    /// The request gate, the authorize family's twin: the note
-    /// unspoken-for, both §4.5 clocks live at `mtp_now`, the request
-    /// newer than the record, forever names taking no term. The record,
-    /// when a challenge may proceed; the paying lanes add the fee.
+    /// The request gate. The note is unspoken-for, the request is newer
+    /// than the record, and a forever name takes no term. The purchased
+    /// term and the liveness deadline are read at the applied tip, the
+    /// same instant as [`Self::authorize_update`]. Returns the record
+    /// when a challenge may proceed.
     #[allow(clippy::too_many_arguments)]
     pub fn authorize_challenge(
         &self,
@@ -326,9 +331,8 @@ impl Registry {
     }
 
     /// Offers a confirmed update candidate; true when the transaction
-    /// spent this name's current note and both clocks still allow a
-    /// renewal at block MTP. A well-formed spend after expiry or
-    /// liveness marks the name released and returns false.
+    /// spent this name's current note. A signed update renews, and the
+    /// new liveness deadline starts at this block's median.
     pub fn accept_update<P: Parameters>(
         &mut self,
         params: &P,
@@ -348,10 +352,6 @@ impl Registry {
         };
         if note.prev_rcm() != Some(record.commitment) {
             // The predecessor was spent whatever the note claims.
-            self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
-            return false;
-        }
-        if record.is_release_due(mtp) {
             self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
             return false;
         }
@@ -775,10 +775,9 @@ mod tests {
         assert!(!term_live.allows_challenge(Action::Release, &ua, None, above, ts(1_500_000_000)));
     }
 
-    /// The gate and the law answer the liveness clock with one
-    /// verdict, through the same public twin: before the deadline a
-    /// request both passes and authorizes; at the deadline
-    /// `authorize_challenge` refuses what `authorize_update` voids.
+    /// The gate and the update law share the tip median. One second
+    /// before the deadline both allow the update. At the deadline both
+    /// refuse, and a queued note would be dropped.
     #[test]
     fn the_gate_and_the_update_law_agree_on_the_liveness_clock() {
         use crate::mint::note::NameNoteQueue;
@@ -815,11 +814,13 @@ mod tests {
             .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, before)
             .is_some());
         assert!(r.authorize_update(&pending(deadline - 1), before).is_some());
+        assert!(!r.record(&name).unwrap().is_release_due(before));
 
         assert!(r
             .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, after)
             .is_none());
         assert!(r.authorize_update(&pending(deadline), after).is_none());
+        assert!(r.record(&name).unwrap().is_release_due(after));
     }
 
     /// A name with a transition already admitted cannot buy a
@@ -845,7 +846,7 @@ mod tests {
                 &test_ua(),
                 None,
                 BlockHeight::from_u32(101),
-                ts(1_000_000_000)
+                ts(1_000_000_000),
             )
             .is_none());
     }
@@ -1286,34 +1287,39 @@ mod tests {
         assert_eq!(rec.predecessor_nullifier, succ);
     }
 
+    /// A confirmed update renews after the predecessor's term has passed.
+    /// The new liveness deadline starts at this block's median.
     #[test]
-    fn accept_update_after_expiry_marks_released() {
+    fn accept_update_after_expiry_renews() {
         let mut r = live_alice(Expiry::At(ts(1_000_000_000)), 3_000_000_000);
         let note = update_for_alice(Expiry::At(ts(2_000_000_000)), 1);
         let succ = nullifier(20);
-        assert!(!r.accept_update(
+        let mtp = ts(1_000_000_000);
+        assert!(r.accept_update(
             &MAIN_NETWORK,
             &note,
             succ,
             &[nullifier(1)],
             BlockHeight::from_u32(101),
-            ts(1_000_000_000),
+            mtp,
         ));
-        assert!(r.record(&test_name()).is_none());
-        let rec = r
-            .record_history(&test_name())
-            .last()
-            .expect("release retained in history");
-        assert_eq!(rec.action, Action::Release);
+        let rec = r.record(&test_name()).expect("alice still bound");
+        assert_eq!(rec.action, Action::Update);
+        assert_eq!(rec.expires_at, Expiry::At(ts(2_000_000_000)));
         assert_eq!(rec.predecessor_nullifier, succ);
+        assert_eq!(
+            rec.release_deadline,
+            ts(1_000_000_000 + crate::mint::LIVENESS_INTERVAL)
+        );
     }
 
+    /// A confirmed update renews after the liveness deadline has passed.
     #[test]
-    fn accept_update_after_liveness_marks_released() {
+    fn accept_update_after_liveness_renews() {
         let mut r = live_alice(Expiry::Never, 1_000_000_000);
         let note = update_for_alice(Expiry::Never, 1);
         let succ = nullifier(20);
-        assert!(!r.accept_update(
+        assert!(r.accept_update(
             &MAIN_NETWORK,
             &note,
             succ,
@@ -1321,12 +1327,9 @@ mod tests {
             BlockHeight::from_u32(101),
             ts(1_000_000_000),
         ));
-        assert!(r.record(&test_name()).is_none());
-        let rec = r
-            .record_history(&test_name())
-            .last()
-            .expect("release retained in history");
-        assert_eq!(rec.action, Action::Release);
+        let rec = r.record(&test_name()).expect("alice still bound");
+        assert_eq!(rec.action, Action::Update);
+        assert_eq!(rec.expires_at, Expiry::Never);
         assert_eq!(rec.predecessor_nullifier, succ);
     }
 

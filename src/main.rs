@@ -10,8 +10,8 @@
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
-use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
+use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
 
 use zns_mint::boot::Boot;
@@ -48,6 +48,7 @@ async fn main() {
         access_code_key,
         mut protected_names,
         presale_client,
+        mut fee_rule,
         mut registry,
         mut name_notes,
         mut requests,
@@ -342,10 +343,24 @@ async fn main() {
             );
             continue;
         }
+        // The node's fee rate for every transaction this pass builds. A
+        // failed read keeps the last rate the node gave.
+        match source.standard_fee().await {
+            Ok(rule) => {
+                if rule.marginal_fee() != fee_rule.marginal_fee() {
+                    tracing::info!(
+                        zats_per_action = rule.marginal_fee().into_u64(),
+                        "fee rate changed"
+                    );
+                }
+                fee_rule = rule;
+            }
+            Err(error) => tracing::warn!(%error, "fee rate unavailable; keeping the last rate"),
+        }
 
         // The three gauges: chain level, money level, price level.
         let treasury_zats = wallet
-            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .get_wallet_summary(zns_mint::wallet::CONFIRMATIONS)
             .expect("FATAL: balance summary failed")
             .expect("FATAL: chain knowledge missing before gauge")
             .account_balances()
@@ -486,6 +501,7 @@ async fn main() {
                 &treasury_keys,
                 &sapling_spend,
                 &sapling_output,
+                &fee_rule,
                 &record.ua,
                 &source,
                 &pending,
@@ -494,6 +510,26 @@ async fn main() {
             .await
             {
                 challenges.challenge_issued(&pending);
+            }
+        }
+
+        // A broadcast order whose expiry height has passed can be signed
+        // again, or dropped below once the tip median would release it.
+        name_notes.expire_sent(tip);
+        // Drop an update the tip median would already release. An echo
+        // for that name can then be decided, and a release note can be
+        // admitted below. A broadcast still inside its expiry window stays.
+        for note in name_notes.authorized_notes() {
+            if note.action().is_update()
+                && registry
+                    .record(note.name())
+                    .is_some_and(|record| record.is_release_due(mtp_now))
+            {
+                tracing::info!(
+                    name = %note.name().as_str(),
+                    "update dropped: the tip median would release the name"
+                );
+                name_notes.drop_note(note.name());
             }
         }
 
@@ -574,7 +610,7 @@ async fn main() {
         }
 
         // Lifecycle releases, §4.5: the registry owns the clocks and
-        // their plural; the sweep moves the batch out each tip.
+        // their plural; each tip admits the release notes.
         // `releases_due` re-derives the same notes per tip, so
         // admission is idempotent.
         for (name, release_note) in registry.releases_due(mtp_now) {
@@ -633,6 +669,7 @@ async fn main() {
                 &registry_keys,
                 &sapling_spend,
                 &sapling_output,
+                &fee_rule,
                 note.clone(),
                 authority_nf,
                 tip,
@@ -668,6 +705,7 @@ async fn main() {
 
             if source.submit(&transaction, "NameNote").await {
                 wallet.record_sent(&transaction, target_height, fee);
+                name_notes.mark_sent(note.name(), target_height + DEFAULT_TX_EXPIRY_DELTA);
                 tracing::info!(
                     txid = %transaction.txid(),
                     name = %note.name().as_str(),
@@ -692,6 +730,7 @@ async fn main() {
                 &treasury_keys,
                 &sapling_spend,
                 &sapling_output,
+                &fee_rule,
             ) {
                 Ok(Some(tx)) => {
                     source.submit(&tx, "vault sweep").await;

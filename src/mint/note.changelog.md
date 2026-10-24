@@ -1,5 +1,19 @@
 # `mint/note.rs` design record
 
+## 2026-10-23 — Name Notes pay the node's fee rate (#357)
+
+- `assemble::prepare` takes the node's `FeeRule` for the fee loop and
+  the builder, in place of `StandardFeeRule::Zip317`.
+
+## 2026-10-23 — A broadcast order stays until its expiry height
+
+- `NameNoteState::Sent` stores the expiry height of a submitted
+  transaction. The enactment loop builds and drops only `Authorized`
+  orders, so a broadcast update is not signed again and is not dropped
+  while it can still confirm.
+- When the applied tip reaches that height, the order returns to
+  `Authorized`. `authorized_names` still includes a sent order.
+
 ## 2026-10-15 — `NameNoteQueue::authorized_names` (#342)
 
 - Names every outstanding authorized order, borrowed, for the request

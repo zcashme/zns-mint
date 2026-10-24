@@ -94,7 +94,7 @@ transparent = { package = "zcash_transparent", version = "=0.11.0-pre.1", defaul
 zip32 = "0.3"
 
 # Block parsing
-zcash_primitives = { version = "=0.31.0-pre.1", default-features = false, features = ["unsafe-zns"] }
+zcash_primitives = { version = "=0.31.0-pre.1", default-features = false, features = ["unsafe-zns", "non-standard-fees"] }
 sapling = { package = "sapling-crypto", version = "0.9", default-features = false, features = ["multicore"] }
 
 # ZIP-321 payment requests for upstream proposal construction
