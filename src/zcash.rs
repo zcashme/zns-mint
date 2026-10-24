@@ -8,6 +8,7 @@
 //! but never sees transport state. The node's identity is not on the wire:
 //! it is the SEV-SNP measurement of the image this process lives in.
 
+pub mod adopt;
 pub mod chain;
 pub mod fees;
 pub mod mempool;
