@@ -105,11 +105,38 @@ mod tests {
         assert!(block_time_ok(None, (wall + MINT_WINDOW + 1) as u32, wall, false).is_err());
     }
 
+    #[cfg(not(any(feature = "testnet", feature = "regtest")))]
+    const PINNED_HEIGHT: u32 = 3_353_606;
+    #[cfg(not(any(feature = "testnet", feature = "regtest")))]
+    const PINNED_HEADER: &str = include_str!("testdata/mainnet-3353606.header.hex");
+    #[cfg(all(feature = "testnet", not(feature = "regtest")))]
+    const PINNED_HEIGHT: u32 = 4_238_000;
+    #[cfg(all(feature = "testnet", not(feature = "regtest")))]
+    const PINNED_HEADER: &str = include_str!("testdata/testnet-4238000.header.hex");
+
+    #[cfg(not(feature = "regtest"))]
+    fn pinned_header() -> zcash_primitives::block::BlockHeader {
+        let bytes = hex::decode(PINNED_HEADER.trim()).expect("pinned header is hex");
+        zcash_primitives::block::BlockHeader::read(std::io::Cursor::new(bytes))
+            .expect("pinned header parses")
+    }
+
     #[cfg(not(feature = "regtest"))]
     #[test]
-    fn the_pinned_block_is_a_real_hash() {
+    fn the_pinned_header_hashes_to_the_pin() {
         let (height, hash) = pinned();
-        assert!(u32::from(height) > 1_000_000);
-        assert_ne!(hash.0, [0; 32]);
+        assert_eq!(u32::from(height), PINNED_HEIGHT);
+        assert_eq!(pinned_header().hash(), hash);
+    }
+
+    #[cfg(not(feature = "regtest"))]
+    #[test]
+    fn a_mismatched_header_is_not_the_pin() {
+        let (_, hash) = pinned();
+        let mut bytes = hex::decode(PINNED_HEADER.trim()).expect("pinned header is hex");
+        bytes[0] ^= 1;
+        let header = zcash_primitives::block::BlockHeader::read(std::io::Cursor::new(bytes))
+            .expect("tampered header parses");
+        assert_ne!(header.hash(), hash);
     }
 }
