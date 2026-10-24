@@ -1,8 +1,9 @@
 //! Refunds owed by the run loop.
 //!
 //! A refund is a Treasury payment, funded from any Treasury notes once the
-//! payment it returns is buried. The payer covers its fee: the refund
-//! withholds `REFUND_FEE_ACTIONS` at the node's rate. A wrong access code
+//! payment it returns is buried. Its amount is fixed when it is admitted:
+//! the payment less any penalty and the withheld fee, `REFUND_FEE_ACTIONS`
+//! at the node's rate, so the payer covers the fee. A wrong access code
 //! also keeps 1% of the quote. The queue is memory: a restart forgets a
 //! refund that has not been mined.
 
@@ -18,33 +19,6 @@ use crate::mint::{Name, UnifiedAddress};
 /// Actions' worth of fee withheld from every refund. The Treasury never
 /// adds to a refund's fee; a proposal that would charge more waits.
 pub const REFUND_FEE_ACTIONS: usize = 10;
-
-/// How `paid` stands against the quote and the refund fee.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaymentAgainstQuote {
-    /// `paid` is at least the quote.
-    Covers,
-    /// `paid` is short. This is `paid` minus the refund fee.
-    Remainder(Zatoshis),
-    /// `paid` is short and does not exceed the refund fee.
-    BelowFee,
-}
-
-/// `Covers` when `paid` meets `price`. Otherwise the positive remainder
-/// after the refund fee, or `BelowFee` when that remainder is zero.
-pub fn payment_against_quote(
-    paid: Zatoshis,
-    price: Zatoshis,
-    fee_rule: &FeeRule,
-) -> PaymentAgainstQuote {
-    if paid >= price {
-        return PaymentAgainstQuote::Covers;
-    }
-    match refund_output(paid, fee_rule) {
-        Some(output) => PaymentAgainstQuote::Remainder(output),
-        None => PaymentAgainstQuote::BelowFee,
-    }
-}
 
 /// `paid` minus the withheld refund fee, when that remainder is positive.
 pub fn refund_output(paid: Zatoshis, fee_rule: &FeeRule) -> Option<Zatoshis> {
@@ -62,10 +36,9 @@ pub fn access_code_penalty(price: Zatoshis) -> Zatoshis {
 pub struct Refund {
     payment: TxId,
     recipient: UnifiedAddress,
-    paid: Zatoshis,
-    /// Change the Treasury keeps. Zero, except a wrong access code keeps
-    /// one percent of the quote.
-    penalty: Zatoshis,
+    /// What the Treasury pays back: the payment less any penalty and the
+    /// withheld fee.
+    amount: Zatoshis,
     name: Name,
     height: BlockHeight,
     /// The refund transaction, once the node has accepted one.
@@ -73,19 +46,17 @@ pub struct Refund {
 }
 
 impl Refund {
-    pub fn new(
+    fn new(
         payment: TxId,
         recipient: UnifiedAddress,
-        paid: Zatoshis,
-        penalty: Zatoshis,
+        amount: Zatoshis,
         name: Name,
         height: BlockHeight,
     ) -> Self {
         Self {
             payment,
             recipient,
-            paid,
-            penalty,
+            amount,
             name,
             height,
             sent: None,
@@ -101,12 +72,8 @@ impl Refund {
         &self.recipient
     }
 
-    pub fn paid(&self) -> Zatoshis {
-        self.paid
-    }
-
-    pub fn penalty(&self) -> Zatoshis {
-        self.penalty
+    pub fn amount(&self) -> Zatoshis {
+        self.amount
     }
 
     pub fn name(&self) -> &Name {
@@ -125,8 +92,8 @@ impl Refund {
 
 /// Refunds owed, in admission order. A reorg drops those whose payment
 /// block was orphaned, and keeps a submitted transaction id so a replay
-/// of that payment can restore it. A payment that no longer covers the fee
-/// is removed, and so is a refund mined at or below the rewind floor.
+/// of that payment can restore it. A refund mined at or below the rewind
+/// floor is removed.
 #[derive(Clone, Debug, Default)]
 pub struct RefundQueue {
     owed: Vec<Refund>,
@@ -142,9 +109,54 @@ impl RefundQueue {
         }
     }
 
+    /// Owes `recipient` what `paid` leaves after `penalty` and the withheld
+    /// fee. A payment that leaves nothing is kept. Returns whether a refund
+    /// is owed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit(
+        &mut self,
+        fee_rule: &FeeRule,
+        txid: TxId,
+        recipient: &UnifiedAddress,
+        name: &Name,
+        height: BlockHeight,
+        paid: Zatoshis,
+        penalty: Zatoshis,
+        reason: &'static str,
+    ) -> bool {
+        let Some(amount) = (paid - penalty).and_then(|net| refund_output(net, fee_rule)) else {
+            tracing::info!(
+                %txid,
+                name = %name.as_str(),
+                reason,
+                paid = paid.into_u64(),
+                penalty = penalty.into_u64(),
+                "payment kept"
+            );
+            return false;
+        };
+        tracing::info!(
+            %txid,
+            name = %name.as_str(),
+            reason,
+            paid = paid.into_u64(),
+            penalty = penalty.into_u64(),
+            refund = amount.into_u64(),
+            "payment refund"
+        );
+        self.record(Refund::new(
+            txid,
+            recipient.clone(),
+            amount,
+            name.clone(),
+            height,
+        ));
+        true
+    }
+
     /// Records `refund` unless that payment is already owed. A replay of an
     /// orphaned payment keeps the refund transaction that paid it back.
-    pub fn admit(&mut self, mut refund: Refund) {
+    fn record(&mut self, mut refund: Refund) {
         if self.owed.iter().any(|owed| owed.payment == refund.payment) {
             return;
         }
@@ -163,14 +175,13 @@ impl RefundQueue {
         self.owed.clone()
     }
 
-    /// What the refunds not yet sent will pay out: each payment less its
-    /// penalty. The sweep leaves this in the Treasury. An overflow holds
-    /// back everything.
+    /// What the refunds not yet sent will pay out. The sweep leaves this
+    /// in the Treasury. An overflow holds back everything.
     pub fn owed_total(&self) -> Zatoshis {
         self.owed
             .iter()
             .filter(|refund| refund.sent.is_none())
-            .map(|refund| (refund.paid - refund.penalty).unwrap_or(Zatoshis::ZERO))
+            .map(|refund| refund.amount)
             .sum::<Option<Zatoshis>>()
             .unwrap_or(Zatoshis::const_from_u64(MAX_MONEY))
     }
@@ -209,11 +220,6 @@ impl RefundQueue {
         {
             refund.sent = None;
         }
-    }
-
-    /// The payment no longer covers a refund; it is kept.
-    pub fn release(&mut self, payment: TxId) {
-        self.owed.retain(|refund| refund.payment != payment);
     }
 
     /// Drops refunds whose transaction was mined at or below `floor`, and
@@ -277,31 +283,79 @@ mod tests {
         Zatoshis::const_from_u64(n)
     }
 
+    fn alice() -> Name {
+        Name::parse("alice").unwrap()
+    }
+
+    fn ua() -> UnifiedAddress {
+        let ua = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
+        match zcash_keys::address::Address::decode(&zcash_protocol::consensus::MAIN_NETWORK, ua) {
+            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
+            _ => panic!("test UA"),
+        }
+    }
+
+    fn owed(payment: TxId, height: u32) -> Refund {
+        Refund::new(
+            payment,
+            ua(),
+            zats(50_000),
+            alice(),
+            BlockHeight::from_u32(height),
+        )
+    }
+
     #[test]
-    fn an_underpaid_claim_refunds_the_payment_minus_the_fee() {
-        let fee = withheld();
-        let paid = zats(80_000);
-        assert_eq!(
-            payment_against_quote(paid, zats(100_000), &FeeRule::standard()),
-            PaymentAgainstQuote::Remainder((paid - fee).unwrap())
-        );
+    fn an_admitted_refund_is_the_payment_less_the_penalty_and_the_fee() {
+        let standard = FeeRule::standard();
+        let txid = TxId::from_bytes([1; 32]);
+        let mut queue = RefundQueue::new();
+        assert!(queue.admit(
+            &standard,
+            txid,
+            &ua(),
+            &alice(),
+            BlockHeight::from_u32(10),
+            zats(80_000),
+            Zatoshis::ZERO,
+            "underpaid",
+        ));
+        assert_eq!(queue.owed_total(), (zats(80_000) - withheld()).unwrap());
+        assert_eq!(queue.due()[0].amount(), zats(30_000));
+
+        let mut queue = RefundQueue::new();
+        let price = zats(100_000);
+        let penalty = access_code_penalty(price);
+        assert!(queue.admit(
+            &standard,
+            txid,
+            &ua(),
+            &alice(),
+            BlockHeight::from_u32(10),
+            price,
+            penalty,
+            "wrong access code",
+        ));
+        assert_eq!(queue.due()[0].amount(), zats(49_000));
     }
 
     #[test]
     fn a_payment_that_does_not_exceed_the_fee_is_kept() {
-        let fee = withheld();
-        assert_eq!(
-            payment_against_quote(fee, zats(100_000), &FeeRule::standard()),
-            PaymentAgainstQuote::BelowFee
-        );
-        assert_eq!(
-            payment_against_quote(
-                (fee - zats(1)).unwrap(),
-                zats(100_000),
-                &FeeRule::standard()
-            ),
-            PaymentAgainstQuote::BelowFee
-        );
+        let standard = FeeRule::standard();
+        let mut queue = RefundQueue::new();
+        for paid in [withheld(), (withheld() - zats(1)).unwrap()] {
+            assert!(!queue.admit(
+                &standard,
+                TxId::from_bytes([1; 32]),
+                &ua(),
+                &alice(),
+                BlockHeight::from_u32(10),
+                paid,
+                Zatoshis::ZERO,
+                "underpaid",
+            ));
+        }
+        assert!(queue.due().is_empty());
     }
 
     #[test]
@@ -332,19 +386,6 @@ mod tests {
     }
 
     #[test]
-    fn a_fully_paid_claim_is_not_refunded() {
-        let price = zats(100_000);
-        assert_eq!(
-            payment_against_quote(price, price, &FeeRule::standard()),
-            PaymentAgainstQuote::Covers
-        );
-        assert_eq!(
-            payment_against_quote(zats(100_001), price, &FeeRule::standard()),
-            PaymentAgainstQuote::Covers
-        );
-    }
-
-    #[test]
     fn a_lower_node_rate_refunds_a_payment_the_standard_rate_keeps() {
         let paid = zats(20_000);
         let node = crate::zcash::fees::fee_rule(zats(1_000));
@@ -355,23 +396,8 @@ mod tests {
     #[test]
     fn a_submitted_refund_stays_until_its_transaction_is_cleared() {
         let payment = TxId::from_bytes([1; 32]);
-        let ua = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
-        let ua = match zcash_keys::address::Address::decode(
-            &zcash_protocol::consensus::MAIN_NETWORK,
-            ua,
-        ) {
-            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
-            _ => panic!("test UA"),
-        };
         let mut queue = RefundQueue::new();
-        queue.admit(Refund::new(
-            payment,
-            ua,
-            zats(50_000),
-            Zatoshis::ZERO,
-            Name::parse("alice").unwrap(),
-            BlockHeight::from_u32(10),
-        ));
+        queue.record(owed(payment, 10));
         assert_eq!(queue.owed_total(), zats(50_000));
         let txid = TxId::from_bytes([2; 32]);
         queue.mark_sent(payment, txid);
@@ -391,24 +417,9 @@ mod tests {
         let buried = TxId::from_bytes([1; 32]);
         let recent = TxId::from_bytes([3; 32]);
         let unsent = TxId::from_bytes([4; 32]);
-        let ua = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
-        let ua = match zcash_keys::address::Address::decode(
-            &zcash_protocol::consensus::MAIN_NETWORK,
-            ua,
-        ) {
-            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
-            _ => panic!("test UA"),
-        };
         let mut queue = RefundQueue::new();
         for (payment, height) in [(buried, 10), (recent, 30), (unsent, 30)] {
-            queue.admit(Refund::new(
-                payment,
-                ua.clone(),
-                zats(50_000),
-                Zatoshis::ZERO,
-                Name::parse("alice").unwrap(),
-                BlockHeight::from_u32(height),
-            ));
+            queue.record(owed(payment, height));
         }
         let buried_tx = TxId::from_bytes([2; 32]);
         let recent_tx = TxId::from_bytes([5; 32]);
@@ -436,35 +447,13 @@ mod tests {
     #[test]
     fn a_replayed_payment_keeps_the_refund_transaction() {
         let payment = TxId::from_bytes([1; 32]);
-        let ua = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
-        let ua = match zcash_keys::address::Address::decode(
-            &zcash_protocol::consensus::MAIN_NETWORK,
-            ua,
-        ) {
-            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
-            _ => panic!("test UA"),
-        };
         let mut queue = RefundQueue::new();
-        queue.admit(Refund::new(
-            payment,
-            ua.clone(),
-            zats(50_000),
-            Zatoshis::ZERO,
-            Name::parse("alice").unwrap(),
-            BlockHeight::from_u32(30),
-        ));
+        queue.record(owed(payment, 30));
         let txid = TxId::from_bytes([2; 32]);
         queue.mark_sent(payment, txid);
         assert_eq!(queue.truncate_to(BlockHeight::from_u32(20)), vec![payment]);
         assert!(queue.due().is_empty());
-        queue.admit(Refund::new(
-            payment,
-            ua,
-            zats(50_000),
-            Zatoshis::ZERO,
-            Name::parse("alice").unwrap(),
-            BlockHeight::from_u32(40),
-        ));
+        queue.record(owed(payment, 40));
         assert_eq!(queue.due()[0].sent(), Some(txid));
         queue.prune_orphaned(|_| true);
         assert_eq!(queue.due()[0].sent(), Some(txid));

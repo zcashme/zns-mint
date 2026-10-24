@@ -1,5 +1,15 @@
 # Treasury design record
 
+## 2026-10-24 — A refund's amount is fixed at admission
+
+- `RefundQueue::admit` computes `paid − penalty − withheld` once, keeps
+  the payment when that is nothing, and queues the amount. Nothing is
+  released later: a queued refund is always payable in full.
+- `refund_underpaid`, `refund_keeping`, `admit_refund` and
+  `payment_against_quote` are gone. The run loop checks `paid < price`
+  and calls `admit`.
+- `plan_refund` takes the amount; `RefundPlan::Dust` is gone.
+
 ## 2026-10-24 — A refund is keyed by its payment's txid
 
 - `Refund` names the transaction that carried the payment, as a request

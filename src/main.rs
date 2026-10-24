@@ -432,16 +432,14 @@ async fn main() {
                                 );
                                 break 'lane true;
                             };
-                            treasury::refund_keeping(
-                                &mut refunds,
+                            refunds.admit(
                                 &fee_rule,
                                 txid,
-                                paid,
-                                treasury::access_code_penalty(price),
                                 ua,
                                 name,
                                 note_height,
-                                Action::Claim.as_str(),
+                                paid,
+                                treasury::access_code_penalty(price),
                                 "wrong access code",
                             );
                             break 'lane true;
@@ -454,17 +452,17 @@ async fn main() {
                         let Some(price) = oracle.quote(name, *term) else {
                             break 'lane true;
                         };
-                        if treasury::refund_underpaid(
-                            &mut refunds,
-                            &fee_rule,
-                            txid,
-                            paid,
-                            price,
-                            ua,
-                            name,
-                            note_height,
-                            Action::Claim.as_str(),
-                        ) {
+                        if paid < price {
+                            refunds.admit(
+                                &fee_rule,
+                                txid,
+                                ua,
+                                name,
+                                note_height,
+                                paid,
+                                Zatoshis::ZERO,
+                                "underpaid",
+                            );
                             break 'lane true;
                         }
                         // A name that already has a record, or a Name Note
@@ -474,16 +472,14 @@ async fn main() {
                             registry.authorize_claim(name.clone(), ua.clone(), *term, mtp_now)
                         else {
                             if !registry.is_available(name) {
-                                treasury::refund_keeping(
-                                    &mut refunds,
+                                refunds.admit(
                                     &fee_rule,
                                     txid,
-                                    paid,
-                                    Zatoshis::ZERO,
                                     ua,
                                     name,
                                     note_height,
-                                    Action::Claim.as_str(),
+                                    paid,
+                                    Zatoshis::ZERO,
                                     "registered name",
                                 );
                             } else {
@@ -496,16 +492,14 @@ async fn main() {
                         };
                         // Enactment below resolves the anchor and broadcasts.
                         if !name_notes.admit(note_height, claim_note) {
-                            treasury::refund_keeping(
-                                &mut refunds,
+                            refunds.admit(
                                 &fee_rule,
                                 txid,
-                                paid,
-                                Zatoshis::ZERO,
                                 ua,
                                 name,
                                 note_height,
-                                Action::Claim.as_str(),
+                                paid,
+                                Zatoshis::ZERO,
                                 "queued name",
                             );
                         }
@@ -528,17 +522,17 @@ async fn main() {
                         ) else {
                             break 'lane true;
                         };
-                        if treasury::refund_underpaid(
-                            &mut refunds,
-                            &fee_rule,
-                            txid,
-                            paid,
-                            oracle.challenge_fee(),
-                            requested_ua,
-                            name,
-                            note_height,
-                            action.as_str(),
-                        ) {
+                        if paid < oracle.challenge_fee() {
+                            refunds.admit(
+                                &fee_rule,
+                                txid,
+                                requested_ua,
+                                name,
+                                note_height,
+                                paid,
+                                Zatoshis::ZERO,
+                                "underpaid",
+                            );
                             break 'lane true;
                         }
                         let pending = OtpChallenge::issue(
@@ -601,33 +595,31 @@ async fn main() {
                         );
                         break 'lane true;
                     };
-                    if treasury::refund_underpaid(
-                        &mut refunds,
-                        &fee_rule,
-                        txid,
-                        paid,
-                        price,
-                        &echo.ua,
-                        &echo.name,
-                        note_height,
-                        echo.action.as_str(),
-                    ) {
+                    if paid < price {
+                        refunds.admit(
+                            &fee_rule,
+                            txid,
+                            &echo.ua,
+                            &echo.name,
+                            note_height,
+                            paid,
+                            Zatoshis::ZERO,
+                            "underpaid",
+                        );
                         break 'lane true;
                     }
                 }
                 // A Name Note already queued owns this name. The payment
                 // goes back minus the fee, and the challenge stays.
                 if name_notes.note_pending(&echo.name) {
-                    treasury::refund_keeping(
-                        &mut refunds,
+                    refunds.admit(
                         &fee_rule,
                         txid,
-                        paid,
-                        Zatoshis::ZERO,
                         &echo.ua,
                         &echo.name,
                         note_height,
-                        echo.action.as_str(),
+                        paid,
+                        Zatoshis::ZERO,
                         "queued name",
                     );
                     break 'lane true;
@@ -853,20 +845,10 @@ async fn main() {
                 &mut wallet,
                 &fee_rule,
                 owed.height(),
-                owed.paid(),
-                owed.penalty(),
+                owed.amount(),
                 &to,
             ) {
                 Ok(RefundPlan::Wait) => {}
-                Ok(RefundPlan::Dust) => {
-                    refunds.release(payment);
-                    tracing::info!(
-                        txid = %payment,
-                        name = %owed.name().as_str(),
-                        paid = owed.paid().into_u64(),
-                        "payment kept"
-                    );
-                }
                 Ok(RefundPlan::Send(proposal)) => {
                     match treasury::build_refund(
                         &network,
@@ -881,7 +863,7 @@ async fn main() {
                                 tracing::info!(
                                     txid = %tx.txid(),
                                     name = %owed.name().as_str(),
-                                    paid = owed.paid().into_u64(),
+                                    amount = owed.amount().into_u64(),
                                     "refund submitted"
                                 );
                                 refunds.mark_sent(payment, tx.txid());
