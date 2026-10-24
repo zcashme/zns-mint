@@ -1,5 +1,15 @@
 # `mint/otp.rs` design record
 
+## 2026-10-24 — term is part of the challenge key
+
+- `admit` records one entry per term at a tip. A different term is
+  a separate challenge, with a separate code.
+- `answer` returns the relayed entry whose code the echo carries.
+  If two entries carry that code, it returns no entry. A non-matching
+  code increments the attempt count only when one entry is relayed.
+- `consume` removes the answered term and retains every other term
+  at the same tip.
+
 ## 2026-10-15 — `OtpQueue::relayed` and `unrelayed` (#342)
 
 - `relayed` names every relayed challenge, awaiting its echo;
