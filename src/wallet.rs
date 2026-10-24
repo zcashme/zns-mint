@@ -124,9 +124,6 @@ pub struct Wallet<P: Parameters> {
     /// Advisory locks use upstream `OutputRef` and `LockOwner` values directly.
     locks: BTreeMap<OutputRef, (LockOwner, BlockHeight)>,
 
-    /// Payment notes a refund still has to spend. Selection skips them.
-    refund_reserved: BTreeSet<NoteId>,
-
     sapling_tree: ShardTree<
         MemoryShardStore<sapling::Node, BlockHeight>,
         SAPLING_NOTE_COMMITMENT_TREE_DEPTH,
@@ -148,21 +145,6 @@ pub struct Wallet<P: Parameters> {
 }
 
 impl<P: Parameters> Wallet<P> {
-    /// Holds `note` until its refund is finished. Other selections skip it.
-    pub(crate) fn reserve_refund(&mut self, note: NoteId) {
-        self.refund_reserved.insert(note);
-    }
-
-    /// The refund no longer needs `note`.
-    pub(crate) fn release_refund(&mut self, note: NoteId) {
-        self.refund_reserved.remove(&note);
-    }
-
-    /// A refund holds `note`.
-    pub(super) fn refund_blocks(&self, note: &NoteId) -> bool {
-        self.refund_reserved.contains(note)
-    }
-
     /// Drops an unmined transaction, so its inputs can be selected again.
     /// A mined transaction is left in place.
     pub(crate) fn release_rejected_spend(&mut self, txid: TxId) {
@@ -215,7 +197,6 @@ impl<P: Parameters> Wallet<P> {
             ironwood_nullifiers: BTreeMap::new(),
             sent_outputs: BTreeMap::new(),
             locks: BTreeMap::new(),
-            refund_reserved: BTreeSet::new(),
             sapling_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),
             sapling_tree_shard_end_heights: BTreeMap::new(),
             orchard_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),

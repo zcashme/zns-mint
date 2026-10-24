@@ -10,6 +10,8 @@
 - The penalty is not change any more; the Treasury keeps it by paying
   back less. The refund-or-keep line is the withheld fee.
 - `propose_one_note`, `refund_settles` and the fee-guess loop are gone.
+- No note is held for a refund. The queue's owed total keeps the money
+  in the Treasury, and the wallet's selection knows nothing of refunds.
 
 ## 2026-10-24 — A refund waits until its payment is buried
 
@@ -54,13 +56,9 @@
 - An update or release whose Name Note is already queued is refunded,
   less the fee. The challenge is not consumed.
 
-## 2026-10-23 — A refund note stays reserved until the refund is finished
+## 2026-10-23 — A refund stays owed until it is buried
 
-- The queue is the reservation. Relays, Name Note fees, and the sweep
-  skip a note while a refund of it is owed, including after the refund
-  transaction is built and after that transaction expires.
-- Echoes are decided before relays, so an underpaid renewal is reserved
-  before another spend can take its note.
+- Echoes are decided before relays.
 - A refund mined at or below the wallet's rewind floor leaves the queue.
 - A second claim for a name that already has a Name Note queued is
   refunded, less the fee.

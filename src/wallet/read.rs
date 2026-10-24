@@ -283,12 +283,10 @@ impl<P: consensus::Parameters> Wallet<P> {
         };
         let required = self.required_confirmations(note_id.txid(), is_change, policy);
         let confirmed = target_height.saturating_sub(u32::from(required)) >= *mined_height;
-        // A refund reservation holds the note the same way a lock does.
-        let locked = self.refund_reserved.contains(note_id)
-            || self
-                .locks
-                .get(&OutputRef::from(*note_id))
-                .is_some_and(|(_, expiry)| *expiry >= BlockHeight::from(target_height));
+        let locked = self
+            .locks
+            .get(&OutputRef::from(*note_id))
+            .is_some_and(|(_, expiry)| *expiry >= BlockHeight::from(target_height));
 
         if !confirmed {
             with_pool(&mut |pool_balance| {
@@ -801,8 +799,7 @@ impl<P: consensus::Parameters> Wallet<P> {
             .iter()
             .filter(move |(_, output)| *output.account_id() == account)
             .filter(|(note_id, _)| {
-                !self.refund_blocks(note_id)
-                    && !self.sapling_note_is_spent(note_id, tip)
+                !self.sapling_note_is_spent(note_id, tip)
                     && self.lock_admits(
                         &OutputRef::from(**note_id),
                         tip,
@@ -826,8 +823,7 @@ impl<P: consensus::Parameters> Wallet<P> {
             .iter()
             .filter(move |(_, output)| *output.account_id() == account)
             .filter(|(note_id, _)| {
-                !self.refund_blocks(note_id)
-                    && !self.ironwood_note_is_spent(note_id, tip)
+                !self.ironwood_note_is_spent(note_id, tip)
                     && self.lock_admits(
                         &OutputRef::from(**note_id),
                         tip,
@@ -847,7 +843,6 @@ impl<P: consensus::Parameters> Wallet<P> {
     ) -> Option<ReceivedNote<NoteId, orchard::note::Note>> {
         let output = self.ironwood_notes.get(&note_id)?;
         (*output.account_id() == account
-            && !self.refund_blocks(&note_id)
             && !self.ironwood_note_is_spent(&note_id, tip)
             && self.lock_admits(
                 &OutputRef::from(note_id),

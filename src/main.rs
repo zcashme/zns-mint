@@ -194,9 +194,7 @@ async fn main() {
             name_notes.rewind_to(rewound);
             name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
-            for note in refunds.truncate_to(rewound) {
-                treasury::release_refund(&mut wallet, note);
-            }
+            refunds.truncate_to(rewound);
             echoes.retain(|(_, _, _, _, height)| *height <= rewound);
             tracing::warn!(
                 height = u32::from(rewound),
@@ -439,7 +437,6 @@ async fn main() {
                             };
                             treasury::refund_keeping(
                                 &mut refunds,
-                                &mut wallet,
                                 &fee_rule,
                                 txid,
                                 output_index,
@@ -463,7 +460,6 @@ async fn main() {
                         };
                         if treasury::refund_underpaid(
                             &mut refunds,
-                            &mut wallet,
                             &fee_rule,
                             txid,
                             output_index,
@@ -485,7 +481,6 @@ async fn main() {
                             if !registry.is_available(name) {
                                 treasury::refund_keeping(
                                     &mut refunds,
-                                    &mut wallet,
                                     &fee_rule,
                                     txid,
                                     output_index,
@@ -509,7 +504,6 @@ async fn main() {
                         if !name_notes.admit(note_height, claim_note) {
                             treasury::refund_keeping(
                                 &mut refunds,
-                                &mut wallet,
                                 &fee_rule,
                                 txid,
                                 output_index,
@@ -543,7 +537,6 @@ async fn main() {
                         };
                         if treasury::refund_underpaid(
                             &mut refunds,
-                            &mut wallet,
                             &fee_rule,
                             txid,
                             output_index,
@@ -594,9 +587,9 @@ async fn main() {
             }
         }
 
-        // OTP responses are decided before relays. An underpaid renewal
-        // is reserved here, so a relay on this tip cannot spend its note.
-        // A voided echo leaves its challenge available.
+        // OTP responses are decided before relays. An underpaid renewal is
+        // queued for a refund here. A voided echo leaves its challenge
+        // available.
         for (txid, output_index, echo, paid, note_height) in std::mem::take(&mut echoes) {
             let _ = 'lane: {
                 // An OTP response is decided on this pass. It never waits
@@ -618,7 +611,6 @@ async fn main() {
                     };
                     if treasury::refund_underpaid(
                         &mut refunds,
-                        &mut wallet,
                         &fee_rule,
                         txid,
                         output_index,
@@ -637,7 +629,6 @@ async fn main() {
                 if name_notes.note_pending(&echo.name) {
                     treasury::refund_keeping(
                         &mut refunds,
-                        &mut wallet,
                         &fee_rule,
                         txid,
                         output_index,
@@ -831,10 +822,10 @@ async fn main() {
             }
         }
 
-        // The note stays reserved until the refund is mined past the rewind
-        // window, or the payment is kept. A refund is planned once its
-        // payment is past that window too. An accepted refund is rebroadcast
-        // until it is mined, and planned again if it expires unmined.
+        // A refund is planned once its payment is past the rewind window,
+        // and stays owed until the refund is past it too, or the payment is
+        // kept. An accepted refund is rebroadcast until it is mined, and
+        // planned again if it expires unmined.
         treasury::prune_buried_refunds(&mut refunds, &mut wallet);
         for owed in refunds.due() {
             let note = owed.note();
@@ -878,7 +869,6 @@ async fn main() {
             ) {
                 Ok(RefundPlan::Wait) => {}
                 Ok(RefundPlan::Dust) => {
-                    treasury::release_refund(&mut wallet, note);
                     refunds.release(note);
                     tracing::info!(
                         txid = %note.txid(),

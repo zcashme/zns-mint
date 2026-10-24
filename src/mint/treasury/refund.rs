@@ -199,13 +199,13 @@ impl RefundQueue {
         }
     }
 
-    /// The payment no longer covers a refund. The note may be swept.
+    /// The payment no longer covers a refund; it is kept.
     pub fn release(&mut self, note: NoteId) {
         self.owed.retain(|refund| refund.note != note);
     }
 
-    /// Drops refunds whose transaction was mined at or below `floor`.
-    /// The caller releases those notes.
+    /// Drops refunds whose transaction was mined at or below `floor`, and
+    /// returns their notes.
     pub fn prune_buried(
         &mut self,
         floor: BlockHeight,
@@ -231,7 +231,7 @@ impl RefundQueue {
     }
 
     /// Drops refunds whose payment was orphaned. A submitted transaction
-    /// id is kept for a replay of that note. The caller releases them.
+    /// id is kept for a replay of that note. Returns the dropped notes.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) -> Vec<NoteId> {
         let mut dropped = Vec::new();
         let mut still_owed = Vec::new();

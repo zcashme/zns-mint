@@ -12,17 +12,6 @@
   send-max assume the wallet never offers dust: a pruned note shrinks
   the selected total, and the selector reports `InsufficientFunds`.
 
-## 2026-10-23 — A reserved refund note is locked balance
-
-- A note held for a refund counts as locked. Releasing the reservation
-  returns it to spendable when no lock applies.
-
-## 2026-10-23 — A refund reserves its payment note
-
-- Notes a refund still owes are skipped by selection and by the unspent
-  note reads Name Note fees use. The refund's own selection still
-  returns that note. The reservation ends when the refund leaves the queue.
-
 ## 2026-10-22 — A rejected refund spend can be dropped
 
 - A rejected or expired unmined spend can be dropped so the same note

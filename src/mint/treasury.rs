@@ -190,9 +190,8 @@ pub fn plan_refund<P: Parameters>(
 ///
 /// Returns `true` when the payment does not cover `price`.
 #[allow(clippy::too_many_arguments)]
-pub fn refund_underpaid<P: Parameters>(
+pub fn refund_underpaid(
     refunds: &mut RefundQueue,
-    wallet: &mut Wallet<P>,
     fee_rule: &FeeRule,
     txid: TxId,
     output_index: Option<u16>,
@@ -208,7 +207,6 @@ pub fn refund_underpaid<P: Parameters>(
         PaymentAgainstQuote::BelowFee | PaymentAgainstQuote::Remainder(_) => {
             admit_refund(
                 refunds,
-                wallet,
                 fee_rule,
                 txid,
                 output_index,
@@ -228,9 +226,8 @@ pub fn refund_underpaid<P: Parameters>(
 /// Refunds `paid` minus `penalty` minus the refund fee. `penalty` is left
 /// as change. Returns whether a refund was admitted.
 #[allow(clippy::too_many_arguments)]
-pub fn refund_keeping<P: Parameters>(
+pub fn refund_keeping(
     refunds: &mut RefundQueue,
-    wallet: &mut Wallet<P>,
     fee_rule: &FeeRule,
     txid: TxId,
     output_index: Option<u16>,
@@ -244,7 +241,6 @@ pub fn refund_keeping<P: Parameters>(
 ) -> bool {
     admit_refund(
         refunds,
-        wallet,
         fee_rule,
         txid,
         output_index,
@@ -261,9 +257,8 @@ pub fn refund_keeping<P: Parameters>(
 /// Admits the refund, or logs that the payment is kept when `paid` minus
 /// `penalty` does not exceed the refund fee.
 #[allow(clippy::too_many_arguments)]
-fn admit_refund<P: Parameters>(
+fn admit_refund(
     refunds: &mut RefundQueue,
-    wallet: &mut Wallet<P>,
     fee_rule: &FeeRule,
     txid: TxId,
     output_index: Option<u16>,
@@ -317,26 +312,18 @@ fn admit_refund<P: Parameters>(
         name.clone(),
         height,
     ));
-    wallet.reserve_refund(note);
     true
 }
 
-/// The refund no longer holds `note`. The sweep may select it.
-pub fn release_refund<P: Parameters>(wallet: &mut Wallet<P>, note: NoteId) {
-    wallet.release_refund(note);
-}
-
-/// Drops refunds mined at or below the wallet's rewind floor, and releases
-/// their notes. A reorg can still unmine anything above that floor.
+/// Drops refunds mined at or below the wallet's rewind floor. A reorg can
+/// still unmine anything above that floor.
 pub fn prune_buried_refunds<P: Parameters>(refunds: &mut RefundQueue, wallet: &mut Wallet<P>) {
     let tip = wallet.tip().block_height();
     let Some(floor) = wallet.rewind_floor() else {
         refunds.prune_orphaned(|txid| wallet.expired_unmined_at(txid, tip));
         return;
     };
-    for note in refunds.prune_buried(floor, |txid| wallet.mined_height(&txid)) {
-        wallet.release_refund(note);
-    }
+    refunds.prune_buried(floor, |txid| wallet.mined_height(&txid));
     refunds.prune_orphaned(|txid| {
         wallet
             .mined_height(&txid)
@@ -345,13 +332,14 @@ pub fn prune_buried_refunds<P: Parameters>(refunds: &mut RefundQueue, wallet: &m
     });
 }
 
-/// Drops a rejected or expired refund transaction. The note stays reserved.
+/// Drops a rejected or expired refund transaction, so its inputs can be
+/// spent again. The refund stays owed.
 pub fn refund_rejected<P: Parameters>(wallet: &mut Wallet<P>, txid: TxId) {
     wallet.release_rejected_spend(txid);
 }
 
 /// Builds `proposal`. The wallet records the spend. A rejected broadcast
-/// drops that spend; the note stays reserved.
+/// drops that spend; the refund stays owed.
 pub fn build_refund<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
