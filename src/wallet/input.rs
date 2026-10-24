@@ -22,7 +22,6 @@ use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{
     Note, NoteId, OutputRef, ReceivedNote, WalletTransparentOutput,
 };
-use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
@@ -335,8 +334,7 @@ impl<P: Parameters> Wallet<P> {
     /// Whether every unspent, spendable-scope note in `sources` is eligible
     /// under `confirmations_policy` and `lock_filter`. Used by
     /// `AllFunds(Everything)`: a leftover unconfirmed or locked note would
-    /// make a "spend all" proposal a lie. Dust is never selected, so it is
-    /// never a leftover.
+    /// make a "spend all" proposal a lie.
     fn everything_spendable(
         &self,
         account: AccountId,
@@ -364,7 +362,6 @@ impl<P: Parameters> Wallet<P> {
                         *output.account_id() == account
                             && !exclude.contains(note_id)
                             && output.recipient_key_scope().is_some()
-                            && output.note().value().inner() > u64::from(MARGINAL_FEE)
                             && !self.sapling_note_is_spent(note_id, target_height)
                             && !eligible.contains(note_id)
                     });
@@ -388,7 +385,6 @@ impl<P: Parameters> Wallet<P> {
                         *output.account_id() == account
                             && !exclude.contains(note_id)
                             && output.recipient_key_scope().is_some()
-                            && output.note().0.value().inner() > u64::from(MARGINAL_FEE)
                             && !self.ironwood_note_is_spent(note_id, target_height)
                             && !eligible.contains(note_id)
                     });
@@ -635,7 +631,8 @@ impl<P: Parameters> InputSource for Wallet<P> {
         // Pools are drawn on in the caller's preference order; within a pool
         // notes are taken preferred lock tier first, then oldest, while the
         // total is still short of the target. The note that meets it is included.
-        // Dust is skipped, as in `zcash_client_sqlite`.
+        // Notes worth less than their fee are left to the caller's change
+        // strategy, which judges them at the fee rule it was given.
         for pool in sources {
             match pool {
                 ShieldedPool::Sapling => {
@@ -653,9 +650,6 @@ impl<P: Parameters> InputSource for Wallet<P> {
                         let value = note
                             .note_value()
                             .expect("Sapling note values are within valid ZEC bounds by consensus");
-                        if value <= MARGINAL_FEE {
-                            continue;
-                        }
                         accumulated = (accumulated + value).expect(
                             "selection cannot overflow MAX_MONEY; mirrors upstream Balance::total",
                         );
@@ -680,9 +674,6 @@ impl<P: Parameters> InputSource for Wallet<P> {
                         let value = note.note_value().expect(
                             "Ironwood note values are within valid ZEC bounds by consensus",
                         );
-                        if value <= MARGINAL_FEE {
-                            continue;
-                        }
                         accumulated = (accumulated + value).expect(
                             "selection cannot overflow MAX_MONEY; mirrors upstream Balance::total",
                         );

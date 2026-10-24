@@ -1,5 +1,15 @@
 # Wallet changelog
 
+## 2026-10-24 — Dust is judged at the node's fee rate (#357)
+
+- `select_spendable_notes`, the `AllFunds(Everything)` precheck and the
+  balance no longer apply the fixed `MARGINAL_FEE` cutoff. The caller's
+  change strategy drops inputs worth no more than one action at the fee
+  rule it was given, so a note is dust only at the node's rate.
+- A fixed cutoff above the node's rate stranded change: the change
+  strategy created notes the wallet would never select. The balance now
+  counts every unspent note.
+
 ## 2026-10-10 — Note selection skips dust
 
 - `select_spendable_notes` skips notes worth `MARGINAL_FEE` or less, as

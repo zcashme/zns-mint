@@ -45,7 +45,7 @@ impl CanonicalBlockSource {
     /// Fetches the current fee recommendation; failures never substitute a fixed rate.
     pub async fn standard_fee(&self) -> Result<FeeRule, TransportError> {
         self.rpc
-            .send_request::<_, StandardFee>("getstandardfee", [] as [(); 0])
+            .send_request::<_, StandardFee>("getstandardfee", [(); 0])
             .await?
             .ok_or(TransportError::BadNodeData("getstandardfee returned null"))?
             .into_rule()

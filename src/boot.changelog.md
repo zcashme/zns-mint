@@ -2,6 +2,11 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-10-24 — Boot retries the fee rate (#357)
+
+- A failed `getstandardfee` read retries after `RETRY_PAUSE`, as the
+  pre-sale table does. Boot still does not start without a usable rate.
+
 ## 2026-10-23 — The fee rate or no start (#357)
 
 - Boot reads the node's fee rate after the price fetch and hands it to

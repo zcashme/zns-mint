@@ -58,6 +58,12 @@ pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 /// transaction's ZIP-317 fee is calculated separately.
 pub const CHALLENGE_RELAY_VALUE: Zatoshis = Zatoshis::ZERO;
 
+/// One confirmation for every Treasury spend. Both halves of a sweep must
+/// see the same notes, or the float is sized from a different input set.
+fn confirmations() -> ConfirmationsPolicy {
+    ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false)
+}
+
 /// The project vault's mainnet Unified Address.
 const MAINNET_VAULT_ADDRESS: &str = "u1eqcql0r460xjqk49maglfxa02mfuetaed4h0nkf0lum4m6ay6t9gjpuxhuuygfeuz3d9sfgcjpz7uev2gsk5nnpf6g0uh0rn2uq0gz44";
 
@@ -112,6 +118,7 @@ fn propose_payment<P: Parameters>(
     to: &Address,
     amount: Zatoshis,
     memo: Option<MemoBytes>,
+    confirmations: ConfirmationsPolicy,
 ) -> Result<TreasuryProposal, TreasuryProposalError<P>> {
     let payment = Payment::new(
         to.to_zcash_address(network),
@@ -136,7 +143,7 @@ fn propose_payment<P: Parameters>(
             DustOutputPolicy::default(),
         ),
         request,
-        ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false),
+        confirmations,
         &SpendPolicy::default(),
         None,
         None,
@@ -150,7 +157,7 @@ fn propose_vault_sweep<P: Parameters>(
     fee_rule: &FeeRule,
 ) -> Result<Option<TreasuryProposal>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>>
 {
-    let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
+    let policy = confirmations();
     let vault = vault_address(network);
     let sendable = match propose_send_max_transfer::<_, _, _, Infallible>(
         wallet,
@@ -181,7 +188,7 @@ fn propose_vault_sweep<P: Parameters>(
         return Ok(None);
     };
 
-    propose_payment(network, wallet, fee_rule, &vault, payment, None)
+    propose_payment(network, wallet, fee_rule, &vault, payment, None, policy)
         .map(Some)
         .map_err(BuildFailure::Proposal)
 }
@@ -248,6 +255,7 @@ pub fn challenge<P: Parameters>(
         &Address::Unified(Box::new(controller.clone())),
         CHALLENGE_RELAY_VALUE,
         Some(memo),
+        confirmations(),
     )
     .map_err(BuildFailure::Proposal)?;
 
@@ -330,8 +338,9 @@ mod tests {
     use crate::wallet::testing::{Cache, Factory};
     use crate::zcash::fees::fee_rule;
     use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
+    use zcash_client_backend::data_api::testing::pool::ShieldedPoolTester;
     use zcash_client_backend::data_api::testing::sapling::SaplingPoolTester;
-    use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
+    use zcash_client_backend::data_api::testing::AddressType;
     use zcash_protocol::consensus::MainNetwork;
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
@@ -384,8 +393,7 @@ mod tests {
         );
     }
 
-    /// The float survives any note count and fee rate, and dust is left
-    /// behind.
+    /// The float survives any note count and fee rate.
     #[test]
     fn sweep_proposal_leaves_exactly_the_float_at_any_note_count() {
         for (note_count, fee_rule) in [3usize, 198, 250, 400].into_iter().flat_map(|count| {
@@ -396,9 +404,7 @@ mod tests {
         }) {
             let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
                 .build::<SaplingPoolTester>();
-            let mut values = vec![Zatoshis::const_from_u64(50_000_000); note_count];
-            values.push(MARGINAL_FEE);
-            st.add_notes_checking_balance([values]);
+            st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(50_000_000); note_count]]);
             st.add_empty_blocks(1);
 
             let network = *st.network();
@@ -412,16 +418,106 @@ mod tests {
                     .map_or(0, |inputs| inputs.notes().len()),
                 note_count
             );
-            let change = step
-                .balance()
-                .proposed_change()
-                .iter()
-                .map(|change| change.value())
-                .sum::<Option<Zatoshis>>()
-                .expect("change fits in the monetary range");
-            assert_eq!(change, SWEEP_RESERVE, "float at {note_count} notes");
+            assert_eq!(change(step), SWEEP_RESERVE, "float at {note_count} notes");
             assert!(step.balance().fee_required() > fee_rule.marginal_fee());
         }
+    }
+
+    /// A note smaller than the float is not needed by the sweep and stays
+    /// in the Treasury. Send-max counted it net of its action fee, so the
+    /// Treasury keeps the float plus one action's fee, whatever the note's
+    /// size relative to the rate.
+    #[test]
+    fn sweep_keeps_the_float_beside_a_small_note() {
+        for (rate, small) in [
+            (5_000, 3_000),
+            (5_000, 5_000),
+            (1_000, 1_000),
+            (1_000, 3_000),
+        ] {
+            let fee_rule = fee_rule(Zatoshis::const_from_u64(rate));
+            let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+                .build::<SaplingPoolTester>();
+            st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(50_000_000); 3]]);
+            let fvk = SaplingPoolTester::test_account_fvk(&st);
+            let (h, _, _) = st.generate_next_block(
+                &fvk,
+                AddressType::DefaultExternal,
+                Zatoshis::const_from_u64(small),
+            );
+            st.scan_cached_blocks(h, 1);
+            st.add_empty_blocks(1);
+
+            let network = *st.network();
+            let proposal = propose_vault_sweep(&network, st.wallet_mut(), &fee_rule)
+                .expect("the sweep proposal closes")
+                .expect("the surplus is far above the minimum");
+
+            let step = proposal.steps().first();
+            assert_eq!(
+                step.shielded_inputs()
+                    .map_or(0, |inputs| inputs.notes().len()),
+                3,
+                "the small note is not needed at rate {rate}"
+            );
+            assert_eq!(
+                change(step) + Zatoshis::const_from_u64(small),
+                SWEEP_RESERVE + Zatoshis::const_from_u64(rate),
+                "kept beside a {small}-zat note at rate {rate}"
+            );
+        }
+    }
+
+    /// Notes are judged at the node's rate, not the fixed ZIP 317 one:
+    /// 3,000-zat notes pay for a relay at 1,000 per action and are dust at
+    /// 5,000.
+    #[test]
+    fn small_notes_are_spendable_at_a_lower_rate() {
+        for (rate, spendable) in [(1_000, true), (5_000, false)] {
+            let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
+                .build::<SaplingPoolTester>();
+            let fvk = SaplingPoolTester::test_account_fvk(&st);
+            for _ in 0..10 {
+                let (h, _, _) = st.generate_next_block(
+                    &fvk,
+                    AddressType::DefaultExternal,
+                    Zatoshis::const_from_u64(3_000),
+                );
+                st.scan_cached_blocks(h, 1);
+            }
+            st.add_empty_blocks(1);
+
+            let network = *st.network();
+            let proposal = propose_payment(
+                &network,
+                st.wallet_mut(),
+                &fee_rule(Zatoshis::const_from_u64(rate)),
+                &vault_address(&network),
+                Zatoshis::ZERO,
+                None,
+                confirmations(),
+            );
+            match proposal {
+                Ok(proposal) => {
+                    assert!(spendable, "dust at rate {rate}");
+                    let step = proposal.steps().first();
+                    assert!(step.shielded_inputs().is_some());
+                }
+                Err(Error::InsufficientFunds { .. }) => {
+                    assert!(!spendable, "spendable at rate {rate}")
+                }
+                Err(error) => panic!("unexpected proposal error: {error:?}"),
+            }
+        }
+    }
+
+    fn change(step: &zcash_client_backend::proposal::Step<NoteId>) -> Zatoshis {
+        step.balance()
+            .proposed_change()
+            .iter()
+            .map(|change| change.value())
+            .sum::<Option<Zatoshis>>()
+            .expect("change fits in the monetary range")
     }
 
     #[test]
