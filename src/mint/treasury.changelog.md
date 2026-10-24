@@ -1,14 +1,14 @@
 # Treasury design record
 
-## 2026-10-24 — Dust at the node's rate; one confirmation policy (#357)
+## 2026-10-24 — Dust at the node's rate (#357)
 
 - Supersedes the dust bullet below: selection hands every note to the
   change strategy, which drops inputs that are dust at the node's rate.
 - A note smaller than the float is not needed by the sweep and stays in
   the Treasury. Send-max counted it net of one action's fee, so the
   float note plus that note hold `SWEEP_RESERVE` plus one action's fee.
-- `confirmations()` is the one policy for send-max and the payment, so
-  both halves of a sweep see the same notes.
+- Send-max and the payment pass `wallet::CONFIRMATIONS`, so both halves
+  of a sweep see the same notes.
 
 ## 2026-10-23 — Treasury payments take the fee rule (#357)
 

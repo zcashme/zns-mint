@@ -7,7 +7,6 @@ mod otp;
 pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
 
 use std::convert::Infallible;
-use std::num::NonZeroU32;
 
 use zcash_client_backend::data_api::error::Error;
 use zcash_client_backend::data_api::locking::LockedInputPolicy;
@@ -15,8 +14,8 @@ use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
 use zcash_client_backend::data_api::wallet::input_selection::SpendPolicy;
 use zcash_client_backend::data_api::wallet::{
-    create_proposed_transactions, propose_send_max_transfer, propose_transfer, ConfirmationsPolicy,
-    CreateErrT, ProposeTransferErrT,
+    create_proposed_transactions, propose_send_max_transfer, propose_transfer, CreateErrT,
+    ProposeTransferErrT,
 };
 use zcash_client_backend::data_api::{MaxSpendMode, WalletRead as _};
 use zcash_client_backend::fees::zip317::SingleOutputChangeStrategy;
@@ -57,12 +56,6 @@ pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 /// The relay sends no value — the memo is the message. The
 /// transaction's ZIP-317 fee is calculated separately.
 pub const CHALLENGE_RELAY_VALUE: Zatoshis = Zatoshis::ZERO;
-
-/// One confirmation for every Treasury spend. Both halves of a sweep must
-/// see the same notes, or the float is sized from a different input set.
-fn confirmations() -> ConfirmationsPolicy {
-    ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false)
-}
 
 /// The project vault's mainnet Unified Address.
 const MAINNET_VAULT_ADDRESS: &str = "u1eqcql0r460xjqk49maglfxa02mfuetaed4h0nkf0lum4m6ay6t9gjpuxhuuygfeuz3d9sfgcjpz7uev2gsk5nnpf6g0uh0rn2uq0gz44";
@@ -118,7 +111,6 @@ fn propose_payment<P: Parameters>(
     to: &Address,
     amount: Zatoshis,
     memo: Option<MemoBytes>,
-    confirmations: ConfirmationsPolicy,
 ) -> Result<TreasuryProposal, TreasuryProposalError<P>> {
     let payment = Payment::new(
         to.to_zcash_address(network),
@@ -143,7 +135,7 @@ fn propose_payment<P: Parameters>(
             DustOutputPolicy::default(),
         ),
         request,
-        confirmations,
+        crate::wallet::CONFIRMATIONS,
         &SpendPolicy::default(),
         None,
         None,
@@ -157,7 +149,6 @@ fn propose_vault_sweep<P: Parameters>(
     fee_rule: &FeeRule,
 ) -> Result<Option<TreasuryProposal>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>>
 {
-    let policy = confirmations();
     let vault = vault_address(network);
     let sendable = match propose_send_max_transfer::<_, _, _, Infallible>(
         wallet,
@@ -168,7 +159,7 @@ fn propose_vault_sweep<P: Parameters>(
         vault.to_zcash_address(network),
         None,
         MaxSpendMode::MaxSpendable,
-        policy,
+        crate::wallet::CONFIRMATIONS,
         &LockedInputPolicy::Exclude,
         None,
     ) {
@@ -188,7 +179,7 @@ fn propose_vault_sweep<P: Parameters>(
         return Ok(None);
     };
 
-    propose_payment(network, wallet, fee_rule, &vault, payment, None, policy)
+    propose_payment(network, wallet, fee_rule, &vault, payment, None)
         .map(Some)
         .map_err(BuildFailure::Proposal)
 }
@@ -255,7 +246,6 @@ pub fn challenge<P: Parameters>(
         &Address::Unified(Box::new(controller.clone())),
         CHALLENGE_RELAY_VALUE,
         Some(memo),
-        confirmations(),
     )
     .map_err(BuildFailure::Proposal)?;
 
@@ -495,7 +485,6 @@ mod tests {
                 &vault_address(&network),
                 Zatoshis::ZERO,
                 None,
-                confirmations(),
             );
             match proposal {
                 Ok(proposal) => {

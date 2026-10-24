@@ -1,5 +1,12 @@
 # Wallet changelog
 
+## 2026-10-24 — `CONFIRMATIONS` is the mint's one policy (#357)
+
+- One confirmation for every note, trusted or not (`ConfirmationsPolicy::MIN`).
+  The library's calls require a policy argument; every caller passes this
+  one: the Treasury balance reads in boot and the run loop, the sweep's
+  send-max and payment, and the challenge relay.
+
 ## 2026-10-24 — Dust is judged at the node's fee rate (#357)
 
 - `select_spendable_notes`, the `AllFunds(Everything)` precheck and the

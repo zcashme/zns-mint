@@ -32,7 +32,6 @@ use crate::wallet::Wallet;
 use crate::zcash::{self, CanonicalBlockSource, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::chain::ChainState;
-use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zns_canon::capsule::{
@@ -673,7 +672,7 @@ impl Boot<Network> {
         // Boot refuses to run with a treasury below MIN_TREASURY_BALANCE.
         // The node's tip is never pushed into the wallet.
         let treasury_balance = wallet
-            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .get_wallet_summary(crate::wallet::CONFIRMATIONS)
             .expect("FATAL: balance summary failed")
             .expect("FATAL: chain knowledge missing at boot balance check")
             .account_balances()
