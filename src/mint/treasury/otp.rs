@@ -143,14 +143,16 @@ impl OtpQueue {
         }
     }
 
-    /// One live entry per pending transition: a repeat request
-    /// receives the existing entry, stamped with the newest txid.
+    /// One live entry per pending transition. The term is part of
+    /// the transition: a repeat request for that term receives the
+    /// existing entry, stamped with the newest txid.
     pub fn admit(&mut self, request: OtpChallenge, txid: TxId) -> OtpChallenge {
         if let Some((existing, _, entry_txid, _)) =
             self.challenges.iter_mut().find(|(existing, _, _, _)| {
                 existing.name == request.name
                     && existing.action == request.action
                     && existing.ua == request.ua
+                    && existing.term == request.term
                     && existing.tip_rcm == request.tip_rcm
             })
         {
@@ -219,30 +221,49 @@ impl OtpQueue {
             .retain(|(request, _, _, _)| mtp < request.expires_at);
     }
 
-    /// The relayed challenge an echo answers when its code is right;
-    /// a wrong code counts one attempt against the transition the
-    /// echo names and retires it at [`MAX_ATTEMPTS`].
+    /// The relayed challenge whose code the echo carries. Several
+    /// terms may be live at one tip; the code selects one of them.
+    /// A shared code selects none. A wrong code counts an attempt
+    /// only when one candidate is live, and retires it at [`MAX_ATTEMPTS`].
     pub fn answer(&mut self, returned: &OtpMemo, tip_rcm: NameCommitment) -> Option<OtpChallenge> {
-        let index = self.challenges.iter().position(|(request, state, _, _)| {
-            matches!(state, ChallengeState::Relayed)
+        let mut matched: Option<usize> = None;
+        let mut ambiguous = false;
+        let mut candidates = 0usize;
+        let mut sole = 0usize;
+        for (index, (request, state, _, _)) in self.challenges.iter().enumerate() {
+            if !(matches!(state, ChallengeState::Relayed)
                 && request.name == returned.name
                 && request.action == returned.action
                 && request.ua == returned.ua
-                && request.tip_rcm == tip_rcm
-        })?;
-        let (request, _, _, attempts) = &mut self.challenges[index];
-        if bool::from(request.code.0.ct_eq(&returned.code.0)) {
-            return Some(request.clone());
+                && request.tip_rcm == tip_rcm)
+            {
+                continue;
+            }
+            candidates += 1;
+            sole = index;
+            if bool::from(request.code.0.ct_eq(&returned.code.0)) {
+                if matched.is_some() {
+                    ambiguous = true;
+                }
+                matched = Some(index);
+            }
         }
-        if attempts.count() {
-            self.challenges.remove(index);
+        if ambiguous {
+            return None;
+        }
+        if let Some(index) = matched {
+            return Some(self.challenges[index].0.clone());
+        }
+        if candidates == 1 && self.challenges[sole].3.count() {
+            self.challenges.remove(sole);
         }
         None
     }
 
     /// Consumes the answered challenge: one code, one use. The
-    /// transition is the key — a txid can back several challenges,
-    /// and consuming one must not evict its neighbors.
+    /// transition includes the term — consuming one term leaves any
+    /// other term at the same tip, and a shared txid does not
+    /// couple them.
     pub fn consume(&mut self, answered: &OtpChallenge) -> bool {
         let before = self.challenges.len();
         self.challenges.retain(|(existing, state, _, _)| {
@@ -250,6 +271,7 @@ impl OtpQueue {
                 && existing.name == answered.name
                 && existing.action == answered.action
                 && existing.ua == answered.ua
+                && existing.term == answered.term
                 && existing.tip_rcm == answered.tip_rcm)
         });
         self.challenges.len() != before
@@ -602,5 +624,94 @@ mod tests {
 
         assert!(!q.consume(&challenge));
         assert_eq!(q.requested().len(), 1);
+    }
+
+    /// Two terms at one tip are two challenges. The echo's code
+    /// selects which, and consuming it leaves the other. A wrong
+    /// code, or a code shared by both, selects neither.
+    #[test]
+    fn a_term_is_its_own_challenge() {
+        let mut q = OtpQueue::new();
+        let alice = test_name("alice");
+        let ua = mainnet_ua();
+        let rcm = commitment(1);
+        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
+
+        let planted = OtpChallenge {
+            name: alice.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            term: None,
+            tip_rcm: rcm,
+            code: OtpCode::for_test(*b"111111"),
+            expires_at: t0 + Duration::seconds(D_OTP),
+        };
+        let renewal = OtpChallenge {
+            name: alice.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            term: Some(Term::Years(1)),
+            tip_rcm: rcm,
+            code: OtpCode::for_test(*b"222222"),
+            expires_at: t0 + Duration::seconds(D_OTP),
+        };
+
+        let planted = q.admit(planted, test_txid(1));
+        let renewal = q.admit(renewal, test_txid(2));
+        assert_ne!(planted.code, renewal.code);
+
+        // A repeat of the planted term receives that entry, not the renewal.
+        let planted_again = q.admit(
+            OtpChallenge {
+                name: alice.clone(),
+                action: Action::Update,
+                ua: ua.clone(),
+                term: None,
+                tip_rcm: rcm,
+                code: OtpCode::for_test(*b"999999"),
+                expires_at: t0 + Duration::seconds(D_OTP),
+            },
+            test_txid(3),
+        );
+        assert_eq!(planted_again.code, planted.code);
+
+        assert!(q.challenge_issued(&planted));
+        assert!(q.challenge_issued(&renewal));
+
+        // A wrong code names neither term, so neither attempt counter moves.
+        assert!(q.answer(&echo_for(&renewal, *b"000000"), rcm).is_none());
+        assert!(q.is_relayed(&planted));
+        assert!(q.is_relayed(&renewal));
+
+        let matched = q
+            .answer(&echo_for(&renewal, *b"222222"), rcm)
+            .expect("renewal code");
+        assert_eq!(matched.term, Some(Term::Years(1)));
+        assert!(q.consume(&matched));
+        assert!(!q.is_relayed(&renewal));
+        assert!(q.is_relayed(&planted));
+
+        let matched = q
+            .answer(&echo_for(&planted, *b"111111"), rcm)
+            .expect("planted code");
+        assert_eq!(matched.term, None);
+
+        // A second term carrying the same code selects neither entry.
+        let shared = q.admit(
+            OtpChallenge {
+                name: alice,
+                action: Action::Update,
+                ua,
+                term: Some(Term::Years(5)),
+                tip_rcm: rcm,
+                code: planted.code.clone(),
+                expires_at: t0 + Duration::seconds(D_OTP),
+            },
+            test_txid(4),
+        );
+        assert!(q.challenge_issued(&shared));
+        assert!(q.answer(&echo_for(&planted, *b"111111"), rcm).is_none());
+        assert!(q.is_relayed(&planted));
+        assert!(q.is_relayed(&shared));
     }
 }

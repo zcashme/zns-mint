@@ -1,5 +1,11 @@
 # Treasury design record
 
+## 2026-10-24 — A queued request stores its zats-per-USD rate
+
+- `record` takes the rate published when the payment was queued.
+  `pending` returns that rate with the payment. Resolution and
+  truncation leave it on the entries they keep.
+
 ## 2026-10-24 — Treasury payments pay the node's fee rate (#357)
 
 - `sweep_to_vault` and `challenge` take the node's `FeeRule` and call

@@ -17,7 +17,7 @@ use zcash_protocol::consensus::BlockHeight;
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::presale;
-use zns_mint::mint::pricing::fetch_round;
+use zns_mint::mint::pricing::{fetch_round, Oracle};
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
 use zns_mint::mint::{relay, Action, MintInbound, Request, TREASURY_ACCOUNT};
@@ -83,7 +83,7 @@ async fn main() {
             requests
                 .names()
                 .chain(challenges.unrelayed())
-                .chain(echoes.iter().map(|(echo, _, _)| &echo.name))
+                .chain(echoes.iter().map(|(echo, _, _, _)| &echo.name))
                 .chain(name_notes.authorized_names()),
             challenges.relayed(),
         );
@@ -183,7 +183,7 @@ async fn main() {
             name_notes.rewind_to(rewound);
             name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
-            echoes.retain(|(_, _, height)| *height <= rewound);
+            echoes.retain(|(_, _, height, _)| *height <= rewound);
             tracing::warn!(
                 height = u32::from(rewound),
                 hash = %wallet.tip().block_hash(),
@@ -284,9 +284,11 @@ async fn main() {
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
-                        requests.record(txid, request, paid, next_height);
+                        requests.record(txid, request, paid, next_height, oracle.current());
                     }
-                    MintInbound::Echo(echo) => echoes.push((echo, paid, next_height)),
+                    MintInbound::Echo(echo) => {
+                        echoes.push((echo, paid, next_height, oracle.current()))
+                    }
                     MintInbound::Unrecognized => {
                         tracing::info!(
                             txid = %txid,
@@ -380,7 +382,7 @@ async fn main() {
         // exactly once, in queue order. A resolved entry leaves the
         // queue — refused by a gate, or handed to the queue that owns
         // its retries. Nothing defers; nothing is re-read.
-        for (txid, request, paid, note_height) in requests.pending() {
+        for (txid, request, paid, note_height, rate) in requests.pending() {
             let resolved = 'lane: {
                 match &request {
                     Request::Claim {
@@ -416,11 +418,11 @@ async fn main() {
                             );
                             break 'lane true;
                         }
-                        // Payment gate: the quote at first sight is binding.
-                        // An underpaid claim, or one whose quote does not
-                        // fit, is dead and silent; a new payment settles
-                        // a new evaluation.
-                        let Some(price) = oracle.quote(name, *term) else {
+                        // The rate stored with the payment is the quote at
+                        // first sight. An underpaid claim, or one whose quote
+                        // does not fit, is resolved and the payment is kept.
+                        // A new payment settles a new evaluation.
+                        let Some(price) = Oracle::quote_at(rate, name, *term) else {
                             break 'lane true;
                         };
                         if paid < price {
@@ -462,7 +464,8 @@ async fn main() {
                         ) else {
                             break 'lane true;
                         };
-                        if paid < oracle.challenge_fee() {
+                        // Challenge fee at the rate stored with the request.
+                        if paid < Oracle::challenge_fee_at(rate) {
                             break 'lane true;
                         }
                         let pending = OtpChallenge::issue(
@@ -540,7 +543,7 @@ async fn main() {
 
         // Confirmed OTP responses wait in the run loop until the tip pass.
         // Requests run first; a voided echo leaves its challenge available.
-        for (echo, paid, note_height) in std::mem::take(&mut echoes) {
+        for (echo, paid, note_height, rate) in std::mem::take(&mut echoes) {
             let _ = 'lane: {
                 // The echo lane: an OTP response. Decided in every outcome —
                 // an echo never waits for money; the renewal or
@@ -551,12 +554,12 @@ async fn main() {
                 let Some(sent) = challenges.answer(&echo, record.commitment) else {
                     break 'lane true; // no pending challenge: dead
                 };
-                // The renewal or upgrade fee, binding at first
-                // sight: a shortfall voids the attempt and never
+                // The renewal or upgrade fee, at the rate stored with
+                // the echo. A shortfall voids the attempt and never
                 // consumes — the challenge stands, retryable with
                 // the same OTP inside D_OTP.
                 if let Some(term) = sent.term {
-                    let Some(price) = oracle.quote(&echo.name, term) else {
+                    let Some(price) = Oracle::quote_at(rate, &echo.name, term) else {
                         tracing::debug!(
                             name = %echo.name.as_str(),
                             "update quote does not fit — attempt void, challenge stands"

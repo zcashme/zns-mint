@@ -110,8 +110,9 @@ pub struct Boot<P: Parameters> {
     pub name_notes: NameNoteQueue,
     /// initialized: pending Treasury requests
     pub requests: RequestQueue,
-    /// initialized: pending OTP echoes
-    pub echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)>,
+    /// initialized: pending OTP echoes (memo, amount paid, height,
+    /// and the zats-per-USD rate published when the echo was queued).
+    pub echoes: Vec<(OtpMemo, Zatoshis, BlockHeight, Zatoshis)>,
     /// The exact encoded identity written to the boot identity document.
     pub treasury_address: String,
     pub registry_ufvk: String,
