@@ -217,7 +217,7 @@ pub fn challenge<P: Parameters>(
         None,
         vec![],
     )
-    .map_err(|error| BuildFailure::Proposal(Error::Payment(error)))?;
+    .map_err(|error| BuildFailure::Proposal(error::Error::Payment(error)))?;
     let request =
         TransactionRequest::new(vec![payment]).expect("one payment is a valid ZIP 321 request");
     let proposal = propose_transfer::<_, _, _, _, Infallible>(
