@@ -101,47 +101,6 @@ impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::err
 {
 }
 
-/// Pays `amount` from the Treasury to `to` at the node's fee rate:
-/// upstream's `propose_standard_transfer_to_address`, which takes only
-/// the fixed ZIP 317 rule, with `fee_rule` in its place.
-fn propose_payment<P: Parameters>(
-    network: &P,
-    wallet: &mut Wallet<P>,
-    fee_rule: &FeeRule,
-    to: &Address,
-    amount: Zatoshis,
-    memo: Option<MemoBytes>,
-) -> Result<TreasuryProposal, TreasuryProposalError<P>> {
-    let payment = Payment::new(
-        to.to_zcash_address(network),
-        Some(amount),
-        memo,
-        None,
-        None,
-        vec![],
-    )
-    .map_err(Error::Payment)?;
-    let request =
-        TransactionRequest::new(vec![payment]).expect("one payment is a valid ZIP 321 request");
-    propose_transfer::<_, _, _, _, Infallible>(
-        wallet,
-        network,
-        TREASURY_ACCOUNT,
-        &GreedyInputSelector::new(),
-        &SingleOutputChangeStrategy::new(
-            fee_rule.clone(),
-            None,
-            ShieldedPool::Ironwood,
-            DustOutputPolicy::default(),
-        ),
-        request,
-        crate::wallet::CONFIRMATIONS,
-        &SpendPolicy::default(),
-        None,
-        None,
-    )
-}
-
 /// Pays the vault what send-max could deliver, less the float.
 fn propose_vault_sweep<P: Parameters>(
     network: &P,
@@ -179,9 +138,30 @@ fn propose_vault_sweep<P: Parameters>(
         return Ok(None);
     };
 
-    propose_payment(network, wallet, fee_rule, &vault, payment, None)
-        .map(Some)
-        .map_err(BuildFailure::Proposal)
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        vault.to_zcash_address(network),
+        payment,
+    )])
+    .expect("one payment is a valid ZIP 321 request");
+    propose_transfer::<_, _, _, _, Infallible>(
+        wallet,
+        network,
+        TREASURY_ACCOUNT,
+        &GreedyInputSelector::new(),
+        &SingleOutputChangeStrategy::new(
+            fee_rule.clone(),
+            None,
+            ShieldedPool::Ironwood,
+            DustOutputPolicy::default(),
+        ),
+        request,
+        crate::wallet::CONFIRMATIONS,
+        &SpendPolicy::default(),
+        None,
+        None,
+    )
+    .map(Some)
+    .map_err(BuildFailure::Proposal)
 }
 
 /// Builds the vault sweep. `Ok(None)` means nothing to move.
@@ -239,13 +219,33 @@ pub fn challenge<P: Parameters>(
     controller: &zcash_keys::address::UnifiedAddress,
     memo: MemoBytes,
 ) -> Result<Transaction, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
-    let proposal = propose_payment(
-        network,
-        wallet,
-        fee_rule,
-        &Address::Unified(Box::new(controller.clone())),
-        CHALLENGE_RELAY_VALUE,
+    let payment = Payment::new(
+        Address::Unified(Box::new(controller.clone())).to_zcash_address(network),
+        Some(CHALLENGE_RELAY_VALUE),
         Some(memo),
+        None,
+        None,
+        vec![],
+    )
+    .map_err(|error| BuildFailure::Proposal(Error::Payment(error)))?;
+    let request =
+        TransactionRequest::new(vec![payment]).expect("one payment is a valid ZIP 321 request");
+    let proposal = propose_transfer::<_, _, _, _, Infallible>(
+        wallet,
+        network,
+        TREASURY_ACCOUNT,
+        &GreedyInputSelector::new(),
+        &SingleOutputChangeStrategy::new(
+            fee_rule.clone(),
+            None,
+            ShieldedPool::Ironwood,
+            DustOutputPolicy::default(),
+        ),
+        request,
+        crate::wallet::CONFIRMATIONS,
+        &SpendPolicy::default(),
+        None,
+        None,
     )
     .map_err(BuildFailure::Proposal)?;
 
@@ -478,12 +478,26 @@ mod tests {
             st.add_empty_blocks(1);
 
             let network = *st.network();
-            let proposal = propose_payment(
-                &network,
-                st.wallet_mut(),
-                &fee_rule(Zatoshis::const_from_u64(rate)),
-                &vault_address(&network),
+            let request = TransactionRequest::new(vec![Payment::without_memo(
+                vault_address(&network).to_zcash_address(&network),
                 Zatoshis::ZERO,
+            )])
+            .unwrap();
+            let proposal = propose_transfer::<_, _, _, _, Infallible>(
+                st.wallet_mut(),
+                &network,
+                TREASURY_ACCOUNT,
+                &GreedyInputSelector::new(),
+                &SingleOutputChangeStrategy::new(
+                    fee_rule(Zatoshis::const_from_u64(rate)),
+                    None,
+                    ShieldedPool::Ironwood,
+                    DustOutputPolicy::default(),
+                ),
+                request,
+                crate::wallet::CONFIRMATIONS,
+                &SpendPolicy::default(),
+                None,
                 None,
             );
             match proposal {

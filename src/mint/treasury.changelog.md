@@ -2,9 +2,10 @@
 
 ## 2026-10-24 — Treasury payments pay the node's fee rate (#357)
 
-- `sweep_to_vault` and `challenge` take the node's `FeeRule`.
-  `propose_payment` is upstream's `propose_standard_transfer_to_address`
-  with that rule in place of `StandardFeeRule::Zip317`.
+- `sweep_to_vault` and `challenge` take the node's `FeeRule` and call
+  upstream's `propose_transfer` with a `SingleOutputChangeStrategy` over
+  it. `propose_standard_transfer_to_address` takes only
+  `StandardFeeRule::Zip317`, so it is no longer used.
 - Dust is judged at the node's rate: selection hands every note to the
   change strategy, which drops inputs worth no more than one action.
 - A note smaller than the float is not needed by the sweep and stays in
