@@ -8,12 +8,12 @@
 use std::num::NonZeroU64;
 
 use zcash_client_backend::wallet::NoteId;
+use zcash_primitives::transaction::fees::zip317::MINIMUM_FEE;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 
 use crate::mint::{Name, UnifiedAddress};
-use crate::zcash::fee::single_action_fee;
 
 /// How `paid` stands against the quote and the refund fee.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,24 +28,19 @@ pub enum PaymentAgainstQuote {
 
 /// `Covers` when `paid` meets `price`. Otherwise the positive remainder
 /// after the refund fee, or `BelowFee` when that remainder is zero.
-pub fn payment_against_quote(
-    paid: Zatoshis,
-    price: Zatoshis,
-    marginal: Zatoshis,
-) -> PaymentAgainstQuote {
+pub fn payment_against_quote(paid: Zatoshis, price: Zatoshis) -> PaymentAgainstQuote {
     if paid >= price {
         return PaymentAgainstQuote::Covers;
     }
-    match refund_output(paid, marginal) {
+    match refund_output(paid) {
         Some(output) => PaymentAgainstQuote::Remainder(output),
         None => PaymentAgainstQuote::BelowFee,
     }
 }
 
 /// `paid` minus the one-action fee, when that remainder is positive.
-pub fn refund_output(paid: Zatoshis, marginal: Zatoshis) -> Option<Zatoshis> {
-    let fee = single_action_fee(marginal)?;
-    (paid - fee).filter(|output| *output > Zatoshis::ZERO)
+pub fn refund_output(paid: Zatoshis) -> Option<Zatoshis> {
+    (paid - MINIMUM_FEE).filter(|output| *output > Zatoshis::ZERO)
 }
 
 /// One percent of `price`, rounded down to a zat.
@@ -232,7 +227,6 @@ impl RefundQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
 
     fn zats(n: u64) -> Zatoshis {
         Zatoshis::const_from_u64(n)
@@ -240,23 +234,23 @@ mod tests {
 
     #[test]
     fn an_underpaid_claim_refunds_the_payment_minus_the_fee() {
-        let fee = single_action_fee(MARGINAL_FEE).unwrap();
+        let fee = MINIMUM_FEE;
         let paid = zats(50_000);
         assert_eq!(
-            payment_against_quote(paid, zats(100_000), MARGINAL_FEE),
+            payment_against_quote(paid, zats(100_000)),
             PaymentAgainstQuote::Remainder((paid - fee).unwrap())
         );
     }
 
     #[test]
     fn a_payment_that_does_not_exceed_the_fee_is_kept() {
-        let fee = single_action_fee(MARGINAL_FEE).unwrap();
+        let fee = MINIMUM_FEE;
         assert_eq!(
-            payment_against_quote(fee, zats(100_000), MARGINAL_FEE),
+            payment_against_quote(fee, zats(100_000)),
             PaymentAgainstQuote::BelowFee
         );
         assert_eq!(
-            payment_against_quote((fee - zats(1)).unwrap(), zats(100_000), MARGINAL_FEE),
+            payment_against_quote((fee - zats(1)).unwrap(), zats(100_000)),
             PaymentAgainstQuote::BelowFee
         );
     }
@@ -265,23 +259,20 @@ mod tests {
     fn a_wrong_access_code_keeps_one_percent_then_the_fee() {
         let price = zats(100_000);
         let penalty = zats(1_000);
-        let fee = single_action_fee(MARGINAL_FEE).unwrap();
+        let fee = MINIMUM_FEE;
         let paid = price;
         assert_eq!(access_code_penalty(price), penalty);
         let net = (paid - penalty).unwrap();
-        assert_eq!(refund_output(net, MARGINAL_FEE), net - fee);
+        assert_eq!(refund_output(net), net - fee);
     }
 
     #[test]
     fn a_payment_that_does_not_cover_the_penalty_and_the_fee_is_kept() {
         let price = zats(100_000);
         let penalty = access_code_penalty(price);
-        let fee = single_action_fee(MARGINAL_FEE).unwrap();
+        let fee = MINIMUM_FEE;
         let covers_the_penalty = (penalty + fee).unwrap();
-        assert_eq!(
-            refund_output((covers_the_penalty - penalty).unwrap(), MARGINAL_FEE),
-            None
-        );
+        assert_eq!(refund_output((covers_the_penalty - penalty).unwrap()), None);
         assert!((penalty - zats(1) - penalty).is_none());
     }
 
@@ -289,11 +280,11 @@ mod tests {
     fn a_fully_paid_claim_is_not_refunded() {
         let price = zats(100_000);
         assert_eq!(
-            payment_against_quote(price, price, MARGINAL_FEE),
+            payment_against_quote(price, price),
             PaymentAgainstQuote::Covers
         );
         assert_eq!(
-            payment_against_quote(zats(100_001), price, MARGINAL_FEE),
+            payment_against_quote(zats(100_001), price),
             PaymentAgainstQuote::Covers
         );
     }

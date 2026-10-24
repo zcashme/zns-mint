@@ -9,7 +9,6 @@
 //! it is the SEV-SNP measurement of the image this process lives in.
 
 pub mod chain;
-pub mod fee;
 pub mod mempool;
 pub mod submit;
 

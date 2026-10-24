@@ -21,16 +21,16 @@ use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelector
 use zcash_client_backend::data_api::wallet::input_selection::GreedyInputSelectorError;
 use zcash_client_backend::data_api::wallet::input_selection::SpendPolicy;
 use zcash_client_backend::data_api::wallet::{
-    create_proposed_transactions, propose_send_max_transfer, propose_transfer, ConfirmationsPolicy,
-    CreateErrT, ProposeTransferErrT,
+    create_proposed_transactions, propose_send_max_transfer, propose_standard_transfer_to_address,
+    propose_transfer, ConfirmationsPolicy, CreateErrT, ProposeTransferErrT,
 };
 use zcash_client_backend::data_api::{MaxSpendMode, WalletRead as _};
-use zcash_client_backend::fees::zip317::SingleOutputChangeStrategy;
-use zcash_client_backend::fees::{DustAction, DustOutputPolicy};
+use zcash_client_backend::fees::standard::SingleOutputChangeStrategy;
+use zcash_client_backend::fees::{DustAction, DustOutputPolicy, StandardFeeRule};
 use zcash_client_backend::proposal::Proposal;
 use zcash_client_backend::util::SystemClock;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
-use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule as Zip317FeeRule};
+use zcash_primitives::transaction::fees::zip317::{FeeError, MINIMUM_FEE};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkType, Parameters, TestNetwork};
 use zcash_protocol::memo::MemoBytes;
@@ -40,14 +40,16 @@ use zip321::{Payment, TransactionRequest};
 
 use crate::mint::{Name, Request, UnifiedAddress, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
-use crate::zcash::fee::{fee_rule, single_action_fee};
 
-type TreasuryChange<P> = SingleOutputChangeStrategy<Zip317FeeRule, Wallet<P>>;
-type TreasuryProposalError<P> =
-    ProposeTransferErrT<Wallet<P>, Infallible, GreedyInputSelector<Wallet<P>>, TreasuryChange<P>>;
+type TreasuryProposalError<P> = ProposeTransferErrT<
+    Wallet<P>,
+    Infallible,
+    GreedyInputSelector<Wallet<P>>,
+    SingleOutputChangeStrategy<Wallet<P>>,
+>;
 type TreasuryBuildError<P> =
-    CreateErrT<Wallet<P>, GreedyInputSelectorError, Zip317FeeRule, FeeError, NoteId>;
-type TreasuryProposal = Proposal<Zip317FeeRule, NoteId>;
+    CreateErrT<Wallet<P>, GreedyInputSelectorError, StandardFeeRule, FeeError, NoteId>;
+type TreasuryProposal = Proposal<StandardFeeRule, NoteId>;
 
 /// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
 /// actually moves, not on the balance behind it.
@@ -107,43 +109,6 @@ impl<ProposalError: std::fmt::Debug, TransactionError: std::fmt::Debug> std::err
 {
 }
 
-/// Pays `amount` from the Treasury with the node's ZIP 317 fee rule.
-fn propose_payment<P: Parameters>(
-    network: &P,
-    wallet: &mut Wallet<P>,
-    fee_rule: &Zip317FeeRule,
-    to: &zcash_keys::address::Address,
-    amount: Zatoshis,
-    memo: Option<MemoBytes>,
-    dust: DustOutputPolicy,
-) -> Result<Proposal<Zip317FeeRule, NoteId>, TreasuryProposalError<P>> {
-    let request = TransactionRequest::new(vec![Payment::new(
-        to.to_zcash_address(network),
-        Some(amount),
-        memo,
-        None,
-        None,
-        vec![],
-    )
-    .map_err(Error::Payment)?])
-    .expect("one shielded payment satisfies a ZIP 321 request");
-    let input_selector = GreedyInputSelector::<Wallet<P>>::new();
-    let change_strategy =
-        SingleOutputChangeStrategy::new(fee_rule.clone(), None, ShieldedPool::Ironwood, dust);
-    propose_transfer(
-        wallet,
-        network,
-        TREASURY_ACCOUNT,
-        &input_selector,
-        &change_strategy,
-        request,
-        ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false),
-        &SpendPolicy::default(),
-        None,
-        None,
-    )
-}
-
 /// What a refund attempt can do this tip.
 #[derive(Debug)]
 pub enum RefundPlan {
@@ -182,9 +147,7 @@ pub fn plan_refund<P: Parameters>(
     let Some(returning) = paid - penalty else {
         return Ok(RefundPlan::Dust);
     };
-    let Some(mut fee) = single_action_fee(wallet.marginal_fee()) else {
-        return Ok(RefundPlan::Wait);
-    };
+    let mut fee = MINIMUM_FEE;
     // The first guess is one shielded action. The built fee can be higher
     // when the output pool is not the note's pool. One revision settles
     // a stable shape; a third guess waits for the next tip.
@@ -229,14 +192,28 @@ fn propose_one_note<P: Parameters>(
     wallet.set_refund_note(Some(note));
     // A penalty below the marginal fee is still the change. The sweep and
     // the relays keep the default dust rule.
-    let result = propose_payment(
-        network,
-        wallet,
-        &fee_rule(wallet.marginal_fee()),
-        to,
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(network),
         amount,
+    )])
+    .expect("one shielded payment satisfies a ZIP 321 request");
+    let change_strategy = SingleOutputChangeStrategy::new(
+        StandardFeeRule::Zip317,
         None,
+        ShieldedPool::Ironwood,
         DustOutputPolicy::new(DustAction::AllowDustChange, None),
+    );
+    let result = propose_transfer(
+        wallet,
+        network,
+        TREASURY_ACCOUNT,
+        &GreedyInputSelector::new(),
+        &change_strategy,
+        request,
+        ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false),
+        &SpendPolicy::default(),
+        None,
+        None,
     );
     wallet.set_refund_note(None);
     result
@@ -291,7 +268,7 @@ pub fn refund_underpaid<P: Parameters>(
     height: BlockHeight,
     kind: &'static str,
 ) -> bool {
-    match payment_against_quote(paid, price, wallet.marginal_fee()) {
+    match payment_against_quote(paid, price) {
         PaymentAgainstQuote::Covers => false,
         PaymentAgainstQuote::BelowFee | PaymentAgainstQuote::Remainder(_) => {
             admit_refund(
@@ -374,7 +351,7 @@ fn admit_refund<P: Parameters>(
         kept();
         return false;
     };
-    let Some(output) = refund_output(net, wallet.marginal_fee()) else {
+    let Some(output) = refund_output(net) else {
         kept();
         return false;
     };
@@ -449,7 +426,7 @@ pub fn build_refund<P: Parameters>(
         Wallet<P>,
         P,
         GreedyInputSelectorError,
-        Zip317FeeRule,
+        StandardFeeRule,
         FeeError,
         NoteId,
     >(
@@ -479,13 +456,12 @@ fn propose_vault_sweep<P: Parameters>(
 {
     let policy = ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false);
     let vault = vault_address(network);
-    let fee_rule = fee_rule(wallet.marginal_fee());
     let sendable = match propose_send_max_transfer::<_, _, _, Infallible>(
         wallet,
         network,
         TREASURY_ACCOUNT,
         &[ShieldedPool::Sapling, ShieldedPool::Ironwood],
-        &fee_rule,
+        &StandardFeeRule::Zip317,
         vault.to_zcash_address(network),
         None,
         MaxSpendMode::MaxSpendable,
@@ -509,14 +485,19 @@ fn propose_vault_sweep<P: Parameters>(
         return Ok(None);
     };
 
-    propose_payment(
-        network,
+    propose_standard_transfer_to_address::<_, _, Infallible>(
         wallet,
-        &fee_rule,
+        network,
+        StandardFeeRule::Zip317,
+        TREASURY_ACCOUNT,
+        policy,
         &vault,
         payment,
         None,
-        DustOutputPolicy::default(),
+        None,
+        ShieldedPool::Ironwood,
+        None,
+        None,
     )
     .map(Some)
     .map_err(BuildFailure::Proposal)
@@ -575,14 +556,19 @@ pub fn challenge<P: Parameters>(
     controller: &zcash_keys::address::UnifiedAddress,
     memo: MemoBytes,
 ) -> Result<Transaction, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
-    let proposal = propose_payment(
-        network,
+    let proposal = propose_standard_transfer_to_address::<_, _, Infallible>(
         wallet,
-        &fee_rule(wallet.marginal_fee()),
+        network,
+        StandardFeeRule::Zip317,
+        TREASURY_ACCOUNT,
+        ConfirmationsPolicy::new_symmetrical(NonZeroU32::MIN, false),
         &zcash_keys::address::Address::Unified(Box::new(controller.clone())),
         CHALLENGE_RELAY_VALUE,
         Some(memo),
-        DustOutputPolicy::default(),
+        None,
+        ShieldedPool::Ironwood,
+        None,
+        None,
     )
     .map_err(BuildFailure::Proposal)?;
 
@@ -591,7 +577,7 @@ pub fn challenge<P: Parameters>(
         Wallet<P>,
         P,
         GreedyInputSelectorError,
-        Zip317FeeRule,
+        StandardFeeRule,
         FeeError,
         NoteId,
     >(

@@ -118,11 +118,6 @@ pub struct Wallet<P: Parameters> {
     /// Advisory locks use upstream `OutputRef` and `LockOwner` values directly.
     locks: BTreeMap<OutputRef, (LockOwner, BlockHeight)>,
 
-    /// The node's ZIP 317 marginal fee, in zatoshis per logical action.
-    /// A note that does not exceed it is dust. The ZIP 317 constant stands
-    /// until `getstandardfee` answers.
-    marginal_fee: Zatoshis,
-
     /// When set, selection returns this note alone. Every other proposal
     /// leaves it unset, and skips notes in `refund_reserved`.
     refund_note: Option<NoteId>,
@@ -151,11 +146,6 @@ pub struct Wallet<P: Parameters> {
 }
 
 impl<P: Parameters> Wallet<P> {
-    /// The marginal fee dust selection and transaction construction use.
-    pub fn marginal_fee(&self) -> Zatoshis {
-        self.marginal_fee
-    }
-
     /// Restricts selection to the refund's note, or clears the restriction.
     pub(crate) fn set_refund_note(&mut self, note: Option<NoteId>) {
         self.refund_note = note;
@@ -228,7 +218,6 @@ impl<P: Parameters> Wallet<P> {
             ironwood_nullifiers: BTreeMap::new(),
             sent_outputs: BTreeMap::new(),
             locks: BTreeMap::new(),
-            marginal_fee: zcash_primitives::transaction::fees::zip317::MARGINAL_FEE,
             refund_note: None,
             refund_reserved: BTreeSet::new(),
             sapling_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),
