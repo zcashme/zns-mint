@@ -13,8 +13,6 @@ pub mod fee;
 pub mod mempool;
 pub mod submit;
 
-pub(crate) use fee::fee_rule;
-
 pub use chain::{BlockchainInfo, ChainClient, TipSession};
 pub use mempool::MempoolSession;
 pub use submit::SubmitOutcome;
