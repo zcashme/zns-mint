@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-10-24 — The fee rate or no start (#357)
+
+- Boot reads the node's fee rate after the price fetch and hands it to
+  the run loop as `Boot::fee_rule`. Like every other node read in boot,
+  it is tried once and a failure is fatal.
+
 ## 2026-10-23 — Boot checks the pinned block, then each header's time
 
 - Before the scan, boot requires the node to serve the pinned block.

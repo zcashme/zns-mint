@@ -10,6 +10,7 @@
 
 pub mod adopt;
 pub mod chain;
+pub mod fees;
 pub mod mempool;
 pub mod submit;
 

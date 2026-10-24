@@ -1,5 +1,17 @@
 # Wallet changelog
 
+## 2026-10-24 — One confirmation policy (#357)
+
+- `CONFIRMATIONS` (`ConfirmationsPolicy::MIN`) is one confirmation for
+  every note, trusted or not. The library's calls require a policy
+  argument; every caller passes this one: the Treasury balance reads in
+  boot and the run loop, the sweep's send-max and payment, and the
+  challenge relay.
+- Dust stays at the fixed `MARGINAL_FEE`, as in `zcash_client_sqlite`,
+  whatever rate the node charges. Upstream's greedy selector and
+  send-max assume the wallet never offers dust: a pruned note shrinks
+  the selected total, and the selector reports `InsufficientFunds`.
+
 ## 2026-10-10 — Note selection skips dust
 
 - `select_spendable_notes` skips notes worth `MARGINAL_FEE` or less, as

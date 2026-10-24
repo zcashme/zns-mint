@@ -1,5 +1,12 @@
 # Zcash I/O changelog
 
+## 2026-10-23 — The node's fee rate (#357)
+
+- `CanonicalBlockSource::standard_fee` reads `getstandardfee` and returns
+  a ZIP 317 `FeeRule` at that per-action rate. Estimator version 0 only;
+  zero, out-of-range, or null answers are refused. No fixed rate stands
+  in for a refused answer: the mint runs its own node.
+
 ## 2026-10-23 — A header is adopted only inside the time window
 
 - The node has to serve one pinned block, hashed locally. Regtest

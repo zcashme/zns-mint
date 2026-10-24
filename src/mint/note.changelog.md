@@ -1,5 +1,10 @@
 # `mint/note.rs` design record
 
+## 2026-10-23 — Name Notes pay the node's fee rate (#357)
+
+- `assemble::prepare` takes the node's `FeeRule` for the fee loop and
+  the builder, in place of `StandardFeeRule::Zip317`.
+
 ## 2026-10-23 — A broadcast order stays until its expiry height
 
 - `NameNoteState::Sent` stores the expiry height of a submitted
