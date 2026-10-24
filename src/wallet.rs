@@ -151,15 +151,6 @@ pub struct Wallet<P: Parameters> {
 }
 
 impl<P: Parameters> Wallet<P> {
-    /// Replaces the marginal fee. Returns whether the rate changed.
-    pub fn set_marginal_fee(&mut self, marginal_fee: Zatoshis) -> bool {
-        if self.marginal_fee == marginal_fee {
-            return false;
-        }
-        self.marginal_fee = marginal_fee;
-        true
-    }
-
     /// The marginal fee dust selection and transaction construction use.
     pub fn marginal_fee(&self) -> Zatoshis {
         self.marginal_fee

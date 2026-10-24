@@ -1,13 +1,5 @@
 # Zcash I/O changelog
 
-## 2026-10-22 — Transaction fees follow the node's standard fee
-
-- Each tip reads `getstandardfee`. `standard_fee` is the ZIP 317 marginal
-  rate for outgoing transactions and for which notes are dust. The ZIP 317
-  constant of 5,000 zatoshis per action stands until the node answers. A
-  node without the method keeps that constant. A zero or out-of-range
-  answer leaves the previous rate in place.
-
 ## 2026-10-13 — The announcement is the answer (#344)
 
 - Upstream receipts first: Zebra's `ChainTipChange` pushes on reorgs

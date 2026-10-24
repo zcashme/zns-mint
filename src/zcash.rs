@@ -213,11 +213,6 @@ impl RpcError {
         self.code == -27
     }
 
-    /// JSON-RPC -32601: the node has no method by that name.
-    pub fn is_method_missing(&self) -> bool {
-        self.code == -32601
-    }
-
     /// The node already has this transaction in its mempool. The message
     /// is the discriminator: -26 is also a policy rejection.
     pub fn is_already_in_mempool(&self) -> bool {
