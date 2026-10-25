@@ -223,13 +223,13 @@ impl OtpQueue {
 
     /// The relayed challenge whose code the echo carries. Several
     /// terms may be live at one tip; the code selects one of them.
-    /// A shared code selects none. A wrong code counts an attempt
-    /// only when one candidate is live, and retires it at [`MAX_ATTEMPTS`].
+    /// A shared code selects none. A wrong code counts one attempt
+    /// against every candidate, and the set retires when one of
+    /// them reaches [`MAX_ATTEMPTS`].
     pub fn answer(&mut self, returned: &OtpMemo, tip_rcm: NameCommitment) -> Option<OtpChallenge> {
         let mut matched: Option<usize> = None;
         let mut ambiguous = false;
-        let mut candidates = 0usize;
-        let mut sole = 0usize;
+        let mut candidates = Vec::new();
         for (index, (request, state, _, _)) in self.challenges.iter().enumerate() {
             if !(matches!(state, ChallengeState::Relayed)
                 && request.name == returned.name
@@ -239,8 +239,7 @@ impl OtpQueue {
             {
                 continue;
             }
-            candidates += 1;
-            sole = index;
+            candidates.push(index);
             if bool::from(request.code.0.ct_eq(&returned.code.0)) {
                 if matched.is_some() {
                     ambiguous = true;
@@ -254,8 +253,23 @@ impl OtpQueue {
         if let Some(index) = matched {
             return Some(self.challenges[index].0.clone());
         }
-        if candidates == 1 && self.challenges[sole].3.count() {
-            self.challenges.remove(sole);
+        if candidates.is_empty() {
+            return None;
+        }
+        let mut retire = false;
+        for index in &candidates {
+            if self.challenges[*index].3.count() {
+                retire = true;
+            }
+        }
+        if retire {
+            self.challenges.retain(|(request, state, _, _)| {
+                !(matches!(state, ChallengeState::Relayed)
+                    && request.name == returned.name
+                    && request.action == returned.action
+                    && request.ua == returned.ua
+                    && request.tip_rcm == tip_rcm)
+            });
         }
         None
     }
@@ -678,7 +692,7 @@ mod tests {
         assert!(q.challenge_issued(&planted));
         assert!(q.challenge_issued(&renewal));
 
-        // A wrong code names neither term, so neither attempt counter moves.
+        // One wrong echo counts against both terms and retires neither.
         assert!(q.answer(&echo_for(&renewal, *b"000000"), rcm).is_none());
         assert!(q.is_relayed(&planted));
         assert!(q.is_relayed(&renewal));
@@ -713,5 +727,52 @@ mod tests {
         assert!(q.answer(&echo_for(&planted, *b"111111"), rcm).is_none());
         assert!(q.is_relayed(&planted));
         assert!(q.is_relayed(&shared));
+    }
+
+    /// A wrong code counts once for every relayed term at that tip.
+    /// Five misses leave the set in place. The sixth removes it.
+    #[test]
+    fn a_wrong_code_retires_every_term_in_the_set() {
+        let mut q = OtpQueue::new();
+        let rcm = commitment(1);
+        let t0 = Timestamp::from_seconds(1_700_000_000).unwrap();
+        let ua = mainnet_ua();
+        let alice = test_name("alice");
+
+        let open = OtpChallenge {
+            name: alice.clone(),
+            action: Action::Update,
+            ua: ua.clone(),
+            term: None,
+            tip_rcm: rcm,
+            code: OtpCode::for_test(*b"111111"),
+            expires_at: t0 + Duration::seconds(D_OTP),
+        };
+        let year = OtpChallenge {
+            name: alice,
+            action: Action::Update,
+            ua,
+            term: Some(Term::Years(1)),
+            tip_rcm: rcm,
+            code: OtpCode::for_test(*b"222222"),
+            expires_at: t0 + Duration::seconds(D_OTP),
+        };
+        let open = q.admit(open, test_txid(1));
+        let year = q.admit(year, test_txid(2));
+        assert!(q.challenge_issued(&open));
+        assert!(q.challenge_issued(&year));
+
+        for n in 1..MAX_ATTEMPTS {
+            let wrong: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();
+            assert!(q.answer(&echo_for(&open, wrong), rcm).is_none());
+            assert!(q.is_relayed(&open));
+            assert!(q.is_relayed(&year));
+        }
+        let wrong: [u8; 6] = format!("{MAX_ATTEMPTS:06}").as_bytes().try_into().unwrap();
+        assert!(q.answer(&echo_for(&open, wrong), rcm).is_none());
+        assert!(!q.is_relayed(&open));
+        assert!(!q.is_relayed(&year));
+        assert!(q.answer(&echo_for(&open, *b"111111"), rcm).is_none());
+        assert!(q.answer(&echo_for(&year, *b"222222"), rcm).is_none());
     }
 }

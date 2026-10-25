@@ -6,7 +6,8 @@
   a separate challenge, with a separate code.
 - `answer` returns the relayed entry whose code the echo carries.
   If two entries carry that code, it returns no entry. A non-matching
-  code increments the attempt count only when one entry is relayed.
+  code counts one attempt against every relayed entry for that name,
+  action, address, and tip, and the sixth removes them all.
 - `consume` removes the answered term and retains every other term
   at the same tip.
 
