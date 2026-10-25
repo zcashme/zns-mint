@@ -558,7 +558,7 @@ async fn main() {
         }
 
         // OTP responses are decided before relays. An underpaid renewal is
-        // queued for a refund here. A voided echo leaves its challenge
+        // queued for a refund here. A voided OTP response leaves its challenge
         // available.
         for (txid, echo, paid, note_height) in std::mem::take(&mut echoes) {
             let _ = 'lane: {

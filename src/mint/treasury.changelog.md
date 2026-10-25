@@ -26,8 +26,8 @@
 
 - `Refund` names the transaction that carried the payment, as a request
   does. The `NoteId` and the output index it needed are gone: `apply_block`,
-  `RequestQueue` and the echo list return to master's shapes, with the
-  echo keeping the txid the refund needs.
+  `RequestQueue` and the OTP response list return to master's shapes,
+  with each OTP response keeping the txid the refund needs.
 
 ## 2026-10-24 — A refund is a plain Treasury payment
 
@@ -87,7 +87,7 @@
 
 ## 2026-10-23 — A refund stays owed until it is buried
 
-- Echoes are decided before relays.
+- OTP responses are decided before relays.
 - A refund mined at or below the wallet's rewind floor leaves the queue.
 - A second claim for a name that already has a Name Note queued is
   refunded, less the fee.
