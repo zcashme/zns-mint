@@ -794,17 +794,32 @@ async fn main() {
         }
 
         // A refund is built on the pass after its payment's block, like a
-        // Name Note. The wallet owns it from there, like a sweep.
-        for tx in treasury::refund(
-            &network,
-            &mut wallet,
-            &treasury_keys,
-            &sapling_spend,
-            &sapling_output,
-            &fee_rule,
-            &mut refunds,
-        ) {
-            source.submit(&tx, "refund").await;
+        // Name Note, one transaction each. The wallet owns it from there,
+        // like a sweep. One the Treasury cannot fund yet stays due.
+        for refund in refunds.due(tip) {
+            match treasury::issue_refund(
+                &network,
+                &mut wallet,
+                &treasury_keys,
+                &sapling_spend,
+                &sapling_output,
+                &fee_rule,
+                &refund,
+            ) {
+                Ok(Some(tx)) => {
+                    refunds.paid(&refund);
+                    source.submit(&tx, "refund").await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        payment = %refund.payment(),
+                        name = %refund.name().as_str(),
+                        "refund not built"
+                    );
+                }
+            }
         }
 
         // A new MTP day sweeps the Treasury to the vault once.

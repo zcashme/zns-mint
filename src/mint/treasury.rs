@@ -96,103 +96,80 @@ pub enum BuildFailure<ProposalError, TransactionError> {
     Transaction(TransactionError),
 }
 
-/// Builds every refund due at the wallet's tip: one Treasury payment of
-/// its amount to its recipient, funded from any Treasury notes. A built
-/// refund leaves the queue, and the wallet owns it from there, as it owns
-/// a sweep: one that expires unmined is kept, and the next sweep moves the
-/// money. One the Treasury cannot fund yet stays due. Returns the built
-/// transactions for broadcast.
-pub fn refund<P: Parameters>(
+/// Builds one refund: a Treasury payment of its amount to its recipient,
+/// funded from any Treasury notes. The wallet owns it from there, as it
+/// owns a sweep: one that expires unmined is kept, and the next sweep
+/// moves the money. `Ok(None)` means the Treasury cannot fund it yet.
+pub fn issue_refund<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
     treasury_keys: &crate::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
     fee_rule: &FeeRule,
-    refunds: &mut RefundQueue,
-) -> Vec<Transaction> {
-    let mut built = Vec::new();
-    for refund in refunds.due(wallet.tip().block_height()) {
-        let to = Address::Unified(Box::new(refund.recipient().clone()));
-        let request = TransactionRequest::new(vec![Payment::without_memo(
-            to.to_zcash_address(network),
-            refund.amount(),
-        )])
-        .expect("one payment is a valid ZIP 321 request");
-        let proposal = match propose_transfer::<_, _, _, _, Infallible>(
-            wallet,
-            network,
-            TREASURY_ACCOUNT,
-            &GreedyInputSelector::new(),
-            &SingleOutputChangeStrategy::new(
-                fee_rule.clone(),
-                None,
-                ShieldedPool::Ironwood,
-                DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE)),
-            ),
-            request,
-            crate::wallet::CONFIRMATIONS,
-            &SpendPolicy::default(),
+    refund: &RefundRequest,
+) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
+    let to = Address::Unified(Box::new(refund.recipient().clone()));
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(network),
+        refund.amount(),
+    )])
+    .expect("one payment is a valid ZIP 321 request");
+    let proposal = match propose_transfer::<_, _, _, _, Infallible>(
+        wallet,
+        network,
+        TREASURY_ACCOUNT,
+        &GreedyInputSelector::new(),
+        &SingleOutputChangeStrategy::new(
+            fee_rule.clone(),
             None,
-            None,
-        ) {
-            Ok(proposal) => proposal,
-            Err(error::Error::InsufficientFunds { .. }) | Err(error::Error::ScanRequired) => {
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = ?error,
-                    txid = %refund.payment(),
-                    name = %refund.name().as_str(),
-                    "refund not proposed"
-                );
-                continue;
-            }
-        };
-        let spending_keys = treasury_keys.spending_keys();
-        let txids =
-            match create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
-                wallet,
-                network,
-                &SystemClock,
-                &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
-                spend_prover,
-                output_prover,
-                &spending_keys,
-                OvkPolicy::Sender,
-                &proposal,
-                None,
-            ) {
-                Ok(txids) => txids,
-                Err(error) => {
-                    tracing::warn!(
-                        error = ?error,
-                        txid = %refund.payment(),
-                        name = %refund.name().as_str(),
-                        "refund not built"
-                    );
-                    continue;
-                }
-            };
-        tracing::info!(
-            txid = %txids.first(),
-            payment = %refund.payment(),
-            name = %refund.name().as_str(),
-            amount = refund.amount().into_u64(),
-            "refund built"
-        );
-        // The build stored the tx and marked its inputs spent; a miss here
-        // is the wallet contradicting itself. Stop; restart rescans.
-        built.push(
-            wallet
-                .get_transaction(*txids.first())
-                .expect("FATAL: refund lookup failed after build")
-                .expect("FATAL: built refund tx missing from wallet"),
-        );
-        refunds.paid(&refund);
-    }
-    built
+            ShieldedPool::Ironwood,
+            DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE)),
+        ),
+        request,
+        crate::wallet::CONFIRMATIONS,
+        &SpendPolicy::default(),
+        None,
+        None,
+    ) {
+        Ok(proposal) => proposal,
+        Err(error::Error::InsufficientFunds { .. }) | Err(error::Error::ScanRequired) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(BuildFailure::Proposal(error)),
+    };
+
+    let spending_keys = treasury_keys.spending_keys();
+    let txids = create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
+        wallet,
+        network,
+        &SystemClock,
+        &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+        spend_prover,
+        output_prover,
+        &spending_keys,
+        OvkPolicy::Sender,
+        &proposal,
+        None,
+    )
+    .map_err(BuildFailure::Transaction)?;
+
+    tracing::info!(
+        txid = %txids.first(),
+        payment = %refund.payment(),
+        name = %refund.name().as_str(),
+        amount = refund.amount().into_u64(),
+        "refund built"
+    );
+
+    // The build stored the tx and marked its inputs spent; a miss here is
+    // the wallet contradicting itself, not a skip. Stop; restart rescans.
+    Ok(Some(
+        wallet
+            .get_transaction(*txids.first())
+            .expect("FATAL: refund lookup failed after build")
+            .expect("FATAL: built refund tx missing from wallet"),
+    ))
 }
 
 /// Pays the vault what send-max could deliver, less the float.

@@ -15,9 +15,11 @@
 - Kept: a wrong OTP, an unparsed memo, and any refusal not listed above.
 - `RefundQueue` holds the refunds due (`RefundRequest`): `admit`, `due`,
   `paid`, `truncate_to`. A reorg drops refunds above the ancestor.
-- `treasury::refund` builds a refund with `propose_transfer` and
-  `create_proposed_transactions` on the tip pass after its payment's
-  block. The wallet owns the transaction from there, as it owns a sweep.
+- `treasury::issue_refund` builds one refund with `propose_transfer` and
+  `create_proposed_transactions`; `Ok(None)` means the Treasury cannot
+  fund it yet. The run loop issues each refund due on the tip pass after
+  its payment's block. The wallet owns the transaction from there, as it
+  owns a sweep.
 - Each OTP response keeps its payment txid for the refund.
 
 ## 2026-10-24 — Treasury payments pay the node's fee rate (#357)
