@@ -786,8 +786,8 @@ async fn main() {
             }
         }
 
-        // A refund is built once its payment is past any reorg. The wallet
-        // owns it from there, like a sweep.
+        // A refund is built on the pass after its payment's block, like a
+        // Name Note. The wallet owns it from there, like a sweep.
         for tx in treasury::refund(
             &network,
             &mut wallet,

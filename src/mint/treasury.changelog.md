@@ -15,12 +15,9 @@
 - `RefundQueue` holds the refunds due (`RefundRequest`): `admit`, `due`,
   `paid`, `truncate_to`. A reorg drops refunds above the ancestor.
 - `treasury::refund` builds a refund with `propose_transfer` and
-  `create_proposed_transactions` once its payment is `REFUND_DEPTH`
-  below the tip: the wallet's `MAX_CHECKPOINTS` (100), past any reorg
-  the wallet can rewind, so no payment is refunded twice. The wallet
-  owns the transaction from there, as it owns a sweep.
+  `create_proposed_transactions` on the tip pass after its payment's
+  block. The wallet owns the transaction from there, as it owns a sweep.
 - Each OTP response keeps its payment txid for the refund.
-  `wallet::MAX_CHECKPOINTS` is `pub(crate)`.
 
 ## 2026-10-24 — Treasury payments pay the node's fee rate (#357)
 

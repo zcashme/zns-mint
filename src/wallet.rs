@@ -61,7 +61,7 @@ const SAPLING_SHARD_HEIGHT: u8 = 16;
 const ORCHARD_SHARD_HEIGHT: u8 = 16;
 
 /// Maximum checkpoints retained per note commitment tree.
-pub(crate) const MAX_CHECKPOINTS: usize = 100;
+const MAX_CHECKPOINTS: usize = 100;
 
 /// Shard-tree error over the infallible in-memory store: only tree-structural
 /// failures (`Query`, `Insert`) are reachable, never storage failures.

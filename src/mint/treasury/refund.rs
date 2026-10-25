@@ -4,9 +4,8 @@
 //! the wallet's from there, like a sweep. Its amount is fixed when it is
 //! admitted: the payment less any penalty and the withheld fee,
 //! `REFUND_FEE_ACTIONS` at the node's rate, so the payer covers the fee.
-//! A wrong access code also keeps 1% of the quote. A refund is built only
-//! once its payment is `REFUND_DEPTH` deep, past any reorg the wallet can
-//! rewind, so no reorg replays a payment already refunded.
+//! A wrong access code also keeps 1% of the quote. A refund is built on
+//! the tip pass after its payment's block.
 
 use std::num::NonZeroU64;
 
@@ -16,11 +15,6 @@ use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 
 use crate::mint::{Name, UnifiedAddress};
-use crate::wallet::MAX_CHECKPOINTS;
-
-/// Blocks a payment must be below the tip before its refund is built: the
-/// wallet's checkpoint window, the deepest reorg it can rewind.
-const REFUND_DEPTH: u32 = MAX_CHECKPOINTS as u32;
 
 /// Actions' worth of fee withheld from every refund.
 pub const REFUND_FEE_ACTIONS: usize = 10;
@@ -127,12 +121,11 @@ impl RefundQueue {
         true
     }
 
-    /// The refunds whose payment is `REFUND_DEPTH` below `tip`, in
-    /// admission order.
+    /// The refunds whose payment is below `tip`, in admission order.
     pub fn due(&self, tip: BlockHeight) -> Vec<RefundRequest> {
         self.refunds_due
             .iter()
-            .filter(|refund| u32::from(refund.height) + REFUND_DEPTH <= u32::from(tip))
+            .filter(|refund| refund.height < tip)
             .cloned()
             .collect()
     }
@@ -291,13 +284,11 @@ mod tests {
     }
 
     #[test]
-    fn a_refund_is_due_once_its_payment_is_past_any_reorg() {
+    fn a_refund_is_due_on_the_tip_after_its_payment() {
         let payment = TxId::from_bytes([1; 32]);
         let mut queue = RefundQueue::new();
         assert!(admit(&mut queue, payment, 10));
-        assert!(queue
-            .due(BlockHeight::from_u32(10 + REFUND_DEPTH - 1))
-            .is_empty());
-        assert_eq!(queue.due(BlockHeight::from_u32(10 + REFUND_DEPTH)).len(), 1);
+        assert!(queue.due(BlockHeight::from_u32(10)).is_empty());
+        assert_eq!(queue.due(BlockHeight::from_u32(11)).len(), 1);
     }
 }
