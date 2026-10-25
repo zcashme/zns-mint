@@ -7,7 +7,9 @@ mod otp;
 mod refund;
 
 pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
-pub use refund::{access_code_penalty, refund_output, Refund, RefundQueue, REFUND_FEE_ACTIONS};
+pub use refund::{
+    access_code_penalty, refund_output, RefundQueue, RefundRequest, REFUND_FEE_ACTIONS,
+};
 
 use std::convert::Infallible;
 
@@ -94,12 +96,12 @@ pub enum BuildFailure<ProposalError, TransactionError> {
     Transaction(TransactionError),
 }
 
-/// Builds every refund owed: one Treasury payment of its amount to its
-/// recipient, funded from any Treasury notes. A built refund is marked in
-/// the queue, and the wallet owns it from there, as it owns a sweep: one that
-/// expires unmined is kept, and the next sweep moves the money. One the
-/// Treasury cannot fund yet stays owed. Returns the built transactions for
-/// broadcast.
+/// Builds every refund due at the wallet's tip: one Treasury payment of
+/// its amount to its recipient, funded from any Treasury notes. A built
+/// refund leaves the queue, and the wallet owns it from there, as it owns
+/// a sweep: one that expires unmined is kept, and the next sweep moves the
+/// money. One the Treasury cannot fund yet stays due. Returns the built
+/// transactions for broadcast.
 pub fn refund<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
@@ -110,7 +112,7 @@ pub fn refund<P: Parameters>(
     refunds: &mut RefundQueue,
 ) -> Vec<Transaction> {
     let mut built = Vec::new();
-    for refund in refunds.due() {
+    for refund in refunds.due(wallet.tip().block_height()) {
         let to = Address::Unified(Box::new(refund.recipient().clone()));
         let request = TransactionRequest::new(vec![Payment::without_memo(
             to.to_zcash_address(network),

@@ -77,9 +77,7 @@ async fn main() {
     // failures repair and read the canonical tip. The loop never sees
     // transport state.
     let mut connection = TipSession::open(chain).await;
-    // Refunds live here, built or not. A restart forgets them, as it
-    // forgets an unsent challenge; boot does not re-decide historical
-    // payments.
+    // Refunds due live here. Boot does not re-decide historical payments.
     let mut refunds = RefundQueue::new();
     'run: loop {
         // Every pass ends here, however it ended: the names the queues
@@ -788,8 +786,8 @@ async fn main() {
             }
         }
 
-        // A refund is built on the pass after its payment's block, like a
-        // Name Note. The wallet owns it from there, like a sweep.
+        // A refund is built once its payment is past any reorg. The wallet
+        // owns it from there, like a sweep.
         for tx in treasury::refund(
             &network,
             &mut wallet,
