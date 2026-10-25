@@ -399,9 +399,10 @@ async fn main() {
                         // is observed. A later payment does not start a
                         // second Name Note.
                         // Early-access regime: only a listed name may claim,
-                        // and only with its per-name access code. No code,
-                        // or a name that is not listed, keeps the payment.
-                        // A wrong code keeps 1% of the quote, then the fee.
+                        // and only with its per-name access code. No code
+                        // keeps the payment. A name that is not listed goes
+                        // back less the fee. A wrong code keeps 1% of the
+                        // quote, then the fee.
                         let Some(offered) = code.as_ref() else {
                             tracing::debug!(
                                 name = %name.as_str(),
@@ -410,9 +411,15 @@ async fn main() {
                             break 'lane true;
                         };
                         if !protected_names.is_protected(name, mtp_now) {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                "pre-sale claim refused: name not listed"
+                            refunds.admit(
+                                &fee_rule,
+                                txid,
+                                ua,
+                                name,
+                                note_height,
+                                paid,
+                                Zatoshis::ZERO,
+                                "unlisted name",
                             );
                             break 'lane true;
                         }
