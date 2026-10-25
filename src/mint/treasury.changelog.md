@@ -21,8 +21,9 @@
 - `treasury::issue_refund` builds one refund with `propose_transfer` and
   `create_proposed_transactions`; `Ok(None)` means the Treasury cannot
   fund it yet. The run loop issues each refund due on the tip pass after
-  its payment's block. The wallet owns the transaction from there, as it
-  owns a sweep.
+  its payment's block. A refund leaves the queue once the node accepts
+  it; one the node refuses is built again on the next tip. The wallet
+  owns the transaction from there, as it owns a sweep.
 - Each OTP response keeps its payment txid for the refund.
 
 ## 2026-10-24 — Treasury payments pay the node's fee rate (#357)

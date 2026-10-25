@@ -61,9 +61,9 @@ impl RefundRequest {
     }
 }
 
-/// Refunds due, in admission order. A refund leaves when it is built
-/// (`paid`) or when a reorg orphans its payment's block (`truncate_to`);
-/// nothing else removes it.
+/// Refunds due, in admission order. A refund leaves when it is built and
+/// accepted (`paid`) or when a reorg orphans its payment's block
+/// (`truncate_to`); nothing else removes it.
 #[derive(Clone, Debug, Default)]
 pub struct RefundQueue {
     refunds_due: Vec<RefundRequest>,
@@ -120,8 +120,8 @@ impl RefundQueue {
         self.refunds_due.is_empty()
     }
 
-    /// `built` is built. One transaction can carry several refunds, so
-    /// only the entry equal to `built` leaves.
+    /// `built` is built and the node accepted it. One transaction can carry
+    /// several refunds, so only the entry equal to `built` leaves.
     pub fn paid(&mut self, built: &RefundRequest) {
         if let Some(i) = self.refunds_due.iter().position(|refund| refund == built) {
             self.refunds_due.remove(i);

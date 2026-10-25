@@ -729,7 +729,8 @@ async fn main() {
 
         // A refund is built on the pass after its payment's block, like a
         // Name Note, one transaction each. The wallet owns it from there,
-        // like a sweep. One the Treasury cannot fund yet stays due.
+        // like a sweep. One the Treasury cannot fund yet, or the node
+        // refused, stays due.
         for refund in refunds.due(tip) {
             match treasury::issue_refund(
                 &network,
@@ -741,8 +742,9 @@ async fn main() {
                 &refund,
             ) {
                 Ok(Some(tx)) => {
-                    refunds.paid(&refund);
-                    source.submit(&tx, "refund").await;
+                    if source.submit(&tx, "refund").await {
+                        refunds.paid(&refund);
+                    }
                 }
                 Ok(None) => {}
                 Err(error) => {
