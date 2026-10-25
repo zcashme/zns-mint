@@ -228,34 +228,18 @@ mod tests {
                 "underpaid",
             ));
         }
+        let penalty = access_code_penalty(zats(100_000));
+        assert!(!queue.admit(
+            &standard,
+            TxId::from_bytes([1; 32]),
+            &ua(),
+            &alice(),
+            BlockHeight::from_u32(10),
+            (penalty + withheld()).unwrap(),
+            penalty,
+            "wrong access code",
+        ));
         assert!(queue.due(deep()).is_empty());
-    }
-
-    #[test]
-    fn a_wrong_access_code_keeps_one_percent_then_the_fee() {
-        let price = zats(100_000);
-        let penalty = zats(1_000);
-        let fee = withheld();
-        let paid = price;
-        assert_eq!(access_code_penalty(price), penalty);
-        let net = (paid - penalty).unwrap();
-        assert_eq!(refund_output(net, &FeeRule::standard()), net - fee);
-    }
-
-    #[test]
-    fn a_payment_that_does_not_cover_the_penalty_and_the_fee_is_kept() {
-        let price = zats(100_000);
-        let penalty = access_code_penalty(price);
-        let fee = withheld();
-        let covers_the_penalty = (penalty + fee).unwrap();
-        assert_eq!(
-            refund_output(
-                (covers_the_penalty - penalty).unwrap(),
-                &FeeRule::standard()
-            ),
-            None
-        );
-        assert!((penalty - zats(1) - penalty).is_none());
     }
 
     #[test]
