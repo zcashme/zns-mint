@@ -122,6 +122,11 @@ impl RefundQueue {
             .collect()
     }
 
+    /// Whether no refund is queued, due or not.
+    pub fn is_empty(&self) -> bool {
+        self.refunds_due.is_empty()
+    }
+
     /// `built` is built. One transaction can carry several refunds, so
     /// only the entry equal to `built` leaves.
     pub fn paid(&mut self, built: &RefundRequest) {

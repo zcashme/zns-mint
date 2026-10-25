@@ -821,8 +821,9 @@ async fn main() {
             }
         }
 
-        // A new MTP day sweeps the Treasury to the vault once.
-        if today > previous_day {
+        // A new MTP day sweeps the Treasury to the vault once. While a
+        // refund is queued, its money stays and the sweep waits a day.
+        if today > previous_day && refunds.is_empty() {
             match treasury::sweep_to_vault(
                 &network,
                 &mut wallet,

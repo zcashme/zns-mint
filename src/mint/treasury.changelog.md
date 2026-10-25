@@ -14,7 +14,10 @@
   queued. The challenge stays.
 - Kept: a wrong OTP, an unparsed memo, and any refusal not listed above.
 - `RefundQueue` holds the refunds due (`RefundRequest`): `admit`, `due`,
-  `paid`, `truncate_to`. A reorg drops refunds above the ancestor.
+  `paid`, `is_empty`, `truncate_to`. A reorg drops refunds above the
+  ancestor.
+- The day's sweep waits while any refund is queued, so a refund's money
+  stays in the Treasury until it is built.
 - `treasury::issue_refund` builds one refund with `propose_transfer` and
   `create_proposed_transactions`; `Ok(None)` means the Treasury cannot
   fund it yet. The run loop issues each refund due on the tip pass after
