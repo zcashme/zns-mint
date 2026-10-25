@@ -20,7 +20,7 @@ use zns_mint::mint::note::assemble;
 use zns_mint::mint::presale;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury;
-use zns_mint::mint::treasury::{OtpChallenge, OtpQueue, RefundQueue};
+use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
 use zns_mint::mint::{relay, Action, MintInbound, Request, TREASURY_ACCOUNT};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
@@ -54,6 +54,7 @@ async fn main() {
         mut name_notes,
         mut requests,
         mut echoes,
+        mut refunds,
         treasury_address,
         registry_ufvk,
         seed_fingerprint,
@@ -77,8 +78,6 @@ async fn main() {
     // failures repair and read the canonical tip. The loop never sees
     // transport state.
     let mut connection = TipSession::open(chain).await;
-    // Refunds due live here. Boot does not re-decide historical payments.
-    let mut refunds = RefundQueue::new();
     'run: loop {
         // Every pass ends here, however it ended: the names the queues
         // still hold are in flight until the next tip.
