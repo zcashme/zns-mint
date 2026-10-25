@@ -6,14 +6,13 @@
   (10) at the node's rate. A claim's refund goes to the memo's UA; an OTP
   response's goes to the name's current UA, where its challenge went. A
   payment that does not exceed the fee is kept.
-- Refunded: a claim for an unlisted name; an underpaid claim, before its
-  access code is judged; a claim with a wrong access code on a listed
-  name, which also keeps 1% of the quote; a claim for a name already
-  registered or already queued; an underpaid renewal or upgrade OTP
-  response, and one whose name has a Name Note queued. The challenge
-  stays.
-- Kept: no access code, a wrong OTP, an unparsed memo, and any refusal
-  not listed above.
+- Refunded: a claim with no access code or for an unlisted name; an
+  underpaid claim, before its access code is judged; a claim with a
+  wrong access code on a listed name, which also keeps 1% of the quote;
+  a claim for a name already registered or already queued; an underpaid
+  renewal or upgrade OTP response, and one whose name has a Name Note
+  queued. The challenge stays.
+- Kept: a wrong OTP, an unparsed memo, and any refusal not listed above.
 - `RefundQueue` holds the refunds due (`RefundRequest`): `admit`, `due`,
   `paid`, `truncate_to`. A reorg drops refunds above the ancestor.
 - `treasury::refund` builds a refund with `propose_transfer` and
