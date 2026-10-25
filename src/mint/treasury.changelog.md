@@ -2,9 +2,10 @@
 
 ## Underpaid payments are refunded (#372)
 
-- A refund goes back to the memo's UA: the payment less the withheld fee,
-  `REFUND_FEE_ACTIONS` (10) at the node's rate. A payment that does not
-  exceed the fee is kept.
+- A refund is the payment less the withheld fee, `REFUND_FEE_ACTIONS`
+  (10) at the node's rate. A claim's refund goes to the memo's UA; an OTP
+  response's goes to the name's current UA, where its challenge went. A
+  payment that does not exceed the fee is kept.
 - Refunded: an underpaid claim; a claim with a wrong access code on a
   listed name, which also keeps 1% of the quote; a claim for a name
   already registered or already queued; an underpaid renewal or upgrade

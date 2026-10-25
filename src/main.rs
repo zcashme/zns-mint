@@ -616,7 +616,7 @@ async fn main() {
                         refunds.admit(
                             &fee_rule,
                             txid,
-                            &echo.ua,
+                            &record.ua,
                             &echo.name,
                             note_height,
                             paid,
@@ -632,7 +632,7 @@ async fn main() {
                     refunds.admit(
                         &fee_rule,
                         txid,
-                        &echo.ua,
+                        &record.ua,
                         &echo.name,
                         note_height,
                         paid,
