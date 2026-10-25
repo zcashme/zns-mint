@@ -137,7 +137,7 @@ impl Registry {
         Self::default()
     }
 
-    /// The claim law. `None` means unlawful; the payment is kept.
+    /// The claim law. `None` means unlawful.
     pub fn authorize_claim(
         &self,
         name: Name,
