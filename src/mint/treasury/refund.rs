@@ -70,9 +70,8 @@ pub struct RefundQueue {
 }
 
 impl RefundQueue {
-    /// Owes `recipient` what `paid` leaves after `penalty` and the withheld
-    /// fee. A payment that leaves nothing is kept.
-    #[allow(clippy::too_many_arguments)]
+    /// Owes `recipient` what `refundable` leaves after the withheld fee. A
+    /// payment that leaves nothing is kept.
     pub fn admit(
         &mut self,
         fee_rule: &FeeRule,
@@ -80,17 +79,13 @@ impl RefundQueue {
         recipient: &UnifiedAddress,
         name: &Name,
         height: BlockHeight,
-        paid: Zatoshis,
-        penalty: Zatoshis,
-        reason: &'static str,
+        refundable: Zatoshis,
     ) {
-        let Some(amount) = (paid - penalty).and_then(|net| refund_output(net, fee_rule)) else {
+        let Some(amount) = refund_output(refundable, fee_rule) else {
             tracing::info!(
                 %txid,
                 name = %name.as_str(),
-                reason,
-                paid = paid.into_u64(),
-                penalty = penalty.into_u64(),
+                refundable = refundable.into_u64(),
                 "payment kept"
             );
             return;
@@ -98,9 +93,7 @@ impl RefundQueue {
         tracing::info!(
             %txid,
             name = %name.as_str(),
-            reason,
-            paid = paid.into_u64(),
-            penalty = penalty.into_u64(),
+            refundable = refundable.into_u64(),
             refund = amount.into_u64(),
             "payment refund"
         );
@@ -181,8 +174,6 @@ mod tests {
             &alice(),
             BlockHeight::from_u32(height),
             zats(100_000),
-            Zatoshis::ZERO,
-            "underpaid",
         )
     }
 
@@ -195,47 +186,30 @@ mod tests {
 
         let mut queue = RefundQueue::default();
         let price = zats(100_000);
-        let penalty = access_code_penalty(price);
         queue.admit(
             &FeeRule::standard(),
             txid,
             &ua(),
             &alice(),
             BlockHeight::from_u32(10),
-            price,
-            penalty,
-            "wrong access code",
+            (price - access_code_penalty(price)).unwrap(),
         );
         assert_eq!(queue.due(deep())[0].amount(), zats(49_000));
     }
 
     #[test]
     fn a_payment_that_does_not_exceed_the_fee_is_kept() {
-        let standard = FeeRule::standard();
         let mut queue = RefundQueue::default();
-        for paid in [withheld(), (withheld() - zats(1)).unwrap()] {
+        for refundable in [withheld(), (withheld() - zats(1)).unwrap()] {
             queue.admit(
-                &standard,
+                &FeeRule::standard(),
                 TxId::from_bytes([1; 32]),
                 &ua(),
                 &alice(),
                 BlockHeight::from_u32(10),
-                paid,
-                Zatoshis::ZERO,
-                "underpaid",
+                refundable,
             );
         }
-        let penalty = access_code_penalty(zats(100_000));
-        queue.admit(
-            &standard,
-            TxId::from_bytes([1; 32]),
-            &ua(),
-            &alice(),
-            BlockHeight::from_u32(10),
-            (penalty + withheld()).unwrap(),
-            penalty,
-            "wrong access code",
-        );
         assert!(queue.due(deep()).is_empty());
     }
 
@@ -280,8 +254,6 @@ mod tests {
             &alice(),
             BlockHeight::from_u32(10),
             zats(200_000),
-            Zatoshis::ZERO,
-            "underpaid",
         );
 
         let second = queue.due(deep()).remove(1);

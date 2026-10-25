@@ -20,7 +20,7 @@ use zns_mint::mint::note::assemble;
 use zns_mint::mint::presale;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury;
-use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
+use zns_mint::mint::treasury::{access_code_penalty, OtpChallenge, OtpQueue};
 use zns_mint::mint::{relay, Action, MintInbound, Request, TREASURY_ACCOUNT};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
@@ -403,29 +403,11 @@ async fn main() {
                         // fee. A wrong code keeps 1% of the quote, then the
                         // fee.
                         let Some(offered) = code.as_ref() else {
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                ua,
-                                name,
-                                note_height,
-                                paid,
-                                Zatoshis::ZERO,
-                                "no access code",
-                            );
+                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                             break 'lane true;
                         };
                         if !protected_names.is_protected(name, mtp_now) {
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                ua,
-                                name,
-                                note_height,
-                                paid,
-                                Zatoshis::ZERO,
-                                "unlisted name",
-                            );
+                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                             break 'lane true;
                         }
                         // Payment gate: the quote at first sight is binding.
@@ -438,16 +420,7 @@ async fn main() {
                             break 'lane true;
                         };
                         if paid < price {
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                ua,
-                                name,
-                                note_height,
-                                paid,
-                                Zatoshis::ZERO,
-                                "underpaid",
-                            );
+                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                             break 'lane true;
                         }
                         if !access_code_key.accepts(name, Some(offered)) {
@@ -457,9 +430,7 @@ async fn main() {
                                 ua,
                                 name,
                                 note_height,
-                                paid,
-                                treasury::access_code_penalty(price),
-                                "wrong access code",
+                                (paid - access_code_penalty(price)).unwrap_or(Zatoshis::ZERO),
                             );
                             break 'lane true;
                         }
@@ -470,16 +441,7 @@ async fn main() {
                             registry.authorize_claim(name.clone(), ua.clone(), *term, mtp_now)
                         else {
                             if !registry.is_available(name) {
-                                refunds.admit(
-                                    &fee_rule,
-                                    txid,
-                                    ua,
-                                    name,
-                                    note_height,
-                                    paid,
-                                    Zatoshis::ZERO,
-                                    "registered name",
-                                );
+                                refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                             } else {
                                 tracing::debug!(
                                     name = %name.as_str(),
@@ -490,16 +452,7 @@ async fn main() {
                         };
                         // Enactment below resolves the anchor and broadcasts.
                         if !name_notes.admit(note_height, claim_note) {
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                ua,
-                                name,
-                                note_height,
-                                paid,
-                                Zatoshis::ZERO,
-                                "queued name",
-                            );
+                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         }
                         true
                     }
@@ -619,32 +572,14 @@ async fn main() {
                         break 'lane true;
                     };
                     if paid < price {
-                        refunds.admit(
-                            &fee_rule,
-                            txid,
-                            &record.ua,
-                            &echo.name,
-                            note_height,
-                            paid,
-                            Zatoshis::ZERO,
-                            "underpaid",
-                        );
+                        refunds.admit(&fee_rule, txid, &record.ua, &echo.name, note_height, paid);
                         break 'lane true;
                     }
                 }
                 // A Name Note already queued owns this name. The payment
                 // goes back minus the fee, and the challenge stays.
                 if name_notes.note_pending(&echo.name) {
-                    refunds.admit(
-                        &fee_rule,
-                        txid,
-                        &record.ua,
-                        &echo.name,
-                        note_height,
-                        paid,
-                        Zatoshis::ZERO,
-                        "queued name",
-                    );
+                    refunds.admit(&fee_rule, txid, &record.ua, &echo.name, note_height, paid);
                     break 'lane true;
                 }
                 let authorized = match echo.action {
