@@ -17,10 +17,10 @@ use zcash_protocol::value::Zatoshis;
 use crate::mint::{Name, UnifiedAddress};
 
 /// Actions' worth of fee withheld from every refund.
-pub const REFUND_FEE_ACTIONS: usize = 10;
+const REFUND_FEE_ACTIONS: usize = 10;
 
 /// `paid` minus the withheld refund fee, when that remainder is positive.
-pub fn refund_output(paid: Zatoshis, fee_rule: &FeeRule) -> Option<Zatoshis> {
+fn refund_output(paid: Zatoshis, fee_rule: &FeeRule) -> Option<Zatoshis> {
     let fee = (fee_rule.marginal_fee() * REFUND_FEE_ACTIONS)?;
     (paid - fee).filter(|output| *output > Zatoshis::ZERO)
 }
@@ -70,15 +70,8 @@ pub struct RefundQueue {
 }
 
 impl RefundQueue {
-    pub fn new() -> Self {
-        Self {
-            refunds_due: Vec::new(),
-        }
-    }
-
     /// Owes `recipient` what `paid` leaves after `penalty` and the withheld
-    /// fee. A payment that leaves nothing is kept. Returns whether a refund
-    /// is owed.
+    /// fee. A payment that leaves nothing is kept.
     #[allow(clippy::too_many_arguments)]
     pub fn admit(
         &mut self,
@@ -90,7 +83,7 @@ impl RefundQueue {
         paid: Zatoshis,
         penalty: Zatoshis,
         reason: &'static str,
-    ) -> bool {
+    ) {
         let Some(amount) = (paid - penalty).and_then(|net| refund_output(net, fee_rule)) else {
             tracing::info!(
                 %txid,
@@ -100,7 +93,7 @@ impl RefundQueue {
                 penalty = penalty.into_u64(),
                 "payment kept"
             );
-            return false;
+            return;
         };
         tracing::info!(
             %txid,
@@ -118,7 +111,6 @@ impl RefundQueue {
             name: name.clone(),
             height,
         });
-        true
     }
 
     /// The refunds whose payment is below `tip`, in admission order.
@@ -176,7 +168,7 @@ mod tests {
     }
 
     /// Owes 50,000 zats for a 100,000-zat payment at `height`.
-    fn admit(queue: &mut RefundQueue, payment: TxId, height: u32) -> bool {
+    fn admit(queue: &mut RefundQueue, payment: TxId, height: u32) {
         queue.admit(
             &FeeRule::standard(),
             payment,
@@ -192,14 +184,14 @@ mod tests {
     #[test]
     fn an_admitted_refund_is_the_payment_less_the_penalty_and_the_fee() {
         let txid = TxId::from_bytes([1; 32]);
-        let mut queue = RefundQueue::new();
-        assert!(admit(&mut queue, txid, 10));
+        let mut queue = RefundQueue::default();
+        admit(&mut queue, txid, 10);
         assert_eq!(queue.due(deep())[0].amount(), zats(50_000));
 
-        let mut queue = RefundQueue::new();
+        let mut queue = RefundQueue::default();
         let price = zats(100_000);
         let penalty = access_code_penalty(price);
-        assert!(queue.admit(
+        queue.admit(
             &FeeRule::standard(),
             txid,
             &ua(),
@@ -208,16 +200,16 @@ mod tests {
             price,
             penalty,
             "wrong access code",
-        ));
+        );
         assert_eq!(queue.due(deep())[0].amount(), zats(49_000));
     }
 
     #[test]
     fn a_payment_that_does_not_exceed_the_fee_is_kept() {
         let standard = FeeRule::standard();
-        let mut queue = RefundQueue::new();
+        let mut queue = RefundQueue::default();
         for paid in [withheld(), (withheld() - zats(1)).unwrap()] {
-            assert!(!queue.admit(
+            queue.admit(
                 &standard,
                 TxId::from_bytes([1; 32]),
                 &ua(),
@@ -226,10 +218,10 @@ mod tests {
                 paid,
                 Zatoshis::ZERO,
                 "underpaid",
-            ));
+            );
         }
         let penalty = access_code_penalty(zats(100_000));
-        assert!(!queue.admit(
+        queue.admit(
             &standard,
             TxId::from_bytes([1; 32]),
             &ua(),
@@ -238,7 +230,7 @@ mod tests {
             (penalty + withheld()).unwrap(),
             penalty,
             "wrong access code",
-        ));
+        );
         assert!(queue.due(deep()).is_empty());
     }
 
@@ -254,9 +246,9 @@ mod tests {
     fn a_refund_leaves_when_built_or_when_its_payment_is_orphaned() {
         let kept = TxId::from_bytes([1; 32]);
         let orphaned = TxId::from_bytes([2; 32]);
-        let mut queue = RefundQueue::new();
-        assert!(admit(&mut queue, kept, 10));
-        assert!(admit(&mut queue, orphaned, 30));
+        let mut queue = RefundQueue::default();
+        admit(&mut queue, kept, 10);
+        admit(&mut queue, orphaned, 30);
 
         queue.truncate_to(BlockHeight::from_u32(20));
         let left: Vec<_> = queue
@@ -274,9 +266,9 @@ mod tests {
     #[test]
     fn a_built_refund_leaves_the_others_from_its_transaction() {
         let txid = TxId::from_bytes([1; 32]);
-        let mut queue = RefundQueue::new();
-        assert!(admit(&mut queue, txid, 10));
-        assert!(queue.admit(
+        let mut queue = RefundQueue::default();
+        admit(&mut queue, txid, 10);
+        queue.admit(
             &FeeRule::standard(),
             txid,
             &ua(),
@@ -285,7 +277,7 @@ mod tests {
             zats(200_000),
             Zatoshis::ZERO,
             "underpaid",
-        ));
+        );
 
         let second = queue.due(deep()).remove(1);
         queue.paid(&second);
@@ -297,8 +289,8 @@ mod tests {
     #[test]
     fn a_refund_is_due_on_the_tip_after_its_payment() {
         let payment = TxId::from_bytes([1; 32]);
-        let mut queue = RefundQueue::new();
-        assert!(admit(&mut queue, payment, 10));
+        let mut queue = RefundQueue::default();
+        admit(&mut queue, payment, 10);
         assert!(queue.due(BlockHeight::from_u32(10)).is_empty());
         assert_eq!(queue.due(BlockHeight::from_u32(11)).len(), 1);
     }
