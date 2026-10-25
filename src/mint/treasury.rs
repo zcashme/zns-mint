@@ -190,7 +190,7 @@ pub fn refund<P: Parameters>(
                 .expect("FATAL: refund lookup failed after build")
                 .expect("FATAL: built refund tx missing from wallet"),
         );
-        refunds.paid(refund.payment());
+        refunds.paid(&refund);
     }
     built
 }

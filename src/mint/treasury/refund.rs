@@ -130,9 +130,12 @@ impl RefundQueue {
             .collect()
     }
 
-    /// The refund for `payment` is built.
-    pub fn paid(&mut self, payment: TxId) {
-        self.refunds_due.retain(|refund| refund.payment != payment);
+    /// `built` is built. One transaction can carry several refunds, so
+    /// only the entry equal to `built` leaves.
+    pub fn paid(&mut self, built: &RefundRequest) {
+        if let Some(i) = self.refunds_due.iter().position(|refund| refund == built) {
+            self.refunds_due.remove(i);
+        }
     }
 
     /// Reorg: refunds whose payment's block was orphaned fall with it.
@@ -279,8 +282,32 @@ mod tests {
             .collect();
         assert_eq!(left, vec![kept]);
 
-        queue.paid(kept);
+        let built = queue.due(deep()).remove(0);
+        queue.paid(&built);
         assert!(queue.due(deep()).is_empty());
+    }
+
+    #[test]
+    fn a_built_refund_leaves_the_others_from_its_transaction() {
+        let txid = TxId::from_bytes([1; 32]);
+        let mut queue = RefundQueue::new();
+        assert!(admit(&mut queue, txid, 10));
+        assert!(queue.admit(
+            &FeeRule::standard(),
+            txid,
+            &ua(),
+            &alice(),
+            BlockHeight::from_u32(10),
+            zats(200_000),
+            Zatoshis::ZERO,
+            "underpaid",
+        ));
+
+        let second = queue.due(deep()).remove(1);
+        queue.paid(&second);
+        let left = queue.due(deep());
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].amount(), zats(50_000));
     }
 
     #[test]
