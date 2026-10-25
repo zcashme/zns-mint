@@ -94,8 +94,8 @@
 
 ## 2026-10-22 — Underpaid payments are refunded
 
-- An underpaid claim, update, or release, and a claim for a name
-  already registered, go back to the memo's UA minus the refund fee.
+- An underpaid claim and a claim for a name
+  already registered go back to the memo's UA minus the refund fee.
   A payment that does not exceed the fee is kept. An underpaid
   renewal or upgrade is refunded the same way; its challenge stays.
 - A wrong access code keeps 1% of the quote, then the refund fee,

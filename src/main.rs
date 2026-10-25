@@ -517,16 +517,6 @@ async fn main() {
                             break 'lane true;
                         };
                         if paid < oracle.challenge_fee() {
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                requested_ua,
-                                name,
-                                note_height,
-                                paid,
-                                Zatoshis::ZERO,
-                                "underpaid",
-                            );
                             break 'lane true;
                         }
                         let pending = OtpChallenge::issue(
