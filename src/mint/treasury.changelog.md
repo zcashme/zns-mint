@@ -3,12 +3,14 @@
 ## 2026-10-24 — A refund is built like the sweep
 
 - `treasury::refund` builds every refund owed on the pass after its
-  payment's block, as a Name Note is, and removes it from the queue. The
-  wallet owns the transaction from there, as it owns a sweep: one that
-  expires unmined is kept, and the next sweep moves the money.
-- The queue is a `Vec` of what is owed: `admit`, `due`, `paid`,
-  `truncate_to`. The sent, orphaned and pruned states, the
-  rewind floor and the refund's rebroadcast are gone.
+  payment's block, as a Name Note is, and marks it built. The wallet
+  owns the transaction from there, as it owns a sweep: one that expires
+  unmined is kept, and the next sweep moves the money.
+- The queue is a `Vec` of refunds, one per payment txid: `admit`, `due`,
+  `paid`, `truncate_to`. A reorg drops unbuilt entries above the ancestor
+  and keeps built ones, so a replayed payment is not refunded twice. The
+  sent, orphaned and pruned states, the rewind floor and the refund's
+  rebroadcast are gone.
 - The wallet is master's again: `release_rejected_spend`,
   `refund_tx_status` and `rewind_floor` are gone.
 

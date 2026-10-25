@@ -4,8 +4,10 @@
 //! the wallet's from there, like a sweep. Its amount is fixed when it is
 //! admitted: the payment less any penalty and the withheld fee,
 //! `REFUND_FEE_ACTIONS` at the node's rate, so the payer covers the fee.
-//! A wrong access code also keeps 1% of the quote. The queue is memory: a
-//! restart forgets a refund that has not been built.
+//! A wrong access code also keeps 1% of the quote. A built refund stays in
+//! the queue, keyed by its payment's txid, so a reorg that replays the
+//! payment does not refund it twice. The queue is memory: a restart
+//! forgets a refund that has not been built.
 
 use std::num::NonZeroU64;
 
@@ -30,7 +32,7 @@ pub fn access_code_penalty(price: Zatoshis) -> Zatoshis {
     price / NonZeroU64::new(100).expect("100 is non-zero")
 }
 
-/// One refund the Treasury still has to build.
+/// One refund the Treasury owes or has built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refund {
     payment: TxId,
@@ -40,6 +42,7 @@ pub struct Refund {
     amount: Zatoshis,
     name: Name,
     height: BlockHeight,
+    built: bool,
 }
 
 impl Refund {
@@ -61,22 +64,24 @@ impl Refund {
     }
 }
 
-/// Refunds owed, in admission order. An entry leaves when its refund is
-/// built (`paid`) or when a reorg orphans its payment's block
-/// (`truncate_to`); nothing else removes it.
+/// Refunds, in admission order, one per payment. An entry is marked when
+/// its refund is built (`paid`). An unbuilt entry leaves when a reorg
+/// orphans its payment's block (`truncate_to`); a built one never leaves.
 #[derive(Clone, Debug, Default)]
 pub struct RefundQueue {
-    owed: Vec<Refund>,
+    refunds: Vec<Refund>,
 }
 
 impl RefundQueue {
     pub fn new() -> Self {
-        Self { owed: Vec::new() }
+        Self {
+            refunds: Vec::new(),
+        }
     }
 
     /// Owes `recipient` what `paid` leaves after `penalty` and the withheld
-    /// fee. A payment that leaves nothing is kept. Returns whether a refund
-    /// is owed.
+    /// fee. A payment that leaves nothing is kept, and a payment already
+    /// in the queue is skipped. Returns whether a refund is owed.
     #[allow(clippy::too_many_arguments)]
     pub fn admit(
         &mut self,
@@ -89,6 +94,9 @@ impl RefundQueue {
         penalty: Zatoshis,
         reason: &'static str,
     ) -> bool {
+        if self.refunds.iter().any(|refund| refund.payment == txid) {
+            return false;
+        }
         let Some(amount) = (paid - penalty).and_then(|net| refund_output(net, fee_rule)) else {
             tracing::info!(
                 %txid,
@@ -109,30 +117,40 @@ impl RefundQueue {
             refund = amount.into_u64(),
             "payment refund"
         );
-        self.owed.push(Refund {
+        self.refunds.push(Refund {
             payment: txid,
             recipient: recipient.clone(),
             amount,
             name: name.clone(),
             height,
+            built: false,
         });
         true
     }
 
-    /// Every refund still owed, in admission order.
+    /// Every refund not yet built, in admission order.
     pub fn due(&self) -> Vec<Refund> {
-        self.owed.clone()
+        self.refunds
+            .iter()
+            .filter(|refund| !refund.built)
+            .cloned()
+            .collect()
     }
 
-    /// The refund for `payment` is built. The only removal besides reorg
-    /// truncation.
+    /// The refund for `payment` is built.
     pub fn paid(&mut self, payment: TxId) {
-        self.owed.retain(|refund| refund.payment != payment);
+        for refund in &mut self.refunds {
+            if refund.payment == payment {
+                refund.built = true;
+            }
+        }
     }
 
-    /// Reorg: entries whose payment's block was orphaned fall with it.
+    /// Reorg: unbuilt entries whose payment's block was orphaned fall with
+    /// it. A built entry stays, so the replayed payment is skipped.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
-        self.owed.retain(|refund| refund.height <= ancestor);
+        self.refunds
+            .retain(|refund| refund.built || refund.height <= ancestor);
     }
 }
 
@@ -266,6 +284,18 @@ mod tests {
         assert_eq!(left, vec![kept]);
 
         queue.paid(kept);
+        assert!(queue.due().is_empty());
+    }
+
+    #[test]
+    fn a_reorg_replaying_a_refunded_payment_does_not_refund_it_twice() {
+        let payment = TxId::from_bytes([1; 32]);
+        let mut queue = RefundQueue::new();
+        assert!(admit(&mut queue, payment, 30));
+        queue.paid(payment);
+
+        queue.truncate_to(BlockHeight::from_u32(20));
+        assert!(!admit(&mut queue, payment, 31));
         assert!(queue.due().is_empty());
     }
 }

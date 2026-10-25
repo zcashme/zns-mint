@@ -95,8 +95,8 @@ pub enum BuildFailure<ProposalError, TransactionError> {
 }
 
 /// Builds every refund owed: one Treasury payment of its amount to its
-/// recipient, funded from any Treasury notes. A built refund leaves the
-/// queue, and the wallet owns it from there, as it owns a sweep: one that
+/// recipient, funded from any Treasury notes. A built refund is marked in
+/// the queue, and the wallet owns it from there, as it owns a sweep: one that
 /// expires unmined is kept, and the next sweep moves the money. One the
 /// Treasury cannot fund yet stays owed. Returns the built transactions for
 /// broadcast.

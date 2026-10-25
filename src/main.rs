@@ -77,7 +77,7 @@ async fn main() {
     // failures repair and read the canonical tip. The loop never sees
     // transport state.
     let mut connection = TipSession::open(chain).await;
-    // Refunds not yet built live here. A restart forgets them, as it
+    // Refunds live here, built or not. A restart forgets them, as it
     // forgets an unsent challenge; boot does not re-decide historical
     // payments.
     let mut refunds = RefundQueue::new();
