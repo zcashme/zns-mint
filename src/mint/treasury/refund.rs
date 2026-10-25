@@ -16,8 +16,7 @@ use zcash_protocol::value::Zatoshis;
 
 use crate::mint::{Name, UnifiedAddress};
 
-/// Actions' worth of fee withheld from every refund. The Treasury never
-/// adds to a refund's fee; a proposal that would charge more waits.
+/// Actions' worth of fee withheld from every refund.
 pub const REFUND_FEE_ACTIONS: usize = 10;
 
 /// `paid` minus the withheld refund fee, when that remainder is positive.

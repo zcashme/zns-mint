@@ -34,8 +34,7 @@
 - `plan_refund` proposes one payment of `paid − penalty − withheld` to
   the memo's UA, funded from any Treasury notes, with the same change
   rule as the sweep and the relay. `withheld` is `REFUND_FEE_ACTIONS`
-  (10) at the node's rate. A proposal whose fee exceeds it waits, so the
-  payer always covers the fee and the Treasury never adds to it.
+  (10) at the node's rate.
 - The penalty is not change any more; the Treasury keeps it by paying
   back less. The refund-or-keep line is the withheld fee.
 - `propose_one_note`, `refund_settles` and the fee-guess loop are gone.
