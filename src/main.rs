@@ -416,29 +416,10 @@ async fn main() {
                             );
                             break 'lane true;
                         }
-                        if !access_code_key.accepts(name, Some(offered)) {
-                            let Some(price) = oracle.quote(name, *term) else {
-                                tracing::debug!(
-                                    name = %name.as_str(),
-                                    "wrong access code; quote does not fit"
-                                );
-                                break 'lane true;
-                            };
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                ua,
-                                name,
-                                note_height,
-                                paid,
-                                treasury::access_code_penalty(price),
-                                "wrong access code",
-                            );
-                            break 'lane true;
-                        }
                         // Payment gate: the quote at first sight is binding.
                         // A payment below the quote goes back to the memo
-                        // address, less the refund fee.
+                        // address, less the refund fee, before the code is
+                        // judged.
                         // A quote that does not fit is dead. A new payment
                         // settles a new evaluation.
                         let Some(price) = oracle.quote(name, *term) else {
@@ -454,6 +435,19 @@ async fn main() {
                                 paid,
                                 Zatoshis::ZERO,
                                 "underpaid",
+                            );
+                            break 'lane true;
+                        }
+                        if !access_code_key.accepts(name, Some(offered)) {
+                            refunds.admit(
+                                &fee_rule,
+                                txid,
+                                ua,
+                                name,
+                                note_height,
+                                paid,
+                                treasury::access_code_penalty(price),
+                                "wrong access code",
                             );
                             break 'lane true;
                         }
