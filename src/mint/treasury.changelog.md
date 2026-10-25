@@ -7,7 +7,7 @@
   wallet owns the transaction from there, as it owns a sweep: one that
   expires unmined is kept, and the next sweep moves the money.
 - The queue is a `Vec` of what is owed: `admit`, `due`, `paid`,
-  `owed_total`, `truncate_to`. The sent, orphaned and pruned states, the
+  `truncate_to`. The sent, orphaned and pruned states, the
   rewind floor and the refund's rebroadcast are gone.
 - The wallet is master's again: `release_rejected_spend`,
   `refund_tx_status` and `rewind_floor` are gone.
@@ -39,8 +39,8 @@
 - The penalty is not change any more; the Treasury keeps it by paying
   back less. The refund-or-keep line is the withheld fee.
 - `propose_one_note`, `refund_settles` and the fee-guess loop are gone.
-- No note is held for a refund. The queue's owed total keeps the money
-  in the Treasury, and the wallet's selection knows nothing of refunds.
+- No note is held for a refund, and the wallet's selection knows nothing
+  of refunds.
 
 ## 2026-10-24 — A refund waits until its payment is buried
 
@@ -48,12 +48,6 @@
   below the wallet's rewind floor. A reorg can remove a payment above
   that floor, and the queue drops its refund; once the Treasury pays
   back, the payment it pays back for cannot vanish.
-
-## 2026-10-24 — The sweep leaves what refunds still owe
-
-- `sweep_to_vault` takes the queue's `owed_total`: each refund not yet
-  sent, at its payment less its penalty. The sweep pays the vault
-  `sendable − SWEEP_RESERVE − owed`, so a refund never waits on a sweep.
 
 ## 2026-10-24 — Refunds pay the node's fee rate
 

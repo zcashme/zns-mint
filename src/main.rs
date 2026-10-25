@@ -802,8 +802,7 @@ async fn main() {
             source.submit(&tx, "refund").await;
         }
 
-        // A new MTP day sweeps the Treasury to the vault once. What the
-        // refunds still owe stays behind.
+        // A new MTP day sweeps the Treasury to the vault once.
         if today > previous_day {
             match treasury::sweep_to_vault(
                 &network,
@@ -812,7 +811,6 @@ async fn main() {
                 &sapling_spend,
                 &sapling_output,
                 &fee_rule,
-                refunds.owed_total(),
             ) {
                 Ok(Some(tx)) => {
                     source.submit(&tx, "vault sweep").await;

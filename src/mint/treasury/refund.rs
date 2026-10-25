@@ -12,7 +12,7 @@ use std::num::NonZeroU64;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::value::{Zatoshis, MAX_MONEY};
+use zcash_protocol::value::Zatoshis;
 
 use crate::mint::{Name, UnifiedAddress};
 
@@ -131,16 +131,6 @@ impl RefundQueue {
         self.owed.retain(|refund| refund.payment != payment);
     }
 
-    /// What the refunds owed will pay out. The sweep leaves this in the
-    /// Treasury. An overflow holds back everything.
-    pub fn owed_total(&self) -> Zatoshis {
-        self.owed
-            .iter()
-            .map(|refund| refund.amount)
-            .sum::<Option<Zatoshis>>()
-            .unwrap_or(Zatoshis::const_from_u64(MAX_MONEY))
-    }
-
     /// Reorg: entries whose payment's block was orphaned fall with it.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
         self.owed.retain(|refund| refund.height <= ancestor);
@@ -192,7 +182,6 @@ mod tests {
         let txid = TxId::from_bytes([1; 32]);
         let mut queue = RefundQueue::new();
         assert!(admit(&mut queue, txid, 10));
-        assert_eq!(queue.owed_total(), (zats(100_000) - withheld()).unwrap());
         assert_eq!(queue.due()[0].amount(), zats(50_000));
 
         let mut queue = RefundQueue::new();
@@ -272,15 +261,12 @@ mod tests {
         let mut queue = RefundQueue::new();
         assert!(admit(&mut queue, kept, 10));
         assert!(admit(&mut queue, orphaned, 30));
-        assert_eq!(queue.owed_total(), zats(100_000));
 
         queue.truncate_to(BlockHeight::from_u32(20));
         let left: Vec<_> = queue.due().iter().map(Refund::payment).collect();
         assert_eq!(left, vec![kept]);
-        assert_eq!(queue.owed_total(), zats(50_000));
 
         queue.paid(kept);
         assert!(queue.due().is_empty());
-        assert_eq!(queue.owed_total(), Zatoshis::ZERO);
     }
 }

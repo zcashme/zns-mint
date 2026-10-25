@@ -223,13 +223,11 @@ pub fn refund<P: Parameters>(
     built
 }
 
-/// Pays the vault what send-max could deliver, less the float and what
-/// the Treasury still owes in refunds.
+/// Pays the vault what send-max could deliver, less the float.
 fn propose_vault_sweep<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
     fee_rule: &FeeRule,
-    owed: Zatoshis,
 ) -> Result<Option<TreasuryProposal>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>>
 {
     let vault = vault_address(network);
@@ -254,10 +252,9 @@ fn propose_vault_sweep<P: Parameters>(
         .map_err(BuildFailure::Balance)?
         .unwrap_or(Zatoshis::ZERO);
 
-    let Some(payment) = ((sendable - SWEEP_RESERVE) - owed).filter(|p| *p >= SWEEP_MINIMUM) else {
+    let Some(payment) = (sendable - SWEEP_RESERVE).filter(|p| *p >= SWEEP_MINIMUM) else {
         tracing::debug!(
             sendable_zats = sendable.into_u64(),
-            owed_zats = owed.into_u64(),
             "vault sweep skipped: payment below the minimum"
         );
         return Ok(None);
@@ -289,8 +286,7 @@ fn propose_vault_sweep<P: Parameters>(
     .map_err(BuildFailure::Proposal)
 }
 
-/// Builds the vault sweep, leaving `owed` for refunds. `Ok(None)` means
-/// nothing to move.
+/// Builds the vault sweep. `Ok(None)` means nothing to move.
 pub fn sweep_to_vault<P: Parameters>(
     network: &P,
     wallet: &mut Wallet<P>,
@@ -298,9 +294,8 @@ pub fn sweep_to_vault<P: Parameters>(
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
     fee_rule: &FeeRule,
-    owed: Zatoshis,
 ) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
-    let Some(proposal) = propose_vault_sweep(network, wallet, fee_rule, owed)? else {
+    let Some(proposal) = propose_vault_sweep(network, wallet, fee_rule)? else {
         return Ok(None);
     };
 
@@ -523,10 +518,9 @@ mod tests {
             st.add_empty_blocks(1);
 
             let network = *st.network();
-            let proposal =
-                propose_vault_sweep(&network, st.wallet_mut(), &fee_rule, Zatoshis::ZERO)
-                    .expect("the sweep proposal closes")
-                    .expect("the surplus is far above the minimum");
+            let proposal = propose_vault_sweep(&network, st.wallet_mut(), &fee_rule)
+                .expect("the sweep proposal closes")
+                .expect("the surplus is far above the minimum");
 
             let step = proposal.steps().first();
             assert_eq!(
@@ -537,31 +531,6 @@ mod tests {
             assert_eq!(change(step), SWEEP_RESERVE, "float at {note_count} notes");
             assert!(step.balance().fee_required() > fee_rule.marginal_fee());
         }
-    }
-
-    /// Refunds still owed stay in the Treasury with the float.
-    #[test]
-    fn sweep_leaves_what_refunds_still_owe() {
-        let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
-            .build::<SaplingPoolTester>();
-        st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(50_000_000); 4]]);
-        st.add_empty_blocks(1);
-
-        let network = *st.network();
-        let owed = Zatoshis::const_from_u64(30_000_000);
-        let proposal = propose_vault_sweep(&network, st.wallet_mut(), &FeeRule::standard(), owed)
-            .expect("the sweep proposal closes")
-            .expect("the surplus is far above the minimum");
-        let step = proposal.steps().first();
-        assert_eq!(change(step), (SWEEP_RESERVE + owed).unwrap());
-
-        let everything = Zatoshis::const_from_u64(200_000_000);
-        assert!(
-            propose_vault_sweep(&network, st.wallet_mut(), &FeeRule::standard(), everything)
-                .expect("no proposal error")
-                .is_none(),
-            "nothing is swept while refunds owe the whole balance"
-        );
     }
 
     fn change(step: &zcash_client_backend::proposal::Step<NoteId>) -> Zatoshis {
