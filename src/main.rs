@@ -535,6 +535,41 @@ async fn main() {
             }
         }
 
+        // Queue admission is independent from submission. Retry every
+        // requested challenge once during each tip pass.
+        for pending in challenges.requested() {
+            let Some(record) = registry.authorize_challenge(
+                &name_notes,
+                &pending.name,
+                pending.action,
+                &pending.ua,
+                pending.term,
+                target_height,
+                mtp_now,
+            ) else {
+                continue;
+            };
+            if record.commitment != pending.tip_rcm {
+                continue;
+            }
+            if relay(
+                &network,
+                &mut wallet,
+                &treasury_keys,
+                &sapling_spend,
+                &sapling_output,
+                &fee_rule,
+                &record.ua,
+                &source,
+                &pending,
+                "tip",
+            )
+            .await
+            {
+                challenges.challenge_issued(&pending);
+            }
+        }
+
         // A broadcast order whose expiry height has passed can be signed
         // again, or dropped below once the tip median would release it.
         name_notes.expire_sent(tip);
@@ -555,8 +590,8 @@ async fn main() {
             }
         }
 
-        // OTP responses are decided before relays. An underpaid renewal is
-        // queued for a refund here. A voided OTP response leaves its challenge
+        // Confirmed OTP responses wait in the run loop until the tip pass.
+        // Requests run first; a voided OTP response leaves its challenge
         // available.
         for (txid, echo, paid, note_height) in std::mem::take(&mut echoes) {
             let _ = 'lane: {
@@ -636,41 +671,6 @@ async fn main() {
                 name_notes.admit(note_height, transition_note);
                 true
             };
-        }
-
-        // Queue admission is independent from submission. Retry every
-        // requested challenge once during each tip pass.
-        for pending in challenges.requested() {
-            let Some(record) = registry.authorize_challenge(
-                &name_notes,
-                &pending.name,
-                pending.action,
-                &pending.ua,
-                pending.term,
-                target_height,
-                mtp_now,
-            ) else {
-                continue;
-            };
-            if record.commitment != pending.tip_rcm {
-                continue;
-            }
-            if relay(
-                &network,
-                &mut wallet,
-                &treasury_keys,
-                &sapling_spend,
-                &sapling_output,
-                &fee_rule,
-                &record.ua,
-                &source,
-                &pending,
-                "tip",
-            )
-            .await
-            {
-                challenges.challenge_issued(&pending);
-            }
         }
 
         // Lifecycle releases, §4.5: the registry owns the clocks and
