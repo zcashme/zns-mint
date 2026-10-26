@@ -133,7 +133,7 @@ impl Registry {
         Self::default()
     }
 
-    /// The claim law. `None` means unlawful; the payment is kept.
+    /// The claim law. `None` means unlawful.
     pub fn authorize_claim(
         &self,
         name: Name,
@@ -465,6 +465,15 @@ impl Registry {
     /// The anchor lineage pool — the only source of claim authority.
     pub fn anchor_pool(&self) -> &BTreeSet<orchard::note::Nullifier> {
         self.anchors.live()
+    }
+
+    /// The first anchor in pool order that `spendable` accepts.
+    /// `None` when the pool is empty or every anchor is refused.
+    pub fn spendable_claim_anchor(
+        &self,
+        mut spendable: impl FnMut(orchard::note::Nullifier) -> bool,
+    ) -> Option<orchard::note::Nullifier> {
+        self.anchor_pool().iter().copied().find(|&nf| spendable(nf))
     }
 
     /// Whether ceremony adoption has reached standing size and stays closed.
@@ -1399,5 +1408,24 @@ mod tests {
             .expect("release retained in history");
         assert_eq!(rec.action, Action::Release);
         assert_eq!(rec.predecessor_nullifier, succ);
+    }
+
+    /// Pool order is kept. An anchor the caller refuses is skipped,
+    /// and a pool with none accepted returns nothing.
+    #[test]
+    fn spendable_claim_anchor_skips_refused_anchors() {
+        let mut r = Registry::new();
+        let height = BlockHeight::from_u32(10);
+        r.adopt_anchor(height, nullifier(1));
+        r.adopt_anchor(height, nullifier(2));
+        r.adopt_anchor(height, nullifier(3));
+        let ordered: Vec<_> = r.anchor_pool().iter().copied().collect();
+
+        assert_eq!(r.spendable_claim_anchor(|_| true), Some(ordered[0]));
+        assert_eq!(
+            r.spendable_claim_anchor(|nf| nf != ordered[0]),
+            Some(ordered[1])
+        );
+        assert_eq!(r.spendable_claim_anchor(|_| false), None);
     }
 }

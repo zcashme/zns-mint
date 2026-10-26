@@ -1,10 +1,13 @@
 //! Treasury wallet view and Treasury policy for the mint: the vault
-//! sweep, the challenge relay builder, and the request queue.
+//! sweep, the challenge relay builder, the request queue, and refunds
+//! of underpaid payments.
 //!
 
 mod otp;
+mod refund;
 
 pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
+pub use refund::{access_code_penalty, RefundQueue, RefundRequest};
 
 use std::convert::Infallible;
 
@@ -89,6 +92,82 @@ pub enum BuildFailure<ProposalError, TransactionError> {
     /// The upstream wallet API rejected transaction construction or storage.
     #[error("transaction build failed: {0:?}")]
     Transaction(TransactionError),
+}
+
+/// Builds one refund: a Treasury payment of its amount to its recipient,
+/// funded from any Treasury notes. The wallet owns it from there, as it
+/// owns a sweep: one that expires unmined is kept, and the next sweep
+/// moves the money. `Ok(None)` means the Treasury cannot fund it yet.
+pub fn issue_refund<P: Parameters>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    treasury_keys: &crate::TreasuryKeys,
+    spend_prover: &sapling::circuit::SpendParameters,
+    output_prover: &sapling::circuit::OutputParameters,
+    fee_rule: &FeeRule,
+    refund: &RefundRequest,
+) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
+    let to = Address::Unified(Box::new(refund.recipient().clone()));
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(network),
+        refund.amount(),
+    )])
+    .expect("one payment is a valid ZIP 321 request");
+    let proposal = match propose_transfer::<_, _, _, _, Infallible>(
+        wallet,
+        network,
+        TREASURY_ACCOUNT,
+        &GreedyInputSelector::new(),
+        &SingleOutputChangeStrategy::new(
+            fee_rule.clone(),
+            None,
+            ShieldedPool::Ironwood,
+            DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE)),
+        ),
+        request,
+        crate::wallet::CONFIRMATIONS,
+        &SpendPolicy::default(),
+        None,
+        None,
+    ) {
+        Ok(proposal) => proposal,
+        Err(error::Error::InsufficientFunds { .. }) | Err(error::Error::ScanRequired) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(BuildFailure::Proposal(error)),
+    };
+
+    let spending_keys = treasury_keys.spending_keys();
+    let txids = create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
+        wallet,
+        network,
+        &SystemClock,
+        &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+        spend_prover,
+        output_prover,
+        &spending_keys,
+        OvkPolicy::Sender,
+        &proposal,
+        None,
+    )
+    .map_err(BuildFailure::Transaction)?;
+
+    tracing::info!(
+        txid = %txids.first(),
+        payment = %refund.payment(),
+        name = %refund.name().as_str(),
+        amount = refund.amount().into_u64(),
+        "refund built"
+    );
+
+    // The build stored the tx and marked its inputs spent; a miss here is
+    // the wallet contradicting itself, not a skip. Stop; restart rescans.
+    Ok(Some(
+        wallet
+            .get_transaction(*txids.first())
+            .expect("FATAL: refund lookup failed after build")
+            .expect("FATAL: built refund tx missing from wallet"),
+    ))
 }
 
 /// Pays the vault what send-max could deliver, less the float.

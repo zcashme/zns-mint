@@ -6,7 +6,8 @@
   response is answered against the challenges relayed before that
   block, and the transition it authorizes is ruled on there: renewal
   price, no note pending, the law, then the note is admitted. The tip
-  pass has no response lane.
+  pass has no response lane. A refused response is refunded there,
+  as the tip pass did.
 - A refused response ends its challenge; the controller requests
   again. Before, an underpaid renewal left the challenge answerable
   with the same code.
@@ -17,8 +18,13 @@
 - A response confirmed before its challenge was relayed, or kept
   across a reorg that rebuilt the queue, can no longer count as a
   wrong attempt against a challenge created later in the same pass.
-- The refusal and voluntary-release log lines name the response's
-  transaction.
+- The voluntary-release log line names the response's transaction.
+
+## 2026-10-26 — A claim spends an anchor the wallet can still spend
+
+- The enactment loop takes the first pool anchor still unspent at
+  the applied tip. A sent claim's anchor stays out until that
+  transaction is mined or expires, and the next claim takes another.
 
 ## 2026-10-23 — Transactions pay the node's fee rate (#357)
 
