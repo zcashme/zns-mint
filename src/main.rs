@@ -19,7 +19,7 @@ use zcash_protocol::value::Zatoshis;
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::presale;
-use zns_mint::mint::pricing::fetch_round;
+use zns_mint::mint::pricing::{fetch_round, Oracle};
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{access_code_penalty, OtpChallenge, OtpQueue};
 use zns_mint::mint::{relay, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
@@ -389,6 +389,9 @@ async fn main() {
         // The tip check below covers the price round and the pre-sale
         // read alike. Only the read's unspent timeout can delay the pass.
         let (round, ()) = tokio::join!(fetch_round(), presale_read.install(&mut protected_names));
+        // The rate when the requests below were first seen: a day this
+        // round publishes does not reprice them.
+        let rate = oracle.current();
         oracle.accumulate(round, today, mtp_now);
         // Transient or unusable tip data → skip this rule pass and wait
         // for another notification; a chain race re-converges.
@@ -483,7 +486,7 @@ async fn main() {
                         // judged.
                         // A quote that does not fit is dead. A new payment
                         // settles a new evaluation.
-                        let Some(price) = oracle.quote(name, *term) else {
+                        let Some(price) = Oracle::quote_at(rate, name, *term) else {
                             break 'lane true;
                         };
                         if paid < price {
@@ -532,7 +535,7 @@ async fn main() {
                         {
                             break 'lane true;
                         }
-                        if paid < oracle.challenge_fee() {
+                        if paid < Oracle::challenge_fee_at(rate) {
                             break 'lane true;
                         }
                         challenges.admit(OtpChallenge::issue(request.clone(), mtp_now));
