@@ -171,20 +171,17 @@ impl ProtectedNames {
 
     /// Rows in, new table out: re-purchases coalesce to the
     /// strongest term (`Forever` over any expiry, the later expiry
-    /// wins). All-or-nothing — one corrupt row fails the batch with
-    /// [`FetchError::CorruptRow`], logged where it is seen.
-    pub fn from_rows(
-        self,
-        rows: impl IntoIterator<Item = ProtectedRow>,
-    ) -> Result<Self, FetchError> {
+    /// wins). A name that does not parse is skipped and warned;
+    /// the other rows still install.
+    pub fn from_rows(self, rows: impl IntoIterator<Item = ProtectedRow>) -> Self {
         let mut map = self.0;
         for row in rows {
             let Some(name) = Name::parse(&row.name) else {
                 tracing::warn!(
                     name = %row.name,
-                    "pre-sale row is not a lawful name; refusing the read"
+                    "pre-sale name does not parse; skipping it"
                 );
-                return Err(FetchError::CorruptRow);
+                continue;
             };
             let status = match row.expiry_at {
                 Some(ts) => ProtectionStatus::WithExpiry(ts),
@@ -210,7 +207,7 @@ impl ProtectedNames {
                 }
             };
         }
-        Ok(Self(map))
+        Self(map)
     }
 }
 
@@ -224,16 +221,12 @@ pub enum FetchError {
     /// missing or mismatched.
     #[error("read could not be confirmed complete")]
     Unconfirmed,
-    /// A row's `name` is not a lawful [`Name`]; retries fail until
-    /// the table is fixed.
-    #[error("row is not a lawful name")]
-    CorruptRow,
 }
 
 /// Reads the whole table; installs only when every counted row landed.
 pub async fn fetch(client: &HttpsClient) -> Result<ProtectedNames, FetchError> {
-    let (rows, total) = fetch_rows(client).await.ok_or(FetchError::Unavailable)?;
-    complete(rows, total)
+    let (rows, landed, total) = fetch_rows(client).await.ok_or(FetchError::Unavailable)?;
+    complete(rows, landed, total)
 }
 
 /// A table read running in the background, started before the tip
@@ -264,19 +257,23 @@ impl Drop for PendingRead {
     }
 }
 
-/// Installs only when the exact count matches the rows read.
-fn complete(rows: Vec<ProtectedRow>, total: Option<usize>) -> Result<ProtectedNames, FetchError> {
-    let read = rows.len();
+/// Installs only when the exact count matches the rows that landed.
+/// A row skipped while decoding still counts as landed.
+fn complete(
+    rows: Vec<ProtectedRow>,
+    landed: usize,
+    total: Option<usize>,
+) -> Result<ProtectedNames, FetchError> {
     match total {
-        Some(total) if total == read => {
-            let table = ProtectedNames(BTreeMap::new()).from_rows(rows)?;
-            tracing::debug!(rows = read, "pre-sale fetch: table loaded");
+        Some(total) if total == landed => {
+            let table = ProtectedNames(BTreeMap::new()).from_rows(rows);
+            tracing::debug!(rows = landed, "pre-sale fetch: table loaded");
             Ok(table)
         }
         Some(total) => {
             tracing::warn!(
                 counted = total,
-                read,
+                read = landed,
                 "pre-sale fetch did not return every counted row"
             );
             Err(FetchError::Unconfirmed)
@@ -288,8 +285,24 @@ fn complete(rows: Vec<ProtectedRow>, total: Option<usize>) -> Result<ProtectedNa
     }
 }
 
+/// A JSON array of rows. An element that does not decode is skipped
+/// and warned, and still counts as landed. A body that is not an
+/// array fails the read.
+fn decode_rows(body: &[u8]) -> Result<(Vec<ProtectedRow>, usize), serde_json::Error> {
+    let values: Vec<serde_json::Value> = serde_json::from_slice(body)?;
+    let landed = values.len();
+    let mut rows = Vec::with_capacity(landed);
+    for value in values {
+        match serde_json::from_value(value) {
+            Ok(row) => rows.push(row),
+            Err(error) => tracing::warn!(%error, "pre-sale row did not decode; skipping it"),
+        }
+    }
+    Ok((rows, landed))
+}
+
 /// Every row and the exact count; `None` on any failure, each warned.
-async fn fetch_rows(client: &HttpsClient) -> Option<(Vec<ProtectedRow>, Option<usize>)> {
+async fn fetch_rows(client: &HttpsClient) -> Option<(Vec<ProtectedRow>, usize, Option<usize>)> {
     let url = format!("{}?select=name,expiry_at", presale_rest_url());
     let uri: Uri = url.parse().ok()?;
     let request = Request::builder()
@@ -323,8 +336,8 @@ async fn fetch_rows(client: &HttpsClient) -> Option<(Vec<ProtectedRow>, Option<u
             })
             .ok()?
             .to_bytes();
-        match serde_json::from_slice(&body) {
-            Ok(rows) => Some((rows, total)),
+        match decode_rows(&body) {
+            Ok((rows, landed)) => Some((rows, landed, total)),
             Err(error) => {
                 tracing::warn!(%error, "pre-sale fetch: json parse failed");
                 None
@@ -529,7 +542,7 @@ mod tests {
     }
 
     /// Builds a table from rows through the public door, seeded empty.
-    fn from_rows(rows: Vec<ProtectedRow>) -> Result<ProtectedNames, FetchError> {
+    fn from_rows(rows: Vec<ProtectedRow>) -> ProtectedNames {
         ProtectedNames(BTreeMap::new()).from_rows(rows)
     }
 
@@ -537,24 +550,26 @@ mod tests {
     /// lift moment is data, not a state.
     #[test]
     fn from_rows_keeps_expired_rows() {
-        let table = from_rows(vec![row_with("alice", Some(ts(1_600_000_000)))]).unwrap();
+        let table = from_rows(vec![row_with("alice", Some(ts(1_600_000_000)))]);
         assert_eq!(
             table.status(&Name::parse("alice").unwrap()),
             ProtectionStatus::WithExpiry(ts(1_600_000_000))
         );
     }
 
+    /// A name that does not parse is skipped. The other rows install.
     #[test]
-    fn from_rows_rejects_corrupt_rows() {
-        let rows = vec![row_with("Not-A-Name!", None)];
-        assert!(matches!(from_rows(rows), Err(FetchError::CorruptRow)));
+    fn from_rows_skips_a_name_that_does_not_parse() {
+        let table = from_rows(vec![row_with("Not-A-Name!", None), row_with("alice", None)]);
+        assert_eq!(table.0.len(), 1);
+        assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
     }
 
     /// A duplicate row is a re-purchase: the name's rows coalesce
     /// to the strongest bought term.
     #[test]
     fn from_rows_coalesces_identical_rows() {
-        let table = from_rows(vec![row_with("alice", None), row_with("alice", None)]).unwrap();
+        let table = from_rows(vec![row_with("alice", None), row_with("alice", None)]);
         assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
     }
 
@@ -564,8 +579,7 @@ mod tests {
         let table = from_rows(vec![
             row_with("alice", Some(ts(2_000_000_000))),
             row_with("alice", Some(ts(1_900_000_000))),
-        ])
-        .unwrap();
+        ]);
         assert_eq!(
             table.status(&alice()),
             ProtectionStatus::WithExpiry(ts(2_000_000_000))
@@ -585,7 +599,7 @@ mod tests {
                 row_with("alice", Some(ts(2_000_000_000))),
             ],
         ] {
-            let table = from_rows(rows).unwrap();
+            let table = from_rows(rows);
             assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
         }
     }
@@ -603,8 +617,7 @@ mod tests {
             row_with("tom", Some(ts(1_800_563_400))),
             row_with("tom", None),
             row_with("alice", Some(ts(2_000_000_000))),
-        ])
-        .unwrap();
+        ]);
         assert_eq!(
             table.status(&Name::parse("9").unwrap()),
             ProtectionStatus::Forever
@@ -646,19 +659,34 @@ mod tests {
         assert_eq!(rows[0].expiry_at, None);
     }
 
-    /// A malformed `expiry_at` string must fail the deserializer,
-    /// which fails the whole read.
+    /// A malformed `expiry_at` skips that row. The other rows
+    /// decode, and the skipped row still counts as landed.
     #[test]
-    fn row_decode_bad_timestamp_errors() {
-        let json = r#"[{"id": "0", "name": "alice", "expiry_at": "not-a-timestamp"}]"#;
-        let rows: Result<Vec<ProtectedRow>, _> = serde_json::from_slice(json.as_bytes());
-        assert!(rows.is_err(), "malformed timestamp must not deserialize");
+    fn decode_rows_skips_a_bad_timestamp() {
+        let json = r#"[
+            {"name": "alice", "expiry_at": "not-a-timestamp"},
+            {"name": "bob", "expiry_at": null}
+        ]"#;
+        let (rows, landed) = decode_rows(json.as_bytes()).unwrap();
+        assert_eq!(landed, 2);
+        let table = complete(rows, landed, Some(landed)).unwrap();
+        assert_eq!(
+            table.status(&Name::parse("bob").unwrap()),
+            ProtectionStatus::Forever
+        );
+        assert_eq!(table.status(&alice()), ProtectionStatus::Unprotected);
+    }
+
+    /// A body that is not a JSON array fails the read.
+    #[test]
+    fn decode_rows_rejects_a_non_array() {
+        assert!(decode_rows(br#"{"name":"alice"}"#).is_err());
     }
 
     /// The read installs only when every counted row arrived.
     #[test]
     fn complete_installs_when_the_count_matches() {
-        let table = complete(vec![row_with("alice", None)], Some(1)).unwrap();
+        let table = complete(vec![row_with("alice", None)], 1, Some(1)).unwrap();
         assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
     }
 
@@ -667,7 +695,7 @@ mod tests {
     fn complete_refuses_a_truncated_read() {
         let rows = vec![row_with("alice", None)];
         assert!(matches!(
-            complete(rows, Some(2)),
+            complete(rows, 1, Some(2)),
             Err(FetchError::Unconfirmed)
         ));
     }
@@ -675,7 +703,17 @@ mod tests {
     #[test]
     fn complete_refuses_a_missing_count() {
         let rows = vec![row_with("alice", None)];
-        assert!(matches!(complete(rows, None), Err(FetchError::Unconfirmed)));
+        assert!(matches!(
+            complete(rows, 1, None),
+            Err(FetchError::Unconfirmed)
+        ));
+    }
+
+    /// A skipped row counts toward the server total, and the reply installs.
+    #[test]
+    fn complete_counts_a_skipped_row_as_landed() {
+        let table = complete(vec![row_with("alice", None)], 2, Some(2)).unwrap();
+        assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
     }
 
     /// `install` takes the table the read returned. A name only the
