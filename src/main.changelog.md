@@ -1,10 +1,34 @@
 # main.changelog.md
 
-## 2026-10-24 — A payment is priced at the rate recorded with it
+## 2026-10-26 — An OTP response is ruled on at the block that carried it (#383)
 
-- A claim, a challenge fee, and a term-carrying echo are priced at
-  the zats-per-USD rate stored when the payment was queued. A later
-  daily publish does not reprice a payment already in hand.
+- The run loop no longer keeps OTP responses. At block application a
+  response completes the challenge relayed before that block, and the
+  transition it authorizes is ruled on there: renewal price, no note
+  pending, the law, then the note is admitted. The tip pass has no
+  response lane. A refused response is refunded there, as the tip
+  pass did.
+- A refused response ends its challenge; the controller requests
+  again. Before, an underpaid renewal left the challenge answerable
+  with the same code.
+- The update law and the renewal quote are read at the response's
+  block: its median time, and the oracle's rate before the pass's
+  round. One block per pass, these are the tip's values; across a
+  catch-up they are the block's own.
+- Challenges are expired at every applied block, by that block's
+  median, before its responses are handled, so a challenge the
+  block's clock has expired completes nothing in it. The tip pass no
+  longer does.
+- A response confirmed before its challenge was relayed, or kept
+  across a reorg that rebuilt the queue, can no longer count as a
+  wrong attempt against a challenge created later in the same pass.
+- The voluntary-release log line names the response's transaction.
+
+## 2026-10-26 — A claim spends an anchor the wallet can still spend
+
+- The enactment loop takes the first pool anchor still unspent at
+  the applied tip. A sent claim's anchor stays out until that
+  transaction is mined or expires, and the next claim takes another.
 
 ## 2026-10-23 — Transactions pay the node's fee rate (#357)
 

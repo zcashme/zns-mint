@@ -12,7 +12,6 @@ use zcash_protocol::consensus::MainNetwork;
 use zcash_protocol::consensus::TestNetwork;
 #[cfg(feature = "regtest")]
 use zcash_protocol::local_consensus::LocalNetwork;
-use zcash_protocol::value::Zatoshis;
 use zcash_protocol::{
     consensus::{BlockHeight, Parameters},
     TxId,
@@ -26,8 +25,8 @@ use crate::mint::note::NameNoteQueue;
 use crate::mint::presale::{self, AccessCodeDerivationKey, HttpsClient, ProtectedNames};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
-use crate::mint::treasury::{OtpQueue, RequestQueue};
-use crate::mint::{OtpMemo, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::treasury::{OtpQueue, RefundQueue, RequestQueue};
+use crate::mint::{MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 use crate::zcash::{self, CanonicalBlockSource, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
@@ -110,9 +109,8 @@ pub struct Boot<P: Parameters> {
     pub name_notes: NameNoteQueue,
     /// initialized: pending Treasury requests
     pub requests: RequestQueue,
-    /// initialized: pending OTP echoes (memo, amount paid, height,
-    /// and the zats-per-USD rate published when the echo was queued).
-    pub echoes: Vec<(OtpMemo, Zatoshis, BlockHeight, Zatoshis)>,
+    /// initialized: refunds due
+    pub refunds: RefundQueue,
     /// The exact encoded identity written to the boot identity document.
     pub treasury_address: String,
     pub registry_ufvk: String,
@@ -206,45 +204,11 @@ const CUSTODY_MANIFEST_FILE: &str = "keys/zns_custody_manifest.toml";
 #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 const GENESIS_RECORD_FILE: &str = "zns_genesis_record.json";
 
-/// The keygen report binds the capsule hash recorded in the custody
-/// manifest. A resealed file has a different hash, so that report is
-/// not required to cover it.
-#[cfg(any(test, all(not(feature = "regtest"), not(feature = "non-tee"))))]
-fn keygen_report_covers(file_hash: &[u8; 32], recorded: &[u8; 32]) -> bool {
-    file_hash == recorded
-}
-
-#[cfg(any(test, all(not(feature = "regtest"), not(feature = "non-tee"))))]
-fn recorded_capsule_hash(text: &str) -> [u8; 32] {
-    #[derive(serde::Deserialize)]
-    struct Raw {
-        #[serde(default)]
-        capsule_hash_blake2b256: Option<String>,
-    }
-    let raw: Raw = toml::from_str(text)
-        .unwrap_or_else(|error| panic!("FATAL: {CUSTODY_MANIFEST_FILE} is invalid: {error}"));
-    let hex_text = raw
-        .capsule_hash_blake2b256
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} has no capsule hash"));
-    let bytes = hex::decode(hex_text.trim())
-        .unwrap_or_else(|_| panic!("FATAL: {CUSTODY_MANIFEST_FILE} capsule hash is not hex"));
-    <[u8; 32]>::try_from(bytes)
-        .unwrap_or_else(|_| panic!("FATAL: {CUSTODY_MANIFEST_FILE} capsule hash is not 32 bytes"))
-}
-
-/// The conf fingerprint is not an identity pin by itself. When this file
-/// is the one the custody manifest records, the keygen report must carry
+/// The keygen report has to cover this capsule file. It carries
 /// `BLAKE2b-512(fingerprint ‖ capsule hash)` under the AMD signature.
+/// A missing report, or one that does not cover this file, refuses boot.
 #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 fn require_keygen_attestation(capsule_bytes: &[u8], fingerprint: &SeedFingerprint) {
-    let text = std::fs::read_to_string(CUSTODY_MANIFEST_FILE).unwrap_or_else(|error| {
-        panic!("FATAL: cannot read {CUSTODY_MANIFEST_FILE}: {error}");
-    });
-    if !keygen_report_covers(&capsule_hash(capsule_bytes), &recorded_capsule_hash(&text)) {
-        tracing::info!("boot: resealed capsule; the keygen report does not bind this file");
-        return;
-    }
     let report = read_attestation_report(std::path::Path::new("keys/zns_attestation.bin"));
     zns_canon::attestation::verify(capsule_bytes, fingerprint, report)
         .expect("FATAL: keygen attestation report failed verification");
@@ -487,7 +451,7 @@ impl Boot<Network> {
         // regtest/non-tee, hardware key for attested builds.
 
         // 2. Seed intake + verification: read capsule, require the keygen
-        //    report when this file is the recorded capsule, unseal, then
+        //    report for this file, unseal, then
         //    derive keys. The seed lives only inside this block — Secret's
         //    Drop wipes it. The access-code key derives from the seed: an
         //    X25519 scalar agreed with the issuer's public key.
@@ -743,7 +707,7 @@ impl Boot<Network> {
         let challenges = OtpQueue::new();
         let name_notes = NameNoteQueue::default();
         let requests = RequestQueue::default();
-        let echoes = Vec::new();
+        let refunds = RefundQueue::default();
 
         // 7. Sapling proving parameters. Loading and hash verification happen
         // before attestation: a mint that produces a report can also prove
@@ -822,7 +786,7 @@ impl Boot<Network> {
             registry,
             name_notes,
             requests,
-            echoes,
+            refunds,
             treasury_address,
             registry_ufvk,
             seed_fingerprint: hex::encode(ceremony_fingerprint),
@@ -1162,17 +1126,6 @@ mod tests {
         assert_eq!(anchor.txid.to_string(), txid);
         #[cfg(not(feature = "non-tee"))]
         assert_eq!(anchor.file_txid, txid_bytes);
-    }
-
-    #[test]
-    fn a_resealed_capsule_is_not_covered_by_the_keygen_report() {
-        let recorded = recorded_capsule_hash(
-            "capsule_hash_blake2b256 = \"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"\n",
-        );
-        assert!(keygen_report_covers(&recorded, &recorded));
-        let mut resealed = recorded;
-        resealed[0] ^= 1;
-        assert!(!keygen_report_covers(&resealed, &recorded));
     }
 
     /// A one-transaction block, for anchor-check fixtures.

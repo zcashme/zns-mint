@@ -1,10 +1,13 @@
 //! Treasury wallet view and Treasury policy for the mint: the vault
-//! sweep, the challenge relay builder, and the request queue.
+//! sweep, the challenge relay builder, the request queue, and refunds
+//! of underpaid payments.
 //!
 
 mod otp;
+mod refund;
 
 pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
+pub use refund::{access_code_penalty, RefundQueue, RefundRequest};
 
 use std::convert::Infallible;
 
@@ -89,6 +92,82 @@ pub enum BuildFailure<ProposalError, TransactionError> {
     /// The upstream wallet API rejected transaction construction or storage.
     #[error("transaction build failed: {0:?}")]
     Transaction(TransactionError),
+}
+
+/// Builds one refund: a Treasury payment of its amount to its recipient,
+/// funded from any Treasury notes. The wallet owns it from there, as it
+/// owns a sweep: one that expires unmined is kept, and the next sweep
+/// moves the money. `Ok(None)` means the Treasury cannot fund it yet.
+pub fn issue_refund<P: Parameters>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    treasury_keys: &crate::TreasuryKeys,
+    spend_prover: &sapling::circuit::SpendParameters,
+    output_prover: &sapling::circuit::OutputParameters,
+    fee_rule: &FeeRule,
+    refund: &RefundRequest,
+) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
+    let to = Address::Unified(Box::new(refund.recipient().clone()));
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(network),
+        refund.amount(),
+    )])
+    .expect("one payment is a valid ZIP 321 request");
+    let proposal = match propose_transfer::<_, _, _, _, Infallible>(
+        wallet,
+        network,
+        TREASURY_ACCOUNT,
+        &GreedyInputSelector::new(),
+        &SingleOutputChangeStrategy::new(
+            fee_rule.clone(),
+            None,
+            ShieldedPool::Ironwood,
+            DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE)),
+        ),
+        request,
+        crate::wallet::CONFIRMATIONS,
+        &SpendPolicy::default(),
+        None,
+        None,
+    ) {
+        Ok(proposal) => proposal,
+        Err(error::Error::InsufficientFunds { .. }) | Err(error::Error::ScanRequired) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(BuildFailure::Proposal(error)),
+    };
+
+    let spending_keys = treasury_keys.spending_keys();
+    let txids = create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
+        wallet,
+        network,
+        &SystemClock,
+        &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
+        spend_prover,
+        output_prover,
+        &spending_keys,
+        OvkPolicy::Sender,
+        &proposal,
+        None,
+    )
+    .map_err(BuildFailure::Transaction)?;
+
+    tracing::info!(
+        txid = %txids.first(),
+        payment = %refund.payment(),
+        name = %refund.name().as_str(),
+        amount = refund.amount().into_u64(),
+        "refund built"
+    );
+
+    // The build stored the tx and marked its inputs spent; a miss here is
+    // the wallet contradicting itself, not a skip. Stop; restart rescans.
+    Ok(Some(
+        wallet
+            .get_transaction(*txids.first())
+            .expect("FATAL: refund lookup failed after build")
+            .expect("FATAL: built refund tx missing from wallet"),
+    ))
 }
 
 /// Pays the vault what send-max could deliver, less the float.
@@ -272,31 +351,23 @@ pub fn challenge<P: Parameters>(
 // ---------------------------------------------------------------------------
 
 /// Treasury requests decoded once at block application: what each memo
-/// said, what it paid, the block that carried it, and the zats-per-USD
-/// rate published then. The deciding pass prices against that rate.
-/// Entries leave by decision (`resolved`) or by reorg (`truncate_to`).
+/// said, what it paid, the block that carried it. Entries are queued at
+/// block application and leave by decision (`resolved`) or by reorg
+/// (`truncate_to`); nothing else removes them.
 #[derive(Clone, Debug, Default)]
 pub struct RequestQueue {
-    requests: Vec<(TxId, Request, Zatoshis, BlockHeight, Zatoshis)>,
+    requests: Vec<(TxId, Request, Zatoshis, BlockHeight)>,
 }
 
 impl RequestQueue {
-    /// A recognized request, routed after block application. `rate` is
-    /// the oracle's published zats per USD at this moment. Admission
+    /// A recognized request, routed after block application. Admission
     /// records facts in transaction order; the deciding pass rules.
-    pub fn record(
-        &mut self,
-        txid: TxId,
-        request: Request,
-        paid: Zatoshis,
-        height: BlockHeight,
-        rate: Zatoshis,
-    ) {
-        self.requests.push((txid, request, paid, height, rate));
+    pub fn record(&mut self, txid: TxId, request: Request, paid: Zatoshis, height: BlockHeight) {
+        self.requests.push((txid, request, paid, height));
     }
 
     /// Every request pending decision, in queue order.
-    pub fn pending(&self) -> Vec<(TxId, Request, Zatoshis, BlockHeight, Zatoshis)> {
+    pub fn pending(&self) -> Vec<(TxId, Request, Zatoshis, BlockHeight)> {
         self.requests.clone()
     }
 
@@ -304,18 +375,18 @@ impl RequestQueue {
     pub fn names(&self) -> impl Iterator<Item = &Name> {
         self.requests
             .iter()
-            .map(|(_, request, _, _, _)| request.name())
+            .map(|(_, request, _, _)| request.name())
     }
 
     /// The request is decided. The only removal besides reorg truncation.
     pub fn resolved(&mut self, txid: TxId) {
-        self.requests.retain(|(queued, _, _, _, _)| *queued != txid);
+        self.requests.retain(|(queued, _, _, _)| *queued != txid);
     }
 
     /// Reorg: entries whose block was orphaned fall with it.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
         self.requests
-            .retain(|(_, _, _, height, _)| *height <= ancestor);
+            .retain(|(_, _, _, height)| *height <= ancestor);
     }
 }
 
@@ -428,23 +499,19 @@ mod tests {
             request(Action::Claim),
             Zatoshis::ZERO,
             h(100),
-            Zatoshis::const_from_u64(100_000),
         );
         queue.record(
             TxId::from_bytes([2; 32]),
             request(Action::Update),
             Zatoshis::ZERO,
             h(101),
-            Zatoshis::ZERO,
         );
 
         let pending = queue.pending();
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].0, TxId::from_bytes([1; 32]));
         assert_eq!(pending[0].3, h(100));
-        assert_eq!(pending[0].4, Zatoshis::const_from_u64(100_000));
         assert_eq!(pending[1].3, h(101));
-        assert_eq!(pending[1].4, Zatoshis::ZERO);
     }
 
     #[test]
@@ -467,7 +534,6 @@ mod tests {
             },
             Zatoshis::ZERO,
             h(100),
-            Zatoshis::ZERO,
         );
         queue.record(
             TxId::from_bytes([2; 32]),
@@ -479,7 +545,6 @@ mod tests {
             },
             Zatoshis::ZERO,
             h(101),
-            Zatoshis::ZERO,
         );
         queue.record(
             TxId::from_bytes([3; 32]),
@@ -491,7 +556,6 @@ mod tests {
             },
             Zatoshis::ZERO,
             h(102),
-            Zatoshis::ZERO,
         );
 
         // Admission records every claim; the deciding pass rules.
@@ -518,21 +582,18 @@ mod tests {
             request(Action::Claim),
             Zatoshis::ZERO,
             h(100),
-            Zatoshis::ZERO,
         );
         queue.record(
             TxId::from_bytes([2; 32]),
             request(Action::Update),
             Zatoshis::ZERO,
             h(101),
-            Zatoshis::ZERO,
         );
         queue.record(
             TxId::from_bytes([3; 32]),
             request(Action::Release),
             Zatoshis::ZERO,
             h(102),
-            Zatoshis::ZERO,
         );
 
         queue.resolved(TxId::from_bytes([2; 32]));
@@ -548,13 +609,7 @@ mod tests {
     #[test]
     fn resolved_unknown_txid_is_a_no_op() {
         let mut queue = RequestQueue::default();
-        queue.record(
-            TxId::NULL,
-            request(Action::Claim),
-            Zatoshis::ZERO,
-            h(100),
-            Zatoshis::ZERO,
-        );
+        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
 
         queue.resolved(TxId::from_bytes([9; 32]));
         assert_eq!(queue.pending().len(), 1);
@@ -563,27 +618,9 @@ mod tests {
     #[test]
     fn queue_truncate_drops_only_orphaned_heights() {
         let mut queue = RequestQueue::default();
-        queue.record(
-            TxId::NULL,
-            request(Action::Claim),
-            Zatoshis::ZERO,
-            h(100),
-            Zatoshis::ZERO,
-        );
-        queue.record(
-            TxId::NULL,
-            request(Action::Update),
-            Zatoshis::ZERO,
-            h(150),
-            Zatoshis::ZERO,
-        );
-        queue.record(
-            TxId::NULL,
-            request(Action::Release),
-            Zatoshis::ZERO,
-            h(200),
-            Zatoshis::ZERO,
-        );
+        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
+        queue.record(TxId::NULL, request(Action::Update), Zatoshis::ZERO, h(150));
+        queue.record(TxId::NULL, request(Action::Release), Zatoshis::ZERO, h(200));
 
         queue.truncate_to(h(120));
         let pending = queue.pending();

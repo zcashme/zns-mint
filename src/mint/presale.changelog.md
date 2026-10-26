@@ -1,5 +1,14 @@
 # `mint/presale.rs` design record
 
+## 2026-10-26 — A bad pre-sale row is skipped
+
+- `from_rows` skips a name that does not parse and warns. A row
+  whose `expiry_at` does not decode is skipped the same way and
+  still counts toward the server total. The other rows install,
+  and boot proceeds on that table. A body that is not a JSON
+  array, a failed read, a truncated reply, or a missing count
+  still refuses the table.
+
 ## 2026-10-22 — One read, every tip pass (#371)
 
 - `fetch` reads the whole table in one request: the project's Max

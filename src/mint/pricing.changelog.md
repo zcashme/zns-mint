@@ -1,14 +1,13 @@
 # Pricing changelog
 
-## 2026-10-24 — A payment is priced at the rate recorded with it
+## 2026-09-24 — A dropped venue says why
 
-- `quote_at` and `challenge_fee_at` price from a zats-per-USD rate;
-  `quote` and `challenge_fee` pass the published rate. A queued
-  payment stores that rate, and a later daily publish does not
-  reprice it.
 - URL, request, transport, timeout, and body failures log the venue
   and the error before the round drops that quote. The round is still
   `Option`.
+
+## 2026-09-24 — A quote that does not fit is None
+
 - `quote` returns `None` when the zat product does not fit. The drain
   refuses that the way it refuses an underpayment.
 
