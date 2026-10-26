@@ -531,13 +531,14 @@ async fn main() {
         for (txid, echo, paid, note_height) in std::mem::take(&mut echoes) {
             let _ = 'lane: {
                 // An OTP response is decided on this pass. It never waits
-                // for money. A renewal or upgrade below its quote does
-                // not consume the challenge.
-                let Some(record) = registry.record(&echo.name).cloned() else {
-                    break 'lane true; // no record — released or unknown: no mint-issued challenge can match
-                };
+                // for money. A refused response goes back to the memo
+                // address, less the refund fee. A renewal or upgrade
+                // below its quote does not consume the challenge.
                 let Some(sent) = challenges.answer(&echo) else {
-                    break 'lane true; // no match, including a wrong code: payment kept
+                    // No live challenge matches: a wrong code, or a right
+                    // one whose challenge was dropped.
+                    refunds.admit(&fee_rule, txid, &echo.ua, &echo.name, note_height, paid);
+                    break 'lane true;
                 };
                 if let Request::Update {
                     term: Some(term), ..
@@ -551,14 +552,18 @@ async fn main() {
                         break 'lane true;
                     };
                     if paid < price {
-                        refunds.admit(&fee_rule, txid, &record.ua, &echo.name, note_height, paid);
+                        refunds.admit(&fee_rule, txid, &echo.ua, &echo.name, note_height, paid);
                         break 'lane true;
                     }
                 }
-                // A Name Note already queued owns this name. The payment
-                // goes back minus the fee, and the challenge stays.
+                // A transition already admitted for this current Name Note
+                // owns its predecessor. Do not consume this OTP response.
                 if name_notes.note_pending(&echo.name) {
-                    refunds.admit(&fee_rule, txid, &record.ua, &echo.name, note_height, paid);
+                    tracing::debug!(
+                        name = %echo.name.as_str(),
+                        action = echo.action.as_str(),
+                        "transition already queued; OTP response does not replace it"
+                    );
                     break 'lane true;
                 }
                 let authorized = match echo.action {
@@ -568,12 +573,10 @@ async fn main() {
                     // the verb; treat a claim echo as a dead memo regardless.
                     Action::Claim => break 'lane true,
                 };
+                // The law refuses a matched response when the name became
+                // due for release after its challenge was issued.
                 let Some(transition_note) = authorized else {
-                    tracing::debug!(
-                        name = %echo.name.as_str(),
-                        action = echo.action.as_str(),
-                        "echo refused by the law — payment kept"
-                    );
+                    refunds.admit(&fee_rule, txid, &echo.ua, &echo.name, note_height, paid);
                     break 'lane true;
                 };
                 challenges.consume(&sent); // spent exactly when the law accepts

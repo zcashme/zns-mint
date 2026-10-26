@@ -2,15 +2,16 @@
 
 ## 2026-10-24 — Underpaid payments are refunded (#372)
 
-- A refund is the payment minus ten actions at the node's rate. A claim
-  returns to the memo address; an OTP response, to the name's current
-  address. A payment within the fee is kept.
+- A refund is the payment minus ten actions at the node's rate. It
+  returns to the memo address. A payment within the fee is kept.
 - Refund a claim for no code, an unlisted name, a payment below the quote,
   a wrong code once the quote is covered (keep 1%), or a name registered
   or queued.
-- Refund a renewal or upgrade below its quote, and an OTP response whose
-  Name Note is already queued. That OTP can be sent again. A wrong OTP,
-  an unparsed memo, or any other refusal leaves its payment with the mint.
+- Refund an OTP response when no live challenge matches (a wrong
+  code, or a right one whose challenge was dropped), a renewal or upgrade
+  below its quote (that OTP can be sent again), or a name that became due
+  for release after its challenge was issued. An unparsed memo leaves its
+  payment with the mint.
 - Build a refund on the tip after its payment. Drop it if that block
   is orphaned. The sweep waits while one is queued. Try again next tip
   until the node accepts it; the wallet then owns the transaction.
