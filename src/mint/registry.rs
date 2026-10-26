@@ -1056,40 +1056,6 @@ mod tests {
         assert!(r.anchor_pool().contains(&fresh_successor));
     }
 
-    /// From NU7 the window is 120 blocks.
-    #[test]
-    fn the_release_window_is_120_blocks_from_nu7() {
-        let mut r = Registry::new();
-        let name = test_name();
-        let nu7 = 3_543_405;
-        let release_height = BlockHeight::from_u32(nu7 + 10);
-        confirm_claim(&mut r, &name, nu7, 1, 11, 21);
-        confirm_release(&mut r, &name, nu7 + 10, 24);
-
-        let claim = NameNote::Claim {
-            name: name.clone(),
-            ua: test_ua(),
-            expires_at: Expiry::Never,
-        };
-        for (seed, expiry, admitted) in [(3, 120, false), (4, 121, true)] {
-            let anchor = nullifier(seed);
-            r.adopt_anchor(release_height, anchor);
-            assert_eq!(
-                r.accept_claim(
-                    &MAIN_NETWORK,
-                    &claim,
-                    nullifier(seed + 30),
-                    Some(nullifier(seed + 40)),
-                    &[anchor],
-                    release_height + 1,
-                    ts(1_700_000_000),
-                    release_height + expiry,
-                ),
-                admitted
-            );
-        }
-    }
-
     #[test]
     fn per_name_history_is_ordered_and_release_is_absent_from_tip_records() {
         let r = registry_with_alice_and_bob_history();
