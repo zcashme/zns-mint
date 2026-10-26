@@ -282,6 +282,12 @@ async fn main() {
                 &mut mtp,
             );
             name_notes.reconcile_seen(&network, &registry);
+            // The block's own clock: a challenge expired by it answers
+            // nothing in it, and the law reads it.
+            let block_mtp = mtp
+                .current()
+                .expect("FATAL: MTP unavailable at the applied block");
+            challenges.prune(block_mtp);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
@@ -329,9 +335,6 @@ async fn main() {
                             );
                             continue;
                         }
-                        let block_mtp = mtp
-                            .current()
-                            .expect("FATAL: MTP unavailable at the applied block");
                         let authorized = match &sent.request {
                             Request::Update { .. } => registry.authorize_update(&sent, block_mtp),
                             Request::Release { .. } => registry.authorize_release(&sent),
@@ -375,7 +378,6 @@ async fn main() {
         let mtp_now = mtp
             .current()
             .expect("FATAL: MTP unavailable at the applied tip");
-        challenges.prune(mtp_now);
 
         let today = mtp
             .current_day()

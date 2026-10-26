@@ -4,8 +4,8 @@ Tracks design-relevant changes to `src/boot.rs`.
 
 ## 2026-10-26 — No response list (#383)
 
-- `Boot` no longer carries a list of pending OTP responses; the OTP
-  queue holds them.
+- `Boot` no longer carries a list of pending OTP responses; a response
+  is ruled on when its block is applied.
 
 ## 2026-10-24 — The fee rate or no start (#357)
 

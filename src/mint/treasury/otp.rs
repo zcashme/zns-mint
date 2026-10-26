@@ -179,7 +179,8 @@ impl OtpQueue {
             .collect()
     }
 
-    /// Drops expired challenges. The run loop calls this each wake-up.
+    /// Drops expired challenges. The run loop calls this at every
+    /// applied block, before answering the block's responses.
     pub fn prune(&mut self, mtp: Timestamp) {
         self.challenges
             .retain(|(challenge, _, _)| mtp < challenge.expires_at);

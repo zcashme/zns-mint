@@ -7,6 +7,8 @@
   The run loop rules on the returned challenge there and then; a
   refused response ends the challenge, and a new request starts a
   new one.
+- `prune` is called per applied block, with that block's median,
+  before the block's responses are answered.
 
 ## 2026-10-22 — A challenge carries its request; one lookup (#368)
 
