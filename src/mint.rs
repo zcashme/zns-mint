@@ -21,12 +21,10 @@ use zcash_protocol::memo::{Memo, MemoBytes};
 use zcash_protocol::value::Zatoshis;
 use zip32::AccountId;
 
-use sapling::circuit::{OutputParameters, SpendParameters};
-use tokio::sync::mpsc;
-
 use crate::wallet::Wallet;
-use crate::zcash::{CanonicalBlockSource, ChainClient, MempoolChangeKind, MempoolSession};
+use crate::zcash::CanonicalBlockSource;
 use crate::TreasuryKeys;
+use sapling::circuit::{OutputParameters, SpendParameters};
 
 use presale::AccessCode;
 use treasury::{OtpChallenge, OtpCode};
@@ -356,17 +354,23 @@ impl NameCommitment {
 pub struct Name(String);
 
 impl Name {
-    /// Attempts to parse a string into a valid ZNS name.
+    /// 1–63 lowercase letters or digits. A string that parses as a Zcash
+    /// address is not a name.
     pub fn parse(s: &str) -> Option<Self> {
         let bytes = s.as_bytes();
         if bytes.is_empty() || bytes.len() > MAX_NAME_LEN {
             return None;
         }
-        if bytes.iter().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9')) {
-            Some(Self(s.to_string()))
-        } else {
-            None
+        if !bytes
+            .iter()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9'))
+        {
+            return None;
         }
+        if s.parse::<zcash_address::ZcashAddress>().is_ok() {
+            return None;
+        }
+        Some(Self(s.to_string()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -603,10 +607,8 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         }
     }
     // The scanner drops note plaintexts, so Treasury memos decode
-    // here, once per block, into arrivals; the block remains the
-    // durable record. Decisions belong to the run loop. The mempool
-    // quick path reads the same memos earlier and ephemerally; it
-    // records nothing — this pass stays the only intake.
+    // here, once per block, into arrivals. The block is the record.
+    // Decisions belong to the run loop.
     let arrivals = treasury_memos
         .into_iter()
         .map(|(txid, _action_index, paid, memo)| (txid, MintInbound::decode(network, &memo), paid))
@@ -715,17 +717,6 @@ pub async fn relay<P: Parameters + Send + 'static>(
     }
 }
 
-/// Forwards Zebra's mempool changes to the run loop, which owns and updates
-/// the OTP queue. The original change kind and txid stay paired.
-pub async fn watch_mempool(chain: ChainClient, sender: mpsc::Sender<(MempoolChangeKind, TxId)>) {
-    let mut session = MempoolSession::open(chain).await;
-    loop {
-        if sender.send(session.next().await).await.is_err() {
-            return;
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests — the Treasury memo grammars
 // ---------------------------------------------------------------------------
@@ -742,6 +733,12 @@ mod tests {
         let mut m = [0u8; 512];
         m[..s.len()].copy_from_slice(s.as_bytes());
         MemoBytes::from_bytes(&m).expect("a 512-byte memo fits")
+    }
+
+    #[test]
+    fn a_tex_address_is_not_a_name() {
+        assert!(Name::parse("alice").is_some());
+        assert!(Name::parse("tex1s2rt77ggv6q989lr49rkgzmh5slsksa9khdgte").is_none());
     }
 
     fn test_ua() -> UnifiedAddress {

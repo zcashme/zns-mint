@@ -1,5 +1,10 @@
 # Treasury design record
 
+## 2026-10-26 — A request is ready at ten blocks
+
+- `decision_reached` counts the request's block through the tip.
+  Ten blocks is ready. Fewer stays queued.
+
 ## 2026-10-24 — Underpaid payments are refunded (#372)
 
 - A refund is the payment minus ten actions at the node's rate. It

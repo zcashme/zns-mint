@@ -54,8 +54,8 @@ rustls = { version = "0.23", default-features = false, features = ["std", "aws-l
 http-body-util = "0.1"
 http = "1"
 bytes = "1"
-# `StreamExt`/`Stream` for the mempool stream adaptor. Already compiled via
-# tonic — direct listing adds no code.
+# `StreamExt` for the tip stream. Already compiled via tonic — direct
+# listing adds no code.
 futures-util = "0.3"
 hex = "0.4"
 zns-canon = { git = "https://github.com/zcashme/zns-canon.git", branch = "main" }

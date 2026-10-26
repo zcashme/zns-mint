@@ -1,5 +1,11 @@
 # main.changelog.md
 
+## 2026-10-26 — A request waits ten blocks
+
+- The deciding pass leaves a request queued until the tip is ten
+  blocks from the block that carried it, counting that block. A
+  shallower block can still fall away with the request.
+
 ## 2026-10-26 — An OTP response is ruled on at the block that carried it (#383)
 
 - The run loop no longer keeps OTP responses. At block application a

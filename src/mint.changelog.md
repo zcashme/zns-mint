@@ -1,5 +1,11 @@
 # Mint live-work design record
 
+## 2026-10-26 — A Zcash address is not a name
+
+- `Name::parse` rejects a string that parses as a Zcash address. A
+  TEX address fits 1–63 lowercase letters and digits, and it is not
+  a name.
+
 ## 2026-10-26 — The inbound kinds are request, OTP response, unrecognized (#383)
 
 - `MintInbound::Echo` is `MintInbound::Response`: the relay memo
