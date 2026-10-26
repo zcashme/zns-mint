@@ -10,6 +10,7 @@
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
+use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
@@ -20,7 +21,7 @@ use zns_mint::mint::presale;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
-use zns_mint::mint::{relay, Action, MintInbound, Request, TREASURY_ACCOUNT};
+use zns_mint::mint::{relay, Action, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
@@ -606,9 +607,10 @@ async fn main() {
         }
 
         for note in name_notes.authorized_notes() {
-            // Authority: a claim spends a lineage pool anchor; an update
-            // or release spends the predecessor — the record's nullifier
-            // matched by commitment.
+            // Authority: a claim spends the first pool anchor the wallet
+            // can still spend. A pending spend stays out until it is
+            // mined or expires. An update or release spends the
+            // predecessor — the record's nullifier matched by commitment.
             let authority_nf = if note.action().is_claim() {
                 // The name must still be absent from the applied-tip registry.
                 if !registry.is_available(note.name()) {
@@ -619,12 +621,21 @@ async fn main() {
                     name_notes.drop_note(note.name());
                     continue;
                 }
-                match registry.anchor_pool().iter().next().copied() {
+                match registry.spendable_claim_anchor(|nf| {
+                    wallet
+                        .unspent_ironwood_note_by_nullifier(
+                            REGISTRY_ACCOUNT,
+                            nf,
+                            TargetHeight::from(tip),
+                        )
+                        .is_some()
+                }) {
                     Some(nf) => nf,
                     None => {
                         tracing::warn!(
                             name = %note.name().as_str(),
-                            "no claim anchor in the pool"
+                            anchors = registry.anchor_pool().len(),
+                            "no spendable claim anchor"
                         );
                         continue;
                     }
