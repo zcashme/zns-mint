@@ -14,18 +14,6 @@ pub const D_OTP: i64 = 1800;
 /// fixes the maximum number of verification attempts).
 pub const MAX_ATTEMPTS: u32 = 6;
 
-/// Wrong OTP responses counted against a challenge's code.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Attempts(u32);
-
-impl Attempts {
-    /// Counts one more wrong response; true when the challenge retires.
-    fn count(&mut self) -> bool {
-        self.0 += 1;
-        self.0 >= MAX_ATTEMPTS
-    }
-}
-
 /// A six-digit one-time passcode.
 #[derive(Clone, PartialEq, Eq, Zeroize)]
 #[zeroize(drop)]
@@ -77,9 +65,17 @@ pub struct OtpChallenge {
     pub request: Request,
     pub code: OtpCode,
     pub expires_at: Timestamp,
+    /// Wrong responses counted against this challenge.
+    pub attempts: u32,
 }
 
 impl OtpChallenge {
+    /// Counts one more wrong response; true when the challenge retires.
+    fn count_failure(&mut self) -> bool {
+        self.attempts += 1;
+        self.attempts >= MAX_ATTEMPTS
+    }
+
     /// The controller-facing projection: code, name, action, ua.
     pub fn memo(&self) -> OtpMemo {
         OtpMemo {
@@ -105,7 +101,7 @@ pub enum ChallengeState {
 /// when it admits a transition for that name.
 #[derive(Clone)]
 pub struct OtpQueue {
-    challenges: Vec<(OtpChallenge, ChallengeState, Attempts)>,
+    challenges: Vec<(OtpChallenge, ChallengeState)>,
 }
 
 impl Default for OtpQueue {
@@ -127,13 +123,13 @@ impl OtpQueue {
         if self
             .challenges
             .iter()
-            .any(|(challenge, _, _)| challenge.request == request)
+            .any(|(challenge, _)| challenge.request == request)
         {
             return;
         }
         let code = loop {
             let code = OtpCode::generate();
-            if !self.challenges.iter().any(|(challenge, _, _)| {
+            if !self.challenges.iter().any(|(challenge, _)| {
                 challenge.request.name() == request.name()
                     && challenge.request.action() == request.action()
                     && challenge.request.ua() == request.ua()
@@ -147,15 +143,15 @@ impl OtpQueue {
                 request,
                 code,
                 expires_at: mtp + Duration::seconds(D_OTP),
+                attempts: 0,
             },
             ChallengeState::Requested,
-            Attempts::default(),
         ));
     }
 
     /// The node accepted `relayed`'s memo.
     pub fn challenge_issued(&mut self, relayed: &OtpChallenge) {
-        for (challenge, state, _) in &mut self.challenges {
+        for (challenge, state) in &mut self.challenges {
             if challenge.request == relayed.request {
                 *state = ChallengeState::Relayed;
             }
@@ -166,21 +162,21 @@ impl OtpQueue {
     pub fn requested(&self) -> Vec<OtpChallenge> {
         self.challenges
             .iter()
-            .filter(|(_, state, _)| *state == ChallengeState::Requested)
-            .map(|(challenge, _, _)| challenge.clone())
+            .filter(|(_, state)| *state == ChallengeState::Requested)
+            .map(|(challenge, _)| challenge.clone())
             .collect()
     }
 
     /// Drops every challenge whose window closed by `mtp`.
     pub fn expire(&mut self, mtp: Timestamp) {
         self.challenges
-            .retain(|(challenge, _, _)| mtp < challenge.expires_at);
+            .retain(|(challenge, _)| mtp < challenge.expires_at);
     }
 
     /// Drops every challenge for `name`, once a transition is admitted.
     pub fn drop_challenges(&mut self, name: &Name) {
         self.challenges
-            .retain(|(challenge, _, _)| challenge.request.name() != name);
+            .retain(|(challenge, _)| challenge.request.name() != name);
     }
 
     /// The right code removes and returns its challenge. A wrong one
@@ -192,14 +188,14 @@ impl OtpQueue {
                 && challenge.request.action() == response.action
                 && challenge.request.ua() == &response.ua
         };
-        let right = self.challenges.iter().position(|(challenge, state, _)| {
+        let right = self.challenges.iter().position(|(challenge, state)| {
             named(challenge, state) && bool::from(challenge.code.0.ct_eq(&response.code.0))
         });
         if let Some(index) = right {
             return Some(self.challenges.remove(index).0);
         }
-        self.challenges.retain_mut(|(challenge, state, attempts)| {
-            !(named(challenge, state) && attempts.count())
+        self.challenges.retain_mut(|(challenge, state)| {
+            !(named(challenge, state) && challenge.count_failure())
         });
         None
     }
@@ -208,16 +204,16 @@ impl OtpQueue {
     pub fn unrelayed(&self) -> impl Iterator<Item = &Name> {
         self.challenges
             .iter()
-            .filter(|(_, state, _)| *state == ChallengeState::Requested)
-            .map(|(challenge, _, _)| challenge.request.name())
+            .filter(|(_, state)| *state == ChallengeState::Requested)
+            .map(|(challenge, _)| challenge.request.name())
     }
 
     /// The name of every relayed challenge, awaiting its response.
     pub fn relayed(&self) -> impl Iterator<Item = &Name> {
         self.challenges
             .iter()
-            .filter(|(_, state, _)| *state == ChallengeState::Relayed)
-            .map(|(challenge, _, _)| challenge.request.name())
+            .filter(|(_, state)| *state == ChallengeState::Relayed)
+            .map(|(challenge, _)| challenge.request.name())
     }
 }
 
@@ -260,10 +256,10 @@ mod tests {
     /// Admits `request` at `t0`, its code fixed to `code`.
     fn admit(q: &mut OtpQueue, request: Request, code: [u8; 6]) -> OtpChallenge {
         q.admit(request.clone(), t0());
-        let (challenge, _, _) = q
+        let (challenge, _) = q
             .challenges
             .iter_mut()
-            .find(|(challenge, _, _)| challenge.request == request)
+            .find(|(challenge, _)| challenge.request == request)
             .unwrap();
         challenge.code = OtpCode::for_test(code);
         challenge.clone()

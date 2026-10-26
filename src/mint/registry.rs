@@ -669,6 +669,7 @@ mod tests {
         let pending = OtpChallenge {
             request: update(Some(Term::Years(1))),
             code: OtpCode::for_test(*b"123456"),
+            attempts: 0,
             expires_at: ts(1_700_000_000 + D_OTP),
         };
         assert!(r.authorize_update(&pending, mtp).is_none());
@@ -687,11 +688,13 @@ mod tests {
         let release_pending = OtpChallenge {
             request: release(),
             code: OtpCode::for_test(*b"123456"),
+            attempts: 0,
             expires_at: ts(1_700_000_000),
         };
         let update_pending = OtpChallenge {
             request: update(Some(Term::Years(1))),
             code: OtpCode::for_test(*b"123456"),
+            attempts: 0,
             expires_at: ts(1_700_000_000),
         };
         assert!(r.authorize_update(&release_pending, mtp).is_none());
@@ -789,6 +792,7 @@ mod tests {
         let pending = |mtp: i64| OtpChallenge {
             request: request.clone(),
             code: OtpCode::for_test(*b"123456"),
+            attempts: 0,
             expires_at: ts(mtp + D_OTP),
         };
 
