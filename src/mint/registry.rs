@@ -802,7 +802,7 @@ mod tests {
 
     /// A name with a transition already admitted cannot buy a
     /// challenge: the gate consults the note queue, the same state the
-    /// echo lane enforces.
+    /// OTP response lane enforces.
     #[test]
     fn authorize_challenge_refuses_when_the_note_is_spoken_for() {
         let mut r = Registry::new();

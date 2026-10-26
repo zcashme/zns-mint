@@ -2,6 +2,11 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-10-26 — No response list (#383)
+
+- `Boot` no longer carries a list of pending OTP responses; the OTP
+  queue holds them.
+
 ## 2026-10-24 — The fee rate or no start (#357)
 
 - Boot reads the node's fee rate after the price fetch and hands it to

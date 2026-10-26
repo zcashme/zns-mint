@@ -1,5 +1,21 @@
 # main.changelog.md
 
+## 2026-10-26 — An OTP response is matched when its block is applied (#383)
+
+- The run loop no longer keeps OTP responses. At block application a
+  response goes to `OtpQueue::respond`, which matches it against the
+  challenges relayed before that block. The tip pass takes the held
+  responses from the queue and rules on them as before.
+- A response confirmed before its challenge was relayed, or kept
+  across a reorg that rebuilt the queue, can no longer count as a
+  wrong attempt against a challenge created later in the same pass.
+- The response lane admits a note only when `consume` finds the
+  challenge: one an earlier response in the same pass retired, by
+  admitting a transition for the same name, spends nothing.
+- The metric reads whose move each challenge is from the queue.
+- The refusal and voluntary-release log lines name the response's
+  transaction.
+
 ## 2026-10-23 — Transactions pay the node's fee rate (#357)
 
 - Each tip pass reads `getstandardfee` once the tip is confirmed and

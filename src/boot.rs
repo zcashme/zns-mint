@@ -12,7 +12,6 @@ use zcash_protocol::consensus::MainNetwork;
 use zcash_protocol::consensus::TestNetwork;
 #[cfg(feature = "regtest")]
 use zcash_protocol::local_consensus::LocalNetwork;
-use zcash_protocol::value::Zatoshis;
 use zcash_protocol::{
     consensus::{BlockHeight, Parameters},
     TxId,
@@ -27,7 +26,7 @@ use crate::mint::presale::{self, AccessCodeDerivationKey, HttpsClient, Protected
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::treasury::{OtpQueue, RequestQueue};
-use crate::mint::{OtpMemo, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::{MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 use crate::zcash::{self, CanonicalBlockSource, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
@@ -110,8 +109,6 @@ pub struct Boot<P: Parameters> {
     pub name_notes: NameNoteQueue,
     /// initialized: pending Treasury requests
     pub requests: RequestQueue,
-    /// initialized: pending OTP echoes
-    pub echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)>,
     /// The exact encoded identity written to the boot identity document.
     pub treasury_address: String,
     pub registry_ufvk: String,
@@ -742,7 +739,6 @@ impl Boot<Network> {
         let challenges = OtpQueue::new();
         let name_notes = NameNoteQueue::default();
         let requests = RequestQueue::default();
-        let echoes = Vec::new();
 
         // 7. Sapling proving parameters. Loading and hash verification happen
         // before attestation: a mint that produces a report can also prove
@@ -821,7 +817,6 @@ impl Boot<Network> {
             registry,
             name_notes,
             requests,
-            echoes,
             treasury_address,
             registry_ufvk,
             seed_fingerprint: hex::encode(ceremony_fingerprint),

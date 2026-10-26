@@ -1,5 +1,10 @@
 # Mint live-work design record
 
+## 2026-10-26 — The inbound kinds are request, OTP response, unrecognized (#383)
+
+- `MintInbound::Echo` is `MintInbound::Response`: the relay memo
+  returned, which the OTP queue takes. No behaviour change.
+
 ## 2026-10-13 — Early-access regime: claims deny by default (#340)
 
 - The deciding pass refuses every claim that lacks its name's listing
