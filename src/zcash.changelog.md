@@ -1,10 +1,5 @@
 # Zcash I/O changelog
 
-## 2026-10-26 — The mempool stream is gone
-
-- Nothing called the mempool watcher. The stream and its session
-  are gone. Block application is the only intake.
-
 ## 2026-10-23 — The node's fee rate (#357)
 
 - `CanonicalBlockSource::standard_fee` reads `getstandardfee` and returns

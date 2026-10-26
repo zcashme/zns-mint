@@ -443,13 +443,12 @@ async fn main() {
             .into_u64();
         zns_mint::metrics::snapshot(tip, treasury_zats, oracle.current().into_u64());
 
-        // A request stays queued until its block is three deep. The pass
-        // then resolves it once. A shallower block can still fall away
-        // with the request.
+        // Treasury requests. Each memo was decoded once, at block
+        // application; the deciding pass resolves each pending entry
+        // exactly once, in queue order. A resolved entry leaves the
+        // queue — refused by a gate, or handed to the queue that owns
+        // its retries. Nothing defers; nothing is re-read.
         for (txid, request, paid, note_height) in requests.pending() {
-            if !zns_mint::mint::treasury::decision_reached(tip, note_height) {
-                continue;
-            }
             let resolved = 'lane: {
                 match &request {
                     Request::Claim {

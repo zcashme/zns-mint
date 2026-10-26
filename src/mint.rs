@@ -21,10 +21,12 @@ use zcash_protocol::memo::{Memo, MemoBytes};
 use zcash_protocol::value::Zatoshis;
 use zip32::AccountId;
 
-use crate::wallet::Wallet;
-use crate::zcash::CanonicalBlockSource;
-use crate::TreasuryKeys;
 use sapling::circuit::{OutputParameters, SpendParameters};
+use tokio::sync::mpsc;
+
+use crate::wallet::Wallet;
+use crate::zcash::{CanonicalBlockSource, ChainClient, MempoolChangeKind, MempoolSession};
+use crate::TreasuryKeys;
 
 use presale::AccessCode;
 use treasury::{OtpChallenge, OtpCode};
@@ -607,8 +609,10 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         }
     }
     // The scanner drops note plaintexts, so Treasury memos decode
-    // here, once per block, into arrivals. The block is the record.
-    // Decisions belong to the run loop.
+    // here, once per block, into arrivals; the block remains the
+    // durable record. Decisions belong to the run loop. The mempool
+    // quick path reads the same memos earlier and ephemerally; it
+    // records nothing — this pass stays the only intake.
     let arrivals = treasury_memos
         .into_iter()
         .map(|(txid, _action_index, paid, memo)| (txid, MintInbound::decode(network, &memo), paid))
@@ -714,6 +718,17 @@ pub async fn relay<P: Parameters + Send + 'static>(
             "controller challenge rejected — deferred"
         );
         false
+    }
+}
+
+/// Forwards Zebra's mempool changes to the run loop, which owns and updates
+/// the OTP queue. The original change kind and txid stay paired.
+pub async fn watch_mempool(chain: ChainClient, sender: mpsc::Sender<(MempoolChangeKind, TxId)>) {
+    let mut session = MempoolSession::open(chain).await;
+    loop {
+        if sender.send(session.next().await).await.is_err() {
+            return;
+        }
     }
 }
 
