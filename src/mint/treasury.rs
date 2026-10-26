@@ -4,7 +4,7 @@
 
 mod otp;
 
-pub use otp::{OtpChallenge, OtpCode, OtpQueue, OtpResponse, D_OTP};
+pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
 
 use std::convert::Infallible;
 

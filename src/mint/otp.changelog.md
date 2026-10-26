@@ -1,24 +1,12 @@
 # `mint/otp.rs` design record
 
-## 2026-10-26 — The queue holds the whole OTP (#383)
+## 2026-10-26 — The right code spends the challenge (#383)
 
-- An OTP response belongs to the challenge it answers. Each entry
-  carries, beside its state and attempts, the one right-code response
-  waiting for the tip pass, an `OtpResponse`: its transaction, what it
-  paid and the block that carried it. The run loop's separate list of
-  responses is gone.
-- `respond(memo, txid, paid, height)` attributes a response at block
-  application: a right code on a relayed challenge is held, the first
-  one holding; a wrong code counts an attempt and retires the
-  challenge at six; a response that names no relayed challenge is
-  dead on arrival. `take_responses` empties every slot for the tip
-  pass and leaves the challenges relayed, so a refused response
-  leaves its challenge answerable. `answer` is gone.
-- The surface reads as the three OTP steps: `admit` (request),
-  `unrelayed` and `relayed` (relay), `respond`, `take_responses` and
-  `consume` (response). `state_of` answers where a challenge is;
-  `working` and `awaiting` name whose move each one is. `requested`,
-  `challenge_issued` and the two name iterators are replaced.
+- `answer` removes the challenge it matches and returns it: one code,
+  one use, at the block that carried the response. `consume` is gone.
+  The run loop rules on the returned challenge there and then; a
+  refused response ends the challenge, and a new request starts a
+  new one.
 
 ## 2026-10-22 — A challenge carries its request; one lookup (#368)
 

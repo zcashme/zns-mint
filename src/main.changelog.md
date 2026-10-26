@@ -1,18 +1,18 @@
 # main.changelog.md
 
-## 2026-10-26 — An OTP response is matched when its block is applied (#383)
+## 2026-10-26 — An OTP response is ruled on at the block that carried it (#383)
 
 - The run loop no longer keeps OTP responses. At block application a
-  response goes to `OtpQueue::respond`, which matches it against the
-  challenges relayed before that block. The tip pass takes the held
-  responses from the queue and rules on them as before.
+  response is answered against the challenges relayed before that
+  block, and the transition it authorizes is ruled on there: renewal
+  price, no note pending, the law, then the note is admitted. The tip
+  pass has no response lane.
+- A refused response ends its challenge; the controller requests
+  again. Before, an underpaid renewal left the challenge answerable
+  with the same code.
 - A response confirmed before its challenge was relayed, or kept
   across a reorg that rebuilt the queue, can no longer count as a
   wrong attempt against a challenge created later in the same pass.
-- The response lane admits a note only when `consume` finds the
-  challenge: one an earlier response in the same pass retired, by
-  admitting a transition for the same name, spends nothing.
-- The metric reads whose move each challenge is from the queue.
 - The refusal and voluntary-release log lines name the response's
   transaction.
 
