@@ -329,6 +329,7 @@ async fn main() {
                                 name = %name.as_str(),
                                 "transition already queued; OTP spent"
                             );
+                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
                             continue;
                         }
                         let authorized = match &sent.request {
@@ -353,7 +354,9 @@ async fn main() {
                         }
                         // The mint keeps the price of what it admits; the
                         // rest goes back.
-                        refunds.admit(&fee_rule, txid, &response.ua, name, next_height, rest);
+                        if rest > Zatoshis::ZERO {
+                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, rest);
+                        }
                     }
                     MintInbound::Unrecognized => {
                         tracing::info!(
