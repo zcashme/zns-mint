@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-10-26 — The release window follows the builder's expiry (#390)
+
+- A claim is built before a release when its expiry is at most the
+  release height plus the expiry delta in force there: 40 blocks,
+  120 from NU7. `DEFAULT_TX_EXPIRY_DELTA` is gone upstream.
+
 ## 2026-10-26 — A claim anchor is the first spendable one in pool order
 
 - `spendable_claim_anchor` walks the pool in order and returns the

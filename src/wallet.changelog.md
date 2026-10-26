@@ -1,5 +1,11 @@
 # Wallet changelog
 
+## 2026-10-26 — The stable NU7 wallet traits (#390)
+
+- `get_change_receivers` reads the account's viewing key, and
+  `get_account_metadata` carries it. `set_account_name` is refused,
+  like every other account write.
+
 ## 2026-10-24 — One confirmation policy (#357)
 
 - `CONFIRMATIONS` (`ConfirmationsPolicy::MIN`) is one confirmation for

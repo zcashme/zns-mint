@@ -1,5 +1,11 @@
 # `mint/note.rs` design record
 
+## 2026-10-26 — The UA is encoded with `encode` (#390)
+
+- Stable `zcash_keys` folds `encode_receiver_preserving` into
+  `encode`, which keeps every receiver. rcm, ψ and the memo are
+  byte-identical; the canon vectors pass unchanged.
+
 ## 2026-10-23 — Name Notes pay the node's fee rate (#357)
 
 - `assemble::prepare` takes the node's `FeeRule` for the fee loop and

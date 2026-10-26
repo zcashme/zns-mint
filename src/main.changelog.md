@@ -1,5 +1,10 @@
 # main.changelog.md
 
+## 2026-10-26 — A sent Name Note waits for its own expiry (#390)
+
+- A sent order is marked with the expiry its transaction carries,
+  120 blocks from NU7, instead of the target height plus 40.
+
 ## 2026-10-26 — A payment is priced at the rate it was seen at; a response without a term pays nothing (#381)
 
 - The request lane prices claims and challenge fees at the rate read
