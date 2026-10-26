@@ -927,10 +927,9 @@ fn read_verified_sapling_params(
         )
     });
 
-    let hash = blake2b_simd::Params::new().hash_length(64).hash(&bytes);
-    let hash_hex = hex::encode(hash.as_bytes());
+    let hash_hex = blake2b_simd::blake2b(&bytes).to_hex();
     assert_eq!(
-        hash_hex,
+        hash_hex.as_str(),
         expected_hash,
         "Sapling params hash mismatch at {}: expected {expected_hash}, got {hash_hex}",
         path.display(),
@@ -996,15 +995,11 @@ fn mint_identity(
 /// Hardware builds only: `non-tee` builds have no report to bind.
 #[cfg(not(feature = "non-tee"))]
 fn identity_report_data(treasury_ua: &str, registry_ufvk: &str) -> [u8; 64] {
-    let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
+    let mut hasher = blake2b_simd::State::new();
     hasher.update(treasury_ua.as_bytes());
     hasher.update(b"||");
     hasher.update(registry_ufvk.as_bytes());
-    let hash = hasher.finalize();
-
-    let mut report_data = [0u8; 64];
-    report_data.copy_from_slice(hash.as_bytes());
-    report_data
+    *hasher.finalize().as_array()
 }
 
 #[cfg(not(feature = "non-tee"))]

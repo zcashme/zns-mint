@@ -328,7 +328,7 @@ fn tagged_zns_hash(
     expires_at: &[u8],
     prev_rcm: &[u8; 32],
 ) -> [u8; 64] {
-    let mut h = blake2b_simd::Params::new().hash_length(64).to_state();
+    let mut h = blake2b_simd::State::new();
     let mut absorb = |b: &[u8]| {
         h.update(&(b.len() as u32).to_le_bytes());
         h.update(b);
@@ -340,10 +340,7 @@ fn tagged_zns_hash(
     absorb(ua);
     absorb(expires_at);
     h.update(prev_rcm);
-
-    let mut out = [0u8; 64];
-    out.copy_from_slice(h.finalize().as_bytes());
-    out
+    *h.finalize().as_array()
 }
 
 impl NameNote {
