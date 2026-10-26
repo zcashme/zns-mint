@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-10-26 — The keygen report has to cover the capsule file
+
+- Boot verifies `keys/zns_attestation.bin` for the capsule file on
+  disk. A missing report, or one that does not cover that file,
+  refuses boot.
+
 ## 2026-10-24 — The fee rate or no start (#357)
 
 - Boot reads the node's fee rate after the price fetch and hands it to
