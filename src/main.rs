@@ -283,8 +283,7 @@ async fn main() {
                     MintInbound::Request(request) => {
                         requests.record(txid, request, paid, next_height);
                     }
-                    // Attributed to its challenge now: a response answers
-                    // what was relayed before its block, not after.
+                    // Matched against what was relayed before this block.
                     MintInbound::Response(response) => {
                         challenges.respond(&response, txid, paid, next_height)
                     }
@@ -515,8 +514,7 @@ async fn main() {
             }
         }
 
-        // OTP responses. Each was attributed to its challenge at block
-        // application; the tip pass rules on them in request order.
+        // OTP responses, held by the queue since block application.
         // Requests run first; a refused response leaves its challenge
         // answerable.
         for (
@@ -531,9 +529,6 @@ async fn main() {
             let name = sent.request.name();
             let action = sent.request.action();
             let _ = 'lane: {
-                // Decided in every outcome — a response never waits for
-                // money; the renewal or upgrade fee declines on
-                // shortfall, it does not defer.
                 // The renewal or upgrade fee, binding at first
                 // sight: a shortfall voids the attempt and never
                 // consumes — the challenge stands, retryable with
@@ -584,10 +579,8 @@ async fn main() {
                     );
                     break 'lane true;
                 };
-                // Spent exactly when the law accepts. A challenge that an
-                // earlier response in this pass retired, by admitting a
-                // transition for the same name, is gone: nothing to spend,
-                // nothing to admit.
+                // Spent exactly when the law accepts; gone if an earlier
+                // response in this pass dropped it.
                 if !challenges.consume(&sent) {
                     break 'lane true;
                 }
