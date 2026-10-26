@@ -11,7 +11,7 @@ use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
-use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
+use zcash_primitives::transaction::builder::BLOSSOM_DEFAULT_TX_EXPIRY_DELTA as DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::consensus::Parameters;
 

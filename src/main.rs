@@ -12,7 +12,7 @@
 
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
+use zcash_primitives::transaction::builder::BLOSSOM_DEFAULT_TX_EXPIRY_DELTA as DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 

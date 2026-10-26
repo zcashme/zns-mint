@@ -15,8 +15,8 @@ use std::num::NonZeroU32;
 use shardtree::store::ShardStore;
 use zcash_client_backend::data_api::{
     wallet::{input_selection::LockFilter, ConfirmationsPolicy, TargetHeight},
-    AccountMeta, CoinbaseFilter, InputSource, MaxSpendMode, NoteFilter, PoolMeta, ReceivedNotes,
-    TargetValue,
+    AccountMeta, ChangeReceivers, CoinbaseFilter, InputSource, MaxSpendMode, NoteFilter, PoolMeta,
+    ReceivedNotes, TargetValue,
 };
 use zcash_client_backend::fees::StandardFeeRule;
 use zcash_client_backend::wallet::{
@@ -736,6 +736,19 @@ impl<P: Parameters> InputSource for Wallet<P> {
         Ok(ReceivedNotes::new(sapling, Vec::new(), ironwood))
     }
 
+    fn get_change_receivers(
+        &self,
+        account: Self::AccountId,
+    ) -> Result<ChangeReceivers, Self::Error> {
+        let ufvk = self
+            .ufvks
+            .get(&account)
+            .ok_or(WalletError::AccountUnknown(account))?;
+        Ok(ChangeReceivers::from_uivk(
+            &ufvk.to_unified_incoming_viewing_key(),
+        ))
+    }
+
     fn get_account_metadata(
         &self,
         account: Self::AccountId,
@@ -773,7 +786,12 @@ impl<P: Parameters> InputSource for Wallet<P> {
             account_balance,
         );
         // Ordinary Orchard is not a tracked pool of this wallet.
-        Ok(AccountMeta::new(sapling_meta, None, ironwood_meta))
+        Ok(AccountMeta::new(
+            sapling_meta,
+            None,
+            ironwood_meta,
+            self.get_change_receivers(account)?,
+        ))
     }
 
     fn get_unspent_transparent_output(

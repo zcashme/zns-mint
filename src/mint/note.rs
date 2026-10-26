@@ -91,7 +91,7 @@ impl NameNote {
     pub fn rcm<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Scalar {
         let verb = self.action().as_str().as_bytes();
         let name = self.name().as_str().as_bytes();
-        let ua = self.ua().encode_receiver_preserving(params);
+        let ua = self.ua().encode(params);
         let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
         zns_rcm(verb, name, ua.as_bytes(), &expiry, &prev)
@@ -110,7 +110,7 @@ impl NameNote {
     pub fn psi<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Base {
         let verb = self.action().as_str().as_bytes();
         let name = self.name().as_str().as_bytes();
-        let ua = self.ua().encode_receiver_preserving(params);
+        let ua = self.ua().encode(params);
         let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
         zns_psi(verb, name, ua.as_bytes(), &expiry, &prev)
@@ -123,7 +123,7 @@ impl NameNote {
     /// `decode_controller_ua` bounds the address to known receivers, and
     /// the time crate bounds the expiry.
     pub fn encode<P: Parameters>(&self, params: &P) -> [u8; 512] {
-        let ua_field = self.ua().encode_receiver_preserving(params);
+        let ua_field = self.ua().encode(params);
         let verb = self.action().as_str();
         let hex_rcm = hex::encode(self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]));
         let expires_field = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
@@ -749,7 +749,7 @@ impl NameNoteQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
+    use zcash_primitives::transaction::builder::BLOSSOM_DEFAULT_TX_EXPIRY_DELTA;
     use zcash_protocol::consensus::MAIN_NETWORK;
 
     /// A real mainnet UA with every known receiver kind — Orchard,
@@ -1094,7 +1094,7 @@ mod tests {
             &[first_anchor],
             height(100),
             mtp,
-            height(100) + DEFAULT_TX_EXPIRY_DELTA,
+            height(100) + BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         let release = NameNote::Release {
@@ -1126,7 +1126,7 @@ mod tests {
             &[second_anchor],
             height(130),
             mtp,
-            height(130) + DEFAULT_TX_EXPIRY_DELTA,
+            height(130) + BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         (registry, release, reclaim)
@@ -1191,7 +1191,7 @@ mod tests {
             &[anchor],
             height(100),
             mtp,
-            height(100) + DEFAULT_TX_EXPIRY_DELTA,
+            height(100) + BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         let mut queue = NameNoteQueue::default();
@@ -1221,7 +1221,7 @@ mod tests {
             &[anchor],
             height(100),
             mtp,
-            height(100) + DEFAULT_TX_EXPIRY_DELTA,
+            height(100) + BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         let mut queue = NameNoteQueue::default();

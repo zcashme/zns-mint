@@ -432,11 +432,11 @@ mod tests {
     fn vault_addresses_match_the_network() {
         for (vault, encoded) in [
             (
-                vault_address(&MainNetwork).to_receiver_preserving_zcash_address(&MainNetwork),
+                vault_address(&MainNetwork).to_zcash_address(&MainNetwork),
                 MAINNET_VAULT_ADDRESS,
             ),
             (
-                vault_address(&TestNetwork).to_receiver_preserving_zcash_address(&TestNetwork),
+                vault_address(&TestNetwork).to_zcash_address(&TestNetwork),
                 TESTNET_VAULT_ADDRESS,
             ),
         ] {

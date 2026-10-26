@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use time::Timestamp;
 use zcash_keys::address::{Address, UnifiedAddress};
-use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
+use zcash_primitives::transaction::builder::BLOSSOM_DEFAULT_TX_EXPIRY_DELTA as DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::{BlockHeight, MainNetwork};
 
 use zns_mint::mint::registry::{Registry, ANCHOR_POOL_SIZE};
@@ -332,8 +332,7 @@ fn snapshot(registry: &Registry, after_event: usize) -> Snapshot {
 }
 
 fn record_snapshot(record: &zns_mint::mint::registry::NameRecord) -> RecordSnapshot {
-    let ua_str =
-        Address::Unified(Box::new(record.ua.clone())).encode_receiver_preserving(&MainNetwork);
+    let ua_str = Address::Unified(Box::new(record.ua.clone())).encode(&MainNetwork);
     let expires_at_secs = match record.expires_at {
         Expiry::Never => None,
         Expiry::At(t) => Some(t.as_seconds()),

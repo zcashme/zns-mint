@@ -2,7 +2,7 @@
 name = "zns-mint"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 publish = false
 
 [features]
@@ -81,29 +81,29 @@ zebra-indexer-proto = "2.5"
 # payments from users. Registry (account 1) is name-notes-only (Orchard). Both
 # accounts derive all enabled pools via `from_seed`; the Registry's Sapling and
 # Transparent components are unused (its address is not published).
-zcash_keys = { version = "=0.17.0-pre.1", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
-zcash_protocol = { version = "=0.11.0-pre.0", default-features = false }
+zcash_keys = { version = "0.17", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
+zcash_protocol = { version = "0.11", default-features = false }
 
 # Address parsing for OTP relay (extracting Orchard receiver from UA string).
 # Already a transitive dep via zcash_keys; listed direct for importability.
-zcash_address = "=0.14.0-pre.1"
+zcash_address = "0.14"
 
 # Transparent key types (Treasury accepts transparent payments from users).
 # The workspace crate is `zcash_transparent`, published as `transparent`.
-transparent = { package = "zcash_transparent", version = "=0.11.0-pre.1", default-features = false }
+transparent = { package = "zcash_transparent", version = "0.11", default-features = false }
 zip32 = "0.3"
 
 # Block parsing
-zcash_primitives = { version = "=0.31.0-pre.1", default-features = false, features = ["unsafe-zns", "non-standard-fees"] }
+zcash_primitives = { version = "0.31", default-features = false, features = ["unsafe-zns", "non-standard-fees"] }
 sapling = { package = "sapling-crypto", version = "0.9", default-features = false, features = ["multicore"] }
 
 # ZIP-321 payment requests for upstream proposal construction
 # (`propose_transfer` consumes a `zip321::TransactionRequest`).
-zip321 = "=0.10.0-pre.1"
+zip321 = "0.10"
 
 # Full-block wallet scanning. `transparent-inputs` enables transparent UTXO
 # detection (Treasury accepts transparent payments from users).
-zcash_client_backend = { version = "=0.25.0-pre.1", default-features = false, features = ["orchard", "transparent-inputs"] }
+zcash_client_backend = { version = "0.25", default-features = false, features = ["orchard", "transparent-inputs"] }
 
 # Orchard with the `unsafe-zns` feature: Name Notes override the standard
 # note commitment so a note commits to a ZNS payload. The fork lives at
@@ -120,14 +120,14 @@ metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 # Also redirect `zcash_primitives` to the ZNS fork so the transaction
 # Builder can compose Name Notes (add_zns_spend / add_zns_output).
 [patch.crates-io]
-orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0-pre.1" }
-zcash_primitives = { git = "https://github.com/zcashme/zns-zcash_primitives.git", tag = "zns-zcash_primitives-v0.31.0-pre.1" }
+orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0" }
+zcash_primitives = { git = "https://github.com/zcashme/zns-zcash_primitives.git", tag = "zns-zcash_primitives-v0.31.0" }
 
 # Upstream ZIP-316 unified test vectors for the key-derivation regression
 # tests (`zcash_address::test_vectors::UNIFIED` is gated behind the crate's
 # `test-dependencies` feature). Dev-only; never part of a release build.
 [dev-dependencies]
-zcash_address = { version = "=0.14.0-pre.1", features = ["test-dependencies"] }
+zcash_address = { version = "0.14", features = ["test-dependencies"] }
 # Upstream wallet conformance corpus. Keep this feature out of release builds;
 # both patched cryptography crates must preserve it when their tags change.
-zcash_client_backend = { version = "=0.25.0-pre.1", default-features = false, features = ["test-dependencies"] }
+zcash_client_backend = { version = "0.25", default-features = false, features = ["test-dependencies"] }

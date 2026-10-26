@@ -239,18 +239,22 @@ dependencies = [
 
 [[package]]
 name = "bit-set"
-version = "0.8.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
+checksum = "56d87354e4229f54a44f7bf2435906a4656dba36026ab6eaca629a2c436a691c"
 dependencies = [
  "bit-vec",
 ]
 
 [[package]]
 name = "bit-vec"
-version = "0.8.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
+checksum = "5727b15fa97d4f4fee0a3b7c3d550ed0269f54329207b86388de918604e31269"
+dependencies = [
+ "borsh",
+ "serde",
+]
 
 [[package]]
 name = "bitfield"
@@ -585,6 +589,12 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+
+[[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
 name = "corez"
@@ -2212,7 +2222,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "orchard"
 version = "0.16.0"
-source = "git+https://github.com/zcashme/orchard.git?tag=zns-orchard-v0.16.0-pre.1#6ffdf4ef8825b15b4e436252b6da4e0182ae5d74"
+source = "git+https://github.com/zcashme/orchard.git?tag=zns-orchard-v0.16.0#6ffdf4ef8825b15b4e436252b6da4e0182ae5d74"
 dependencies = [
  "aes",
  "bitvec",
@@ -2482,17 +2492,17 @@ dependencies = [
 
 [[package]]
 name = "proptest"
-version = "1.6.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14cae93065090804185d3b75f0bf93b8eeda30c7a9b4a33d3bdb3988d6229e50"
+checksum = "b8530004ccb15eae51c7e40009fbe317f341f804db54dc033eec1c50be28cfa0"
 dependencies = [
  "bit-set",
  "bit-vec",
  "bitflags 2.13.2",
- "lazy_static",
+ "chacha20 0.10.2",
+ "core_detect",
  "num-traits",
- "rand 0.8.8",
- "rand_chacha 0.3.1",
+ "rand 0.10.3",
  "rand_xorshift",
  "regex-syntax",
  "rusty-fork",
@@ -2753,11 +2763,11 @@ dependencies = [
 
 [[package]]
 name = "rand_xorshift"
-version = "0.3.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d25bf25ec5ae4a3f1b92f929810509a2f53d7dca2f50b794ff57e3face536c8f"
+checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
 dependencies = [
- "rand_core 0.6.4",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -4753,9 +4763,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_address"
-version = "0.14.0-pre.1"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db56348a60fb82895c37475a4a3a39e9eaf47bc4267c05cad42f83b0771b18c8"
+checksum = "372023d82d978ab3f27b8e9f7f9b56fc61f3c9cc2b72ec2f8e3bbb278497e474"
 dependencies = [
  "bech32",
  "bs58",
@@ -4768,9 +4778,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_client_backend"
-version = "0.25.0-pre.1"
+version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "081a6a497f0016a4de2ef9f45cbca6d271037035f5e7614b2c16363f8c3b4a84"
+checksum = "27228f279facfd6b9dd015cea88538020c30f87c8a4aa59e8ed85808d81febb5"
 dependencies = [
  "ambassador",
  "assert_matches",
@@ -4832,9 +4842,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_keys"
-version = "0.17.0-pre.1"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96e6eaf9ae82ea0e40aadd35df0778f37125fb3405a25e2b1f0d6b45a9884e14"
+checksum = "6e35ad8dafd173b0465e5963b520b241f497d978319faed46547bd81f403fa98"
 dependencies = [
  "bech32",
  "bip32",
@@ -4875,8 +4885,8 @@ dependencies = [
 
 [[package]]
 name = "zcash_primitives"
-version = "0.31.0-pre.1"
-source = "git+https://github.com/zcashme/zns-zcash_primitives.git?tag=zns-zcash_primitives-v0.31.0-pre.1#62316cef72f3a2e395f7aa8a936385c8c2467f78"
+version = "0.31.0"
+source = "git+https://github.com/zcashme/zns-zcash_primitives.git?tag=zns-zcash_primitives-v0.31.0#f436d1b426a61f9c9e02e2b12df92f16cb86592b"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -4904,9 +4914,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_proofs"
-version = "0.31.0-pre.1"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cc30f2c394b8558269a13f5c9b4188eae7b9b5b659afdc60d1c6fcd861d2311"
+checksum = "f2ec0c92cb3bca94f8d875260b09eaad8f97eb8ebe7b5ca099ad0ae10eb19d84"
 dependencies = [
  "bellman",
  "blake2b_simd",
@@ -4925,9 +4935,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_protocol"
-version = "0.11.0-pre.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98aeb25d9f741670fd63f9dbf76bca87d87c4fd32e1a7469bc4c43c4d0af09f7"
+checksum = "266da226b6be42545b9fc299f1def9f5e525764845b8afa874f167155de943ba"
 dependencies = [
  "corez",
  "document-features",
@@ -4967,9 +4977,9 @@ dependencies = [
 
 [[package]]
 name = "zcash_transparent"
-version = "0.11.0-pre.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3b7dfde65266233ad2babba2f115d41a786e0270cac1a4644e26b9992dcf375"
+checksum = "eb804d0179500e9543502dd6dfa178826617107897e6fe171241e5b767b7a0dd"
 dependencies = [
  "bip32",
  "bs58",
@@ -4983,7 +4993,6 @@ dependencies = [
  "secp256k1",
  "sha2 0.10.9",
  "subtle",
- "zcash_address",
  "zcash_encoding",
  "zcash_protocol",
  "zcash_script",
@@ -5113,9 +5122,9 @@ dependencies = [
 
 [[package]]
 name = "zip321"
-version = "0.10.0-pre.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60e43f36a390a70ff428ee900f50c146fb43277028502717fbbb44918e575488"
+checksum = "e6960586c9e1a91c734e9175913e22b88f2df11617f1decdefb15dd971ffd383"
 dependencies = [
  "base64 0.22.1",
  "nom",

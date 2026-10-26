@@ -494,6 +494,11 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         Err(WalletError::FixedAccountsOnly)
     }
 
+    fn set_account_name(&mut self, _account: AccountId, _name: &str) -> Result<(), WalletError> {
+        // Accounts 0 and 1 are named by their role, not by a stored name.
+        Err(WalletError::FixedAccountsOnly)
+    }
+
     fn get_next_available_address(
         &mut self,
         _account: AccountId,
