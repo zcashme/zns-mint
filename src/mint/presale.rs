@@ -363,23 +363,6 @@ impl AccessCodeDerivationKey {
         Self(purpose_key(seed))
     }
 
-    /// The purpose key of a shared secret (or a test-vector key):
-    /// `HMAC-SHA256(key, "access-code-v1")`.
-    pub fn from_private_key(private_key: &[u8; 32]) -> Self {
-        let mut mac =
-            HmacSha256::new_from_slice(private_key).expect("HMAC-SHA256 accepts any key length");
-        mac.update(b"access-code-v1");
-        let mut out = mac.finalize().into_bytes();
-        let mut key = Zeroizing::new([0u8; 32]);
-        key.copy_from_slice(&out);
-        out.zeroize();
-        Self(key)
-    }
-
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
     /// The six-digit code `name` must present:
     /// `u32_be(HMAC-SHA256(key, name)[0..4]) mod 1_000_000`.
     pub fn derive(&self, name: &Name) -> AccessCode {
@@ -404,6 +387,7 @@ impl AccessCodeDerivationKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zns_canon::access_code::purpose;
 
     /// Spec test vector private key.
     fn vector_private_key() -> [u8; 32] {
@@ -419,7 +403,7 @@ mod tests {
     }
 
     fn gate() -> AccessCodeDerivationKey {
-        AccessCodeDerivationKey::from_private_key(&vector_private_key())
+        AccessCodeDerivationKey(purpose(&vector_private_key()))
     }
 
     fn alice() -> Name {
@@ -435,9 +419,9 @@ mod tests {
 
     #[test]
     fn reference_vector_alice_bob() {
-        let gate = AccessCodeDerivationKey::from_private_key(&vector_private_key());
+        let gate = gate();
         assert_eq!(
-            hex::encode(gate.as_bytes()),
+            hex::encode(*gate.0),
             "5e2db6040cd32d2486675a3b3d60b9d4d96e9c8d4a5f862e0dfd7bd6a3f57b91"
         );
         assert_eq!(gate.derive(&alice()).digits(), *b"352582");
@@ -469,7 +453,7 @@ mod tests {
     fn issuer_known_answer_vector() {
         let key = AccessCodeDerivationKey::from_seed(&[0x22u8; 32]);
         assert_eq!(
-            hex::encode(key.as_bytes()),
+            hex::encode(*key.0),
             "bcd2c0e1ffa22fdd3756b5ec81a4b7c2d252c14251a44552aea3324d5d41d3f0"
         );
         assert_eq!(key.derive(&alice()).digits(), *b"549703");
