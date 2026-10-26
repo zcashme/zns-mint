@@ -10,6 +10,10 @@
 - A refused response ends its challenge; the controller requests
   again. Before, an underpaid renewal left the challenge answerable
   with the same code.
+- The update law and the renewal quote are read at the response's
+  block: its median time, and the oracle's rate before the pass's
+  round. One block per pass, these are the tip's values; across a
+  catch-up they are the block's own.
 - A response confirmed before its challenge was relayed, or kept
   across a reorg that rebuilt the queue, can no longer count as a
   wrong attempt against a challenge created later in the same pass.
