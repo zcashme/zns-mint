@@ -19,9 +19,9 @@ use zcash_protocol::value::Zatoshis;
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::presale;
-use zns_mint::mint::pricing::fetch_round;
+use zns_mint::mint::pricing::{fetch_round, Oracle};
 use zns_mint::mint::treasury;
-use zns_mint::mint::treasury::{access_code_penalty, OtpChallenge, OtpQueue};
+use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
 use zns_mint::mint::{relay, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
@@ -311,28 +311,28 @@ async fn main() {
                             continue;
                         };
                         let name = sent.request.name();
-                        if let Request::Update {
-                            term: Some(term), ..
-                        } = &sent.request
-                        {
-                            if !oracle.quote(name, *term).is_some_and(|price| paid >= price) {
-                                refunds.admit(
-                                    &fee_rule,
-                                    txid,
-                                    &response.ua,
-                                    name,
-                                    next_height,
-                                    paid,
-                                );
-                                continue;
-                            }
-                        }
+                        // A term keeps the whole payment once it covers
+                        // the price; without a term, all of it goes back.
+                        let rest = match &sent.request {
+                            Request::Update {
+                                term: Some(term), ..
+                            } => oracle
+                                .quote(name, *term)
+                                .filter(|price| paid >= *price)
+                                .map(|_| Zatoshis::ZERO),
+                            _ => Some(paid),
+                        };
+                        let Some(rest) = rest else {
+                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
+                            continue;
+                        };
                         if name_notes.note_pending(name) {
                             tracing::debug!(
                                 %txid,
                                 name = %name.as_str(),
                                 "transition already queued; OTP spent"
                             );
+                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
                             continue;
                         }
                         let authorized = match &sent.request {
@@ -354,6 +354,9 @@ async fn main() {
                         }
                         if name_notes.admit(next_height, note) {
                             challenges.drop_challenges(name);
+                        }
+                        if rest > Zatoshis::ZERO {
+                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, rest);
                         }
                     }
                     MintInbound::Unrecognized => {
@@ -385,6 +388,9 @@ async fn main() {
         // The tip check below covers the price round and the pre-sale
         // read alike. Only the read's unspent timeout can delay the pass.
         let (round, ()) = tokio::join!(fetch_round(), presale_read.install(&mut protected_names));
+        // The rate when the requests below were first seen: a day this
+        // round publishes does not reprice them.
+        let rate = oracle.current();
         oracle.accumulate(round, today, mtp_now);
         // Transient or unusable tip data → skip this rule pass and wait
         // for another notification; a chain race re-converges.
@@ -479,7 +485,7 @@ async fn main() {
                         // judged.
                         // A quote that does not fit is dead. A new payment
                         // settles a new evaluation.
-                        let Some(price) = oracle.quote(name, *term) else {
+                        let Some(price) = Oracle::quote_at(rate, name, *term) else {
                             break 'lane true;
                         };
                         if paid < price {
@@ -528,10 +534,10 @@ async fn main() {
                         {
                             break 'lane true;
                         }
-                        if paid < oracle.challenge_fee() {
+                        if paid < Oracle::challenge_fee_at(rate) {
                             break 'lane true;
                         }
-                        challenges.admit(OtpChallenge::issue(request.clone(), mtp_now));
+                        challenges.admit(request.clone(), mtp_now);
                         true
                     }
                 }
