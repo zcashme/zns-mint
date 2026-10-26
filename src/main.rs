@@ -355,6 +355,10 @@ async fn main() {
                         if name_notes.admit(next_height, note) {
                             challenges.drop_challenges(name);
                         }
+                        // A response that buys no term pays nothing.
+                        if !matches!(sent.request, Request::Update { term: Some(_), .. }) {
+                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
+                        }
                     }
                     MintInbound::Unrecognized => {
                         tracing::info!(
