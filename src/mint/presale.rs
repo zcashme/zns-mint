@@ -21,7 +21,7 @@ use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, Timestamp};
 use tokio::task::JoinHandle;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::mint::Name;
 use zns_canon::access_code::purpose_key;
@@ -67,8 +67,7 @@ fn presale_rest_url() -> String {
 }
 
 /// A six-digit protected-name access code (same wire shape as an OTP).
-#[derive(Clone, PartialEq, Eq, Zeroize)]
-#[zeroize(drop)]
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct AccessCode(u32);
 
 impl std::fmt::Debug for AccessCode {
