@@ -359,13 +359,9 @@ async fn require_anchor_on_chain(
 fn ceremony_anchor(text: &str) -> CeremonyAnchor {
     #[derive(serde::Deserialize)]
     struct RawAnchor {
-        #[serde(default)]
         anchor_txid: Option<String>,
-        #[serde(default)]
         birthday: Option<u32>,
-        #[serde(default)]
         network: Option<String>,
-        #[serde(default)]
         seed_fingerprint: Option<String>,
     }
     let raw: RawAnchor = toml::from_str(text)
@@ -544,7 +540,7 @@ impl Boot<Network> {
         );
 
         #[cfg(not(feature = "regtest"))]
-        crate::zcash::adopt::require_pinned(&source).await;
+        zcash::adopt::require_pinned(&source).await;
 
         // 3d. The mint's birthday: a throwaway window ending at the
         // birthday block, whose median is the birthday block's MTP —
@@ -699,7 +695,7 @@ impl Boot<Network> {
                     tracing::warn!(%error, "boot: pre-sale table unavailable; retrying");
                 }
             }
-            tokio::time::sleep(crate::zcash::RETRY_PAUSE).await;
+            tokio::time::sleep(zcash::RETRY_PAUSE).await;
         };
 
         // The challenge memory: empty by construction, filled by the run
@@ -860,7 +856,7 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 /// by the SEV-SNP attestation, not by runtime RPC checks.
 async fn origin_checkpoint(
     birthday: BlockHeight,
-    treestate: impl std::ops::AsyncFnOnce(BlockHeight) -> Result<ChainState, zcash::TransportError>,
+    treestate: impl AsyncFnOnce(BlockHeight) -> Result<ChainState, zcash::TransportError>,
 ) -> ChainState {
     #[cfg(not(feature = "regtest"))]
     let checkpoint_height = birthday - 101;
@@ -931,10 +927,9 @@ fn read_verified_sapling_params(
         )
     });
 
-    let hash = blake2b_simd::Params::new().hash_length(64).hash(&bytes);
-    let hash_hex = hex::encode(hash.as_bytes());
+    let hash_hex = blake2b_simd::blake2b(&bytes).to_hex();
     assert_eq!(
-        hash_hex,
+        hash_hex.as_str(),
         expected_hash,
         "Sapling params hash mismatch at {}: expected {expected_hash}, got {hash_hex}",
         path.display(),
@@ -1000,15 +995,11 @@ fn mint_identity(
 /// Hardware builds only: `non-tee` builds have no report to bind.
 #[cfg(not(feature = "non-tee"))]
 fn identity_report_data(treasury_ua: &str, registry_ufvk: &str) -> [u8; 64] {
-    let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
+    let mut hasher = blake2b_simd::State::new();
     hasher.update(treasury_ua.as_bytes());
     hasher.update(b"||");
     hasher.update(registry_ufvk.as_bytes());
-    let hash = hasher.finalize();
-
-    let mut report_data = [0u8; 64];
-    report_data.copy_from_slice(hash.as_bytes());
-    report_data
+    *hasher.finalize().as_array()
 }
 
 #[cfg(not(feature = "non-tee"))]
@@ -1949,7 +1940,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "FATAL: SEED FINGERPRINT MISMATCH")]
     fn verify_fingerprint_mismatch_is_redacted() {
-        use secrecy::Secret;
         let seed = Secret::new([0xAB; 32]);
         let wrong_fp = SeedFingerprint::from_seed(&[0xCD; 32]).unwrap().to_string();
         verify_fingerprint(&seed, &wrong_fp);

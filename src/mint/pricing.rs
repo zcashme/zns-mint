@@ -3,10 +3,9 @@
 
 use std::time::Duration;
 
-use http::Uri;
 use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::Bytes;
-use hyper::Request;
+use hyper::{Request, Uri};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
@@ -431,6 +430,16 @@ mod tests {
 
     fn quoted(oracle: &Oracle, name: &Name, term: Term) -> u64 {
         oracle.quote(name, term).expect("quote fits").into_u64()
+    }
+
+    /// Most venues quote a string; Bitfinex quotes a number.
+    #[test]
+    fn a_price_reads_from_a_string_or_a_number() {
+        let price = Decimal::new(4153, 2);
+        let string = serde_json::json!("41.53");
+        let number = serde_json::json!(41.53);
+        assert_eq!(serde_json::from_value::<Decimal>(string).unwrap(), price);
+        assert_eq!(serde_json::from_value::<Decimal>(number).unwrap(), price);
     }
 
     #[test]

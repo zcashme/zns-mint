@@ -21,9 +21,9 @@ pub use zebra_indexer_proto::MempoolChangeKind;
 
 use std::{any::type_name, fmt, time::Duration};
 
-use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::Request;
+use hyper::body::Bytes;
+use hyper::{Request, StatusCode};
 use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
 use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
@@ -75,8 +75,8 @@ impl JsonRpc {
         params: T,
     ) -> Result<Option<R>, TransportError> {
         let req = RpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: method.to_string(),
+            jsonrpc: "2.0",
+            method,
             params,
             id: 0,
         };
@@ -106,7 +106,7 @@ impl JsonRpc {
     /// consensus and covered by one deadline, headers through the last
     /// byte. A stalled body times out; an oversized one is bad node
     /// data, not transport.
-    async fn round_trip(&self, body: String) -> Result<(http::StatusCode, Bytes), TransportError> {
+    async fn round_trip(&self, body: String) -> Result<(StatusCode, Bytes), TransportError> {
         // The request is entirely static, so building it cannot fail.
         let request = Request::builder()
             .method("POST")
@@ -134,12 +134,6 @@ impl JsonRpc {
         .map_err(|_| TransportError::Timeout)??;
 
         Ok((status, body))
-    }
-}
-
-impl Default for JsonRpc {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -175,24 +169,22 @@ impl CanonicalBlockSource {
 // Envelopes and the error policy
 // ============================================================================
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-struct RpcRequest<T> {
-    jsonrpc: String,
-    method: String,
+#[derive(Serialize)]
+struct RpcRequest<'a, T> {
+    jsonrpc: &'static str,
+    method: &'a str,
     params: T,
     id: i32,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Deserialize)]
 struct RpcResponse<T> {
-    id: i64,
-    jsonrpc: Option<String>,
     result: Option<T>,
     error: Option<RpcError>,
 }
 
 /// A JSON-RPC error object, as answered by the node.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Error)]
+#[derive(Deserialize, Debug, Error)]
 #[error("RPC error {code}: {message}")]
 pub struct RpcError {
     code: i64,

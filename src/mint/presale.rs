@@ -6,12 +6,11 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use hmac::{Hmac, Mac};
-use http::header::CONTENT_RANGE;
-use http::Uri;
+use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::Bytes;
-use hyper::Request;
+use hyper::header::CONTENT_RANGE;
+use hyper::{Request, Uri};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::{TokioExecutor, TokioTimer};
@@ -22,7 +21,7 @@ use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, Timestamp};
 use tokio::task::JoinHandle;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::mint::Name;
 use zns_canon::access_code::purpose_key;
@@ -68,8 +67,7 @@ fn presale_rest_url() -> String {
 }
 
 /// A six-digit protected-name access code (same wire shape as an OTP).
-#[derive(Clone, PartialEq, Eq, Zeroize)]
-#[zeroize(drop)]
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct AccessCode(u32);
 
 impl std::fmt::Debug for AccessCode {
@@ -363,23 +361,6 @@ impl AccessCodeDerivationKey {
         Self(purpose_key(seed))
     }
 
-    /// The purpose key of a shared secret (or a test-vector key):
-    /// `HMAC-SHA256(key, "access-code-v1")`.
-    pub fn from_private_key(private_key: &[u8; 32]) -> Self {
-        let mut mac =
-            HmacSha256::new_from_slice(private_key).expect("HMAC-SHA256 accepts any key length");
-        mac.update(b"access-code-v1");
-        let mut out = mac.finalize().into_bytes();
-        let mut key = Zeroizing::new([0u8; 32]);
-        key.copy_from_slice(&out);
-        out.zeroize();
-        Self(key)
-    }
-
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
     /// The six-digit code `name` must present:
     /// `u32_be(HMAC-SHA256(key, name)[0..4]) mod 1_000_000`.
     pub fn derive(&self, name: &Name) -> AccessCode {
@@ -404,6 +385,7 @@ impl AccessCodeDerivationKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zns_canon::access_code::purpose;
 
     /// Spec test vector private key.
     fn vector_private_key() -> [u8; 32] {
@@ -419,7 +401,7 @@ mod tests {
     }
 
     fn gate() -> AccessCodeDerivationKey {
-        AccessCodeDerivationKey::from_private_key(&vector_private_key())
+        AccessCodeDerivationKey(purpose(&vector_private_key()))
     }
 
     fn alice() -> Name {
@@ -435,9 +417,9 @@ mod tests {
 
     #[test]
     fn reference_vector_alice_bob() {
-        let gate = AccessCodeDerivationKey::from_private_key(&vector_private_key());
+        let gate = gate();
         assert_eq!(
-            hex::encode(gate.as_bytes()),
+            hex::encode(*gate.0),
             "5e2db6040cd32d2486675a3b3d60b9d4d96e9c8d4a5f862e0dfd7bd6a3f57b91"
         );
         assert_eq!(gate.derive(&alice()).digits(), *b"352582");
@@ -469,7 +451,7 @@ mod tests {
     fn issuer_known_answer_vector() {
         let key = AccessCodeDerivationKey::from_seed(&[0x22u8; 32]);
         assert_eq!(
-            hex::encode(key.as_bytes()),
+            hex::encode(*key.0),
             "bcd2c0e1ffa22fdd3756b5ec81a4b7c2d252c14251a44552aea3324d5d41d3f0"
         );
         assert_eq!(key.derive(&alice()).digits(), *b"549703");
@@ -753,7 +735,7 @@ mod tests {
         }));
         started_rx.await.unwrap();
         drop(pending);
-        let finished = tokio::time::timeout(std::time::Duration::from_secs(1), finished_rx).await;
+        let finished = tokio::time::timeout(Duration::from_secs(1), finished_rx).await;
         assert!(matches!(finished, Ok(Err(_))));
     }
 }

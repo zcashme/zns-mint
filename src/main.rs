@@ -12,7 +12,6 @@
 
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 
@@ -172,7 +171,7 @@ async fn main() {
                 let source = source.clone();
                 async move {
                     let (_, _, timestamp) = source.get_block_header(height).await?;
-                    Ok::<_, zns_mint::zcash::TransportError>(
+                    Ok::<_, TransportError>(
                         u32::try_from(timestamp.as_seconds())
                             .expect("Zcash header timestamps fit u32"),
                     )
@@ -701,7 +700,7 @@ async fn main() {
 
             if source.submit(&transaction, "NameNote").await {
                 wallet.record_sent(&transaction, target_height, fee);
-                name_notes.mark_sent(note.name(), target_height + DEFAULT_TX_EXPIRY_DELTA);
+                name_notes.mark_sent(note.name(), transaction.expiry_height());
                 tracing::info!(
                     txid = %transaction.txid(),
                     name = %note.name().as_str(),

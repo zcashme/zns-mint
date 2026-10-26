@@ -93,11 +93,8 @@ pub(crate) type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
 pub(crate) fn tip_height_hash(
     tip: &BlockHashAndHeight,
 ) -> Result<(BlockHeight, BlockHash), TransportError> {
-    let bytes = tip
-        .hash_display_order()
-        .ok_or(TransportError::BadNodeData("tip hash length"))?;
     let hash =
-        block_hash_from_display(bytes).ok_or(TransportError::BadNodeData("tip hash length"))?;
+        block_hash_from_display(&tip.hash).ok_or(TransportError::BadNodeData("tip hash length"))?;
     Ok((BlockHeight::from_u32(tip.height), hash))
 }
 
@@ -364,7 +361,7 @@ impl JsonRpc {
     }
 }
 
-impl super::CanonicalBlockSource {
+impl CanonicalBlockSource {
     /// Returns the exact `(height, hash)` pair for the current best-chain
     /// tip, parsed from one `getblockchaininfo` response so observations
     /// from different tips cannot be combined.
@@ -439,10 +436,7 @@ impl super::CanonicalBlockSource {
     }
 
     /// The raw header at `height` (see [`JsonRpc::header_at`]).
-    pub async fn header_at(
-        &self,
-        height: BlockHeight,
-    ) -> Result<zcash_primitives::block::BlockHeader, TransportError> {
+    pub async fn header_at(&self, height: BlockHeight) -> Result<BlockHeader, TransportError> {
         self.rpc.header_at(height).await
     }
 }

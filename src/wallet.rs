@@ -368,7 +368,6 @@ pub(crate) mod testing {
     use incrementalmerkletree::{Hashable, Position};
     use secrecy::{ExposeSecret, SecretVec};
     use shardtree::store::ShardStore;
-    use std::collections::BTreeSet;
     use zcash_client_backend::data_api::anchor_retention::AnchorRetentionInterval;
     use zcash_client_backend::{
         data_api::{
@@ -389,7 +388,7 @@ pub(crate) mod testing {
     impl DataStoreFactory for Factory {
         type Error = WalletError;
         type AccountId = AccountId;
-        type Account = super::read::FixedAccount;
+        type Account = read::FixedAccount;
         type DsError = WalletError;
         type DataStore = Wallet<LocalNetwork>;
 
@@ -441,7 +440,7 @@ pub(crate) mod testing {
         // `TestBuilder::build` may already have written the birthday
         // frontier and shard roots through the public tree API; replacing
         // the wallet would discard them.
-        let frontier_loaded = super::from_infallible(
+        let frontier_loaded = from_infallible(
             wallet
                 .sapling_tree
                 .store()

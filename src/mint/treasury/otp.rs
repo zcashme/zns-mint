@@ -3,7 +3,7 @@
 use rand::RngExt;
 use subtle::ConstantTimeEq;
 use time::{Duration, Timestamp};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::mint::{Name, OtpMemo, Request};
 
@@ -27,8 +27,7 @@ impl Attempts {
 }
 
 /// A six-digit one-time passcode.
-#[derive(Clone, PartialEq, Eq, Zeroize)]
-#[zeroize(drop)]
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct OtpCode(u32);
 
 impl std::fmt::Debug for OtpCode {
