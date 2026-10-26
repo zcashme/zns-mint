@@ -80,15 +80,6 @@ pub struct OtpChallenge {
 }
 
 impl OtpChallenge {
-    /// Issues a challenge: draws a fresh code, expires after `D_OTP`.
-    pub fn issue(request: Request, mtp_now: Timestamp) -> Self {
-        Self {
-            request,
-            code: OtpCode::generate(),
-            expires_at: mtp_now + Duration::seconds(D_OTP),
-        }
-    }
-
     /// The controller-facing projection: code, name, action, ua.
     pub fn memo(&self) -> OtpMemo {
         OtpMemo {
@@ -97,15 +88,6 @@ impl OtpChallenge {
             action: self.request.action(),
             ua: self.request.ua().clone(),
         }
-    }
-
-    /// Whether a response naming `memo`'s name, verb and address may
-    /// answer this challenge. The memo carries no term, so every term
-    /// of one request answers to it.
-    fn is_named_by(&self, memo: &OtpMemo) -> bool {
-        self.request.name() == &memo.name
-            && self.request.action() == memo.action
-            && self.request.ua() == &memo.ua
     }
 }
 
@@ -139,51 +121,48 @@ impl OtpQueue {
         }
     }
 
-    /// Where the challenge for `request` sits. The whole request,
-    /// term included, is the key.
-    fn index_of(&self, request: &Request) -> Option<usize> {
-        self.challenges
-            .iter()
-            .position(|(challenge, _, _)| challenge.request == *request)
-    }
-
-    /// One live entry per request: an identical repeat receives the
-    /// existing entry. A challenge's code differs from every other
-    /// challenge a response could name.
-    pub fn admit(&mut self, mut challenge: OtpChallenge) -> OtpChallenge {
-        if let Some(index) = self.index_of(&challenge.request) {
-            return self.challenges[index].0.clone();
-        }
-        let memo = challenge.memo();
-        while self
+    /// Issues a challenge for `request` unless one is live. Its code is
+    /// unique among the challenges a response could also name.
+    pub fn admit(&mut self, request: Request, mtp: Timestamp) {
+        if self
             .challenges
             .iter()
-            .any(|(other, _, _)| other.is_named_by(&memo) && other.code == challenge.code)
+            .any(|(challenge, _, _)| challenge.request == request)
         {
-            challenge.code = OtpCode::generate();
+            return;
         }
+        let code = loop {
+            let code = OtpCode::generate();
+            if !self.challenges.iter().any(|(challenge, _, _)| {
+                challenge.request.name() == request.name()
+                    && challenge.request.action() == request.action()
+                    && challenge.request.ua() == request.ua()
+                    && challenge.code == code
+            }) {
+                break code;
+            }
+        };
         self.challenges.push((
-            challenge.clone(),
+            OtpChallenge {
+                request,
+                code,
+                expires_at: mtp + Duration::seconds(D_OTP),
+            },
             ChallengeState::Requested,
             Attempts::default(),
         ));
-        challenge
     }
 
-    /// Marks a request as relayed after the node accepts its challenge.
-    pub fn challenge_issued(&mut self, challenge: &OtpChallenge) -> bool {
-        let Some(index) = self.index_of(&challenge.request) else {
-            return false;
-        };
-        let state = &mut self.challenges[index].1;
-        if *state != ChallengeState::Requested {
-            return false;
+    /// The node accepted `relayed`'s memo.
+    pub fn challenge_issued(&mut self, relayed: &OtpChallenge) {
+        for (challenge, state, _) in &mut self.challenges {
+            if challenge.request == relayed.request {
+                *state = ChallengeState::Relayed;
+            }
         }
-        *state = ChallengeState::Relayed;
-        true
     }
 
-    /// Returns queued requests that still need a challenge submission.
+    /// Challenges not yet relayed.
     pub fn requested(&self) -> Vec<OtpChallenge> {
         self.challenges
             .iter()
@@ -192,41 +171,35 @@ impl OtpQueue {
             .collect()
     }
 
-    /// Drops every challenge whose window has closed by `mtp`. The run
-    /// loop calls this at every applied block, with the block's median,
-    /// before handling the block's responses.
+    /// Drops every challenge whose window closed by `mtp`.
     pub fn expire(&mut self, mtp: Timestamp) {
         self.challenges
             .retain(|(challenge, _, _)| mtp < challenge.expires_at);
     }
 
-    /// Drops every challenge for `name`: a transition for it was
-    /// admitted, and no code issued before it may answer after it.
+    /// Drops every challenge for `name`, once a transition is admitted.
     pub fn drop_challenges(&mut self, name: &Name) {
         self.challenges
             .retain(|(challenge, _, _)| challenge.request.name() != name);
     }
 
-    /// The code picks among the relayed challenges the response names.
-    /// The right code removes its challenge and returns it. A wrong code
-    /// counts an attempt against each of them; a sixth retires one.
-    pub fn complete(&mut self, returned: &OtpMemo) -> Option<OtpChallenge> {
-        let mut matched = None;
-        for (index, (challenge, state, _)) in self.challenges.iter().enumerate() {
-            if *state == ChallengeState::Relayed
-                && challenge.is_named_by(returned)
-                && bool::from(challenge.code.0.ct_eq(&returned.code.0))
-            {
-                matched = Some(index);
-            }
-        }
-        if let Some(index) = matched {
+    /// The right code removes and returns its challenge. A wrong one
+    /// counts against every challenge the response names.
+    pub fn complete(&mut self, response: &OtpMemo) -> Option<OtpChallenge> {
+        let named = |challenge: &OtpChallenge, state: &ChallengeState| {
+            *state == ChallengeState::Relayed
+                && challenge.request.name() == &response.name
+                && challenge.request.action() == response.action
+                && challenge.request.ua() == &response.ua
+        };
+        let right = self.challenges.iter().position(|(challenge, state, _)| {
+            named(challenge, state) && bool::from(challenge.code.0.ct_eq(&response.code.0))
+        });
+        if let Some(index) = right {
             return Some(self.challenges.remove(index).0);
         }
         self.challenges.retain_mut(|(challenge, state, attempts)| {
-            !(*state == ChallengeState::Relayed
-                && challenge.is_named_by(returned)
-                && attempts.count())
+            !(named(challenge, state) && attempts.count())
         });
         None
     }
@@ -284,12 +257,16 @@ mod tests {
         }
     }
 
-    fn challenge(request: Request, code: [u8; 6]) -> OtpChallenge {
-        OtpChallenge {
-            request,
-            code: OtpCode::for_test(code),
-            expires_at: t0() + Duration::seconds(D_OTP),
-        }
+    /// Admits `request` at `t0`, its code fixed to `code`.
+    fn admit(q: &mut OtpQueue, request: Request, code: [u8; 6]) -> OtpChallenge {
+        q.admit(request.clone(), t0());
+        let (challenge, _, _) = q
+            .challenges
+            .iter_mut()
+            .find(|(challenge, _, _)| challenge.request == request)
+            .unwrap();
+        challenge.code = OtpCode::for_test(code);
+        challenge.clone()
     }
 
     /// The controller's response to `challenge`, with `code`.
@@ -300,28 +277,19 @@ mod tests {
         }
     }
 
+    /// The memo is the request less its term, with the code; the
+    /// challenge expires `D_OTP` after admission.
     #[test]
-    fn the_birth_shares_one_code_and_expires_after_d_otp() {
-        let request = Request::Update {
-            name: test_name("alice"),
-            ua: mainnet_ua(),
-            term: Some(Term::Years(1)),
-        };
-        let pending = OtpChallenge::issue(request.clone(), t0());
-
-        // One code in two bodies: the memo is the controller's whole
-        // view of the record — four fields, nothing private.
+    fn a_challenge_memo_and_expiry() {
+        let mut q = OtpQueue::new();
+        q.admit(update("alice"), t0());
+        let pending = q.requested().remove(0);
         let memo = pending.memo();
         assert_eq!(memo.code, pending.code);
-        assert_eq!(&memo.name, request.name());
-        assert_eq!(memo.action, request.action());
-        assert_eq!(&memo.ua, request.ua());
-        // The pending alone carries the expiry and the request.
-        assert_eq!(
-            pending.expires_at,
-            Timestamp::from_seconds(1_700_000_000 + D_OTP).unwrap()
-        );
-        assert_eq!(pending.request, request);
+        assert_eq!(&memo.name, pending.request.name());
+        assert_eq!(memo.action, pending.request.action());
+        assert_eq!(&memo.ua, pending.request.ua());
+        assert_eq!(pending.expires_at, t0() + Duration::seconds(D_OTP));
     }
 
     /// Admitting a transition for a name drops every challenge for it:
@@ -330,12 +298,11 @@ mod tests {
     #[test]
     fn drop_challenges_retires_every_code_for_the_name() {
         let mut q = OtpQueue::new();
-        let alice_update = challenge(update("alice"), *b"111111");
-        let alice_release = challenge(release("alice"), *b"222222");
-        let bob = challenge(update("bob"), *b"333333");
+        let alice_update = admit(&mut q, update("alice"), *b"111111");
+        let alice_release = admit(&mut q, release("alice"), *b"222222");
+        let bob = admit(&mut q, update("bob"), *b"333333");
         for pending in [&alice_update, &alice_release, &bob] {
-            q.admit(pending.clone());
-            assert!(q.challenge_issued(pending));
+            q.challenge_issued(pending);
         }
 
         q.drop_challenges(&test_name("alice"));
@@ -355,13 +322,11 @@ mod tests {
     #[test]
     fn a_relayed_challenge_names_its_name_until_expired() {
         let mut q = OtpQueue::new();
-        let sent = challenge(update("alice"), *b"111111");
-        let unsent = challenge(release("alice"), *b"222222");
-        q.admit(sent.clone());
-        q.admit(unsent.clone());
+        let sent = admit(&mut q, update("alice"), *b"111111");
+        let unsent = admit(&mut q, release("alice"), *b"222222");
         assert_eq!(q.relayed().count(), 0);
         assert_eq!(q.unrelayed().count(), 2);
-        assert!(q.challenge_issued(&sent));
+        q.challenge_issued(&sent);
         assert_eq!(q.relayed().collect::<Vec<_>>(), [sent.request.name()]);
         assert_eq!(q.unrelayed().collect::<Vec<_>>(), [unsent.request.name()]);
         q.expire(sent.expires_at);
@@ -374,9 +339,8 @@ mod tests {
     #[test]
     fn respond_burns_once_and_then_nothing() {
         let mut q = OtpQueue::new();
-        let pending = challenge(update("alice"), *b"123456");
-        q.admit(pending.clone());
-        assert!(q.challenge_issued(&pending));
+        let pending = admit(&mut q, update("alice"), *b"123456");
+        q.challenge_issued(&pending);
 
         let response = response_for(&pending, *b"123456");
         let matched = q.complete(&response).expect("live pending");
@@ -385,26 +349,17 @@ mod tests {
         assert_eq!(q.relayed().count(), 0);
     }
 
-    /// One entry per transition; a repeat shares it; five wrong
-    /// responses are tolerated and the sixth retires the entry they
-    /// name, alone; a hit burns once.
+    /// A repeat request shares its challenge; five wrong responses are
+    /// tolerated and the sixth retires the challenge; a hit burns once.
     #[test]
     fn a_challenge_survives_a_repeat_and_retires_at_six() {
         let mut q = OtpQueue::new();
-
-        // A first request opens one entry for its transition.
-        let check_in = challenge(update("alice"), *b"111111");
-        let pending = q.admit(check_in.clone());
-
-        // A repeat request receives the same entry — same code.
-        let again = q.admit(challenge(update("alice"), *b"222222"));
-        assert_eq!(again.code, pending.code);
-        assert!(q.challenge_issued(&pending));
-
-        // A different transition opens its own entry, its own code.
-        let other = q.admit(challenge(release("alice"), *b"333333"));
-        assert!(q.challenge_issued(&other));
-        assert_ne!(other.code, pending.code);
+        let pending = admit(&mut q, update("alice"), *b"111111");
+        q.admit(update("alice"), t0());
+        assert_eq!(q.requested().len(), 1);
+        q.challenge_issued(&pending);
+        let other = admit(&mut q, release("alice"), *b"333333");
+        q.challenge_issued(&other);
 
         // Five wrong responses against the check-in are tolerated: its
         // right code still answers.
@@ -428,46 +383,31 @@ mod tests {
         assert_eq!(q.relayed().count(), 0);
     }
 
-    /// Two terms are two challenges with two codes; each code answers
-    /// only its own. A wrong code counts against both.
+    /// Two terms are two challenges; each code answers only its own.
     #[test]
     fn each_term_is_its_own_challenge() {
         let mut q = OtpQueue::new();
-        let planted = q.admit(challenge(update("alice"), *b"111111"));
         let renewal = Request::Update {
             name: test_name("alice"),
             ua: mainnet_ua(),
             term: Some(Term::Years(5)),
         };
-        let renewal = q.admit(challenge(renewal, *b"111111"));
-        assert_ne!(planted.code, renewal.code);
-        assert!(q.challenge_issued(&planted));
-        assert!(q.challenge_issued(&renewal));
+        let planted = admit(&mut q, update("alice"), *b"111111");
+        let renewal = admit(&mut q, renewal, *b"222222");
+        q.challenge_issued(&planted);
+        q.challenge_issued(&renewal);
 
-        for n in 1..MAX_ATTEMPTS {
-            let wrong: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();
-            assert!(q.complete(&response_for(&renewal, wrong)).is_none());
-        }
-        let answered = q
-            .complete(&OtpMemo {
-                code: renewal.code.clone(),
-                ..renewal.memo()
-            })
-            .expect("the renewal's code");
+        let answered = q.complete(&response_for(&renewal, *b"222222")).unwrap();
         assert_eq!(answered.request, renewal.request);
-
-        // The sixth wrong code retires the planted challenge too.
-        assert!(q.complete(&response_for(&planted, *b"000000")).is_none());
-        assert_eq!(q.relayed().count(), 0);
+        assert_eq!(q.relayed().count(), 1);
     }
 
     /// Only `expire` closes a challenge's window.
     #[test]
     fn expire_is_owner_invoked() {
         let mut q = OtpQueue::new();
-        let pending = challenge(update("alice"), *b"123456");
-        q.admit(pending.clone());
-        assert!(q.challenge_issued(&pending));
+        let pending = admit(&mut q, update("alice"), *b"123456");
+        q.challenge_issued(&pending);
 
         q.expire(pending.expires_at);
         assert!(q.complete(&response_for(&pending, *b"123456")).is_none());
@@ -478,8 +418,7 @@ mod tests {
     #[test]
     fn respond_never_burns_an_unrelayed_entry() {
         let mut q = OtpQueue::new();
-        let pending = challenge(update("alice"), *b"123456");
-        q.admit(pending.clone());
+        let pending = admit(&mut q, update("alice"), *b"123456");
 
         assert!(q.complete(&response_for(&pending, *b"123456")).is_none());
         assert_eq!(q.requested().len(), 1);

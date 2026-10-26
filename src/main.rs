@@ -21,7 +21,7 @@ use zns_mint::mint::note::assemble;
 use zns_mint::mint::presale;
 use zns_mint::mint::pricing::{fetch_round, Oracle};
 use zns_mint::mint::treasury;
-use zns_mint::mint::treasury::{access_code_penalty, OtpChallenge, OtpQueue};
+use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
 use zns_mint::mint::{relay, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
@@ -533,7 +533,7 @@ async fn main() {
                         if paid < Oracle::challenge_fee_at(rate) {
                             break 'lane true;
                         }
-                        challenges.admit(OtpChallenge::issue(request.clone(), mtp_now));
+                        challenges.admit(request.clone(), mtp_now);
                         true
                     }
                 }
