@@ -443,7 +443,7 @@ async fn main() {
             .into_u64();
         zns_mint::metrics::snapshot(tip, treasury_zats, oracle.current().into_u64());
 
-        // A request stays queued until its block is ten deep. The pass
+        // A request stays queued until its block is three deep. The pass
         // then resolves it once. A shallower block can still fall away
         // with the request.
         for (txid, request, paid, note_height) in requests.pending() {

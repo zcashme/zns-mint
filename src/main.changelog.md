@@ -1,8 +1,8 @@
 # main.changelog.md
 
-## 2026-10-26 — A request waits ten blocks
+## 2026-10-26 — A request waits three blocks
 
-- The deciding pass leaves a request queued until the tip is ten
+- The deciding pass leaves a request queued until the tip is three
   blocks from the block that carried it, counting that block. A
   shallower block can still fall away with the request.
 

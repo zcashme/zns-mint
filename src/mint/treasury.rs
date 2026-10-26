@@ -352,7 +352,7 @@ pub fn challenge<P: Parameters>(
 
 /// Blocks from a request's block through the tip before the pass rules,
 /// counting the request's block.
-pub const DECISION_DEPTH: u32 = 10;
+pub const DECISION_DEPTH: u32 = 3;
 
 /// True when `tip` is at least [`DECISION_DEPTH`] blocks from `included`.
 pub fn decision_reached(tip: BlockHeight, included: BlockHeight) -> bool {
@@ -441,11 +441,11 @@ mod tests {
     }
 
     #[test]
-    fn a_request_is_ready_ten_blocks_from_its_block() {
+    fn a_request_is_ready_three_blocks_from_its_block() {
         let included = h(100);
         assert!(!decision_reached(h(100), included));
-        assert!(!decision_reached(h(108), included));
-        assert!(decision_reached(h(109), included));
+        assert!(!decision_reached(h(101), included));
+        assert!(decision_reached(h(102), included));
         assert!(!decision_reached(h(99), included));
     }
 
