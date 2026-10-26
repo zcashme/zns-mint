@@ -287,7 +287,7 @@ async fn main() {
             let block_mtp = mtp
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
-            challenges.prune(block_mtp);
+            challenges.expire(block_mtp);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {

@@ -179,9 +179,10 @@ impl OtpQueue {
             .collect()
     }
 
-    /// Drops expired challenges. The run loop calls this at every
-    /// applied block, before answering the block's responses.
-    pub fn prune(&mut self, mtp: Timestamp) {
+    /// Drops every challenge whose window has closed by `mtp`. The run
+    /// loop calls this at every applied block, with the block's median,
+    /// before answering the block's responses.
+    pub fn expire(&mut self, mtp: Timestamp) {
         self.challenges
             .retain(|(challenge, _, _)| mtp < challenge.expires_at);
     }
@@ -332,7 +333,7 @@ mod tests {
     /// A challenge names its name as unrelayed until it is relayed, and
     /// as relayed after. Pruning clears both.
     #[test]
-    fn a_relayed_challenge_names_its_name_until_pruned() {
+    fn a_relayed_challenge_names_its_name_until_expired() {
         let mut q = OtpQueue::new();
         let sent = challenge(update("alice"), *b"111111");
         let unsent = challenge(release("alice"), *b"222222");
@@ -343,7 +344,7 @@ mod tests {
         assert!(q.challenge_issued(&sent));
         assert_eq!(q.relayed().collect::<Vec<_>>(), [sent.request.name()]);
         assert_eq!(q.unrelayed().collect::<Vec<_>>(), [unsent.request.name()]);
-        q.prune(sent.expires_at);
+        q.expire(sent.expires_at);
         assert_eq!(q.relayed().count(), 0);
         assert_eq!(q.unrelayed().count(), 0);
     }
@@ -407,15 +408,15 @@ mod tests {
         assert_eq!(q.relayed().count(), 0);
     }
 
-    /// Only `prune` expires a challenge.
+    /// Only `expire` closes a challenge's window.
     #[test]
-    fn prune_is_owner_invoked() {
+    fn expire_is_owner_invoked() {
         let mut q = OtpQueue::new();
         let pending = challenge(update("alice"), *b"123456");
         q.admit(pending.clone());
         assert!(q.challenge_issued(&pending));
 
-        q.prune(pending.expires_at);
+        q.expire(pending.expires_at);
         assert!(q.answer(&response_for(&pending, *b"123456")).is_none());
         assert_eq!(q.relayed().count(), 0);
     }

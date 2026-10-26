@@ -15,10 +15,10 @@
   block: its median time, and the oracle's rate before the pass's
   round. One block per pass, these are the tip's values; across a
   catch-up they are the block's own.
-- Challenges are pruned at every applied block, by that block's
+- Challenges are expired at every applied block, by that block's
   median, before its responses are answered, so a challenge the
   block's clock has expired answers nothing in it. The tip pass no
-  longer prunes.
+  longer does.
 - A response confirmed before its challenge was relayed, or kept
   across a reorg that rebuilt the queue, can no longer count as a
   wrong attempt against a challenge created later in the same pass.
