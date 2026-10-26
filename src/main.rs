@@ -14,13 +14,14 @@ use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::value::Zatoshis;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::presale;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury;
-use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
+use zns_mint::mint::treasury::{access_code_penalty, OtpChallenge, OtpQueue};
 use zns_mint::mint::{relay, Action, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
@@ -54,6 +55,7 @@ async fn main() {
         mut name_notes,
         mut requests,
         mut echoes,
+        mut refunds,
         treasury_address,
         registry_ufvk,
         seed_fingerprint,
@@ -84,7 +86,7 @@ async fn main() {
             requests
                 .names()
                 .chain(challenges.unrelayed())
-                .chain(echoes.iter().map(|(echo, _, _)| &echo.name))
+                .chain(echoes.iter().map(|(_, echo, _, _)| &echo.name))
                 .chain(name_notes.authorized_names()),
             challenges.relayed(),
         );
@@ -184,7 +186,8 @@ async fn main() {
             name_notes.rewind_to(rewound);
             name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
-            echoes.retain(|(_, _, height)| *height <= rewound);
+            refunds.truncate_to(rewound);
+            echoes.retain(|(_, _, _, height)| *height <= rewound);
             tracing::warn!(
                 height = u32::from(rewound),
                 hash = %wallet.tip().block_hash(),
@@ -287,7 +290,9 @@ async fn main() {
                     MintInbound::Request(request) => {
                         requests.record(txid, request, paid, next_height);
                     }
-                    MintInbound::Echo(echo) => echoes.push((echo, paid, next_height)),
+                    MintInbound::Echo(echo) => {
+                        echoes.push((txid, echo, paid, next_height));
+                    }
                     MintInbound::Unrecognized => {
                         tracing::info!(
                             txid = %txid,
@@ -394,57 +399,63 @@ async fn main() {
                         // is observed. A later payment does not start a
                         // second Name Note.
                         // Early-access regime: only a listed name may claim,
-                        // and only with its per-name access code; an absent
-                        // or lapsed row refuses, payment kept.
+                        // and only with its per-name access code. No code,
+                        // or a name that is not listed, goes back less the
+                        // fee. A wrong code keeps 1% of the quote, then the
+                        // fee.
                         let Some(offered) = code.as_ref() else {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                "pre-sale claim refused: no access code"
-                            );
+                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                             break 'lane true;
                         };
-                        if !access_code_key.accepts(name, Some(offered)) {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                "pre-sale claim refused: wrong access code"
-                            );
-                            break 'lane true;
-                        }
                         if !protected_names.is_protected(name, mtp_now) {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                "pre-sale claim refused: name not listed"
-                            );
+                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                             break 'lane true;
                         }
                         // Payment gate: the quote at first sight is binding.
-                        // An underpaid claim, or one whose quote does not
-                        // fit, is dead and silent; a new payment settles
-                        // a new evaluation.
+                        // A payment below the quote goes back to the memo
+                        // address, less the refund fee, before the code is
+                        // judged.
+                        // A quote that does not fit is dead. A new payment
+                        // settles a new evaluation.
                         let Some(price) = oracle.quote(name, *term) else {
                             break 'lane true;
                         };
                         if paid < price {
+                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                             break 'lane true;
                         }
+                        if !access_code_key.accepts(name, Some(offered)) {
+                            refunds.admit(
+                                &fee_rule,
+                                txid,
+                                ua,
+                                name,
+                                note_height,
+                                (paid - access_code_penalty(price)).unwrap_or(Zatoshis::ZERO),
+                            );
+                            break 'lane true;
+                        }
+                        // A name that already has a record, or a Name Note
+                        // already queued, is refunded. Any other refusal
+                        // keeps the payment.
                         let Some(claim_note) =
                             registry.authorize_claim(name.clone(), ua.clone(), *term, mtp_now)
                         else {
-                            tracing::debug!(
-                                name = %name.as_str(),
-                                "claim not authorized"
-                            );
+                            if !registry.is_available(name) {
+                                refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                            } else {
+                                tracing::debug!(
+                                    name = %name.as_str(),
+                                    "claim not authorized"
+                                );
+                            }
                             break 'lane true;
                         };
                         // Enactment below resolves the anchor and broadcasts.
                         if name_notes.admit(note_height, claim_note) {
                             challenges.drop_challenges(name);
                         } else {
-                            tracing::debug!(
-                                %txid,
-                                name = %name.as_str(),
-                                "transition already queued; the earlier payment owns the name"
-                            );
+                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         }
                         true
                     }
@@ -515,19 +526,20 @@ async fn main() {
         }
 
         // Confirmed OTP responses wait in the run loop until the tip pass.
-        // Requests run first; a voided echo leaves its challenge available.
-        for (echo, paid, note_height) in std::mem::take(&mut echoes) {
+        // Requests run first; a voided OTP response leaves its challenge
+        // available.
+        for (txid, echo, paid, note_height) in std::mem::take(&mut echoes) {
             let _ = 'lane: {
-                // The echo lane: an OTP response. Decided in every outcome —
-                // an echo never waits for money; the renewal or
-                // upgrade fee declines on shortfall, it does not defer.
+                // An OTP response is decided on this pass. It never waits
+                // for money. A refused response goes back to the memo
+                // address, less the refund fee. A renewal or upgrade
+                // below its quote does not consume the challenge.
                 let Some(sent) = challenges.answer(&echo) else {
-                    break 'lane true; // no pending challenge: dead
+                    // No live challenge matches: a wrong code, or a right
+                    // one whose challenge was dropped.
+                    refunds.admit(&fee_rule, txid, &echo.ua, &echo.name, note_height, paid);
+                    break 'lane true;
                 };
-                // The renewal or upgrade fee, binding at first
-                // sight: a shortfall voids the attempt and never
-                // consumes — the challenge stands, retryable with
-                // the same OTP inside D_OTP.
                 if let Request::Update {
                     term: Some(term), ..
                 } = sent.request
@@ -540,11 +552,7 @@ async fn main() {
                         break 'lane true;
                     };
                     if paid < price {
-                        tracing::debug!(
-                            name = %echo.name.as_str(),
-                            paid = paid.into_u64(),
-                            "update response underpaid — attempt void, challenge stands"
-                        );
+                        refunds.admit(&fee_rule, txid, &echo.ua, &echo.name, note_height, paid);
                         break 'lane true;
                     }
                 }
@@ -565,12 +573,10 @@ async fn main() {
                     // the verb; treat a claim echo as a dead memo regardless.
                     Action::Claim => break 'lane true,
                 };
+                // The law refuses a matched response when the name became
+                // due for release after its challenge was issued.
                 let Some(transition_note) = authorized else {
-                    tracing::debug!(
-                        name = %echo.name.as_str(),
-                        action = echo.action.as_str(),
-                        "echo refused by the law — payment kept"
-                    );
+                    refunds.admit(&fee_rule, txid, &echo.ua, &echo.name, note_height, paid);
                     break 'lane true;
                 };
                 challenges.consume(&sent); // spent exactly when the law accepts
@@ -717,8 +723,40 @@ async fn main() {
             }
         }
 
-        // A new MTP day sweeps the Treasury to the vault once.
-        if today > previous_day {
+        // A refund is built on the pass after its payment's block, like a
+        // Name Note, one transaction each. The wallet owns it from there,
+        // like a sweep. One the Treasury cannot fund yet, or the node
+        // refused, stays due.
+        for refund in refunds.due(tip) {
+            match treasury::issue_refund(
+                &network,
+                &mut wallet,
+                &treasury_keys,
+                &sapling_spend,
+                &sapling_output,
+                &fee_rule,
+                &refund,
+            ) {
+                Ok(Some(tx)) => {
+                    if source.submit(&tx, "refund").await {
+                        refunds.paid(&refund);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        payment = %refund.payment(),
+                        name = %refund.name().as_str(),
+                        "refund not built"
+                    );
+                }
+            }
+        }
+
+        // A new MTP day sweeps the Treasury to the vault once. While a
+        // refund is queued, its money stays and the sweep waits a day.
+        if today > previous_day && refunds.is_empty() {
             match treasury::sweep_to_vault(
                 &network,
                 &mut wallet,
