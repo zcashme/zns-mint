@@ -10,16 +10,16 @@ use crate::mint::{Action, Name, OtpMemo, Request, UnifiedAddress};
 /// Thirty minutes; §5.3: D_OTP.
 pub const D_OTP: i64 = 1800;
 
-/// Wrong echoes tolerated per challenge (§5: the deployment fixes
-/// the maximum number of verification attempts).
+/// Wrong OTP responses tolerated per challenge (§5: the deployment
+/// fixes the maximum number of verification attempts).
 pub const MAX_ATTEMPTS: u32 = 6;
 
-/// Wrong echoes counted against a challenge's code.
+/// Wrong OTP responses counted against a challenge's code.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Attempts(u32);
 
 impl Attempts {
-    /// Counts one more wrong echo; true when the challenge retires.
+    /// Counts one more wrong response; true when the challenge retires.
     fn count(&mut self) -> bool {
         self.0 += 1;
         self.0 >= MAX_ATTEMPTS
@@ -179,8 +179,10 @@ impl OtpQueue {
             .collect()
     }
 
-    /// Drops expired challenges. The run loop calls this each wake-up.
-    pub fn prune(&mut self, mtp: Timestamp) {
+    /// Drops every challenge whose window has closed by `mtp`. The run
+    /// loop calls this at every applied block, with the block's median,
+    /// before handling the block's responses.
+    pub fn expire(&mut self, mtp: Timestamp) {
         self.challenges
             .retain(|(challenge, _, _)| mtp < challenge.expires_at);
     }
@@ -192,35 +194,21 @@ impl OtpQueue {
             .retain(|(challenge, _, _)| challenge.request.name() != name);
     }
 
-    /// The relayed challenge an echo answers when its code is right;
-    /// a wrong code counts one attempt against the transition the
-    /// echo names and retires it at [`MAX_ATTEMPTS`].
-    pub fn answer(&mut self, returned: &OtpMemo) -> Option<OtpChallenge> {
+    /// The right code removes its challenge and returns it. A wrong
+    /// code counts an attempt; the sixth retires the challenge.
+    pub fn complete(&mut self, returned: &OtpMemo) -> Option<OtpChallenge> {
         let index = self.index_of(&returned.name, returned.action, &returned.ua)?;
         let (challenge, state, attempts) = &mut self.challenges[index];
         if *state != ChallengeState::Relayed {
             return None;
         }
         if bool::from(challenge.code.0.ct_eq(&returned.code.0)) {
-            return Some(challenge.clone());
+            return Some(self.challenges.remove(index).0);
         }
         if attempts.count() {
             self.challenges.remove(index);
         }
         None
-    }
-
-    /// Consumes the answered challenge: one code, one use.
-    pub fn consume(&mut self, answered: &OtpChallenge) -> bool {
-        let request = &answered.request;
-        let Some(index) = self.index_of(request.name(), request.action(), request.ua()) else {
-            return false;
-        };
-        if self.challenges[index].1 != ChallengeState::Relayed {
-            return false;
-        }
-        self.challenges.remove(index);
-        true
     }
 
     /// The name of every challenge still awaiting relay, borrowed.
@@ -231,7 +219,7 @@ impl OtpQueue {
             .map(|(challenge, _, _)| challenge.request.name())
     }
 
-    /// The name of every relayed challenge, awaiting its echo.
+    /// The name of every relayed challenge, awaiting its response.
     pub fn relayed(&self) -> impl Iterator<Item = &Name> {
         self.challenges
             .iter()
@@ -284,9 +272,8 @@ mod tests {
         }
     }
 
-    /// The echo a controller sends back for `challenge`, carrying a
-    /// code of the caller's choosing.
-    fn echo_for(challenge: &OtpChallenge, code: [u8; 6]) -> OtpMemo {
+    /// The controller's response to `challenge`, with `code`.
+    fn response_for(challenge: &OtpChallenge, code: [u8; 6]) -> OtpMemo {
         OtpMemo {
             code: OtpCode::for_test(code),
             ..challenge.memo()
@@ -333,16 +320,20 @@ mod tests {
 
         q.drop_challenges(&test_name("alice"));
 
-        assert!(q.answer(&echo_for(&alice_update, *b"111111")).is_none());
-        assert!(q.answer(&echo_for(&alice_release, *b"222222")).is_none());
-        assert!(q.answer(&echo_for(&bob, *b"333333")).is_some());
+        assert!(q
+            .complete(&response_for(&alice_update, *b"111111"))
+            .is_none());
+        assert!(q
+            .complete(&response_for(&alice_release, *b"222222"))
+            .is_none());
         assert_eq!(q.relayed().collect::<Vec<_>>(), [bob.request.name()]);
+        assert!(q.complete(&response_for(&bob, *b"333333")).is_some());
     }
 
     /// A challenge names its name as unrelayed until it is relayed, and
     /// as relayed after. Pruning clears both.
     #[test]
-    fn a_relayed_challenge_names_its_name_until_pruned() {
+    fn a_relayed_challenge_names_its_name_until_expired() {
         let mut q = OtpQueue::new();
         let sent = challenge(update("alice"), *b"111111");
         let unsent = challenge(release("alice"), *b"222222");
@@ -353,14 +344,13 @@ mod tests {
         assert!(q.challenge_issued(&sent));
         assert_eq!(q.relayed().collect::<Vec<_>>(), [sent.request.name()]);
         assert_eq!(q.unrelayed().collect::<Vec<_>>(), [unsent.request.name()]);
-        q.prune(sent.expires_at);
+        q.expire(sent.expires_at);
         assert_eq!(q.relayed().count(), 0);
         assert_eq!(q.unrelayed().count(), 0);
     }
 
-    /// A relayed challenge burns exactly once: `answer` finds it,
-    /// `consume` removes it, and no later echo — even the identical
-    /// one — can claim it again.
+    /// The right code answers once; the identical response after it
+    /// answers nothing.
     #[test]
     fn respond_burns_once_and_then_nothing() {
         let mut q = OtpQueue::new();
@@ -368,19 +358,16 @@ mod tests {
         q.admit(pending.clone());
         assert!(q.challenge_issued(&pending));
 
-        let echo = echo_for(&pending, *b"123456");
-        let matched = q.answer(&echo).expect("live pending");
+        let response = response_for(&pending, *b"123456");
+        let matched = q.complete(&response).expect("live pending");
         assert_eq!(matched.request, pending.request);
-
-        assert!(q.consume(&matched));
-        assert!(q.answer(&echo).is_none());
-        assert!(!q.consume(&matched));
+        assert!(q.complete(&response).is_none());
+        assert_eq!(q.relayed().count(), 0);
     }
 
-    /// The queue's contract in one walk: one live entry per pending
-    /// transition; a repeat request receives it; five wrong echoes are
-    /// tolerated and the sixth retires the entry they name, alone;
-    /// and a hit burns exactly once.
+    /// One entry per transition; a repeat shares it; five wrong
+    /// responses are tolerated and the sixth retires the entry they
+    /// name, alone; a hit burns once.
     #[test]
     fn a_challenge_survives_a_repeat_and_retires_at_six() {
         let mut q = OtpQueue::new();
@@ -399,57 +386,49 @@ mod tests {
         assert!(q.challenge_issued(&other));
         assert_ne!(other.code, pending.code);
 
-        // Five wrong echoes against the check-in are tolerated: its
+        // Five wrong responses against the check-in are tolerated: its
         // right code still answers.
         for n in 1..MAX_ATTEMPTS {
             let wrong: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();
-            assert!(q.answer(&echo_for(&pending, wrong)).is_none());
+            assert!(q.complete(&response_for(&pending, wrong)).is_none());
         }
-        let right = echo_for(&pending, *b"111111");
-        let answered = q.answer(&right).expect("still answers");
+        let right = response_for(&pending, *b"111111");
+        assert!(q.complete(&right).is_some());
 
         // The hit burns exactly once — and only the entry it answered.
-        assert!(q.consume(&answered));
-        assert!(q.answer(&right).is_none());
+        assert!(q.complete(&right).is_none());
         assert_eq!(q.relayed().collect::<Vec<_>>(), [other.request.name()]);
 
-        // Six wrong echoes retire the entry they name, and only it.
+        // Six wrong responses retire the entry they name, and only it.
         for n in 1..=MAX_ATTEMPTS {
             let wrong: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();
-            assert!(q.answer(&echo_for(&other, wrong)).is_none());
+            assert!(q.complete(&response_for(&other, wrong)).is_none());
         }
-        assert!(q.answer(&echo_for(&other, *b"333333")).is_none());
+        assert!(q.complete(&response_for(&other, *b"333333")).is_none());
         assert_eq!(q.relayed().count(), 0);
     }
 
-    /// Freshness is the owner's prune, not the scans': an expired
-    /// challenge still matches until the owner prunes, and prune
-    /// alone removes it.
+    /// Only `expire` closes a challenge's window.
     #[test]
-    fn prune_is_owner_invoked() {
+    fn expire_is_owner_invoked() {
         let mut q = OtpQueue::new();
         let pending = challenge(update("alice"), *b"123456");
         q.admit(pending.clone());
         assert!(q.challenge_issued(&pending));
 
-        let echo = echo_for(&pending, *b"123456");
-        assert!(q.answer(&echo).is_some());
-        q.prune(t0() + Duration::seconds(D_OTP + 1));
-        assert!(q.answer(&echo).is_none());
+        q.expire(pending.expires_at);
+        assert!(q.complete(&response_for(&pending, *b"123456")).is_none());
+        assert_eq!(q.relayed().count(), 0);
     }
 
-    /// `answer` and `consume` touch only relayed challenges: a
-    /// never-relayed entry is neither answered nor burned, and stays
-    /// queued for the relay loop.
+    /// An unrelayed entry is never answered; it stays for the relay loop.
     #[test]
     fn respond_never_burns_an_unrelayed_entry() {
         let mut q = OtpQueue::new();
         let pending = challenge(update("alice"), *b"123456");
         q.admit(pending.clone());
-        // Still `Requested`: the challenge memo was never accepted.
 
-        assert!(q.answer(&echo_for(&pending, *b"123456")).is_none());
-        assert!(!q.consume(&pending));
+        assert!(q.complete(&response_for(&pending, *b"123456")).is_none());
         assert_eq!(q.requested().len(), 1);
     }
 }

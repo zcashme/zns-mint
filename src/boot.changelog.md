@@ -2,6 +2,11 @@
 
 Tracks design-relevant changes to `src/boot.rs`.
 
+## 2026-10-26 — No response list (#383)
+
+- `Boot` no longer carries a list of pending OTP responses; a response
+  is ruled on when its block is applied.
+
 ## 2026-10-26 — The keygen report has to cover the capsule file
 
 - Boot verifies `keys/zns_attestation.bin` for the capsule file on

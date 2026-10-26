@@ -302,19 +302,19 @@ pub enum MintInbound {
     /// A request — a user's proposed transition, decoded from a Treasury
     /// memo; the Registry's `authorize_*` family rules on it.
     Request(Request),
-    /// An OTP consume — the relay memo returned; what `awaiting` takes.
-    Echo(OtpMemo),
+    /// An OTP response — the relay memo returned; the OTP queue takes it.
+    Response(OtpMemo),
     /// A payment with no parseable message: the deciding pass logs it once and
     /// the sweep keeps the value; the queue names it by its txid.
     Unrecognized,
 }
 
 impl MintInbound {
-    /// Classifies one Treasury memo: echo, request, or unrecognized
-    /// payment. Called once per memo, at block application.
+    /// Classifies one Treasury memo: OTP response, request, or
+    /// unrecognized payment. Called once per memo, at block application.
     pub fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Self {
-        if let Some(echo) = OtpMemo::decode(network, memo) {
-            Self::Echo(echo)
+        if let Some(response) = OtpMemo::decode(network, memo) {
+            Self::Response(response)
         } else if let Some(request) = Request::decode(network, memo) {
             Self::Request(request)
         } else {
@@ -877,7 +877,7 @@ mod tests {
         .expect("ZIP-316 composition rules permit it")
         .encode(&zcash_protocol::consensus::NetworkType::Main);
 
-        // No verb parses — requests and echoes alike.
+        // No verb parses — requests and OTP responses alike.
         for memo in [
             format!("ZNS:claim:forever:alice:{ua}"),
             format!("ZNS:update:none:alice:{ua}"),
@@ -923,10 +923,10 @@ mod tests {
     fn decode_classifies_each_kind() {
         let network = MainNetwork;
 
-        let echo = padded(&format!("ZNS:otp:417293:alice:update:{TEST_UA}"));
+        let response = padded(&format!("ZNS:otp:417293:alice:update:{TEST_UA}"));
         assert!(matches!(
-            MintInbound::decode(&network, &echo),
-            MintInbound::Echo(_)
+            MintInbound::decode(&network, &response),
+            MintInbound::Response(_)
         ));
         let request = padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"));
         assert!(matches!(

@@ -4,7 +4,7 @@
 //! chain tip, and verifies genesis (ceremony adoption closed, minimum Treasury balance).
 //! `main` is then a pure run loop: it follows Zebra's canonical chain,
 //! scans each new block, enforces the Registry transition law, services
-//! Treasury memos (paid claims, update and release requests, OTP echoes),
+//! Treasury memos (paid claims, update and release requests, OTP responses),
 //! runs the lifecycle (expiry releases), and
 //! sweeps the Treasury. The mint authors no genesis state: the anchor
 //! pool is created once by the keygen ceremony and replenishes itself
@@ -22,7 +22,7 @@ use zns_mint::mint::presale;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{access_code_penalty, OtpChallenge, OtpQueue};
-use zns_mint::mint::{relay, Action, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use zns_mint::mint::{relay, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
@@ -54,7 +54,6 @@ async fn main() {
         mut registry,
         mut name_notes,
         mut requests,
-        mut echoes,
         mut refunds,
         treasury_address,
         registry_ufvk,
@@ -86,7 +85,6 @@ async fn main() {
             requests
                 .names()
                 .chain(challenges.unrelayed())
-                .chain(echoes.iter().map(|(_, echo, _, _)| &echo.name))
                 .chain(name_notes.authorized_names()),
             challenges.relayed(),
         );
@@ -187,7 +185,6 @@ async fn main() {
             name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
             refunds.truncate_to(rewound);
-            echoes.retain(|(_, _, _, height)| *height <= rewound);
             tracing::warn!(
                 height = u32::from(rewound),
                 hash = %wallet.tip().block_hash(),
@@ -285,13 +282,79 @@ async fn main() {
                 &mut mtp,
             );
             name_notes.reconcile_seen(&network, &registry);
+            // The block's own clock: a challenge expired by it completes
+            // nothing in it, and the law reads it.
+            let block_mtp = mtp
+                .current()
+                .expect("FATAL: MTP unavailable at the applied block");
+            challenges.expire(block_mtp);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
                         requests.record(txid, request, paid, next_height);
                     }
-                    MintInbound::Echo(echo) => {
-                        echoes.push((txid, echo, paid, next_height));
+                    // The right code spends its OTP, and the transition it
+                    // authorizes is ruled on at the block that carried it.
+                    // A refused response goes back to the memo address,
+                    // less the refund fee.
+                    MintInbound::Response(response) => {
+                        let Some(sent) = challenges.complete(&response) else {
+                            // A wrong code, or no live challenge.
+                            refunds.admit(
+                                &fee_rule,
+                                txid,
+                                &response.ua,
+                                &response.name,
+                                next_height,
+                                paid,
+                            );
+                            continue;
+                        };
+                        let name = sent.request.name();
+                        if let Request::Update {
+                            term: Some(term), ..
+                        } = &sent.request
+                        {
+                            if !oracle.quote(name, *term).is_some_and(|price| paid >= price) {
+                                refunds.admit(
+                                    &fee_rule,
+                                    txid,
+                                    &response.ua,
+                                    name,
+                                    next_height,
+                                    paid,
+                                );
+                                continue;
+                            }
+                        }
+                        if name_notes.note_pending(name) {
+                            tracing::debug!(
+                                %txid,
+                                name = %name.as_str(),
+                                "transition already queued; OTP spent"
+                            );
+                            continue;
+                        }
+                        let authorized = match &sent.request {
+                            Request::Update { .. } => registry.authorize_update(&sent, block_mtp),
+                            Request::Release { .. } => registry.authorize_release(&sent),
+                            Request::Claim { .. } => continue,
+                        };
+                        let Some(note) = authorized else {
+                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
+                            continue;
+                        };
+                        // The only durable record that a release was voluntary.
+                        if sent.request.action().is_release() {
+                            tracing::info!(
+                                %txid,
+                                name = %name.as_str(),
+                                "voluntary release authorized"
+                            );
+                        }
+                        if name_notes.admit(next_height, note) {
+                            challenges.drop_challenges(name);
+                        }
                     }
                     MintInbound::Unrecognized => {
                         tracing::info!(
@@ -315,7 +378,6 @@ async fn main() {
         let mtp_now = mtp
             .current()
             .expect("FATAL: MTP unavailable at the applied tip");
-        challenges.prune(mtp_now);
 
         let today = mtp
             .current_day()
@@ -508,9 +570,9 @@ async fn main() {
         // A broadcast order whose expiry height has passed can be signed
         // again, or dropped below once the tip median would release it.
         name_notes.expire_sent(tip);
-        // Drop an update the tip median would already release. An echo
-        // for that name can then be decided, and a release note can be
-        // admitted below. A broadcast still inside its expiry window stays.
+        // Drop an update the tip median would already release, so a
+        // release note can be admitted below. A broadcast still inside
+        // its expiry window stays.
         for note in name_notes.authorized_notes() {
             if note.action().is_update()
                 && registry
@@ -523,79 +585,6 @@ async fn main() {
                 );
                 name_notes.drop_note(note.name());
             }
-        }
-
-        // Confirmed OTP responses wait in the run loop until the tip pass.
-        // Requests run first; a voided OTP response leaves its challenge
-        // available.
-        for (txid, echo, paid, note_height) in std::mem::take(&mut echoes) {
-            let _ = 'lane: {
-                // An OTP response is decided on this pass. It never waits
-                // for money. A refused response goes back to the memo
-                // address, less the refund fee. A renewal or upgrade
-                // below its quote does not consume the challenge.
-                let Some(sent) = challenges.answer(&echo) else {
-                    // No live challenge matches: a wrong code, or a right
-                    // one whose challenge was dropped.
-                    refunds.admit(&fee_rule, txid, &echo.ua, &echo.name, note_height, paid);
-                    break 'lane true;
-                };
-                if let Request::Update {
-                    term: Some(term), ..
-                } = sent.request
-                {
-                    let Some(price) = oracle.quote(&echo.name, term) else {
-                        tracing::debug!(
-                            name = %echo.name.as_str(),
-                            "update quote does not fit — attempt void, challenge stands"
-                        );
-                        break 'lane true;
-                    };
-                    if paid < price {
-                        refunds.admit(&fee_rule, txid, &echo.ua, &echo.name, note_height, paid);
-                        break 'lane true;
-                    }
-                }
-                // A transition already admitted for this current Name Note
-                // owns its predecessor. Do not consume this OTP response.
-                if name_notes.note_pending(&echo.name) {
-                    tracing::debug!(
-                        name = %echo.name.as_str(),
-                        action = echo.action.as_str(),
-                        "transition already queued; OTP response does not replace it"
-                    );
-                    break 'lane true;
-                }
-                let authorized = match echo.action {
-                    Action::Update => registry.authorize_update(&sent, mtp_now),
-                    Action::Release => registry.authorize_release(&sent),
-                    // Challenges never claim, and `OtpMemo::decode` refuses
-                    // the verb; treat a claim echo as a dead memo regardless.
-                    Action::Claim => break 'lane true,
-                };
-                // The law refuses a matched response when the name became
-                // due for release after its challenge was issued.
-                let Some(transition_note) = authorized else {
-                    refunds.admit(&fee_rule, txid, &echo.ua, &echo.name, note_height, paid);
-                    break 'lane true;
-                };
-                challenges.consume(&sent); // spent exactly when the law accepts
-                                           // The seam where a voluntary release exists:
-                                           // the OTP that authorized it is consumed here,
-                                           // and the resulting note is indistinguishable
-                                           // from a unilateral one on chain. This line is
-                                           // the only durable record of the cause.
-                if echo.action.is_release() {
-                    tracing::info!(
-                        name = %echo.name.as_str(),
-                        "voluntary release authorized"
-                    );
-                }
-                if name_notes.admit(note_height, transition_note) {
-                    challenges.drop_challenges(&echo.name);
-                }
-                true
-            };
         }
 
         // Lifecycle releases, §4.5: the registry owns the clocks and
