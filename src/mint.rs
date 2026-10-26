@@ -152,6 +152,23 @@ impl Request {
         }
     }
 
+    pub fn action(&self) -> Action {
+        match self {
+            Request::Claim { .. } => Action::Claim,
+            Request::Update { .. } => Action::Update,
+            Request::Release { .. } => Action::Release,
+        }
+    }
+
+    /// The requested Unified Address every variant carries.
+    pub fn ua(&self) -> &UnifiedAddress {
+        match self {
+            Request::Claim { ua, .. }
+            | Request::Update { ua, .. }
+            | Request::Release { ua, .. } => ua,
+        }
+    }
+
     /// Parses a request memo:
     ///
     /// - `ZNS:claim:<term>:<name>:<ua>`, or with a six-digit pre-sale
@@ -637,19 +654,20 @@ pub async fn relay<P: Parameters + Send + 'static>(
     fee_rule: &FeeRule,
     controller_ua: &UnifiedAddress,
     source: &CanonicalBlockSource,
-    request: &OtpChallenge,
+    challenge: &OtpChallenge,
     lane: &'static str,
 ) -> bool {
-    let memo = match request.memo().encode(network) {
+    let request = &challenge.request;
+    let memo = match challenge.memo().encode(network) {
         Some(memo) => memo,
-        None if request.action.is_claim() => {
+        None if request.action().is_claim() => {
             unreachable!("claims never enter the controller challenge relay")
         }
         None => {
             tracing::error!(
                 lane,
-                name = %request.name.as_str(),
-                action = request.action.as_str(),
+                name = %request.name().as_str(),
+                action = request.action().as_str(),
                 "controller challenge memo exceeds the ZIP-302 512-byte limit"
             );
             return false;
@@ -670,8 +688,8 @@ pub async fn relay<P: Parameters + Send + 'static>(
             tracing::warn!(
                 lane,
                 %error,
-                name = %request.name.as_str(),
-                action = request.action.as_str(),
+                name = %request.name().as_str(),
+                action = request.action().as_str(),
                 "controller challenge not built"
             );
             return false;
@@ -681,16 +699,16 @@ pub async fn relay<P: Parameters + Send + 'static>(
         tracing::info!(
             lane,
             txid = %transaction.txid(),
-            name = %request.name.as_str(),
-            action = request.action.as_str(),
+            name = %request.name().as_str(),
+            action = request.action().as_str(),
             "controller challenged"
         );
         true
     } else {
         tracing::debug!(
             lane,
-            name = %request.name.as_str(),
-            action = request.action.as_str(),
+            name = %request.name().as_str(),
+            action = request.action().as_str(),
             "controller challenge rejected — deferred"
         );
         false

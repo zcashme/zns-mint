@@ -10,6 +10,7 @@
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
+use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
@@ -21,7 +22,7 @@ use zns_mint::mint::presale;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{access_code_penalty, OtpChallenge, OtpQueue};
-use zns_mint::mint::{relay, Action, MintInbound, Request, TREASURY_ACCOUNT};
+use zns_mint::mint::{relay, Action, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
@@ -451,40 +452,24 @@ async fn main() {
                             break 'lane true;
                         };
                         // Enactment below resolves the anchor and broadcasts.
-                        if !name_notes.admit(note_height, claim_note) {
+                        if name_notes.admit(note_height, claim_note) {
+                            challenges.drop_challenges(name);
+                        } else {
                             refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         }
                         true
                     }
-                    request @ (Request::Update { .. } | Request::Release { .. }) => {
-                        let (name, action, requested_ua, term) = match request {
-                            Request::Update { name, ua, term } => (name, Action::Update, ua, *term),
-                            Request::Release { name, ua } => (name, Action::Release, ua, None),
-                            Request::Claim { .. } => unreachable!(),
-                        };
-                        let Some(record) = registry.authorize_challenge(
-                            &name_notes,
-                            name,
-                            action,
-                            requested_ua,
-                            term,
-                            target_height,
-                            mtp_now,
-                        ) else {
+                    Request::Update { .. } | Request::Release { .. } => {
+                        if registry
+                            .authorize_challenge(&name_notes, &request, target_height, mtp_now)
+                            .is_none()
+                        {
                             break 'lane true;
-                        };
+                        }
                         if paid < oracle.challenge_fee() {
                             break 'lane true;
                         }
-                        let pending = OtpChallenge::issue(
-                            name.clone(),
-                            action,
-                            requested_ua.clone(),
-                            record.commitment,
-                            term,
-                            mtp_now,
-                        );
-                        challenges.admit(pending, txid);
+                        challenges.admit(OtpChallenge::issue(request.clone(), mtp_now));
                         true
                     }
                 }
@@ -497,20 +482,11 @@ async fn main() {
         // Queue admission is independent from submission. Retry every
         // requested challenge once during each tip pass.
         for pending in challenges.requested() {
-            let Some(record) = registry.authorize_challenge(
-                &name_notes,
-                &pending.name,
-                pending.action,
-                &pending.ua,
-                pending.term,
-                target_height,
-                mtp_now,
-            ) else {
+            let Some(record) =
+                registry.authorize_challenge(&name_notes, &pending.request, target_height, mtp_now)
+            else {
                 continue;
             };
-            if record.commitment != pending.tip_rcm {
-                continue;
-            }
             if relay(
                 &network,
                 &mut wallet,
@@ -560,10 +536,13 @@ async fn main() {
                 let Some(record) = registry.record(&echo.name).cloned() else {
                     break 'lane true; // no record — released or unknown: no mint-issued challenge can match
                 };
-                let Some(sent) = challenges.answer(&echo, record.commitment) else {
+                let Some(sent) = challenges.answer(&echo) else {
                     break 'lane true; // no match, including a wrong code: payment kept
                 };
-                if let Some(term) = sent.term {
+                if let Request::Update {
+                    term: Some(term), ..
+                } = sent.request
+                {
                     let Some(price) = oracle.quote(&echo.name, term) else {
                         tracing::debug!(
                             name = %echo.name.as_str(),
@@ -609,7 +588,9 @@ async fn main() {
                         "voluntary release authorized"
                     );
                 }
-                name_notes.admit(note_height, transition_note);
+                if name_notes.admit(note_height, transition_note) {
+                    challenges.drop_challenges(&echo.name);
+                }
                 true
             };
         }
@@ -623,13 +604,16 @@ async fn main() {
                 continue;
             }
             tracing::info!(name = %name.as_str(), "lifecycle release authorized");
-            name_notes.admit(tip, release_note);
+            if name_notes.admit(tip, release_note) {
+                challenges.drop_challenges(&name);
+            }
         }
 
         for note in name_notes.authorized_notes() {
-            // Authority: a claim spends a lineage pool anchor; an update
-            // or release spends the predecessor — the record's nullifier
-            // matched by commitment.
+            // Authority: a claim spends the first pool anchor the wallet
+            // can still spend. A pending spend stays out until it is
+            // mined or expires. An update or release spends the
+            // predecessor — the record's nullifier matched by commitment.
             let authority_nf = if note.action().is_claim() {
                 // The name must still be absent from the applied-tip registry.
                 if !registry.is_available(note.name()) {
@@ -640,12 +624,21 @@ async fn main() {
                     name_notes.drop_note(note.name());
                     continue;
                 }
-                match registry.anchor_pool().iter().next().copied() {
+                match registry.spendable_claim_anchor(|nf| {
+                    wallet
+                        .unspent_ironwood_note_by_nullifier(
+                            REGISTRY_ACCOUNT,
+                            nf,
+                            TargetHeight::from(tip),
+                        )
+                        .is_some()
+                }) {
                     Some(nf) => nf,
                     None => {
                         tracing::warn!(
                             name = %note.name().as_str(),
-                            "no claim anchor in the pool"
+                            anchors = registry.anchor_pool().len(),
+                            "no spendable claim anchor"
                         );
                         continue;
                     }

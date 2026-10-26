@@ -1,5 +1,11 @@
 # main.changelog.md
 
+## 2026-10-26 — A claim spends an anchor the wallet can still spend
+
+- The enactment loop takes the first pool anchor still unspent at
+  the applied tip. A sent claim's anchor stays out until that
+  transaction is mined or expires, and the next claim takes another.
+
 ## 2026-10-23 — Transactions pay the node's fee rate (#357)
 
 - Each tip pass reads `getstandardfee` once the tip is confirmed and

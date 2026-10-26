@@ -8,7 +8,7 @@ pub use anchor_pool::{is_ceremony_fill, ANCHOR_POOL_SIZE};
 
 use crate::mint::note::NameNoteQueue;
 use crate::mint::treasury::OtpChallenge;
-use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Term, UnifiedAddress};
+use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
 use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
@@ -72,12 +72,10 @@ impl NameRecord {
     /// The clock-and-verb check behind [`Registry::authorize_challenge`]:
     /// both §4.5 clocks live at `mtp_now`, trigger newer than this
     /// record, release from this record's controller, forever names
-    /// take no term.
+    /// take no term. Claims are never challenged.
     fn allows_challenge(
         &self,
-        action: Action,
-        ua: &UnifiedAddress,
-        term: Option<Term>,
+        request: &Request,
         trigger_height: BlockHeight,
         mtp_now: Timestamp,
     ) -> bool {
@@ -87,13 +85,11 @@ impl NameRecord {
         if trigger_height <= self.confirmed_height {
             return false;
         }
-        if action.is_release() && *ua != self.ua {
-            return false;
+        match request {
+            Request::Claim { .. } => false,
+            Request::Update { term, .. } => !(self.expires_at == Expiry::Never && term.is_some()),
+            Request::Release { ua, .. } => *ua == self.ua,
         }
-        if self.expires_at == Expiry::Never && term.is_some() {
-            return false;
-        }
-        true
     }
 
     /// This record's nullifier, when `note` still names this exact
@@ -156,46 +152,40 @@ impl Registry {
         })
     }
 
-    /// The update law: action, commitment, term, liveness. `None` means unlawful.
+    /// The update law: action, term, liveness. `None` means unlawful.
     ///
     /// The purchased term and the liveness deadline are read at the applied
     /// tip. A confirmed update renews even when the confirming block's
     /// median is later.
     pub fn authorize_update(&self, pending: &OtpChallenge, mtp: Timestamp) -> Option<NameNote> {
-        let record = self.record(&pending.name).cloned()?;
-        if pending.action != Action::Update {
+        let Request::Update { name, ua, term } = &pending.request else {
             return None;
-        }
-        if record.commitment != pending.tip_rcm {
-            return None;
-        }
+        };
+        let record = self.record(name)?;
         if record.is_release_due(mtp) {
             return None;
         }
-        let expires_at = record.expires_at.extend(pending.term, mtp)?;
+        let expires_at = record.expires_at.extend(*term, mtp)?;
         Some(NameNote::Update {
-            name: pending.name.clone(),
-            ua: pending.ua.clone(),
+            name: name.clone(),
+            ua: ua.clone(),
             expires_at,
             prev: record.commitment,
         })
     }
 
-    /// The release law: action, commitment, UA. `None` means unlawful.
+    /// The release law: action, UA. `None` means unlawful.
     pub fn authorize_release(&self, pending: &OtpChallenge) -> Option<NameNote> {
-        let record = self.record(&pending.name).cloned()?;
-        if pending.action != Action::Release {
+        let Request::Release { name, ua } = &pending.request else {
             return None;
-        }
-        if record.commitment != pending.tip_rcm {
-            return None;
-        }
-        if record.ua != pending.ua {
+        };
+        let record = self.record(name)?;
+        if record.ua != *ua {
             return None;
         }
         Some(NameNote::Release {
-            name: pending.name.clone(),
-            ua: pending.ua.clone(),
+            name: name.clone(),
+            ua: ua.clone(),
             prev: record.commitment,
         })
     }
@@ -205,23 +195,19 @@ impl Registry {
     /// term and the liveness deadline are read at the applied tip, the
     /// same instant as [`Self::authorize_update`]. Returns the record
     /// when a challenge may proceed.
-    #[allow(clippy::too_many_arguments)]
     pub fn authorize_challenge(
         &self,
         name_notes: &NameNoteQueue,
-        name: &Name,
-        action: Action,
-        requested_ua: &UnifiedAddress,
-        term: Option<Term>,
+        request: &Request,
         trigger_height: BlockHeight,
         mtp_now: Timestamp,
     ) -> Option<NameRecord> {
-        let record = self.records.get(name)?;
-        if name_notes.note_pending(name) {
+        let record = self.records.get(request.name())?;
+        if name_notes.note_pending(request.name()) {
             return None;
         }
         record
-            .allows_challenge(action, requested_ua, term, trigger_height, mtp_now)
+            .allows_challenge(request, trigger_height, mtp_now)
             .then(|| record.clone())
     }
 
@@ -481,6 +467,15 @@ impl Registry {
         self.anchors.live()
     }
 
+    /// The first anchor in pool order that `spendable` accepts.
+    /// `None` when the pool is empty or every anchor is refused.
+    pub fn spendable_claim_anchor(
+        &self,
+        mut spendable: impl FnMut(orchard::note::Nullifier) -> bool,
+    ) -> Option<orchard::note::Nullifier> {
+        self.anchor_pool().iter().copied().find(|&nf| spendable(nf))
+    }
+
     /// Whether ceremony adoption has reached standing size and stays closed.
     pub fn anchor_adoption_closed(&self) -> bool {
         self.anchors.adoption_closed()
@@ -524,6 +519,21 @@ mod tests {
         match zcash_keys::address::Address::decode(&MAIN_NETWORK, TEST_UA) {
             Some(zcash_keys::address::Address::Unified(ua)) => *ua,
             _ => panic!("vector is a mainnet Unified Address"),
+        }
+    }
+
+    fn update(term: Option<Term>) -> Request {
+        Request::Update {
+            name: test_name(),
+            ua: test_ua(),
+            term,
+        }
+    }
+
+    fn release() -> Request {
+        Request::Release {
+            name: test_name(),
+            ua: test_ua(),
         }
     }
 
@@ -657,11 +667,7 @@ mod tests {
         let mtp = ts(1_700_000_000);
         r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
         let pending = OtpChallenge {
-            name: test_name(),
-            action: Action::Update,
-            ua: test_ua(),
-            term: Some(Term::Years(1)),
-            tip_rcm: commitment(1),
+            request: update(Some(Term::Years(1))),
             code: OtpCode::for_test(*b"123456"),
             expires_at: ts(1_700_000_000 + D_OTP),
         };
@@ -670,7 +676,7 @@ mod tests {
 
     /// The laws are action-typed: a release-shaped pending cannot feed
     /// the update law, an update-shaped one cannot feed the release
-    /// law — even with the commitment and UA matching.
+    /// law — even with the UA matching.
     #[test]
     fn authorize_laws_reject_pendings_for_other_actions() {
         use crate::mint::treasury::OtpCode;
@@ -679,20 +685,12 @@ mod tests {
         let mtp = ts(1_700_000_000);
         r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
         let release_pending = OtpChallenge {
-            name: test_name(),
-            action: Action::Release,
-            ua: test_ua(),
-            term: None,
-            tip_rcm: commitment(1),
+            request: release(),
             code: OtpCode::for_test(*b"123456"),
             expires_at: ts(1_700_000_000),
         };
         let update_pending = OtpChallenge {
-            name: test_name(),
-            action: Action::Update,
-            ua: test_ua(),
-            term: Some(Term::Years(1)),
-            tip_rcm: commitment(1),
+            request: update(Some(Term::Years(1))),
             code: OtpCode::for_test(*b"123456"),
             expires_at: ts(1_700_000_000),
         };
@@ -704,7 +702,6 @@ mod tests {
     /// with its release note. Live and already-released names are absent.
     #[test]
     fn allows_challenge_gates_the_stale_the_expired_and_the_forever_term() {
-        let ua = test_ua();
         let now = ts(1_000_000_000);
         let above = BlockHeight::from_u32(101);
         let live = record(
@@ -716,22 +713,22 @@ mod tests {
 
         // A live record allows an update challenge, a term, and a
         // release from its own UA.
-        assert!(live.allows_challenge(Action::Update, &ua, Some(Term::Years(1)), above, now));
-        assert!(live.allows_challenge(Action::Release, &ua, None, above, now));
+        assert!(live.allows_challenge(&update(Some(Term::Years(1))), above, now));
+        assert!(live.allows_challenge(&release(), above, now));
 
         // Expired: the term has passed.
-        assert!(!live.allows_challenge(Action::Update, &ua, None, above, ts(2_000_000_001)));
+        assert!(!live.allows_challenge(&update(None), above, ts(2_000_000_001)));
 
         // Stale: the trigger rides at or below the last confirmed
         // transition — it speaks against superseded state.
-        assert!(!live.allows_challenge(Action::Update, &ua, None, BlockHeight::from_u32(100), now));
-        assert!(!live.allows_challenge(Action::Update, &ua, None, BlockHeight::from_u32(99), now));
+        assert!(!live.allows_challenge(&update(None), BlockHeight::from_u32(100), now));
+        assert!(!live.allows_challenge(&update(None), BlockHeight::from_u32(99), now));
 
         // A forever name refuses any term — no runway to bank, no
         // second upgrade to buy — and allows the termless otherwise.
         let forever = record(Action::Claim, Expiry::Never, 2_000_000_000, 3);
-        assert!(!forever.allows_challenge(Action::Update, &ua, Some(Term::Years(1)), above, now));
-        assert!(forever.allows_challenge(Action::Update, &ua, None, above, now));
+        assert!(!forever.allows_challenge(&update(Some(Term::Years(1))), above, now));
+        assert!(forever.allows_challenge(&update(None), above, now));
     }
 
     /// The gate applies both §4.5 clocks — the same predicate the law
@@ -740,7 +737,6 @@ mod tests {
     /// would buy is one `authorize_update` always voids.
     #[test]
     fn allows_challenge_refuses_liveness_due_names() {
-        let ua = test_ua();
         let above = BlockHeight::from_u32(101);
         // Term runs to 2_000_000_000; the liveness deadline passed at
         // 1_500_000_000. Term-live, liveness-due.
@@ -752,27 +748,23 @@ mod tests {
         );
 
         assert!(term_live.allows_challenge(
-            Action::Update,
-            &ua,
-            Some(Term::Years(1)),
+            &update(Some(Term::Years(1))),
             above,
             ts(1_499_999_999)
         ));
         assert!(!term_live.allows_challenge(
-            Action::Update,
-            &ua,
-            Some(Term::Years(1)),
+            &update(Some(Term::Years(1))),
             above,
             ts(1_500_000_000)
         ));
 
         // A forever name past its liveness deadline: refused termless too.
         let forever = record(Action::Claim, Expiry::Never, 1_500_000_000, 2);
-        assert!(!forever.allows_challenge(Action::Update, &ua, None, above, ts(1_500_000_000)));
+        assert!(!forever.allows_challenge(&update(None), above, ts(1_500_000_000)));
 
         // Release challenges from the controller are refused alike; the
         // lifecycle sweep releases without a challenge.
-        assert!(!term_live.allows_challenge(Action::Release, &ua, None, above, ts(1_500_000_000)));
+        assert!(!term_live.allows_challenge(&release(), above, ts(1_500_000_000)));
     }
 
     /// The gate and the update law share the tip median. One second
@@ -784,8 +776,6 @@ mod tests {
         use crate::mint::treasury::{OtpChallenge, OtpCode, D_OTP};
 
         let mut r = Registry::new();
-        let name = test_name();
-        let ua = test_ua();
         let deadline = 1_500_000_000_i64;
         r.set_record(record(
             Action::Claim,
@@ -795,12 +785,9 @@ mod tests {
         ));
         let queue = NameNoteQueue::default();
 
+        let request = update(Some(Term::Years(1)));
         let pending = |mtp: i64| OtpChallenge {
-            name: name.clone(),
-            action: Action::Update,
-            ua: ua.clone(),
-            term: Some(Term::Years(1)),
-            tip_rcm: commitment(1),
+            request: request.clone(),
             code: OtpCode::for_test(*b"123456"),
             expires_at: ts(mtp + D_OTP),
         };
@@ -808,19 +795,18 @@ mod tests {
         let before = ts(deadline - 1);
         let after = ts(deadline);
         let above = BlockHeight::from_u32(101);
-        let term = Some(Term::Years(1));
 
         assert!(r
-            .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, before)
+            .authorize_challenge(&queue, &request, above, before)
             .is_some());
         assert!(r.authorize_update(&pending(deadline - 1), before).is_some());
-        assert!(!r.record(&name).unwrap().is_release_due(before));
+        assert!(!r.record(request.name()).unwrap().is_release_due(before));
 
         assert!(r
-            .authorize_challenge(&queue, &name, Action::Update, &ua, term, above, after)
+            .authorize_challenge(&queue, &request, above, after)
             .is_none());
         assert!(r.authorize_update(&pending(deadline), after).is_none());
-        assert!(r.record(&name).unwrap().is_release_due(after));
+        assert!(r.record(request.name()).unwrap().is_release_due(after));
     }
 
     /// A name with a transition already admitted cannot buy a
@@ -841,10 +827,7 @@ mod tests {
         assert!(r
             .authorize_challenge(
                 &queue,
-                &test_name(),
-                Action::Update,
-                &test_ua(),
-                None,
+                &update(None),
                 BlockHeight::from_u32(101),
                 ts(1_000_000_000),
             )
@@ -1425,5 +1408,24 @@ mod tests {
             .expect("release retained in history");
         assert_eq!(rec.action, Action::Release);
         assert_eq!(rec.predecessor_nullifier, succ);
+    }
+
+    /// Pool order is kept. An anchor the caller refuses is skipped,
+    /// and a pool with none accepted returns nothing.
+    #[test]
+    fn spendable_claim_anchor_skips_refused_anchors() {
+        let mut r = Registry::new();
+        let height = BlockHeight::from_u32(10);
+        r.adopt_anchor(height, nullifier(1));
+        r.adopt_anchor(height, nullifier(2));
+        r.adopt_anchor(height, nullifier(3));
+        let ordered: Vec<_> = r.anchor_pool().iter().copied().collect();
+
+        assert_eq!(r.spendable_claim_anchor(|_| true), Some(ordered[0]));
+        assert_eq!(
+            r.spendable_claim_anchor(|nf| nf != ordered[0]),
+            Some(ordered[1])
+        );
+        assert_eq!(r.spendable_claim_anchor(|_| false), None);
     }
 }

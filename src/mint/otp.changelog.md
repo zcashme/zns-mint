@@ -1,5 +1,24 @@
 # `mint/otp.rs` design record
 
+## 2026-10-22 — A challenge carries its request; one lookup (#368)
+
+- `OtpChallenge` is `{ request, code, expires_at }`. It carries the
+  update or release `Request` it answers instead of copies of its name,
+  verb, address and term, so the request lane passes the request
+  through and no longer unpacks it into a tuple.
+- `index_of(name, action, ua)` is the one definition of "the same
+  OTP". `admit`, `challenge_issued`, `answer` and `consume` look up
+  through it; the five hand-written comparisons, over two different
+  field sets, are gone.
+- `tip_rcm` is gone. Every record change is a Name Note the run loop
+  admits, and each admission drops that name's challenges
+  (`drop_challenges`), so no challenge outlives the record it was
+  issued against. A reorg or a restart still starts from an empty
+  queue. Any new way to change a record must drop the name's
+  challenges too.
+- `invalidate` and `is_relayed` had no callers; gone, with the request
+  txid each entry carried for them.
+
 ## 2026-10-15 — `OtpQueue::relayed` and `unrelayed` (#342)
 
 - `relayed` names every relayed challenge, awaiting its echo;
