@@ -1,15 +1,15 @@
 # main.changelog.md
 
-## 2026-10-26 — A payment is priced at the rate it was seen at; a term-less response pays nothing (#381)
+## 2026-10-26 — A payment is priced at the rate it was seen at; a response keeps the price of what it admits (#381)
 
 - The request lane prices claims and challenge fees at the rate read
   before the pass's round, the rate an OTP response is priced at its
   block. A day the round publishes does not reprice a payment already
   seen (M-04).
-- A term-less update or release response is refunded to the memo
-  address, less the refund fee, once its transition is ruled on. A
-  stranger's term-less challenge can no longer keep a renewal payment
-  (M-01).
+- An admitted response keeps the price of the term it buys, none
+  without a term, and the rest goes back to the memo address less the
+  refund fee. An overpaid renewal gets its excess back, and a code
+  answered for the wrong term costs nothing beyond that term (M-01).
 
 ## 2026-10-26 — An OTP response is ruled on at the block that carried it (#383)
 

@@ -1,5 +1,14 @@
 # `mint/otp.rs` design record
 
+## 2026-10-26 — A challenge is keyed by its whole request (#381)
+
+- Name, verb, address and term are the key. Two terms are two
+  challenges with two codes; only an identical repeat receives the
+  existing challenge.
+- The response carries no term, so `complete` picks by code among the
+  relayed challenges it names. `admit` draws codes distinct among
+  them. A wrong code counts an attempt against each.
+
 ## 2026-10-26 — The right code spends the challenge (#383)
 
 - `answer` is `complete`: it removes the challenge the right code
