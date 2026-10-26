@@ -1,5 +1,36 @@
 # main.changelog.md
 
+## 2026-10-23 — Transactions pay the node's fee rate (#357)
+
+- Each tip pass reads `getstandardfee` once the tip is confirmed and
+  passes the rule to the challenge relay, Name Note assembly, and the
+  vault sweep. A failed read keeps the last rate the node gave.
+
+## 2026-10-23 — The run loop refuses a header outside the time window
+
+- Before a block is applied, its time has to be after the previous
+  median, at most 90 minutes past it, and at most two hours ahead of
+  the mint.
+
+## 2026-10-23 — A queued update is dropped when the tip median would release it
+
+- Before echoes and the lifecycle releases, an update still waiting to
+  be signed is dropped when the purchased term or the liveness deadline
+  has passed at the tip median. A broadcast order stays until its expiry
+  height and keeps the name reserved, so no release note is admitted
+  while that transaction can still confirm.
+
+## 2026-10-22 — The pre-sale table is read beside the price round (#371)
+
+- Every tip pass starts `presale::PendingRead` when the tip arrives,
+  so the read runs during the ancestor walk and block application. It
+  is awaited beside `fetch_round` once the scan reaches the tip, before
+  the tip check; only the unspent part of its 3 s timeout can delay the
+  pass. A failed read warns and keeps the last table; a pass that
+  re-converges aborts it.
+- The daily background refresh (`presale_refresh`) is gone; a new MTP
+  day only sweeps the Treasury.
+
 ## 2026-10-15 — The names in flight are on the metrics page (#342)
 
 - `zns_mint_request_state{name}` for every name the mint has anything

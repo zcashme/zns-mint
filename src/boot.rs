@@ -23,7 +23,7 @@ use std::str::FromStr;
 
 use crate::mint::mtp::MtpTracker;
 use crate::mint::note::NameNoteQueue;
-use crate::mint::presale::{self, AccessCodeDerivationKey, FetchError, ProtectedNames};
+use crate::mint::presale::{self, AccessCodeDerivationKey, HttpsClient, ProtectedNames};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::treasury::{OtpQueue, RequestQueue};
@@ -32,8 +32,8 @@ use crate::wallet::Wallet;
 use crate::zcash::{self, CanonicalBlockSource, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::chain::ChainState;
-use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
+use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zns_canon::capsule::{
     hash as capsule_hash, parse_capsule, read_capsule_file, unseal_seed, CAPSULE_KEY_CONTEXT,
 };
@@ -100,6 +100,10 @@ pub struct Boot<P: Parameters> {
     pub access_code_key: AccessCodeDerivationKey,
     /// must not: fail-closed at birth — the table or no start
     pub protected_names: ProtectedNames,
+    /// initialized: the one client every pre-sale read goes through
+    pub presale_client: HttpsClient,
+    /// must not: fail-closed at birth — the node's fee rate or no start
+    pub fee_rule: FeeRule,
     /// produced: scanned and verified during boot sync
     pub registry: Registry,
     /// initialized: pending Name Note authorizations
@@ -108,8 +112,6 @@ pub struct Boot<P: Parameters> {
     pub requests: RequestQueue,
     /// initialized: pending OTP echoes
     pub echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)>,
-    /// initialized: no pre-sale refresh is in flight
-    pub presale_refresh: Option<tokio::task::JoinHandle<Result<ProtectedNames, FetchError>>>,
     /// The exact encoded identity written to the boot identity document.
     pub treasury_address: String,
     pub registry_ufvk: String,
@@ -576,6 +578,9 @@ impl Boot<Network> {
             "boot: wallet born complete from the origin checkpoint"
         );
 
+        #[cfg(not(feature = "regtest"))]
+        crate::zcash::adopt::require_pinned(&source).await;
+
         // 3d. The mint's birthday: a throwaway window ending at the
         // birthday block, whose median is the birthday block's MTP —
         // the day-zero anchor for `current_day`.
@@ -644,6 +649,11 @@ impl Boot<Network> {
                 .get_block(&network, next_height)
                 .await
                 .expect("FATAL: block unavailable during boot sync");
+            let wall = time::OffsetDateTime::now_utc().unix_timestamp();
+            mtp.header_time_ok(block.header().time, wall)
+                .unwrap_or_else(|reason| {
+                    panic!("FATAL: {reason} at height {}", u32::from(next_height))
+                });
 
             let _ = crate::mint::apply_block(
                 &network,
@@ -670,7 +680,7 @@ impl Boot<Network> {
         // Boot refuses to run with a treasury below MIN_TREASURY_BALANCE.
         // The node's tip is never pushed into the wallet.
         let treasury_balance = wallet
-            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .get_wallet_summary(crate::wallet::CONFIRMATIONS)
             .expect("FATAL: balance summary failed")
             .expect("FATAL: chain knowledge missing at boot balance check")
             .account_balances()
@@ -702,9 +712,20 @@ impl Boot<Network> {
             "boot: initial price ingested"
         );
 
+        // 6a. The node's fee rate.
+        let fee_rule = source
+            .standard_fee()
+            .await
+            .expect("FATAL: fee rate unavailable from Zebra");
+        tracing::info!(
+            zats_per_action = fee_rule.marginal_fee().into_u64(),
+            "boot: fee rate read"
+        );
+
         // 6b. Pre-sale table: fail-closed at birth — no table, no start.
+        let presale_client = presale::https_client();
         let protected_names = loop {
-            match presale::fetch().await {
+            match presale::fetch(&presale_client).await {
                 Ok(names) => {
                     tracing::info!("boot: pre-sale table fetched");
                     break names;
@@ -722,7 +743,6 @@ impl Boot<Network> {
         let name_notes = NameNoteQueue::default();
         let requests = RequestQueue::default();
         let echoes = Vec::new();
-        let presale_refresh = None;
 
         // 7. Sapling proving parameters. Loading and hash verification happen
         // before attestation: a mint that produces a report can also prove
@@ -796,11 +816,12 @@ impl Boot<Network> {
             challenges,
             access_code_key,
             protected_names,
+            presale_client,
+            fee_rule,
             registry,
             name_notes,
             requests,
             echoes,
-            presale_refresh,
             treasury_address,
             registry_ufvk,
             seed_fingerprint: hex::encode(ceremony_fingerprint),

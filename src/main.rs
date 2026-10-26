@@ -10,12 +10,13 @@
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
-use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
+use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
 
 use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
+use zns_mint::mint::presale;
 use zns_mint::mint::pricing::fetch_round;
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{OtpChallenge, OtpQueue};
@@ -46,11 +47,12 @@ async fn main() {
         mut challenges,
         access_code_key,
         mut protected_names,
+        presale_client,
+        mut fee_rule,
         mut registry,
         mut name_notes,
         mut requests,
         mut echoes,
-        mut presale_refresh,
         treasury_address,
         registry_ufvk,
         seed_fingerprint,
@@ -88,6 +90,9 @@ async fn main() {
         let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {
             panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
         });
+        // The pre-sale read runs while the blocks below are fetched and
+        // applied. If this pass restarts, the read is cancelled.
+        let presale_read = presale::PendingRead::start(&presale_client);
 
         // Compare the wallet's own cursor with Zebra at the same height.
         // If they disagree, walk backward until both name the same block;
@@ -257,6 +262,11 @@ async fn main() {
                 );
                 continue 'run;
             }
+            let wall = time::OffsetDateTime::now_utc().unix_timestamp();
+            mtp.header_time_ok(block.header().time, wall)
+                .unwrap_or_else(|reason| {
+                    panic!("FATAL: {reason} at height {}", u32::from(next_height))
+                });
 
             let arrivals = zns_mint::mint::apply_block(
                 &network,
@@ -304,7 +314,10 @@ async fn main() {
         let today = mtp
             .current_day()
             .expect("FATAL: MTP unavailable at the applied tip");
-        oracle.accumulate(fetch_round().await, today, mtp_now);
+        // The tip check below covers the price round and the pre-sale
+        // read alike. Only the read's unspent timeout can delay the pass.
+        let (round, ()) = tokio::join!(fetch_round(), presale_read.install(&mut protected_names));
+        oracle.accumulate(round, today, mtp_now);
         // Transient or unusable tip data → skip this rule pass and wait
         // for another notification; a chain race re-converges.
         let exact_tip = match source.canonical_tip().await {
@@ -335,10 +348,24 @@ async fn main() {
             );
             continue;
         }
+        // The node's fee rate for every transaction this pass builds. A
+        // failed read keeps the last rate the node gave.
+        match source.standard_fee().await {
+            Ok(rule) => {
+                if rule.marginal_fee() != fee_rule.marginal_fee() {
+                    tracing::info!(
+                        zats_per_action = rule.marginal_fee().into_u64(),
+                        "fee rate changed"
+                    );
+                }
+                fee_rule = rule;
+            }
+            Err(error) => tracing::warn!(%error, "fee rate unavailable; keeping the last rate"),
+        }
 
         // The three gauges: chain level, money level, price level.
         let treasury_zats = wallet
-            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .get_wallet_summary(zns_mint::wallet::CONFIRMATIONS)
             .expect("FATAL: balance summary failed")
             .expect("FATAL: chain knowledge missing before gauge")
             .account_balances()
@@ -454,6 +481,7 @@ async fn main() {
                 &treasury_keys,
                 &sapling_spend,
                 &sapling_output,
+                &fee_rule,
                 &record.ua,
                 &source,
                 &pending,
@@ -462,6 +490,26 @@ async fn main() {
             .await
             {
                 challenges.challenge_issued(&pending);
+            }
+        }
+
+        // A broadcast order whose expiry height has passed can be signed
+        // again, or dropped below once the tip median would release it.
+        name_notes.expire_sent(tip);
+        // Drop an update the tip median would already release. An echo
+        // for that name can then be decided, and a release note can be
+        // admitted below. A broadcast still inside its expiry window stays.
+        for note in name_notes.authorized_notes() {
+            if note.action().is_update()
+                && registry
+                    .record(note.name())
+                    .is_some_and(|record| record.is_release_due(mtp_now))
+            {
+                tracing::info!(
+                    name = %note.name().as_str(),
+                    "update dropped: the tip median would release the name"
+                );
+                name_notes.drop_note(note.name());
             }
         }
 
@@ -544,7 +592,7 @@ async fn main() {
         }
 
         // Lifecycle releases, §4.5: the registry owns the clocks and
-        // their plural; the sweep moves the batch out each tip.
+        // their plural; each tip admits the release notes.
         // `releases_due` re-derives the same notes per tip, so
         // admission is idempotent.
         for (name, release_note) in registry.releases_due(mtp_now) {
@@ -605,6 +653,7 @@ async fn main() {
                 &registry_keys,
                 &sapling_spend,
                 &sapling_output,
+                &fee_rule,
                 note.clone(),
                 authority_nf,
                 tip,
@@ -640,6 +689,7 @@ async fn main() {
 
             if source.submit(&transaction, "NameNote").await {
                 wallet.record_sent(&transaction, target_height, fee);
+                name_notes.mark_sent(note.name(), target_height + DEFAULT_TX_EXPIRY_DELTA);
                 tracing::info!(
                     txid = %transaction.txid(),
                     name = %note.name().as_str(),
@@ -656,35 +706,15 @@ async fn main() {
             }
         }
 
-        // A completed background pre-sale fetch installs now; an
-        // unfinished one keeps waiting off the loop's path.
-        if let Some(handle) = presale_refresh.take() {
-            if handle.is_finished() {
-                match handle.await {
-                    Ok(Ok(fresh)) => protected_names = fresh,
-                    Ok(Err(error)) => {
-                        tracing::warn!(%error, "pre-sale refresh failed; yesterday's rows stand")
-                    }
-                    Err(error) => tracing::warn!(?error, "pre-sale refresh task failed"),
-                }
-            } else {
-                presale_refresh = Some(handle);
-            }
-        }
-
-        // A new MTP day refreshes the pre-sale table in the
-        // background and sweeps the Treasury to the vault once. No
-        // claim ever waits on the fetch.
+        // A new MTP day sweeps the Treasury to the vault once.
         if today > previous_day {
-            if presale_refresh.is_none() {
-                presale_refresh = Some(tokio::spawn(zns_mint::mint::presale::fetch()));
-            }
             match treasury::sweep_to_vault(
                 &network,
                 &mut wallet,
                 &treasury_keys,
                 &sapling_spend,
                 &sapling_output,
+                &fee_rule,
             ) {
                 Ok(Some(tx)) => {
                     source.submit(&tx, "vault sweep").await;
