@@ -361,7 +361,7 @@ impl JsonRpc {
     }
 }
 
-impl super::CanonicalBlockSource {
+impl CanonicalBlockSource {
     /// Returns the exact `(height, hash)` pair for the current best-chain
     /// tip, parsed from one `getblockchaininfo` response so observations
     /// from different tips cannot be combined.
@@ -436,10 +436,7 @@ impl super::CanonicalBlockSource {
     }
 
     /// The raw header at `height` (see [`JsonRpc::header_at`]).
-    pub async fn header_at(
-        &self,
-        height: BlockHeight,
-    ) -> Result<zcash_primitives::block::BlockHeader, TransportError> {
+    pub async fn header_at(&self, height: BlockHeight) -> Result<BlockHeader, TransportError> {
         self.rpc.header_at(height).await
     }
 }

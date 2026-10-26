@@ -204,15 +204,13 @@ impl<P: consensus::Parameters> Wallet<P> {
         &self,
         balances: &mut HashMap<AccountId, AccountBalance>,
         account: AccountId,
-        note_id: &zcash_client_backend::wallet::NoteId,
+        note_id: &NoteId,
         is_change: bool,
         value: Zatoshis,
         pool: ShieldedPool,
         target_height: TargetHeight,
         policy: ConfirmationsPolicy,
     ) -> Result<(), WalletError> {
-        use zcash_client_backend::wallet::OutputRef;
-
         let balance = balances
             .get_mut(&account)
             .expect("both fixed accounts are seeded with a zero balance");
@@ -542,10 +540,7 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
             .collect())
     }
 
-    fn get_memo(
-        &self,
-        note_id: zcash_client_backend::wallet::NoteId,
-    ) -> Result<Option<Memo>, Self::Error> {
+    fn get_memo(&self, note_id: NoteId) -> Result<Option<Memo>, Self::Error> {
         Ok(self.memos.get(&note_id).cloned())
     }
 

@@ -516,7 +516,6 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mint::NameNote;
     use zcash_protocol::consensus::MAIN_NETWORK;
 
     /// The expiry the builder sets for a transaction targeting `height`.

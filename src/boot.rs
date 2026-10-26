@@ -540,7 +540,7 @@ impl Boot<Network> {
         );
 
         #[cfg(not(feature = "regtest"))]
-        crate::zcash::adopt::require_pinned(&source).await;
+        zcash::adopt::require_pinned(&source).await;
 
         // 3d. The mint's birthday: a throwaway window ending at the
         // birthday block, whose median is the birthday block's MTP —
@@ -695,7 +695,7 @@ impl Boot<Network> {
                     tracing::warn!(%error, "boot: pre-sale table unavailable; retrying");
                 }
             }
-            tokio::time::sleep(crate::zcash::RETRY_PAUSE).await;
+            tokio::time::sleep(zcash::RETRY_PAUSE).await;
         };
 
         // The challenge memory: empty by construction, filled by the run
@@ -856,7 +856,7 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 /// by the SEV-SNP attestation, not by runtime RPC checks.
 async fn origin_checkpoint(
     birthday: BlockHeight,
-    treestate: impl std::ops::AsyncFnOnce(BlockHeight) -> Result<ChainState, zcash::TransportError>,
+    treestate: impl AsyncFnOnce(BlockHeight) -> Result<ChainState, zcash::TransportError>,
 ) -> ChainState {
     #[cfg(not(feature = "regtest"))]
     let checkpoint_height = birthday - 101;
@@ -1940,7 +1940,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "FATAL: SEED FINGERPRINT MISMATCH")]
     fn verify_fingerprint_mismatch_is_redacted() {
-        use secrecy::Secret;
         let seed = Secret::new([0xAB; 32]);
         let wrong_fp = SeedFingerprint::from_seed(&[0xCD; 32]).unwrap().to_string();
         verify_fingerprint(&seed, &wrong_fp);

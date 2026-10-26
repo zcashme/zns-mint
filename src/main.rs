@@ -171,7 +171,7 @@ async fn main() {
                 let source = source.clone();
                 async move {
                     let (_, _, timestamp) = source.get_block_header(height).await?;
-                    Ok::<_, zns_mint::zcash::TransportError>(
+                    Ok::<_, TransportError>(
                         u32::try_from(timestamp.as_seconds())
                             .expect("Zcash header timestamps fit u32"),
                     )

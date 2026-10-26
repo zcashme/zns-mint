@@ -371,7 +371,7 @@ impl NameNote {
             if net != params.network_type() || revision != zcash_address::unified::Revision::R0 {
                 return None;
             }
-            zcash_keys::address::UnifiedAddress::try_from(container).ok()?
+            UnifiedAddress::try_from(container).ok()?
         };
         let expires_at = Expiry::parse(parts[4])?;
 
@@ -540,7 +540,7 @@ pub fn decrypt_treasury_memos(
     block: &Block,
     treasury_keys: &crate::TreasuryKeys,
 ) -> Vec<(
-    zcash_primitives::transaction::TxId,
+    TxId,
     usize,
     zcash_protocol::value::Zatoshis,
     zcash_protocol::memo::MemoBytes,

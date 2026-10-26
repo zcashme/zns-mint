@@ -393,18 +393,17 @@ impl RequestQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mint::{Action, Name, Term};
+    use crate::mint::{Action, Term};
     use crate::wallet::testing::{Cache, Factory};
     use crate::zcash::fees::fee_rule;
     use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
     use zcash_client_backend::data_api::testing::sapling::SaplingPoolTester;
-    use zcash_protocol::consensus::MainNetwork;
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
 
     fn request(action: Action) -> Request {
-        let ua = match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
-            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
+        let ua = match Address::decode(&MainNetwork, TEST_UA) {
+            Some(Address::Unified(ua)) => *ua,
             _ => panic!("vector is a mainnet Unified Address"),
         };
         let name = Name::parse("alice").unwrap();
@@ -442,12 +441,8 @@ mod tests {
         ] {
             assert_eq!(vault.to_string(), encoded);
         }
-        assert!(
-            zcash_keys::address::Address::decode(&MainNetwork, TESTNET_VAULT_ADDRESS).is_none()
-        );
-        assert!(
-            zcash_keys::address::Address::decode(&TestNetwork, MAINNET_VAULT_ADDRESS).is_none()
-        );
+        assert!(Address::decode(&MainNetwork, TESTNET_VAULT_ADDRESS).is_none());
+        assert!(Address::decode(&TestNetwork, MAINNET_VAULT_ADDRESS).is_none());
     }
 
     /// The float survives any note count and fee rate.
@@ -516,8 +511,8 @@ mod tests {
 
     #[test]
     fn queue_records_every_claim_in_order() {
-        let ua = match zcash_keys::address::Address::decode(&MainNetwork, TEST_UA) {
-            Some(zcash_keys::address::Address::Unified(ua)) => *ua,
+        let ua = match Address::decode(&MainNetwork, TEST_UA) {
+            Some(Address::Unified(ua)) => *ua,
             _ => panic!("vector is a mainnet Unified Address"),
         };
         let alice = Name::parse("alice").unwrap();

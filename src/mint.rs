@@ -388,11 +388,11 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     network: &P,
     birthday: BlockHeight,
     registry_keys: &crate::RegistryKeys,
-    treasury_keys: &crate::TreasuryKeys,
+    treasury_keys: &TreasuryKeys,
     from_state: &zcash_client_backend::data_api::chain::ChainState,
     block: zcash_primitives::block::Block,
     height: BlockHeight,
-    wallet: &mut crate::wallet::Wallet<P>,
+    wallet: &mut Wallet<P>,
     registry: &mut registry::Registry,
     mtp: &mut mtp::MtpTracker,
 ) -> Vec<(TxId, MintInbound, Zatoshis)> {
@@ -447,13 +447,9 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         &spend_identifiers,
         Some(&cursor),
         |_| {
-            Ok::<
-                Option<(
-                    zip32::AccountId,
-                    Option<transparent::keys::TransparentKeyScope>,
-                )>,
-                Infallible,
-            >(None)
+            Ok::<Option<(AccountId, Option<transparent::keys::TransparentKeyScope>)>, Infallible>(
+                None,
+            )
         },
     )
     .expect("FATAL: a canonical block failed deterministic wallet scanning");
@@ -733,7 +729,7 @@ pub async fn watch_mempool(chain: ChainClient, sender: mpsc::Sender<(MempoolChan
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zcash_address::unified::{Address as Ua, Encoding, Receiver, Revision, Uitem};
+    use zcash_address::unified::{Address as Ua, Receiver, Revision, Uitem};
     use zcash_protocol::consensus::MainNetwork;
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";

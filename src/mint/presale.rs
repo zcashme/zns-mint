@@ -735,7 +735,7 @@ mod tests {
         }));
         started_rx.await.unwrap();
         drop(pending);
-        let finished = tokio::time::timeout(std::time::Duration::from_secs(1), finished_rx).await;
+        let finished = tokio::time::timeout(Duration::from_secs(1), finished_rx).await;
         assert!(matches!(finished, Ok(Err(_))));
     }
 }
