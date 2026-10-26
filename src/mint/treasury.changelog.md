@@ -1,30 +1,19 @@
 # Treasury design record
 
-## Underpaid payments are refunded (#372)
+## 2026-10-24 — Underpaid payments are refunded (#372)
 
-- A refund is the payment less the withheld fee, `REFUND_FEE_ACTIONS`
-  (10) at the node's rate. A claim's refund goes to the memo's UA; an OTP
-  response's goes to the name's current UA, where its challenge went. A
-  payment that does not exceed the fee is kept.
-- Refunded: a claim with no access code or for an unlisted name; an
-  underpaid claim, before its access code is judged; a claim with a
-  wrong access code on a listed name, which also keeps 1% of the quote;
-  a claim for a name already registered or already queued; an underpaid
-  renewal or upgrade OTP response, and one whose name has a Name Note
-  queued. The challenge stays.
-- Kept: a wrong OTP, an unparsed memo, and any refusal not listed above.
-- `RefundQueue` holds the refunds due (`RefundRequest`): `admit`, `due`,
-  `paid`, `is_empty`, `truncate_to`. A reorg drops refunds above the
-  ancestor.
-- The day's sweep waits while any refund is queued, so a refund's money
-  stays in the Treasury until it is built.
-- `treasury::issue_refund` builds one refund with `propose_transfer` and
-  `create_proposed_transactions`; `Ok(None)` means the Treasury cannot
-  fund it yet. The run loop issues each refund due on the tip pass after
-  its payment's block. A refund leaves the queue once the node accepts
-  it; one the node refuses is built again on the next tip. The wallet
-  owns the transaction from there, as it owns a sweep.
-- Each OTP response keeps its payment txid for the refund.
+- A refund is the payment minus ten actions at the node's rate. A claim
+  returns to the memo address; an OTP response, to the name's current
+  address. A payment within the fee is kept.
+- Refund a claim for no code, an unlisted name, a payment below the quote,
+  a wrong code once the quote is covered (keep 1%), or a name registered
+  or queued.
+- Refund a renewal or upgrade below its quote, and an OTP response whose
+  Name Note is already queued. That OTP can be sent again. A wrong OTP,
+  an unparsed memo, or any other refusal leaves its payment with the mint.
+- Build a refund on the tip after its payment. Drop it if that block
+  is orphaned. The sweep waits while one is queued. Try again next tip
+  until the node accepts it; the wallet then owns the transaction.
 
 ## 2026-10-24 — Treasury payments pay the node's fee rate (#357)
 
