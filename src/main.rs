@@ -282,7 +282,7 @@ async fn main() {
                 &mut mtp,
             );
             name_notes.reconcile_seen(&network, &registry);
-            // The block's own clock: a challenge expired by it answers
+            // The block's own clock: a challenge expired by it completes
             // nothing in it, and the law reads it.
             let block_mtp = mtp
                 .current()
@@ -298,7 +298,7 @@ async fn main() {
                     // A refused response goes back to the memo address,
                     // less the refund fee.
                     MintInbound::Response(response) => {
-                        let Some(sent) = challenges.answer(&response) else {
+                        let Some(sent) = challenges.complete(&response) else {
                             // A wrong code, or no live challenge.
                             refunds.admit(
                                 &fee_rule,

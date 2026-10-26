@@ -181,7 +181,7 @@ impl OtpQueue {
 
     /// Drops every challenge whose window has closed by `mtp`. The run
     /// loop calls this at every applied block, with the block's median,
-    /// before answering the block's responses.
+    /// before handling the block's responses.
     pub fn expire(&mut self, mtp: Timestamp) {
         self.challenges
             .retain(|(challenge, _, _)| mtp < challenge.expires_at);
@@ -194,11 +194,9 @@ impl OtpQueue {
             .retain(|(challenge, _, _)| challenge.request.name() != name);
     }
 
-    /// The relayed challenge an OTP response answers when its code is
-    /// right, removed: one code, one use. A wrong code counts one
-    /// attempt against the challenge the response names and retires
-    /// it at [`MAX_ATTEMPTS`].
-    pub fn answer(&mut self, returned: &OtpMemo) -> Option<OtpChallenge> {
+    /// The right code removes its challenge and returns it. A wrong
+    /// code counts an attempt; the sixth retires the challenge.
+    pub fn complete(&mut self, returned: &OtpMemo) -> Option<OtpChallenge> {
         let index = self.index_of(&returned.name, returned.action, &returned.ua)?;
         let (challenge, state, attempts) = &mut self.challenges[index];
         if *state != ChallengeState::Relayed {
@@ -322,12 +320,14 @@ mod tests {
 
         q.drop_challenges(&test_name("alice"));
 
-        assert!(q.answer(&response_for(&alice_update, *b"111111")).is_none());
         assert!(q
-            .answer(&response_for(&alice_release, *b"222222"))
+            .complete(&response_for(&alice_update, *b"111111"))
+            .is_none());
+        assert!(q
+            .complete(&response_for(&alice_release, *b"222222"))
             .is_none());
         assert_eq!(q.relayed().collect::<Vec<_>>(), [bob.request.name()]);
-        assert!(q.answer(&response_for(&bob, *b"333333")).is_some());
+        assert!(q.complete(&response_for(&bob, *b"333333")).is_some());
     }
 
     /// A challenge names its name as unrelayed until it is relayed, and
@@ -359,9 +359,9 @@ mod tests {
         assert!(q.challenge_issued(&pending));
 
         let response = response_for(&pending, *b"123456");
-        let matched = q.answer(&response).expect("live pending");
+        let matched = q.complete(&response).expect("live pending");
         assert_eq!(matched.request, pending.request);
-        assert!(q.answer(&response).is_none());
+        assert!(q.complete(&response).is_none());
         assert_eq!(q.relayed().count(), 0);
     }
 
@@ -390,21 +390,21 @@ mod tests {
         // right code still answers.
         for n in 1..MAX_ATTEMPTS {
             let wrong: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();
-            assert!(q.answer(&response_for(&pending, wrong)).is_none());
+            assert!(q.complete(&response_for(&pending, wrong)).is_none());
         }
         let right = response_for(&pending, *b"111111");
-        assert!(q.answer(&right).is_some());
+        assert!(q.complete(&right).is_some());
 
         // The hit burns exactly once — and only the entry it answered.
-        assert!(q.answer(&right).is_none());
+        assert!(q.complete(&right).is_none());
         assert_eq!(q.relayed().collect::<Vec<_>>(), [other.request.name()]);
 
         // Six wrong responses retire the entry they name, and only it.
         for n in 1..=MAX_ATTEMPTS {
             let wrong: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();
-            assert!(q.answer(&response_for(&other, wrong)).is_none());
+            assert!(q.complete(&response_for(&other, wrong)).is_none());
         }
-        assert!(q.answer(&response_for(&other, *b"333333")).is_none());
+        assert!(q.complete(&response_for(&other, *b"333333")).is_none());
         assert_eq!(q.relayed().count(), 0);
     }
 
@@ -417,7 +417,7 @@ mod tests {
         assert!(q.challenge_issued(&pending));
 
         q.expire(pending.expires_at);
-        assert!(q.answer(&response_for(&pending, *b"123456")).is_none());
+        assert!(q.complete(&response_for(&pending, *b"123456")).is_none());
         assert_eq!(q.relayed().count(), 0);
     }
 
@@ -428,7 +428,7 @@ mod tests {
         let pending = challenge(update("alice"), *b"123456");
         q.admit(pending.clone());
 
-        assert!(q.answer(&response_for(&pending, *b"123456")).is_none());
+        assert!(q.complete(&response_for(&pending, *b"123456")).is_none());
         assert_eq!(q.requested().len(), 1);
     }
 }

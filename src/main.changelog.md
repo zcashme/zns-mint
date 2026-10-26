@@ -3,8 +3,8 @@
 ## 2026-10-26 — An OTP response is ruled on at the block that carried it (#383)
 
 - The run loop no longer keeps OTP responses. At block application a
-  response is answered against the challenges relayed before that
-  block, and the transition it authorizes is ruled on there: renewal
+  response completes the challenge relayed before that block, and
+  the transition it authorizes is ruled on there: renewal
   price, no note pending, the law, then the note is admitted. The tip
   pass has no response lane. A refused response is refunded there,
   as the tip pass did.
@@ -16,8 +16,8 @@
   round. One block per pass, these are the tip's values; across a
   catch-up they are the block's own.
 - Challenges are expired at every applied block, by that block's
-  median, before its responses are answered, so a challenge the
-  block's clock has expired answers nothing in it. The tip pass no
+  median, before its responses are handled, so a challenge the
+  block's clock has expired completes nothing in it. The tip pass no
   longer does.
 - A response confirmed before its challenge was relayed, or kept
   across a reorg that rebuilt the queue, can no longer count as a
