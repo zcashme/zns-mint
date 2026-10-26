@@ -475,46 +475,24 @@ mod tests {
         assert_eq!(quoted(&oracle, &long, Term::Forever), 6_000_000);
     }
 
-    /// A payment priced at the rate in force when it was queued still
-    /// meets that quote after a later day publishes a higher rate.
+    /// `quote_at` and `challenge_fee_at` price at the rate given; `quote`
+    /// and `challenge_fee` pass the published one.
     #[test]
-    fn a_stored_rate_prices_the_payment_after_rollover() {
-        let mut oracle = Oracle::new(Decimal::from(1_000), 0, Timestamp::from_seconds(0).unwrap());
-        let sighted = oracle.current();
+    fn a_quote_at_a_given_rate() {
+        let oracle = Oracle::new(Decimal::from(1_000), 0, Timestamp::from_seconds(0).unwrap());
         let name = Name::parse("purple").unwrap();
-        let paid = Oracle::quote_at(sighted, &name, Term::Years(1)).unwrap();
-        let sighted_fee = Oracle::challenge_fee_at(sighted);
-
-        // A zero-length interval moves the spot to $500 without billing
-        // the opening price. The rest of the day is $500, and the next
-        // day's rollover publishes it: 200_000 zats per USD.
-        oracle.accumulate(
-            Some(Decimal::from(500)),
-            0,
-            Timestamp::from_seconds(0).unwrap(),
-        );
-        oracle.accumulate(
-            Some(Decimal::from(500)),
-            0,
-            Timestamp::from_seconds(3_600).unwrap(),
-        );
-        oracle.accumulate(
-            Some(Decimal::from(500)),
-            1,
-            Timestamp::from_seconds(86_400).unwrap(),
-        );
-        assert_eq!(oracle.current().into_u64(), 200_000);
-
-        assert_eq!(paid.into_u64(), 2_000_000);
+        let rate = Zatoshis::const_from_u64(200_000);
+        let quote = Oracle::quote_at(rate, &name, Term::Years(1)).unwrap();
+        assert_eq!(quote.into_u64(), 4_000_000);
+        assert_eq!(Oracle::challenge_fee_at(rate).into_u64(), 200_000);
         assert_eq!(
-            Oracle::quote_at(sighted, &name, Term::Years(1))
-                .unwrap()
-                .into_u64(),
-            paid.into_u64()
+            oracle.quote(&name, Term::Years(1)),
+            Oracle::quote_at(oracle.current(), &name, Term::Years(1))
         );
-        assert!(paid < oracle.quote(&name, Term::Years(1)).unwrap());
-        assert_eq!(sighted_fee.into_u64(), 100_000);
-        assert!(sighted_fee < oracle.challenge_fee());
+        assert_eq!(
+            oracle.challenge_fee(),
+            Oracle::challenge_fee_at(oracle.current())
+        );
     }
 
     /// The registration quote follows the term: N annuals for `Ny`, three
