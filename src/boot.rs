@@ -359,13 +359,9 @@ async fn require_anchor_on_chain(
 fn ceremony_anchor(text: &str) -> CeremonyAnchor {
     #[derive(serde::Deserialize)]
     struct RawAnchor {
-        #[serde(default)]
         anchor_txid: Option<String>,
-        #[serde(default)]
         birthday: Option<u32>,
-        #[serde(default)]
         network: Option<String>,
-        #[serde(default)]
         seed_fingerprint: Option<String>,
     }
     let raw: RawAnchor = toml::from_str(text)
