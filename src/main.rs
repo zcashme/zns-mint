@@ -311,12 +311,15 @@ async fn main() {
                             continue;
                         };
                         let name = sent.request.name();
-                        // What the response pays beyond the price of the
-                        // term it buys; all of it without a term.
+                        // A term keeps the whole payment once it covers
+                        // the price; without a term, all of it goes back.
                         let rest = match &sent.request {
                             Request::Update {
                                 term: Some(term), ..
-                            } => oracle.quote(name, *term).and_then(|price| paid - price),
+                            } => oracle
+                                .quote(name, *term)
+                                .filter(|price| paid >= *price)
+                                .map(|_| Zatoshis::ZERO),
                             _ => Some(paid),
                         };
                         let Some(rest) = rest else {
@@ -352,8 +355,6 @@ async fn main() {
                         if name_notes.admit(next_height, note) {
                             challenges.drop_challenges(name);
                         }
-                        // The mint keeps the price of what it admits; the
-                        // rest goes back.
                         if rest > Zatoshis::ZERO {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, rest);
                         }
