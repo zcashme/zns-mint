@@ -4,10 +4,9 @@
 
 - `answer` is `complete`: it removes the challenge the right code
   matches and returns it, one code, one use, at the block that carried
-  the response. `consume` is gone.
-  The run loop rules on the returned challenge there and then; a
-  refused response ends the challenge, and a new request starts a
-  new one.
+  the response. `consume` is gone. The run loop rules on the returned
+  challenge there and then; a refused response ends the challenge,
+  and a new request starts a new one.
 - `prune` is `expire`, called per applied block with that block's
   median, before the block's responses are handled.
 

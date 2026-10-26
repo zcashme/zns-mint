@@ -3,11 +3,11 @@
 ## 2026-10-26 — An OTP response is ruled on at the block that carried it (#383)
 
 - The run loop no longer keeps OTP responses. At block application a
-  response completes the challenge relayed before that block, and
-  the transition it authorizes is ruled on there: renewal
-  price, no note pending, the law, then the note is admitted. The tip
-  pass has no response lane. A refused response is refunded there,
-  as the tip pass did.
+  response completes the challenge relayed before that block, and the
+  transition it authorizes is ruled on there: renewal price, no note
+  pending, the law, then the note is admitted. The tip pass has no
+  response lane. A refused response is refunded there, as the tip
+  pass did.
 - A refused response ends its challenge; the controller requests
   again. Before, an underpaid renewal left the challenge answerable
   with the same code.
