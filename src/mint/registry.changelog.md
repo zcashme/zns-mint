@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-10-26 — A claim anchor is the first spendable one in pool order
+
+- `spendable_claim_anchor` walks the pool in order and returns the
+  first anchor the caller accepts. An empty pool, or one whose
+  anchors are all refused, returns nothing.
+
 ## 2026-10-23 — An update is signed at the tip and renews when it confirms
 
 - `authorize_update` and an update challenge read the purchased term
