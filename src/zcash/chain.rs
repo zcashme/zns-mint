@@ -93,11 +93,8 @@ pub(crate) type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
 pub(crate) fn tip_height_hash(
     tip: &BlockHashAndHeight,
 ) -> Result<(BlockHeight, BlockHash), TransportError> {
-    let bytes = tip
-        .hash_display_order()
-        .ok_or(TransportError::BadNodeData("tip hash length"))?;
     let hash =
-        block_hash_from_display(bytes).ok_or(TransportError::BadNodeData("tip hash length"))?;
+        block_hash_from_display(&tip.hash).ok_or(TransportError::BadNodeData("tip hash length"))?;
     Ok((BlockHeight::from_u32(tip.height), hash))
 }
 
