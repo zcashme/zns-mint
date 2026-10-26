@@ -5,7 +5,7 @@ use subtle::ConstantTimeEq;
 use time::{Duration, Timestamp};
 use zeroize::Zeroize;
 
-use crate::mint::{Action, Name, OtpMemo, Request, UnifiedAddress};
+use crate::mint::{Name, OtpMemo, Request};
 
 /// Thirty minutes; §5.3: D_OTP.
 pub const D_OTP: i64 = 1800;
@@ -98,6 +98,15 @@ impl OtpChallenge {
             ua: self.request.ua().clone(),
         }
     }
+
+    /// Whether a response naming `memo`'s name, verb and address may
+    /// answer this challenge. The memo carries no term, so every term
+    /// of one request answers to it.
+    fn is_named_by(&self, memo: &OtpMemo) -> bool {
+        self.request.name() == &memo.name
+            && self.request.action() == memo.action
+            && self.request.ua() == &memo.ua
+    }
 }
 
 /// Lifecycle state for a pending challenge entry.
@@ -130,23 +139,28 @@ impl OtpQueue {
         }
     }
 
-    /// Where the OTP for a name, verb and requested address sits:
-    /// the one definition of "the same OTP". Every phase looks up
-    /// through it.
-    fn index_of(&self, name: &Name, action: Action, ua: &UnifiedAddress) -> Option<usize> {
-        self.challenges.iter().position(|(challenge, _, _)| {
-            challenge.request.name() == name
-                && challenge.request.action() == action
-                && challenge.request.ua() == ua
-        })
+    /// Where the challenge for `request` sits. The whole request,
+    /// term included, is the key.
+    fn index_of(&self, request: &Request) -> Option<usize> {
+        self.challenges
+            .iter()
+            .position(|(challenge, _, _)| challenge.request == *request)
     }
 
-    /// One live entry per pending transition: a repeat request
-    /// receives the existing entry.
-    pub fn admit(&mut self, challenge: OtpChallenge) -> OtpChallenge {
-        let request = &challenge.request;
-        if let Some(index) = self.index_of(request.name(), request.action(), request.ua()) {
+    /// One live entry per request: an identical repeat receives the
+    /// existing entry. A challenge's code differs from every other
+    /// challenge a response could name.
+    pub fn admit(&mut self, mut challenge: OtpChallenge) -> OtpChallenge {
+        if let Some(index) = self.index_of(&challenge.request) {
             return self.challenges[index].0.clone();
+        }
+        let memo = challenge.memo();
+        while self
+            .challenges
+            .iter()
+            .any(|(other, _, _)| other.is_named_by(&memo) && other.code == challenge.code)
+        {
+            challenge.code = OtpCode::generate();
         }
         self.challenges.push((
             challenge.clone(),
@@ -158,8 +172,7 @@ impl OtpQueue {
 
     /// Marks a request as relayed after the node accepts its challenge.
     pub fn challenge_issued(&mut self, challenge: &OtpChallenge) -> bool {
-        let request = &challenge.request;
-        let Some(index) = self.index_of(request.name(), request.action(), request.ua()) else {
+        let Some(index) = self.index_of(&challenge.request) else {
             return false;
         };
         let state = &mut self.challenges[index].1;
@@ -194,20 +207,27 @@ impl OtpQueue {
             .retain(|(challenge, _, _)| challenge.request.name() != name);
     }
 
-    /// The right code removes its challenge and returns it. A wrong
-    /// code counts an attempt; the sixth retires the challenge.
+    /// The code picks among the relayed challenges the response names.
+    /// The right code removes its challenge and returns it. A wrong code
+    /// counts an attempt against each of them; a sixth retires one.
     pub fn complete(&mut self, returned: &OtpMemo) -> Option<OtpChallenge> {
-        let index = self.index_of(&returned.name, returned.action, &returned.ua)?;
-        let (challenge, state, attempts) = &mut self.challenges[index];
-        if *state != ChallengeState::Relayed {
-            return None;
+        let mut matched = None;
+        for (index, (challenge, state, _)) in self.challenges.iter().enumerate() {
+            if *state == ChallengeState::Relayed
+                && challenge.is_named_by(returned)
+                && bool::from(challenge.code.0.ct_eq(&returned.code.0))
+            {
+                matched = Some(index);
+            }
         }
-        if bool::from(challenge.code.0.ct_eq(&returned.code.0)) {
+        if let Some(index) = matched {
             return Some(self.challenges.remove(index).0);
         }
-        if attempts.count() {
-            self.challenges.remove(index);
-        }
+        self.challenges.retain_mut(|(challenge, state, attempts)| {
+            !(*state == ChallengeState::Relayed
+                && challenge.is_named_by(returned)
+                && attempts.count())
+        });
         None
     }
 
@@ -231,7 +251,7 @@ impl OtpQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mint::Term;
+    use crate::mint::{Term, UnifiedAddress};
 
     fn test_name(s: &str) -> Name {
         Name::parse(s).unwrap()
@@ -405,6 +425,39 @@ mod tests {
             assert!(q.complete(&response_for(&other, wrong)).is_none());
         }
         assert!(q.complete(&response_for(&other, *b"333333")).is_none());
+        assert_eq!(q.relayed().count(), 0);
+    }
+
+    /// Two terms are two challenges with two codes; each code answers
+    /// only its own. A wrong code counts against both.
+    #[test]
+    fn each_term_is_its_own_challenge() {
+        let mut q = OtpQueue::new();
+        let planted = q.admit(challenge(update("alice"), *b"111111"));
+        let renewal = Request::Update {
+            name: test_name("alice"),
+            ua: mainnet_ua(),
+            term: Some(Term::Years(5)),
+        };
+        let renewal = q.admit(challenge(renewal, *b"111111"));
+        assert_ne!(planted.code, renewal.code);
+        assert!(q.challenge_issued(&planted));
+        assert!(q.challenge_issued(&renewal));
+
+        for n in 1..MAX_ATTEMPTS {
+            let wrong: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();
+            assert!(q.complete(&response_for(&renewal, wrong)).is_none());
+        }
+        let answered = q
+            .complete(&OtpMemo {
+                code: renewal.code.clone(),
+                ..renewal.memo()
+            })
+            .expect("the renewal's code");
+        assert_eq!(answered.request, renewal.request);
+
+        // The sixth wrong code retires the planted challenge too.
+        assert!(q.complete(&response_for(&planted, *b"000000")).is_none());
         assert_eq!(q.relayed().count(), 0);
     }
 
