@@ -432,6 +432,16 @@ mod tests {
         oracle.quote(name, term).expect("quote fits").into_u64()
     }
 
+    /// Most venues quote a string; Bitfinex quotes a number.
+    #[test]
+    fn a_price_reads_from_a_string_or_a_number() {
+        let price = Decimal::new(4153, 2);
+        let string = serde_json::json!("41.53");
+        let number = serde_json::json!(41.53);
+        assert_eq!(serde_json::from_value::<Decimal>(string).unwrap(), price);
+        assert_eq!(serde_json::from_value::<Decimal>(number).unwrap(), price);
+    }
+
     #[test]
     fn challenge_fee_rounds_one_dollar_up_to_the_grid() {
         // $1,000/ZEC ⇒ $1 = 100_000 zats: exactly on the grid.

@@ -32,9 +32,9 @@ serde_json = "1"
 toml = "1"
 # `O_NOFOLLOW` when opening the keygen attestation report.
 libc = "0.2"
-# Exchange price parsing: `Decimal` deserializes JSON price strings
-# ("41.53") directly, so no hand-rolled decimal parser is needed.
-rust_decimal = { version = "1.42", features = ["serde-with-str"] }
+# Exchange price parsing: `Decimal` deserializes a JSON price string
+# ("41.53") or number directly, so no hand-rolled decimal parser is needed.
+rust_decimal = { version = "1.42", features = ["serde"] }
 # `OffsetDateTime` for `SentTransaction::new` (zcash_client_backend data-api);
 # same crate upstream depends on, lockfile-shared at 0.3.x.
 time = { version = "0.3", features = ["parsing"] }
