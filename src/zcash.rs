@@ -21,9 +21,9 @@ pub use zebra_indexer_proto::MempoolChangeKind;
 
 use std::{any::type_name, fmt, time::Duration};
 
-use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::Request;
+use hyper::body::Bytes;
+use hyper::{Request, StatusCode};
 use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
 use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
@@ -106,7 +106,7 @@ impl JsonRpc {
     /// consensus and covered by one deadline, headers through the last
     /// byte. A stalled body times out; an oversized one is bad node
     /// data, not transport.
-    async fn round_trip(&self, body: String) -> Result<(http::StatusCode, Bytes), TransportError> {
+    async fn round_trip(&self, body: String) -> Result<(StatusCode, Bytes), TransportError> {
         // The request is entirely static, so building it cannot fail.
         let request = Request::builder()
             .method("POST")

@@ -3,10 +3,9 @@
 
 use std::time::Duration;
 
-use http::Uri;
 use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::Bytes;
-use hyper::Request;
+use hyper::{Request, Uri};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;

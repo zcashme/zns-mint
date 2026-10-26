@@ -7,11 +7,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use hmac::{Hmac, KeyInit, Mac};
-use http::header::CONTENT_RANGE;
-use http::Uri;
 use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::Bytes;
-use hyper::Request;
+use hyper::header::CONTENT_RANGE;
+use hyper::{Request, Uri};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::{TokioExecutor, TokioTimer};

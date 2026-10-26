@@ -19,7 +19,7 @@ path = "src/main.rs"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
 subtle = "2.5"
 secrecy = "0.8"
@@ -39,8 +39,9 @@ rust_decimal = { version = "1.42", features = ["serde-with-str"] }
 # same crate upstream depends on, lockfile-shared at 0.3.x.
 time = { version = "0.3", features = ["parsing"] }
 # JSON-RPC transport over plaintext HTTP/1.1 to the local Zebra node (same
-# TEE). All five crates are already compiled via tonic/gRPC — listing them as
-# direct deps just makes them importable. No TLS, no reqwest, no ring.
+# TEE). tonic, hyper, hyper-util and http-body-util are already compiled via
+# tonic/gRPC — listing them as direct deps just makes them importable. `http`
+# and `bytes` types come through hyper's re-exports. No TLS on this transport.
 tonic = "0.14"
 # `server` serves the metrics page (src/metrics.rs); the exporter's own
 # listener compiled the same feature.
@@ -51,8 +52,6 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc
 # rustls/aws-lc-rs. Boot installs this provider as the process default.
 rustls = { version = "0.23", default-features = false, features = ["std", "aws-lc-rs"] }
 http-body-util = "0.1"
-http = "1"
-bytes = "1"
 # `StreamExt`/`Stream` for the mempool stream adaptor. Already compiled via
 # tonic — direct listing adds no code.
 futures-util = "0.3"
@@ -69,7 +68,7 @@ pasta_curves = "0.6"
 zcash_note_encryption = "0.5"
 
 # CSPRNG for Orchard spend-auth + binding nonces in the signer. Already a
-# transitive dep (orchard); pulled direct with default features so `OsRng` is
+# transitive dep (orchard); pulled direct with default features so `SysRng` is
 # available (orchard itself uses `default-features = false`).
 rand = "0.10"
 
