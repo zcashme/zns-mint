@@ -65,15 +65,17 @@ pub struct OtpChallenge {
     pub request: Request,
     pub code: OtpCode,
     pub expires_at: Timestamp,
-    /// Wrong responses counted against this challenge.
     pub attempts: u32,
 }
 
 impl OtpChallenge {
-    /// Counts one more wrong response; true when the challenge retires.
-    fn count_failure(&mut self) -> bool {
-        self.attempts += 1;
-        self.attempts >= MAX_ATTEMPTS
+    /// Checks the code and counts a failure if it is wrong.
+    fn attempt(&mut self, code: &OtpCode) -> bool {
+        let correct = bool::from(self.code.0.ct_eq(&code.0));
+        if !correct {
+            self.attempts += 1;
+        }
+        correct
     }
 
     /// The controller-facing projection: code, name, action, ua.
@@ -192,10 +194,14 @@ impl OtpQueue {
             named(challenge, state) && bool::from(challenge.code.0.ct_eq(&response.code.0))
         });
         if let Some(index) = right {
-            return Some(self.challenges.remove(index).0);
+            let mut challenge = self.challenges.remove(index).0;
+            return challenge.attempt(&response.code).then_some(challenge);
         }
         self.challenges.retain_mut(|(challenge, state)| {
-            !(named(challenge, state) && challenge.count_failure())
+            if !named(challenge, state) {
+                return true;
+            }
+            challenge.attempt(&response.code) || challenge.attempts < MAX_ATTEMPTS
         });
         None
     }
@@ -395,7 +401,9 @@ mod tests {
 
         let answered = q.complete(&response_for(&renewal, *b"222222")).unwrap();
         assert_eq!(answered.request, renewal.request);
+        assert_eq!(answered.attempts, 0);
         assert_eq!(q.relayed().count(), 1);
+        assert_eq!(q.challenges[0].0.attempts, 0);
     }
 
     /// Only `expire` closes a challenge's window.
