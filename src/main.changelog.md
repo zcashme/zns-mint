@@ -1,5 +1,17 @@
 # main.changelog.md
 
+## 2026-10-26 — A payment is priced at the rate it was seen at; a response without a term pays nothing (#381)
+
+- The request lane prices claims and challenge fees at the rate read
+  before the pass's round, the rate an OTP response is priced at its
+  block. A day the round publishes does not reprice a payment already
+  seen (M-04).
+- An admitted response without a term, an update or a release, gets
+  its payment back less the refund fee. A response with a term keeps
+  the whole payment once it covers the price (M-01).
+- A right code refused because a note is already pending is refunded
+  like every other refusal.
+
 ## 2026-10-26 — An OTP response is ruled on at the block that carried it (#383)
 
 - The run loop no longer keeps OTP responses. At block application a
