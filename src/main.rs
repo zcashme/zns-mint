@@ -311,22 +311,18 @@ async fn main() {
                             continue;
                         };
                         let name = sent.request.name();
-                        if let Request::Update {
-                            term: Some(term), ..
-                        } = &sent.request
-                        {
-                            if !oracle.quote(name, *term).is_some_and(|price| paid >= price) {
-                                refunds.admit(
-                                    &fee_rule,
-                                    txid,
-                                    &response.ua,
-                                    name,
-                                    next_height,
-                                    paid,
-                                );
-                                continue;
-                            }
-                        }
+                        // What the response pays beyond the price of the
+                        // term it buys; all of it without a term.
+                        let rest = match &sent.request {
+                            Request::Update {
+                                term: Some(term), ..
+                            } => oracle.quote(name, *term).and_then(|price| paid - price),
+                            _ => Some(paid),
+                        };
+                        let Some(rest) = rest else {
+                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
+                            continue;
+                        };
                         if name_notes.note_pending(name) {
                             tracing::debug!(
                                 %txid,
@@ -355,10 +351,9 @@ async fn main() {
                         if name_notes.admit(next_height, note) {
                             challenges.drop_challenges(name);
                         }
-                        // A response that buys no term pays nothing.
-                        if !matches!(sent.request, Request::Update { term: Some(_), .. }) {
-                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
-                        }
+                        // The mint keeps the price of what it admits; the
+                        // rest goes back.
+                        refunds.admit(&fee_rule, txid, &response.ua, name, next_height, rest);
                     }
                     MintInbound::Unrecognized => {
                         tracing::info!(
