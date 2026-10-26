@@ -75,8 +75,8 @@ impl JsonRpc {
         params: T,
     ) -> Result<Option<R>, TransportError> {
         let req = RpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: method.to_string(),
+            jsonrpc: "2.0",
+            method,
             params,
             id: 0,
         };
@@ -137,12 +137,6 @@ impl JsonRpc {
     }
 }
 
-impl Default for JsonRpc {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ============================================================================
 // The orchestrator's handle — impls in every conversation file
 // ============================================================================
@@ -175,24 +169,22 @@ impl CanonicalBlockSource {
 // Envelopes and the error policy
 // ============================================================================
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-struct RpcRequest<T> {
-    jsonrpc: String,
-    method: String,
+#[derive(Serialize)]
+struct RpcRequest<'a, T> {
+    jsonrpc: &'static str,
+    method: &'a str,
     params: T,
     id: i32,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Deserialize)]
 struct RpcResponse<T> {
-    id: i64,
-    jsonrpc: Option<String>,
     result: Option<T>,
     error: Option<RpcError>,
 }
 
 /// A JSON-RPC error object, as answered by the node.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Error)]
+#[derive(Deserialize, Debug, Error)]
 #[error("RPC error {code}: {message}")]
 pub struct RpcError {
     code: i64,
