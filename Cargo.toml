@@ -23,14 +23,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 zeroize = { version = "1.7", features = ["zeroize_derive"] }
 subtle = "2.5"
 secrecy = "0.8"
-hkdf = "0.12"
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Keygen's `keys/zns_custody_manifest.toml`: network, seed fingerprint, anchor, birthday.
-toml = "0.8"
+toml = "1"
 # `O_NOFOLLOW` when opening the keygen attestation report.
 libc = "0.2"
 # Exchange price parsing: `Decimal` deserializes JSON price strings

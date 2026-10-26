@@ -6,7 +6,7 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use http::header::CONTENT_RANGE;
 use http::Uri;
 use http_body_util::{BodyExt, Empty, Limited};
