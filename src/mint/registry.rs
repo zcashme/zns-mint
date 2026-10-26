@@ -11,9 +11,8 @@ use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
-use zcash_primitives::transaction::builder::BLOSSOM_DEFAULT_TX_EXPIRY_DELTA as DEFAULT_TX_EXPIRY_DELTA;
-use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::consensus::Parameters;
+use zcash_primitives::transaction::builder::default_tx_expiry_delta;
+use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
 
 // ---------------------------------------------------------------------------
 // NameRecord — a confirmed state in one name's chain
@@ -276,7 +275,7 @@ impl Registry {
             .copied()
             .collect();
         let name_free = self.record(note.name()).is_none();
-        let built_after_release = !self.built_before_release(note.name(), expiry);
+        let built_after_release = !self.built_before_release(params, note.name(), expiry);
         // Spent anchors retire on any verdict. The successor joins only
         // when this claim is admitted: one anchor, no Name Note, name free,
         // and not an older transaction mining after a release.
@@ -307,13 +306,22 @@ impl Registry {
     }
 
     /// The mint builds a claim only after a release is applied, and sets
-    /// expiry to the target height plus the standard delta. A transaction
-    /// inside that window was built before the release.
-    fn built_before_release(&self, name: &Name, expiry: BlockHeight) -> bool {
+    /// expiry to the target height plus the standard delta at that
+    /// height: 40 blocks, 120 from NU7. The delta never shrinks, so a
+    /// transaction inside the release height's window was built before
+    /// the release.
+    fn built_before_release<P: Parameters>(
+        &self,
+        params: &P,
+        name: &Name,
+        expiry: BlockHeight,
+    ) -> bool {
         let Some(latest) = self.record_history(name).last() else {
             return false;
         };
-        latest.action.is_release() && expiry <= latest.confirmed_height + DEFAULT_TX_EXPIRY_DELTA
+        let released = latest.confirmed_height;
+        let delta = default_tx_expiry_delta(BranchId::for_height(params, released));
+        latest.action.is_release() && expiry <= released + delta
     }
 
     /// Offers a confirmed update candidate; true when the transaction
@@ -511,6 +519,11 @@ mod tests {
     use crate::mint::NameNote;
     use zcash_protocol::consensus::MAIN_NETWORK;
 
+    /// The expiry the builder sets for a transaction targeting `height`.
+    fn standard_expiry(height: BlockHeight) -> BlockHeight {
+        height + default_tx_expiry_delta(BranchId::for_height(&MAIN_NETWORK, height))
+    }
+
     /// A mainnet UA with every known receiver kind (shared with the
     /// note and treasury tests).
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
@@ -608,7 +621,7 @@ mod tests {
             &[anchor],
             block_height,
             ts(1_700_000_000 + i64::from(height)),
-            block_height + DEFAULT_TX_EXPIRY_DELTA,
+            standard_expiry(block_height),
         ));
     }
 
@@ -967,7 +980,7 @@ mod tests {
             &[a1],
             h1,
             mtp,
-            h1 + DEFAULT_TX_EXPIRY_DELTA,
+            standard_expiry(h1),
         ));
         let first = r.record(&test_name()).expect("alice registered").clone();
 
@@ -979,7 +992,7 @@ mod tests {
             &[a2],
             h2,
             mtp,
-            h2 + DEFAULT_TX_EXPIRY_DELTA,
+            standard_expiry(h2),
         ));
         let kept = r.record(&test_name()).expect("alice still registered");
         assert_eq!(kept.commitment, first.commitment);
@@ -1021,7 +1034,7 @@ mod tests {
             &[stale_anchor],
             BlockHeight::from_u32(120),
             ts(1_700_000_120),
-            release_height + DEFAULT_TX_EXPIRY_DELTA,
+            standard_expiry(release_height),
         ));
         assert!(r.record(&name).is_none());
         assert!(!r.anchor_pool().contains(&stale_anchor));
@@ -1038,10 +1051,44 @@ mod tests {
             &[fresh_anchor],
             BlockHeight::from_u32(121),
             ts(1_700_000_121),
-            release_height + DEFAULT_TX_EXPIRY_DELTA + 1,
+            standard_expiry(release_height) + 1,
         ));
         assert!(r.record(&name).is_some());
         assert!(r.anchor_pool().contains(&fresh_successor));
+    }
+
+    /// From NU7 the window is 120 blocks.
+    #[test]
+    fn the_release_window_is_120_blocks_from_nu7() {
+        let mut r = Registry::new();
+        let name = test_name();
+        let nu7 = 3_543_405;
+        let release_height = BlockHeight::from_u32(nu7 + 10);
+        confirm_claim(&mut r, &name, nu7, 1, 11, 21);
+        confirm_release(&mut r, &name, nu7 + 10, 24);
+
+        let claim = NameNote::Claim {
+            name: name.clone(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+        for (seed, expiry, admitted) in [(3, 120, false), (4, 121, true)] {
+            let anchor = nullifier(seed);
+            r.adopt_anchor(release_height, anchor);
+            assert_eq!(
+                r.accept_claim(
+                    &MAIN_NETWORK,
+                    &claim,
+                    nullifier(seed + 30),
+                    Some(nullifier(seed + 40)),
+                    &[anchor],
+                    release_height + 1,
+                    ts(1_700_000_000),
+                    release_height + expiry,
+                ),
+                admitted
+            );
+        }
     }
 
     #[test]
@@ -1126,7 +1173,7 @@ mod tests {
             &[a1],
             h,
             mtp,
-            h + DEFAULT_TX_EXPIRY_DELTA,
+            standard_expiry(h),
         ));
         assert!(!r.anchor_pool().contains(&a1));
         assert!(r.record(&test_name()).is_none());
@@ -1142,7 +1189,7 @@ mod tests {
             &[a2, a1],
             h,
             mtp,
-            h + DEFAULT_TX_EXPIRY_DELTA,
+            standard_expiry(h),
         ));
         assert!(!r.anchor_pool().contains(&a2));
         assert!(!r.anchor_pool().contains(&succ));
@@ -1174,7 +1221,7 @@ mod tests {
             &[nullifier(9)],
             h,
             mtp,
-            h + DEFAULT_TX_EXPIRY_DELTA,
+            standard_expiry(h),
         ));
         assert!(r.anchor_pool().contains(&anchor));
         assert!(!r.anchor_pool().contains(&nullifier(200)));
@@ -1204,7 +1251,7 @@ mod tests {
             &[anchor, nullifier(1)],
             h,
             mtp,
-            h + DEFAULT_TX_EXPIRY_DELTA,
+            standard_expiry(h),
         ));
         assert!(r.record(&test_name()).is_none());
         let alice = r

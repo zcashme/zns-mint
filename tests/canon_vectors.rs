@@ -19,8 +19,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use time::Timestamp;
 use zcash_keys::address::{Address, UnifiedAddress};
-use zcash_primitives::transaction::builder::BLOSSOM_DEFAULT_TX_EXPIRY_DELTA as DEFAULT_TX_EXPIRY_DELTA;
-use zcash_protocol::consensus::{BlockHeight, MainNetwork};
+use zcash_primitives::transaction::builder::default_tx_expiry_delta;
+use zcash_protocol::consensus::{BlockHeight, BranchId, MainNetwork};
 
 use zns_mint::mint::registry::{Registry, ANCHOR_POOL_SIZE};
 use zns_mint::mint::{Action, Expiry, Name, NameNote};
@@ -192,9 +192,8 @@ fn apply(registry: &mut Registry, event: &Event) {
                 ua: parse_ua(ua),
                 expires_at: expiry(*expires_at_secs),
             };
-            let tx_expiry = expiry_height
-                .map(BlockHeight::from_u32)
-                .unwrap_or_else(|| BlockHeight::from_u32(*height) + DEFAULT_TX_EXPIRY_DELTA);
+            let tx_expiry =
+                BlockHeight::from_u32(expiry_height.unwrap_or(standard_expiry(*height)));
             let ok = registry.accept_claim(
                 &MainNetwork,
                 &note,
@@ -236,7 +235,7 @@ fn apply(registry: &mut Registry, event: &Event) {
                 &nfs,
                 BlockHeight::from_u32(*height),
                 ts(*mtp_secs),
-                BlockHeight::from_u32(*height) + DEFAULT_TX_EXPIRY_DELTA,
+                BlockHeight::from_u32(standard_expiry(*height)),
             );
             assert!(!accepted, "unbacked claim was accepted: {name}");
         }
@@ -380,6 +379,12 @@ fn expiry(secs: Option<i64>) -> Expiry {
 
 fn ts(secs: i64) -> Timestamp {
     Timestamp::from_seconds(secs).expect("MTP fits Timestamp")
+}
+
+/// The expiry the builder sets for a transaction targeting `height`.
+fn standard_expiry(height: u32) -> u32 {
+    let height = BlockHeight::from_u32(height);
+    u32::from(height + default_tx_expiry_delta(BranchId::for_height(&MainNetwork, height)))
 }
 
 /// Parses a lowercase 32-byte hex nullifier.
@@ -683,7 +688,7 @@ fn claim_inside_release_window() -> Scenario {
             spent_anchor: a2,
             successor_anchor: s2,
             nullifier: n2,
-            expiry_height: Some(release_height + DEFAULT_TX_EXPIRY_DELTA),
+            expiry_height: Some(standard_expiry(release_height)),
             expect: Expectation::Rejected,
         },
     ];

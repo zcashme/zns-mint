@@ -12,7 +12,6 @@
 
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_primitives::transaction::builder::BLOSSOM_DEFAULT_TX_EXPIRY_DELTA as DEFAULT_TX_EXPIRY_DELTA;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 
@@ -701,7 +700,7 @@ async fn main() {
 
             if source.submit(&transaction, "NameNote").await {
                 wallet.record_sent(&transaction, target_height, fee);
-                name_notes.mark_sent(note.name(), target_height + DEFAULT_TX_EXPIRY_DELTA);
+                name_notes.mark_sent(note.name(), transaction.expiry_height());
                 tracing::info!(
                     txid = %transaction.txid(),
                     name = %note.name().as_str(),
