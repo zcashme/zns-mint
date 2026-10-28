@@ -117,8 +117,8 @@ pub struct Boot<P: Parameters> {
     /// Verified capsule fingerprint and hash, retained after the seed is wiped.
     pub seed_fingerprint: String,
     pub capsule_hash: String,
-    /// Facts from the identity report; absent in development mode.
-    pub guest: Option<GuestInfo>,
+    #[cfg(not(feature = "non-tee"))]
+    pub guest: GuestInfo,
 }
 
 /// Network label for logging.
@@ -739,13 +739,13 @@ impl Boot<Network> {
                 doc_hash = %blake2b_simd::Params::new().hash_length(32).hash(&doc).to_hex(),
                 "boot: identity doc written to zns_mint_identity.json"
             );
-            Some(GuestInfo {
+            GuestInfo {
                 measurement: hex::encode(parsed.measurement),
                 guest_policy: format!("0x{:x}", parsed.guest_policy),
-            })
+            }
         };
         #[cfg(feature = "non-tee")]
-        let guest = {
+        {
             let doc = dev_identity_document(NETWORK_LABEL, &treasury_address, &registry_ufvk);
             std::fs::write(IDENTITY_DOC_FILE, &doc)
                 .expect("FATAL: failed to write identity doc to disk");
@@ -753,8 +753,7 @@ impl Boot<Network> {
                 doc_hash = %blake2b_simd::Params::new().hash_length(32).hash(&doc).to_hex(),
                 "boot: DEV identity doc written (no attestation)"
             );
-            None
-        };
+        }
 
         tracing::info!(
             network = NETWORK_LABEL,
@@ -787,6 +786,7 @@ impl Boot<Network> {
             registry_ufvk,
             seed_fingerprint: hex::encode(ceremony_fingerprint),
             capsule_hash: hex::encode(ceremony_capsule_hash),
+            #[cfg(not(feature = "non-tee"))]
             guest,
         }
     }
