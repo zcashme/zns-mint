@@ -448,101 +448,76 @@ async fn main() {
             .into_u64();
         zns_mint::metrics::snapshot(tip, treasury_zats, oracle.current().into_u64());
 
-        // Treasury requests. Each memo was decoded once, at block
-        // application; the deciding pass resolves each pending entry
-        // exactly once, in queue order. A resolved entry leaves the
-        // queue — refused by a gate, or handed to the queue that owns
-        // its retries. Nothing defers; nothing is re-read.
+        // Each request is decided once, in queue order.
         for (txid, request, paid, note_height) in requests.pending() {
-            let resolved = 'lane: {
-                match &request {
-                    Request::Claim {
-                        name,
-                        ua,
-                        term,
-                        code,
-                    } => {
-                        // The earliest payment owns the name until its claim
-                        // is observed. A later payment does not start a
-                        // second Name Note.
-                        // Early-access regime: only a listed name may claim,
-                        // and only with its per-name access code. No code,
-                        // or a name that is not listed, goes back less the
-                        // fee. A wrong code keeps 1% of the quote, then the
-                        // fee.
-                        let Some(offered) = code.as_ref() else {
-                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
-                            break 'lane true;
-                        };
-                        if !protected_names.is_protected(name, mtp_now) {
-                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
-                            break 'lane true;
-                        }
-                        // Payment gate: the quote at first sight is binding.
-                        // A payment below the quote goes back to the memo
-                        // address, less the refund fee, before the code is
-                        // judged.
-                        // A quote that does not fit is dead. A new payment
-                        // settles a new evaluation.
-                        let Some(price) = Oracle::quote_at(rate, name, *term) else {
-                            break 'lane true;
-                        };
-                        if paid < price {
-                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
-                            break 'lane true;
-                        }
-                        if !access_code_key.accepts(name, Some(offered)) {
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                ua,
-                                name,
-                                note_height,
-                                (paid - access_code_penalty(price)).unwrap_or(Zatoshis::ZERO),
-                            );
-                            break 'lane true;
-                        }
-                        // A name that already has a record, or a Name Note
-                        // already queued, is refunded. Any other refusal
-                        // keeps the payment.
-                        let Some(claim_note) =
-                            registry.authorize_claim(name.clone(), ua.clone(), *term, mtp_now)
-                        else {
-                            if !registry.is_available(name) {
-                                refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
-                            } else {
-                                tracing::debug!(
-                                    name = %name.as_str(),
-                                    "claim not authorized"
-                                );
-                            }
-                            break 'lane true;
-                        };
-                        // Enactment below resolves the anchor and broadcasts.
-                        if name_notes.admit(note_height, claim_note) {
-                            challenges.drop_challenges(name);
-                        } else {
-                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
-                        }
-                        true
+            requests.resolved(txid);
+            match &request {
+                Request::Claim {
+                    name,
+                    ua,
+                    term,
+                    code,
+                } => {
+                    // Early access: only a listed name, with its code.
+                    let Some(offered) = code.as_ref() else {
+                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                        continue;
+                    };
+                    if !protected_names.is_protected(name, mtp_now) {
+                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                        continue;
                     }
-                    Request::Update { .. } | Request::Release { .. } => {
-                        if registry
-                            .authorize_challenge(&name_notes, &request, target_height, mtp_now)
-                            .is_none()
-                        {
-                            break 'lane true;
+                    // The quote at first sight is binding.
+                    let Some(price) = Oracle::quote_at(rate, name, *term) else {
+                        continue;
+                    };
+                    if paid < price {
+                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                        continue;
+                    }
+                    if !access_code_key.accepts(name, Some(offered)) {
+                        refunds.admit(
+                            &fee_rule,
+                            txid,
+                            ua,
+                            name,
+                            note_height,
+                            (paid - access_code_penalty(price)).unwrap_or(Zatoshis::ZERO),
+                        );
+                        continue;
+                    }
+                    // A refusal keeps the payment unless the name is taken.
+                    let Some(claim_note) =
+                        registry.authorize_claim(name.clone(), ua.clone(), *term, mtp_now)
+                    else {
+                        if !registry.is_available(name) {
+                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                        } else {
+                            tracing::debug!(
+                                name = %name.as_str(),
+                                "claim not authorized"
+                            );
                         }
-                        if paid < Oracle::challenge_fee_at(rate) {
-                            break 'lane true;
-                        }
-                        challenges.admit(request.clone(), mtp_now);
-                        true
+                        continue;
+                    };
+                    if name_notes.admit(note_height, claim_note) {
+                        challenges.drop_challenges(name);
+                    } else {
+                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                     }
                 }
-            };
-            if resolved {
-                requests.resolved(txid);
+                Request::Update { .. } | Request::Release { .. } => {
+                    if registry
+                        .authorize_challenge(&name_notes, &request, target_height, mtp_now)
+                        .is_none()
+                    {
+                        continue;
+                    }
+                    if paid < Oracle::challenge_fee_at(rate) {
+                        continue;
+                    }
+                    challenges.admit(request.clone(), mtp_now);
+                }
             }
         }
 
