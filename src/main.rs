@@ -470,6 +470,12 @@ async fn main() {
                     // The quote at first sight is binding. A quote above
                     // the money supply is dead; the payment is kept.
                     let Some(price) = Oracle::quote_at(rate, name, *term) else {
+                        tracing::info!(
+                            %txid,
+                            name = %name.as_str(),
+                            paid = paid.into_u64(),
+                            "quote above the money supply; payment kept"
+                        );
                         continue;
                     };
                     if paid < price {
