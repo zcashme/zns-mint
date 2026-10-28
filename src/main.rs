@@ -476,6 +476,7 @@ async fn main() {
                         continue;
                     }
                     if !access_code_key.accepts(name, Some(offered)) {
+                        tracing::info!(%txid, name = %name.as_str(), "wrong access code");
                         refunds.admit(
                             &fee_rule,
                             txid,
@@ -493,9 +494,11 @@ async fn main() {
                         if !registry.is_available(name) {
                             refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         } else {
-                            tracing::debug!(
+                            tracing::info!(
+                                %txid,
                                 name = %name.as_str(),
-                                "claim not authorized"
+                                paid = paid.into_u64(),
+                                "claim not authorized; payment kept"
                             );
                         }
                         continue;
@@ -511,9 +514,21 @@ async fn main() {
                         .authorize_challenge(&name_notes, &request, target_height, mtp_now)
                         .is_none()
                     {
+                        tracing::info!(
+                            %txid,
+                            name = %request.name().as_str(),
+                            paid = paid.into_u64(),
+                            "challenge not authorized"
+                        );
                         continue;
                     }
                     if paid < Oracle::challenge_fee_at(rate) {
+                        tracing::info!(
+                            %txid,
+                            name = %request.name().as_str(),
+                            paid = paid.into_u64(),
+                            "below the challenge fee"
+                        );
                         continue;
                     }
                     challenges.admit(request.clone(), mtp_now);
