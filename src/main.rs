@@ -467,7 +467,8 @@ async fn main() {
                         refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         continue;
                     }
-                    // The quote at first sight is binding.
+                    // The quote at first sight is binding. A quote above
+                    // the money supply is dead; the payment is kept.
                     let Some(price) = Oracle::quote_at(rate, name, *term) else {
                         continue;
                     };
@@ -503,6 +504,7 @@ async fn main() {
                         }
                         continue;
                     };
+                    // The earliest payment owns the name until its claim is observed.
                     if name_notes.admit(note_height, claim_note) {
                         challenges.drop_challenges(name);
                     } else {
