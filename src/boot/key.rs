@@ -80,10 +80,4 @@ impl AccountKeys<Treasury> {
     pub(crate) fn spending_keys(&self) -> SpendingKeys {
         SpendingKeys::new(self.spending.clone())
     }
-
-    /// The Sapling full viewing key, for reading requests paid to the
-    /// Treasury's Sapling receiver.
-    pub(crate) fn sapling_dfvk(&self) -> sapling::zip32::DiversifiableFullViewingKey {
-        self.spending.sapling().to_diversifiable_full_viewing_key()
-    }
 }
