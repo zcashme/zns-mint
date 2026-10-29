@@ -1,5 +1,46 @@
 # `mint/otp.rs` design record
 
+## 2026-10-26 — A challenge is keyed by its whole request (#381)
+
+- Name, verb, address and term are the key. Two terms are two
+  challenges with two codes; only an identical repeat receives the
+  existing challenge.
+- The response carries no term, so `complete` picks by code among the
+  relayed challenges it names. `admit` draws codes distinct among
+  them. A wrong code counts an attempt against each.
+- `admit` takes the request and the median and issues the challenge;
+  `OtpChallenge::issue` is gone. `admit` and `challenge_issued` return
+  nothing; the run loop never read them.
+
+## 2026-10-26 — The right code spends the challenge (#383)
+
+- `answer` is `complete`: it removes the challenge the right code
+  matches and returns it, one code, one use, at the block that carried
+  the response. `consume` is gone. The run loop rules on the returned
+  challenge there and then; a refused response ends the challenge,
+  and a new request starts a new one.
+- `prune` is `expire`, called per applied block with that block's
+  median, before the block's responses are handled.
+
+## 2026-10-22 — A challenge carries its request; one lookup (#368)
+
+- `OtpChallenge` is `{ request, code, expires_at }`. It carries the
+  update or release `Request` it answers instead of copies of its name,
+  verb, address and term, so the request lane passes the request
+  through and no longer unpacks it into a tuple.
+- `index_of(name, action, ua)` is the one definition of "the same
+  OTP". `admit`, `challenge_issued`, `answer` and `consume` look up
+  through it; the five hand-written comparisons, over two different
+  field sets, are gone.
+- `tip_rcm` is gone. Every record change is a Name Note the run loop
+  admits, and each admission drops that name's challenges
+  (`drop_challenges`), so no challenge outlives the record it was
+  issued against. A reorg or a restart still starts from an empty
+  queue. Any new way to change a record must drop the name's
+  challenges too.
+- `invalidate` and `is_relayed` had no callers; gone, with the request
+  txid each entry carried for them.
+
 ## 2026-10-15 — `OtpQueue::relayed` and `unrelayed` (#342)
 
 - `relayed` names every relayed challenge, awaiting its echo;

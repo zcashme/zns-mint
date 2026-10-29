@@ -359,15 +359,11 @@ where
 /// pools, so anchors stay computable per block. Uses `ShardTree::checkpoint`
 /// so checkpoints written without an append are pruned too.
 fn ensure_block_checkpoint<H, const DEPTH: u8, const SHARD_HEIGHT: u8>(
-    tree: &mut ShardTree<
-        shardtree::store::memory::MemoryShardStore<H, BlockHeight>,
-        DEPTH,
-        SHARD_HEIGHT,
-    >,
+    tree: &mut ShardTree<MemoryShardStore<H, BlockHeight>, DEPTH, SHARD_HEIGHT>,
     height: BlockHeight,
 ) -> Result<(), WalletError>
 where
-    shardtree::store::memory::MemoryShardStore<H, BlockHeight>:
+    MemoryShardStore<H, BlockHeight>:
         ShardStore<H = H, CheckpointId = BlockHeight, Error = Infallible>,
     H: Hashable + PartialEq + Clone,
 {
@@ -393,17 +389,13 @@ where
 /// belongs to the block's last commitment; a marked Name Note that is not
 /// last must not claim it.
 fn append_block_commitments<H, Nf, const DEPTH: u8, const SHARD_HEIGHT: u8>(
-    tree: &mut ShardTree<
-        shardtree::store::memory::MemoryShardStore<H, BlockHeight>,
-        DEPTH,
-        SHARD_HEIGHT,
-    >,
+    tree: &mut ShardTree<MemoryShardStore<H, BlockHeight>, DEPTH, SHARD_HEIGHT>,
     bundles: &ScannedBundles<H, Nf>,
     height: BlockHeight,
     marks: &[H],
 ) -> Result<(), WalletError>
 where
-    shardtree::store::memory::MemoryShardStore<H, BlockHeight>:
+    MemoryShardStore<H, BlockHeight>:
         ShardStore<H = H, CheckpointId = BlockHeight, Error = Infallible>,
     H: Hashable + PartialEq + Clone,
 {
@@ -470,7 +462,7 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         &mut self,
         _account_name: &str,
         _seed: &SecretVec<u8>,
-        _account_index: zip32::AccountId,
+        _account_index: AccountId,
         _birthday: &AccountBirthday,
         _key_source: Option<&str>,
     ) -> Result<(Self::Account, UnifiedSpendingKey), WalletError> {
@@ -491,6 +483,11 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
 
     fn delete_account(&mut self, _account: AccountId) -> Result<(), WalletError> {
         // The namespace cannot survive deletion of either account.
+        Err(WalletError::FixedAccountsOnly)
+    }
+
+    fn set_account_name(&mut self, _account: AccountId, _name: &str) -> Result<(), WalletError> {
+        // Accounts 0 and 1 are named by their role, not by a stored name.
         Err(WalletError::FixedAccountsOnly)
     }
 
@@ -1629,7 +1626,7 @@ mod tests {
                     false,
                     Position::from(u64::from(base) + 2),
                     None,
-                    zip32::AccountId::const_from_u32(0),
+                    AccountId::const_from_u32(0),
                     Some(zip32::Scope::External),
                 ),
             );

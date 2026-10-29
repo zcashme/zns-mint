@@ -3,10 +3,9 @@
 
 use std::time::Duration;
 
-use http::Uri;
 use http_body_util::{BodyExt, Empty, Limited};
 use hyper::body::Bytes;
-use hyper::Request;
+use hyper::{Request, Uri};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
@@ -389,27 +388,18 @@ impl Oracle {
     /// Registration quote in zats at the published rate. `None` when the
     /// product does not fit a zat amount.
     pub fn quote(&self, name: &Name, term: Term) -> Option<Zatoshis> {
+        Self::quote_at(self.current(), name, term)
+    }
+
+    /// Registration quote in zats at `rate` zats per USD. `None` when
+    /// the product does not fit a zat amount.
+    pub fn quote_at(rate: Zatoshis, name: &Name, term: Term) -> Option<Zatoshis> {
         let usd = match term {
             Term::Forever => forever_usd(name),
             Term::Years(years) => annual_usd(name) * years,
         };
-        let zats = usd.checked_mul(self.current().into_u64())?;
+        let zats = usd.checked_mul(rate.into_u64())?;
         Zatoshis::from_u64(zats).ok()
-    }
-
-    /// The challenge fee (issue #18): the minimum payment that triggers a
-    /// controller challenge — one dollar at the current published rate,
-    /// rounded up to the next 100_000-zat increment. Anti-spam pricing,
-    /// not revenue: the deciding pass refuses underpaid relay requests outright.
-    pub fn challenge_fee(&self) -> Zatoshis {
-        const GRID: u64 = 100_000;
-        let rate = self.current().into_u64();
-        // Checked so the grid step cannot wrap.
-        let zats = rate
-            .div_ceil(GRID)
-            .checked_mul(GRID)
-            .expect("challenge fee fits u64");
-        Zatoshis::from_u64(zats).expect("challenge fee fits the Zcash monetary range")
     }
 }
 
@@ -421,29 +411,14 @@ mod tests {
         oracle.quote(name, term).expect("quote fits").into_u64()
     }
 
+    /// Most venues quote a string; Bitfinex quotes a number.
     #[test]
-    fn challenge_fee_rounds_one_dollar_up_to_the_grid() {
-        // $1,000/ZEC ⇒ $1 = 100_000 zats: exactly on the grid.
-        let oracle = Oracle::new(Decimal::from(1_000), 0, Timestamp::from_seconds(0).unwrap());
-        assert_eq!(oracle.challenge_fee().into_u64(), 100_000);
-
-        // $800/ZEC ⇒ $1 = 125_000 zats, the issue-#18 rounding: one grid
-        // step up, to 200_000.
-        let oracle = Oracle::new(Decimal::from(800), 0, Timestamp::from_seconds(0).unwrap());
-        assert_eq!(oracle.challenge_fee().into_u64(), 200_000);
-
-        // $400/ZEC ⇒ $1 = 250_000 zats, mid-grid: up to 300_000.
-        let oracle = Oracle::new(Decimal::from(400), 0, Timestamp::from_seconds(0).unwrap());
-        assert_eq!(oracle.challenge_fee().into_u64(), 300_000);
-
-        // $10,000/ZEC ⇒ $1 = 10_000 zats, below the grid: the 100_000
-        // floor holds.
-        let oracle = Oracle::new(
-            Decimal::from(10_000),
-            0,
-            Timestamp::from_seconds(0).unwrap(),
-        );
-        assert_eq!(oracle.challenge_fee().into_u64(), 100_000);
+    fn a_price_reads_from_a_string_or_a_number() {
+        let price = Decimal::new(4153, 2);
+        let string = serde_json::json!("41.53");
+        let number = serde_json::json!(41.53);
+        assert_eq!(serde_json::from_value::<Decimal>(string).unwrap(), price);
+        assert_eq!(serde_json::from_value::<Decimal>(number).unwrap(), price);
     }
 
     #[test]
@@ -461,6 +436,20 @@ mod tests {
         let long = Name::parse("purple").unwrap();
         assert_eq!(quoted(&oracle, &long, Term::Years(1)), 2_000_000);
         assert_eq!(quoted(&oracle, &long, Term::Forever), 6_000_000);
+    }
+
+    /// `quote_at` prices at the rate given; `quote` passes the published one.
+    #[test]
+    fn a_quote_at_a_given_rate() {
+        let oracle = Oracle::new(Decimal::from(1_000), 0, Timestamp::from_seconds(0).unwrap());
+        let name = Name::parse("purple").unwrap();
+        let rate = Zatoshis::const_from_u64(200_000);
+        let quote = Oracle::quote_at(rate, &name, Term::Years(1)).unwrap();
+        assert_eq!(quote.into_u64(), 4_000_000);
+        assert_eq!(
+            oracle.quote(&name, Term::Years(1)),
+            Oracle::quote_at(oracle.current(), &name, Term::Years(1))
+        );
     }
 
     /// The registration quote follows the term: N annuals for `Ny`, three

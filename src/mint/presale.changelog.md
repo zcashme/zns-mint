@@ -1,5 +1,34 @@
 # `mint/presale.rs` design record
 
+## 2026-10-26 — A bad pre-sale row is skipped
+
+- `from_rows` skips a name that does not parse and warns. A row
+  whose `expiry_at` does not decode is skipped the same way and
+  still counts toward the server total. The other rows install,
+  and boot proceeds on that table. A body that is not a JSON
+  array, a failed read, a truncated reply, or a missing count
+  still refuses the table.
+
+## 2026-10-22 — One read, every tip pass (#371)
+
+- `fetch` reads the whole table in one request: the project's Max
+  Rows is raised to 100,000, so the keyset paging (`keyset_filter`,
+  `PAGE_ROWS`, `MAX_PAGES`) and the `id` column it keyed on are gone.
+  `count=exact` stays: past Max Rows PostgREST truncates silently, so
+  `complete` refuses a read whose rows fall short of the count.
+- Every read goes through one client built at boot, so consecutive
+  passes share a connection. Idle ones are evicted after 120 s; the
+  pool holds a `TokioTimer`, since the timeout never fires without
+  one. A read that times out drops its connection; the next read
+  opens a fresh one.
+- One end-to-end timeout, 3 s, covers the request and the body.
+  `MAX_BODY_BYTES` is 4 MiB (~30,000 worst-case rows; the table is
+  ~214 KB today); over it, the read is refused.
+- The table is read on every tip pass instead of once per MTP day, so
+  a row added before a pass binds that pass's claims. `PendingRead`
+  spawns the read ahead of the pass and aborts it if dropped
+  uninstalled; a failed read keeps the last table.
+
 ## 2026-10-13 — The early-access regime denies by default (#340)
 
 - The deciding pass flips the refusal: a claim dies unless the name is

@@ -1,5 +1,41 @@
 # Treasury design record
 
+## 2026-10-29 — A refund withholds a hundred actions
+
+- A refund is the payment minus `FEE_ACTIONS`, a hundred actions at the
+  node's rate: 100,000 zats at 1,000 per action.
+
+## 2026-10-24 — Underpaid payments are refunded (#372)
+
+- A refund is the payment minus ten actions at the node's rate. It
+  returns to the memo address. A payment within the fee is kept.
+- Refund a claim for no code, an unlisted name, a payment below the quote,
+  a wrong code once the quote is covered (keep 1%), or a name registered
+  or queued.
+- Refund an OTP response when no live challenge matches (a wrong
+  code, or a right one whose challenge was dropped), a renewal or upgrade
+  below its quote (that OTP can be sent again), or a name that became due
+  for release after its challenge was issued. An unparsed memo leaves its
+  payment with the mint.
+- Build a refund on the tip after its payment. Drop it if that block
+  is orphaned. The sweep waits while one is queued. Try again next tip
+  until the node accepts it; the wallet then owns the transaction.
+
+## 2026-10-24 — Treasury payments pay the node's fee rate (#357)
+
+- `sweep_to_vault` and `challenge` take the node's `FeeRule` and call
+  upstream's `propose_transfer` with a `SingleOutputChangeStrategy` over
+  it. `propose_standard_transfer_to_address` takes only
+  `StandardFeeRule::Zip317`, so it is no longer used.
+- Change follows the wallet's dust line:
+  `DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE))`. At a
+  rate below 5,000 the default threshold would let the change strategy
+  create change the wallet never selects. Name Note change is built by
+  hand and keeps no such rule; it is that small only when the Treasury
+  is nearly empty.
+- Send-max and the payment pass `wallet::CONFIRMATIONS`, so both halves
+  of a sweep see the same notes.
+
 ## 2026-10-15 — `RequestQueue::names` (#342)
 
 - Names every request pending decision, borrowed, for the request state

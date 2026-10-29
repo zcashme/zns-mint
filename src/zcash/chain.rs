@@ -8,7 +8,7 @@ use sapling::Node as SaplingNode;
 use serde::Deserialize;
 use time::Timestamp;
 use zcash_client_backend::data_api::chain::{ChainState, CommitmentTreeRoot};
-use zcash_primitives::block::{Block, BlockHash};
+use zcash_primitives::block::{Block, BlockHash, BlockHeader};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::constants::MAX_BLOCK_BYTES;
@@ -93,11 +93,8 @@ pub(crate) type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
 pub(crate) fn tip_height_hash(
     tip: &BlockHashAndHeight,
 ) -> Result<(BlockHeight, BlockHash), TransportError> {
-    let bytes = tip
-        .hash_display_order()
-        .ok_or(TransportError::BadNodeData("tip hash length"))?;
     let hash =
-        block_hash_from_display(bytes).ok_or(TransportError::BadNodeData("tip hash length"))?;
+        block_hash_from_display(&tip.hash).ok_or(TransportError::BadNodeData("tip hash length"))?;
     Ok((BlockHeight::from_u32(tip.height), hash))
 }
 
@@ -328,9 +325,43 @@ impl JsonRpc {
             }
         }
     }
+
+    /// The raw header at `height`, hashed locally. Verbose JSON is not
+    /// used: the hash is the header's own bytes.
+    pub async fn header_at(&self, height: BlockHeight) -> Result<BlockHeader, TransportError> {
+        loop {
+            let result: Result<_, TransportError> = async {
+                let hex_header: String = self
+                    .send_request("getblockheader", (u32::from(height).to_string(), false))
+                    .await
+                    .map_err(not_on_best_chain)?
+                    .ok_or(TransportError::BadNodeData("getblockheader returned null"))?;
+                let bytes = hex::decode(hex_header.trim())
+                    .map_err(|_| TransportError::BadNodeData("getblockheader hex"))?;
+                BlockHeader::read(std::io::Cursor::new(bytes))
+                    .map_err(|_| TransportError::BadNodeData("getblockheader parse"))
+            }
+            .await;
+
+            match result {
+                Ok(header) => return Ok(header),
+                Err(error)
+                    if error.is_retryable() || matches!(&error, TransportError::NotOnBestChain) =>
+                {
+                    tracing::warn!(
+                        %error,
+                        height = u32::from(height),
+                        "block header unavailable or unusable; retrying"
+                    );
+                    tokio::time::sleep(RETRY_PAUSE).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
 }
 
-impl super::CanonicalBlockSource {
+impl CanonicalBlockSource {
     /// Returns the exact `(height, hash)` pair for the current best-chain
     /// tip, parsed from one `getblockchaininfo` response so observations
     /// from different tips cannot be combined.
@@ -402,6 +433,11 @@ impl super::CanonicalBlockSource {
         height: BlockHeight,
     ) -> Result<(BlockHash, BlockHeight, Timestamp), TransportError> {
         self.rpc.get_block_header(height).await
+    }
+
+    /// The raw header at `height` (see [`JsonRpc::header_at`]).
+    pub async fn header_at(&self, height: BlockHeight) -> Result<BlockHeader, TransportError> {
+        self.rpc.header_at(height).await
     }
 }
 

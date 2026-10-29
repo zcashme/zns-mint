@@ -1,5 +1,12 @@
 # Mtp design record
 
+## 2026-10-23 — A header time is judged against the median window
+
+- `header_time_ok` refuses a stamp more than two hours ahead of the
+  mint. Once eleven times are recorded, the stamp also has to be
+  after their median and at most 90 minutes past it. `backfill` uses
+  the same check.
+
 ## The day-zero clamp test is gone (#108)
 
 - `a_reorg_below_the_birthday_stays_day_zero` is deleted with its

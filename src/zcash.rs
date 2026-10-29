@@ -8,7 +8,9 @@
 //! but never sees transport state. The node's identity is not on the wire:
 //! it is the SEV-SNP measurement of the image this process lives in.
 
+pub mod adopt;
 pub mod chain;
+pub mod fees;
 pub mod mempool;
 pub mod submit;
 
@@ -19,12 +21,13 @@ pub use zebra_indexer_proto::MempoolChangeKind;
 
 use std::{any::type_name, fmt, time::Duration};
 
-use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::Request;
+use hyper::body::Bytes;
+use hyper::{Request, StatusCode};
 use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
 use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use zcash_protocol::constants::MAX_BLOCK_BYTES;
 
 /// The wait between retries of a retryable transport call.
@@ -72,8 +75,8 @@ impl JsonRpc {
         params: T,
     ) -> Result<Option<R>, TransportError> {
         let req = RpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: method.to_string(),
+            jsonrpc: "2.0",
+            method,
             params,
             id: 0,
         };
@@ -103,7 +106,7 @@ impl JsonRpc {
     /// consensus and covered by one deadline, headers through the last
     /// byte. A stalled body times out; an oversized one is bad node
     /// data, not transport.
-    async fn round_trip(&self, body: String) -> Result<(http::StatusCode, Bytes), TransportError> {
+    async fn round_trip(&self, body: String) -> Result<(StatusCode, Bytes), TransportError> {
         // The request is entirely static, so building it cannot fail.
         let request = Request::builder()
             .method("POST")
@@ -131,12 +134,6 @@ impl JsonRpc {
         .map_err(|_| TransportError::Timeout)??;
 
         Ok((status, body))
-    }
-}
-
-impl Default for JsonRpc {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -172,37 +169,28 @@ impl CanonicalBlockSource {
 // Envelopes and the error policy
 // ============================================================================
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-struct RpcRequest<T> {
-    jsonrpc: String,
-    method: String,
+#[derive(Serialize)]
+struct RpcRequest<'a, T> {
+    jsonrpc: &'static str,
+    method: &'a str,
     params: T,
     id: i32,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Deserialize)]
 struct RpcResponse<T> {
-    id: i64,
-    jsonrpc: Option<String>,
     result: Option<T>,
     error: Option<RpcError>,
 }
 
 /// A JSON-RPC error object, as answered by the node.
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Deserialize, Debug, Error)]
+#[error("RPC error {code}: {message}")]
 pub struct RpcError {
     code: i64,
     message: String,
     data: Option<serde_json::Value>,
 }
-
-impl fmt::Display for RpcError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "RPC error {}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for RpcError {}
 
 impl RpcError {
     /// Bitcoin Core / Zebra RPC error -27: transaction already in chain.
@@ -233,7 +221,7 @@ pub(crate) fn not_on_best_chain(error: TransportError) -> TransportError {
 }
 
 /// Everything that can go wrong talking to the node, classified once.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum TransportError {
     #[error("hyper-util client error: {0}")]
     Client(#[from] hyper_util::client::legacy::Error),

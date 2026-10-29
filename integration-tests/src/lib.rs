@@ -38,8 +38,7 @@ use zcash_primitives::transaction::components::orchard::bundle_version_for_branc
 use zcash_primitives::transaction::fees::transparent::InputSize;
 use zcash_primitives::transaction::fees::zip317::FeeRule as Zip317;
 use zcash_primitives::transaction::fees::FeeRule as _;
-use zcash_primitives::transaction::sighash::{signature_hash, SignableInput};
-use zcash_primitives::transaction::txid::TxIdDigester;
+use zcash_primitives::transaction::sighash::{PrecomputedSighashData, SignableInput};
 use zcash_primitives::transaction::{self, Transaction, TransactionData};
 use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
 use zcash_protocol::local_consensus::LocalNetwork;
@@ -334,13 +333,15 @@ pub fn assemble_v6_transparent_ironwood<P: Parameters>(
         None,
         Some(ironwood.clone()),
     );
-    let txid_parts = unauthed.digest(TxIdDigester);
+    let sighash = PrecomputedSighashData::new_zip244(unauthed)
+        .unwrap_or_else(|_| unreachable!("v6 signs under ZIP 244"));
 
     let transparent = transparent
         .map(|b| {
             b.apply_signatures(
                 |index| {
-                    *signature_hash(&unauthed, &SignableInput::Transparent(index), &txid_parts)
+                    *sighash
+                        .signature_hash(&SignableInput::Transparent(index))
                         .as_ref()
                 },
                 signing,
@@ -357,7 +358,7 @@ pub fn assemble_v6_transparent_ironwood<P: Parameters>(
         )?
         .prepare(
             UnwrapErr(SysRng),
-            *signature_hash(&unauthed, &SignableInput::Shielded, &txid_parts).as_ref(),
+            *sighash.signature_hash(&SignableInput::Shielded).as_ref(),
         )
         .finalize()?;
 

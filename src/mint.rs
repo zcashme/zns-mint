@@ -14,6 +14,7 @@ pub use time::Timestamp;
 pub use zcash_keys::address::UnifiedAddress;
 
 use zcash_address::unified::{Container as _, Encoding};
+use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::memo::{Memo, MemoBytes};
@@ -151,6 +152,23 @@ impl Request {
         }
     }
 
+    pub fn action(&self) -> Action {
+        match self {
+            Request::Claim { .. } => Action::Claim,
+            Request::Update { .. } => Action::Update,
+            Request::Release { .. } => Action::Release,
+        }
+    }
+
+    /// The requested Unified Address every variant carries.
+    pub fn ua(&self) -> &UnifiedAddress {
+        match self {
+            Request::Claim { ua, .. }
+            | Request::Update { ua, .. }
+            | Request::Release { ua, .. } => ua,
+        }
+    }
+
     /// Parses a request memo:
     ///
     /// - `ZNS:claim:<term>:<name>:<ua>`, or with a six-digit pre-sale
@@ -238,7 +256,7 @@ impl OtpMemo {
             "ZNS:otp:{otp}:{}:{}:{}",
             self.name.as_str(),
             self.action.as_str(),
-            self.ua.encode_receiver_preserving(network),
+            self.ua.encode(network),
         );
         // `from_bytes` pads; the UA guard bounds the length.
         MemoBytes::from_bytes(text.as_bytes()).ok()
@@ -284,19 +302,19 @@ pub enum MintInbound {
     /// A request — a user's proposed transition, decoded from a Treasury
     /// memo; the Registry's `authorize_*` family rules on it.
     Request(Request),
-    /// An OTP consume — the relay memo returned; what `awaiting` takes.
-    Echo(OtpMemo),
+    /// An OTP response — the relay memo returned; the OTP queue takes it.
+    Response(OtpMemo),
     /// A payment with no parseable message: the deciding pass logs it once and
     /// the sweep keeps the value; the queue names it by its txid.
     Unrecognized,
 }
 
 impl MintInbound {
-    /// Classifies one Treasury memo: echo, request, or unrecognized
-    /// payment. Called once per memo, at block application.
+    /// Classifies one Treasury memo: OTP response, request, or
+    /// unrecognized payment. Called once per memo, at block application.
     pub fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Self {
-        if let Some(echo) = OtpMemo::decode(network, memo) {
-            Self::Echo(echo)
+        if let Some(response) = OtpMemo::decode(network, memo) {
+            Self::Response(response)
         } else if let Some(request) = Request::decode(network, memo) {
             Self::Request(request)
         } else {
@@ -370,11 +388,11 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     network: &P,
     birthday: BlockHeight,
     registry_keys: &crate::RegistryKeys,
-    treasury_keys: &crate::TreasuryKeys,
+    treasury_keys: &TreasuryKeys,
     from_state: &zcash_client_backend::data_api::chain::ChainState,
     block: zcash_primitives::block::Block,
     height: BlockHeight,
-    wallet: &mut crate::wallet::Wallet<P>,
+    wallet: &mut Wallet<P>,
     registry: &mut registry::Registry,
     mtp: &mut mtp::MtpTracker,
 ) -> Vec<(TxId, MintInbound, Zatoshis)> {
@@ -429,13 +447,9 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         &spend_identifiers,
         Some(&cursor),
         |_| {
-            Ok::<
-                Option<(
-                    zip32::AccountId,
-                    Option<transparent::keys::TransparentKeyScope>,
-                )>,
-                Infallible,
-            >(None)
+            Ok::<Option<(AccountId, Option<transparent::keys::TransparentKeyScope>)>, Infallible>(
+                None,
+            )
         },
     )
     .expect("FATAL: a canonical block failed deterministic wallet scanning");
@@ -633,21 +647,23 @@ pub async fn relay<P: Parameters + Send + 'static>(
     treasury_keys: &TreasuryKeys,
     spend_prover: &SpendParameters,
     output_prover: &OutputParameters,
+    fee_rule: &FeeRule,
     controller_ua: &UnifiedAddress,
     source: &CanonicalBlockSource,
-    request: &OtpChallenge,
+    challenge: &OtpChallenge,
     lane: &'static str,
 ) -> bool {
-    let memo = match request.memo().encode(network) {
+    let request = &challenge.request;
+    let memo = match challenge.memo().encode(network) {
         Some(memo) => memo,
-        None if request.action.is_claim() => {
+        None if request.action().is_claim() => {
             unreachable!("claims never enter the controller challenge relay")
         }
         None => {
             tracing::error!(
                 lane,
-                name = %request.name.as_str(),
-                action = request.action.as_str(),
+                name = %request.name().as_str(),
+                action = request.action().as_str(),
                 "controller challenge memo exceeds the ZIP-302 512-byte limit"
             );
             return false;
@@ -659,6 +675,7 @@ pub async fn relay<P: Parameters + Send + 'static>(
         treasury_keys,
         spend_prover,
         output_prover,
+        fee_rule,
         controller_ua,
         memo,
     ) {
@@ -667,8 +684,8 @@ pub async fn relay<P: Parameters + Send + 'static>(
             tracing::warn!(
                 lane,
                 %error,
-                name = %request.name.as_str(),
-                action = request.action.as_str(),
+                name = %request.name().as_str(),
+                action = request.action().as_str(),
                 "controller challenge not built"
             );
             return false;
@@ -678,16 +695,16 @@ pub async fn relay<P: Parameters + Send + 'static>(
         tracing::info!(
             lane,
             txid = %transaction.txid(),
-            name = %request.name.as_str(),
-            action = request.action.as_str(),
+            name = %request.name().as_str(),
+            action = request.action().as_str(),
             "controller challenged"
         );
         true
     } else {
         tracing::debug!(
             lane,
-            name = %request.name.as_str(),
-            action = request.action.as_str(),
+            name = %request.name().as_str(),
+            action = request.action().as_str(),
             "controller challenge rejected — deferred"
         );
         false
@@ -712,7 +729,7 @@ pub async fn watch_mempool(chain: ChainClient, sender: mpsc::Sender<(MempoolChan
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zcash_address::unified::{Address as Ua, Encoding, Receiver, Revision, Uitem};
+    use zcash_address::unified::{Address as Ua, Receiver, Revision, Uitem};
     use zcash_protocol::consensus::MainNetwork;
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
@@ -856,7 +873,7 @@ mod tests {
         .expect("ZIP-316 composition rules permit it")
         .encode(&zcash_protocol::consensus::NetworkType::Main);
 
-        // No verb parses — requests and echoes alike.
+        // No verb parses — requests and OTP responses alike.
         for memo in [
             format!("ZNS:claim:forever:alice:{ua}"),
             format!("ZNS:update:none:alice:{ua}"),
@@ -896,7 +913,7 @@ mod tests {
                 &network,
                 &padded(&format!("ZNS:otp:417293:alice:update:{ua}"))
             ),
-            MintInbound::Echo(_)
+            MintInbound::Response(_)
         ));
     }
 
@@ -917,10 +934,10 @@ mod tests {
     fn decode_classifies_each_kind() {
         let network = MainNetwork;
 
-        let echo = padded(&format!("ZNS:otp:417293:alice:update:{TEST_UA}"));
+        let response = padded(&format!("ZNS:otp:417293:alice:update:{TEST_UA}"));
         assert!(matches!(
-            MintInbound::decode(&network, &echo),
-            MintInbound::Echo(_)
+            MintInbound::decode(&network, &response),
+            MintInbound::Response(_)
         ));
         let request = padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"));
         assert!(matches!(

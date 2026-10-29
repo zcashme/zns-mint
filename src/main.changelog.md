@@ -1,5 +1,89 @@
 # main.changelog.md
 
+## 2026-10-29 — The challenge fee is a hundred actions at the node's rate
+
+- An update or release request pays `treasury::FEE_ACTIONS` at the
+  node's fee rate. A fee that does not fit a zat amount refuses the
+  request.
+
+## 2026-10-26 — A sent Name Note waits for its own expiry (#390)
+
+- A sent order is marked with the expiry its transaction carries,
+  120 blocks from NU7, instead of the target height plus 40.
+
+## 2026-10-26 — A payment is priced at the rate it was seen at; a response without a term pays nothing (#381)
+
+- The request lane prices claims and challenge fees at the rate read
+  before the pass's round, the rate an OTP response is priced at its
+  block. A day the round publishes does not reprice a payment already
+  seen (M-04).
+- An admitted response without a term, an update or a release, gets
+  its payment back less the refund fee. A response with a term keeps
+  the whole payment once it covers the price (M-01).
+- A right code refused because a note is already pending is refunded
+  like every other refusal.
+
+## 2026-10-26 — An OTP response is ruled on at the block that carried it (#383)
+
+- The run loop no longer keeps OTP responses. At block application a
+  response completes the challenge relayed before that block, and the
+  transition it authorizes is ruled on there: renewal price, no note
+  pending, the law, then the note is admitted. The tip pass has no
+  response lane. A refused response is refunded there, as the tip
+  pass did.
+- A refused response ends its challenge; the controller requests
+  again. Before, an underpaid renewal left the challenge answerable
+  with the same code.
+- The update law and the renewal quote are read at the response's
+  block: its median time, and the oracle's rate before the pass's
+  round. One block per pass, these are the tip's values; across a
+  catch-up they are the block's own.
+- Challenges are expired at every applied block, by that block's
+  median, before its responses are handled, so a challenge the
+  block's clock has expired completes nothing in it. The tip pass no
+  longer does.
+- A response confirmed before its challenge was relayed, or kept
+  across a reorg that rebuilt the queue, can no longer count as a
+  wrong attempt against a challenge created later in the same pass.
+- The voluntary-release log line names the response's transaction.
+
+## 2026-10-26 — A claim spends an anchor the wallet can still spend
+
+- The enactment loop takes the first pool anchor still unspent at
+  the applied tip. A sent claim's anchor stays out until that
+  transaction is mined or expires, and the next claim takes another.
+
+## 2026-10-23 — Transactions pay the node's fee rate (#357)
+
+- Each tip pass reads `getstandardfee` once the tip is confirmed and
+  passes the rule to the challenge relay, Name Note assembly, and the
+  vault sweep. A failed read keeps the last rate the node gave.
+
+## 2026-10-23 — The run loop refuses a header outside the time window
+
+- Before a block is applied, its time has to be after the previous
+  median, at most 90 minutes past it, and at most two hours ahead of
+  the mint.
+
+## 2026-10-23 — A queued update is dropped when the tip median would release it
+
+- Before echoes and the lifecycle releases, an update still waiting to
+  be signed is dropped when the purchased term or the liveness deadline
+  has passed at the tip median. A broadcast order stays until its expiry
+  height and keeps the name reserved, so no release note is admitted
+  while that transaction can still confirm.
+
+## 2026-10-22 — The pre-sale table is read beside the price round (#371)
+
+- Every tip pass starts `presale::PendingRead` when the tip arrives,
+  so the read runs during the ancestor walk and block application. It
+  is awaited beside `fetch_round` once the scan reaches the tip, before
+  the tip check; only the unspent part of its 3 s timeout can delay the
+  pass. A failed read warns and keeps the last table; a pass that
+  re-converges aborts it.
+- The daily background refresh (`presale_refresh`) is gone; a new MTP
+  day only sweeps the Treasury.
+
 ## 2026-10-15 — The names in flight are on the metrics page (#342)
 
 - `zns_mint_request_state{name}` for every name the mint has anything

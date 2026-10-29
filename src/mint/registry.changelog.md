@@ -2,6 +2,37 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-10-26 — The release window follows the builder's expiry (#390)
+
+- A claim is built before a release when its expiry is at most the
+  release height plus the expiry delta in force there: 40 blocks,
+  120 from NU7. `DEFAULT_TX_EXPIRY_DELTA` is gone upstream.
+
+## 2026-10-26 — A claim anchor is the first spendable one in pool order
+
+- `spendable_claim_anchor` walks the pool in order and returns the
+  first anchor the caller accepts. An empty pool, or one whose
+  anchors are all refused, returns nothing.
+
+## 2026-10-23 — An update is signed at the tip and renews when it confirms
+
+- `authorize_update` and an update challenge read the purchased term
+  and the liveness deadline at the applied tip. A deadline the tip has
+  reached is refused before the note is signed.
+- A confirmed update that spends the predecessor renews. The confirming
+  block's median starts the new liveness deadline and is not read again
+  for the old one.
+- A release stays legal after the term and after the liveness deadline.
+
+## 2026-10-22 — The challenge laws read the request (#368)
+
+- `authorize_challenge` and `allows_challenge` take the `Request`;
+  `authorize_update` and `authorize_release` match its variant instead
+  of checking an `action` field. A claim is never challenged.
+- The laws no longer compare `record.commitment` with the challenge's
+  `tip_rcm`: the OTP queue drops a name's challenges whenever a
+  transition for it is admitted, so none can be stale.
+
 ## 2026-10-03 — The request gate joins the authorize family
 
 - `Registry::authorize_challenge` is the request-side twin of

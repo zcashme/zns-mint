@@ -12,6 +12,7 @@ use std::convert::Infallible;
 
 use incrementalmerkletree::{Address, Marking, Retention};
 use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTree};
+use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::scanning::ScanningKeys;
 use zcash_client_backend::{
     data_api::chain::{ChainState, CommitmentTreeRoot},
@@ -32,6 +33,11 @@ use zcash_protocol::{
 use zip32::AccountId;
 
 use crate::mint::TREASURY_ACCOUNT;
+
+/// One confirmation for every note, trusted or not. The mint never varies
+/// it: every library call that takes a policy passes this one, so balance
+/// reads, send-max and payments all see the same notes.
+pub const CONFIRMATIONS: ConfirmationsPolicy = ConfirmationsPolicy::MIN;
 
 /// The shard store's error type is [`Infallible`]. Callers use this so a
 /// store failure is not read as a missing checkpoint.
@@ -362,7 +368,6 @@ pub(crate) mod testing {
     use incrementalmerkletree::{Hashable, Position};
     use secrecy::{ExposeSecret, SecretVec};
     use shardtree::store::ShardStore;
-    use std::collections::BTreeSet;
     use zcash_client_backend::data_api::anchor_retention::AnchorRetentionInterval;
     use zcash_client_backend::{
         data_api::{
@@ -383,7 +388,7 @@ pub(crate) mod testing {
     impl DataStoreFactory for Factory {
         type Error = WalletError;
         type AccountId = AccountId;
-        type Account = super::read::FixedAccount;
+        type Account = read::FixedAccount;
         type DsError = WalletError;
         type DataStore = Wallet<LocalNetwork>;
 
@@ -435,7 +440,7 @@ pub(crate) mod testing {
         // `TestBuilder::build` may already have written the birthday
         // frontier and shard roots through the public tree API; replacing
         // the wallet would discard them.
-        let frontier_loaded = super::from_infallible(
+        let frontier_loaded = from_infallible(
             wallet
                 .sapling_tree
                 .store()

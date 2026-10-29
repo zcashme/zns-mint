@@ -12,7 +12,6 @@ use zcash_protocol::consensus::MainNetwork;
 use zcash_protocol::consensus::TestNetwork;
 #[cfg(feature = "regtest")]
 use zcash_protocol::local_consensus::LocalNetwork;
-use zcash_protocol::value::Zatoshis;
 use zcash_protocol::{
     consensus::{BlockHeight, Parameters},
     TxId,
@@ -23,17 +22,17 @@ use std::str::FromStr;
 
 use crate::mint::mtp::MtpTracker;
 use crate::mint::note::NameNoteQueue;
-use crate::mint::presale::{self, AccessCodeDerivationKey, FetchError, ProtectedNames};
+use crate::mint::presale::{self, AccessCodeDerivationKey, HttpsClient, ProtectedNames};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
-use crate::mint::treasury::{OtpQueue, RequestQueue};
-use crate::mint::{OtpMemo, MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use crate::mint::treasury::{OtpQueue, RefundQueue, RequestQueue};
+use crate::mint::{MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 use crate::zcash::{self, CanonicalBlockSource, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::chain::ChainState;
-use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::data_api::WalletRead as _;
+use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zns_canon::capsule::{
     hash as capsule_hash, parse_capsule, read_capsule_file, unseal_seed, CAPSULE_KEY_CONTEXT,
 };
@@ -100,24 +99,26 @@ pub struct Boot<P: Parameters> {
     pub access_code_key: AccessCodeDerivationKey,
     /// must not: fail-closed at birth — the table or no start
     pub protected_names: ProtectedNames,
+    /// initialized: the one client every pre-sale read goes through
+    pub presale_client: HttpsClient,
+    /// must not: fail-closed at birth — the node's fee rate or no start
+    pub fee_rule: FeeRule,
     /// produced: scanned and verified during boot sync
     pub registry: Registry,
     /// initialized: pending Name Note authorizations
     pub name_notes: NameNoteQueue,
     /// initialized: pending Treasury requests
     pub requests: RequestQueue,
-    /// initialized: pending OTP echoes
-    pub echoes: Vec<(OtpMemo, Zatoshis, BlockHeight)>,
-    /// initialized: no pre-sale refresh is in flight
-    pub presale_refresh: Option<tokio::task::JoinHandle<Result<ProtectedNames, FetchError>>>,
+    /// initialized: refunds due
+    pub refunds: RefundQueue,
     /// The exact encoded identity written to the boot identity document.
     pub treasury_address: String,
     pub registry_ufvk: String,
     /// Verified capsule fingerprint and hash, retained after the seed is wiped.
     pub seed_fingerprint: String,
     pub capsule_hash: String,
-    /// Facts from the identity report; absent in development mode.
-    pub guest: Option<GuestInfo>,
+    #[cfg(not(feature = "non-tee"))]
+    pub guest: GuestInfo,
 }
 
 /// Network label for logging.
@@ -203,45 +204,11 @@ const CUSTODY_MANIFEST_FILE: &str = "keys/zns_custody_manifest.toml";
 #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 const GENESIS_RECORD_FILE: &str = "zns_genesis_record.json";
 
-/// The keygen report binds the capsule hash recorded in the custody
-/// manifest. A resealed file has a different hash, so that report is
-/// not required to cover it.
-#[cfg(any(test, all(not(feature = "regtest"), not(feature = "non-tee"))))]
-fn keygen_report_covers(file_hash: &[u8; 32], recorded: &[u8; 32]) -> bool {
-    file_hash == recorded
-}
-
-#[cfg(any(test, all(not(feature = "regtest"), not(feature = "non-tee"))))]
-fn recorded_capsule_hash(text: &str) -> [u8; 32] {
-    #[derive(serde::Deserialize)]
-    struct Raw {
-        #[serde(default)]
-        capsule_hash_blake2b256: Option<String>,
-    }
-    let raw: Raw = toml::from_str(text)
-        .unwrap_or_else(|error| panic!("FATAL: {CUSTODY_MANIFEST_FILE} is invalid: {error}"));
-    let hex_text = raw
-        .capsule_hash_blake2b256
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} has no capsule hash"));
-    let bytes = hex::decode(hex_text.trim())
-        .unwrap_or_else(|_| panic!("FATAL: {CUSTODY_MANIFEST_FILE} capsule hash is not hex"));
-    <[u8; 32]>::try_from(bytes)
-        .unwrap_or_else(|_| panic!("FATAL: {CUSTODY_MANIFEST_FILE} capsule hash is not 32 bytes"))
-}
-
-/// The conf fingerprint is not an identity pin by itself. When this file
-/// is the one the custody manifest records, the keygen report must carry
+/// The keygen report has to cover this capsule file. It carries
 /// `BLAKE2b-512(fingerprint ‖ capsule hash)` under the AMD signature.
+/// A missing report, or one that does not cover this file, refuses boot.
 #[cfg(all(not(feature = "regtest"), not(feature = "non-tee")))]
 fn require_keygen_attestation(capsule_bytes: &[u8], fingerprint: &SeedFingerprint) {
-    let text = std::fs::read_to_string(CUSTODY_MANIFEST_FILE).unwrap_or_else(|error| {
-        panic!("FATAL: cannot read {CUSTODY_MANIFEST_FILE}: {error}");
-    });
-    if !keygen_report_covers(&capsule_hash(capsule_bytes), &recorded_capsule_hash(&text)) {
-        tracing::info!("boot: resealed capsule; the keygen report does not bind this file");
-        return;
-    }
     let report = read_attestation_report(std::path::Path::new("keys/zns_attestation.bin"));
     zns_canon::attestation::verify(capsule_bytes, fingerprint, report)
         .expect("FATAL: keygen attestation report failed verification");
@@ -392,13 +359,9 @@ async fn require_anchor_on_chain(
 fn ceremony_anchor(text: &str) -> CeremonyAnchor {
     #[derive(serde::Deserialize)]
     struct RawAnchor {
-        #[serde(default)]
         anchor_txid: Option<String>,
-        #[serde(default)]
         birthday: Option<u32>,
-        #[serde(default)]
         network: Option<String>,
-        #[serde(default)]
         seed_fingerprint: Option<String>,
     }
     let raw: RawAnchor = toml::from_str(text)
@@ -484,7 +447,7 @@ impl Boot<Network> {
         // regtest/non-tee, hardware key for attested builds.
 
         // 2. Seed intake + verification: read capsule, require the keygen
-        //    report when this file is the recorded capsule, unseal, then
+        //    report for this file, unseal, then
         //    derive keys. The seed lives only inside this block — Secret's
         //    Drop wipes it. The access-code key derives from the seed: an
         //    X25519 scalar agreed with the issuer's public key.
@@ -576,6 +539,9 @@ impl Boot<Network> {
             "boot: wallet born complete from the origin checkpoint"
         );
 
+        #[cfg(not(feature = "regtest"))]
+        zcash::adopt::require_pinned(&source).await;
+
         // 3d. The mint's birthday: a throwaway window ending at the
         // birthday block, whose median is the birthday block's MTP —
         // the day-zero anchor for `current_day`.
@@ -644,6 +610,11 @@ impl Boot<Network> {
                 .get_block(&network, next_height)
                 .await
                 .expect("FATAL: block unavailable during boot sync");
+            let wall = time::OffsetDateTime::now_utc().unix_timestamp();
+            mtp.header_time_ok(block.header().time, wall)
+                .unwrap_or_else(|reason| {
+                    panic!("FATAL: {reason} at height {}", u32::from(next_height))
+                });
 
             let _ = crate::mint::apply_block(
                 &network,
@@ -670,7 +641,7 @@ impl Boot<Network> {
         // Boot refuses to run with a treasury below MIN_TREASURY_BALANCE.
         // The node's tip is never pushed into the wallet.
         let treasury_balance = wallet
-            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .get_wallet_summary(crate::wallet::CONFIRMATIONS)
             .expect("FATAL: balance summary failed")
             .expect("FATAL: chain knowledge missing at boot balance check")
             .account_balances()
@@ -702,9 +673,20 @@ impl Boot<Network> {
             "boot: initial price ingested"
         );
 
+        // 6a. The node's fee rate.
+        let fee_rule = source
+            .standard_fee()
+            .await
+            .expect("FATAL: fee rate unavailable from Zebra");
+        tracing::info!(
+            zats_per_action = fee_rule.marginal_fee().into_u64(),
+            "boot: fee rate read"
+        );
+
         // 6b. Pre-sale table: fail-closed at birth — no table, no start.
+        let presale_client = presale::https_client();
         let protected_names = loop {
-            match presale::fetch().await {
+            match presale::fetch(&presale_client).await {
                 Ok(names) => {
                     tracing::info!("boot: pre-sale table fetched");
                     break names;
@@ -713,7 +695,7 @@ impl Boot<Network> {
                     tracing::warn!(%error, "boot: pre-sale table unavailable; retrying");
                 }
             }
-            tokio::time::sleep(crate::zcash::RETRY_PAUSE).await;
+            tokio::time::sleep(zcash::RETRY_PAUSE).await;
         };
 
         // The challenge memory: empty by construction, filled by the run
@@ -721,8 +703,7 @@ impl Boot<Network> {
         let challenges = OtpQueue::new();
         let name_notes = NameNoteQueue::default();
         let requests = RequestQueue::default();
-        let echoes = Vec::new();
-        let presale_refresh = None;
+        let refunds = RefundQueue::default();
 
         // 7. Sapling proving parameters. Loading and hash verification happen
         // before attestation: a mint that produces a report can also prove
@@ -758,13 +739,13 @@ impl Boot<Network> {
                 doc_hash = %blake2b_simd::Params::new().hash_length(32).hash(&doc).to_hex(),
                 "boot: identity doc written to zns_mint_identity.json"
             );
-            Some(GuestInfo {
+            GuestInfo {
                 measurement: hex::encode(parsed.measurement),
                 guest_policy: format!("0x{:x}", parsed.guest_policy),
-            })
+            }
         };
         #[cfg(feature = "non-tee")]
-        let guest = {
+        {
             let doc = dev_identity_document(NETWORK_LABEL, &treasury_address, &registry_ufvk);
             std::fs::write(IDENTITY_DOC_FILE, &doc)
                 .expect("FATAL: failed to write identity doc to disk");
@@ -772,8 +753,7 @@ impl Boot<Network> {
                 doc_hash = %blake2b_simd::Params::new().hash_length(32).hash(&doc).to_hex(),
                 "boot: DEV identity doc written (no attestation)"
             );
-            None
-        };
+        }
 
         tracing::info!(
             network = NETWORK_LABEL,
@@ -796,15 +776,17 @@ impl Boot<Network> {
             challenges,
             access_code_key,
             protected_names,
+            presale_client,
+            fee_rule,
             registry,
             name_notes,
             requests,
-            echoes,
-            presale_refresh,
+            refunds,
             treasury_address,
             registry_ufvk,
             seed_fingerprint: hex::encode(ceremony_fingerprint),
             capsule_hash: hex::encode(ceremony_capsule_hash),
+            #[cfg(not(feature = "non-tee"))]
             guest,
         }
     }
@@ -874,7 +856,7 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 /// by the SEV-SNP attestation, not by runtime RPC checks.
 async fn origin_checkpoint(
     birthday: BlockHeight,
-    treestate: impl std::ops::AsyncFnOnce(BlockHeight) -> Result<ChainState, zcash::TransportError>,
+    treestate: impl AsyncFnOnce(BlockHeight) -> Result<ChainState, zcash::TransportError>,
 ) -> ChainState {
     #[cfg(not(feature = "regtest"))]
     let checkpoint_height = birthday - 101;
@@ -945,10 +927,9 @@ fn read_verified_sapling_params(
         )
     });
 
-    let hash = blake2b_simd::Params::new().hash_length(64).hash(&bytes);
-    let hash_hex = hex::encode(hash.as_bytes());
+    let hash_hex = blake2b_simd::blake2b(&bytes).to_hex();
     assert_eq!(
-        hash_hex,
+        hash_hex.as_str(),
         expected_hash,
         "Sapling params hash mismatch at {}: expected {expected_hash}, got {hash_hex}",
         path.display(),
@@ -1021,15 +1002,11 @@ fn mint_identity(
 /// Hardware builds only: `non-tee` builds have no report to bind.
 #[cfg(not(feature = "non-tee"))]
 fn identity_report_data(treasury_ua: &str, registry_ufvk: &str) -> [u8; 64] {
-    let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
+    let mut hasher = blake2b_simd::State::new();
     hasher.update(treasury_ua.as_bytes());
     hasher.update(b"||");
     hasher.update(registry_ufvk.as_bytes());
-    let hash = hasher.finalize();
-
-    let mut report_data = [0u8; 64];
-    report_data.copy_from_slice(hash.as_bytes());
-    report_data
+    *hasher.finalize().as_array()
 }
 
 #[cfg(not(feature = "non-tee"))]
@@ -1160,17 +1137,6 @@ mod tests {
         assert_eq!(anchor.txid.to_string(), txid);
         #[cfg(not(feature = "non-tee"))]
         assert_eq!(anchor.file_txid, txid_bytes);
-    }
-
-    #[test]
-    fn a_resealed_capsule_is_not_covered_by_the_keygen_report() {
-        let recorded = recorded_capsule_hash(
-            "capsule_hash_blake2b256 = \"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"\n",
-        );
-        assert!(keygen_report_covers(&recorded, &recorded));
-        let mut resealed = recorded;
-        resealed[0] ^= 1;
-        assert!(!keygen_report_covers(&resealed, &recorded));
     }
 
     /// A one-transaction block, for anchor-check fixtures.
@@ -2096,7 +2062,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "FATAL: SEED FINGERPRINT MISMATCH")]
     fn verify_fingerprint_mismatch_is_redacted() {
-        use secrecy::Secret;
         let seed = Secret::new([0xAB; 32]);
         let wrong_fp = SeedFingerprint::from_seed(&[0xCD; 32]).unwrap().to_string();
         verify_fingerprint(&seed, &wrong_fp);

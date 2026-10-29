@@ -19,7 +19,8 @@
 //! every name ever requested; instead the loop hands over the whole set
 //! once per pass and the listener prints it beside the recorder's text.
 //! A name with nothing pending is absent; `1` while the mint holds the
-//! next move, `2` while a relayed challenge awaits the owner's echo.
+//! next move, `2` while a relayed challenge awaits the owner's OTP
+//! response.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -89,18 +90,18 @@ pub fn snapshot(
 }
 
 /// Replaces the names in flight. Called once per pass: `working` names
-/// every request the mint holds the next move on, `awaiting_echo` every
-/// relayed challenge.
+/// every request the mint holds the next move on, `awaiting_response`
+/// every relayed challenge.
 pub fn requests_in_flight<'a>(
     working: impl IntoIterator<Item = &'a Name>,
-    awaiting_echo: impl IntoIterator<Item = &'a Name>,
+    awaiting_response: impl IntoIterator<Item = &'a Name>,
 ) {
     // One `zns_mint_request_state` sample per name, sorted, each once: a
     // name in several queues is still one request in flight, and a scrape
     // with a repeated series is rejected whole. The mint's move wins: a
     // working name overwrites its `2`. Names are `[a-z0-9]` and need no
     // escaping.
-    let mut states: BTreeMap<&str, u8> = awaiting_echo
+    let mut states: BTreeMap<&str, u8> = awaiting_response
         .into_iter()
         .map(|name| (name.as_str(), 2))
         .collect();

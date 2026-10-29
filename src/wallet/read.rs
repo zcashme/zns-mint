@@ -7,7 +7,9 @@ use std::convert::Infallible;
 use std::num::NonZeroU32;
 
 use secrecy::SecretVec;
+use shardtree::error::ShardTreeError;
 use shardtree::store::ShardStore;
+use thiserror::Error;
 use zcash_client_backend::data_api::locking::{LockFilter, LockedInputPolicy};
 use zcash_client_backend::data_api::{
     defaults,
@@ -36,101 +38,61 @@ use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use super::Wallet;
 
 /// Errors produced by the mint's fixed-account in-memory WalletDb.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum WalletError {
     /// A lifecycle operation that cannot exist in this wallet: account
     /// creation, import, or deletion, address generation or reservation.
+    #[error("operation is not supported by the fixed Treasury/Registry wallet")]
     FixedAccountsOnly,
     /// A query or mutation named an account other than 0 (Treasury) or
     /// 1 (Registry).
+    #[error("unknown account {}", u32::from(*.0))]
     AccountUnknown(AccountId),
     /// `put_blocks` was called with non-sequential heights or a `from_state`
     /// that does not connect to the wallet's applied tip, or a truncation was
     /// requested against a chain state that contradicts the applied blocks.
     /// The payload is the height at which continuity broke.
+    #[error("chain discontinuity detected at or before height {0}")]
     ChainDiscontinuity(BlockHeight),
     /// Truncation was requested to a height below every checkpoint retained by
     /// all three note commitment trees.
+    #[error("no retained checkpoint at or below height {0}")]
     TruncationTargetUnavailable(BlockHeight),
     /// A note commitment tree operation failed.
-    CommitmentTree(shardtree::error::ShardTreeError<Infallible>),
+    #[error("note commitment tree error: {0}")]
+    CommitmentTree(#[from] ShardTreeError<Infallible>),
     /// A value aggregation would overflow `MAX_MONEY`.
-    Balance(BalanceError),
+    #[error("balance error: {0}")]
+    Balance(#[from] BalanceError),
     /// `AllFunds(Everything)` was requested but some notes in the spend
     /// pools are not currently spendable (unconfirmed, locked, or otherwise
     /// ineligible).
+    #[error("not all funds in the requested pools are spendable")]
     UnspendableFunds,
     /// A scanned block contained an ordinary-Orchard output belonging to a
     /// mint account. This wallet keeps no Orchard note table; accepting the
     /// block would make that value invisible.
+    #[error("scanned ordinary-Orchard receive is not stored by this wallet")]
     UnexpectedOrchardReceive,
     /// `store_name_note` disagreed with applied wallet state (height, tx
     /// status, ZNS cmx, or a stored field).
+    #[error("invalid Name Note ingestion: {0}")]
     InvalidNameNote(&'static str),
     /// A rescan was requested, but the in-memory projection retains no
     /// blocks to re-scan. The process must be restarted, replaying from the
     /// birthday.
+    #[error(
+        "rescan is not supported: the wallet retains no blocks to re-scan; restart to replay from the birthday"
+    )]
     RescanUnsupported,
 }
 
-impl From<shardtree::error::ShardTreeError<Infallible>> for WalletError {
-    fn from(e: shardtree::error::ShardTreeError<Infallible>) -> Self {
-        WalletError::CommitmentTree(e)
-    }
-}
-
-impl From<BalanceError> for WalletError {
-    fn from(e: BalanceError) -> Self {
-        WalletError::Balance(e)
-    }
-}
-
+/// No variant: an infallible operation never produces a `WalletError`.
 impl From<Infallible> for WalletError {
     fn from(e: Infallible) -> Self {
         match e {}
     }
 }
-
-impl std::fmt::Display for WalletError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WalletError::FixedAccountsOnly => write!(
-                f,
-                "operation is not supported by the fixed Treasury/Registry wallet"
-            ),
-            WalletError::RescanUnsupported => write!(
-                f,
-                "rescan is not supported: the wallet retains no blocks to re-scan; restart to replay from the birthday"
-            ),
-            WalletError::AccountUnknown(account) => {
-                write!(f, "unknown account {account:?}")
-            }
-            WalletError::ChainDiscontinuity(height) => {
-                write!(
-                    f,
-                    "chain discontinuity detected at or before height {height}"
-                )
-            }
-            WalletError::TruncationTargetUnavailable(height) => {
-                write!(f, "no retained checkpoint at or below height {height}")
-            }
-            WalletError::CommitmentTree(e) => write!(f, "note commitment tree error: {e}"),
-            WalletError::Balance(e) => write!(f, "balance error: {e}"),
-            WalletError::UnspendableFunds => {
-                write!(f, "not all funds in the requested pools are spendable")
-            }
-            WalletError::UnexpectedOrchardReceive => write!(
-                f,
-                "scanned ordinary-Orchard receive is not stored by this wallet"
-            ),
-            WalletError::InvalidNameNote(reason) => {
-                write!(f, "invalid Name Note ingestion: {reason}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for WalletError {}
 
 /// `height + 1`, saturating instead of panicking at the top of the `u32`
 /// height space.
@@ -242,15 +204,13 @@ impl<P: consensus::Parameters> Wallet<P> {
         &self,
         balances: &mut HashMap<AccountId, AccountBalance>,
         account: AccountId,
-        note_id: &zcash_client_backend::wallet::NoteId,
+        note_id: &NoteId,
         is_change: bool,
         value: Zatoshis,
         pool: ShieldedPool,
         target_height: TargetHeight,
         policy: ConfirmationsPolicy,
     ) -> Result<(), WalletError> {
-        use zcash_client_backend::wallet::OutputRef;
-
         let balance = balances
             .get_mut(&account)
             .expect("both fixed accounts are seeded with a zero balance");
@@ -580,10 +540,7 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
             .collect())
     }
 
-    fn get_memo(
-        &self,
-        note_id: zcash_client_backend::wallet::NoteId,
-    ) -> Result<Option<Memo>, Self::Error> {
+    fn get_memo(&self, note_id: NoteId) -> Result<Option<Memo>, Self::Error> {
         Ok(self.memos.get(&note_id).cloned())
     }
 
