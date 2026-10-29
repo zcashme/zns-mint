@@ -29,9 +29,8 @@
 - Sapling outputs decrypt under the ZIP 212 rule at the block's (or the
   mempool transaction's target) height: past the grace period on mainnet
   and testnet, but not yet on regtest, which activates Canopy near
-  genesis. Both ivks are prepared once per block or mempool transaction
-  (`TreasuryIvks`), External scope only, so Treasury change is never read
-  as a request.
+  genesis. Both ivks are External scope only, so Treasury change is never
+  read as a request.
 - Arrivals lose their action index. Nothing read it, and Sapling output
   indices would collide with Ironwood action indices.
 
