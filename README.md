@@ -72,7 +72,7 @@ A name on the pre-sale list also needs its six-digit code in the memo. The mint 
 
 An update changes a name you already hold: a new address, more years, or a conversion to forever.
 
-1. You pay the treasury the challenge fee, one dollar, with `ZNS:update:<term>:<name>:<address>`.
+1. You pay the treasury the challenge fee with `ZNS:update:<term>:<name>:<address>`.
 2. The mint sends a one-time code to the address the name points at now.
 3. You send that code back to the treasury.
 4. If the update adds years or converts the name to forever, that return payment covers the price of the new term. An address-only update (`none`) has no second price.
@@ -84,7 +84,7 @@ The code is how the mint knows the request came from the current controller. A s
 
 A release ends a registration before its term is up. The address in the memo is the one the name already points at.
 
-1. You pay the one-dollar challenge fee with `ZNS:release:<name>:<address>`.
+1. You pay the challenge fee with `ZNS:release:<name>:<address>`.
 2. The mint sends a one-time code to the current controller.
 3. You send the code back.
 4. The mint spends the current registry note and writes a release note.
@@ -110,7 +110,7 @@ Forever is three years' price, paid once. A term of several years is the yearly 
 
 The mint publishes a daily ZEC price from public exchanges and quotes every name in zatoshis from that rate. The quote you meet is the one in force when the mint first sees the payment.
 
-An update or a release starts with a challenge fee of one dollar, rounded up to the next 100,000 zatoshis. That fee opens the confirmation. It is not the price of the name. Extra years are paid when you send the confirmation code back.
+An update or a release starts with a challenge fee of a hundred times the node's fee per logical action: 100,000 zatoshis at 1,000 per action. It does not follow the daily ZEC price. That fee opens the confirmation. It is not the price of the name. Extra years are paid when you send the confirmation code back.
 
 A payment changes a name only when the memo is one of the sentences above and the amount covers the price that sentence requires. Any other payment to the treasury stays there.
 

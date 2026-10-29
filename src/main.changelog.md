@@ -1,5 +1,11 @@
 # main.changelog.md
 
+## 2026-10-29 — The challenge fee is a hundred actions at the node's rate
+
+- An update or release request pays `treasury::FEE_ACTIONS` at the
+  node's fee rate, the rate read before the pass, like the oracle rate.
+  A fee that does not fit a zat amount refuses the request.
+
 ## 2026-10-26 — A sent Name Note waits for its own expiry (#390)
 
 - A sent order is marked with the expiry its transaction carries,

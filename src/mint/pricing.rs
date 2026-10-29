@@ -401,27 +401,6 @@ impl Oracle {
         let zats = usd.checked_mul(rate.into_u64())?;
         Zatoshis::from_u64(zats).ok()
     }
-
-    /// The challenge fee (issue #18): the minimum payment that triggers a
-    /// controller challenge — one dollar at the current published rate,
-    /// rounded up to the next 100_000-zat increment. Anti-spam pricing,
-    /// not revenue: the deciding pass refuses underpaid relay requests outright.
-    pub fn challenge_fee(&self) -> Zatoshis {
-        Self::challenge_fee_at(self.current())
-    }
-
-    /// The challenge fee at `rate` zats per USD: one dollar, rounded
-    /// up to the next 100_000-zat increment.
-    pub fn challenge_fee_at(rate: Zatoshis) -> Zatoshis {
-        const GRID: u64 = 100_000;
-        let rate = rate.into_u64();
-        // Checked so the grid step cannot wrap.
-        let zats = rate
-            .div_ceil(GRID)
-            .checked_mul(GRID)
-            .expect("challenge fee fits u64");
-        Zatoshis::from_u64(zats).expect("challenge fee fits the Zcash monetary range")
-    }
 }
 
 #[cfg(test)]
@@ -443,31 +422,6 @@ mod tests {
     }
 
     #[test]
-    fn challenge_fee_rounds_one_dollar_up_to_the_grid() {
-        // $1,000/ZEC ⇒ $1 = 100_000 zats: exactly on the grid.
-        let oracle = Oracle::new(Decimal::from(1_000), 0, Timestamp::from_seconds(0).unwrap());
-        assert_eq!(oracle.challenge_fee().into_u64(), 100_000);
-
-        // $800/ZEC ⇒ $1 = 125_000 zats, the issue-#18 rounding: one grid
-        // step up, to 200_000.
-        let oracle = Oracle::new(Decimal::from(800), 0, Timestamp::from_seconds(0).unwrap());
-        assert_eq!(oracle.challenge_fee().into_u64(), 200_000);
-
-        // $400/ZEC ⇒ $1 = 250_000 zats, mid-grid: up to 300_000.
-        let oracle = Oracle::new(Decimal::from(400), 0, Timestamp::from_seconds(0).unwrap());
-        assert_eq!(oracle.challenge_fee().into_u64(), 300_000);
-
-        // $10,000/ZEC ⇒ $1 = 10_000 zats, below the grid: the 100_000
-        // floor holds.
-        let oracle = Oracle::new(
-            Decimal::from(10_000),
-            0,
-            Timestamp::from_seconds(0).unwrap(),
-        );
-        assert_eq!(oracle.challenge_fee().into_u64(), 100_000);
-    }
-
-    #[test]
     fn construction_publishes_spot_and_quotes() {
         // $1,000/ZEC ⇒ rate 100,000 zats per dollar, from the first round.
         let oracle = Oracle::new(Decimal::from(1_000), 0, Timestamp::from_seconds(0).unwrap());
@@ -484,8 +438,7 @@ mod tests {
         assert_eq!(quoted(&oracle, &long, Term::Forever), 6_000_000);
     }
 
-    /// `quote_at` and `challenge_fee_at` price at the rate given; `quote`
-    /// and `challenge_fee` pass the published one.
+    /// `quote_at` prices at the rate given; `quote` passes the published one.
     #[test]
     fn a_quote_at_a_given_rate() {
         let oracle = Oracle::new(Decimal::from(1_000), 0, Timestamp::from_seconds(0).unwrap());
@@ -493,14 +446,9 @@ mod tests {
         let rate = Zatoshis::const_from_u64(200_000);
         let quote = Oracle::quote_at(rate, &name, Term::Years(1)).unwrap();
         assert_eq!(quote.into_u64(), 4_000_000);
-        assert_eq!(Oracle::challenge_fee_at(rate).into_u64(), 200_000);
         assert_eq!(
             oracle.quote(&name, Term::Years(1)),
             Oracle::quote_at(oracle.current(), &name, Term::Years(1))
-        );
-        assert_eq!(
-            oracle.challenge_fee(),
-            Oracle::challenge_fee_at(oracle.current())
         );
     }
 
