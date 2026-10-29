@@ -140,7 +140,6 @@ mod tests {
     use super::*;
     use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
 
-    /// The standard rate's withheld fee: 500,000 zats.
     fn withheld() -> Zatoshis {
         (MARGINAL_FEE * FEE_ACTIONS).unwrap()
     }
@@ -166,7 +165,6 @@ mod tests {
         BlockHeight::from_u32(1_000)
     }
 
-    /// Owes 500,000 zats for a 1,000,000-zat payment at `height`.
     fn admit(queue: &mut RefundQueue, payment: TxId, height: u32) {
         queue.admit(
             &FeeRule::standard(),
