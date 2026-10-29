@@ -3,7 +3,7 @@
 //! A refund is a Treasury payment, built once from any Treasury notes and
 //! the wallet's from there, like a sweep. Its amount is fixed when it is
 //! admitted: the payment less any penalty and the withheld fee,
-//! `REFUND_FEE_ACTIONS` at the node's rate, so the payer covers the fee.
+//! `FEE_ACTIONS` at the node's rate, so the payer covers the fee.
 //! A wrong access code also keeps 1% of the quote. A refund is built on
 //! the tip pass after its payment's block.
 
@@ -16,12 +16,13 @@ use zcash_protocol::value::Zatoshis;
 
 use crate::mint::{Name, UnifiedAddress};
 
-/// Actions' worth of fee withheld from every refund.
-const REFUND_FEE_ACTIONS: usize = 10;
+/// Actions' worth of the node's rate withheld from every refund, and
+/// paid by every update or release request.
+pub const FEE_ACTIONS: usize = 100;
 
 /// `paid` minus the withheld refund fee, when that remainder is positive.
 fn refund_output(paid: Zatoshis, fee_rule: &FeeRule) -> Option<Zatoshis> {
-    let fee = (fee_rule.marginal_fee() * REFUND_FEE_ACTIONS)?;
+    let fee = (fee_rule.marginal_fee() * FEE_ACTIONS)?;
     (paid - fee).filter(|output| *output > Zatoshis::ZERO)
 }
 
@@ -139,9 +140,8 @@ mod tests {
     use super::*;
     use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
 
-    /// The standard rate's withheld fee: 50,000 zats.
     fn withheld() -> Zatoshis {
-        (MARGINAL_FEE * REFUND_FEE_ACTIONS).unwrap()
+        (MARGINAL_FEE * FEE_ACTIONS).unwrap()
     }
 
     fn zats(n: u64) -> Zatoshis {
@@ -165,7 +165,6 @@ mod tests {
         BlockHeight::from_u32(1_000)
     }
 
-    /// Owes 50,000 zats for a 100,000-zat payment at `height`.
     fn admit(queue: &mut RefundQueue, payment: TxId, height: u32) {
         queue.admit(
             &FeeRule::standard(),
@@ -173,7 +172,7 @@ mod tests {
             &ua(),
             &alice(),
             BlockHeight::from_u32(height),
-            zats(100_000),
+            zats(1_000_000),
         )
     }
 
@@ -182,10 +181,10 @@ mod tests {
         let txid = TxId::from_bytes([1; 32]);
         let mut queue = RefundQueue::default();
         admit(&mut queue, txid, 10);
-        assert_eq!(queue.due(deep())[0].amount(), zats(50_000));
+        assert_eq!(queue.due(deep())[0].amount(), zats(500_000));
 
         let mut queue = RefundQueue::default();
-        let price = zats(100_000);
+        let price = zats(1_000_000);
         queue.admit(
             &FeeRule::standard(),
             txid,
@@ -194,7 +193,7 @@ mod tests {
             BlockHeight::from_u32(10),
             (price - access_code_penalty(price)).unwrap(),
         );
-        assert_eq!(queue.due(deep())[0].amount(), zats(49_000));
+        assert_eq!(queue.due(deep())[0].amount(), zats(490_000));
     }
 
     #[test]
@@ -215,9 +214,9 @@ mod tests {
 
     #[test]
     fn a_lower_node_rate_refunds_a_payment_the_standard_rate_keeps() {
-        let paid = zats(20_000);
+        let paid = zats(200_000);
         let node = crate::zcash::fees::fee_rule(zats(1_000));
-        assert_eq!(refund_output(paid, &node), Some(zats(10_000)));
+        assert_eq!(refund_output(paid, &node), Some(zats(100_000)));
         assert_eq!(refund_output(paid, &FeeRule::standard()), None);
     }
 
@@ -253,14 +252,14 @@ mod tests {
             &ua(),
             &alice(),
             BlockHeight::from_u32(10),
-            zats(200_000),
+            zats(2_000_000),
         );
 
         let second = queue.due(deep()).remove(1);
         queue.paid(&second);
         let left = queue.due(deep());
         assert_eq!(left.len(), 1);
-        assert_eq!(left[0].amount(), zats(50_000));
+        assert_eq!(left[0].amount(), zats(500_000));
     }
 
     #[test]

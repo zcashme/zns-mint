@@ -530,7 +530,9 @@ async fn main() {
                         );
                         continue;
                     }
-                    if paid < Oracle::challenge_fee_at(rate) {
+                    if (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
+                        .is_none_or(|fee| paid < fee)
+                    {
                         tracing::info!(
                             %txid,
                             name = %request.name().as_str(),

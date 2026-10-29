@@ -1,5 +1,9 @@
 # Pricing changelog
 
+## 2026-10-29 — The challenge fee leaves the oracle
+
+- `challenge_fee` and `challenge_fee_at` are gone.
+
 ## 2026-10-26 — A quote at a given rate (#381)
 
 - `quote_at` and `challenge_fee_at` price from a zats-per-USD rate;
