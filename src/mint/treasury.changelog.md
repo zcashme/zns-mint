@@ -1,5 +1,10 @@
 # Treasury design record
 
+## 2026-10-29 — A refund withholds a hundred actions
+
+- A refund is the payment minus `FEE_ACTIONS`, a hundred actions at the
+  node's rate: 100,000 zats at 1,000 per action.
+
 ## 2026-10-24 — Underpaid payments are refunded (#372)
 
 - A refund is the payment minus ten actions at the node's rate. It
