@@ -110,7 +110,7 @@ Forever is three years' price, paid once. A term of several years is the yearly 
 
 The mint publishes a daily ZEC price from public exchanges and quotes every name in zatoshis from that rate. The quote you meet is the one in force when the mint first sees the payment.
 
-An update or a release starts with a challenge fee of a hundred times the node's fee per logical action: 100,000 zatoshis at 1,000 per action. That fee opens the confirmation. It is not the price of the name. Extra years are paid when you send the confirmation code back.
+An update or a release starts with a challenge fee of a hundred times the node's fee per logical action: 500,000 zatoshis at 5,000 per action, and 100,000 zatoshis at 1,000 per action from height 3,590,000. That fee opens the confirmation. It is not the price of the name. Extra years are paid when you send the confirmation code back.
 
 A payment changes a name only when the memo is one of the sentences above and the amount covers the price that sentence requires. Any other payment to the treasury stays there.
 
