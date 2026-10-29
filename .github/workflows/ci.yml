@@ -23,11 +23,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The runner keeps a stable toolchain. Updating it in place leaves
-      # bin/cargo-clippy behind, and the new clippy package refuses to unpack.
-      - name: Drop the runner's stable toolchain
-        run: rustup toolchain uninstall stable || true
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -87,11 +82,6 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-
-      # The runner keeps a stable toolchain. Updating it in place leaves
-      # bin/cargo-clippy behind, and the new clippy package refuses to unpack.
-      - name: Drop the runner's stable toolchain
-        run: rustup toolchain uninstall stable || true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
