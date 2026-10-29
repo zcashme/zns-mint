@@ -3,8 +3,7 @@
 ## 2026-10-29 — A refund withholds a hundred actions
 
 - A refund is the payment minus `FEE_ACTIONS`, a hundred actions at the
-  node's rate: 100,000 zats at 1,000 per action. An update or release
-  request pays the same amount to open a challenge.
+  node's rate: 100,000 zats at 1,000 per action.
 
 ## 2026-10-24 — Underpaid payments are refunded (#372)
 

@@ -387,10 +387,9 @@ async fn main() {
         // The tip check below covers the price round and the pre-sale
         // read alike. Only the read's unspent timeout can delay the pass.
         let (round, ()) = tokio::join!(fetch_round(), presale_read.install(&mut protected_names));
-        // The rates when the requests below were first seen: a day this
-        // round publishes, or the node's fee read below, does not reprice them.
+        // The rate when the requests below were first seen: a day this
+        // round publishes does not reprice them.
         let rate = oracle.current();
-        let challenge_fee = fee_rule.marginal_fee() * treasury::FEE_ACTIONS;
         oracle.accumulate(round, today, mtp_now);
         // Transient or unusable tip data → skip this rule pass and wait
         // for another notification; a chain race re-converges.
@@ -531,7 +530,9 @@ async fn main() {
                         );
                         continue;
                     }
-                    if challenge_fee.is_none_or(|fee| paid < fee) {
+                    if (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
+                        .is_none_or(|fee| paid < fee)
+                    {
                         tracing::info!(
                             %txid,
                             name = %request.name().as_str(),
