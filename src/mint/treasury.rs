@@ -95,7 +95,7 @@ pub enum BuildFailure<ProposalError, TransactionError> {
 }
 
 /// Builds one refund: a Treasury payment of its amount to its recipient,
-/// funded from any Treasury notes. The wallet owns it from there, as it
+/// funded from Ironwood notes. The wallet owns it from there, as it
 /// owns a sweep: one that expires unmined is kept, and the next sweep
 /// moves the money. `Ok(None)` means the Treasury cannot fund it yet.
 pub fn issue_refund<P: Parameters>(
@@ -126,7 +126,7 @@ pub fn issue_refund<P: Parameters>(
         ),
         request,
         crate::wallet::CONFIRMATIONS,
-        &SpendPolicy::default(),
+        &SpendPolicy::shielded_pools([ShieldedPool::Ironwood]),
         None,
         None,
     ) {
@@ -182,7 +182,7 @@ fn propose_vault_sweep<P: Parameters>(
         wallet,
         network,
         TREASURY_ACCOUNT,
-        &[ShieldedPool::Sapling, ShieldedPool::Ironwood],
+        &[ShieldedPool::Ironwood],
         fee_rule,
         vault.to_zcash_address(network),
         None,
@@ -225,7 +225,7 @@ fn propose_vault_sweep<P: Parameters>(
         ),
         request,
         crate::wallet::CONFIRMATIONS,
-        &SpendPolicy::default(),
+        &SpendPolicy::shielded_pools([ShieldedPool::Ironwood]),
         None,
         None,
     )
@@ -312,7 +312,7 @@ pub fn challenge<P: Parameters>(
         ),
         request,
         crate::wallet::CONFIRMATIONS,
-        &SpendPolicy::default(),
+        &SpendPolicy::shielded_pools([ShieldedPool::Ironwood]),
         None,
         None,
     )
@@ -394,10 +394,11 @@ impl RequestQueue {
 mod tests {
     use super::*;
     use crate::mint::{Action, Term};
-    use crate::wallet::testing::{Cache, Factory};
+    use crate::wallet::testing::{Cache, Factory, IronwoodPoolTester, IRONWOOD_NETWORK};
     use crate::zcash::fees::fee_rule;
     use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
-    use zcash_client_backend::data_api::testing::sapling::SaplingPoolTester;
+    use zcash_client_backend::data_api::testing::TestBuilder;
+    use zcash_primitives::block::BlockHash;
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
 
@@ -454,8 +455,14 @@ mod tests {
                 (count, fee_rule(Zatoshis::const_from_u64(1_000))),
             ]
         }) {
-            let mut st = TestDsl::with_sapling_birthday_account(Factory, Cache::default())
-                .build::<SaplingPoolTester>();
+            let mut st = TestDsl::from(
+                TestBuilder::new()
+                    .with_data_store_factory(Factory)
+                    .with_block_cache(Cache::default())
+                    .with_network(IRONWOOD_NETWORK)
+                    .with_account_from_sapling_activation(BlockHash([0; 32])),
+            )
+            .build::<IronwoodPoolTester>();
             st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(50_000_000); note_count]]);
             st.add_empty_blocks(1);
 

@@ -1,5 +1,17 @@
 # Treasury design record
 
+## 2026-10-29 — The Treasury spends Ironwood only (#365)
+
+- The sweep's send-max draws on Ironwood alone, and refunds, challenges
+  and the sweep itself propose under
+  `SpendPolicy::shielded_pools([Ironwood])`. A request paid in Sapling is
+  read for its memo and its note is never spent: no Treasury transaction
+  moves value out of Sapling, so none publishes a Sapling value balance.
+  Sapling notes stay in the Treasury account; the seed holder can move
+  them later.
+- The sweep float test funds the Treasury in Ironwood, through the
+  wallet's `IronwoodPoolTester`.
+
 ## 2026-10-29 — A refund withholds a hundred actions
 
 - A refund is the payment minus `FEE_ACTIONS`, a hundred actions at the
