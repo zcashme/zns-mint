@@ -15,18 +15,17 @@ const PAYMENT_ZEC: f64 = 2.0;
 
 const SYNC_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// This test's spending plan — two lifecycles of claim, update, and
-/// release, each transition followed by an OTP response payment, plus fees
-/// with margin — as the spendable shielded balance the wallet must hold
-/// before the run starts.
-const USER_BUDGET_ZATS: u64 = 2_200_000_000;
+/// This test's spending plan — claim, update, and release, each followed
+/// by an OTP echo payment, plus fees with margin — as the spendable
+/// shielded balance the wallet must hold before the run starts.
+const USER_BUDGET_ZATS: u64 = 1_200_000_000;
 
 /// A funded Zallet wallet playing the user.
 pub struct User {
     pub zallet: Zallet,
     /// Transparent address zebrad mines to so the wallet holds coinbase.
     pub miner_address: String,
-    /// The wallet-derived controller UA that goes into request memos. The
+    /// The wallet-derived Orchard UA that goes into request memos. The
     /// wallet sees payments made back to it, which the OTP challenge
     /// read relies on.
     pub ua: String,
@@ -70,23 +69,6 @@ impl User {
             ua,
             zallet,
         })
-    }
-
-    /// Become a Sapling-only controller: its challenges arrive as Sapling
-    /// notes. Requests are still paid to the Treasury UA: on regtest the
-    /// chain sits inside ZIP 212's grace period, where Zallet's PCZT
-    /// builder refuses Sapling outputs.
-    pub async fn use_sapling_controller(&mut self) -> Result<()> {
-        let ua = self
-            .zallet
-            .call("z_getaddressforaccount", json!([0, ["sapling"]]))
-            .await?;
-        self.ua = ua
-            .get("address")
-            .and_then(|a| a.as_str())
-            .map(str::to_string)
-            .with_context(|| format!("z_getaddressforaccount returned no address: {ua}"))?;
-        Ok(())
     }
 
     /// Spend shielded funds to the Treasury with `memo`; returns the txid.

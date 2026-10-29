@@ -321,8 +321,10 @@ async fn read_otp(stack: &mut Stack, challenge_txid: &str, ua: &str) -> Result<S
         .cloned()
         .unwrap_or_default();
     for output in &outputs {
-        // A Sapling-only controller's output may be listed under its
-        // Sapling receiver rather than the UA, so the memo decides.
+        let address = output.get("address").and_then(|a| a.as_str());
+        if address != Some(ua) {
+            continue;
+        }
         let text = output
             .get("memoStr")
             .and_then(|m| m.as_str())
@@ -341,7 +343,6 @@ async fn read_otp(stack: &mut Stack, challenge_txid: &str, ua: &str) -> Result<S
             && parts[1] == "otp"
             && parts[2].len() == 6
             && parts[2].bytes().all(|b| b.is_ascii_digit())
-            && parts[5] == ua
         {
             return Ok(parts[2].to_string());
         }
