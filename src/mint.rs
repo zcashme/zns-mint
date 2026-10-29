@@ -53,7 +53,7 @@ fn decode_controller_ua<P: Parameters>(network: &P, ua_str: &str) -> Option<Unif
         return None;
     }
     let ua = UnifiedAddress::try_from(container).ok()?;
-    (ua.unknown().is_empty() && (ua.orchard().is_some() || ua.sapling().is_some())).then_some(ua)
+    (ua.unknown().is_empty() && (ua.has_orchard() || ua.has_sapling())).then_some(ua)
 }
 
 /// ZNS action kinds.
