@@ -16,7 +16,7 @@ const PAYMENT_ZEC: f64 = 2.0;
 const SYNC_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// This test's spending plan — two lifecycles of claim, update, and
-/// release, each transition followed by an OTP echo payment, plus fees
+/// release, each transition followed by an OTP response payment, plus fees
 /// with margin — as the spendable shielded balance the wallet must hold
 /// before the run starts.
 const USER_BUDGET_ZATS: u64 = 2_200_000_000;

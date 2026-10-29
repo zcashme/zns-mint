@@ -24,8 +24,8 @@
 
 - `decrypt_treasury_memos` and `decrypt_treasury_transaction` read the
   Treasury's Sapling outputs as well as its Ironwood actions. The
-  Treasury UA has always advertised a Sapling receiver; a request paid
-  there was swept as balance and never read.
+  testnet Treasury UA already advertised a Sapling receiver; a request
+  paid there was swept as balance and never read.
 - Sapling outputs decrypt under the ZIP 212 rule at the block's (or the
   mempool transaction's target) height: past the grace period on mainnet
   and testnet, but not yet on regtest, which activates Canopy near

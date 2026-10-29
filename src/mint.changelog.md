@@ -10,8 +10,8 @@
 - `decode_controller_ua` accepts a UA with a Sapling or an Orchard
   receiver; it no longer requires Orchard. The relay lane challenges a
   Sapling-only controller at its Sapling receiver (the backend routes a
-  UA payment Orchard, else Sapling), and the echo returns through the
-  Treasury's Sapling intake. Unknown receivers, metadata items, and
+  UA payment Orchard, else Sapling), and the OTP response returns
+  through the Treasury's Sapling intake. Unknown receivers, metadata items, and
   revisions other than R0 stay refused; an R0 UA is never
   transparent-only, and the explicit shielded check holds for R2 (#358).
 - Existing records are unchanged: every UA admitted before is admitted
