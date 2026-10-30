@@ -274,8 +274,8 @@ pub fn sweep_to_vault<P: Parameters>(
 }
 
 /// Proposes, builds, and records a Treasury payment carrying an OTP challenge
-/// memo to the controller. Funded from Treasury Ironwood notes, with change
-/// in Ironwood, including when the zero-value output goes to Sapling.
+/// memo to the controller. Inputs and change use Ironwood when the controller
+/// has an Orchard receiver, otherwise Sapling. The challenge carries no value.
 /// Build failures are returned to the relay lane, which logs them and tries
 /// again on a later tip.
 #[allow(clippy::too_many_arguments)]
@@ -308,12 +308,20 @@ pub fn challenge<P: Parameters>(
         &SingleOutputChangeStrategy::new(
             fee_rule.clone(),
             None,
-            ShieldedPool::Ironwood,
+            if controller.has_orchard() {
+                ShieldedPool::Ironwood
+            } else {
+                ShieldedPool::Sapling
+            },
             DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE)),
         ),
         request,
         crate::wallet::CONFIRMATIONS,
-        &SpendPolicy::shielded_pools([ShieldedPool::Ironwood]),
+        &SpendPolicy::shielded_pools([if controller.has_orchard() {
+            ShieldedPool::Ironwood
+        } else {
+            ShieldedPool::Sapling
+        }]),
         None,
         None,
     )

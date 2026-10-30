@@ -1,5 +1,15 @@
 # Treasury design record
 
+## 2026-10-30 — Challenge inputs and change follow the controller pool (#365)
+
+- Challenges to Sapling-only controllers spend Sapling and return change to
+  Sapling. Controllers with an Orchard receiver use Ironwood inputs and
+  change. The pool choices are inline in `challenge`, without a helper.
+- A Sapling-funded zero-value challenge exposes only its fee in the Sapling
+  value balance. It does not move Treasury change into Ironwood.
+- A challenge waits when its selected pool lacks spendable funds. The
+  incoming request's payment pool does not determine challenge funding.
+
 ## 2026-10-30 — Separate Treasury funding from recipient pools (#365)
 
 - Refunds may spend Sapling or Ironwood, with change in Ironwood, regardless
