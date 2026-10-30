@@ -2,17 +2,25 @@
 //! derivation.
 //!
 
+use std::collections::HashMap;
+
 use orchard::note::Psi;
 use time::Timestamp;
 use zcash_address::unified::Encoding;
+use zcash_client_backend::data_api::DecryptedTransaction;
+use zcash_client_backend::{decrypt_transaction, TransferType};
 use zcash_keys::address::UnifiedAddress;
-use zcash_primitives::transaction::TxId;
+use zcash_keys::keys::UnifiedFullViewingKey;
+use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::memo::MemoBytes;
+use zcash_protocol::value::Zatoshis;
+use zip32::AccountId;
 
 pub mod assemble;
 
 use crate::mint::registry::Registry;
-use crate::mint::{Action, Name, NameCommitment, LIVENESS_INTERVAL};
+use crate::mint::{Action, Name, NameCommitment, LIVENESS_INTERVAL, TREASURY_ACCOUNT};
 use crate::RegistryKeys;
 
 /// A Name transition (§3.2), typed so every action carries exactly its
@@ -532,77 +540,72 @@ pub fn decrypt_name_notes<P: Parameters>(
     candidates
 }
 
-/// Trial-decrypts the block's Ironwood actions sent to the Treasury's
-/// external address, exposing each `(txid, action index, memo)`. The
-/// upstream scanner deliberately drops note plaintexts; request memos
+/// Trial-decrypts the block's Sapling outputs and Ironwood actions sent to
+/// the Treasury's external addresses, exposing each `(txid, paid, memo)`.
+/// The upstream scanner deliberately drops note plaintexts; request memos
 /// arrive through this pass instead.
-pub fn decrypt_treasury_memos(
+pub fn decrypt_treasury_memos<P: Parameters>(
+    network: &P,
     block: &Block,
+    height: BlockHeight,
     treasury_keys: &crate::TreasuryKeys,
-) -> Vec<(
-    TxId,
-    usize,
-    zcash_protocol::value::Zatoshis,
-    zcash_protocol::memo::MemoBytes,
-)> {
+) -> Vec<(TxId, Zatoshis, MemoBytes)> {
+    let ufvks = treasury_ufvk(treasury_keys);
     let mut memos = Vec::new();
     for tx in block.vtx() {
-        for (action_index, paid, memo) in
-            decrypt_treasury_tx_with_fvk(tx, &treasury_keys.orchard_fvk())
-        {
-            memos.push((tx.txid(), action_index, paid, memo));
+        let decrypted = decrypt_transaction(network, Some(height), None, tx, &ufvks);
+        for (paid, memo) in treasury_payments(&decrypted) {
+            memos.push((tx.txid(), paid, memo));
         }
     }
     memos
 }
 
-/// Trial-decrypts one transaction's Ironwood actions using the Treasury's
-/// viewing capability. Intended for mempool transactions, whose memos are
-/// not yet available through block scanning.
-pub fn decrypt_treasury_transaction(
-    tx: &zcash_primitives::transaction::Transaction,
+/// Trial-decrypts one transaction's Sapling outputs and Ironwood actions
+/// using the Treasury's viewing capability. Intended for mempool
+/// transactions, whose memos are not yet available through block scanning;
+/// `tip_height` is the chain tip the transaction would follow.
+pub fn decrypt_treasury_transaction<P: Parameters>(
+    network: &P,
+    tx: &Transaction,
+    tip_height: BlockHeight,
     treasury_keys: &crate::TreasuryKeys,
-) -> Vec<(
-    usize,
-    zcash_protocol::value::Zatoshis,
-    zcash_protocol::memo::MemoBytes,
-)> {
-    decrypt_treasury_tx_with_fvk(tx, &treasury_keys.orchard_fvk())
+) -> Vec<(Zatoshis, MemoBytes)> {
+    let ufvks = treasury_ufvk(treasury_keys);
+    treasury_payments(&decrypt_transaction(
+        network,
+        None,
+        Some(tip_height),
+        tx,
+        &ufvks,
+    ))
 }
 
-/// The viewing-key implementation shared by block and mempool memo scans.
-fn decrypt_treasury_tx_with_fvk(
-    tx: &zcash_primitives::transaction::Transaction,
-    treasury_fvk: &orchard::keys::FullViewingKey,
-) -> Vec<(
-    usize,
-    zcash_protocol::value::Zatoshis,
-    zcash_protocol::memo::MemoBytes,
-)> {
-    let ivk = treasury_fvk
-        .to_ivk(orchard::keys::Scope::External)
-        .prepare();
+/// The Treasury UFVK, keyed as upstream's decryption takes it.
+fn treasury_ufvk(treasury_keys: &crate::TreasuryKeys) -> HashMap<AccountId, UnifiedFullViewingKey> {
+    HashMap::from([(TREASURY_ACCOUNT, treasury_keys.fvk())])
+}
 
-    let mut memos = Vec::new();
-    let Some(bundle) = tx.ironwood_bundle() else {
-        return memos;
-    };
-    if bundle.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3() {
-        return memos;
-    }
-    for (action_index, action) in bundle.actions().iter().enumerate() {
-        let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
-        if let Some((note, _recipient, memo)) =
-            zcash_note_encryption::try_note_decryption(&domain, &ivk, action)
-        {
-            let paid = zcash_protocol::value::Zatoshis::from_u64(note.value().inner())
-                .expect("note values are consensus-bounded");
-            let memo = zcash_protocol::memo::MemoBytes::from_bytes(&memo)
-                .expect("a decrypted memo is 512 bytes");
-            memos.push((action_index, paid, memo));
+/// The payments to the Treasury's external addresses: Sapling outputs,
+/// then Ironwood actions, each in bundle order. Change is not a payment.
+fn treasury_payments(
+    decrypted: &DecryptedTransaction<Transaction, AccountId>,
+) -> Vec<(Zatoshis, MemoBytes)> {
+    let mut payments = Vec::new();
+    for output in decrypted.sapling_outputs() {
+        if output.transfer_type() == TransferType::Incoming {
+            payments.push((output.note_value(), output.memo().clone()));
         }
     }
-    memos
+    for output in decrypted.ironwood_outputs() {
+        if output.transfer_type() == TransferType::Incoming {
+            let (note, _pool) = output.note();
+            let paid = Zatoshis::from_u64(note.value().inner())
+                .expect("Ironwood note value is validated by consensus");
+            payments.push((paid, output.memo().clone()));
+        }
+    }
+    payments
 }
 
 // ---------------------------------------------------------------------------

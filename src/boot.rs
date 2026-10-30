@@ -965,6 +965,15 @@ fn load_sapling_output_params() -> OutputParameters {
 // Step 5: Attestation
 // ---------------------------------------------------------------------------
 
+/// The Treasury's published address shape: Orchard and Sapling receivers,
+/// never transparent. `SHIELDED` only allows Sapling, and drops it whenever
+/// diversifier index 0 is not a valid Sapling diversifier; requiring both
+/// takes the first index valid for each.
+pub const TREASURY_ADDRESS_REQUEST: zcash_keys::keys::UnifiedAddressRequest = {
+    use zcash_keys::keys::ReceiverRequirement::{Omit, Require};
+    zcash_keys::keys::UnifiedAddressRequest::unsafe_custom(Require, Require, Omit)
+};
+
 /// The mint's public identity: the Treasury's shielded default address and
 /// the Registry's UFVK, in exactly the encoded form the attestation binds.
 fn mint_identity(
@@ -972,11 +981,9 @@ fn mint_identity(
     treasury_keys: &TreasuryKeys,
     registry_keys: &RegistryKeys,
 ) -> (String, String) {
-    use zcash_keys::keys::UnifiedAddressRequest;
-
     let (treasury_addr, _) = treasury_keys
         .fvk()
-        .default_address(UnifiedAddressRequest::SHIELDED)
+        .default_address(TREASURY_ADDRESS_REQUEST)
         .expect("FATAL: Treasury FVK missing default address");
     (
         treasury_addr.encode(network),
@@ -1039,9 +1046,9 @@ fn dev_identity_document(network: &str, treasury_ua: &str, registry_ufvk: &str) 
 mod tests {
     use super::*;
 
-    /// The identity strings come from the same SHIELDED default-address
-    /// derivation the attestation binds; the Treasury receiver must never
-    /// be transparent.
+    /// The identity strings come from the same default-address derivation
+    /// the attestation binds: an Orchard and a Sapling receiver, never a
+    /// transparent one.
     #[test]
     fn mint_identity_is_shielded_only() {
         let seed = Secret::new([0x42u8; 32]);
@@ -1062,6 +1069,10 @@ mod tests {
         assert!(
             ua.orchard().is_some(),
             "identity UA lacks an Orchard receiver"
+        );
+        assert!(
+            ua.sapling().is_some(),
+            "identity UA lacks a Sapling receiver"
         );
         assert!(
             ua.transparent().is_none(),

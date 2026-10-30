@@ -33,6 +33,18 @@ Tracks design-relevant changes to `src/boot.rs`.
   one client the boot read and every pass read share. The boot read
   is unchanged — no table, no start.
 
+## 2026-10-20 — The Treasury identity always carries a Sapling receiver (#365)
+
+- `mint_identity` derives the Treasury address with
+  `TREASURY_ADDRESS_REQUEST`: Orchard and Sapling required, transparent
+  omitted. `SHIELDED` only allowed Sapling, so the address came out
+  Orchard-only whenever diversifier index 0 was not a Sapling diversifier
+  (the published mainnet identity was Orchard-only).
+- For such seeds the identity moves to the first index valid for both
+  pools, so the identity UA and the attestation report data change.
+  Payments to the earlier address are still read: intake decrypts with
+  the Treasury's incoming viewing keys, which cover every diversifier.
+
 ## 2026-10-11 — A resealed capsule does not have to match the keygen report
 
 - The keygen report binds the capsule hash recorded in

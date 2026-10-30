@@ -43,7 +43,7 @@ pub const MIN_TREASURY_BALANCE: u64 = 200_000;
 /// The longest name a memo accepts.
 pub const MAX_NAME_LEN: usize = 63;
 
-/// Decodes a controller UA: known receivers only, Orchard among them.
+/// Decodes a controller UA: known receivers only, at least one shielded.
 fn decode_controller_ua<P: Parameters>(network: &P, ua_str: &str) -> Option<UnifiedAddress> {
     let (net, revision, container) = zcash_address::unified::Address::decode(ua_str).ok()?;
     if net != network.network_type()
@@ -53,7 +53,7 @@ fn decode_controller_ua<P: Parameters>(network: &P, ua_str: &str) -> Option<Unif
         return None;
     }
     let ua = UnifiedAddress::try_from(container).ok()?;
-    (ua.unknown().is_empty() && ua.orchard().is_some()).then_some(ua)
+    (ua.unknown().is_empty() && (ua.has_orchard() || ua.has_sapling())).then_some(ua)
 }
 
 /// ZNS action kinds.
@@ -429,7 +429,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     let (candidates, treasury_memos) = if height >= birthday {
         (
             decrypt_name_notes(network, &block, registry_keys),
-            note::decrypt_treasury_memos(&block, treasury_keys),
+            note::decrypt_treasury_memos(network, &block, height, treasury_keys),
         )
     } else {
         (Vec::new(), Vec::new())
@@ -605,7 +605,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     // records nothing — this pass stays the only intake.
     let arrivals = treasury_memos
         .into_iter()
-        .map(|(txid, _action_index, paid, memo)| (txid, MintInbound::decode(network, &memo), paid))
+        .map(|(txid, paid, memo)| (txid, MintInbound::decode(network, &memo), paid))
         .collect();
     for (index, position) in accepted_name_notes {
         let candidate = &candidates[index];
@@ -887,19 +887,34 @@ mod tests {
         }
     }
 
-    /// The pre-fix corpus vector: a real Sapling+P2pkh address with no
-    /// Orchard receiver — inside the memo budget, but a controller the
-    /// relay lane could never challenge.
-    const ORCHARDLESS_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
+    /// A real Sapling+P2pkh address with no Orchard receiver. Its Sapling
+    /// receiver is enough: the relay lane challenges it there.
+    const SAPLING_CONTROLLER_UA: &str = "u1l8xunezsvhq8fgzfl7404m450nwnd76zshscn6nfys7vyz2ywyh4cc5daaq0c7q2su5lqfh23sp7fkf3kt27ve5948mzpfdvckzaect2jtte308mkwlycj2u0eac077wu70vqcetkxf";
 
     #[test]
-    fn orchardless_known_receiver_ua_is_rejected() {
+    fn orchardless_sapling_controller_ua_is_accepted() {
         let network = MainNetwork;
-        assert!(Request::decode(
-            &network,
-            &padded(&format!("ZNS:claim:forever:alice:{ORCHARDLESS_UA}"))
-        )
-        .is_none());
+        let ua = SAPLING_CONTROLLER_UA;
+        let decoded = decode_controller_ua(&network, ua).expect("a Sapling receiver suffices");
+        assert!(decoded.orchard().is_none());
+        assert!(decoded.sapling().is_some());
+        for memo in [
+            format!("ZNS:claim:forever:alice:{ua}"),
+            format!("ZNS:update:none:alice:{ua}"),
+            format!("ZNS:release:alice:{ua}"),
+        ] {
+            assert!(matches!(
+                MintInbound::decode(&network, &padded(&memo)),
+                MintInbound::Request(_)
+            ));
+        }
+        assert!(matches!(
+            MintInbound::decode(
+                &network,
+                &padded(&format!("ZNS:otp:417293:alice:update:{ua}"))
+            ),
+            MintInbound::Response(_)
+        ));
     }
 
     #[test]

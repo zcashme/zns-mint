@@ -1,5 +1,36 @@
 # Treasury design record
 
+## 2026-10-30 — Challenge inputs and change follow the controller pool (#365)
+
+- Challenges to Sapling-only controllers spend Sapling and return change to
+  Sapling. Controllers with an Orchard receiver use Ironwood inputs and
+  change. The pool choices are inline in `challenge`, without a helper.
+- A Sapling-funded zero-value challenge exposes only its fee in the Sapling
+  value balance. It does not move Treasury change into Ironwood.
+- A challenge waits when its selected pool lacks spendable funds. The
+  incoming request's payment pool does not determine challenge funding.
+
+## 2026-10-30 — Separate Treasury funding from recipient pools (#365)
+
+- Refunds may spend Sapling or Ironwood, with change in Ironwood, regardless
+  of the recipient's receiver pool. Cross-pool refunds are allowed and
+  expose the net amount crossing each pool, including Sapling value moved
+  into Ironwood change.
+- Zero-value challenges spend Ironwood only and return change to Ironwood,
+  including challenges to Sapling-only controllers. They do not require a
+  Sapling reserve or move positive value across the Sapling turnstile.
+- Vault sweeps still spend Ironwood only. Refund eligibility, amounts and
+  queue behavior are unchanged.
+
+## 2026-10-29 — Treasury pool policy (#365)
+
+- The vault sweep spends Ironwood only. Sapling notes remain available for
+  refunds and challenges to Sapling-only recipients; those transactions use
+  Sapling inputs and change. Recipients with Orchard use Ironwood inputs.
+- Refunds and challenges require enough spendable funds in the chosen pool;
+  they do not fall back to another pool. Sapling spends publish a Sapling
+  value balance, including the transaction fee.
+
 ## 2026-10-29 — A refund withholds a hundred actions
 
 - A refund is the payment minus `FEE_ACTIONS`, a hundred actions at the
@@ -133,6 +164,7 @@
 
 - `sweep_to_vault` builds a sweep when called; `main` owns the once-per-day
   gate and invokes it only when catch-up advances the mint's day.
+
 ## 2026-09-24 — A skipped build names the failure
 
 - `sweep_to_vault` returns `Ok(None)` only when there is nothing to

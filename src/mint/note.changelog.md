@@ -20,6 +20,22 @@
 - When the applied tip reaches that height, the order returns to
   `Authorized`. `authorized_names` still includes a sent order.
 
+## 2026-10-20 — Treasury memos arrive from both shielded pools (#365)
+
+- `decrypt_treasury_memos` and `decrypt_treasury_transaction` read the
+  Treasury's Sapling outputs as well as its Ironwood actions, through
+  upstream's `decrypt_transaction` under the Treasury UFVK. Only
+  `TransferType::Incoming` outputs count, so Treasury change is never
+  read as a request. The testnet Treasury UA already advertised a
+  Sapling receiver; a request paid there was swept as balance and never
+  read.
+- Upstream applies the ZIP 212 rule at the mined height, or at the tip
+  plus one for a mempool transaction: past the grace period on mainnet
+  and testnet, but not yet on regtest, which activates Canopy near
+  genesis.
+- Arrivals lose their action index. Nothing read it, and Sapling output
+  indices would collide with Ironwood action indices.
+
 ## 2026-10-15 — `NameNoteQueue::authorized_names` (#342)
 
 - Names every outstanding authorized order, borrowed, for the request
