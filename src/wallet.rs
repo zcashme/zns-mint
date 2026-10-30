@@ -69,14 +69,13 @@ pub(crate) type TreeError = ShardTreeError<Infallible>;
 
 /// The in-memory wallet for the two fixed mint accounts.
 ///
-/// Owned shielded pools are Sapling (Treasury cold path —
-/// `sweep_sapling_to_vault`) and Ironwood (Registry Name Notes and Treasury
-/// operating pool). The ordinary Orchard commitment tree is kept only so
-/// scanned blocks can append and checkpoint Orchard commitments in order;
-/// this wallet never persists ordinary-Orchard received notes, nullifiers, or
-/// spends. Under NU6.3 those inbound payments cannot arise; if a scanned
-/// block still surfaces one, `put_blocks` refuses it rather than dropping
-/// value.
+/// Owned shielded pools are Sapling (Treasury payments) and Ironwood
+/// (Registry Name Notes and Treasury payments). The ordinary Orchard commitment
+/// tree is kept only so scanned blocks can append and checkpoint Orchard
+/// commitments in order; this wallet never persists ordinary-Orchard received
+/// notes, nullifiers, or spends. Under NU6.3 those inbound payments cannot
+/// arise; if a scanned block still surfaces one, `put_blocks` refuses it rather
+/// than dropping value.
 pub struct Wallet<P: Parameters> {
     /// The consensus parameters of the network this wallet's accounts were
     /// derived for. The single authority for network context inside the

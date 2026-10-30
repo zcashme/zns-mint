@@ -1,6 +1,6 @@
 //! Refunds due from the run loop.
 //!
-//! A refund is a Treasury payment, built once from any Treasury notes and
+//! A refund is a Treasury payment, funded from the recipient's shielded pool and
 //! the wallet's from there, like a sweep. Its amount is fixed when it is
 //! admitted: the payment less any penalty and the withheld fee,
 //! `FEE_ACTIONS` at the node's rate, so the payer covers the fee.

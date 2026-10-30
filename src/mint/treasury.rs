@@ -27,7 +27,7 @@ use zcash_client_backend::fees::{DustAction, DustOutputPolicy};
 use zcash_client_backend::proposal::Proposal;
 use zcash_client_backend::util::SystemClock;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
-use zcash_keys::address::Address;
+use zcash_keys::address::{Address, UnifiedAddress};
 use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule, MARGINAL_FEE};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkType, Parameters, TestNetwork};
@@ -77,6 +77,16 @@ fn vault_address<P: Parameters>(network: &P) -> Address {
     .expect("FATAL: the configured vault Unified Address is invalid for its network")
 }
 
+/// Match the backend's preferred receiver: Orchard (Ironwood after NU6.3),
+/// otherwise Sapling. Controllers are validated to have a shielded receiver.
+fn recipient_pool(recipient: &UnifiedAddress) -> ShieldedPool {
+    if recipient.has_orchard() {
+        ShieldedPool::Ironwood
+    } else {
+        ShieldedPool::Sapling
+    }
+}
+
 /// A Treasury transaction was not built. Distinct from "nothing to do".
 ///
 /// The upstream errors print with `Debug`: their `Display` requires a
@@ -95,8 +105,8 @@ pub enum BuildFailure<ProposalError, TransactionError> {
 }
 
 /// Builds one refund: a Treasury payment of its amount to its recipient,
-/// funded from Ironwood notes. The wallet owns it from there, as it
-/// owns a sweep: one that expires unmined is kept, and the next sweep
+/// funded from the recipient's shielded pool. The wallet owns it from there,
+/// as it owns a sweep: one that expires unmined is kept, and the next sweep
 /// moves the money. `Ok(None)` means the Treasury cannot fund it yet.
 pub fn issue_refund<P: Parameters>(
     network: &P,
@@ -107,6 +117,7 @@ pub fn issue_refund<P: Parameters>(
     fee_rule: &FeeRule,
     refund: &RefundRequest,
 ) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
+    let pool = recipient_pool(refund.recipient());
     let to = Address::Unified(Box::new(refund.recipient().clone()));
     let request = TransactionRequest::new(vec![Payment::without_memo(
         to.to_zcash_address(network),
@@ -121,12 +132,12 @@ pub fn issue_refund<P: Parameters>(
         &SingleOutputChangeStrategy::new(
             fee_rule.clone(),
             None,
-            ShieldedPool::Ironwood,
+            pool,
             DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE)),
         ),
         request,
         crate::wallet::CONFIRMATIONS,
-        &SpendPolicy::shielded_pools([ShieldedPool::Ironwood]),
+        &SpendPolicy::shielded_pools([pool]),
         None,
         None,
     ) {
@@ -288,6 +299,7 @@ pub fn challenge<P: Parameters>(
     controller: &zcash_keys::address::UnifiedAddress,
     memo: MemoBytes,
 ) -> Result<Transaction, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
+    let pool = recipient_pool(controller);
     let payment = Payment::new(
         Address::Unified(Box::new(controller.clone())).to_zcash_address(network),
         Some(CHALLENGE_RELAY_VALUE),
@@ -307,12 +319,12 @@ pub fn challenge<P: Parameters>(
         &SingleOutputChangeStrategy::new(
             fee_rule.clone(),
             None,
-            ShieldedPool::Ironwood,
+            pool,
             DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE)),
         ),
         request,
         crate::wallet::CONFIRMATIONS,
-        &SpendPolicy::shielded_pools([ShieldedPool::Ironwood]),
+        &SpendPolicy::shielded_pools([pool]),
         None,
         None,
     )
