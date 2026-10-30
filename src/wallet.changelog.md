@@ -1,14 +1,5 @@
 # Wallet changelog
 
-## 2026-10-29 — An Ironwood pool tester (#365)
-
-- `testing::IronwoodPoolTester` runs upstream's pool-agnostic scenarios
-  on Ironwood, which upstream ships only for Sapling and Orchard
-  (librustzcash#2617). Upstream's `IronwoodFvk` already writes fake
-  outputs as Ironwood actions; the tester supplies the tree, note
-  selection and output accessors for the pool. `get_notes` serves
-  Ironwood as well as Sapling.
-
 ## 2026-10-26 — The stable NU7 wallet traits (#390)
 
 - `get_change_receivers` reads the account's viewing key, and

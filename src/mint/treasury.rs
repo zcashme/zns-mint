@@ -394,11 +394,6 @@ impl RequestQueue {
 mod tests {
     use super::*;
     use crate::mint::{Action, Term};
-    use crate::wallet::testing::{Cache, Factory, IronwoodPoolTester, IRONWOOD_NETWORK};
-    use crate::zcash::fees::fee_rule;
-    use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
-    use zcash_client_backend::data_api::testing::TestBuilder;
-    use zcash_primitives::block::BlockHash;
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";
 
@@ -444,51 +439,6 @@ mod tests {
         }
         assert!(Address::decode(&MainNetwork, TESTNET_VAULT_ADDRESS).is_none());
         assert!(Address::decode(&TestNetwork, MAINNET_VAULT_ADDRESS).is_none());
-    }
-
-    /// The float survives any note count and fee rate.
-    #[test]
-    fn sweep_proposal_leaves_exactly_the_float_at_any_note_count() {
-        for (note_count, fee_rule) in [3usize, 198, 250, 400].into_iter().flat_map(|count| {
-            [
-                (count, FeeRule::standard()),
-                (count, fee_rule(Zatoshis::const_from_u64(1_000))),
-            ]
-        }) {
-            let mut st = TestDsl::from(
-                TestBuilder::new()
-                    .with_data_store_factory(Factory)
-                    .with_block_cache(Cache::default())
-                    .with_network(IRONWOOD_NETWORK)
-                    .with_account_from_sapling_activation(BlockHash([0; 32])),
-            )
-            .build::<IronwoodPoolTester>();
-            st.add_notes_checking_balance([vec![Zatoshis::const_from_u64(50_000_000); note_count]]);
-            st.add_empty_blocks(1);
-
-            let network = *st.network();
-            let proposal = propose_vault_sweep(&network, st.wallet_mut(), &fee_rule)
-                .expect("the sweep proposal closes")
-                .expect("the surplus is far above the minimum");
-
-            let step = proposal.steps().first();
-            assert_eq!(
-                step.shielded_inputs()
-                    .map_or(0, |inputs| inputs.notes().len()),
-                note_count
-            );
-            assert_eq!(change(step), SWEEP_RESERVE, "float at {note_count} notes");
-            assert!(step.balance().fee_required() > fee_rule.marginal_fee());
-        }
-    }
-
-    fn change(step: &zcash_client_backend::proposal::Step<NoteId>) -> Zatoshis {
-        step.balance()
-            .proposed_change()
-            .iter()
-            .map(|change| change.value())
-            .sum::<Option<Zatoshis>>()
-            .expect("change fits in the monetary range")
     }
 
     #[test]

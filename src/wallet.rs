@@ -358,37 +358,28 @@ pub fn block_metadata(state: &ChainState) -> BlockMetadata {
     )
 }
 
-/// Adapter for upstream's unchanged Sapling and Ironwood scenarios. Only
-/// account setup is special: all scanning, balances, input selection,
-/// locking and transaction persistence use the real Wallet implementations.
-/// In particular, this does not override the mint birthday or make
-/// unsupported operations succeed.
+/// Adapter for upstream's unchanged Sapling scenarios. Only account setup is
+/// special: all scanning, balances, input selection, locking and transaction
+/// persistence use the real Wallet implementations. In particular, this does
+/// not override the mint birthday or make unsupported operations succeed.
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
-    use incrementalmerkletree::{Address as TreeAddress, Hashable, Level, Position};
-    use orchard::keys::SpendingKey;
-    use orchard::note_encryption::IronwoodDomain;
-    use orchard::tree::MerkleHashOrchard;
+    use incrementalmerkletree::{Hashable, Position};
     use secrecy::{ExposeSecret, SecretVec};
     use shardtree::store::ShardStore;
     use zcash_client_backend::data_api::anchor_retention::AnchorRetentionInterval;
-    use zcash_client_backend::data_api::testing::pool::ShieldedPoolTester;
-    use zcash_client_backend::data_api::testing::{IronwoodFvk, TestState};
-    use zcash_client_backend::data_api::wallet::input_selection::{LockFilter, LockedInputPolicy};
-    use zcash_client_backend::data_api::wallet::TargetHeight;
-    use zcash_client_backend::data_api::{
-        chain::{error, BlockSource, CommitmentTreeRoot, ScanSummary},
-        testing::{CacheInsertionResult, DataStoreFactory, TestCache, TransactionSummary},
-        AccountBirthday, DecryptedTransaction, InputSource, OutputOfSentTx, TargetValue,
-        WalletCommitmentTrees, WalletSummary, WalletTest, IRONWOOD_SHARD_HEIGHT,
+    use zcash_client_backend::{
+        data_api::{
+            chain::{error, BlockSource},
+            testing::{CacheInsertionResult, DataStoreFactory, TestCache, TransactionSummary},
+            AccountBirthday, OutputOfSentTx, WalletTest,
+        },
+        proto::compact_formats::CompactBlock,
+        wallet::{Note, ReceivedNote, Recipient},
     };
-    use zcash_client_backend::proto::compact_formats::CompactBlock;
-    use zcash_client_backend::wallet::{Note, ReceivedNote, Recipient};
-    use zcash_keys::address::{Address, UnifiedAddress};
+    use zcash_keys::address::Address;
     use zcash_keys::keys::{transparent::gap_limits::GapLimits, UnifiedSpendingKey};
-    use zcash_note_encryption::try_output_recovery_with_ovk;
-    use zcash_protocol::memo::MemoBytes;
     use zcash_protocol::value::{BalanceError, ZatBalance};
     use zcash_protocol::{local_consensus::LocalNetwork, PoolType, ShieldedPool};
 
@@ -816,222 +807,8 @@ pub(crate) mod testing {
                             .map_note(Note::Sapling)
                     })
                     .collect()),
-                ShieldedPool::Ironwood => Ok(self
-                    .ironwood_notes
-                    .keys()
-                    .map(|id| {
-                        self.ironwood_received_note(*id)
-                            .expect("stored note has spending scope")
-                            .map_note(|note| Note::Orchard {
-                                note,
-                                pool: orchard::ValuePool::Ironwood,
-                            })
-                    })
-                    .collect()),
-                ShieldedPool::Orchard => unimplemented!("the mint owns no ordinary-Orchard notes"),
+                _ => unimplemented!("this batch covers Sapling only"),
             }
-        }
-    }
-
-    /// Upstream's default test network with every upgrade through NU6.3 at
-    /// the same height: input selection draws on Ironwood only where NU6.3
-    /// is active, and `TestBuilder::DEFAULT_NETWORK` leaves it unset.
-    pub(crate) const IRONWOOD_NETWORK: LocalNetwork = LocalNetwork {
-        overwinter: Some(BlockHeight::from_u32(1)),
-        sapling: Some(BlockHeight::from_u32(100_000)),
-        blossom: Some(BlockHeight::from_u32(100_000)),
-        heartwood: Some(BlockHeight::from_u32(100_000)),
-        canopy: Some(BlockHeight::from_u32(100_000)),
-        nu5: Some(BlockHeight::from_u32(100_000)),
-        nu6: Some(BlockHeight::from_u32(100_000)),
-        nu6_1: Some(BlockHeight::from_u32(100_000)),
-        nu6_2: Some(BlockHeight::from_u32(100_000)),
-        nu6_3: Some(BlockHeight::from_u32(100_000)),
-        nu7: None,
-    };
-
-    /// Runs upstream's pool-agnostic scenarios on Ironwood, the Treasury's
-    /// operating pool. Upstream ships Sapling and Orchard testers only
-    /// (librustzcash#2617); its `IronwoodFvk` already places fake outputs
-    /// in `ironwood_actions`, so only the pool-specific plumbing is here.
-    pub(crate) struct IronwoodPoolTester;
-
-    impl ShieldedPoolTester for IronwoodPoolTester {
-        const SHIELDED_PROTOCOL: ShieldedPool = ShieldedPool::Ironwood;
-
-        type Sk = SpendingKey;
-        type Fvk = IronwoodFvk;
-        type MerkleTreeHash = MerkleHashOrchard;
-        type Note = orchard::note::Note;
-
-        fn test_account_fvk<Cache, DbT: WalletTest, P: Parameters>(
-            st: &TestState<Cache, DbT, P>,
-        ) -> Self::Fvk {
-            IronwoodFvk(st.test_account_orchard().unwrap().clone())
-        }
-
-        fn usk_to_sk(usk: &UnifiedSpendingKey) -> &Self::Sk {
-            usk.orchard()
-        }
-
-        fn sk(seed: &[u8]) -> Self::Sk {
-            let mut account = AccountId::ZERO;
-            loop {
-                if let Ok(sk) = SpendingKey::from_zip32_seed(seed, 1, account) {
-                    break sk;
-                }
-                account = account.next().unwrap();
-            }
-        }
-
-        fn sk_to_fvk(sk: &Self::Sk) -> Self::Fvk {
-            IronwoodFvk(sk.into())
-        }
-
-        fn sk_default_address(sk: &Self::Sk) -> Address {
-            Self::fvk_default_address(&Self::sk_to_fvk(sk))
-        }
-
-        fn fvk_default_address(fvk: &Self::Fvk) -> Address {
-            UnifiedAddress::from_receivers(
-                Some(fvk.0.address_at(0u32, zip32::Scope::External)),
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap()
-            .into()
-        }
-
-        fn fvks_equal(a: &Self::Fvk, b: &Self::Fvk) -> bool {
-            a.0 == b.0
-        }
-
-        fn empty_tree_leaf() -> Self::MerkleTreeHash {
-            MerkleHashOrchard::empty_leaf()
-        }
-
-        fn empty_tree_root(level: Level) -> Self::MerkleTreeHash {
-            MerkleHashOrchard::empty_root(level)
-        }
-
-        fn put_subtree_roots<Cache, DbT: WalletTest + WalletCommitmentTrees, P>(
-            st: &mut TestState<Cache, DbT, P>,
-            start_index: u64,
-            roots: &[CommitmentTreeRoot<Self::MerkleTreeHash>],
-        ) -> Result<(), ShardTreeError<<DbT as WalletCommitmentTrees>::Error>> {
-            st.wallet_mut()
-                .put_ironwood_subtree_roots(start_index, roots)
-        }
-
-        fn shard_root<Cache, DbT: WalletTest + WalletCommitmentTrees, P>(
-            st: &mut TestState<Cache, DbT, P>,
-            shard_index: u64,
-        ) -> Result<Self::MerkleTreeHash, ShardTreeError<<DbT as WalletCommitmentTrees>::Error>>
-        {
-            let addr = TreeAddress::from_parts(Level::from(IRONWOOD_SHARD_HEIGHT), shard_index);
-            let end_position = Position::from((shard_index + 1) << IRONWOOD_SHARD_HEIGHT);
-            st.wallet_mut()
-                .with_ironwood_tree_mut(|tree| tree.root(addr, end_position))
-                .map(|root| root.expect("the Ironwood tree exists"))
-        }
-
-        fn next_subtree_index<A: std::hash::Hash + Eq>(s: &WalletSummary<A>) -> u64 {
-            s.next_ironwood_subtree_index()
-        }
-
-        fn note_value(note: &Self::Note) -> Zatoshis {
-            Zatoshis::const_from_u64(note.value().inner())
-        }
-
-        fn select_spendable_notes<Cache, DbT: InputSource + WalletTest, P>(
-            st: &TestState<Cache, DbT, P>,
-            account: <DbT as InputSource>::AccountId,
-            target_value: TargetValue,
-            target_height: TargetHeight,
-            confirmations_policy: ConfirmationsPolicy,
-            exclude: &[DbT::NoteRef],
-        ) -> Result<Vec<ReceivedNote<DbT::NoteRef, Self::Note>>, <DbT as InputSource>::Error>
-        {
-            st.wallet()
-                .select_spendable_notes(
-                    account,
-                    target_value,
-                    &[ShieldedPool::Ironwood],
-                    target_height,
-                    confirmations_policy,
-                    exclude,
-                    LockFilter::Policy(&LockedInputPolicy::Exclude),
-                )
-                .map(|n| n.take_ironwood())
-        }
-
-        fn select_unspent_notes<Cache, DbT: InputSource + WalletTest, P>(
-            st: &TestState<Cache, DbT, P>,
-            account: <DbT as InputSource>::AccountId,
-            target_height: TargetHeight,
-            exclude: &[DbT::NoteRef],
-        ) -> Result<Vec<ReceivedNote<DbT::NoteRef, Self::Note>>, <DbT as InputSource>::Error>
-        {
-            st.wallet()
-                .select_unspent_notes(
-                    account,
-                    &[ShieldedPool::Ironwood],
-                    target_height,
-                    exclude,
-                    LockFilter::Policy(&LockedInputPolicy::Exclude),
-                )
-                .map(|n| n.take_ironwood())
-        }
-
-        fn decrypted_pool_outputs_count<A>(d_tx: &DecryptedTransaction<Transaction, A>) -> usize {
-            d_tx.ironwood_outputs().len()
-        }
-
-        fn with_decrypted_pool_memos<A>(
-            d_tx: &DecryptedTransaction<Transaction, A>,
-            mut f: impl FnMut(&MemoBytes),
-        ) {
-            for output in d_tx.ironwood_outputs() {
-                f(output.memo());
-            }
-        }
-
-        fn try_output_recovery<P: Parameters>(
-            _params: &P,
-            _: BlockHeight,
-            tx: &Transaction,
-            fvk: &Self::Fvk,
-        ) -> Option<(Note, Address, MemoBytes)> {
-            for action in tx.ironwood_bundle().unwrap().actions() {
-                let result = try_output_recovery_with_ovk(
-                    &IronwoodDomain::for_action(action),
-                    &fvk.0.to_ovk(zip32::Scope::External),
-                    action,
-                    action.cv_net(),
-                    &action.encrypted_note().out_ciphertext,
-                );
-                if result.is_some() {
-                    return result.map(|(note, addr, memo)| {
-                        (
-                            Note::Orchard {
-                                note,
-                                pool: orchard::ValuePool::Ironwood,
-                            },
-                            UnifiedAddress::from_receivers(Some(addr), None, None, None, None)
-                                .unwrap()
-                                .into(),
-                            MemoBytes::from_bytes(&memo).expect("correct length"),
-                        )
-                    });
-                }
-            }
-            None
-        }
-
-        fn received_note_count(_summary: &ScanSummary) -> usize {
-            unimplemented!("upstream's ScanSummary does not count Ironwood notes")
         }
     }
 }

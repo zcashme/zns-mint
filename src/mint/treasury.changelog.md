@@ -9,8 +9,6 @@
   moves value out of Sapling, so none publishes a Sapling value balance.
   Sapling notes stay in the Treasury account; the seed holder can move
   them later.
-- The sweep float test funds the Treasury in Ironwood, through the
-  wallet's `IronwoodPoolTester`.
 
 ## 2026-10-29 — A refund withholds a hundred actions
 
