@@ -92,12 +92,14 @@ jobs:
       - name: Check protoc
         run: protoc --version
 
-      # Same tag the e2e test verifies against; bump deliberately.
+      # zallet-zebra reads zebrad's state directly; Zebra 7 writes format
+      # v29, which no zallet release reads yet. Move to the first release
+      # that does.
       - name: Checkout zallet
         uses: actions/checkout@v4
         with:
           repository: zcash/zallet
-          ref: v0.1.0-beta.3
+          ref: aec7f3fa8397ef17b2852dc6835572d6e623b1a2
           path: zallet
 
       # Build artifacts persist on the runner (outside the workspace, so
@@ -106,11 +108,11 @@ jobs:
       # rebuild only what changed.
       - name: Prepare runner-local caches
         run: |
-          mkdir -p "$ZVS_CACHE/zebrad-6.3.0" "$ZVS_CACHE/target" "$ZVS_CACHE/params"
-          if [ ! -x "$ZVS_CACHE/zebrad-6.3.0/zebrad" ]; then
-            cd "$ZVS_CACHE/zebrad-6.3.0"
-            base="https://github.com/ZcashFoundation/zebra/releases/download/v6.3.0"
-            asset="zebrad-6.3.0-x86_64-unknown-linux-gnu.tar.gz"
+          mkdir -p "$ZVS_CACHE/zebrad-7.0.0" "$ZVS_CACHE/target" "$ZVS_CACHE/params"
+          if [ ! -x "$ZVS_CACHE/zebrad-7.0.0/zebrad" ]; then
+            cd "$ZVS_CACHE/zebrad-7.0.0"
+            base="https://github.com/ZcashFoundation/zebra/releases/download/v7.0.0"
+            asset="zebrad-7.0.0-x86_64-unknown-linux-gnu.tar.gz"
             curl -fsSL -O "$base/$asset" -O "$base/$asset.sha256"
             sha256sum -c "$asset.sha256"
             tar -xzf "$asset"
@@ -128,7 +130,7 @@ jobs:
 
       - name: Export binary paths
         run: |
-          echo "ZEBRAD_BIN=${{ runner.workspace }}/../zvs-cache/zebrad-6.3.0/zebrad" >> "$GITHUB_ENV"
+          echo "ZEBRAD_BIN=${{ runner.workspace }}/../zvs-cache/zebrad-7.0.0/zebrad" >> "$GITHUB_ENV"
           echo "ZCASH_PARAMS_DIR=${{ runner.workspace }}/../zvs-cache/params" >> "$GITHUB_ENV"
 
       - name: Build zallet (zebra backend)
@@ -137,11 +139,11 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/zallet-target
         run: |
           cargo build --locked --release
-          cp -f "${{ runner.workspace }}/../zvs-cache/zallet-target/release/zallet-zebra" "${{ runner.workspace }}/../zvs-cache/zallet-zebra-v0.1.0-beta.3"
+          cp -f "${{ runner.workspace }}/../zvs-cache/zallet-target/release/zallet-zebra" "${{ runner.workspace }}/../zvs-cache/zallet-zebra-aec7f3f"
 
       - name: Export zallet binary path
         run: |
-          echo "ZALLET_BIN=${{ runner.workspace }}/../zvs-cache/zallet-zebra-v0.1.0-beta.3" >> "$GITHUB_ENV"
+          echo "ZALLET_BIN=${{ runner.workspace }}/../zvs-cache/zallet-zebra-aec7f3f" >> "$GITHUB_ENV"
 
       # Per-job network isolation: rootlesskit + slirp4netns give the test
       # process tree its own netns (private 127.0.0.1, so the harness's
