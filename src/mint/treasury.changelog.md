@@ -1,5 +1,17 @@
 # Treasury design record
 
+## 2026-10-30 — Separate Treasury funding from recipient pools (#365)
+
+- Refunds may spend Sapling or Ironwood, with change in Ironwood, regardless
+  of the recipient's receiver pool. Cross-pool refunds are allowed and
+  expose the net amount crossing each pool, including Sapling value moved
+  into Ironwood change.
+- Zero-value challenges spend Ironwood only and return change to Ironwood,
+  including challenges to Sapling-only controllers. They do not require a
+  Sapling reserve or move positive value across the Sapling turnstile.
+- Vault sweeps still spend Ironwood only. Refund eligibility, amounts and
+  queue behavior are unchanged.
+
 ## 2026-10-29 — Treasury pool policy (#365)
 
 - The vault sweep spends Ironwood only. Sapling notes remain available for

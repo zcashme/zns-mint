@@ -1,9 +1,9 @@
 //! Refunds due from the run loop.
 //!
-//! A refund is a Treasury payment, funded from the recipient's shielded pool and
-//! the wallet's from there, like a sweep. Its amount is fixed when it is
-//! admitted: the payment less any penalty and the withheld fee,
-//! `FEE_ACTIONS` at the node's rate, so the payer covers the fee.
+//! A refund is a Treasury payment, funded from Sapling or Ironwood, with
+//! change in Ironwood, and the wallet's from there, like a sweep. Its amount
+//! is fixed when it is admitted: the payment less any penalty and the
+//! withheld fee, `FEE_ACTIONS` at the node's rate, so the payer covers the fee.
 //! A wrong access code also keeps 1% of the quote. A refund is built on
 //! the tip pass after its payment's block.
 
