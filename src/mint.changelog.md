@@ -1,5 +1,11 @@
 # Mint live-work design record
 
+## 2026-10-31 — The wallet owns continuous scan state (#309)
+
+- `apply_block` no longer takes a caller-fetched `ChainState`. It
+  requires the next height and matching parent hash against the wallet
+  tip, scans with that metadata, and appends to the existing trees.
+
 ## 2026-10-26 — The inbound kinds are request, OTP response, unrecognized (#383)
 
 - `MintInbound::Echo` is `MintInbound::Response`: the relay memo

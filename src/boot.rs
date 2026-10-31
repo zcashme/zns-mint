@@ -602,10 +602,6 @@ impl Boot<Network> {
             let from_height = wallet.tip().block_height();
             let next_height = from_height + 1;
 
-            let from_state = source
-                .chain_state_at(from_height)
-                .await
-                .expect("FATAL: chain state unavailable during boot sync");
             let block = source
                 .get_block(&network, next_height)
                 .await
@@ -621,7 +617,6 @@ impl Boot<Network> {
                 mint_birthday,
                 &registry_keys,
                 &treasury_keys,
-                &from_state,
                 block,
                 next_height,
                 &mut wallet,
@@ -1550,7 +1545,6 @@ mod tests {
                     birthday,
                     &registry_keys,
                     &treasury_keys,
-                    from_state,
                     test_block(block.vtx()[0].clone(), height, from_state.block_hash()),
                     height,
                     &mut wallet,
@@ -1923,7 +1917,6 @@ mod tests {
                 ceremony_height,
                 &registry_keys,
                 &treasury_keys,
-                from_state,
                 test_block(block.vtx()[0].clone(), height, from_state.block_hash()),
                 height,
                 &mut wallet,

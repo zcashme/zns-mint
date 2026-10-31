@@ -1,5 +1,11 @@
 # Boot module changelog
 
+## 2026-10-31 — Replay continues the initialized wallet trees (#309)
+
+- Boot still fetches the origin tree state and completed subtree roots.
+  Replay applies each successor using the wallet's cursor instead of
+  fetching another tree state before every block.
+
 Tracks design-relevant changes to `src/boot.rs`.
 
 ## 2026-10-26 — No response list (#383)
