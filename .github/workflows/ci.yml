@@ -18,7 +18,7 @@ env:
 jobs:
   ci:
     name: test
-    runs-on: zvs
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -78,8 +78,8 @@ jobs:
   e2e:
     name: e2e (boot to happy path)
     needs: ci
-    runs-on: zvs
-    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -89,101 +89,72 @@ jobs:
           components: rustfmt, clippy
 
       # zebra-indexer-proto (tonic/prost) needs protoc at build time.
-      - name: Check protoc
-        run: protoc --version
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
 
-      # Same tag the e2e test verifies against; bump deliberately.
+      # zallet-zebra reads zebrad's state directly; Zebra 7 writes format
+      # v29, which no zallet release reads yet. Move to the first release
+      # that does.
       - name: Checkout zallet
         uses: actions/checkout@v4
         with:
           repository: zcash/zallet
-          ref: v0.1.0-beta.3
+          ref: aec7f3fa8397ef17b2852dc6835572d6e623b1a2
           path: zallet
 
-      # Build artifacts persist on the runner (outside the workspace, so
-      # checkout's git clean never touches them) instead of round-tripping
-      # gigabytes through GitHub's cache service. Cargo's fingerprints
-      # rebuild only what changed.
-      - name: Prepare runner-local caches
-        run: |
-          mkdir -p "$ZVS_CACHE/zebrad-6.3.0" "$ZVS_CACHE/target" "$ZVS_CACHE/params"
-          if [ ! -x "$ZVS_CACHE/zebrad-6.3.0/zebrad" ]; then
-            cd "$ZVS_CACHE/zebrad-6.3.0"
-            base="https://github.com/ZcashFoundation/zebra/releases/download/v6.3.0"
-            asset="zebrad-6.3.0-x86_64-unknown-linux-gnu.tar.gz"
-            curl -fsSL -O "$base/$asset" -O "$base/$asset.sha256"
-            sha256sum -c "$asset.sha256"
-            tar -xzf "$asset"
-            find . -maxdepth 3 -type f -name zebrad -exec mv {} ./zebrad \;
-            chmod +x ./zebrad
-          fi
-          cd "${{ github.workspace }}"
-          for p in sapling-spend.params sapling-output.params; do
-            if [ ! -f "$ZVS_CACHE/params/$p" ]; then
-              curl -L --fail -o "$ZVS_CACHE/params/$p" "https://download.z.cash/downloads/$p"
-            fi
-          done
-        env:
-          ZVS_CACHE: ${{ runner.workspace }}/../zvs-cache
+      - name: Cache cargo registry and targets
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            integration-tests -> target
+            zallet/backends/zebra -> target
 
-      - name: Export binary paths
+      - name: Download zebrad and Sapling params
         run: |
-          echo "ZEBRAD_BIN=${{ runner.workspace }}/../zvs-cache/zebrad-6.3.0/zebrad" >> "$GITHUB_ENV"
-          echo "ZCASH_PARAMS_DIR=${{ runner.workspace }}/../zvs-cache/params" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/zebrad" "$RUNNER_TEMP/params"
+          cd "$RUNNER_TEMP/zebrad"
+          base="https://github.com/ZcashFoundation/zebra/releases/download/v7.0.0"
+          asset="zebrad-7.0.0-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -O "$base/$asset" -O "$base/$asset.sha256"
+          sha256sum -c "$asset.sha256"
+          tar -xzf "$asset"
+          find . -maxdepth 3 -type f -name zebrad -exec mv {} ./zebrad \;
+          chmod +x ./zebrad
+          for p in sapling-spend.params sapling-output.params; do
+            curl -L --fail -o "$RUNNER_TEMP/params/$p" "https://download.z.cash/downloads/$p"
+          done
+          echo "ZEBRAD_BIN=$RUNNER_TEMP/zebrad/zebrad" >> "$GITHUB_ENV"
+          echo "ZCASH_PARAMS_DIR=$RUNNER_TEMP/params" >> "$GITHUB_ENV"
 
       - name: Build zallet (zebra backend)
         working-directory: zallet/backends/zebra
-        env:
-          CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/zallet-target
         run: |
           cargo build --locked --release
-          cp -f "${{ runner.workspace }}/../zvs-cache/zallet-target/release/zallet-zebra" "${{ runner.workspace }}/../zvs-cache/zallet-zebra-v0.1.0-beta.3"
-
-      - name: Export zallet binary path
-        run: |
-          echo "ZALLET_BIN=${{ runner.workspace }}/../zvs-cache/zallet-zebra-v0.1.0-beta.3" >> "$GITHUB_ENV"
-
-      # Per-job network isolation: rootlesskit + slirp4netns give the test
-      # process tree its own netns (private 127.0.0.1, so the harness's
-      # fixed ports 8232/8230 cannot collide across concurrent jobs) with
-      # full outbound HTTPS via usermode NAT — the mint's oracle and
-      # pre-sale fetches still work.
-      - name: Install rootlesskit
-        run: |
-          if ! command -v rootlesskit >/dev/null || ! command -v slirp4netns >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y rootlesskit slirp4netns
-          fi
+          echo "ZALLET_BIN=$PWD/target/release/zallet-zebra" >> "$GITHUB_ENV"
 
       - name: rustfmt (integration)
         working-directory: integration-tests
-        env:
-          CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target
         run: cargo fmt --check
 
       - name: clippy (integration)
         working-directory: integration-tests
-        env:
-          CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Build mint for e2e
-        env:
-          CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target-happy-path
         run: |
           cargo \
             --config profile.dev.package.orchard.opt-level=3 \
             --config profile.dev.package.halo2_proofs.opt-level=3 \
             --config profile.dev.package.halo2_gadgets.opt-level=3 \
             build --locked --bin zns-mint --features regtest
-          test -x "$CARGO_TARGET_DIR/debug/zns-mint"
-          echo "ZNS_MINT_BIN=$CARGO_TARGET_DIR/debug/zns-mint" >> "$GITHUB_ENV"
+          test -x target/debug/zns-mint
+          echo "ZNS_MINT_BIN=$PWD/target/debug/zns-mint" >> "$GITHUB_ENV"
 
       - name: boot to happy path
         working-directory: integration-tests
         env:
-          CARGO_TARGET_DIR: ${{ runner.workspace }}/../zvs-cache/target
           ZNS_MINT_DIR: ${{ github.workspace }}
-        run: |
-          rootlesskit --net=slirp4netns --copy-up=/etc --disable-host-loopback \
-            cargo test --locked --test happy_path -- --nocapture
+        run: cargo test --locked --test happy_path -- --nocapture
