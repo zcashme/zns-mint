@@ -1,5 +1,11 @@
 # main.changelog.md
 
+## 2026-10-31 — Continuous apply uses the wallet cursor (#309)
+
+- Remove the tree-state RPC before each live block. `apply_block` uses
+  the wallet's committed tip and trees; canonical block fetching, parent
+  checks, reorg convergence, and the final tip guard remain in place.
+
 ## 2026-10-29 — The challenge fee is a hundred actions at the node's rate
 
 - An update or release request pays `treasury::FEE_ACTIONS` at the

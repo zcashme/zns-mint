@@ -1,5 +1,12 @@
 # Wallet changelog
 
+## 2026-10-31 — Marked block commits take predecessor metadata (#309)
+
+- The mint's contiguous commit path takes `BlockMetadata` from its
+  wallet cursor. The upstream `WalletWrite::put_blocks` signature stays
+  unchanged and adapts its `ChainState` to that metadata. Sequential
+  height/hash checks and atomic commitment-tree updates are unchanged.
+
 ## 2026-10-26 — The stable NU7 wallet traits (#390)
 
 - `get_change_receivers` reads the account's viewing key, and

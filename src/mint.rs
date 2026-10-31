@@ -389,7 +389,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     birthday: BlockHeight,
     registry_keys: &crate::RegistryKeys,
     treasury_keys: &TreasuryKeys,
-    from_state: &zcash_client_backend::data_api::chain::ChainState,
     block: zcash_primitives::block::Block,
     height: BlockHeight,
     wallet: &mut Wallet<P>,
@@ -405,14 +404,9 @@ pub fn apply_block<P: Parameters + Send + 'static>(
 
     let cursor = wallet.tip();
     assert_eq!(
-        from_state.block_height(),
-        cursor.block_height(),
-        "FATAL: previous chain-state height mismatch"
-    );
-    assert_eq!(
-        from_state.block_hash(),
-        cursor.block_hash(),
-        "FATAL: previous chain state does not describe the applied cursor"
+        height,
+        cursor.block_height() + 1,
+        "FATAL: block height does not follow the applied cursor"
     );
     assert_eq!(
         block.header().prev_block,
@@ -590,7 +584,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .iter()
         .map(|(index, _)| orchard::tree::MerkleHashOrchard::from_cmx(&candidates[*index].cmx))
         .collect();
-    if let Err(error) = wallet.put_blocks_marked(from_state, vec![scanned], &marks) {
+    if let Err(error) = wallet.put_blocks_marked(&cursor, vec![scanned], &marks) {
         match error {
             crate::wallet::WalletError::UnexpectedOrchardReceive => {
                 panic!("FATAL: ordinary-Orchard receive — consensus violation or key compromise")

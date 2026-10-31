@@ -205,30 +205,6 @@ async fn main() {
             let from_height = wallet.tip().block_height();
             let next_height = from_height + 1;
 
-            let from_state = loop {
-                match source.chain_state_at(from_height).await {
-                    Ok(state) => break state,
-                    Err(error) if error.is_retryable() => {
-                        tracing::warn!(
-                            %error,
-                            height = u32::from(from_height),
-                            "previous chain state unavailable; retrying"
-                        );
-                        tokio::time::sleep(RETRY_PAUSE).await;
-                    }
-                    Err(TransportError::NotOnBestChain) => {
-                        tracing::warn!(
-                            height = u32::from(from_height),
-                            "the chain moved under the tree-state fetch; re-converging"
-                        );
-                        continue 'run;
-                    }
-                    Err(error) => {
-                        panic!("FATAL: Zebra returned an invalid previous chain state: {error}")
-                    }
-                }
-            };
-
             let block = loop {
                 match source.get_block(&network, next_height).await {
                     Ok(block) => break block,
@@ -273,7 +249,6 @@ async fn main() {
                 birthday,
                 &registry_keys,
                 &treasury_keys,
-                &from_state,
                 block,
                 next_height,
                 &mut wallet,
