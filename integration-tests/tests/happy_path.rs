@@ -16,6 +16,11 @@ use zns_mint_integration_tests::{claim, release, update, Stack};
 const SYNC_TIMEOUT: Duration = Duration::from_secs(300);
 const BOOT_TIMEOUT: Duration = Duration::from_secs(1800);
 
+// Zebra 7.0.0's MAX_BLOCK_REORG_HEIGHT: these blocks can be lost on
+// restart before the periodic non-finalized backup catches up. Mine
+// past this window so the funder's rewards are finalized on disk.
+const ZEBRA_NON_FINALIZED_BLOCKS: u32 = 1000;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn boot_then_claim_update_release() -> Result<()> {
     if zebrad_bin().is_none() || zallet_bin().is_none() {
@@ -40,7 +45,12 @@ async fn boot_then_claim_update_release() -> Result<()> {
     let mut funder = fixture::Zallet::init(&zebra)?;
     zebra.restart_with_miner(&funder.miner_address).await?;
     zebra
-        .generate_blocks(fixture::NU6_3_ACTIVATION_HEIGHT + fixture::COINBASE_MATURITY + 2)
+        .generate_blocks(
+            ZEBRA_NON_FINALIZED_BLOCKS
+                + fixture::NU6_3_ACTIVATION_HEIGHT
+                + fixture::COINBASE_MATURITY
+                + 2,
+        )
         .await?;
 
     // User second: its shield is the chain's first shielded tx; its
@@ -49,6 +59,15 @@ async fn boot_then_claim_update_release() -> Result<()> {
     eprintln!("user miner: {}", user.miner_address);
     eprintln!("user UA: {}", user.ua);
 
+    let funder_floor = fixture::TREASURY_PAYMENT_ZATS * 2;
+    let mature = fixture::mature_coinbase_zats(&zebra, &funder.miner_address).await?;
+    if mature < funder_floor {
+        bail!(
+            "funder has only {mature} mature coinbase zats after the miner restart; \
+             need {funder_floor}: mine beyond Zebra's non-finalized window before restarting"
+        );
+    }
+
     funder.start_daemon().await?;
     let tip = zebra.tip_height().await?;
     funder.wait_until_synced(tip, SYNC_TIMEOUT).await?;
@@ -56,8 +75,7 @@ async fn boot_then_claim_update_release() -> Result<()> {
     // Wait for a floor, not the node's full mature truth — the funder
     // only needs the 1-ZEC Treasury payment, and CI's zallet credits it
     // only its deep-finalized core.
-    fixture::wait_until_sees_coinbase(&funder, fixture::TREASURY_PAYMENT_ZATS * 2, SYNC_TIMEOUT)
-        .await?;
+    fixture::wait_until_sees_coinbase(&funder, funder_floor, SYNC_TIMEOUT).await?;
     funder.shield_coinbase().await?;
     zebra.generate_blocks(1).await?;
     let tip = zebra.tip_height().await?;
