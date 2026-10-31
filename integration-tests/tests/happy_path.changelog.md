@@ -2,11 +2,13 @@
 
 ## 2026-10-31
 
-- Mine past Zebra 7.0.0's 1,000-block non-finalized window before
-  switching miners. The previous 106-block setup was entirely lost on
-  restart, leaving the funder with no rewards and a five-minute wallet
-  balance timeout. Check the node's mature funder balance after the
-  restart so lost funding reports its cause immediately.
+- Bootstrap one coinbase-funded wallet, then fund the user through a
+  shielded transfer with the existing `User::fund_attached` helper.
+  Switch miners only on the empty chain, before any rewards exist.
+  This removes the funded-chain restart and the dependency on Zebra's
+  periodic non-finalized backup, replacing the extra-1,000-block
+  workaround. Assert the funder has the user and Treasury budgets
+  before sending either payment.
 
 ## 2026-10-12
 
