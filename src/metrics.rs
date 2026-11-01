@@ -210,6 +210,12 @@ pub fn guest(measurement: &str, guest_policy: &str) {
     .set(1);
 }
 
+/// 0 when the wallet scan is finished and the run loop has not started.
+/// 1 once the tip session is open.
+pub fn serving(serving: bool) {
+    metrics::gauge!("zns_mint_serving").set(if serving { 1.0 } else { 0.0 });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
