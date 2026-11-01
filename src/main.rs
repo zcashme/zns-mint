@@ -10,6 +10,8 @@
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
+use std::time::Duration;
+
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_protocol::consensus::BlockHeight;
@@ -23,6 +25,40 @@ use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
 use zns_mint::mint::{relay, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
+
+// How long a migration target waits for the source to say it will restart
+// its mint. A source that leaves its mint stopped never writes that file.
+const CUTOVER_SIGNAL_WAIT: Duration = Duration::from_secs(60);
+
+// migrate-target.wait means this boot was handed the seed.
+// zns_mint_serving stays 0 while the wallet is at the tip. A cutover
+// file means the source brought its mint back for the sync, and the
+// run loop waits until that mint stops.
+async fn hold_serving_until_previous_mint_stops() {
+    let waiting = std::path::Path::new("/state/migrate-target.wait");
+    let release = std::path::Path::new("/state/migrate-target.release");
+    if !waiting.exists() || release.exists() {
+        return;
+    }
+    zns_mint::metrics::serving(false);
+    let cutover = std::path::Path::new("/state/migrate-target.cutover");
+    let deadline = std::time::Instant::now() + CUTOVER_SIGNAL_WAIT;
+    while !cutover.exists() {
+        if std::time::Instant::now() >= deadline {
+            tracing::info!("previous mint stayed stopped; mint is running");
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    tracing::info!("wallet is at the tip; waiting until the previous mint stops");
+    loop {
+        if release.exists() {
+            tracing::info!("previous mint is stopped; mint is running");
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -67,6 +103,8 @@ async fn main() {
     zns_mint::metrics::ceremony(&seed_fingerprint, &capsule_hash);
     #[cfg(not(feature = "non-tee"))]
     zns_mint::metrics::guest(&guest.measurement, &guest.guest_policy);
+    hold_serving_until_previous_mint_stops().await;
+    zns_mint::metrics::serving(true);
     tracing::info!(
         height = u32::from(wallet.tip().block_height()),
         hash = %wallet.tip().block_hash(),
