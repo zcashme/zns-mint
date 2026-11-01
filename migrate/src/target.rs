@@ -7,12 +7,15 @@
 //! published only after the resealed capsule unseals to the same seed,
 //! attested for `to_measurement`.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use rand::rngs::SysRng;
 use rand::TryRng;
-use secrecy::Secret;
+use secrecy::{ExposeSecret, Secret};
 use tracing::info;
+use zip32::fingerprint::SeedFingerprint;
+use zns_canon::attestation;
 use zns_canon::capsule::{self, SEED_LEN};
 use zns_canon::migration::{self, MigrationOffer};
 use zns_canon::sealing::{get_attestation, SealingKey};
@@ -101,13 +104,17 @@ pub fn run(
     let capsule = capsule::seal_seed(sealing_key, &seed, &mut rng)?;
     let bytes = capsule::serialize_capsule(&capsule)?;
     let staged = persist::stage(output, &bytes)?;
-    prove_persisted(
-        sealing_key,
-        &seed,
-        &capsule::read_capsule_file(staged.path())?,
-    )?;
+    let staged_bytes = capsule::read_capsule_file(staged.path())?;
+    prove_persisted(sealing_key, &seed, &staged_bytes)?;
+    let seed_fingerprint =
+        SeedFingerprint::from_seed(seed.expose_secret()).ok_or(MigrateError::SeedFingerprint)?;
+    // The report is made and checked against the staged bytes before anything
+    // is committed, so the capsule, manifest, and report land together or not
+    // at all.
+    let attestation = stage_attestation(output, &staged_bytes, &seed_fingerprint)?;
     let mut pending = vec![(staged, output.to_path_buf())];
     pending.push(stage_custody_manifest(output, &custody_manifest)?);
+    pending.push(attestation);
     persist::commit_files(pending, args.replace_after_verified_migration)?;
 
     let persisted = capsule::read_capsule_file(output)?;
@@ -147,9 +154,37 @@ pub fn run(
 }
 
 fn guard_outputs(output: &Path, replace: bool) -> Result<(), MigrateError> {
+    if output.file_name() == Some(OsStr::new(ATTESTATION_FILE)) {
+        return Err(MigrateError::usage(format!(
+            "--output-capsule cannot be named {ATTESTATION_FILE}; that name is the attestation"
+        )));
+    }
     persist::guard_output(output, replace)?;
     let dir = persist::containing_dir(output);
-    persist::guard_output(&dir.join(transport::CUSTODY_MANIFEST_FILE), replace)
+    persist::guard_output(&dir.join(transport::CUSTODY_MANIFEST_FILE), replace)?;
+    persist::guard_output(&dir.join(ATTESTATION_FILE), replace)
+}
+
+/// The mint refuses to boot without `keys/zns_attestation.bin`, a report that
+/// covers the capsule file on disk. A migration target seals its own capsule,
+/// so the report has to come from this guest, over the capsule it persisted.
+const ATTESTATION_FILE: &str = "zns_attestation.bin";
+
+/// Request this guest's report over the capsule bytes it is about to commit,
+/// verify that report against those same bytes, and stage it beside the
+/// capsule. The caller commits it with the capsule and the manifest.
+fn stage_attestation(
+    output: &Path,
+    capsule_bytes: &[u8],
+    fingerprint: &SeedFingerprint,
+) -> Result<(persist::StagedCapsule, PathBuf), MigrateError> {
+    let dest = persist::containing_dir(output).join(ATTESTATION_FILE);
+    let report = attestation::request(capsule_bytes, fingerprint);
+    attestation::verify(capsule_bytes, fingerprint, report.report_bytes.clone())?;
+    Ok((
+        persist::stage_file(&dest, &report.report_bytes, 0o644)?,
+        dest,
+    ))
 }
 
 /// The custody manifest beside the capsule, public (0644) like keygen writes it.

@@ -15,6 +15,7 @@ hex = "0.4"
 libc = "0.2"
 rand = "0.10"
 secrecy = "0.8"
+zip32 = "0.3"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 toml = "0.8"

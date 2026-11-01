@@ -3067,5 +3067,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "zip32",
  "zns-canon",
 ]
