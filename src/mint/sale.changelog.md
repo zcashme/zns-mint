@@ -2,15 +2,19 @@
 
 ## 2026-11-02 — Listings and sales are read again from the chain
 
-- A list or a delist waits for a controller challenge. The list sentence
-  carries her t1 and the price. The code is derived from the request. A
-  code already open does not open another challenge. The reply is refunded.
-- A buy code comes from the access-code key, the buy transaction, and
-  the name. One transparent output settles one sale.
-- Startup and a rollback apply answered listings, payments, and expiries
-  in block order. A rollback submits an open code. A sale signs only
-  while the note it captured is still live. A finished sale leaves
-  before the next block's memos.
+- A list or a delist waits until the controller returns the challenge.
+  The list sentence names her t1 and her price. When that code is
+  already open, a second challenge does not start. The payment that
+  returns her code is refunded, and the list fee stays. The listing
+  leaves the book when she no longer holds the
+  name.
+- One transparent output settles one sale. A buy stays closed when an
+  open buy already pays that address the same total. The buy code is
+  derived from the access-code key, the buy transaction, and the name.
+- Startup and a rollback replay listings, payments, and expiries in
+  block order. A rollback sends any code that is still open. The sale
+  note is signed only while the note captured at open is still live.
+  A finished sale leaves before the next block's memos are read.
 
 ## 2026-11-01 — A buy OTP, then a sale note
 

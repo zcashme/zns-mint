@@ -190,6 +190,10 @@ pub fn payment_is_price_plus_otp(value: Zatoshis, price: Zatoshis, code: &OtpCod
     value.into_u64().checked_sub(price.into_u64()) == Some(otp_amount(code).into_u64())
 }
 
+fn payment_total(price: Zatoshis, code: &OtpCode) -> Option<u64> {
+    price.into_u64().checked_add(otp_amount(code).into_u64())
+}
+
 /// Transparent outputs of one block that pay a public-key or script
 /// address. The sale compares the address with the one Bob named.
 pub fn transparent_payments(block: &Block) -> Vec<(TransparentAddress, Zatoshis)> {
@@ -303,6 +307,22 @@ impl SaleQueue {
     /// Every open sale's name.
     pub fn names(&self) -> impl Iterator<Item = &Name> {
         self.sales.iter().map(|sale| &sale.name)
+    }
+
+    /// True when a buy already open pays `pay_to` the same total.
+    fn same_payment(&self, pay_to: TransparentAddress, price: Zatoshis, code: &OtpCode) -> bool {
+        let Some(total) = payment_total(price, code) else {
+            return true;
+        };
+        self.sales.iter().any(|sale| match &sale.phase {
+            Phase::Paying {
+                code,
+                pay_to: addr,
+                price,
+                ..
+            } => *addr == pay_to && payment_total(*price, code) == Some(total),
+            Phase::Paid => false,
+        })
     }
 
     /// The buy OTP for this name was submitted.
@@ -520,6 +540,15 @@ impl ListingBook {
         });
     }
 
+    /// Names whose listing owner is not the live holder.
+    fn lost(&self, holder: impl Fn(&Name) -> Option<UnifiedAddress>) -> Vec<Name> {
+        self.listings
+            .iter()
+            .filter(|listing| holder(&listing.name).as_ref() != Some(&listing.ua))
+            .map(|listing| listing.name.clone())
+            .collect()
+    }
+
     /// Removes the listing. The caller has checked that `ua` owns the name.
     pub fn delist(&mut self, name: &Name) -> bool {
         let before = self.listings.len();
@@ -545,6 +574,8 @@ pub enum MarketRefusal {
     AlreadyOpen,
     /// An open challenge already carries this code.
     CodeTaken,
+    /// An open buy already pays this address the same total.
+    PaymentTaken,
 }
 
 /// A list or delist waiting for the controller's code.
@@ -730,13 +761,19 @@ impl Market {
         }
     }
 
-    /// Drops a sale whose captured note is no longer live. A scan calls
-    /// this before the block's memos, so a finished sale does not block them.
+    /// Drops a listing whose owner no longer holds the name, and a sale
+    /// whose captured note is no longer live. A scan calls this before
+    /// the block's memos, so a finished sale does not block them.
     pub fn reconcile(
         &mut self,
         live: impl Fn(&Name) -> Option<(UnifiedAddress, NameCommitment)>,
         height: BlockHeight,
     ) {
+        let lost = self.listings.lost(|name| live(name).map(|(ua, _)| ua));
+        for name in lost {
+            self.listings.delist(&name);
+            self.record(height, MarketEvent::Delist { name });
+        }
         let stale: Vec<OtpCode> = self
             .challenges
             .iter()
@@ -880,6 +917,9 @@ impl Market {
         }
         if note_pending {
             return Err(MarketRefusal::InFlight);
+        }
+        if self.sales.same_payment(pay_to, price, &code) {
+            return Err(MarketRefusal::PaymentTaken);
         }
         let otp = self
             .sales
@@ -1275,6 +1315,14 @@ impl Market {
                             %txid,
                             name = %buy.name.as_str(),
                             "buy fee kept: sale already open"
+                        );
+                        None
+                    }
+                    Err(MarketRefusal::PaymentTaken) => {
+                        tracing::info!(
+                            %txid,
+                            name = %buy.name.as_str(),
+                            "buy fee kept: that payment is already open"
                         );
                         None
                     }
@@ -1928,7 +1976,7 @@ mod tests {
                 held(),
                 false,
                 false,
-                code.clone(),
+                OtpCode::for_test(*b"654321"),
                 mtp(),
                 height(),
             )
@@ -2072,5 +2120,95 @@ mod tests {
         assert!(market.unrelayed().is_empty());
         market.truncate_to(height());
         assert_eq!(market.unrelayed().len(), 1);
+    }
+
+    #[test]
+    fn a_buy_whose_payment_is_already_open_stays_closed() {
+        let (owner, pay_to) = alice();
+        let mut market = Market::new();
+        let second = Name::parse("zed").unwrap();
+        market
+            .list(&list_for(100_000_000), &owner, height())
+            .unwrap();
+        market
+            .list(
+                &ListRequest {
+                    name: second.clone(),
+                    ua: owner.clone(),
+                    pay_to,
+                    price: zats(100_000_001),
+                },
+                &owner,
+                height(),
+            )
+            .unwrap();
+        market
+            .open_buy(
+                &buy_for(),
+                &owner,
+                Expiry::Never,
+                held(),
+                false,
+                false,
+                OtpCode::for_test(*b"000002"),
+                mtp(),
+                height(),
+            )
+            .unwrap();
+        assert!(matches!(
+            market.open_buy(
+                &BuyRequest {
+                    name: second.clone(),
+                    ua: bob(),
+                },
+                &owner,
+                Expiry::Never,
+                held(),
+                false,
+                false,
+                OtpCode::for_test(*b"000001"),
+                mtp(),
+                height(),
+            ),
+            Err(MarketRefusal::PaymentTaken)
+        ));
+        assert!(!market.is_open(&second));
+        market
+            .open_buy(
+                &BuyRequest {
+                    name: second.clone(),
+                    ua: bob(),
+                },
+                &owner,
+                Expiry::Never,
+                held(),
+                false,
+                false,
+                OtpCode::for_test(*b"000003"),
+                mtp(),
+                height(),
+            )
+            .unwrap();
+        assert!(market.is_open(&second));
+    }
+
+    #[test]
+    fn a_listing_leaves_when_she_no_longer_holds_the_name() {
+        let (owner, _) = alice();
+        let mut market = Market::new();
+        let listed_at = height();
+        market
+            .list(&list_for(100_000_000), &owner, listed_at)
+            .unwrap();
+        let later = BlockHeight::from_u32(2);
+        market.reconcile(|_| None, later);
+        assert_eq!(market.price(&name()), None);
+        market.truncate_to(listed_at);
+        assert_eq!(market.price(&name()), Some(zats(100_000_000)));
+
+        market.reconcile(|_| Some((owner.clone(), held())), later);
+        assert_eq!(market.price(&name()), Some(zats(100_000_000)));
+        market.reconcile(|_| Some((bob(), held())), later);
+        assert_eq!(market.price(&name()), None);
     }
 }
