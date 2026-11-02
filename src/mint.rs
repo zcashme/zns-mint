@@ -16,6 +16,7 @@ pub use zcash_keys::address::UnifiedAddress;
 
 use transparent::address::TransparentAddress;
 use zcash_address::unified::{Container as _, Encoding};
+use zcash_keys::address::Address;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -298,27 +299,42 @@ impl Request {
 }
 
 /// A mint-issued challenge to a wallet, proving that the wallet controls a name via shielded-memos.
+/// A list challenge also carries the t1 and the price she is authorizing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OtpMemo {
     pub code: OtpCode,
     pub name: Name,
     pub action: Action,
     pub ua: UnifiedAddress,
+    /// The t1 and price on a list challenge. Absent for every other verb.
+    pub listing: Option<(TransparentAddress, Zatoshis)>,
 }
 
 impl OtpMemo {
-    /// Encodes the challenge memo; claims are never challenged.
+    /// Encodes the challenge memo. A list sentence appends the t1 and the
+    /// price. Claims are never challenged.
     pub fn encode<P: Parameters>(&self, network: &P) -> Option<MemoBytes> {
         if self.action.is_claim() {
             return None;
         }
         let otp: String = self.code.digits().into_iter().map(|b| b as char).collect();
-        let text = format!(
-            "ZNS:otp:{otp}:{}:{}:{}",
-            self.name.as_str(),
-            self.action.as_str(),
-            self.ua.encode(network),
-        );
+        let text = if self.action.is_list() {
+            let (pay_to, price) = self.listing.as_ref()?;
+            format!(
+                "ZNS:otp:{otp}:{}:list:{}:{}:{}",
+                self.name.as_str(),
+                self.ua.encode(network),
+                Address::Transparent(*pay_to).encode(network),
+                sale::encode_zec(*price),
+            )
+        } else {
+            format!(
+                "ZNS:otp:{otp}:{}:{}:{}",
+                self.name.as_str(),
+                self.action.as_str(),
+                self.ua.encode(network),
+            )
+        };
         // `from_bytes` pads; the UA guard bounds the length.
         MemoBytes::from_bytes(text.as_bytes()).ok()
     }
@@ -331,7 +347,7 @@ impl OtpMemo {
         };
 
         let parts: Vec<&str> = text.split(':').collect();
-        if parts.len() != 6 || parts[0] != "ZNS" || parts[1] != "otp" {
+        if parts.len() < 6 || parts[0] != "ZNS" || parts[1] != "otp" {
             return None;
         }
 
@@ -347,13 +363,28 @@ impl OtpMemo {
             action.is_update() || action.is_release() || action.is_list() || action.is_delist()
         })?;
 
-        let ua = decode_controller_ua(network, parts[5])?;
+        // A list sentence carries the t1 and the price. The other verbs stay six fields.
+        let (ua, listing) = if action.is_list() {
+            if parts.len() != 8 {
+                return None;
+            }
+            let ua = decode_controller_ua(network, parts[5])?;
+            let pay_to = sale::decode_t1(network, parts[6])?;
+            let price = sale::decode_zec(parts[7])?;
+            (ua, Some((pay_to, price)))
+        } else {
+            if parts.len() != 6 {
+                return None;
+            }
+            (decode_controller_ua(network, parts[5])?, None)
+        };
 
         Some(Self {
             code,
             name,
             action,
             ua,
+            listing,
         })
     }
 }
@@ -1161,6 +1192,7 @@ mod tests {
                 name: Name::parse("alice").unwrap(),
                 action,
                 ua: ua.clone(),
+                listing: None,
             };
             let memo = challenge.encode(&network).expect("non-claims encode");
             assert_eq!(OtpMemo::decode(&network, &memo), Some(challenge));
@@ -1170,8 +1202,23 @@ mod tests {
             code: OtpCode::for_test(*b"417293"),
             name: Name::parse("alice").unwrap(),
             action: Action::Claim,
-            ua,
+            ua: ua.clone(),
+            listing: None,
         };
         assert!(claim.encode(&network).is_none());
+
+        let pay_to = TransparentAddress::PublicKeyHash([0x11; 20]);
+        let price = Zatoshis::from_u64(150_000_000).unwrap();
+        let list = OtpMemo {
+            code: OtpCode::for_test(*b"417293"),
+            name: Name::parse("alice").unwrap(),
+            action: Action::List,
+            ua,
+            listing: Some((pay_to, price)),
+        };
+        let memo = list.encode(&network).expect("a list sentence encodes");
+        assert_eq!(OtpMemo::decode(&network, &memo), Some(list));
+        let bare = format!("ZNS:otp:417293:alice:list:{TEST_UA}");
+        assert!(OtpMemo::decode(&network, &padded(&bare)).is_none());
     }
 }

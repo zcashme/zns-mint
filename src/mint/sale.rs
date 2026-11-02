@@ -134,7 +134,7 @@ impl BuyOtp {
 
 /// A public-key-hash transparent address on this network. TEX and
 /// script-hash addresses are not payment destinations for a sale.
-fn decode_t1<P: Parameters>(network: &P, text: &str) -> Option<TransparentAddress> {
+pub(crate) fn decode_t1<P: Parameters>(network: &P, text: &str) -> Option<TransparentAddress> {
     match Address::decode(network, text)? {
         Address::Transparent(addr @ TransparentAddress::PublicKeyHash(_)) => Some(addr),
         _ => None,
@@ -142,7 +142,7 @@ fn decode_t1<P: Parameters>(network: &P, text: &str) -> Option<TransparentAddres
 }
 
 /// ZEC with at most eight decimal places, as zatoshis.
-fn decode_zec(text: &str) -> Option<Zatoshis> {
+pub(crate) fn decode_zec(text: &str) -> Option<Zatoshis> {
     let (whole, frac) = match text.split_once('.') {
         Some((whole, frac)) => (whole, frac),
         None => (text, ""),
@@ -162,6 +162,19 @@ fn decode_zec(text: &str) -> Option<Zatoshis> {
         format!("{frac:0<8}").parse().ok()?
     };
     Zatoshis::from_u64(whole.checked_mul(100_000_000)?.checked_add(frac_zats)?).ok()
+}
+
+/// `price` as ZEC text that [`decode_zec`] accepts. Whole zatoshis
+/// stay an integer. A fraction drops trailing zeros.
+pub(crate) fn encode_zec(price: Zatoshis) -> String {
+    let zats = price.into_u64();
+    let whole = zats / 100_000_000;
+    let frac = zats % 100_000_000;
+    if frac == 0 {
+        return whole.to_string();
+    }
+    let digits = format!("{frac:08}");
+    format!("{whole}.{}", digits.trim_end_matches('0'))
 }
 
 /// The OTP as zatoshis. Code `123456` is `0.00123456` ZEC.
@@ -530,6 +543,8 @@ pub enum MarketRefusal {
     ReleaseDue,
     /// This name already has a buy.
     AlreadyOpen,
+    /// An open challenge already carries this code.
+    CodeTaken,
 }
 
 /// A list or delist waiting for the controller's code.
@@ -594,6 +609,17 @@ impl MarketChallenge {
                     && listing.price == request.price
             }
             ChallengeKind::Delist { .. } => false,
+        }
+    }
+
+    fn same_terms(&self, response: &OtpMemo) -> bool {
+        match &self.kind {
+            ChallengeKind::List(listing) => {
+                response.listing.as_ref().is_some_and(|(pay_to, price)| {
+                    *pay_to == listing.pay_to && *price == listing.price
+                })
+            }
+            ChallengeKind::Delist { .. } => response.listing.is_none(),
         }
     }
 
@@ -669,17 +695,10 @@ impl Market {
         self.sales.unrelayed()
     }
 
+    /// The node accepted the buy OTP. The open event keeps `relayed` clear,
+    /// so a rollback submits that code.
     pub fn relayed(&mut self, name: &Name) {
         self.sales.relayed(name);
-        if let Some(stamped) = self.events.iter_mut().rev().find(
-            |stamped| matches!(&stamped.event, MarketEvent::Open { sale } if sale.name == *name),
-        ) {
-            if let MarketEvent::Open { sale } = &mut stamped.event {
-                if let Phase::Paying { relayed, .. } = &mut sale.phase {
-                    *relayed = true;
-                }
-            }
-        }
     }
 
     pub fn observe(
@@ -890,17 +909,11 @@ impl Market {
             .collect()
     }
 
-    /// The node accepted the challenge memo for `code`.
+    /// The node accepted the challenge memo. The challenge event keeps
+    /// `relayed` clear, so a rollback submits that code.
     pub fn challenge_relayed(&mut self, code: &OtpCode) {
         for challenge in &mut self.challenges {
             if &challenge.code == code {
-                challenge.relayed = true;
-            }
-        }
-        if let Some(stamped) = self.events.iter_mut().rev().find(|stamped| {
-            matches!(&stamped.event, MarketEvent::Challenge { challenge } if &challenge.code == code)
-        }) {
-            if let MarketEvent::Challenge { challenge } = &mut stamped.event {
                 challenge.relayed = true;
             }
         }
@@ -928,6 +941,9 @@ impl Market {
             .any(|challenge| challenge.same_list(request))
         {
             return Ok(());
+        }
+        if self.code_is_open(&code) {
+            return Err(MarketRefusal::CodeTaken);
         }
         self.push_challenge(
             MarketChallenge {
@@ -975,6 +991,9 @@ impl Market {
         {
             return Ok(());
         }
+        if self.code_is_open(&code) {
+            return Err(MarketRefusal::CodeTaken);
+        }
         self.push_challenge(
             MarketChallenge {
                 kind: ChallengeKind::Delist {
@@ -1017,11 +1036,10 @@ impl Market {
         if named.is_empty() {
             return false;
         }
-        if let Some(index) = named
-            .iter()
-            .copied()
-            .find(|&index| self.challenges[index].code == response.code)
-        {
+        if let Some(index) = named.iter().copied().find(|&index| {
+            let challenge = &self.challenges[index];
+            challenge.code == response.code && challenge.same_terms(response)
+        }) {
             let challenge = self.challenges.remove(index);
             self.record(
                 height,
@@ -1059,6 +1077,12 @@ impl Market {
             }
         }
         false
+    }
+
+    fn code_is_open(&self, code: &OtpCode) -> bool {
+        self.challenges
+            .iter()
+            .any(|challenge| &challenge.code == code)
     }
 
     fn push_challenge(&mut self, challenge: MarketChallenge, height: BlockHeight) {
@@ -1146,6 +1170,11 @@ impl Market {
                         name = %list.name.as_str(),
                         "list fee kept: a buy is open"
                     ),
+                    Err(MarketRefusal::CodeTaken) => tracing::info!(
+                        %txid,
+                        name = %list.name.as_str(),
+                        "list fee kept: that code is already open"
+                    ),
                     Err(_) => tracing::info!(
                         %txid,
                         name = %list.name.as_str(),
@@ -1182,6 +1211,11 @@ impl Market {
                         %txid,
                         name = %delist.name.as_str(),
                         "delist fee kept: a buy is open"
+                    ),
+                    Err(MarketRefusal::CodeTaken) => tracing::info!(
+                        %txid,
+                        name = %delist.name.as_str(),
+                        "delist fee kept: that code is already open"
                     ),
                     Err(_) => tracing::info!(
                         %txid,
@@ -1770,14 +1804,25 @@ mod tests {
             name: name(),
             action: Action::List,
             ua: owner.clone(),
+            listing: Some((pay_to, request.price)),
         };
         assert!(!market.answer(&wrong, Some(&owner), height()));
+        assert_eq!(market.price(&name()), None);
+        let other_price = OtpMemo {
+            code: code.clone(),
+            name: name(),
+            action: Action::List,
+            ua: owner.clone(),
+            listing: Some((pay_to, zats(1))),
+        };
+        assert!(!market.answer(&other_price, Some(&owner), height()));
         assert_eq!(market.price(&name()), None);
         let right = OtpMemo {
             code,
             name: name(),
             action: Action::List,
             ua: owner.clone(),
+            listing: Some((pay_to, request.price)),
         };
         assert!(market.answer(&right, Some(&owner), height()));
         assert_eq!(market.price(&name()), Some(zats(150_000_000)));
@@ -1806,6 +1851,10 @@ mod tests {
             name: name(),
             action: Action::List,
             ua: bob(),
+            listing: Some((
+                TransparentAddress::PublicKeyHash([0x11; 20]),
+                zats(150_000_000),
+            )),
         };
         assert!(!market.answer(&stranger, Some(&owner), height()));
         assert_eq!(market.price(&name()), None);
@@ -1828,6 +1877,7 @@ mod tests {
             name: name(),
             action: Action::Delist,
             ua: owner.clone(),
+            listing: None,
         };
         assert!(market.answer(&right, Some(&owner), height()));
         assert_eq!(market.price(&name()), None);
@@ -1950,5 +2000,77 @@ mod tests {
             expired_at,
         );
         assert!(market.is_paid(&name()));
+    }
+
+    #[test]
+    fn a_code_already_open_does_not_open_another_challenge() {
+        let (owner, _) = alice();
+        let mut market = Market::new();
+        let code = OtpCode::for_test(*b"042831");
+        market
+            .propose_list(
+                &list_for(150_000_000),
+                &owner,
+                code.clone(),
+                mtp(),
+                height(),
+            )
+            .unwrap();
+        let cheaper = ListRequest {
+            price: zats(1),
+            ..list_for(150_000_000)
+        };
+        assert_eq!(
+            market.propose_list(&cheaper, &owner, code.clone(), mtp(), height()),
+            Err(MarketRefusal::CodeTaken)
+        );
+        market
+            .list(&list_for(150_000_000), &owner, height())
+            .unwrap();
+        assert_eq!(
+            market.propose_delist(&name(), &owner, &owner, code, mtp(), height()),
+            Err(MarketRefusal::CodeTaken)
+        );
+        assert_eq!(market.unrelayed_challenges().len(), 1);
+    }
+
+    #[test]
+    fn a_rollback_submits_an_open_code() {
+        let (owner, _) = alice();
+        let mut market = Market::new();
+        let code = OtpCode::for_test(*b"042831");
+        market
+            .propose_list(
+                &list_for(150_000_000),
+                &owner,
+                code.clone(),
+                mtp(),
+                height(),
+            )
+            .unwrap();
+        market.challenge_relayed(&code);
+        assert!(market.unrelayed_challenges().is_empty());
+        market.truncate_to(height());
+        assert_eq!(market.unrelayed_challenges().len(), 1);
+
+        let (mut market, owner, _) = listed(100_000_000);
+        let buy = OtpCode::for_test(*b"123456");
+        market
+            .open_buy(
+                &buy_for(),
+                &owner,
+                Expiry::Never,
+                held(),
+                false,
+                false,
+                buy,
+                mtp(),
+                height(),
+            )
+            .unwrap();
+        market.relayed(&name());
+        assert!(market.unrelayed().is_empty());
+        market.truncate_to(height());
+        assert_eq!(market.unrelayed().len(), 1);
     }
 }

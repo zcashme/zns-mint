@@ -125,13 +125,18 @@ impl OtpChallenge {
         correct
     }
 
-    /// The controller-facing projection: code, name, action, ua.
+    /// The controller-facing projection. A list also carries the t1 and the price.
     pub fn memo(&self) -> OtpMemo {
+        let listing = match &self.request {
+            Request::List { pay_to, price, .. } => Some((*pay_to, *price)),
+            _ => None,
+        };
         OtpMemo {
             code: self.code.clone(),
             name: self.request.name().clone(),
             action: self.request.action(),
             ua: self.request.ua().clone(),
+            listing,
         }
     }
 }
