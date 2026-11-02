@@ -196,10 +196,11 @@ const ATTESTATION_REPORT_LEN: usize = 1184;
 /// The boot identity document: written once, at attestation time.
 const IDENTITY_DOC_FILE: &str = "zns_mint_identity.json";
 
-/// Keygen's custody manifest: the network, the seed fingerprint, the
-/// anchor txid, and the height it mined at, published at ceremony
-/// finalize. Required on every network — the anchor check verifies it
-/// against the chain; a missing file refuses boot.
+/// Keygen's custody manifest: network, seed fingerprint, anchor txid,
+/// and the height it mined at. Boot accepts the seed this fingerprint
+/// names when the capsule matches it; an attested build also requires
+/// the keygen report. The anchor txid is checked against the chain.
+/// A missing file refuses boot.
 const CUSTODY_MANIFEST_FILE: &str = "keys/zns_custody_manifest.toml";
 
 /// Genesis facts and the hex-encoded SNP report, one file. `keys/` is
