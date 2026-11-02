@@ -1,5 +1,12 @@
 # Boot module changelog
 
+## 2026-11-02 — The seed fingerprint is the custody manifest
+
+- Boot accepts the seed named by `seed_fingerprint` in
+  `keys/zns_custody_manifest.toml` when the capsule matches it. An
+  attested build also requires the keygen report to bind that value.
+- `deployment/seed_fingerprint.txt` is not a build input.
+
 ## 2026-10-31 — Replay continues the initialized wallet trees (#309)
 
 - Boot still fetches the origin tree state and completed subtree roots.
