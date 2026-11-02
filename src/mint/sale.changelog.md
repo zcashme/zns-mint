@@ -12,9 +12,11 @@
   open buy already pays that address the same total. The buy code is
   derived from the access-code key, the buy transaction, and the name.
 - Startup and a rollback replay listings, payments, and expiries in
-  block order. A rollback sends any code that is still open. The sale
-  note is signed only while the note captured at open is still live.
-  A finished sale leaves before the next block's memos are read.
+  block order. A buy read from the chain stays payable, and its code
+  stays unsent through a later rollback. A rollback sends a code that
+  this process opened and has not yet marked sent. The sale note is
+  signed only while the note captured at open is still live. A
+  finished sale leaves before the next block's memos are read.
 
 ## 2026-11-01 — A buy OTP, then a sale note
 

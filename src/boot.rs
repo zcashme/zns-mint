@@ -688,6 +688,9 @@ impl Boot<Network> {
                 next_height,
             );
         }
+        // A buy read from history stays payable. This process does not
+        // send its code, and a later rollback leaves that code unsent.
+        market.seal_replayed_buys();
         tracing::info!(
             height = u32::from(wallet.tip().block_height()),
             "boot: synced to chain tip"
