@@ -1,5 +1,10 @@
 # Mint live-work design record
 
+## 2026-11-02 — A list waits for the controller's code
+
+- `ZNS:otp` accepts the verbs `list` and `delist`. The listing changes
+  when the controller returns that code. The list fee stays.
+
 ## 2026-11-01 — A buy is its own inbound, answered by a buy OTP
 
 - `MintInbound::List` and `Delist` are Alice's listing. `Buy` is

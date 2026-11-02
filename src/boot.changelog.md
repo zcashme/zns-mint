@@ -2,9 +2,10 @@
 
 ## 2026-11-02 — Boot keeps the sale market it reads
 
-- The sync applies list, delist, buy, and payment and returns that
-  market with the rest of the boot product. Other treasury memos
-  stay balance.
+- The sync applies list, delist, buy, payment, and expiry and returns
+  that market. A list or delist applies when its challenge reply is
+  in the chain. A sale whose note is already in the registry leaves
+  before the next block's memos. Other treasury memos stay balance.
 
 ## 2026-10-31 — Replay continues the initialized wallet trees (#309)
 

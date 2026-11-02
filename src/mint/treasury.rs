@@ -6,7 +6,7 @@
 mod otp;
 mod refund;
 
-pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP};
+pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP, MAX_ATTEMPTS};
 pub use refund::{access_code_penalty, RefundQueue, RefundRequest, FEE_ACTIONS};
 
 use std::convert::Infallible;
@@ -426,6 +426,7 @@ mod tests {
             },
             Action::Release => Request::Release { name, ua },
             Action::Sale => panic!("a sale is not a request"),
+            Action::List | Action::Delist => panic!("a listing challenge is not this request"),
         }
     }
 

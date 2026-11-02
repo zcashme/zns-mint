@@ -4,7 +4,10 @@
 
 - The market from boot is the one the loop runs. A rollback drops
   listings and sales opened above the ancestor, then the blocks
-  above it are applied again.
+  above it are applied again. Each block ends an expired code and a
+  finished sale before it reads that block's memos.
+- A list or delist reply refunds its payment. The listing changes
+  when the code matches.
 
 ## 2026-11-01 — A buy is relayed, then the buyer is bound
 

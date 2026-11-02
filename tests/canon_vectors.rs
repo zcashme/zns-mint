@@ -342,6 +342,8 @@ fn record_snapshot(record: &zns_mint::mint::registry::NameRecord) -> RecordSnaps
             Action::Update => "update".to_owned(),
             Action::Release => "release".to_owned(),
             Action::Sale => "sale".to_owned(),
+            Action::List => "list".to_owned(),
+            Action::Delist => "delist".to_owned(),
         },
         ua: ua_str,
         expires_at_secs,

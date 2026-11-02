@@ -2,11 +2,14 @@
 
 ## 2026-11-02 — Listings and sales are read again from the chain
 
-- A buy code comes from the access-code key and the buy transaction,
-  so a second read issues the same code. Startup applies list, delist,
-  buy, and payment the same way the live loop does, and keeps them.
-- A rollback drops what came from blocks above the ancestor and keeps
-  the rest. Those later blocks are read again.
+- A list or a delist waits for a controller challenge. The reply is
+  `ZNS:otp` with verb `list` or `delist`. The code is derived from the
+  request, so a rescan matches her reply. The reply payment is refunded.
+- A buy code comes from the access-code key, the buy transaction, and
+  the name. One transparent output settles one sale.
+- Startup and a rollback apply answered listings, payments, and expiries
+  in block order. A sale signs only while the note it captured is still
+  live. A finished sale leaves before the next block's memos.
 
 ## 2026-11-01 — A buy OTP, then a sale note
 

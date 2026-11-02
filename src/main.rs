@@ -21,7 +21,9 @@ use zns_mint::mint::presale;
 use zns_mint::mint::pricing::{fetch_round, Oracle};
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
-use zns_mint::mint::{relay, relay_buy, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use zns_mint::mint::{
+    relay, relay_buy, relay_challenge, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
@@ -186,7 +188,10 @@ async fn main() {
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
             market.truncate_to(rewound);
-            market.expire(mtp.current().expect("FATAL: MTP unavailable after reorg"));
+            market.expire(
+                mtp.current().expect("FATAL: MTP unavailable after reorg"),
+                rewound,
+            );
             name_notes.rewind_to(rewound);
             name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
@@ -270,6 +275,15 @@ async fn main() {
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
             challenges.expire(block_mtp);
+            market.expire(block_mtp, next_height);
+            market.reconcile(
+                |name| {
+                    registry
+                        .record(name)
+                        .map(|record| (record.ua.clone(), record.commitment))
+                },
+                next_height,
+            );
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
@@ -280,6 +294,21 @@ async fn main() {
                     // A refused response goes back to the memo address,
                     // less the refund fee.
                     MintInbound::Response(response) => {
+                        if response.action.is_list() || response.action.is_delist() {
+                            let owner = registry
+                                .record(&response.name)
+                                .map(|record| record.ua.clone());
+                            market.answer(&response, owner.as_ref(), next_height);
+                            refunds.admit(
+                                &fee_rule,
+                                txid,
+                                &response.ua,
+                                &response.name,
+                                next_height,
+                                paid,
+                            );
+                            continue;
+                        }
                         // A buy holds the name. A code already issued cannot
                         // apply an update or a release, and its payment returns.
                         if !market.allows_transition(&response.name) {
@@ -334,7 +363,9 @@ async fn main() {
                         let authorized = match &sent.request {
                             Request::Update { .. } => registry.authorize_update(&sent, block_mtp),
                             Request::Release { .. } => registry.authorize_release(&sent),
-                            Request::Claim { .. } => continue,
+                            Request::Claim { .. }
+                            | Request::List { .. }
+                            | Request::Delist { .. } => continue,
                         };
                         let Some(note) = authorized else {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
@@ -356,7 +387,6 @@ async fn main() {
                         }
                     }
                     MintInbound::List(_) | MintInbound::Delist(_) | MintInbound::Buy(_) => {
-                        let code = access_code_key.buy_otp(&txid);
                         if let Some(name) = market.admit(
                             txid,
                             &inbound,
@@ -366,7 +396,19 @@ async fn main() {
                             next_height,
                             block_mtp,
                             |name| name_notes.note_pending(name),
-                            code,
+                            |name| access_code_key.buy_otp(&txid, name),
+                            |inbound| match inbound {
+                                MintInbound::List(list) => Some(access_code_key.list_otp(
+                                    &txid,
+                                    &list.name,
+                                    list.price,
+                                    &list.pay_to,
+                                )),
+                                MintInbound::Delist(delist) => {
+                                    Some(access_code_key.delist_otp(&txid, &delist.name))
+                                }
+                                _ => None,
+                            },
                         ) {
                             challenges.drop_challenges(&name);
                         }
@@ -387,7 +429,6 @@ async fn main() {
                 block_mtp,
                 next_height,
             );
-            market.expire(block_mtp);
         }
 
         tracing::info!(
@@ -571,6 +612,7 @@ async fn main() {
                     }
                     challenges.admit(request.clone(), mtp_now);
                 }
+                Request::List { .. } | Request::Delist { .. } => {}
             }
         }
 
@@ -600,6 +642,38 @@ async fn main() {
             .await
             {
                 challenges.challenge_issued(&pending);
+            }
+        }
+
+        for pending in market.unrelayed_challenges() {
+            if !market.allows_transition(pending.request.name()) {
+                continue;
+            }
+            let Some(record) =
+                registry.authorize_challenge(&name_notes, &pending.request, target_height, mtp_now)
+            else {
+                continue;
+            };
+            let challenge = treasury::OtpChallenge {
+                request: pending.request.clone(),
+                code: pending.code.clone(),
+                expires_at: pending.expires_at,
+                attempts: 0,
+            };
+            if relay_challenge(
+                &network,
+                &mut wallet,
+                &treasury_keys,
+                &sapling_spend,
+                &sapling_output,
+                &fee_rule,
+                &record.ua,
+                &source,
+                &challenge,
+            )
+            .await
+            {
+                market.challenge_relayed(&pending.code);
             }
         }
 

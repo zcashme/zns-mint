@@ -14,6 +14,7 @@ pub use time::Timestamp;
 
 pub use zcash_keys::address::UnifiedAddress;
 
+use transparent::address::TransparentAddress;
 use zcash_address::unified::{Container as _, Encoding};
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
@@ -71,6 +72,10 @@ pub enum Action {
     Release,
     /// Spends the holder's note and binds the buyer. The name stays live.
     Sale,
+    /// A controller challenge that lists the name. Not a name note.
+    List,
+    /// A controller challenge that removes a listing. Not a name note.
+    Delist,
 }
 
 impl Action {
@@ -81,6 +86,8 @@ impl Action {
             Action::Update => "update",
             Action::Release => "release",
             Action::Sale => "sale",
+            Action::List => "list",
+            Action::Delist => "delist",
         }
     }
 
@@ -91,6 +98,8 @@ impl Action {
             "update" => Some(Action::Update),
             "release" => Some(Action::Release),
             "sale" => Some(Action::Sale),
+            "list" => Some(Action::List),
+            "delist" => Some(Action::Delist),
             _ => None,
         }
     }
@@ -115,6 +124,16 @@ impl Action {
     /// True when this action hands the name to a buyer.
     pub const fn is_sale(self) -> bool {
         matches!(self, Action::Sale)
+    }
+
+    /// True when this action is a list challenge.
+    pub const fn is_list(self) -> bool {
+        matches!(self, Action::List)
+    }
+
+    /// True when this action is a delist challenge.
+    pub const fn is_delist(self) -> bool {
+        matches!(self, Action::Delist)
     }
 
     /// True when this action spends the registration's current note as
@@ -153,6 +172,20 @@ pub enum Request {
         name: Name,
         ua: UnifiedAddress,
     },
+    /// List the name at `pay_to` for `price`, once the controller returns
+    /// the challenge.
+    List {
+        name: Name,
+        ua: UnifiedAddress,
+        pay_to: TransparentAddress,
+        price: Zatoshis,
+    },
+    /// Take the name off the market, once the controller returns the
+    /// challenge.
+    Delist {
+        name: Name,
+        ua: UnifiedAddress,
+    },
 }
 
 impl Request {
@@ -161,7 +194,9 @@ impl Request {
         match self {
             Request::Claim { name, .. }
             | Request::Update { name, .. }
-            | Request::Release { name, .. } => name,
+            | Request::Release { name, .. }
+            | Request::List { name, .. }
+            | Request::Delist { name, .. } => name,
         }
     }
 
@@ -170,6 +205,8 @@ impl Request {
             Request::Claim { .. } => Action::Claim,
             Request::Update { .. } => Action::Update,
             Request::Release { .. } => Action::Release,
+            Request::List { .. } => Action::List,
+            Request::Delist { .. } => Action::Delist,
         }
     }
 
@@ -178,7 +215,9 @@ impl Request {
         match self {
             Request::Claim { ua, .. }
             | Request::Update { ua, .. }
-            | Request::Release { ua, .. } => ua,
+            | Request::Release { ua, .. }
+            | Request::List { ua, .. }
+            | Request::Delist { ua, .. } => ua,
         }
     }
 
@@ -199,8 +238,9 @@ impl Request {
             return None;
         }
         let action = Action::parse(fields.next()?)?;
-        // A sale is a name note the mint signs. It is not a treasury request.
-        if action.is_sale() {
+        // A sale is a name note the mint signs. A list or a delist is a
+        // controller challenge parsed by its own memo.
+        if action.is_sale() || action.is_list() || action.is_delist() {
             return None;
         }
 
@@ -230,6 +270,7 @@ impl Request {
             }
             Action::Release => (None, None),
             Action::Sale => unreachable!("a sale is not a request"),
+            Action::List | Action::Delist => unreachable!("a listing is not this request"),
         };
 
         let name = Name::parse(fields.next()?)?;
@@ -251,6 +292,7 @@ impl Request {
             // A claim always carries a term.
             (Action::Claim, None) => unreachable!("claims always carry a term"),
             (Action::Sale, _) => unreachable!("a sale is not a request"),
+            (Action::List | Action::Delist, _) => unreachable!("a listing is not this request"),
         })
     }
 }
@@ -300,9 +342,10 @@ impl OtpMemo {
         let code = OtpCode::from_digits(digits.try_into().ok()?)?;
 
         let name = Name::parse(parts[3])?;
-        // A challenge is an update or a release.
-        let action =
-            Action::parse(parts[4]).filter(|action| action.is_update() || action.is_release())?;
+        // A challenge is an update, a release, a list, or a delist.
+        let action = Action::parse(parts[4]).filter(|action| {
+            action.is_update() || action.is_release() || action.is_list() || action.is_delist()
+        })?;
 
         let ua = decode_controller_ua(network, parts[5])?;
 
@@ -414,7 +457,7 @@ impl Name {
 
 /// Applies one verified canonical successor to every faculty: scan, clock,
 /// Registry law, wallet commit, Treasury decode, and Name Note storage.
-/// Returns Treasury arrivals for the run loop to route; boot discards them.
+/// Returns Treasury arrivals. The caller routes them.
 /// Before birthday, applies only wallet history and clock.
 /// Never fetches, never broadcasts.
 #[allow(clippy::too_many_arguments)]
@@ -588,6 +631,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                             block_mtp,
                         ),
                         Action::Claim => unreachable!("claims are routed above"),
+                        Action::List | Action::Delist => false,
                     }
                 };
                 if accepted {
@@ -741,6 +785,71 @@ pub async fn relay<P: Parameters + Send + 'static>(
             lane,
             name = %request.name().as_str(),
             action = request.action().as_str(),
+            "controller challenge rejected — deferred"
+        );
+        false
+    }
+}
+
+/// Submits a list or delist challenge. The memo verb is `list` or
+/// `delist`, so it cannot be read as an update or a release. Returns
+/// false when Treasury funds or node acceptance defer it.
+#[allow(clippy::too_many_arguments)]
+pub async fn relay_challenge<P: Parameters + Send + 'static>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    treasury_keys: &TreasuryKeys,
+    spend_prover: &SpendParameters,
+    output_prover: &OutputParameters,
+    fee_rule: &FeeRule,
+    controller_ua: &UnifiedAddress,
+    source: &CanonicalBlockSource,
+    challenge: &OtpChallenge,
+) -> bool {
+    let memo = match challenge.memo().encode(network) {
+        Some(memo) => memo,
+        None => {
+            tracing::error!(
+                name = %challenge.request.name().as_str(),
+                action = challenge.request.action().as_str(),
+                "controller challenge memo exceeds the ZIP-302 512-byte limit"
+            );
+            return false;
+        }
+    };
+    let transaction = match treasury::challenge(
+        network,
+        wallet,
+        treasury_keys,
+        spend_prover,
+        output_prover,
+        fee_rule,
+        controller_ua,
+        memo,
+    ) {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                name = %challenge.request.name().as_str(),
+                action = challenge.request.action().as_str(),
+                "controller challenge not built"
+            );
+            return false;
+        }
+    };
+    if source.submit(&transaction, "controller challenge").await {
+        tracing::info!(
+            txid = %transaction.txid(),
+            name = %challenge.request.name().as_str(),
+            action = challenge.request.action().as_str(),
+            "controller challenged"
+        );
+        true
+    } else {
+        tracing::debug!(
+            name = %challenge.request.name().as_str(),
+            action = challenge.request.action().as_str(),
             "controller challenge rejected — deferred"
         );
         false

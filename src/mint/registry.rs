@@ -87,7 +87,10 @@ impl NameRecord {
         match request {
             Request::Claim { .. } => false,
             Request::Update { term, .. } => !(self.expires_at == Expiry::Never && term.is_some()),
-            Request::Release { ua, .. } => *ua == self.ua,
+            Request::Release { ua, .. } | Request::Delist { ua, .. } => *ua == self.ua,
+            Request::List { ua, pay_to, .. } => {
+                *ua == self.ua && self.ua.transparent() == Some(pay_to)
+            }
         }
     }
 
@@ -190,14 +193,19 @@ impl Registry {
     }
 
     /// The note a sale signs. It spends the live record and binds `bob`
-    /// for the term the sale captured. The name stays live.
+    /// for the term the sale captured, while `held` is still that record.
+    /// The name stays live.
     pub fn sale_transfer(
         &self,
         name: &Name,
         bob: &UnifiedAddress,
         expires_at: Expiry,
+        held: NameCommitment,
     ) -> Option<NameNote> {
         let record = self.record(name)?;
+        if record.commitment != held {
+            return None;
+        }
         Some(NameNote::Sale {
             name: name.clone(),
             ua: bob.clone(),
@@ -787,6 +795,65 @@ mod tests {
         assert!(forever.allows_challenge(&update(None), above, now));
     }
 
+    #[test]
+    fn a_list_challenge_requires_the_controller_and_her_t1() {
+        let above = BlockHeight::from_u32(101);
+        let now = ts(1_000_000_000);
+        let mut live = record(
+            Action::Claim,
+            Expiry::At(ts(2_000_000_000)),
+            2_000_000_000,
+            1,
+        );
+        live.ua = bob_ua();
+        let pay_to = transparent::address::TransparentAddress::PublicKeyHash([0x22; 20]);
+        let price = zcash_protocol::value::Zatoshis::from_u64(1).unwrap();
+        let list = Request::List {
+            name: test_name(),
+            ua: bob_ua(),
+            pay_to,
+            price,
+        };
+        assert!(live.allows_challenge(&list, above, now));
+        let other = transparent::address::TransparentAddress::PublicKeyHash([0x11; 20]);
+        assert!(!live.allows_challenge(
+            &Request::List {
+                name: test_name(),
+                ua: bob_ua(),
+                pay_to: other,
+                price,
+            },
+            above,
+            now,
+        ));
+        assert!(!live.allows_challenge(
+            &Request::List {
+                name: test_name(),
+                ua: test_ua(),
+                pay_to,
+                price,
+            },
+            above,
+            now,
+        ));
+        assert!(live.allows_challenge(
+            &Request::Delist {
+                name: test_name(),
+                ua: bob_ua(),
+            },
+            above,
+            now,
+        ));
+        assert!(!live.allows_challenge(
+            &Request::Delist {
+                name: test_name(),
+                ua: test_ua(),
+            },
+            above,
+            now,
+        ));
+    }
+
     /// The gate applies both §4.5 clocks — the same predicate the law
     /// applies. A name past its liveness deadline cannot buy a
     /// challenge, even with purchased term remaining: the update it
@@ -1346,9 +1413,12 @@ mod tests {
         let mut r = live_alice(Expiry::At(ts(2_000_000_000)), 3_000_000_000);
         let term = Expiry::At(ts(2_000_000_000));
         let bob = bob_ua();
+        assert!(r
+            .sale_transfer(&test_name(), &bob, term, commitment(2))
+            .is_none());
         let note = r
-            .sale_transfer(&test_name(), &bob, term)
-            .expect("alice holds the name");
+            .sale_transfer(&test_name(), &bob, term, commitment(1))
+            .expect("alice holds the captured note");
         assert!(note.action().is_sale());
         assert!(!note.action().is_update());
         assert_eq!(note.ua(), &bob);

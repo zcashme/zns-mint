@@ -639,7 +639,24 @@ impl Boot<Network> {
             let block_mtp = mtp
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
+            market.expire(block_mtp, next_height);
+            market.reconcile(
+                |name| {
+                    registry
+                        .record(name)
+                        .map(|record| (record.ua.clone(), record.commitment))
+                },
+                next_height,
+            );
             for (txid, inbound, paid) in arrivals {
+                if let crate::mint::MintInbound::Response(response) = &inbound {
+                    if response.action.is_list() || response.action.is_delist() {
+                        let owner = registry
+                            .record(&response.name)
+                            .map(|record| record.ua.clone());
+                        market.answer(response, owner.as_ref(), next_height);
+                    }
+                }
                 market.admit(
                     txid,
                     &inbound,
@@ -649,7 +666,19 @@ impl Boot<Network> {
                     next_height,
                     block_mtp,
                     |_| false,
-                    access_code_key.buy_otp(&txid),
+                    |name| access_code_key.buy_otp(&txid, name),
+                    |inbound| match inbound {
+                        crate::mint::MintInbound::List(list) => Some(access_code_key.list_otp(
+                            &txid,
+                            &list.name,
+                            list.price,
+                            &list.pay_to,
+                        )),
+                        crate::mint::MintInbound::Delist(delist) => {
+                            Some(access_code_key.delist_otp(&txid, &delist.name))
+                        }
+                        _ => None,
+                    },
                 );
             }
             market.observe(
@@ -658,7 +687,6 @@ impl Boot<Network> {
                 block_mtp,
                 next_height,
             );
-            market.expire(block_mtp);
         }
         tracing::info!(
             height = u32::from(wallet.tip().block_height()),
