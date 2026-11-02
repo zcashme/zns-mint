@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-11-01 — A sale binds the buyer and leaves the name live
+
+- `sale_transfer` spends the live record and binds the buyer for
+  the term the sale captured. The verb is `sale`, so a resolver
+  can tell a new holder from an address change.
+
 ## 2026-10-26 — The release window follows the builder's expiry (#390)
 
 - A claim is built before a release when its expiry is at most the

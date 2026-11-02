@@ -425,6 +425,7 @@ mod tests {
                 term: None,
             },
             Action::Release => Request::Release { name, ua },
+            Action::Sale => panic!("a sale is not a request"),
         }
     }
 

@@ -189,6 +189,23 @@ impl Registry {
         })
     }
 
+    /// The note a sale signs. It spends the live record and binds `bob`
+    /// for the term the sale captured. The name stays live.
+    pub fn sale_transfer(
+        &self,
+        name: &Name,
+        bob: &UnifiedAddress,
+        expires_at: Expiry,
+    ) -> Option<NameNote> {
+        let record = self.record(name)?;
+        Some(NameNote::Sale {
+            name: name.clone(),
+            ua: bob.clone(),
+            expires_at,
+            prev: record.commitment,
+        })
+    }
+
     /// The request gate. The note is unspoken-for, the request is newer
     /// than the record, and a forever name takes no term. The purchased
     /// term and the liveness deadline are read at the applied tip, the
@@ -373,6 +390,30 @@ impl Registry {
         };
         if note.prev_rcm() != Some(record.commitment) {
             // The predecessor was spent whatever the note claims.
+            self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
+            return false;
+        }
+        self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
+        true
+    }
+
+    /// Offers a confirmed sale. The transaction spent this name's current
+    /// note, and the buyer is bound for the term the note carries.
+    pub fn accept_sale<P: Parameters>(
+        &mut self,
+        params: &P,
+        note: &NameNote,
+        nullifier: orchard::note::Nullifier,
+        nfs: &[orchard::note::Nullifier],
+        height: BlockHeight,
+        mtp: Timestamp,
+    ) -> bool {
+        assert!(matches!(note, NameNote::Sale { .. }));
+        let Some(record) = self.predecessor_spent(note, nfs) else {
+            self.follow_spends(nfs, height);
+            return false;
+        };
+        if note.prev_rcm() != Some(record.commitment) {
             self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
             return false;
         }
@@ -1283,6 +1324,47 @@ mod tests {
         ));
         let rec = r.record(&test_name()).expect("alice still bound");
         assert_eq!(rec.action, Action::Update);
+        assert_eq!(rec.predecessor_nullifier, succ);
+    }
+
+    fn bob_ua() -> UnifiedAddress {
+        let base = test_ua();
+        UnifiedAddress::from_receivers(
+            base.orchard().copied(),
+            base.sapling().cloned(),
+            Some(transparent::address::TransparentAddress::PublicKeyHash(
+                [0x22; 20],
+            )),
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn accept_sale_binds_the_buyer_and_leaves_the_name_live() {
+        let mut r = live_alice(Expiry::At(ts(2_000_000_000)), 3_000_000_000);
+        let term = Expiry::At(ts(2_000_000_000));
+        let bob = bob_ua();
+        let note = r
+            .sale_transfer(&test_name(), &bob, term)
+            .expect("alice holds the name");
+        assert!(note.action().is_sale());
+        assert!(!note.action().is_update());
+        assert_eq!(note.ua(), &bob);
+        let succ = nullifier(20);
+        assert!(r.accept_sale(
+            &MAIN_NETWORK,
+            &note,
+            succ,
+            &[nullifier(1)],
+            BlockHeight::from_u32(101),
+            ts(1_000_000_000),
+        ));
+        let rec = r.record(&test_name()).expect("the name stays live");
+        assert_eq!(rec.action, Action::Sale);
+        assert_eq!(rec.ua, bob);
+        assert_eq!(rec.expires_at, term);
         assert_eq!(rec.predecessor_nullifier, succ);
     }
 

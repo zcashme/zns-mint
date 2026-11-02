@@ -5,6 +5,7 @@ pub mod note;
 pub mod presale;
 pub mod pricing;
 pub mod registry;
+pub mod sale;
 pub mod treasury;
 
 // The Name Note type and its codec.
@@ -44,7 +45,10 @@ pub const MIN_TREASURY_BALANCE: u64 = 200_000;
 pub const MAX_NAME_LEN: usize = 63;
 
 /// Decodes a controller UA: known receivers only, at least one shielded.
-fn decode_controller_ua<P: Parameters>(network: &P, ua_str: &str) -> Option<UnifiedAddress> {
+pub(crate) fn decode_controller_ua<P: Parameters>(
+    network: &P,
+    ua_str: &str,
+) -> Option<UnifiedAddress> {
     let (net, revision, container) = zcash_address::unified::Address::decode(ua_str).ok()?;
     if net != network.network_type()
         || revision != zcash_address::unified::Revision::R0
@@ -65,6 +69,8 @@ pub enum Action {
     Update,
     /// Terminates a name's linkage to an address
     Release,
+    /// Spends the holder's note and binds the buyer. The name stays live.
+    Sale,
 }
 
 impl Action {
@@ -74,6 +80,7 @@ impl Action {
             Action::Claim => "claim",
             Action::Update => "update",
             Action::Release => "release",
+            Action::Sale => "sale",
         }
     }
 
@@ -83,6 +90,7 @@ impl Action {
             "claim" => Some(Action::Claim),
             "update" => Some(Action::Update),
             "release" => Some(Action::Release),
+            "sale" => Some(Action::Sale),
             _ => None,
         }
     }
@@ -104,10 +112,15 @@ impl Action {
         matches!(self, Action::Update)
     }
 
+    /// True when this action hands the name to a buyer.
+    pub const fn is_sale(self) -> bool {
+        matches!(self, Action::Sale)
+    }
+
     /// True when this action spends the registration's current note as
     /// its authority; a claim spends an anchor instead.
     pub const fn needs_predecessor(self) -> bool {
-        matches!(self, Action::Update | Action::Release)
+        matches!(self, Action::Update | Action::Release | Action::Sale)
     }
 }
 
@@ -186,6 +199,10 @@ impl Request {
             return None;
         }
         let action = Action::parse(fields.next()?)?;
+        // A sale is a name note the mint signs. It is not a treasury request.
+        if action.is_sale() {
+            return None;
+        }
 
         // Claims may lead with a pre-sale code; the discriminator is whether
         // the next field is a term. Updates say `none`, `<N>y`, or `forever`.
@@ -212,6 +229,7 @@ impl Request {
                 (None, term)
             }
             Action::Release => (None, None),
+            Action::Sale => unreachable!("a sale is not a request"),
         };
 
         let name = Name::parse(fields.next()?)?;
@@ -232,6 +250,7 @@ impl Request {
             (Action::Release, _) => Request::Release { name, ua },
             // A claim always carries a term.
             (Action::Claim, None) => unreachable!("claims always carry a term"),
+            (Action::Sale, _) => unreachable!("a sale is not a request"),
         })
     }
 }
@@ -281,8 +300,9 @@ impl OtpMemo {
         let code = OtpCode::from_digits(digits.try_into().ok()?)?;
 
         let name = Name::parse(parts[3])?;
-        // Challenges never claim: parse the verb, then refuse claims.
-        let action = Action::parse(parts[4]).filter(|action| !action.is_claim())?;
+        // A challenge is an update or a release.
+        let action =
+            Action::parse(parts[4]).filter(|action| action.is_update() || action.is_release())?;
 
         let ua = decode_controller_ua(network, parts[5])?;
 
@@ -304,6 +324,14 @@ pub enum MintInbound {
     Request(Request),
     /// An OTP response — the relay memo returned; the OTP queue takes it.
     Response(OtpMemo),
+    /// Alice lists the name she owns, at the transparent receiver on
+    /// her controller address, for a price of at most eight decimals.
+    List(sale::ListRequest),
+    /// Alice takes her listing down. The controller must still own the name.
+    Delist(sale::DelistRequest),
+    /// A buy request: Bob asks for a listed name. The sale queue sends
+    /// him a buy OTP. The price and address are Alice's listing.
+    Buy(sale::BuyRequest),
     /// A payment with no parseable message: the deciding pass logs it once and
     /// the sweep keeps the value; the queue names it by its txid.
     Unrecognized,
@@ -315,6 +343,12 @@ impl MintInbound {
     pub fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Self {
         if let Some(response) = OtpMemo::decode(network, memo) {
             Self::Response(response)
+        } else if let Some(buy) = sale::BuyRequest::decode(network, memo) {
+            Self::Buy(buy)
+        } else if let Some(list) = sale::ListRequest::decode(network, memo) {
+            Self::List(list)
+        } else if let Some(delist) = sale::DelistRequest::decode(network, memo) {
+            Self::Delist(delist)
         } else if let Some(request) = Request::decode(network, memo) {
             Self::Request(request)
         } else {
@@ -545,6 +579,14 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                             height,
                             block_mtp,
                         ),
+                        Action::Sale => registry.accept_sale(
+                            network,
+                            &candidate.payload,
+                            candidate.nullifier,
+                            &nfs,
+                            height,
+                            block_mtp,
+                        ),
                         Action::Claim => unreachable!("claims are routed above"),
                     }
                 };
@@ -701,6 +743,59 @@ pub async fn relay<P: Parameters + Send + 'static>(
             action = request.action().as_str(),
             "controller challenge rejected — deferred"
         );
+        false
+    }
+}
+
+/// Submits the buy OTP. The memo verb is `buyotp`, so it cannot be
+/// read as an update or release challenge. Returns false when Treasury
+/// funds or node acceptance defer it.
+#[allow(clippy::too_many_arguments)]
+pub async fn relay_buy<P: Parameters + Send + 'static>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    treasury_keys: &TreasuryKeys,
+    spend_prover: &SpendParameters,
+    output_prover: &OutputParameters,
+    fee_rule: &FeeRule,
+    source: &CanonicalBlockSource,
+    otp: &sale::BuyOtp,
+) -> bool {
+    let memo = match otp.encode(network) {
+        Some(memo) => memo,
+        None => {
+            tracing::error!(
+                name = %otp.name.as_str(),
+                "buy OTP memo exceeds the ZIP-302 512-byte limit"
+            );
+            return false;
+        }
+    };
+    let transaction = match treasury::challenge(
+        network,
+        wallet,
+        treasury_keys,
+        spend_prover,
+        output_prover,
+        fee_rule,
+        &otp.ua,
+        memo,
+    ) {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            tracing::warn!(%error, name = %otp.name.as_str(), "buy OTP not built");
+            return false;
+        }
+    };
+    if source.submit(&transaction, "buy otp").await {
+        tracing::info!(
+            txid = %transaction.txid(),
+            name = %otp.name.as_str(),
+            "buy OTP sent"
+        );
+        true
+    } else {
+        tracing::debug!(name = %otp.name.as_str(), "buy OTP rejected — deferred");
         false
     }
 }

@@ -48,6 +48,14 @@ pub enum NameNote {
         ua: UnifiedAddress,
         prev: NameCommitment,
     },
+    /// Hand the name to a buyer. Spends the holder's note, binds `ua`
+    /// for `expires_at`, and leaves the name live.
+    Sale {
+        name: Name,
+        ua: UnifiedAddress,
+        expires_at: Expiry,
+        prev: NameCommitment,
+    },
 }
 
 impl NameNote {
@@ -55,7 +63,8 @@ impl NameNote {
         match self {
             NameNote::Claim { name, .. }
             | NameNote::Update { name, .. }
-            | NameNote::Release { name, .. } => name,
+            | NameNote::Release { name, .. }
+            | NameNote::Sale { name, .. } => name,
         }
     }
 
@@ -64,6 +73,7 @@ impl NameNote {
             NameNote::Claim { .. } => Action::Claim,
             NameNote::Update { .. } => Action::Update,
             NameNote::Release { .. } => Action::Release,
+            NameNote::Sale { .. } => Action::Sale,
         }
     }
 
@@ -72,16 +82,17 @@ impl NameNote {
         match self {
             NameNote::Claim { ua, .. }
             | NameNote::Update { ua, .. }
-            | NameNote::Release { ua, .. } => ua,
+            | NameNote::Release { ua, .. }
+            | NameNote::Sale { ua, .. } => ua,
         }
     }
 
     /// The committed expiration; absent only for a release.
     pub fn expires_at(&self) -> Option<Expiry> {
         match self {
-            NameNote::Claim { expires_at, .. } | NameNote::Update { expires_at, .. } => {
-                Some(*expires_at)
-            }
+            NameNote::Claim { expires_at, .. }
+            | NameNote::Update { expires_at, .. }
+            | NameNote::Sale { expires_at, .. } => Some(*expires_at),
             NameNote::Release { .. } => None,
         }
     }
@@ -90,7 +101,9 @@ impl NameNote {
     pub fn prev_rcm(&self) -> Option<NameCommitment> {
         match self {
             NameNote::Claim { .. } => None,
-            NameNote::Update { prev, .. } | NameNote::Release { prev, .. } => Some(*prev),
+            NameNote::Update { prev, .. }
+            | NameNote::Release { prev, .. }
+            | NameNote::Sale { prev, .. } => Some(*prev),
         }
     }
 
@@ -357,7 +370,7 @@ impl NameNote {
     /// Accepts exactly the canonical encoding: trailing-zero stripping, the
     /// six-field grammar, canonical decimal or `none` expiry, 64-char lowercase
     /// hex predecessor, action-consistent fields (release: a valid UA and `none`
-    /// expiry; claim: zero predecessor; update/release: nonzero predecessor),
+    /// expiry; claim: zero predecessor; update, release, and sale: nonzero predecessor),
     /// and a re-encode that reproduces the input byte-for-byte.
     pub fn decode<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<Self> {
         let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
@@ -409,6 +422,17 @@ impl NameNote {
                     return None;
                 }
                 NameNote::Update {
+                    name,
+                    ua,
+                    expires_at,
+                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                }
+            }
+            Action::Sale => {
+                if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                    return None;
+                }
+                NameNote::Sale {
                     name,
                     ua,
                     expires_at,

@@ -30,6 +30,20 @@ impl OtpCode {
         Self(rand::rand_core::UnwrapErr(rand::rngs::SysRng).random_range(0..1_000_000))
     }
 
+    /// The buy code for this transaction. The same key and txid always
+    /// yield the same code, so a rescan matches the payment already sent.
+    pub fn buy(key: &[u8], txid: &[u8; 32]) -> Self {
+        use hmac::{Hmac, KeyInit, Mac};
+        use sha2::Sha256;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+        mac.update(b"ZNS:buyotp");
+        mac.update(txid);
+        let digest = mac.finalize().into_bytes();
+        let n = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+        Self(n % 1_000_000)
+    }
+
     /// The six ASCII digits.
     pub fn digits(&self) -> [u8; 6] {
         let mut digits = [0u8; 6];

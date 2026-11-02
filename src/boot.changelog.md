@@ -1,5 +1,11 @@
 # Boot module changelog
 
+## 2026-11-02 — Boot keeps the sale market it reads
+
+- The sync applies list, delist, buy, and payment and returns that
+  market with the rest of the boot product. Other treasury memos
+  stay balance.
+
 ## 2026-10-31 — Replay continues the initialized wallet trees (#309)
 
 - Boot still fetches the origin tree state and completed subtree roots.
