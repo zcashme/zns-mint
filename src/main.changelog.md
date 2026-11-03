@@ -1,5 +1,9 @@
 # main.changelog.md
 
+## 2026-11-03 — Unify inbound requests
+
+- Dispatch list, delist, and buy from `MintInbound::Request` at block admission; other requests retain their existing queue.
+
 ## 2026-11-02 — A rollback keeps sales from blocks that remain
 
 - The market from boot is the one the loop runs. A rollback drops

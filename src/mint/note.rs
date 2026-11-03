@@ -407,7 +407,7 @@ impl NameNote {
         hex::decode_to_slice(parts[5], &mut prev_rcm_bytes).ok()?;
 
         let note = match Action::parse(parts[1])? {
-            Action::List | Action::Delist => return None,
+            Action::List | Action::Delist | Action::Buy => return None,
             Action::Claim => {
                 if prev_rcm_bytes != [0u8; 32] || ua_str.is_empty() {
                     return None;

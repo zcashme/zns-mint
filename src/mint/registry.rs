@@ -85,7 +85,7 @@ impl NameRecord {
             return false;
         }
         match request {
-            Request::Claim { .. } => false,
+            Request::Claim { .. } | Request::Buy { .. } => false,
             Request::Update { term, .. } => !(self.expires_at == Expiry::Never && term.is_some()),
             Request::Release { ua, .. } | Request::Delist { ua, .. } => *ua == self.ua,
             Request::List { ua, pay_to, .. } => {

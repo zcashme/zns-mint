@@ -1,5 +1,9 @@
 # Mint live-work design record
 
+## 2026-11-03 — Unify inbound requests
+
+- All six request verbs decode through `Request` and arrive as `MintInbound::Request`. Removed the separate list, delist, and buy inbound variants and request structs.
+
 ## 2026-11-02 — A list waits for the controller's code
 
 - `ZNS:otp` accepts the verbs `list` and `delist`. A list sentence also

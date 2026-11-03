@@ -286,6 +286,37 @@ async fn main() {
             );
             for (txid, inbound, paid) in arrivals {
                 match inbound {
+                    MintInbound::Request(
+                        request @ (Request::List { .. }
+                        | Request::Delist { .. }
+                        | Request::Buy { .. }),
+                    ) => {
+                        if let Some(name) = market.admit(
+                            txid,
+                            &request,
+                            paid,
+                            &registry,
+                            &fee_rule,
+                            next_height,
+                            block_mtp,
+                            |name| name_notes.note_pending(name),
+                            |name| access_code_key.buy_otp(&txid, name),
+                            |request| match request {
+                                Request::List {
+                                    name,
+                                    price,
+                                    pay_to,
+                                    ..
+                                } => Some(access_code_key.list_otp(&txid, name, *price, pay_to)),
+                                Request::Delist { name, .. } => {
+                                    Some(access_code_key.delist_otp(&txid, name))
+                                }
+                                _ => None,
+                            },
+                        ) {
+                            challenges.drop_challenges(&name);
+                        }
+                    }
                     MintInbound::Request(request) => {
                         requests.record(txid, request, paid, next_height);
                     }
@@ -365,7 +396,8 @@ async fn main() {
                             Request::Release { .. } => registry.authorize_release(&sent),
                             Request::Claim { .. }
                             | Request::List { .. }
-                            | Request::Delist { .. } => continue,
+                            | Request::Delist { .. }
+                            | Request::Buy { .. } => continue,
                         };
                         let Some(note) = authorized else {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
@@ -384,33 +416,6 @@ async fn main() {
                         }
                         if rest > Zatoshis::ZERO {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, rest);
-                        }
-                    }
-                    MintInbound::List(_) | MintInbound::Delist(_) | MintInbound::Buy(_) => {
-                        if let Some(name) = market.admit(
-                            txid,
-                            &inbound,
-                            paid,
-                            &registry,
-                            &fee_rule,
-                            next_height,
-                            block_mtp,
-                            |name| name_notes.note_pending(name),
-                            |name| access_code_key.buy_otp(&txid, name),
-                            |inbound| match inbound {
-                                MintInbound::List(list) => Some(access_code_key.list_otp(
-                                    &txid,
-                                    &list.name,
-                                    list.price,
-                                    &list.pay_to,
-                                )),
-                                MintInbound::Delist(delist) => {
-                                    Some(access_code_key.delist_otp(&txid, &delist.name))
-                                }
-                                _ => None,
-                            },
-                        ) {
-                            challenges.drop_challenges(&name);
                         }
                     }
                     MintInbound::Unrecognized => {
@@ -612,7 +617,7 @@ async fn main() {
                     }
                     challenges.admit(request.clone(), mtp_now);
                 }
-                Request::List { .. } | Request::Delist { .. } => {}
+                Request::List { .. } | Request::Delist { .. } | Request::Buy { .. } => {}
             }
         }
 

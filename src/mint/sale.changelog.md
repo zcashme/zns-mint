@@ -1,5 +1,9 @@
 # Sale module changelog
 
+## 2026-11-03 — Unify inbound requests
+
+- Marketplace admission and controller challenges use the shared `Request` variants. Listing and sale state, payment rules, and rollback history keep their existing behavior.
+
 ## 2026-11-02 — Listings and sales are read again from the chain
 
 - A list or a delist waits until the controller returns the challenge.

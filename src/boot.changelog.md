@@ -1,5 +1,9 @@
 # Boot module changelog
 
+## 2026-11-03 — Unify inbound requests
+
+- Replay marketplace requests from the shared `MintInbound::Request` representation.
+
 ## 2026-11-02 — Boot keeps the sale market it reads
 
 - The sync applies list, delist, buy, payment, and expiry and returns

@@ -73,6 +73,8 @@ pub enum Action {
     Release,
     /// Spends the holder's note and binds the buyer. The name stays live.
     Sale,
+    /// A request to buy a listed name. Not a name note.
+    Buy,
     /// A controller challenge that lists the name. Not a name note.
     List,
     /// A controller challenge that removes a listing. Not a name note.
@@ -87,6 +89,7 @@ impl Action {
             Action::Update => "update",
             Action::Release => "release",
             Action::Sale => "sale",
+            Action::Buy => "buy",
             Action::List => "list",
             Action::Delist => "delist",
         }
@@ -99,6 +102,7 @@ impl Action {
             "update" => Some(Action::Update),
             "release" => Some(Action::Release),
             "sale" => Some(Action::Sale),
+            "buy" => Some(Action::Buy),
             "list" => Some(Action::List),
             "delist" => Some(Action::Delist),
             _ => None,
@@ -144,12 +148,13 @@ impl Action {
     }
 }
 
-/// An authorized transition the loop is about to assemble.
+/// A Treasury request, decoded before authorization.
 ///
 /// Built by the Treasury memo grammar (`Request::decode`); memo bytes
 /// stay on that parser. Claims carry a term (`forever` or `<N>y`) and
 /// an optional leading pre-sale access code; updates carry `none`
-/// (carried forward), `<N>y`, or `forever` — the upgrade.
+/// (carried forward), `<N>y`, or `forever` — the upgrade. List and
+/// delist requests need controller confirmation; buys open a payment code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// Create a new registration; the term slot is never empty.
@@ -170,6 +175,11 @@ pub enum Request {
         term: Option<Term>,
     },
     Release {
+        name: Name,
+        ua: UnifiedAddress,
+    },
+    /// Buy a listed name; the reply carries its payment code.
+    Buy {
         name: Name,
         ua: UnifiedAddress,
     },
@@ -197,7 +207,8 @@ impl Request {
             | Request::Update { name, .. }
             | Request::Release { name, .. }
             | Request::List { name, .. }
-            | Request::Delist { name, .. } => name,
+            | Request::Delist { name, .. }
+            | Request::Buy { name, .. } => name,
         }
     }
 
@@ -208,6 +219,7 @@ impl Request {
             Request::Release { .. } => Action::Release,
             Request::List { .. } => Action::List,
             Request::Delist { .. } => Action::Delist,
+            Request::Buy { .. } => Action::Buy,
         }
     }
 
@@ -218,7 +230,8 @@ impl Request {
             | Request::Update { ua, .. }
             | Request::Release { ua, .. }
             | Request::List { ua, .. }
-            | Request::Delist { ua, .. } => ua,
+            | Request::Delist { ua, .. }
+            | Request::Buy { ua, .. } => ua,
         }
     }
 
@@ -228,6 +241,9 @@ impl Request {
     ///   code leading: `ZNS:claim:<code>:<term>:<name>:<ua>`
     /// - `ZNS:update:<none | <N>y | forever>:<name>:<ua>`
     /// - `ZNS:release:<name>:<ua>`
+    /// - `ZNS:list:<name>:<ua>:<t1>:<price>`
+    /// - `ZNS:delist:<name>:<ua>`
+    /// - `ZNS:buy:<name>:<ua>`
     fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Option<Request> {
         let text = match Memo::try_from(memo).ok()? {
             Memo::Text(text) => text,
@@ -239,9 +255,8 @@ impl Request {
             return None;
         }
         let action = Action::parse(fields.next()?)?;
-        // A sale is a name note the mint signs. A list or a delist is a
-        // controller challenge parsed by its own memo.
-        if action.is_sale() || action.is_list() || action.is_delist() {
+        // A sale is a name note the mint signs, never a request.
+        if action.is_sale() {
             return None;
         }
 
@@ -269,19 +284,18 @@ impl Request {
                 };
                 (None, term)
             }
-            Action::Release => (None, None),
+            Action::Release | Action::List | Action::Delist | Action::Buy => (None, None),
             Action::Sale => unreachable!("a sale is not a request"),
-            Action::List | Action::Delist => unreachable!("a listing is not this request"),
         };
 
         let name = Name::parse(fields.next()?)?;
         let ua_str = fields.next()?;
-        if ua_str.is_empty() || fields.next().is_some() {
+        if ua_str.is_empty() {
             return None;
         }
         let ua = decode_controller_ua(network, ua_str)?;
 
-        Some(match (action, term) {
+        let request = match (action, term) {
             (Action::Claim, Some(term)) => Request::Claim {
                 name,
                 ua,
@@ -293,8 +307,16 @@ impl Request {
             // A claim always carries a term.
             (Action::Claim, None) => unreachable!("claims always carry a term"),
             (Action::Sale, _) => unreachable!("a sale is not a request"),
-            (Action::List | Action::Delist, _) => unreachable!("a listing is not this request"),
-        })
+            (Action::List, _) => Request::List {
+                name,
+                ua,
+                pay_to: sale::decode_t1(network, fields.next()?)?,
+                price: sale::decode_zec(fields.next()?)?,
+            },
+            (Action::Delist, _) => Request::Delist { name, ua },
+            (Action::Buy, _) => Request::Buy { name, ua },
+        };
+        fields.next().is_none().then_some(request)
     }
 }
 
@@ -398,14 +420,6 @@ pub enum MintInbound {
     Request(Request),
     /// An OTP response — the relay memo returned; the OTP queue takes it.
     Response(OtpMemo),
-    /// Alice lists the name she owns, at the transparent receiver on
-    /// her controller address, for a price of at most eight decimals.
-    List(sale::ListRequest),
-    /// Alice takes her listing down. The controller must still own the name.
-    Delist(sale::DelistRequest),
-    /// A buy request: Bob asks for a listed name. The sale queue sends
-    /// him a buy OTP. The price and address are Alice's listing.
-    Buy(sale::BuyRequest),
     /// A payment with no parseable message: the deciding pass logs it once and
     /// the sweep keeps the value; the queue names it by its txid.
     Unrecognized,
@@ -417,12 +431,6 @@ impl MintInbound {
     pub fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Self {
         if let Some(response) = OtpMemo::decode(network, memo) {
             Self::Response(response)
-        } else if let Some(buy) = sale::BuyRequest::decode(network, memo) {
-            Self::Buy(buy)
-        } else if let Some(list) = sale::ListRequest::decode(network, memo) {
-            Self::List(list)
-        } else if let Some(delist) = sale::DelistRequest::decode(network, memo) {
-            Self::Delist(delist)
         } else if let Some(request) = Request::decode(network, memo) {
             Self::Request(request)
         } else {
@@ -662,7 +670,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                             block_mtp,
                         ),
                         Action::Claim => unreachable!("claims are routed above"),
-                        Action::List | Action::Delist => false,
+                        Action::List | Action::Delist | Action::Buy => false,
                     }
                 };
                 if accepted {
@@ -977,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_exactly_the_three_request_forms() {
+    fn accepts_the_existing_request_forms() {
         let network = MainNetwork;
 
         assert!(matches!(
@@ -1173,6 +1181,54 @@ mod tests {
             MintInbound::decode(&network, &request),
             MintInbound::Request(_)
         ));
+        let ua = test_ua();
+        let pay_to = TransparentAddress::PublicKeyHash([0x11; 20]);
+        let t1 = Address::Transparent(pay_to).encode(&network);
+        let name = Name::parse("alice").unwrap();
+        for (text, expected) in [
+            (
+                format!("ZNS:list:alice:{TEST_UA}:{t1}:1.5"),
+                Request::List {
+                    name: name.clone(),
+                    ua: ua.clone(),
+                    pay_to,
+                    price: Zatoshis::from_u64(150_000_000).unwrap(),
+                },
+            ),
+            (
+                format!("ZNS:delist:alice:{TEST_UA}"),
+                Request::Delist {
+                    name: name.clone(),
+                    ua: ua.clone(),
+                },
+            ),
+            (
+                format!("ZNS:buy:alice:{TEST_UA}"),
+                Request::Buy { name, ua },
+            ),
+        ] {
+            let memo = padded(&text);
+            assert_eq!(Request::decode(&network, &memo), Some(expected.clone()));
+            assert!(
+                matches!(MintInbound::decode(&network, &memo), MintInbound::Request(actual) if actual == expected)
+            );
+            assert!(matches!(
+                MintInbound::decode(&network, &padded(&format!("{text}:extra"))),
+                MintInbound::Unrecognized
+            ));
+        }
+        for text in [
+            format!("ZNS:list:alice:{TEST_UA}:{t1}"),
+            format!("ZNS:list:alice:{TEST_UA}:{t1}:1.123456789"),
+            "ZNS:buy:alice".to_owned(),
+            "ZNS:delist:alice".to_owned(),
+            format!("ZNS:sale:alice:{TEST_UA}"),
+        ] {
+            assert!(matches!(
+                MintInbound::decode(&network, &padded(&text)),
+                MintInbound::Unrecognized
+            ));
+        }
         // A bare payment: the queue names it by its txid.
         let garbage = padded("hello world");
         assert!(matches!(

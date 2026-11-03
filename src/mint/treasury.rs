@@ -426,7 +426,9 @@ mod tests {
             },
             Action::Release => Request::Release { name, ua },
             Action::Sale => panic!("a sale is not a request"),
-            Action::List | Action::Delist => panic!("a listing challenge is not this request"),
+            Action::List | Action::Delist | Action::Buy => {
+                panic!("a marketplace request is not this queue test fixture")
+            }
         }
     }
 
