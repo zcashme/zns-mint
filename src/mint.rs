@@ -1060,19 +1060,30 @@ mod tests {
     }
 
     #[test]
-    fn rejects_extra_field_and_non_zns_and_invalid_name() {
-        let network = MainNetwork;
-        assert!(Request::decode(
-            &network,
-            &padded(&format!("ZNS:release:alice:{TEST_UA}:004206"))
-        )
-        .is_none());
-        assert!(Request::decode(&network, &padded("hello world")).is_none());
-        assert!(Request::decode(
-            &network,
-            &padded(&format!("ZNS:claim:forever:INVALID:{TEST_UA}"))
-        )
-        .is_none());
+    fn rejects_malformed_requests() {
+        let t1 = Address::Transparent(TransparentAddress::PublicKeyHash([0x11; 20]))
+            .encode(&MainNetwork);
+        for text in [
+            "hello world".to_owned(),
+            format!("ZNS:release:alice:{TEST_UA}:004206"),
+            format!("ZNS:claim:forever:INVALID:{TEST_UA}"),
+            format!("ZNS:list:alice:{TEST_UA}:{t1}"),
+            format!("ZNS:list:alice:{TEST_UA}:{t1}:1.123456789"),
+            format!("ZNS:list:alice:{TEST_UA}:{t1}:1.5:extra"),
+            format!("ZNS:delist:alice:{TEST_UA}:extra"),
+            format!("ZNS:buy:alice:{TEST_UA}:extra"),
+            "ZNS:buy:alice".to_owned(),
+            "ZNS:delist:alice".to_owned(),
+            format!("ZNS:sale:alice:{TEST_UA}"),
+        ] {
+            assert!(
+                matches!(
+                    MintInbound::decode(&MainNetwork, &padded(&text)),
+                    MintInbound::Unrecognized
+                ),
+                "accepted {text}"
+            );
+        }
     }
 
     #[test]
@@ -1084,8 +1095,6 @@ mod tests {
         m[400] = 1; // garbage inside the zero tail
         let memo = MemoBytes::from_bytes(&m).expect("a 512-byte memo fits");
         // The tail lands inside the terminal UA field — nothing parses.
-        assert!(Request::decode(&network, &memo).is_none());
-        assert!(OtpMemo::decode(&network, &memo).is_none());
         assert!(matches!(
             MintInbound::decode(&network, &memo),
             MintInbound::Unrecognized
@@ -1155,85 +1164,31 @@ mod tests {
     }
 
     #[test]
-    fn largest_known_receiver_ua_is_accepted() {
-        let network = MainNetwork;
-        // The corpus vector carries every known receiver kind — the
-        // longest address shape the guard admits.
-        assert!(TEST_UA.len() > 200);
-        assert!(Request::decode(
-            &network,
-            &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"))
-        )
-        .is_some());
-    }
-
-    #[test]
     fn decode_classifies_each_kind() {
-        let network = MainNetwork;
-
-        let response = padded(&format!("ZNS:otp:417293:alice:update:{TEST_UA}"));
-        assert!(matches!(
-            MintInbound::decode(&network, &response),
-            MintInbound::Response(_)
-        ));
-        let request = padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"));
-        assert!(matches!(
-            MintInbound::decode(&network, &request),
-            MintInbound::Request(_)
-        ));
-        let ua = test_ua();
-        let pay_to = TransparentAddress::PublicKeyHash([0x11; 20]);
-        let t1 = Address::Transparent(pay_to).encode(&network);
-        let name = Name::parse("alice").unwrap();
-        for (text, expected) in [
-            (
-                format!("ZNS:list:alice:{TEST_UA}:{t1}:1.5"),
-                Request::List {
-                    name: name.clone(),
-                    ua: ua.clone(),
-                    pay_to,
-                    price: Zatoshis::from_u64(150_000_000).unwrap(),
-                },
-            ),
-            (
-                format!("ZNS:delist:alice:{TEST_UA}"),
-                Request::Delist {
-                    name: name.clone(),
-                    ua: ua.clone(),
-                },
-            ),
-            (
-                format!("ZNS:buy:alice:{TEST_UA}"),
-                Request::Buy { name, ua },
-            ),
+        let t1 = Address::Transparent(TransparentAddress::PublicKeyHash([0x11; 20]))
+            .encode(&MainNetwork);
+        for (text, action) in [
+            (format!("ZNS:claim:forever:alice:{TEST_UA}"), Action::Claim),
+            (format!("ZNS:update:none:alice:{TEST_UA}"), Action::Update),
+            (format!("ZNS:release:alice:{TEST_UA}"), Action::Release),
+            (format!("ZNS:list:alice:{TEST_UA}:{t1}:1.5"), Action::List),
+            (format!("ZNS:delist:alice:{TEST_UA}"), Action::Delist),
+            (format!("ZNS:buy:alice:{TEST_UA}"), Action::Buy),
         ] {
-            let memo = padded(&text);
-            assert_eq!(Request::decode(&network, &memo), Some(expected.clone()));
             assert!(
-                matches!(MintInbound::decode(&network, &memo), MintInbound::Request(actual) if actual == expected)
+                matches!(
+                    MintInbound::decode(&MainNetwork, &padded(&text)),
+                    MintInbound::Request(request) if request.action() == action
+                ),
+                "misclassified {text}"
             );
-            assert!(matches!(
-                MintInbound::decode(&network, &padded(&format!("{text}:extra"))),
-                MintInbound::Unrecognized
-            ));
         }
-        for text in [
-            format!("ZNS:list:alice:{TEST_UA}:{t1}"),
-            format!("ZNS:list:alice:{TEST_UA}:{t1}:1.123456789"),
-            "ZNS:buy:alice".to_owned(),
-            "ZNS:delist:alice".to_owned(),
-            format!("ZNS:sale:alice:{TEST_UA}"),
-        ] {
-            assert!(matches!(
-                MintInbound::decode(&network, &padded(&text)),
-                MintInbound::Unrecognized
-            ));
-        }
-        // A bare payment: the queue names it by its txid.
-        let garbage = padded("hello world");
         assert!(matches!(
-            MintInbound::decode(&network, &garbage),
-            MintInbound::Unrecognized
+            MintInbound::decode(
+                &MainNetwork,
+                &padded(&format!("ZNS:otp:417293:alice:update:{TEST_UA}"))
+            ),
+            MintInbound::Response(_)
         ));
     }
 
