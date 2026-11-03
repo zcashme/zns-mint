@@ -30,6 +30,54 @@ impl OtpCode {
         Self(rand::rand_core::UnwrapErr(rand::rngs::SysRng).random_range(0..1_000_000))
     }
 
+    /// The buy code for this transaction and name. The same inputs always
+    /// yield the same code, so a rescan matches the payment already sent.
+    pub fn buy(key: &[u8], txid: &[u8; 32], name: &[u8]) -> Self {
+        use hmac::{Hmac, KeyInit, Mac};
+        use sha2::Sha256;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+        mac.update(b"ZNS:buyotp");
+        mac.update(txid);
+        mac.update(name);
+        Self::from_mac(mac)
+    }
+
+    /// The list challenge for this request. The same inputs yield the
+    /// same code, so a rescan matches the controller's reply.
+    pub fn list(key: &[u8], txid: &[u8; 32], name: &[u8], price: u64, pay_to: &[u8]) -> Self {
+        use hmac::{Hmac, KeyInit, Mac};
+        use sha2::Sha256;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+        mac.update(b"ZNS:listotp");
+        mac.update(txid);
+        mac.update(name);
+        mac.update(&price.to_be_bytes());
+        mac.update(pay_to);
+        Self::from_mac(mac)
+    }
+
+    /// The delist challenge for this request. The same inputs yield the
+    /// same code, so a rescan matches the controller's reply.
+    pub fn delist(key: &[u8], txid: &[u8; 32], name: &[u8]) -> Self {
+        use hmac::{Hmac, KeyInit, Mac};
+        use sha2::Sha256;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+        mac.update(b"ZNS:delistotp");
+        mac.update(txid);
+        mac.update(name);
+        Self::from_mac(mac)
+    }
+
+    fn from_mac(mac: hmac::Hmac<sha2::Sha256>) -> Self {
+        use hmac::Mac;
+        let digest = mac.finalize().into_bytes();
+        let n = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+        Self(n % 1_000_000)
+    }
+
     /// The six ASCII digits.
     pub fn digits(&self) -> [u8; 6] {
         let mut digits = [0u8; 6];
@@ -77,13 +125,18 @@ impl OtpChallenge {
         correct
     }
 
-    /// The controller-facing projection: code, name, action, ua.
+    /// The controller-facing projection. A list also carries the t1 and the price.
     pub fn memo(&self) -> OtpMemo {
+        let listing = match &self.request {
+            Request::List { pay_to, price, .. } => Some((*pay_to, *price)),
+            _ => None,
+        };
         OtpMemo {
             code: self.code.clone(),
             name: self.request.name().clone(),
             action: self.request.action(),
             ua: self.request.ua().clone(),
+            listing,
         }
     }
 }

@@ -87,7 +87,10 @@ impl NameRecord {
         match request {
             Request::Claim { .. } => false,
             Request::Update { term, .. } => !(self.expires_at == Expiry::Never && term.is_some()),
-            Request::Release { ua, .. } => *ua == self.ua,
+            Request::Release { ua, .. } | Request::Delist { ua, .. } => *ua == self.ua,
+            Request::List { ua, pay_to, .. } => {
+                *ua == self.ua && self.ua.transparent() == Some(pay_to)
+            }
         }
     }
 
@@ -185,6 +188,28 @@ impl Registry {
         Some(NameNote::Release {
             name: name.clone(),
             ua: ua.clone(),
+            prev: record.commitment,
+        })
+    }
+
+    /// The note a sale signs. It spends the live record and binds `bob`
+    /// for the term the sale captured, while `held` is still that record.
+    /// The name stays live.
+    pub fn sale_transfer(
+        &self,
+        name: &Name,
+        bob: &UnifiedAddress,
+        expires_at: Expiry,
+        held: NameCommitment,
+    ) -> Option<NameNote> {
+        let record = self.record(name)?;
+        if record.commitment != held {
+            return None;
+        }
+        Some(NameNote::Sale {
+            name: name.clone(),
+            ua: bob.clone(),
+            expires_at,
             prev: record.commitment,
         })
     }
@@ -373,6 +398,30 @@ impl Registry {
         };
         if note.prev_rcm() != Some(record.commitment) {
             // The predecessor was spent whatever the note claims.
+            self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
+            return false;
+        }
+        self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
+        true
+    }
+
+    /// Offers a confirmed sale. The transaction spent this name's current
+    /// note, and the buyer is bound for the term the note carries.
+    pub fn accept_sale<P: Parameters>(
+        &mut self,
+        params: &P,
+        note: &NameNote,
+        nullifier: orchard::note::Nullifier,
+        nfs: &[orchard::note::Nullifier],
+        height: BlockHeight,
+        mtp: Timestamp,
+    ) -> bool {
+        assert!(matches!(note, NameNote::Sale { .. }));
+        let Some(record) = self.predecessor_spent(note, nfs) else {
+            self.follow_spends(nfs, height);
+            return false;
+        };
+        if note.prev_rcm() != Some(record.commitment) {
             self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
             return false;
         }
@@ -744,6 +793,65 @@ mod tests {
         let forever = record(Action::Claim, Expiry::Never, 2_000_000_000, 3);
         assert!(!forever.allows_challenge(&update(Some(Term::Years(1))), above, now));
         assert!(forever.allows_challenge(&update(None), above, now));
+    }
+
+    #[test]
+    fn a_list_challenge_requires_the_controller_and_her_t1() {
+        let above = BlockHeight::from_u32(101);
+        let now = ts(1_000_000_000);
+        let mut live = record(
+            Action::Claim,
+            Expiry::At(ts(2_000_000_000)),
+            2_000_000_000,
+            1,
+        );
+        live.ua = bob_ua();
+        let pay_to = transparent::address::TransparentAddress::PublicKeyHash([0x22; 20]);
+        let price = zcash_protocol::value::Zatoshis::from_u64(1).unwrap();
+        let list = Request::List {
+            name: test_name(),
+            ua: bob_ua(),
+            pay_to,
+            price,
+        };
+        assert!(live.allows_challenge(&list, above, now));
+        let other = transparent::address::TransparentAddress::PublicKeyHash([0x11; 20]);
+        assert!(!live.allows_challenge(
+            &Request::List {
+                name: test_name(),
+                ua: bob_ua(),
+                pay_to: other,
+                price,
+            },
+            above,
+            now,
+        ));
+        assert!(!live.allows_challenge(
+            &Request::List {
+                name: test_name(),
+                ua: test_ua(),
+                pay_to,
+                price,
+            },
+            above,
+            now,
+        ));
+        assert!(live.allows_challenge(
+            &Request::Delist {
+                name: test_name(),
+                ua: bob_ua(),
+            },
+            above,
+            now,
+        ));
+        assert!(!live.allows_challenge(
+            &Request::Delist {
+                name: test_name(),
+                ua: test_ua(),
+            },
+            above,
+            now,
+        ));
     }
 
     /// The gate applies both §4.5 clocks — the same predicate the law
@@ -1283,6 +1391,50 @@ mod tests {
         ));
         let rec = r.record(&test_name()).expect("alice still bound");
         assert_eq!(rec.action, Action::Update);
+        assert_eq!(rec.predecessor_nullifier, succ);
+    }
+
+    fn bob_ua() -> UnifiedAddress {
+        let base = test_ua();
+        UnifiedAddress::from_receivers(
+            base.orchard().copied(),
+            base.sapling().cloned(),
+            Some(transparent::address::TransparentAddress::PublicKeyHash(
+                [0x22; 20],
+            )),
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn accept_sale_binds_the_buyer_and_leaves_the_name_live() {
+        let mut r = live_alice(Expiry::At(ts(2_000_000_000)), 3_000_000_000);
+        let term = Expiry::At(ts(2_000_000_000));
+        let bob = bob_ua();
+        assert!(r
+            .sale_transfer(&test_name(), &bob, term, commitment(2))
+            .is_none());
+        let note = r
+            .sale_transfer(&test_name(), &bob, term, commitment(1))
+            .expect("alice holds the captured note");
+        assert!(note.action().is_sale());
+        assert!(!note.action().is_update());
+        assert_eq!(note.ua(), &bob);
+        let succ = nullifier(20);
+        assert!(r.accept_sale(
+            &MAIN_NETWORK,
+            &note,
+            succ,
+            &[nullifier(1)],
+            BlockHeight::from_u32(101),
+            ts(1_000_000_000),
+        ));
+        let rec = r.record(&test_name()).expect("the name stays live");
+        assert_eq!(rec.action, Action::Sale);
+        assert_eq!(rec.ua, bob);
+        assert_eq!(rec.expires_at, term);
         assert_eq!(rec.predecessor_nullifier, succ);
     }
 

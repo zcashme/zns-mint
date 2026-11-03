@@ -5,6 +5,7 @@ pub mod note;
 pub mod presale;
 pub mod pricing;
 pub mod registry;
+pub mod sale;
 pub mod treasury;
 
 // The Name Note type and its codec.
@@ -13,7 +14,9 @@ pub use time::Timestamp;
 
 pub use zcash_keys::address::UnifiedAddress;
 
+use transparent::address::TransparentAddress;
 use zcash_address::unified::{Container as _, Encoding};
+use zcash_keys::address::Address;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -44,7 +47,10 @@ pub const MIN_TREASURY_BALANCE: u64 = 200_000;
 pub const MAX_NAME_LEN: usize = 63;
 
 /// Decodes a controller UA: known receivers only, at least one shielded.
-fn decode_controller_ua<P: Parameters>(network: &P, ua_str: &str) -> Option<UnifiedAddress> {
+pub(crate) fn decode_controller_ua<P: Parameters>(
+    network: &P,
+    ua_str: &str,
+) -> Option<UnifiedAddress> {
     let (net, revision, container) = zcash_address::unified::Address::decode(ua_str).ok()?;
     if net != network.network_type()
         || revision != zcash_address::unified::Revision::R0
@@ -65,6 +71,12 @@ pub enum Action {
     Update,
     /// Terminates a name's linkage to an address
     Release,
+    /// Spends the holder's note and binds the buyer. The name stays live.
+    Sale,
+    /// A controller challenge that lists the name. Not a name note.
+    List,
+    /// A controller challenge that removes a listing. Not a name note.
+    Delist,
 }
 
 impl Action {
@@ -74,6 +86,9 @@ impl Action {
             Action::Claim => "claim",
             Action::Update => "update",
             Action::Release => "release",
+            Action::Sale => "sale",
+            Action::List => "list",
+            Action::Delist => "delist",
         }
     }
 
@@ -83,6 +98,9 @@ impl Action {
             "claim" => Some(Action::Claim),
             "update" => Some(Action::Update),
             "release" => Some(Action::Release),
+            "sale" => Some(Action::Sale),
+            "list" => Some(Action::List),
+            "delist" => Some(Action::Delist),
             _ => None,
         }
     }
@@ -104,10 +122,25 @@ impl Action {
         matches!(self, Action::Update)
     }
 
+    /// True when this action hands the name to a buyer.
+    pub const fn is_sale(self) -> bool {
+        matches!(self, Action::Sale)
+    }
+
+    /// True when this action is a list challenge.
+    pub const fn is_list(self) -> bool {
+        matches!(self, Action::List)
+    }
+
+    /// True when this action is a delist challenge.
+    pub const fn is_delist(self) -> bool {
+        matches!(self, Action::Delist)
+    }
+
     /// True when this action spends the registration's current note as
     /// its authority; a claim spends an anchor instead.
     pub const fn needs_predecessor(self) -> bool {
-        matches!(self, Action::Update | Action::Release)
+        matches!(self, Action::Update | Action::Release | Action::Sale)
     }
 }
 
@@ -140,6 +173,20 @@ pub enum Request {
         name: Name,
         ua: UnifiedAddress,
     },
+    /// List the name at `pay_to` for `price`, once the controller returns
+    /// the challenge.
+    List {
+        name: Name,
+        ua: UnifiedAddress,
+        pay_to: TransparentAddress,
+        price: Zatoshis,
+    },
+    /// Take the name off the market, once the controller returns the
+    /// challenge.
+    Delist {
+        name: Name,
+        ua: UnifiedAddress,
+    },
 }
 
 impl Request {
@@ -148,7 +195,9 @@ impl Request {
         match self {
             Request::Claim { name, .. }
             | Request::Update { name, .. }
-            | Request::Release { name, .. } => name,
+            | Request::Release { name, .. }
+            | Request::List { name, .. }
+            | Request::Delist { name, .. } => name,
         }
     }
 
@@ -157,6 +206,8 @@ impl Request {
             Request::Claim { .. } => Action::Claim,
             Request::Update { .. } => Action::Update,
             Request::Release { .. } => Action::Release,
+            Request::List { .. } => Action::List,
+            Request::Delist { .. } => Action::Delist,
         }
     }
 
@@ -165,7 +216,9 @@ impl Request {
         match self {
             Request::Claim { ua, .. }
             | Request::Update { ua, .. }
-            | Request::Release { ua, .. } => ua,
+            | Request::Release { ua, .. }
+            | Request::List { ua, .. }
+            | Request::Delist { ua, .. } => ua,
         }
     }
 
@@ -186,6 +239,11 @@ impl Request {
             return None;
         }
         let action = Action::parse(fields.next()?)?;
+        // A sale is a name note the mint signs. A list or a delist is a
+        // controller challenge parsed by its own memo.
+        if action.is_sale() || action.is_list() || action.is_delist() {
+            return None;
+        }
 
         // Claims may lead with a pre-sale code; the discriminator is whether
         // the next field is a term. Updates say `none`, `<N>y`, or `forever`.
@@ -212,6 +270,8 @@ impl Request {
                 (None, term)
             }
             Action::Release => (None, None),
+            Action::Sale => unreachable!("a sale is not a request"),
+            Action::List | Action::Delist => unreachable!("a listing is not this request"),
         };
 
         let name = Name::parse(fields.next()?)?;
@@ -232,32 +292,49 @@ impl Request {
             (Action::Release, _) => Request::Release { name, ua },
             // A claim always carries a term.
             (Action::Claim, None) => unreachable!("claims always carry a term"),
+            (Action::Sale, _) => unreachable!("a sale is not a request"),
+            (Action::List | Action::Delist, _) => unreachable!("a listing is not this request"),
         })
     }
 }
 
 /// A mint-issued challenge to a wallet, proving that the wallet controls a name via shielded-memos.
+/// A list challenge also carries the t1 and the price she is authorizing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OtpMemo {
     pub code: OtpCode,
     pub name: Name,
     pub action: Action,
     pub ua: UnifiedAddress,
+    /// The t1 and price on a list challenge. Absent for every other verb.
+    pub listing: Option<(TransparentAddress, Zatoshis)>,
 }
 
 impl OtpMemo {
-    /// Encodes the challenge memo; claims are never challenged.
+    /// Encodes the challenge memo. A list sentence appends the t1 and the
+    /// price. Claims are never challenged.
     pub fn encode<P: Parameters>(&self, network: &P) -> Option<MemoBytes> {
         if self.action.is_claim() {
             return None;
         }
         let otp: String = self.code.digits().into_iter().map(|b| b as char).collect();
-        let text = format!(
-            "ZNS:otp:{otp}:{}:{}:{}",
-            self.name.as_str(),
-            self.action.as_str(),
-            self.ua.encode(network),
-        );
+        let text = if self.action.is_list() {
+            let (pay_to, price) = self.listing.as_ref()?;
+            format!(
+                "ZNS:otp:{otp}:{}:list:{}:{}:{}",
+                self.name.as_str(),
+                self.ua.encode(network),
+                Address::Transparent(*pay_to).encode(network),
+                sale::encode_zec(*price),
+            )
+        } else {
+            format!(
+                "ZNS:otp:{otp}:{}:{}:{}",
+                self.name.as_str(),
+                self.action.as_str(),
+                self.ua.encode(network),
+            )
+        };
         // `from_bytes` pads; the UA guard bounds the length.
         MemoBytes::from_bytes(text.as_bytes()).ok()
     }
@@ -270,7 +347,7 @@ impl OtpMemo {
         };
 
         let parts: Vec<&str> = text.split(':').collect();
-        if parts.len() != 6 || parts[0] != "ZNS" || parts[1] != "otp" {
+        if parts.len() < 6 || parts[0] != "ZNS" || parts[1] != "otp" {
             return None;
         }
 
@@ -281,16 +358,33 @@ impl OtpMemo {
         let code = OtpCode::from_digits(digits.try_into().ok()?)?;
 
         let name = Name::parse(parts[3])?;
-        // Challenges never claim: parse the verb, then refuse claims.
-        let action = Action::parse(parts[4]).filter(|action| !action.is_claim())?;
+        // A challenge is an update, a release, a list, or a delist.
+        let action = Action::parse(parts[4]).filter(|action| {
+            action.is_update() || action.is_release() || action.is_list() || action.is_delist()
+        })?;
 
-        let ua = decode_controller_ua(network, parts[5])?;
+        // A list sentence carries the t1 and the price. The other verbs stay six fields.
+        let (ua, listing) = if action.is_list() {
+            if parts.len() != 8 {
+                return None;
+            }
+            let ua = decode_controller_ua(network, parts[5])?;
+            let pay_to = sale::decode_t1(network, parts[6])?;
+            let price = sale::decode_zec(parts[7])?;
+            (ua, Some((pay_to, price)))
+        } else {
+            if parts.len() != 6 {
+                return None;
+            }
+            (decode_controller_ua(network, parts[5])?, None)
+        };
 
         Some(Self {
             code,
             name,
             action,
             ua,
+            listing,
         })
     }
 }
@@ -304,6 +398,14 @@ pub enum MintInbound {
     Request(Request),
     /// An OTP response — the relay memo returned; the OTP queue takes it.
     Response(OtpMemo),
+    /// Alice lists the name she owns, at the transparent receiver on
+    /// her controller address, for a price of at most eight decimals.
+    List(sale::ListRequest),
+    /// Alice takes her listing down. The controller must still own the name.
+    Delist(sale::DelistRequest),
+    /// A buy request: Bob asks for a listed name. The sale queue sends
+    /// him a buy OTP. The price and address are Alice's listing.
+    Buy(sale::BuyRequest),
     /// A payment with no parseable message: the deciding pass logs it once and
     /// the sweep keeps the value; the queue names it by its txid.
     Unrecognized,
@@ -315,6 +417,12 @@ impl MintInbound {
     pub fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Self {
         if let Some(response) = OtpMemo::decode(network, memo) {
             Self::Response(response)
+        } else if let Some(buy) = sale::BuyRequest::decode(network, memo) {
+            Self::Buy(buy)
+        } else if let Some(list) = sale::ListRequest::decode(network, memo) {
+            Self::List(list)
+        } else if let Some(delist) = sale::DelistRequest::decode(network, memo) {
+            Self::Delist(delist)
         } else if let Some(request) = Request::decode(network, memo) {
             Self::Request(request)
         } else {
@@ -380,7 +488,7 @@ impl Name {
 
 /// Applies one verified canonical successor to every faculty: scan, clock,
 /// Registry law, wallet commit, Treasury decode, and Name Note storage.
-/// Returns Treasury arrivals for the run loop to route; boot discards them.
+/// Returns Treasury arrivals. The caller routes them.
 /// Before birthday, applies only wallet history and clock.
 /// Never fetches, never broadcasts.
 #[allow(clippy::too_many_arguments)]
@@ -545,7 +653,16 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                             height,
                             block_mtp,
                         ),
+                        Action::Sale => registry.accept_sale(
+                            network,
+                            &candidate.payload,
+                            candidate.nullifier,
+                            &nfs,
+                            height,
+                            block_mtp,
+                        ),
                         Action::Claim => unreachable!("claims are routed above"),
+                        Action::List | Action::Delist => false,
                     }
                 };
                 if accepted {
@@ -701,6 +818,124 @@ pub async fn relay<P: Parameters + Send + 'static>(
             action = request.action().as_str(),
             "controller challenge rejected — deferred"
         );
+        false
+    }
+}
+
+/// Submits a list or delist challenge. The memo verb is `list` or
+/// `delist`, so it cannot be read as an update or a release. Returns
+/// false when Treasury funds or node acceptance defer it.
+#[allow(clippy::too_many_arguments)]
+pub async fn relay_challenge<P: Parameters + Send + 'static>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    treasury_keys: &TreasuryKeys,
+    spend_prover: &SpendParameters,
+    output_prover: &OutputParameters,
+    fee_rule: &FeeRule,
+    controller_ua: &UnifiedAddress,
+    source: &CanonicalBlockSource,
+    challenge: &OtpChallenge,
+) -> bool {
+    let memo = match challenge.memo().encode(network) {
+        Some(memo) => memo,
+        None => {
+            tracing::error!(
+                name = %challenge.request.name().as_str(),
+                action = challenge.request.action().as_str(),
+                "controller challenge memo exceeds the ZIP-302 512-byte limit"
+            );
+            return false;
+        }
+    };
+    let transaction = match treasury::challenge(
+        network,
+        wallet,
+        treasury_keys,
+        spend_prover,
+        output_prover,
+        fee_rule,
+        controller_ua,
+        memo,
+    ) {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                name = %challenge.request.name().as_str(),
+                action = challenge.request.action().as_str(),
+                "controller challenge not built"
+            );
+            return false;
+        }
+    };
+    if source.submit(&transaction, "controller challenge").await {
+        tracing::info!(
+            txid = %transaction.txid(),
+            name = %challenge.request.name().as_str(),
+            action = challenge.request.action().as_str(),
+            "controller challenged"
+        );
+        true
+    } else {
+        tracing::debug!(
+            name = %challenge.request.name().as_str(),
+            action = challenge.request.action().as_str(),
+            "controller challenge rejected — deferred"
+        );
+        false
+    }
+}
+
+/// Submits the buy OTP. The memo verb is `buyotp`, so it cannot be
+/// read as an update or release challenge. Returns false when Treasury
+/// funds or node acceptance defer it.
+#[allow(clippy::too_many_arguments)]
+pub async fn relay_buy<P: Parameters + Send + 'static>(
+    network: &P,
+    wallet: &mut Wallet<P>,
+    treasury_keys: &TreasuryKeys,
+    spend_prover: &SpendParameters,
+    output_prover: &OutputParameters,
+    fee_rule: &FeeRule,
+    source: &CanonicalBlockSource,
+    otp: &sale::BuyOtp,
+) -> bool {
+    let memo = match otp.encode(network) {
+        Some(memo) => memo,
+        None => {
+            tracing::error!(
+                name = %otp.name.as_str(),
+                "buy OTP memo exceeds the ZIP-302 512-byte limit"
+            );
+            return false;
+        }
+    };
+    let transaction = match treasury::challenge(
+        network,
+        wallet,
+        treasury_keys,
+        spend_prover,
+        output_prover,
+        fee_rule,
+        &otp.ua,
+        memo,
+    ) {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            tracing::warn!(%error, name = %otp.name.as_str(), "buy OTP not built");
+            return false;
+        }
+    };
+    if source.submit(&transaction, "buy otp").await {
+        tracing::info!(
+            txid = %transaction.txid(),
+            name = %otp.name.as_str(),
+            "buy OTP sent"
+        );
+        true
+    } else {
+        tracing::debug!(name = %otp.name.as_str(), "buy OTP rejected — deferred");
         false
     }
 }
@@ -957,6 +1192,7 @@ mod tests {
                 name: Name::parse("alice").unwrap(),
                 action,
                 ua: ua.clone(),
+                listing: None,
             };
             let memo = challenge.encode(&network).expect("non-claims encode");
             assert_eq!(OtpMemo::decode(&network, &memo), Some(challenge));
@@ -966,8 +1202,23 @@ mod tests {
             code: OtpCode::for_test(*b"417293"),
             name: Name::parse("alice").unwrap(),
             action: Action::Claim,
-            ua,
+            ua: ua.clone(),
+            listing: None,
         };
         assert!(claim.encode(&network).is_none());
+
+        let pay_to = TransparentAddress::PublicKeyHash([0x11; 20]);
+        let price = Zatoshis::from_u64(150_000_000).unwrap();
+        let list = OtpMemo {
+            code: OtpCode::for_test(*b"417293"),
+            name: Name::parse("alice").unwrap(),
+            action: Action::List,
+            ua,
+            listing: Some((pay_to, price)),
+        };
+        let memo = list.encode(&network).expect("a list sentence encodes");
+        assert_eq!(OtpMemo::decode(&network, &memo), Some(list));
+        let bare = format!("ZNS:otp:417293:alice:list:{TEST_UA}");
+        assert!(OtpMemo::decode(&network, &padded(&bare)).is_none());
     }
 }

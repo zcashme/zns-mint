@@ -1,5 +1,18 @@
 # Mint live-work design record
 
+## 2026-11-02 — A list waits for the controller's code
+
+- `ZNS:otp` accepts the verbs `list` and `delist`. A list sentence also
+  carries the t1 and the price. The listing changes when the controller
+  returns that code. The list fee stays.
+
+## 2026-11-01 — A buy is its own inbound, answered by a buy OTP
+
+- `MintInbound::List` and `Delist` are Alice's listing. `Buy` is
+  `ZNS:buy:<name>:<ua>`. The reply `relay_buy` sends is `ZNS:buyotp`,
+  which does not decode as a challenge. The list, delist, and OTP
+  fees stay with the treasury.
+
 ## 2026-10-31 — The wallet owns continuous scan state (#309)
 
 - `apply_block` no longer takes a caller-fetched `ChainState`. It

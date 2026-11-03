@@ -1,5 +1,11 @@
 # `mint/presale.rs` design record
 
+## 2026-11-02 — The buy code is derived from the buy transaction
+
+- `buy_otp` is the six-digit code for that txid and name under the
+  access-code key. A rescan of the same buy produces the same code.
+  `list_otp` and `delist_otp` do the same for a listing challenge.
+
 ## 2026-10-26 — A bad pre-sale row is skipped
 
 - `from_rows` skips a name that does not parse and warns. A row

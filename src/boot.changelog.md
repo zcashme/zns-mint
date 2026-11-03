@@ -1,5 +1,12 @@
 # Boot module changelog
 
+## 2026-11-02 — Boot keeps the sale market it reads
+
+- The sync applies list, delist, buy, payment, and expiry and returns
+  that market. A buy read there stays payable and its code stays
+  unsent. A list or delist applies when its challenge reply is in the
+  chain. A sale whose note is already in the registry leaves before
+  the next block's memos. Other treasury memos stay balance.
 ## 2026-11-02 — The seed fingerprint is the custody manifest
 
 - Boot accepts the seed named by `seed_fingerprint` in

@@ -1,5 +1,25 @@
 # main.changelog.md
 
+## 2026-11-02 — A rollback keeps sales from blocks that remain
+
+- The market from boot is the one the loop runs. A rollback drops
+  listings and sales opened above the ancestor, then the blocks
+  above it are applied again. An open code is submitted after that.
+  Each block ends an expired code and a finished sale before it reads
+  that block's memos.
+- A list or delist reply refunds its payment. The listing changes
+  when the code matches.
+
+## 2026-11-01 — A buy is relayed, then the buyer is bound
+
+- Alice lists and delists. The list fee stays with the treasury.
+  A buy opens only against her current listing. The OTP fee stays
+  too. A transparent output to her listed address counts when the
+  amount minus the listed price is that OTP. The mint admits one
+  `ZNS:sale`, which spends her note and binds the buyer. The name
+  stays live. While a buy is open the name takes no update, release,
+  or lifecycle release, and a challenge already queued is dropped.
+
 ## 2026-10-31 — Continuous apply uses the wallet cursor (#309)
 
 - Remove the tree-state RPC before each live block. `apply_block` uses

@@ -25,6 +25,7 @@ use crate::mint::note::NameNoteQueue;
 use crate::mint::presale::{self, AccessCodeDerivationKey, HttpsClient, ProtectedNames};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
+use crate::mint::sale::{transparent_payments, Market};
 use crate::mint::treasury::{OtpQueue, RefundQueue, RequestQueue};
 use crate::mint::{MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
@@ -111,6 +112,8 @@ pub struct Boot<P: Parameters> {
     pub requests: RequestQueue,
     /// initialized: refunds due
     pub refunds: RefundQueue,
+    /// Listings and open sales read from the chain during boot sync.
+    pub market: Market,
     /// The exact encoded identity written to the boot identity document.
     pub treasury_address: String,
     pub registry_ufvk: String,
@@ -599,6 +602,15 @@ impl Boot<Network> {
             to = u32::from(best_height),
             "boot: syncing to chain tip"
         );
+        let fee_rule = source
+            .standard_fee()
+            .await
+            .expect("FATAL: fee rate unavailable from Zebra");
+        tracing::info!(
+            zats_per_action = fee_rule.marginal_fee().into_u64(),
+            "boot: fee rate read"
+        );
+        let mut market = Market::new();
         while wallet.tip().block_height() < best_height {
             let from_height = wallet.tip().block_height();
             let next_height = from_height + 1;
@@ -613,7 +625,8 @@ impl Boot<Network> {
                     panic!("FATAL: {reason} at height {}", u32::from(next_height))
                 });
 
-            let _ = crate::mint::apply_block(
+            let payments = transparent_payments(&block);
+            let arrivals = crate::mint::apply_block(
                 &network,
                 mint_birthday,
                 &registry_keys,
@@ -624,7 +637,61 @@ impl Boot<Network> {
                 &mut registry,
                 &mut mtp,
             );
+            let block_mtp = mtp
+                .current()
+                .expect("FATAL: MTP unavailable at the applied block");
+            market.expire(block_mtp, next_height);
+            market.reconcile(
+                |name| {
+                    registry
+                        .record(name)
+                        .map(|record| (record.ua.clone(), record.commitment))
+                },
+                next_height,
+            );
+            for (txid, inbound, paid) in arrivals {
+                if let crate::mint::MintInbound::Response(response) = &inbound {
+                    if response.action.is_list() || response.action.is_delist() {
+                        let owner = registry
+                            .record(&response.name)
+                            .map(|record| record.ua.clone());
+                        market.answer(response, owner.as_ref(), next_height);
+                    }
+                }
+                market.admit(
+                    txid,
+                    &inbound,
+                    paid,
+                    &registry,
+                    &fee_rule,
+                    next_height,
+                    block_mtp,
+                    |_| false,
+                    |name| access_code_key.buy_otp(&txid, name),
+                    |inbound| match inbound {
+                        crate::mint::MintInbound::List(list) => Some(access_code_key.list_otp(
+                            &txid,
+                            &list.name,
+                            list.price,
+                            &list.pay_to,
+                        )),
+                        crate::mint::MintInbound::Delist(delist) => {
+                            Some(access_code_key.delist_otp(&txid, &delist.name))
+                        }
+                        _ => None,
+                    },
+                );
+            }
+            market.observe(
+                |name| registry.record(name).map(|record| record.ua.clone()),
+                &payments,
+                block_mtp,
+                next_height,
+            );
         }
+        // A buy read from history stays payable. This process does not
+        // send its code, and a later rollback leaves that code unsent.
+        market.seal_replayed_buys();
         tracing::info!(
             height = u32::from(wallet.tip().block_height()),
             "boot: synced to chain tip"
@@ -667,16 +734,6 @@ impl Boot<Network> {
             usd_per_zec = %price.round_dp(2),
             zats_per_usd = oracle.current().into_u64(),
             "boot: initial price ingested"
-        );
-
-        // 6a. The node's fee rate.
-        let fee_rule = source
-            .standard_fee()
-            .await
-            .expect("FATAL: fee rate unavailable from Zebra");
-        tracing::info!(
-            zats_per_action = fee_rule.marginal_fee().into_u64(),
-            "boot: fee rate read"
         );
 
         // 6b. Pre-sale table: fail-closed at birth — no table, no start.
@@ -778,6 +835,7 @@ impl Boot<Network> {
             name_notes,
             requests,
             refunds,
+            market,
             treasury_address,
             registry_ufvk,
             seed_fingerprint: hex::encode(ceremony_fingerprint),

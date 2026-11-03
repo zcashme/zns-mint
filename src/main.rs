@@ -4,8 +4,8 @@
 //! chain tip, and verifies genesis (ceremony adoption closed, minimum Treasury balance).
 //! `main` is then a pure run loop: it follows Zebra's canonical chain,
 //! scans each new block, enforces the Registry transition law, services
-//! Treasury memos (paid claims, update and release requests, OTP responses),
-//! runs the lifecycle (expiry releases), and
+//! Treasury memos (paid claims, update and release requests, OTP responses,
+//! buy requests), runs the lifecycle (expiry releases), and
 //! sweeps the Treasury. The mint authors no genesis state: the anchor
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
@@ -21,7 +21,9 @@ use zns_mint::mint::presale;
 use zns_mint::mint::pricing::{fetch_round, Oracle};
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
-use zns_mint::mint::{relay, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use zns_mint::mint::{
+    relay, relay_buy, relay_challenge, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
@@ -54,6 +56,7 @@ async fn main() {
         mut name_notes,
         mut requests,
         mut refunds,
+        mut market,
         treasury_address,
         registry_ufvk,
         seed_fingerprint,
@@ -87,6 +90,7 @@ async fn main() {
             requests
                 .names()
                 .chain(challenges.unrelayed())
+                .chain(market.names())
                 .chain(name_notes.authorized_names()),
             challenges.relayed(),
         );
@@ -183,6 +187,11 @@ async fn main() {
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
+            market.truncate_to(rewound);
+            market.expire(
+                mtp.current().expect("FATAL: MTP unavailable after reorg"),
+                rewound,
+            );
             name_notes.rewind_to(rewound);
             name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
@@ -247,6 +256,7 @@ async fn main() {
                     panic!("FATAL: {reason} at height {}", u32::from(next_height))
                 });
 
+            let payments = zns_mint::mint::sale::transparent_payments(&block);
             let arrivals = zns_mint::mint::apply_block(
                 &network,
                 birthday,
@@ -265,6 +275,15 @@ async fn main() {
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
             challenges.expire(block_mtp);
+            market.expire(block_mtp, next_height);
+            market.reconcile(
+                |name| {
+                    registry
+                        .record(name)
+                        .map(|record| (record.ua.clone(), record.commitment))
+                },
+                next_height,
+            );
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(request) => {
@@ -275,6 +294,35 @@ async fn main() {
                     // A refused response goes back to the memo address,
                     // less the refund fee.
                     MintInbound::Response(response) => {
+                        if response.action.is_list() || response.action.is_delist() {
+                            let owner = registry
+                                .record(&response.name)
+                                .map(|record| record.ua.clone());
+                            market.answer(&response, owner.as_ref(), next_height);
+                            refunds.admit(
+                                &fee_rule,
+                                txid,
+                                &response.ua,
+                                &response.name,
+                                next_height,
+                                paid,
+                            );
+                            continue;
+                        }
+                        // A buy holds the name. A code already issued cannot
+                        // apply an update or a release, and its payment returns.
+                        if !market.allows_transition(&response.name) {
+                            challenges.drop_challenges(&response.name);
+                            refunds.admit(
+                                &fee_rule,
+                                txid,
+                                &response.ua,
+                                &response.name,
+                                next_height,
+                                paid,
+                            );
+                            continue;
+                        }
                         let Some(sent) = challenges.complete(&response) else {
                             // A wrong code, or no live challenge.
                             refunds.admit(
@@ -315,7 +363,9 @@ async fn main() {
                         let authorized = match &sent.request {
                             Request::Update { .. } => registry.authorize_update(&sent, block_mtp),
                             Request::Release { .. } => registry.authorize_release(&sent),
-                            Request::Claim { .. } => continue,
+                            Request::Claim { .. }
+                            | Request::List { .. }
+                            | Request::Delist { .. } => continue,
                         };
                         let Some(note) = authorized else {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
@@ -336,6 +386,33 @@ async fn main() {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, rest);
                         }
                     }
+                    MintInbound::List(_) | MintInbound::Delist(_) | MintInbound::Buy(_) => {
+                        if let Some(name) = market.admit(
+                            txid,
+                            &inbound,
+                            paid,
+                            &registry,
+                            &fee_rule,
+                            next_height,
+                            block_mtp,
+                            |name| name_notes.note_pending(name),
+                            |name| access_code_key.buy_otp(&txid, name),
+                            |inbound| match inbound {
+                                MintInbound::List(list) => Some(access_code_key.list_otp(
+                                    &txid,
+                                    &list.name,
+                                    list.price,
+                                    &list.pay_to,
+                                )),
+                                MintInbound::Delist(delist) => {
+                                    Some(access_code_key.delist_otp(&txid, &delist.name))
+                                }
+                                _ => None,
+                            },
+                        ) {
+                            challenges.drop_challenges(&name);
+                        }
+                    }
                     MintInbound::Unrecognized => {
                         tracing::info!(
                             txid = %txid,
@@ -346,6 +423,12 @@ async fn main() {
                     }
                 }
             }
+            market.observe(
+                |name| registry.record(name).map(|record| record.ua.clone()),
+                &payments,
+                block_mtp,
+                next_height,
+            );
         }
 
         tracing::info!(
@@ -496,6 +579,14 @@ async fn main() {
                     }
                 }
                 Request::Update { .. } | Request::Release { .. } => {
+                    if !market.allows_transition(request.name()) {
+                        tracing::info!(
+                            %txid,
+                            name = %request.name().as_str(),
+                            "challenge kept: a buy is open"
+                        );
+                        continue;
+                    }
                     if registry
                         .authorize_challenge(&name_notes, &request, target_height, mtp_now)
                         .is_none()
@@ -521,12 +612,16 @@ async fn main() {
                     }
                     challenges.admit(request.clone(), mtp_now);
                 }
+                Request::List { .. } | Request::Delist { .. } => {}
             }
         }
 
         // Queue admission is independent from submission. Retry every
         // requested challenge once during each tip pass.
         for pending in challenges.requested() {
+            if !market.allows_transition(pending.request.name()) {
+                continue;
+            }
             let Some(record) =
                 registry.authorize_challenge(&name_notes, &pending.request, target_height, mtp_now)
             else {
@@ -547,6 +642,64 @@ async fn main() {
             .await
             {
                 challenges.challenge_issued(&pending);
+            }
+        }
+
+        for pending in market.unrelayed_challenges() {
+            if !market.allows_transition(pending.request.name()) {
+                continue;
+            }
+            let Some(record) =
+                registry.authorize_challenge(&name_notes, &pending.request, target_height, mtp_now)
+            else {
+                continue;
+            };
+            let challenge = treasury::OtpChallenge {
+                request: pending.request.clone(),
+                code: pending.code.clone(),
+                expires_at: pending.expires_at,
+                attempts: 0,
+            };
+            if relay_challenge(
+                &network,
+                &mut wallet,
+                &treasury_keys,
+                &sapling_spend,
+                &sapling_output,
+                &fee_rule,
+                &record.ua,
+                &source,
+                &challenge,
+            )
+            .await
+            {
+                market.challenge_relayed(&pending.code);
+            }
+        }
+
+        for otp in market.unrelayed() {
+            if relay_buy(
+                &network,
+                &mut wallet,
+                &treasury_keys,
+                &sapling_spend,
+                &sapling_output,
+                &fee_rule,
+                &source,
+                &otp,
+            )
+            .await
+            {
+                market.relayed(&otp.name);
+            }
+        }
+
+        // A paid sale binds the buyer while the holder is unchanged,
+        // before the lifecycle admits its own release of the same name.
+        for note in market.poll(&registry, |name| name_notes.note_pending(name), tip) {
+            let name = note.name().clone();
+            if name_notes.admit(tip, note) {
+                challenges.drop_challenges(&name);
             }
         }
 
@@ -575,7 +728,8 @@ async fn main() {
         // `releases_due` re-derives the same notes per tip, so
         // admission is idempotent.
         for (name, release_note) in registry.releases_due(mtp_now) {
-            if name_notes.note_pending(&name) {
+            // A buy holds the name past a deadline that falls while it is open.
+            if name_notes.note_pending(&name) || !market.allows_transition(&name) {
                 continue;
             }
             tracing::info!(name = %name.as_str(), "lifecycle release authorized");

@@ -1,5 +1,11 @@
 # `mint/note.rs` design record
 
+## 2026-11-02 — A sale note binds the buyer
+
+- `ZNS:sale` spends the holder's note and binds the buyer for the
+  captured term. The name stays live. The verb is `sale`, so a
+  resolver can tell a new holder from an address change.
+
 ## 2026-10-26 — The UA is encoded with `encode` (#390)
 
 - Stable `zcash_keys` folds `encode_receiver_preserving` into
