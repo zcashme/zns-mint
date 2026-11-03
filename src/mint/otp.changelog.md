@@ -1,15 +1,14 @@
 # `mint/otp.rs` design record
 
-## 2026-11-03 — A mempool echo waits until its request is mined
+## 2026-11-03 — A reply waits until the request is mined
 
-- A challenge opened from the mempool keeps that request's txid. The
-  echo completes only after the tip pass accepts the mined request.
-  Until then it is held and counts no attempt.
-- If that request leaves the mempool after the challenge was sent, the
-  entry stays marked dead: the echo never counts, and the challenge is
-  not relayed from the mempool again. A request that dies unsent does
-  not use that relay. A mined request for the same challenge still
-  opens one. Six wrong codes still retire a mined challenge.
+- A code sent from the mempool is spent only once the mint has accepted
+  the mined request. A reply that arrives earlier is held. A wrong
+  guess while the request is unmined does not count toward the six.
+- If the request disappears after the code was sent, the mint remembers
+  the challenge and will not send another code for it from the mempool.
+  The next request has to be mined. A request that disappears before
+  any code is sent leaves that chance open.
 
 ## 2026-10-26 — A challenge is keyed by its whole request (#381)
 

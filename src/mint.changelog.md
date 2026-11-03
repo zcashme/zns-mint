@@ -1,10 +1,9 @@
 # Mint live-work design record
 
-## 2026-11-03 — A transparent input is not a mempool relay
+## 2026-11-03 — A transparent spend waits for a block
 
-- `spends_transparent` is a non-empty transparent vin. That transaction
-  gets no challenge until a block. The block pass still records every
-  request.
+- A mempool transaction that spends transparent coins is challenged
+  from the block that mines it.
 
 ## 2026-11-02 — A list waits for the controller's code
 

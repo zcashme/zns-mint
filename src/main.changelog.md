@@ -1,13 +1,16 @@
 # main.changelog.md
 
-## 2026-11-03 — One mempool challenge per request transaction
+## 2026-11-03 — A shielded request can be challenged before it is mined
 
-- A shielded update or release can be challenged before it is mined.
-  A transparent input waits for a block. One transaction relays one
-  challenge. The block pass still records every request and decides it.
-- An echo for an unmined request is held. A dead request's echo is
-  refunded. `zns_mint_zero_conf_relays_lost` counts a sent relay whose
-  request left the mempool.
+- An update or release paid from shielded notes gets its code while the
+  request is still in the mempool, and only when a mined request would
+  have earned that code. A request that spends transparent coins waits
+  for a block. A transaction that names several names gets one code;
+  the rest wait with it.
+- Mining the request is what lets the mint accept or refuse it. Her
+  reply is held until then. If the request disappears, the reply is
+  refunded. `zns_mint_zero_conf_relays_lost` counts a code already sent
+  for a request that never landed.
 
 ## 2026-11-02 — A rollback keeps sales from blocks that remain
 
