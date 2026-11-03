@@ -1,5 +1,14 @@
 # main.changelog.md
 
+## 2026-11-03 — One mempool challenge per request transaction
+
+- A shielded update or release can be challenged before it is mined.
+  A transparent input waits for a block. One transaction relays one
+  challenge. The block pass still records every request and decides it.
+- An echo for an unmined request is held. A dead request's echo is
+  refunded. `zns_mint_zero_conf_relays_lost` counts a sent relay whose
+  request left the mempool.
+
 ## 2026-11-02 — A rollback keeps sales from blocks that remain
 
 - The market from boot is the one the loop runs. A rollback drops

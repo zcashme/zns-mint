@@ -1,5 +1,5 @@
 //! The mint's Prometheus surface: tip gauges, boot facts, the requests
-//! in flight, and the scrape listener.
+//! in flight, lost mempool relays, and the scrape listener.
 //!
 //! Zebra's pattern, minus the knobs: the `metrics` facade resolves
 //! every call site through the globally installed recorder, so there is
@@ -208,6 +208,11 @@ pub fn guest(measurement: &str, guest_policy: &str) {
         "guest_policy" => guest_policy.to_owned(),
     )
     .set(1);
+}
+
+/// A mempool relay whose request left the mempool without being mined.
+pub fn zero_conf_relay_lost() {
+    metrics::counter!("zns_mint_zero_conf_relays_lost").increment(1);
 }
 
 /// 0 when the wallet scan is finished and the run loop has not started.

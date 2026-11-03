@@ -10,21 +10,34 @@
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
+use time::Timestamp;
+use tokio::sync::mpsc;
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_primitives::transaction::fees::zip317::FeeRule;
+use zcash_primitives::transaction::TxId;
+use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
 use zcash_protocol::value::Zatoshis;
 
 use zns_mint::boot::Boot;
-use zns_mint::mint::note::assemble;
+use zns_mint::mint::note::{assemble, NameNoteQueue};
 use zns_mint::mint::presale;
 use zns_mint::mint::pricing::{fetch_round, Oracle};
+use zns_mint::mint::registry::Registry;
+use zns_mint::mint::sale::Market;
 use zns_mint::mint::treasury;
-use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
-use zns_mint::mint::{
-    relay, relay_buy, relay_challenge, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+use zns_mint::mint::treasury::{
+    access_code_penalty, zero_conf_candidate, ChallengeAnswer, OtpQueue, RefundQueue,
 };
-use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
+use zns_mint::mint::{
+    relay, relay_buy, relay_challenge, spends_transparent, MintInbound, OtpMemo, Request,
+    REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+};
+use zns_mint::wallet::Wallet;
+use zns_mint::zcash::{
+    CanonicalBlockSource, MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE,
+};
+use zns_mint::TreasuryKeys;
 
 #[tokio::main]
 async fn main() {
@@ -81,7 +94,10 @@ async fn main() {
     // The tip session owns the stream: announcements are the answer,
     // failures repair and read the canonical tip. The loop never sees
     // transport state.
-    let mut connection = TipSession::open(chain).await;
+    let mut connection = TipSession::open(chain.clone()).await;
+    let (mempool_tx, mut mempool_rx) = mpsc::channel(64);
+    tokio::spawn(zns_mint::mint::watch_mempool(chain, mempool_tx));
+    let mut held: Vec<HeldEcho> = Vec::new();
     zns_mint::metrics::serving(true);
     'run: loop {
         // Every pass ends here, however it ended: the names the queues
@@ -94,9 +110,43 @@ async fn main() {
                 .chain(name_notes.authorized_names()),
             challenges.relayed(),
         );
-        let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {
-            panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
-        });
+        let best_height = tokio::select! {
+            tip = connection.next_tip(&source) => {
+                tip.unwrap_or_else(|error| {
+                    panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
+                })
+                .0
+            }
+            event = mempool_rx.recv() => {
+                let Some((kind, txid)) = event else {
+                    panic!("FATAL: mempool watcher ended");
+                };
+                let mtp_now = mtp
+                    .current()
+                    .expect("FATAL: MTP unavailable before a mempool relay");
+                consider_mempool(
+                    &network,
+                    &source,
+                    &mut wallet,
+                    &treasury_keys,
+                    &sapling_spend,
+                    &sapling_output,
+                    &fee_rule,
+                    &registry,
+                    &mut name_notes,
+                    &market,
+                    &mut challenges,
+                    &mut held,
+                    &mut refunds,
+                    &oracle,
+                    kind,
+                    txid,
+                    mtp_now,
+                )
+                .await;
+                continue;
+            }
+        };
         // The pre-sale read runs while the blocks below are fetched and
         // applied. If this pass restarts, the read is cancelled.
         let presale_read = presale::PendingRead::start(&presale_client);
@@ -186,6 +236,20 @@ async fn main() {
             })
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
+            // Echoes in blocks that remain can never match: the queue is
+            // empty after the rewind. Echoes above the ancestor return
+            // with those blocks.
+            held.retain(|echo| echo.height <= rewound);
+            for echo in held.drain(..) {
+                refunds.admit(
+                    &fee_rule,
+                    echo.txid,
+                    &echo.response.ua,
+                    &echo.response.name,
+                    echo.height,
+                    echo.paid,
+                );
+            }
             challenges = OtpQueue::new();
             market.truncate_to(rewound);
             market.expire(
@@ -275,6 +339,17 @@ async fn main() {
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
             challenges.expire(block_mtp);
+            settle_held(
+                &fee_rule,
+                &oracle,
+                &registry,
+                &mut name_notes,
+                &mut challenges,
+                &market,
+                &mut refunds,
+                &mut held,
+                block_mtp,
+            );
             market.expire(block_mtp, next_height);
             market.reconcile(
                 |name| {
@@ -309,82 +384,21 @@ async fn main() {
                             );
                             continue;
                         }
-                        // A buy holds the name. A code already issued cannot
-                        // apply an update or a release, and its payment returns.
-                        if !market.allows_transition(&response.name) {
-                            challenges.drop_challenges(&response.name);
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                &response.ua,
-                                &response.name,
-                                next_height,
-                                paid,
-                            );
-                            continue;
-                        }
-                        let Some(sent) = challenges.complete(&response) else {
-                            // A wrong code, or no live challenge.
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                &response.ua,
-                                &response.name,
-                                next_height,
-                                paid,
-                            );
-                            continue;
-                        };
-                        let name = sent.request.name();
-                        // A term keeps the whole payment once it covers
-                        // the price; without a term, all of it goes back.
-                        let rest = match &sent.request {
-                            Request::Update {
-                                term: Some(term), ..
-                            } => oracle
-                                .quote(name, *term)
-                                .filter(|price| paid >= *price)
-                                .map(|_| Zatoshis::ZERO),
-                            _ => Some(paid),
-                        };
-                        let Some(rest) = rest else {
-                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
-                            continue;
-                        };
-                        if name_notes.note_pending(name) {
-                            tracing::debug!(
-                                %txid,
-                                name = %name.as_str(),
-                                "transition already queued; OTP spent"
-                            );
-                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
-                            continue;
-                        }
-                        let authorized = match &sent.request {
-                            Request::Update { .. } => registry.authorize_update(&sent, block_mtp),
-                            Request::Release { .. } => registry.authorize_release(&sent),
-                            Request::Claim { .. }
-                            | Request::List { .. }
-                            | Request::Delist { .. } => continue,
-                        };
-                        let Some(note) = authorized else {
-                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
-                            continue;
-                        };
-                        // The only durable record that a release was voluntary.
-                        if sent.request.action().is_release() {
-                            tracing::info!(
-                                %txid,
-                                name = %name.as_str(),
-                                "voluntary release authorized"
-                            );
-                        }
-                        if name_notes.admit(next_height, note) {
-                            challenges.drop_challenges(name);
-                        }
-                        if rest > Zatoshis::ZERO {
-                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, rest);
-                        }
+                        take_controller_echo(
+                            &fee_rule,
+                            &oracle,
+                            &registry,
+                            &mut name_notes,
+                            &mut challenges,
+                            &market,
+                            &mut refunds,
+                            &mut held,
+                            txid,
+                            response,
+                            paid,
+                            next_height,
+                            block_mtp,
+                        );
                     }
                     MintInbound::List(_) | MintInbound::Delist(_) | MintInbound::Buy(_) => {
                         if let Some(name) = market.admit(
@@ -585,6 +599,7 @@ async fn main() {
                             name = %request.name().as_str(),
                             "challenge kept: a buy is open"
                         );
+                        challenges.refuse_unmined(txid);
                         continue;
                     }
                     if registry
@@ -597,24 +612,37 @@ async fn main() {
                             paid = paid.into_u64(),
                             "challenge not authorized"
                         );
+                        challenges.refuse_unmined(txid);
                         continue;
                     }
-                    if (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
-                        .is_none_or(|fee| paid < fee)
-                    {
+                    if !covers_challenge_fee(&fee_rule, paid) {
                         tracing::info!(
                             %txid,
                             name = %request.name().as_str(),
                             paid = paid.into_u64(),
                             "below the challenge fee"
                         );
+                        challenges.refuse_unmined(txid);
                         continue;
                     }
                     challenges.admit(request.clone(), mtp_now);
+                    challenges.confirm_mined(txid, note_height);
                 }
                 Request::List { .. } | Request::Delist { .. } => {}
             }
         }
+
+        settle_held(
+            &fee_rule,
+            &oracle,
+            &registry,
+            &mut name_notes,
+            &mut challenges,
+            &market,
+            &mut refunds,
+            &mut held,
+            mtp_now,
+        );
 
         // Queue admission is independent from submission. Retry every
         // requested challenge once during each tip pass.
@@ -906,5 +934,262 @@ async fn main() {
             hash = %tip_hash,
             "mint rules applied at canonical tip"
         );
+    }
+}
+
+/// An OTP response seen before the request it answers is mined.
+struct HeldEcho {
+    txid: TxId,
+    response: OtpMemo,
+    paid: Zatoshis,
+    height: BlockHeight,
+}
+
+/// The request payment covers the challenge fee at the node's rate.
+fn covers_challenge_fee(fee_rule: &FeeRule, paid: Zatoshis) -> bool {
+    (fee_rule.marginal_fee() * treasury::FEE_ACTIONS).is_some_and(|fee| paid >= fee)
+}
+
+/// Rules on one controller echo. An unmined request holds the echo.
+/// A dead request, a wrong code, or a refused transition refunds it.
+#[allow(clippy::too_many_arguments)]
+fn take_controller_echo(
+    fee_rule: &FeeRule,
+    oracle: &Oracle,
+    registry: &Registry,
+    name_notes: &mut NameNoteQueue,
+    challenges: &mut OtpQueue,
+    market: &Market,
+    refunds: &mut RefundQueue,
+    held: &mut Vec<HeldEcho>,
+    txid: TxId,
+    response: OtpMemo,
+    paid: Zatoshis,
+    height: BlockHeight,
+    mtp: Timestamp,
+) {
+    // A buy holds the name. A code already issued cannot apply an
+    // update or a release, and its payment returns.
+    if !market.allows_transition(&response.name) {
+        challenges.drop_challenges(&response.name);
+        refunds.admit(fee_rule, txid, &response.ua, &response.name, height, paid);
+        return;
+    }
+    let sent = match challenges.complete(&response, height) {
+        Some(ChallengeAnswer::Held) => {
+            held.push(HeldEcho {
+                txid,
+                response,
+                paid,
+                height,
+            });
+            return;
+        }
+        Some(ChallengeAnswer::Accepted { challenge, at }) => (*challenge, at),
+        None => {
+            refunds.admit(fee_rule, txid, &response.ua, &response.name, height, paid);
+            return;
+        }
+    };
+    let (sent, at) = sent;
+    let name = sent.request.name();
+    // A term keeps the whole payment once it covers the price; without
+    // a term, all of it goes back.
+    let rest = match &sent.request {
+        Request::Update {
+            term: Some(term), ..
+        } => oracle
+            .quote(name, *term)
+            .filter(|price| paid >= *price)
+            .map(|_| Zatoshis::ZERO),
+        _ => Some(paid),
+    };
+    let Some(rest) = rest else {
+        refunds.admit(fee_rule, txid, &response.ua, name, height, paid);
+        return;
+    };
+    if name_notes.note_pending(name) {
+        tracing::debug!(
+            %txid,
+            name = %name.as_str(),
+            "transition already queued; OTP spent"
+        );
+        refunds.admit(fee_rule, txid, &response.ua, name, height, paid);
+        return;
+    }
+    let authorized = match &sent.request {
+        Request::Update { .. } => registry.authorize_update(&sent, mtp),
+        Request::Release { .. } => registry.authorize_release(&sent),
+        Request::Claim { .. } | Request::List { .. } | Request::Delist { .. } => return,
+    };
+    let Some(note) = authorized else {
+        refunds.admit(fee_rule, txid, &response.ua, name, height, paid);
+        return;
+    };
+    // The only durable record that a release was voluntary.
+    if sent.request.action().is_release() {
+        tracing::info!(
+            %txid,
+            name = %name.as_str(),
+            "voluntary release authorized"
+        );
+    }
+    if name_notes.admit(at, note) {
+        challenges.drop_challenges(name);
+    }
+    if rest > Zatoshis::ZERO {
+        refunds.admit(fee_rule, txid, &response.ua, name, height, rest);
+    }
+}
+
+/// Replays echoes that were waiting on a request which has since been
+/// mined, rejected, or dropped.
+#[allow(clippy::too_many_arguments)]
+fn settle_held(
+    fee_rule: &FeeRule,
+    oracle: &Oracle,
+    registry: &Registry,
+    name_notes: &mut NameNoteQueue,
+    challenges: &mut OtpQueue,
+    market: &Market,
+    refunds: &mut RefundQueue,
+    held: &mut Vec<HeldEcho>,
+    mtp: Timestamp,
+) {
+    let waiting = std::mem::take(held);
+    for echo in waiting {
+        take_controller_echo(
+            fee_rule,
+            oracle,
+            registry,
+            name_notes,
+            challenges,
+            market,
+            refunds,
+            held,
+            echo.txid,
+            echo.response,
+            echo.paid,
+            echo.height,
+            mtp,
+        );
+    }
+}
+
+/// Relays at most one challenge for a mempool transaction, or retires
+/// one whose request left the mempool. A mined transaction waits for
+/// the block pass.
+#[allow(clippy::too_many_arguments)]
+async fn consider_mempool<P: Parameters + Send + 'static>(
+    network: &P,
+    source: &CanonicalBlockSource,
+    wallet: &mut Wallet<P>,
+    treasury_keys: &TreasuryKeys,
+    spend_prover: &sapling::circuit::SpendParameters,
+    output_prover: &sapling::circuit::OutputParameters,
+    fee_rule: &FeeRule,
+    registry: &Registry,
+    name_notes: &mut NameNoteQueue,
+    market: &Market,
+    challenges: &mut OtpQueue,
+    held: &mut Vec<HeldEcho>,
+    refunds: &mut RefundQueue,
+    oracle: &Oracle,
+    kind: MempoolChangeKind,
+    txid: TxId,
+    mtp: Timestamp,
+) {
+    match kind {
+        MempoolChangeKind::Mined => {}
+        MempoolChangeKind::Invalidated => {
+            if challenges.invalidate(txid) {
+                zns_mint::metrics::zero_conf_relay_lost();
+            }
+            settle_held(
+                fee_rule, oracle, registry, name_notes, challenges, market, refunds, held, mtp,
+            );
+        }
+        MempoolChangeKind::Added => {
+            let branch = BranchId::for_height(network, wallet.tip().block_height());
+            let tx = match source.get_raw_transaction(branch, txid).await {
+                Ok(Some(tx)) => tx,
+                Ok(None) => {
+                    tracing::debug!(%txid, "mempool transaction gone before the fetch");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, %txid, "mempool transaction not fetched");
+                    return;
+                }
+            };
+            if spends_transparent(&tx) {
+                return;
+            }
+            let tip = wallet.tip().block_height();
+            let payments = zns_mint::mint::note::decrypt_treasury_transaction(
+                network,
+                &tx,
+                tip,
+                treasury_keys,
+            );
+            let requests: Vec<(Request, Zatoshis)> = payments
+                .iter()
+                .filter_map(|(paid, memo)| match MintInbound::decode(network, memo) {
+                    MintInbound::Request(request) => Some((request, *paid)),
+                    _ => None,
+                })
+                .collect();
+            let target = tip + 1;
+            let Some(request) = zero_conf_candidate(
+                true,
+                requests.iter().map(|(request, _)| request),
+                |request| {
+                    let paid = requests
+                        .iter()
+                        .find(|(candidate, _)| candidate == request)
+                        .map(|(_, paid)| *paid)
+                        .expect("the candidate is one of this transaction's requests");
+                    !challenges.mempool_blocked(request)
+                        && market.allows_transition(request.name())
+                        && registry
+                            .authorize_challenge(name_notes, request, target, mtp)
+                            .is_some()
+                        && covers_challenge_fee(fee_rule, paid)
+                },
+            )
+            .cloned() else {
+                return;
+            };
+            let Some(record) = registry.authorize_challenge(name_notes, &request, target, mtp)
+            else {
+                return;
+            };
+            if !challenges.admit_unmined(request.clone(), txid, mtp) {
+                return;
+            }
+            let Some(pending) = challenges
+                .requested()
+                .into_iter()
+                .find(|pending| pending.request == request)
+            else {
+                return;
+            };
+            if relay(
+                network,
+                wallet,
+                treasury_keys,
+                spend_prover,
+                output_prover,
+                fee_rule,
+                &record.ua,
+                source,
+                &pending,
+                "mempool",
+            )
+            .await
+            {
+                challenges.challenge_issued(&pending);
+            }
+        }
     }
 }

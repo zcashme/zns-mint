@@ -3,6 +3,8 @@
 use rand::RngExt;
 use subtle::ConstantTimeEq;
 use time::{Duration, Timestamp};
+use zcash_primitives::transaction::TxId;
+use zcash_protocol::consensus::BlockHeight;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::mint::{Name, OtpMemo, Request};
@@ -142,12 +144,58 @@ impl OtpChallenge {
 }
 
 /// Lifecycle state for a pending challenge entry.
-#[derive(Clone, PartialEq, Eq)]
-pub enum ChallengeState {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChallengeState {
     /// Seen, its challenge memo not yet accepted by the node.
     Requested,
     /// The node accepted the challenge memo; an OTP response may arrive.
     Relayed,
+}
+
+/// A request opened from the mempool. The echo waits until the tip
+/// pass accepts the mined request. A dead request keeps the entry, and
+/// that challenge gets no second mempool relay.
+#[derive(Clone)]
+struct ZeroConf {
+    txid: TxId,
+    confirmed_at: Option<BlockHeight>,
+    dead: bool,
+}
+
+/// What `complete` did with an echo.
+#[derive(Clone)]
+pub enum ChallengeAnswer {
+    /// The code matched a relayed challenge whose request is mined.
+    /// `at` is the block that owns the name note.
+    Accepted {
+        challenge: Box<OtpChallenge>,
+        at: BlockHeight,
+    },
+    /// The echo names a relayed challenge whose request is still unmined.
+    Held,
+}
+
+#[derive(Clone)]
+struct Queued {
+    challenge: OtpChallenge,
+    state: ChallengeState,
+    zero_conf: Option<ZeroConf>,
+}
+
+impl Queued {
+    fn dead(&self) -> bool {
+        self.zero_conf
+            .as_ref()
+            .is_some_and(|zero_conf| zero_conf.dead)
+    }
+
+    /// A block-path challenge is mined. A mempool one is mined once the
+    /// tip pass has accepted its request.
+    fn mined(&self) -> bool {
+        self.zero_conf
+            .as_ref()
+            .is_none_or(|zero_conf| zero_conf.confirmed_at.is_some())
+    }
 }
 
 /// Issued challenges, in order. Every challenge was issued against
@@ -155,7 +203,7 @@ pub enum ChallengeState {
 /// when it admits a transition for that name.
 #[derive(Clone)]
 pub struct OtpQueue {
-    challenges: Vec<(OtpChallenge, ChallengeState)>,
+    challenges: Vec<Queued>,
 }
 
 impl Default for OtpQueue {
@@ -174,40 +222,124 @@ impl OtpQueue {
     /// Issues a challenge for `request` unless one is live. Its code is
     /// unique among the challenges a response could also name.
     pub fn admit(&mut self, request: Request, mtp: Timestamp) {
-        if self
-            .challenges
+        self.push(request, mtp, None);
+    }
+
+    /// Opens a mempool challenge for `request`, bound to `txid`. A live
+    /// challenge, or one already relayed from the mempool, is left as it is.
+    pub fn admit_unmined(&mut self, request: Request, txid: TxId, mtp: Timestamp) -> bool {
+        if self.mempool_blocked(&request) {
+            return false;
+        }
+        self.push(
+            request,
+            mtp,
+            Some(ZeroConf {
+                txid,
+                confirmed_at: None,
+                dead: false,
+            }),
+        );
+        true
+    }
+
+    /// A mempool relay must wait: a challenge for `request` is live, or
+    /// this challenge was already relayed from the mempool.
+    pub fn mempool_blocked(&self, request: &Request) -> bool {
+        self.live(request) || self.zero_conf_used(request)
+    }
+
+    /// This challenge was already relayed from the mempool, including one
+    /// whose request has since died.
+    fn zero_conf_used(&self, request: &Request) -> bool {
+        self.challenges
             .iter()
-            .any(|(challenge, _)| challenge.request == request)
-        {
+            .any(|queued| queued.challenge.request == *request && queued.zero_conf.is_some())
+    }
+
+    /// The tip pass accepted the mined request behind this mempool challenge.
+    pub fn confirm_mined(&mut self, txid: TxId, height: BlockHeight) {
+        for queued in &mut self.challenges {
+            let Some(zero_conf) = queued.zero_conf.as_mut() else {
+                continue;
+            };
+            if zero_conf.txid == txid && !zero_conf.dead {
+                zero_conf.confirmed_at = Some(height);
+            }
+        }
+    }
+
+    /// The tip pass rejected `txid`. A sent mempool challenge stays, marked
+    /// dead. One that was never sent is dropped.
+    pub fn refuse_unmined(&mut self, txid: TxId) {
+        self.invalidate_txid(txid);
+    }
+
+    /// `txid` left the mempool. A sent challenge stays marked dead, and
+    /// the return is true once, for the lost-relay counter. An unsent
+    /// challenge is dropped and the return is false.
+    pub fn invalidate(&mut self, txid: TxId) -> bool {
+        self.invalidate_txid(txid)
+    }
+
+    fn invalidate_txid(&mut self, txid: TxId) -> bool {
+        let Some(index) = self.challenges.iter().position(|queued| {
+            queued
+                .zero_conf
+                .as_ref()
+                .is_some_and(|zero_conf| zero_conf.txid == txid && !zero_conf.dead)
+        }) else {
+            return false;
+        };
+        if self.challenges[index].state == ChallengeState::Relayed {
+            if let Some(zero_conf) = self.challenges[index].zero_conf.as_mut() {
+                zero_conf.dead = true;
+            }
+            true
+        } else {
+            self.challenges.remove(index);
+            false
+        }
+    }
+
+    fn live(&self, request: &Request) -> bool {
+        self.challenges
+            .iter()
+            .any(|queued| queued.challenge.request == *request && !queued.dead())
+    }
+
+    fn push(&mut self, request: Request, mtp: Timestamp, zero_conf: Option<ZeroConf>) {
+        if zero_conf.is_none() && self.live(&request) {
             return;
         }
         let code = loop {
             let code = OtpCode::generate();
-            if !self.challenges.iter().any(|(challenge, _)| {
-                challenge.request.name() == request.name()
-                    && challenge.request.action() == request.action()
-                    && challenge.request.ua() == request.ua()
-                    && challenge.code == code
+            if !self.challenges.iter().any(|queued| {
+                queued.challenge.request.name() == request.name()
+                    && queued.challenge.request.action() == request.action()
+                    && queued.challenge.request.ua() == request.ua()
+                    && queued.challenge.code == code
             }) {
                 break code;
             }
         };
-        self.challenges.push((
-            OtpChallenge {
+        self.challenges.push(Queued {
+            challenge: OtpChallenge {
                 request,
                 code,
                 expires_at: mtp + Duration::seconds(D_OTP),
                 attempts: 0,
             },
-            ChallengeState::Requested,
-        ));
+            state: ChallengeState::Requested,
+            zero_conf,
+        });
     }
 
     /// The node accepted `relayed`'s memo.
     pub fn challenge_issued(&mut self, relayed: &OtpChallenge) {
-        for (challenge, state) in &mut self.challenges {
-            if challenge.request == relayed.request {
-                *state = ChallengeState::Relayed;
+        for queued in &mut self.challenges {
+            if queued.challenge.request == relayed.request && !queued.dead() {
+                queued.state = ChallengeState::Relayed;
             }
         }
     }
@@ -216,44 +348,76 @@ impl OtpQueue {
     pub fn requested(&self) -> Vec<OtpChallenge> {
         self.challenges
             .iter()
-            .filter(|(_, state)| *state == ChallengeState::Requested)
-            .map(|(challenge, _)| challenge.clone())
+            .filter(|queued| queued.state == ChallengeState::Requested && !queued.dead())
+            .map(|queued| queued.challenge.clone())
             .collect()
     }
 
     /// Drops every challenge whose window closed by `mtp`.
     pub fn expire(&mut self, mtp: Timestamp) {
         self.challenges
-            .retain(|(challenge, _)| mtp < challenge.expires_at);
+            .retain(|queued| mtp < queued.challenge.expires_at);
     }
 
     /// Drops every challenge for `name`, once a transition is admitted.
     pub fn drop_challenges(&mut self, name: &Name) {
         self.challenges
-            .retain(|(challenge, _)| challenge.request.name() != name);
+            .retain(|queued| queued.challenge.request.name() != name);
     }
 
-    /// The right code removes and returns its challenge. A wrong one
-    /// counts against every challenge the response names.
-    pub fn complete(&mut self, response: &OtpMemo) -> Option<OtpChallenge> {
-        let named = |challenge: &OtpChallenge, state: &ChallengeState| {
-            *state == ChallengeState::Relayed
-                && challenge.request.name() == &response.name
-                && challenge.request.action() == response.action
-                && challenge.request.ua() == &response.ua
+    /// The right code removes and returns its mined challenge. A code
+    /// that names an unmined mempool challenge is held, and counts no
+    /// attempt. A wrong code counts against every mined challenge the
+    /// response names. A dead request's echo counts nothing.
+    pub fn complete(
+        &mut self,
+        response: &OtpMemo,
+        echo_at: BlockHeight,
+    ) -> Option<ChallengeAnswer> {
+        let names = |queued: &Queued| {
+            queued.challenge.request.name() == &response.name
+                && queued.challenge.request.action() == response.action
+                && queued.challenge.request.ua() == &response.ua
         };
-        let right = self.challenges.iter().position(|(challenge, state)| {
-            named(challenge, state) && bool::from(challenge.code.0.ct_eq(&response.code.0))
+        let answerable = |queued: &Queued| {
+            queued.state == ChallengeState::Relayed && !queued.dead() && queued.mined()
+        };
+        let waiting = |queued: &Queued| {
+            queued.state == ChallengeState::Relayed && !queued.dead() && !queued.mined()
+        };
+        let right = self.challenges.iter().position(|queued| {
+            answerable(queued)
+                && names(queued)
+                && bool::from(queued.challenge.code.0.ct_eq(&response.code.0))
         });
         if let Some(index) = right {
-            let mut challenge = self.challenges.remove(index).0;
-            return challenge.attempt(&response.code).then_some(challenge);
+            let mut queued = self.challenges.remove(index);
+            let at = queued
+                .zero_conf
+                .as_ref()
+                .and_then(|zero_conf| zero_conf.confirmed_at)
+                .map(|mined| echo_at.max(mined))
+                .unwrap_or(echo_at);
+            return queued
+                .challenge
+                .attempt(&response.code)
+                .then_some(ChallengeAnswer::Accepted {
+                    challenge: Box::new(queued.challenge),
+                    at,
+                });
         }
-        self.challenges.retain_mut(|(challenge, state)| {
-            if !named(challenge, state) {
+        if self
+            .challenges
+            .iter()
+            .any(|queued| waiting(queued) && names(queued))
+        {
+            return Some(ChallengeAnswer::Held);
+        }
+        self.challenges.retain_mut(|queued| {
+            if !answerable(queued) || !names(queued) {
                 return true;
             }
-            challenge.attempt(&response.code) || challenge.attempts < MAX_ATTEMPTS
+            queued.challenge.attempt(&response.code) || queued.challenge.attempts < MAX_ATTEMPTS
         });
         None
     }
@@ -262,17 +426,33 @@ impl OtpQueue {
     pub fn unrelayed(&self) -> impl Iterator<Item = &Name> {
         self.challenges
             .iter()
-            .filter(|(_, state)| *state == ChallengeState::Requested)
-            .map(|(challenge, _)| challenge.request.name())
+            .filter(|queued| queued.state == ChallengeState::Requested && !queued.dead())
+            .map(|queued| queued.challenge.request.name())
     }
 
     /// The name of every relayed challenge, awaiting its response.
     pub fn relayed(&self) -> impl Iterator<Item = &Name> {
         self.challenges
             .iter()
-            .filter(|(_, state)| *state == ChallengeState::Relayed)
-            .map(|(challenge, _)| challenge.request.name())
+            .filter(|queued| queued.state == ChallengeState::Relayed && !queued.dead())
+            .map(|queued| queued.challenge.request.name())
     }
+}
+
+/// The one mempool relay for this transaction: the first update or
+/// release `ready` accepts. A transparent spend relays nothing. Claims
+/// are not challenged.
+pub fn zero_conf_candidate<'a>(
+    shielded_only: bool,
+    requests: impl IntoIterator<Item = &'a Request>,
+    ready: impl Fn(&Request) -> bool,
+) -> Option<&'a Request> {
+    if !shielded_only {
+        return None;
+    }
+    requests.into_iter().find(|request| {
+        matches!(request, Request::Update { .. } | Request::Release { .. }) && ready(request)
+    })
 }
 
 #[cfg(test)]
@@ -311,16 +491,31 @@ mod tests {
         }
     }
 
+    fn height() -> BlockHeight {
+        BlockHeight::from_u32(1)
+    }
+
+    fn txid(byte: u8) -> TxId {
+        TxId::from_bytes([byte; 32])
+    }
+
     /// Admits `request` at `t0`, its code fixed to `code`.
     fn admit(q: &mut OtpQueue, request: Request, code: [u8; 6]) -> OtpChallenge {
         q.admit(request.clone(), t0());
-        let (challenge, _) = q
+        let queued = q
             .challenges
             .iter_mut()
-            .find(|(challenge, _)| challenge.request == request)
+            .find(|queued| queued.challenge.request == request)
             .unwrap();
-        challenge.code = OtpCode::for_test(code);
-        challenge.clone()
+        queued.challenge.code = OtpCode::for_test(code);
+        queued.challenge.clone()
+    }
+
+    fn accepted(q: &mut OtpQueue, response: &OtpMemo) -> Option<OtpChallenge> {
+        match q.complete(response, height()) {
+            Some(ChallengeAnswer::Accepted { challenge, .. }) => Some(*challenge),
+            _ => None,
+        }
     }
 
     /// The controller's response to `challenge`, with `code`.
@@ -361,14 +556,10 @@ mod tests {
 
         q.drop_challenges(&test_name("alice"));
 
-        assert!(q
-            .complete(&response_for(&alice_update, *b"111111"))
-            .is_none());
-        assert!(q
-            .complete(&response_for(&alice_release, *b"222222"))
-            .is_none());
+        assert!(accepted(&mut q, &response_for(&alice_update, *b"111111")).is_none());
+        assert!(accepted(&mut q, &response_for(&alice_release, *b"222222")).is_none());
         assert_eq!(q.relayed().collect::<Vec<_>>(), [bob.request.name()]);
-        assert!(q.complete(&response_for(&bob, *b"333333")).is_some());
+        assert!(accepted(&mut q, &response_for(&bob, *b"333333")).is_some());
     }
 
     /// A challenge names its name as unrelayed until it is relayed, and
@@ -397,9 +588,9 @@ mod tests {
         q.challenge_issued(&pending);
 
         let response = response_for(&pending, *b"123456");
-        let matched = q.complete(&response).expect("live pending");
+        let matched = accepted(&mut q, &response).expect("live pending");
         assert_eq!(matched.request, pending.request);
-        assert!(q.complete(&response).is_none());
+        assert!(accepted(&mut q, &response).is_none());
         assert_eq!(q.relayed().count(), 0);
     }
 
@@ -419,21 +610,21 @@ mod tests {
         // right code still answers.
         for n in 1..MAX_ATTEMPTS {
             let wrong: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();
-            assert!(q.complete(&response_for(&pending, wrong)).is_none());
+            assert!(accepted(&mut q, &response_for(&pending, wrong)).is_none());
         }
         let right = response_for(&pending, *b"111111");
-        assert!(q.complete(&right).is_some());
+        assert!(accepted(&mut q, &right).is_some());
 
         // The hit burns exactly once — and only the entry it answered.
-        assert!(q.complete(&right).is_none());
+        assert!(accepted(&mut q, &right).is_none());
         assert_eq!(q.relayed().collect::<Vec<_>>(), [other.request.name()]);
 
         // Six wrong responses retire the entry they name, and only it.
         for n in 1..=MAX_ATTEMPTS {
             let wrong: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();
-            assert!(q.complete(&response_for(&other, wrong)).is_none());
+            assert!(accepted(&mut q, &response_for(&other, wrong)).is_none());
         }
-        assert!(q.complete(&response_for(&other, *b"333333")).is_none());
+        assert!(accepted(&mut q, &response_for(&other, *b"333333")).is_none());
         assert_eq!(q.relayed().count(), 0);
     }
 
@@ -451,11 +642,11 @@ mod tests {
         q.challenge_issued(&planted);
         q.challenge_issued(&renewal);
 
-        let answered = q.complete(&response_for(&renewal, *b"222222")).unwrap();
+        let answered = accepted(&mut q, &response_for(&renewal, *b"222222")).unwrap();
         assert_eq!(answered.request, renewal.request);
         assert_eq!(answered.attempts, 0);
         assert_eq!(q.relayed().count(), 1);
-        assert_eq!(q.challenges[0].0.attempts, 0);
+        assert_eq!(q.challenges[0].challenge.attempts, 0);
     }
 
     /// Only `expire` closes a challenge's window.
@@ -466,7 +657,7 @@ mod tests {
         q.challenge_issued(&pending);
 
         q.expire(pending.expires_at);
-        assert!(q.complete(&response_for(&pending, *b"123456")).is_none());
+        assert!(accepted(&mut q, &response_for(&pending, *b"123456")).is_none());
         assert_eq!(q.relayed().count(), 0);
     }
 
@@ -476,7 +667,96 @@ mod tests {
         let mut q = OtpQueue::new();
         let pending = admit(&mut q, update("alice"), *b"123456");
 
-        assert!(q.complete(&response_for(&pending, *b"123456")).is_none());
+        assert!(accepted(&mut q, &response_for(&pending, *b"123456")).is_none());
+        assert_eq!(q.requested().len(), 1);
+    }
+
+    /// A transparent spend is not relayed before it is mined. One
+    /// transaction yields the first update or release that is ready,
+    /// and a challenge already relayed from the mempool is skipped.
+    #[test]
+    fn one_shielded_transaction_relays_one_ready_challenge() {
+        let batch = [update("alice"), update("bob"), release("carol")];
+        assert!(zero_conf_candidate(false, &batch, |_| true).is_none());
+        assert_eq!(
+            zero_conf_candidate(true, &batch, |_| true).map(Request::name),
+            Some(batch[0].name())
+        );
+        assert_eq!(
+            zero_conf_candidate(true, &batch, |request| request.name().as_str() != "alice")
+                .map(Request::name),
+            Some(batch[1].name())
+        );
+        let claims = [Request::Claim {
+            name: test_name("alice"),
+            ua: mainnet_ua(),
+            term: Term::Forever,
+            code: None,
+        }];
+        assert!(zero_conf_candidate(true, &claims, |_| true).is_none());
+    }
+
+    /// The second request for a challenge waits for a block, including
+    /// after the relayed request dies. A mined request still opens one.
+    /// A request that dies before its challenge is sent does not use the relay.
+    #[test]
+    fn a_second_mempool_request_waits_after_the_first_dies() {
+        let mut q = OtpQueue::new();
+        let request = update("alice");
+        assert!(q.admit_unmined(request.clone(), txid(1), t0()));
+        assert!(!q.invalidate(txid(1)));
+        assert!(q.admit_unmined(request.clone(), txid(2), t0()));
+        let pending = q.requested().remove(0);
+        q.challenge_issued(&pending);
+        assert!(q.invalidate(txid(2)));
+        assert!(!q.invalidate(txid(2)));
+        assert!(!q.admit_unmined(request.clone(), txid(3), t0()));
+        q.admit(request, t0());
+        assert_eq!(q.requested().len(), 1);
+    }
+
+    /// An echo against an unmined request is held and counts no attempt.
+    /// Once the request dies, the same echo counts nothing.
+    #[test]
+    fn an_unmined_echo_is_held_and_a_dead_one_is_refused() {
+        let mut q = OtpQueue::new();
+        let request = update("alice");
+        assert!(q.admit_unmined(request.clone(), txid(1), t0()));
+        q.challenges[0].challenge.code = OtpCode::for_test(*b"111111");
+        let pending = q.challenges[0].challenge.clone();
+        q.challenge_issued(&pending);
+        let right = response_for(&pending, *b"111111");
+        let wrong = response_for(&pending, *b"000000");
+
+        assert!(matches!(
+            q.complete(&wrong, height()),
+            Some(ChallengeAnswer::Held)
+        ));
+        assert!(matches!(
+            q.complete(&right, height()),
+            Some(ChallengeAnswer::Held)
+        ));
+        assert_eq!(q.challenges[0].challenge.attempts, 0);
+
+        q.confirm_mined(txid(1), BlockHeight::from_u32(5));
+        assert!(accepted(&mut q, &wrong).is_none());
+        assert_eq!(q.challenges[0].challenge.attempts, 1);
+        let Some(ChallengeAnswer::Accepted { at, .. }) =
+            q.complete(&right, BlockHeight::from_u32(2))
+        else {
+            panic!("mined echo should complete");
+        };
+        assert_eq!(at, BlockHeight::from_u32(5));
+
+        assert!(q.admit_unmined(request.clone(), txid(4), t0()));
+        q.challenges[0].challenge.code = OtpCode::for_test(*b"222222");
+        let pending = q.challenges[0].challenge.clone();
+        q.challenge_issued(&pending);
+        let right = response_for(&pending, *b"222222");
+        assert!(q.invalidate(txid(4)));
+        assert!(q.complete(&right, height()).is_none());
+        assert_eq!(q.challenges[0].challenge.attempts, 0);
+        q.admit(request, t0());
         assert_eq!(q.requested().len(), 1);
     }
 }

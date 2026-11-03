@@ -1,5 +1,11 @@
 # Mint live-work design record
 
+## 2026-11-03 — A transparent input is not a mempool relay
+
+- `spends_transparent` is a non-empty transparent vin. That transaction
+  gets no challenge until a block. The block pass still records every
+  request.
+
 ## 2026-11-02 — A list waits for the controller's code
 
 - `ZNS:otp` accepts the verbs `list` and `delist`. A list sentence also
