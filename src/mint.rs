@@ -712,8 +712,8 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     // The scanner drops note plaintexts, so Treasury memos decode
     // here, once per block, into arrivals; the block remains the
     // durable record. Decisions belong to the run loop. The mempool
-    // path may relay one challenge first. It records nothing: this
-    // pass stays the only intake.
+    // quick path reads the same memos earlier and ephemerally; it
+    // records nothing — this pass stays the only intake.
     let arrivals = treasury_memos
         .into_iter()
         .map(|(txid, paid, memo)| (txid, MintInbound::decode(network, &memo), paid))
