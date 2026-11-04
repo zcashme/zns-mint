@@ -98,14 +98,21 @@ async fn main() {
                 .chain(name_notes.authorized_names()),
             challenges.relayed(),
         );
-        let best_height = tokio::select! {
-            tip = connection.next_tip(&source) => {
-                tip.unwrap_or_else(|error| {
-                    panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
-                })
-                .0
-            }
-            event = mempool_rx.recv() => {
+        // The tip read stays pinned, on its own handle, across mempool
+        // events. A reconnect pause runs to the end.
+        let tip_source = source.clone();
+        let mut tip_wait = std::pin::pin!(connection.next_tip(&tip_source));
+        let best_height = loop {
+            tokio::select! {
+                biased;
+                tip = &mut tip_wait => {
+                    break tip
+                        .unwrap_or_else(|error| {
+                            panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
+                        })
+                        .0;
+                }
+                event = mempool_rx.recv() => {
                 let Some((kind, txid)) = event else {
                     panic!("FATAL: mempool watcher ended");
                 };
@@ -187,7 +194,7 @@ async fn main() {
                 {
                     challenges.challenge_issued(&pending);
                 }
-                continue;
+            }
             }
         };
         // The pre-sale read runs while the blocks below are fetched and

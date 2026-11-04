@@ -6,6 +6,8 @@
   per transaction. A transparent spend waits for its block.
 - A response counts once the wallet holds its request mined; else it
   is refunded.
+- A mempool transaction leaves the tip read running, so a reconnect
+  pause finishes and the block is applied.
 
 ## 2026-11-02 — A rollback keeps sales from blocks that remain
 
