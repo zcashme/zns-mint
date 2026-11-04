@@ -21,9 +21,7 @@ use zns_mint::mint::presale;
 use zns_mint::mint::pricing::{fetch_round, Oracle};
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
-use zns_mint::mint::{
-    relay, relay_buy, relay_challenge, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
-};
+use zns_mint::mint::{relay, relay_buy, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
@@ -641,7 +639,7 @@ async fn main() {
                 &fee_rule,
                 &record.ua,
                 &source,
-                &pending,
+                &pending.memo(),
                 "tip",
             )
             .await
@@ -650,35 +648,26 @@ async fn main() {
             }
         }
 
-        for pending in market.unrelayed_challenges() {
-            if !market.allows_transition(pending.request.name()) {
-                continue;
-            }
-            let Some(record) =
-                registry.authorize_challenge(&name_notes, &pending.request, target_height, mtp_now)
-            else {
-                continue;
-            };
-            let challenge = treasury::OtpChallenge {
-                request: pending.request.clone(),
-                code: pending.code.clone(),
-                expires_at: pending.expires_at,
-                attempts: 0,
-            };
-            if relay_challenge(
+        for challenge in market.unrelayed_challenges(|name| {
+            registry
+                .challengeable(&name_notes, name, target_height, mtp_now)
+                .map(|record| record.ua.clone())
+        }) {
+            if relay(
                 &network,
                 &mut wallet,
                 &treasury_keys,
                 &sapling_spend,
                 &sapling_output,
                 &fee_rule,
-                &record.ua,
+                &challenge.ua,
                 &source,
                 &challenge,
+                "market",
             )
             .await
             {
-                market.challenge_relayed(&pending.code);
+                market.challenge_relayed(&challenge.code);
             }
         }
 

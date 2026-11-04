@@ -536,18 +536,23 @@ impl MarketChallenge {
         }
     }
 
-    fn request(&self) -> Request {
+    fn memo(&self) -> OtpMemo {
+        OtpMemo {
+            code: self.code.clone(),
+            name: self.name().clone(),
+            action: self.action(),
+            ua: self.ua().clone(),
+            listing: match &self.kind {
+                ChallengeKind::List(listing) => Some((listing.pay_to, listing.price)),
+                ChallengeKind::Delist { .. } => None,
+            },
+        }
+    }
+
+    fn held_by(&self, owner: &UnifiedAddress) -> bool {
         match &self.kind {
-            ChallengeKind::List(listing) => Request::List {
-                name: listing.name.clone(),
-                ua: listing.ua.clone(),
-                pay_to: listing.pay_to,
-                price: listing.price,
-            },
-            ChallengeKind::Delist { name, ua } => Request::Delist {
-                name: name.clone(),
-                ua: ua.as_ref().clone(),
-            },
+            ChallengeKind::List(listing) => is_owner_listing(owner, &listing.ua, &listing.pay_to),
+            ChallengeKind::Delist { ua, .. } => ua.as_ref() == owner,
         }
     }
 
@@ -586,13 +591,6 @@ impl MarketChallenge {
             ChallengeKind::List(_) => false,
         }
     }
-}
-
-/// A controller challenge the relay loop has not sent.
-pub struct RelayChallenge {
-    pub request: Request,
-    pub code: OtpCode,
-    pub expires_at: Timestamp,
 }
 
 enum MarketEvent {
@@ -882,16 +880,17 @@ impl Market {
         Ok(otp)
     }
 
-    /// Controller challenges not yet sent.
-    pub fn unrelayed_challenges(&self) -> Vec<RelayChallenge> {
+    /// Controller challenges not yet sent, while `owner` still holds the
+    /// name on the terms each one names.
+    pub fn unrelayed_challenges(
+        &self,
+        owner: impl Fn(&Name) -> Option<UnifiedAddress>,
+    ) -> Vec<OtpMemo> {
         self.challenges
             .iter()
-            .filter(|challenge| !challenge.relayed)
-            .map(|challenge| RelayChallenge {
-                request: challenge.request(),
-                code: challenge.code.clone(),
-                expires_at: challenge.expires_at,
-            })
+            .filter(|challenge| !challenge.relayed && !self.sales.is_open(challenge.name()))
+            .filter(|challenge| owner(challenge.name()).is_some_and(|ua| challenge.held_by(&ua)))
+            .map(MarketChallenge::memo)
             .collect()
     }
 
@@ -2049,7 +2048,31 @@ mod tests {
             market.propose_delist(&name(), &owner, &owner, code, mtp(), height()),
             Err(MarketRefusal::CodeTaken)
         );
-        assert_eq!(market.unrelayed_challenges().len(), 1);
+        assert_eq!(
+            market.unrelayed_challenges(|_| Some(owner.clone())).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_challenge_is_sent_only_while_she_holds_the_name() {
+        let (owner, _) = alice();
+        let mut market = Market::new();
+        market
+            .propose_list(
+                &list_for(150_000_000),
+                &owner,
+                OtpCode::for_test(*b"042831"),
+                mtp(),
+                height(),
+            )
+            .unwrap();
+        assert_eq!(
+            market.unrelayed_challenges(|_| Some(owner.clone())).len(),
+            1
+        );
+        assert!(market.unrelayed_challenges(|_| Some(bob())).is_empty());
+        assert!(market.unrelayed_challenges(|_| None).is_empty());
     }
 
     #[test]
@@ -2067,9 +2090,14 @@ mod tests {
             )
             .unwrap();
         market.challenge_relayed(&code);
-        assert!(market.unrelayed_challenges().is_empty());
+        assert!(market
+            .unrelayed_challenges(|_| Some(owner.clone()))
+            .is_empty());
         market.truncate_to(height());
-        assert_eq!(market.unrelayed_challenges().len(), 1);
+        assert_eq!(
+            market.unrelayed_challenges(|_| Some(owner.clone())).len(),
+            1
+        );
 
         let (mut market, owner, _) = listed(100_000_000);
         let buy = OtpCode::for_test(*b"123456");

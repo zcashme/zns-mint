@@ -68,29 +68,31 @@ impl NameRecord {
         }
     }
 
+    /// Both §4.5 clocks live at `mtp_now`, and the trigger is newer than
+    /// this record.
+    fn is_challengeable(&self, trigger_height: BlockHeight, mtp_now: Timestamp) -> bool {
+        !self.is_release_due(mtp_now) && trigger_height > self.confirmed_height
+    }
+
     /// The clock-and-verb check behind [`Registry::authorize_challenge`]:
-    /// both §4.5 clocks live at `mtp_now`, trigger newer than this
-    /// record, release from this record's controller, forever names
-    /// take no term. Claims are never challenged.
+    /// release from this record's controller, forever names take no
+    /// term. Claims are never challenged.
     fn allows_challenge(
         &self,
         request: &Request,
         trigger_height: BlockHeight,
         mtp_now: Timestamp,
     ) -> bool {
-        if self.is_release_due(mtp_now) {
-            return false;
-        }
-        if trigger_height <= self.confirmed_height {
+        if !self.is_challengeable(trigger_height, mtp_now) {
             return false;
         }
         match request {
-            Request::Claim { .. } | Request::Buy { .. } => false,
             Request::Update { term, .. } => !(self.expires_at == Expiry::Never && term.is_some()),
-            Request::Release { ua, .. } | Request::Delist { ua, .. } => *ua == self.ua,
-            Request::List { ua, pay_to, .. } => {
-                *ua == self.ua && self.ua.transparent() == Some(pay_to)
-            }
+            Request::Release { ua, .. } => *ua == self.ua,
+            Request::Claim { .. }
+            | Request::List { .. }
+            | Request::Delist { .. }
+            | Request::Buy { .. } => false,
         }
     }
 
@@ -233,6 +235,23 @@ impl Registry {
         record
             .allows_challenge(request, trigger_height, mtp_now)
             .then(|| record.clone())
+    }
+
+    /// The record a market challenge goes to, under the same gate as
+    /// [`Self::authorize_challenge`]. The market rules on the verb.
+    pub fn challengeable(
+        &self,
+        name_notes: &NameNoteQueue,
+        name: &Name,
+        trigger_height: BlockHeight,
+        mtp_now: Timestamp,
+    ) -> Option<&NameRecord> {
+        if name_notes.note_pending(name) {
+            return None;
+        }
+        self.records
+            .get(name)
+            .filter(|record| record.is_challengeable(trigger_height, mtp_now))
     }
 
     /// The record for a name at the applied tip. Released names are absent.
@@ -793,65 +812,6 @@ mod tests {
         let forever = record(Action::Claim, Expiry::Never, 2_000_000_000, 3);
         assert!(!forever.allows_challenge(&update(Some(Term::Years(1))), above, now));
         assert!(forever.allows_challenge(&update(None), above, now));
-    }
-
-    #[test]
-    fn a_list_challenge_requires_the_controller_and_her_t1() {
-        let above = BlockHeight::from_u32(101);
-        let now = ts(1_000_000_000);
-        let mut live = record(
-            Action::Claim,
-            Expiry::At(ts(2_000_000_000)),
-            2_000_000_000,
-            1,
-        );
-        live.ua = bob_ua();
-        let pay_to = transparent::address::TransparentAddress::PublicKeyHash([0x22; 20]);
-        let price = zcash_protocol::value::Zatoshis::from_u64(1).unwrap();
-        let list = Request::List {
-            name: test_name(),
-            ua: bob_ua(),
-            pay_to,
-            price,
-        };
-        assert!(live.allows_challenge(&list, above, now));
-        let other = transparent::address::TransparentAddress::PublicKeyHash([0x11; 20]);
-        assert!(!live.allows_challenge(
-            &Request::List {
-                name: test_name(),
-                ua: bob_ua(),
-                pay_to: other,
-                price,
-            },
-            above,
-            now,
-        ));
-        assert!(!live.allows_challenge(
-            &Request::List {
-                name: test_name(),
-                ua: test_ua(),
-                pay_to,
-                price,
-            },
-            above,
-            now,
-        ));
-        assert!(live.allows_challenge(
-            &Request::Delist {
-                name: test_name(),
-                ua: bob_ua(),
-            },
-            above,
-            now,
-        ));
-        assert!(!live.allows_challenge(
-            &Request::Delist {
-                name: test_name(),
-                ua: test_ua(),
-            },
-            above,
-            now,
-        ));
     }
 
     /// The gate applies both §4.5 clocks — the same predicate the law

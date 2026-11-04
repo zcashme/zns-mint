@@ -32,7 +32,7 @@ use crate::zcash::{CanonicalBlockSource, ChainClient, MempoolChangeKind, Mempool
 use crate::TreasuryKeys;
 
 use presale::AccessCode;
-use treasury::{OtpChallenge, OtpCode};
+use treasury::OtpCode;
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
@@ -757,8 +757,8 @@ pub fn apply_block<P: Parameters + Send + 'static>(
 // OtpMemo submission
 // ===========================================================================
 
-/// Builds and submits the challenge for a request already admitted to
-/// `OtpQueue`. Returns false when Treasury funds or node acceptance defer it.
+/// Builds and submits a controller challenge. Returns false when Treasury
+/// funds or node acceptance defer it.
 #[allow(clippy::too_many_arguments)]
 pub async fn relay<P: Parameters + Send + 'static>(
     network: &P,
@@ -769,20 +769,19 @@ pub async fn relay<P: Parameters + Send + 'static>(
     fee_rule: &FeeRule,
     controller_ua: &UnifiedAddress,
     source: &CanonicalBlockSource,
-    challenge: &OtpChallenge,
+    challenge: &OtpMemo,
     lane: &'static str,
 ) -> bool {
-    let request = &challenge.request;
-    let memo = match challenge.memo().encode(network) {
+    let memo = match challenge.encode(network) {
         Some(memo) => memo,
-        None if request.action().is_claim() => {
+        None if challenge.action.is_claim() => {
             unreachable!("claims never enter the controller challenge relay")
         }
         None => {
             tracing::error!(
                 lane,
-                name = %request.name().as_str(),
-                action = request.action().as_str(),
+                name = %challenge.name.as_str(),
+                action = challenge.action.as_str(),
                 "controller challenge memo exceeds the ZIP-302 512-byte limit"
             );
             return false;
@@ -803,8 +802,8 @@ pub async fn relay<P: Parameters + Send + 'static>(
             tracing::warn!(
                 lane,
                 %error,
-                name = %request.name().as_str(),
-                action = request.action().as_str(),
+                name = %challenge.name.as_str(),
+                action = challenge.action.as_str(),
                 "controller challenge not built"
             );
             return false;
@@ -814,81 +813,16 @@ pub async fn relay<P: Parameters + Send + 'static>(
         tracing::info!(
             lane,
             txid = %transaction.txid(),
-            name = %request.name().as_str(),
-            action = request.action().as_str(),
+            name = %challenge.name.as_str(),
+            action = challenge.action.as_str(),
             "controller challenged"
         );
         true
     } else {
         tracing::debug!(
             lane,
-            name = %request.name().as_str(),
-            action = request.action().as_str(),
-            "controller challenge rejected — deferred"
-        );
-        false
-    }
-}
-
-/// Submits a list or delist challenge. The memo verb is `list` or
-/// `delist`, so it cannot be read as an update or a release. Returns
-/// false when Treasury funds or node acceptance defer it.
-#[allow(clippy::too_many_arguments)]
-pub async fn relay_challenge<P: Parameters + Send + 'static>(
-    network: &P,
-    wallet: &mut Wallet<P>,
-    treasury_keys: &TreasuryKeys,
-    spend_prover: &SpendParameters,
-    output_prover: &OutputParameters,
-    fee_rule: &FeeRule,
-    controller_ua: &UnifiedAddress,
-    source: &CanonicalBlockSource,
-    challenge: &OtpChallenge,
-) -> bool {
-    let memo = match challenge.memo().encode(network) {
-        Some(memo) => memo,
-        None => {
-            tracing::error!(
-                name = %challenge.request.name().as_str(),
-                action = challenge.request.action().as_str(),
-                "controller challenge memo exceeds the ZIP-302 512-byte limit"
-            );
-            return false;
-        }
-    };
-    let transaction = match treasury::challenge(
-        network,
-        wallet,
-        treasury_keys,
-        spend_prover,
-        output_prover,
-        fee_rule,
-        controller_ua,
-        memo,
-    ) {
-        Ok(transaction) => transaction,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                name = %challenge.request.name().as_str(),
-                action = challenge.request.action().as_str(),
-                "controller challenge not built"
-            );
-            return false;
-        }
-    };
-    if source.submit(&transaction, "controller challenge").await {
-        tracing::info!(
-            txid = %transaction.txid(),
-            name = %challenge.request.name().as_str(),
-            action = challenge.request.action().as_str(),
-            "controller challenged"
-        );
-        true
-    } else {
-        tracing::debug!(
-            name = %challenge.request.name().as_str(),
-            action = challenge.request.action().as_str(),
+            name = %challenge.name.as_str(),
+            action = challenge.action.as_str(),
             "controller challenge rejected — deferred"
         );
         false
