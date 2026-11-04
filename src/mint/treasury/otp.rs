@@ -216,6 +216,33 @@ impl OtpQueue {
             .any(|(challenge, _, _)| challenge.request == *request)
     }
 
+    /// Points a live challenge for `request` at `txid`. A request with
+    /// no challenge is left alone.
+    pub fn rebind(&mut self, request: &Request, txid: TxId) -> bool {
+        let Some((_, _, backing)) = self
+            .challenges
+            .iter_mut()
+            .find(|(challenge, _, _)| challenge.request == *request)
+        else {
+            return false;
+        };
+        *backing = txid;
+        true
+    }
+
+    /// The txid a relayed challenge with this code would spend. The
+    /// challenge stays.
+    pub fn backing(&self, response: &OtpMemo) -> Option<TxId> {
+        self.challenges.iter().find_map(|(challenge, state, txid)| {
+            (*state == ChallengeState::Relayed
+                && challenge.request.name() == &response.name
+                && challenge.request.action() == response.action
+                && challenge.request.ua() == &response.ua
+                && bool::from(challenge.code.0.ct_eq(&response.code.0)))
+            .then_some(*txid)
+        })
+    }
+
     /// The node accepted `relayed`'s memo.
     pub fn challenge_issued(&mut self, relayed: &OtpChallenge) {
         for (challenge, state, _) in &mut self.challenges {
@@ -513,5 +540,24 @@ mod tests {
 
         assert!(q.complete(&response_for(&pending, *b"123456")).is_none());
         assert_eq!(q.requested().len(), 1);
+    }
+
+    /// Reading the txid leaves the challenge. Rebinding points it at
+    /// the mined repeat. Completing then spends it.
+    #[test]
+    fn backing_reads_the_txid_and_rebind_points_at_the_repeat() {
+        let mut q = OtpQueue::new();
+        let pending = admit(&mut q, update("alice"), *b"111111");
+        let response = response_for(&pending, *b"111111");
+        assert!(q.backing(&response).is_none());
+        q.challenge_issued(&pending);
+        assert_eq!(q.backing(&response), Some(txid(1)));
+        assert!(q.rebind(&pending.request, txid(2)));
+        assert_eq!(q.backing(&response), Some(txid(2)));
+        assert_eq!(q.relayed().count(), 1);
+        assert!(!q.rebind(&release("alice"), txid(3)));
+        assert_eq!(q.challenges.len(), 1);
+        assert!(q.complete(&response).is_some());
+        assert!(q.backing(&response).is_none());
     }
 }

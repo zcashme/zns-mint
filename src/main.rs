@@ -313,6 +313,9 @@ async fn main() {
         // Apply every missing canonical block in strict order: fetch with
         // retry, verify the terminal block, call `apply_block` — the
         // application itself is the one body shared with boot.
+        // Requests whose code was spent while their block was applied.
+        // The request pass must not open a second code for them.
+        let mut answered: Vec<Request> = Vec::new();
         while wallet.tip().block_height() < best_height {
             let from_height = wallet.tip().block_height();
             let next_height = from_height + 1;
@@ -375,6 +378,29 @@ async fn main() {
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
             challenges.expire(block_mtp);
+            // A mined repeat takes the code before this block's replies
+            // are read. The fee and the authorization are the same ones
+            // the request pass requires.
+            let trigger = next_height + 1;
+            for (txid, inbound, paid) in &arrivals {
+                let MintInbound::Request(
+                    request @ (Request::Update { .. } | Request::Release { .. }),
+                ) = inbound
+                else {
+                    continue;
+                };
+                if !challenges.holds(request)
+                    || !market.allows_transition(request.name())
+                    || registry
+                        .authorize_challenge(&name_notes, request, trigger, block_mtp)
+                        .is_none()
+                    || (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
+                        .is_none_or(|fee| *paid < fee)
+                {
+                    continue;
+                }
+                challenges.rebind(request, *txid);
+            }
             market.expire(block_mtp, next_height);
             market.reconcile(
                 |name| {
@@ -423,7 +449,24 @@ async fn main() {
                             );
                             continue;
                         }
-                        let Some((sent, request_txid)) = challenges.complete(&response) else {
+                        // The code stays until the wallet holds its request.
+                        // An earlier reply is refunded.
+                        if challenges.backing(&response).is_some_and(|request_txid| {
+                            !wallet
+                                .get_tx_height(request_txid)
+                                .is_ok_and(|height| height.is_some())
+                        }) {
+                            refunds.admit(
+                                &fee_rule,
+                                txid,
+                                &response.ua,
+                                &response.name,
+                                next_height,
+                                paid,
+                            );
+                            continue;
+                        }
+                        let Some((sent, _)) = challenges.complete(&response) else {
                             // A wrong code, or no live challenge.
                             refunds.admit(
                                 &fee_rule,
@@ -435,22 +478,6 @@ async fn main() {
                             );
                             continue;
                         };
-                        // A code relayed from the mempool counts only once
-                        // the wallet holds its request mined.
-                        if !wallet
-                            .get_tx_height(request_txid)
-                            .is_ok_and(|height| height.is_some())
-                        {
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                &response.ua,
-                                &response.name,
-                                next_height,
-                                paid,
-                            );
-                            continue;
-                        }
                         let name = sent.request.name();
                         // A term keeps the whole payment once it covers
                         // the price; without a term, all of it goes back.
@@ -497,6 +524,7 @@ async fn main() {
                         }
                         if name_notes.admit(next_height, note) {
                             challenges.drop_challenges(name);
+                            answered.push(sent.request.clone());
                         }
                         if rest > Zatoshis::ZERO {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, rest);
@@ -695,6 +723,9 @@ async fn main() {
                     }
                 }
                 Request::Update { .. } | Request::Release { .. } => {
+                    if answered.iter().any(|done| done == &request) {
+                        continue;
+                    }
                     if !market.allows_transition(request.name()) {
                         tracing::info!(
                             %txid,

@@ -5,6 +5,8 @@
 - `admit` takes it, `complete` returns it. A repeat request hands a
   live challenge its txid.
 - `holds`: the mempool opens only new challenges.
+- `backing` reads the txid and leaves the challenge. `rebind` points
+  a live challenge at a mined repeat.
 
 ## 2026-10-26 — A challenge is keyed by its whole request (#381)
 
