@@ -1,5 +1,15 @@
 # main.changelog.md
 
+## 2026-11-04 — A shielded request is challenged from the mempool (#361)
+
+- A shielded update or release gets its code from the mempool; one
+  per transaction. A transparent spend waits for its block.
+- A response counts once the wallet holds its request mined. An
+  earlier reply is refunded and the code stays. A mined repeat takes
+  that code before replies in the same wake-up are read.
+- A mempool transaction leaves the tip read running, so a reconnect
+  pause finishes and the block is applied.
+
 ## 2026-11-02 — A rollback keeps sales from blocks that remain
 
 - The market from boot is the one the loop runs. A rollback drops

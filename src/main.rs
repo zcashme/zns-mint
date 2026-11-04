@@ -10,9 +10,10 @@
 //! pool is created once by the keygen ceremony and replenishes itself
 //! through every claim.
 
+use tokio::sync::mpsc;
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, BranchId};
 use zcash_protocol::value::Zatoshis;
 
 use zns_mint::boot::Boot;
@@ -22,9 +23,10 @@ use zns_mint::mint::pricing::{fetch_round, Oracle};
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
 use zns_mint::mint::{
-    relay, relay_buy, relay_challenge, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    relay, relay_buy, relay_challenge, spends_transparent, MintInbound, Request, REGISTRY_ACCOUNT,
+    TREASURY_ACCOUNT,
 };
-use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
+use zns_mint::zcash::{MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
 async fn main() {
@@ -81,7 +83,9 @@ async fn main() {
     // The tip session owns the stream: announcements are the answer,
     // failures repair and read the canonical tip. The loop never sees
     // transport state.
-    let mut connection = TipSession::open(chain).await;
+    let mut connection = TipSession::open(chain.clone()).await;
+    let (mempool_tx, mut mempool_rx) = mpsc::channel(64);
+    tokio::spawn(zns_mint::mint::watch_mempool(chain, mempool_tx));
     zns_mint::metrics::serving(true);
     'run: loop {
         // Every pass ends here, however it ended: the names the queues
@@ -94,9 +98,105 @@ async fn main() {
                 .chain(name_notes.authorized_names()),
             challenges.relayed(),
         );
-        let (best_height, _) = connection.next_tip(&source).await.unwrap_or_else(|error| {
-            panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
-        });
+        // The tip read stays pinned, on its own handle, across mempool
+        // events. A reconnect pause runs to the end.
+        let tip_source = source.clone();
+        let mut tip_wait = std::pin::pin!(connection.next_tip(&tip_source));
+        let best_height = loop {
+            tokio::select! {
+                biased;
+                tip = &mut tip_wait => {
+                    break tip
+                        .unwrap_or_else(|error| {
+                            panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
+                        })
+                        .0;
+                }
+                event = mempool_rx.recv() => {
+                let Some((kind, txid)) = event else {
+                    panic!("FATAL: mempool watcher ended");
+                };
+                // A request seen in the mempool opens its challenge and
+                // relays it now. A transparent spend can chain on unmined
+                // transactions, so it waits for its block. One request
+                // per transaction, so one conflicting spend voids one code.
+                if kind != MempoolChangeKind::Added {
+                    continue;
+                }
+                let tip = wallet.tip().block_height();
+                let tx = match source
+                    .get_raw_transaction(BranchId::for_height(&network, tip), txid)
+                    .await
+                {
+                    Ok(Some(tx)) => tx,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        tracing::warn!(%error, %txid, "mempool transaction not fetched");
+                        continue;
+                    }
+                };
+                if spends_transparent(&tx) {
+                    continue;
+                }
+                let mtp_now = mtp
+                    .current()
+                    .expect("FATAL: MTP unavailable before a mempool relay");
+                let target_height = tip + 1;
+                let candidate = zns_mint::mint::note::decrypt_treasury_transaction(
+                    &network,
+                    &tx,
+                    tip,
+                    &treasury_keys,
+                )
+                .into_iter()
+                .filter_map(|(paid, memo)| match MintInbound::decode(&network, &memo) {
+                    MintInbound::Request(
+                        request @ (Request::Update { .. } | Request::Release { .. }),
+                    ) => Some((request, paid)),
+                    _ => None,
+                })
+                .find_map(|(request, paid)| {
+                    if challenges.holds(&request)
+                        || !market.allows_transition(request.name())
+                        || (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
+                            .is_none_or(|fee| paid < fee)
+                    {
+                        return None;
+                    }
+                    registry
+                        .authorize_challenge(&name_notes, &request, target_height, mtp_now)
+                        .map(|record| (request, record.ua.clone()))
+                });
+                let Some((request, ua)) = candidate else {
+                    continue;
+                };
+                challenges.admit(request.clone(), txid, mtp_now);
+                let Some(pending) = challenges
+                    .requested()
+                    .into_iter()
+                    .find(|pending| pending.request == request)
+                else {
+                    continue;
+                };
+                if relay(
+                    &network,
+                    &mut wallet,
+                    &treasury_keys,
+                    &sapling_spend,
+                    &sapling_output,
+                    &fee_rule,
+                    &ua,
+                    &source,
+                    &pending,
+                    "mempool",
+                )
+                .await
+                {
+                    challenges.challenge_issued(&pending);
+                }
+            }
+            }
+        };
         // The pre-sale read runs while the blocks below are fetched and
         // applied. If this pass restarts, the read is cancelled.
         let presale_read = presale::PendingRead::start(&presale_client);
@@ -213,6 +313,9 @@ async fn main() {
         // Apply every missing canonical block in strict order: fetch with
         // retry, verify the terminal block, call `apply_block` — the
         // application itself is the one body shared with boot.
+        // Requests whose code was spent while their block was applied.
+        // The request pass must not open a second code for them.
+        let mut answered: Vec<Request> = Vec::new();
         while wallet.tip().block_height() < best_height {
             let from_height = wallet.tip().block_height();
             let next_height = from_height + 1;
@@ -275,6 +378,29 @@ async fn main() {
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
             challenges.expire(block_mtp);
+            // A mined repeat takes the code before this block's replies
+            // are read. The fee and the authorization are the same ones
+            // the request pass requires.
+            let trigger = next_height + 1;
+            for (txid, inbound, paid) in &arrivals {
+                let MintInbound::Request(
+                    request @ (Request::Update { .. } | Request::Release { .. }),
+                ) = inbound
+                else {
+                    continue;
+                };
+                if !challenges.holds(request)
+                    || !market.allows_transition(request.name())
+                    || registry
+                        .authorize_challenge(&name_notes, request, trigger, block_mtp)
+                        .is_none()
+                    || (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
+                        .is_none_or(|fee| *paid < fee)
+                {
+                    continue;
+                }
+                challenges.rebind(request, *txid);
+            }
             market.expire(block_mtp, next_height);
             market.reconcile(
                 |name| {
@@ -323,7 +449,24 @@ async fn main() {
                             );
                             continue;
                         }
-                        let Some(sent) = challenges.complete(&response) else {
+                        // The code stays until the wallet holds its request.
+                        // An earlier reply is refunded.
+                        if challenges.backing(&response).is_some_and(|request_txid| {
+                            !wallet
+                                .get_tx_height(request_txid)
+                                .is_ok_and(|height| height.is_some())
+                        }) {
+                            refunds.admit(
+                                &fee_rule,
+                                txid,
+                                &response.ua,
+                                &response.name,
+                                next_height,
+                                paid,
+                            );
+                            continue;
+                        }
+                        let Some((sent, _)) = challenges.complete(&response) else {
                             // A wrong code, or no live challenge.
                             refunds.admit(
                                 &fee_rule,
@@ -381,6 +524,7 @@ async fn main() {
                         }
                         if name_notes.admit(next_height, note) {
                             challenges.drop_challenges(name);
+                            answered.push(sent.request.clone());
                         }
                         if rest > Zatoshis::ZERO {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, rest);
@@ -579,6 +723,9 @@ async fn main() {
                     }
                 }
                 Request::Update { .. } | Request::Release { .. } => {
+                    if answered.iter().any(|done| done == &request) {
+                        continue;
+                    }
                     if !market.allows_transition(request.name()) {
                         tracing::info!(
                             %txid,
@@ -610,7 +757,7 @@ async fn main() {
                         );
                         continue;
                     }
-                    challenges.admit(request.clone(), mtp_now);
+                    challenges.admit(request.clone(), txid, mtp_now);
                 }
                 Request::List { .. } | Request::Delist { .. } => {}
             }

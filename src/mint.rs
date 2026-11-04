@@ -18,7 +18,7 @@ use transparent::address::TransparentAddress;
 use zcash_address::unified::{Container as _, Encoding};
 use zcash_keys::address::Address;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
-use zcash_primitives::transaction::TxId;
+use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::memo::{Memo, MemoBytes};
 use zcash_protocol::value::Zatoshis;
@@ -938,6 +938,13 @@ pub async fn relay_buy<P: Parameters + Send + 'static>(
         tracing::debug!(name = %otp.name.as_str(), "buy OTP rejected — deferred");
         false
     }
+}
+
+/// True when `tx` spends a transparent prevout. A mempool request with
+/// one is not relayed until it is mined.
+pub fn spends_transparent(tx: &Transaction) -> bool {
+    tx.transparent_bundle()
+        .is_some_and(|bundle| !bundle.vin.is_empty())
 }
 
 /// Forwards Zebra's mempool changes to the run loop, which owns and updates

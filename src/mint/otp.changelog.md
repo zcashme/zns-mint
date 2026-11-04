@@ -1,5 +1,13 @@
 # `mint/otp.rs` design record
 
+## 2026-11-04 — A challenge carries its request's txid (#361)
+
+- `admit` takes it, `complete` returns it. A repeat request hands a
+  live challenge its txid.
+- `holds`: the mempool opens only new challenges.
+- `backing` reads the txid and leaves the challenge. `rebind` points
+  a live challenge at a mined repeat.
+
 ## 2026-10-26 — A challenge is keyed by its whole request (#381)
 
 - Name, verb, address and term are the key. Two terms are two

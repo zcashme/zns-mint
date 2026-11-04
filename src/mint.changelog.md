@@ -1,5 +1,9 @@
 # Mint live-work design record
 
+## 2026-11-04 — A transparent spend waits for a block (#361)
+
+- `spends_transparent` keeps such a request on the block path.
+
 ## 2026-11-02 — A list waits for the controller's code
 
 - `ZNS:otp` accepts the verbs `list` and `delist`. A list sentence also
