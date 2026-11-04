@@ -47,7 +47,6 @@ async fn main() {
         mut oracle,
         mut challenges,
         access_code_key,
-        mut protected_names,
         presale_client,
         mut fee_rule,
         mut registry,
@@ -185,7 +184,7 @@ async fn main() {
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
-            market.truncate_to(rewound);
+            market.truncate_to(&mut registry, rewound);
             market.expire(
                 mtp.current().expect("FATAL: MTP unavailable after reorg"),
                 rewound,
@@ -274,14 +273,7 @@ async fn main() {
                 .expect("FATAL: MTP unavailable at the applied block");
             challenges.expire(block_mtp);
             market.expire(block_mtp, next_height);
-            market.reconcile(
-                |name| {
-                    registry
-                        .record(name)
-                        .map(|record| (record.ua.clone(), record.commitment))
-                },
-                next_height,
-            );
+            market.reconcile(&mut registry, next_height);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Market(request) => {
@@ -308,10 +300,7 @@ async fn main() {
                     // less the refund fee.
                     MintInbound::Response(response) => {
                         if response.action.is_list() || response.action.is_delist() {
-                            let owner = registry
-                                .record(&response.name)
-                                .map(|record| record.ua.clone());
-                            market.answer(&response, owner.as_ref(), next_height);
+                            market.answer(&mut registry, &response, next_height);
                             refunds.admit(
                                 &fee_rule,
                                 txid,
@@ -431,7 +420,7 @@ async fn main() {
             .expect("FATAL: MTP unavailable at the applied tip");
         // The tip check below covers the price round and the pre-sale
         // read alike. Only the read's unspent timeout can delay the pass.
-        let (round, ()) = tokio::join!(fetch_round(), presale_read.install(&mut protected_names));
+        let (round, ()) = tokio::join!(fetch_round(), presale_read.install(&mut registry));
         // The rate when the requests below were first seen: a day this
         // round publishes does not reprice them.
         let rate = oracle.current();
@@ -508,7 +497,7 @@ async fn main() {
                         refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         continue;
                     };
-                    if !protected_names.is_protected(name, mtp_now) {
+                    if !registry.is_protected(name, mtp_now) {
                         refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         continue;
                     }

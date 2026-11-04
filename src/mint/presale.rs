@@ -23,6 +23,7 @@ use time::{OffsetDateTime, Timestamp};
 use tokio::task::JoinHandle;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
+use crate::mint::registry::Registry;
 use crate::mint::treasury::OtpCode;
 use crate::mint::Name;
 use zcash_protocol::TxId;
@@ -145,70 +146,45 @@ where
     Ok(Some(ts))
 }
 
-/// name → protection; absent is unprotected. Pure data —
-/// [`ProtectedNames::from_rows`] is the only writer.
-#[derive(Clone, Debug)]
-pub struct ProtectedNames(BTreeMap<Name, ProtectionStatus>);
-
-impl ProtectedNames {
-    /// The stored fact — `Unprotected` for absent names; never `None`.
-    pub fn status(&self, name: &Name) -> ProtectionStatus {
-        self.0
-            .get(name)
-            .copied()
-            .unwrap_or(ProtectionStatus::Unprotected)
+/// Decode rows into a fresh protection snapshot. Duplicate names keep the
+/// strongest term: forever wins, otherwise the later expiry wins.
+fn protection_from_rows(
+    rows: impl IntoIterator<Item = ProtectedRow>,
+) -> BTreeMap<Name, ProtectionStatus> {
+    let mut map = BTreeMap::new();
+    for row in rows {
+        let Some(name) = Name::parse(&row.name) else {
+            tracing::warn!(
+                name = %row.name,
+                "pre-sale name does not parse; skipping it"
+            );
+            continue;
+        };
+        let status = match row.expiry_at {
+            Some(ts) => ProtectionStatus::WithExpiry(ts),
+            None => ProtectionStatus::Forever,
+        };
+        match map.entry(name) {
+            Entry::Vacant(entry) => {
+                entry.insert(status);
+            }
+            Entry::Occupied(mut entry) => {
+                let strongest = match (*entry.get(), status) {
+                    (ProtectionStatus::Forever, _) | (_, ProtectionStatus::Forever) => {
+                        ProtectionStatus::Forever
+                    }
+                    (ProtectionStatus::WithExpiry(have), ProtectionStatus::WithExpiry(got)) => {
+                        ProtectionStatus::WithExpiry(have.max(got))
+                    }
+                    (ProtectionStatus::Unprotected, _) | (_, ProtectionStatus::Unprotected) => {
+                        unreachable!("Unprotected is never stored")
+                    }
+                };
+                entry.insert(strongest);
+            }
+        };
     }
-
-    /// The judged question: protected at this MTP? Expiry is never
-    /// stored, so protection lifts exactly on schedule.
-    pub fn is_protected(&self, name: &Name, mtp: Timestamp) -> bool {
-        match self.status(name) {
-            ProtectionStatus::Unprotected => false,
-            ProtectionStatus::Forever => true,
-            ProtectionStatus::WithExpiry(ts) => mtp < ts,
-        }
-    }
-
-    /// Rows in, new table out: re-purchases coalesce to the
-    /// strongest term (`Forever` over any expiry, the later expiry
-    /// wins). A name that does not parse is skipped and warned;
-    /// the other rows still install.
-    pub fn from_rows(self, rows: impl IntoIterator<Item = ProtectedRow>) -> Self {
-        let mut map = self.0;
-        for row in rows {
-            let Some(name) = Name::parse(&row.name) else {
-                tracing::warn!(
-                    name = %row.name,
-                    "pre-sale name does not parse; skipping it"
-                );
-                continue;
-            };
-            let status = match row.expiry_at {
-                Some(ts) => ProtectionStatus::WithExpiry(ts),
-                None => ProtectionStatus::Forever,
-            };
-            match map.entry(name) {
-                Entry::Vacant(entry) => {
-                    entry.insert(status);
-                }
-                Entry::Occupied(mut entry) => {
-                    let strongest = match (*entry.get(), status) {
-                        (ProtectionStatus::Forever, _) | (_, ProtectionStatus::Forever) => {
-                            ProtectionStatus::Forever
-                        }
-                        (ProtectionStatus::WithExpiry(have), ProtectionStatus::WithExpiry(got)) => {
-                            ProtectionStatus::WithExpiry(have.max(got))
-                        }
-                        (ProtectionStatus::Unprotected, _) | (_, ProtectionStatus::Unprotected) => {
-                            unreachable!("Unprotected is never stored")
-                        }
-                    };
-                    entry.insert(strongest);
-                }
-            };
-        }
-        Self(map)
-    }
+    map
 }
 
 /// Why a pre-sale table read failed.
@@ -224,14 +200,14 @@ pub enum FetchError {
 }
 
 /// Reads the whole table; installs only when every counted row landed.
-pub async fn fetch(client: &HttpsClient) -> Result<ProtectedNames, FetchError> {
+pub async fn fetch(client: &HttpsClient) -> Result<BTreeMap<Name, ProtectionStatus>, FetchError> {
     let (rows, landed, total) = fetch_rows(client).await.ok_or(FetchError::Unavailable)?;
     complete(rows, landed, total)
 }
 
 /// A table read running in the background, started before the tip
 /// pass needs it. Dropping it before `install` cancels the read.
-pub struct PendingRead(JoinHandle<Result<ProtectedNames, FetchError>>);
+pub struct PendingRead(JoinHandle<Result<BTreeMap<Name, ProtectionStatus>, FetchError>>);
 
 impl PendingRead {
     pub fn start(client: &HttpsClient) -> Self {
@@ -239,13 +215,13 @@ impl PendingRead {
         Self(tokio::spawn(async move { fetch(&client).await }))
     }
 
-    /// Waits out the read into `names`; a failed read keeps the last table.
-    pub async fn install(mut self, names: &mut ProtectedNames) {
+    /// Installs the completed snapshot in the registry; a failed read keeps the last table.
+    pub async fn install(mut self, registry: &mut Registry) {
         match (&mut self.0)
             .await
             .expect("FATAL: pre-sale read task panicked")
         {
-            Ok(fresh) => *names = fresh,
+            Ok(fresh) => registry.replace_protected(fresh),
             Err(error) => tracing::warn!(%error, "pre-sale read failed; the last table stands"),
         }
     }
@@ -263,10 +239,10 @@ fn complete(
     rows: Vec<ProtectedRow>,
     landed: usize,
     total: Option<usize>,
-) -> Result<ProtectedNames, FetchError> {
+) -> Result<BTreeMap<Name, ProtectionStatus>, FetchError> {
     match total {
         Some(total) if total == landed => {
-            let table = ProtectedNames(BTreeMap::new()).from_rows(rows);
+            let table = protection_from_rows(rows);
             tracing::debug!(rows = landed, "pre-sale fetch: table loaded");
             Ok(table)
         }
@@ -491,12 +467,14 @@ mod tests {
         assert_eq!(key.derive(&alice()).digits(), *b"549703");
     }
 
-    fn table_of(rows: &[(&str, ProtectionStatus)]) -> ProtectedNames {
+    fn table_of(rows: &[(&str, ProtectionStatus)]) -> Registry {
         let mut map = BTreeMap::new();
         for (name, status) in rows {
             map.insert(Name::parse(name).unwrap(), *status);
         }
-        ProtectedNames(map)
+        let mut registry = Registry::new();
+        registry.replace_protected(map);
+        registry
     }
 
     #[test]
@@ -558,8 +536,10 @@ mod tests {
     }
 
     /// Builds a table from rows through the public door, seeded empty.
-    fn from_rows(rows: Vec<ProtectedRow>) -> ProtectedNames {
-        ProtectedNames(BTreeMap::new()).from_rows(rows)
+    fn from_rows(rows: Vec<ProtectedRow>) -> Registry {
+        let mut registry = Registry::new();
+        registry.replace_protected(protection_from_rows(rows));
+        registry
     }
 
     /// An expired row is stored as `WithExpiry` all the same — the
@@ -568,7 +548,7 @@ mod tests {
     fn from_rows_keeps_expired_rows() {
         let table = from_rows(vec![row_with("alice", Some(ts(1_600_000_000)))]);
         assert_eq!(
-            table.status(&Name::parse("alice").unwrap()),
+            table.protection_status(&Name::parse("alice").unwrap()),
             ProtectionStatus::WithExpiry(ts(1_600_000_000))
         );
     }
@@ -576,9 +556,10 @@ mod tests {
     /// A name that does not parse is skipped. The other rows install.
     #[test]
     fn from_rows_skips_a_name_that_does_not_parse() {
-        let table = from_rows(vec![row_with("Not-A-Name!", None), row_with("alice", None)]);
-        assert_eq!(table.0.len(), 1);
-        assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
+        let table =
+            protection_from_rows(vec![row_with("Not-A-Name!", None), row_with("alice", None)]);
+        assert_eq!(table.len(), 1);
+        assert_eq!(table.get(&alice()), Some(&ProtectionStatus::Forever));
     }
 
     /// A duplicate row is a re-purchase: the name's rows coalesce
@@ -586,7 +567,7 @@ mod tests {
     #[test]
     fn from_rows_coalesces_identical_rows() {
         let table = from_rows(vec![row_with("alice", None), row_with("alice", None)]);
-        assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
+        assert_eq!(table.protection_status(&alice()), ProtectionStatus::Forever);
     }
 
     /// Two dated terms cover the name to the later lift moment.
@@ -597,7 +578,7 @@ mod tests {
             row_with("alice", Some(ts(1_900_000_000))),
         ]);
         assert_eq!(
-            table.status(&alice()),
+            table.protection_status(&alice()),
             ProtectionStatus::WithExpiry(ts(2_000_000_000))
         );
     }
@@ -616,7 +597,7 @@ mod tests {
             ],
         ] {
             let table = from_rows(rows);
-            assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
+            assert_eq!(table.protection_status(&alice()), ProtectionStatus::Forever);
         }
     }
 
@@ -635,15 +616,15 @@ mod tests {
             row_with("alice", Some(ts(2_000_000_000))),
         ]);
         assert_eq!(
-            table.status(&Name::parse("9").unwrap()),
+            table.protection_status(&Name::parse("9").unwrap()),
             ProtectionStatus::Forever
         );
         assert_eq!(
-            table.status(&Name::parse("tom").unwrap()),
+            table.protection_status(&Name::parse("tom").unwrap()),
             ProtectionStatus::Forever
         );
         assert_eq!(
-            table.status(&Name::parse("alice").unwrap()),
+            table.protection_status(&Name::parse("alice").unwrap()),
             ProtectionStatus::WithExpiry(ts(2_000_000_000))
         );
     }
@@ -685,12 +666,16 @@ mod tests {
         ]"#;
         let (rows, landed) = decode_rows(json.as_bytes()).unwrap();
         assert_eq!(landed, 2);
-        let table = complete(rows, landed, Some(landed)).unwrap();
+        let mut table = Registry::new();
+        table.replace_protected(complete(rows, landed, Some(landed)).unwrap());
         assert_eq!(
-            table.status(&Name::parse("bob").unwrap()),
+            table.protection_status(&Name::parse("bob").unwrap()),
             ProtectionStatus::Forever
         );
-        assert_eq!(table.status(&alice()), ProtectionStatus::Unprotected);
+        assert_eq!(
+            table.protection_status(&alice()),
+            ProtectionStatus::Unprotected
+        );
     }
 
     /// A body that is not a JSON array fails the read.
@@ -702,8 +687,9 @@ mod tests {
     /// The read installs only when every counted row arrived.
     #[test]
     fn complete_installs_when_the_count_matches() {
-        let table = complete(vec![row_with("alice", None)], 1, Some(1)).unwrap();
-        assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
+        let mut table = Registry::new();
+        table.replace_protected(complete(vec![row_with("alice", None)], 1, Some(1)).unwrap());
+        assert_eq!(table.protection_status(&alice()), ProtectionStatus::Forever);
     }
 
     /// A reply cut short by Max Rows is refused, not installed.
@@ -728,8 +714,9 @@ mod tests {
     /// A skipped row counts toward the server total, and the reply installs.
     #[test]
     fn complete_counts_a_skipped_row_as_landed() {
-        let table = complete(vec![row_with("alice", None)], 2, Some(2)).unwrap();
-        assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
+        let mut table = Registry::new();
+        table.replace_protected(complete(vec![row_with("alice", None)], 2, Some(2)).unwrap());
+        assert_eq!(table.protection_status(&alice()), ProtectionStatus::Forever);
     }
 
     /// `install` takes the table the read returned. A name only the
@@ -737,12 +724,15 @@ mod tests {
     #[tokio::test]
     async fn install_replaces_the_table() {
         let mut names = table_of(&[("alice", ProtectionStatus::Forever)]);
-        let fresh = table_of(&[("bob", ProtectionStatus::Forever)]);
+        let fresh = protection_from_rows(vec![row_with("bob", None)]);
         let pending = PendingRead(tokio::spawn(async move { Ok(fresh) }));
         pending.install(&mut names).await;
-        assert_eq!(names.status(&alice()), ProtectionStatus::Unprotected);
         assert_eq!(
-            names.status(&Name::parse("bob").unwrap()),
+            names.protection_status(&alice()),
+            ProtectionStatus::Unprotected
+        );
+        assert_eq!(
+            names.protection_status(&Name::parse("bob").unwrap()),
             ProtectionStatus::Forever
         );
     }
@@ -753,7 +743,7 @@ mod tests {
         let mut names = table_of(&[("alice", ProtectionStatus::Forever)]);
         let pending = PendingRead(tokio::spawn(async { Err(FetchError::Unavailable) }));
         pending.install(&mut names).await;
-        assert_eq!(names.status(&alice()), ProtectionStatus::Forever);
+        assert_eq!(names.protection_status(&alice()), ProtectionStatus::Forever);
     }
 
     /// A read dropped before `install` is cancelled, even after it has started.

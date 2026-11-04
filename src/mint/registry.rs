@@ -7,6 +7,8 @@ use anchor_pool::AnchorPool;
 pub use anchor_pool::{is_ceremony_fill, ANCHOR_POOL_SIZE};
 
 use crate::mint::note::NameNoteQueue;
+use crate::mint::presale::ProtectionStatus;
+use crate::mint::sale::{is_owner_listing, Listing, MarketRefusal};
 use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
@@ -117,14 +119,18 @@ impl std::fmt::Debug for NameRecord {
 // Registry — tip records, per-name chains, and anchor lineage
 // ---------------------------------------------------------------------------
 
-/// Name records at the applied tip, each name's confirmed record chain, and
-/// the anchor lineage pool.
+/// Name ownership and history, current protection and listings, and the
+/// anchor lineage pool.
 #[derive(Default)]
 pub struct Registry {
     /// Names that are live at the applied tip. Released names are absent.
     records: BTreeMap<Name, NameRecord>,
     /// All confirmed records for each name, in canonical application order.
     history: BTreeMap<Name, Vec<NameRecord>>,
+    /// Latest complete external snapshot; independent of chain rollback.
+    protected: BTreeMap<Name, ProtectionStatus>,
+    /// Current listings, rebuilt from the market event log on rollback.
+    listings: BTreeMap<Name, Listing>,
     anchors: AnchorPool,
 }
 
@@ -132,6 +138,84 @@ impl Registry {
     /// Empty state; boot sync adopts the ceremony's anchor pool.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Protection snapshot, judged against MTP without modifying stored facts.
+    pub fn protection_status(&self, name: &Name) -> ProtectionStatus {
+        self.protected
+            .get(name)
+            .copied()
+            .unwrap_or(ProtectionStatus::Unprotected)
+    }
+
+    pub fn is_protected(&self, name: &Name, mtp: Timestamp) -> bool {
+        match self.protection_status(name) {
+            ProtectionStatus::Unprotected => false,
+            ProtectionStatus::Forever => true,
+            ProtectionStatus::WithExpiry(expiry) => mtp < expiry,
+        }
+    }
+
+    /// Install a complete external snapshot. Chain rollback does not rewind it.
+    pub fn replace_protected(&mut self, protected: BTreeMap<Name, ProtectionStatus>) {
+        self.protected = protected;
+    }
+
+    pub fn listing(&self, name: &Name) -> Option<&Listing> {
+        self.listings.get(name)
+    }
+
+    pub fn price(&self, name: &Name) -> Option<zcash_protocol::value::Zatoshis> {
+        self.listing(name).map(|listing| listing.price)
+    }
+
+    /// The market has completed the controller challenge and checked open buys.
+    pub(crate) fn list(&mut self, listing: Listing) -> Result<(), MarketRefusal> {
+        let owner = self.record(&listing.name).ok_or(MarketRefusal::NotOwner)?;
+        if !is_owner_listing(&owner.ua, &listing.ua, &listing.pay_to) {
+            return Err(MarketRefusal::NotOwner);
+        }
+        self.restore_listing(listing);
+        Ok(())
+    }
+
+    pub(crate) fn delist(&mut self, name: &Name, ua: &UnifiedAddress) -> Result<(), MarketRefusal> {
+        if self.record(name).is_none_or(|record| record.ua != *ua) {
+            return Err(MarketRefusal::NotOwner);
+        }
+        self.remove_listing(name)
+            .then_some(())
+            .ok_or(MarketRefusal::NotListed)
+    }
+
+    /// Remove listings whose controller no longer holds the name.
+    pub(crate) fn reconcile_listings(&mut self) -> Vec<Name> {
+        let mut lost = Vec::new();
+        self.listings.retain(|name, listing| {
+            let live = self
+                .records
+                .get(name)
+                .is_some_and(|record| record.ua == listing.ua);
+            if !live {
+                lost.push(name.clone());
+            }
+            live
+        });
+        lost
+    }
+
+    // Market event replay applies historical listing facts without checking
+    // ownership at the current tip. Later delist events restore the final state.
+    pub(crate) fn restore_listing(&mut self, listing: Listing) {
+        self.listings.insert(listing.name.clone(), listing);
+    }
+
+    pub(crate) fn remove_listing(&mut self, name: &Name) -> bool {
+        self.listings.remove(name).is_some()
+    }
+
+    pub(crate) fn clear_listings(&mut self) {
+        self.listings.clear();
     }
 
     /// The claim law. `None` means unlawful.

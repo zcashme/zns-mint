@@ -22,7 +22,7 @@ use std::str::FromStr;
 
 use crate::mint::mtp::MtpTracker;
 use crate::mint::note::NameNoteQueue;
-use crate::mint::presale::{self, AccessCodeDerivationKey, HttpsClient, ProtectedNames};
+use crate::mint::presale::{self, AccessCodeDerivationKey, HttpsClient};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::sale::{transparent_payments, Market};
@@ -98,13 +98,11 @@ pub struct Boot<P: Parameters> {
     pub challenges: OtpQueue,
     /// TEE-derived access-code key (HMAC purpose key, not the root)
     pub access_code_key: AccessCodeDerivationKey,
-    /// must not: fail-closed at birth — the table or no start
-    pub protected_names: ProtectedNames,
     /// initialized: the one client every pre-sale read goes through
     pub presale_client: HttpsClient,
     /// must not: fail-closed at birth — the node's fee rate or no start
     pub fee_rule: FeeRule,
-    /// produced: scanned and verified during boot sync
+    /// produced: chain state replayed and initial protection snapshot fetched
     pub registry: Registry,
     /// initialized: pending Name Note authorizations
     pub name_notes: NameNoteQueue,
@@ -112,7 +110,7 @@ pub struct Boot<P: Parameters> {
     pub requests: RequestQueue,
     /// initialized: refunds due
     pub refunds: RefundQueue,
-    /// Listings and open sales read from the chain during boot sync.
+    /// Open sales, challenges, and market events read from the chain during boot sync.
     pub market: Market,
     /// The exact encoded identity written to the boot identity document.
     pub treasury_address: String,
@@ -641,21 +639,11 @@ impl Boot<Network> {
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
             market.expire(block_mtp, next_height);
-            market.reconcile(
-                |name| {
-                    registry
-                        .record(name)
-                        .map(|record| (record.ua.clone(), record.commitment))
-                },
-                next_height,
-            );
+            market.reconcile(&mut registry, next_height);
             for (txid, inbound, paid) in arrivals {
                 if let crate::mint::MintInbound::Response(response) = &inbound {
                     if response.action.is_list() || response.action.is_delist() {
-                        let owner = registry
-                            .record(&response.name)
-                            .map(|record| record.ua.clone());
-                        market.answer(response, owner.as_ref(), next_height);
+                        market.answer(&mut registry, response, next_height);
                     }
                 }
                 if let crate::mint::MintInbound::Market(request) = &inbound {
@@ -741,6 +729,8 @@ impl Boot<Network> {
             tokio::time::sleep(zcash::RETRY_PAUSE).await;
         };
 
+        registry.replace_protected(protected_names);
+
         // The challenge memory: empty by construction, filled by the run
         // loop as update/release relays are issued.
         let challenges = OtpQueue::new();
@@ -818,7 +808,6 @@ impl Boot<Network> {
             oracle,
             challenges,
             access_code_key,
-            protected_names,
             presale_client,
             fee_rule,
             registry,

@@ -2,8 +2,6 @@
 //! to buy it, and a payment of her price plus the buy OTP makes the
 //! mint hand the name to Bob. The note is a sale, so the name stays live.
 
-use std::collections::BTreeMap;
-
 use transparent::address::TransparentAddress;
 use zcash_keys::address::Address;
 use zcash_primitives::block::Block;
@@ -476,41 +474,6 @@ pub struct Listing {
     pub price: Zatoshis,
 }
 
-/// Alice's open listings.
-#[derive(Default)]
-pub struct ListingBook {
-    listings: BTreeMap<Name, Listing>,
-}
-
-impl ListingBook {
-    pub fn new() -> Self {
-        Self {
-            listings: BTreeMap::new(),
-        }
-    }
-
-    pub fn get(&self, name: &Name) -> Option<&Listing> {
-        self.listings.get(name)
-    }
-
-    fn insert(&mut self, listing: Listing) {
-        self.listings.insert(listing.name.clone(), listing);
-    }
-
-    fn lost(&self, holder: impl Fn(&Name) -> Option<UnifiedAddress>) -> Vec<Name> {
-        self.listings
-            .values()
-            .filter(|listing| holder(&listing.name).as_ref() != Some(&listing.ua))
-            .map(|listing| listing.name.clone())
-            .collect()
-    }
-
-    /// Removes the listing. The caller has checked that `ua` owns the name.
-    pub fn delist(&mut self, name: &Name) -> bool {
-        self.listings.remove(name).is_some()
-    }
-}
-
 /// Why a list, delist, or buy did not change the market.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarketRefusal {
@@ -638,7 +601,6 @@ struct Stamped {
 #[derive(Default)]
 pub struct Market {
     sales: SaleQueue,
-    listings: ListingBook,
     challenges: Vec<MarketChallenge>,
     events: Vec<Stamped>,
 }
@@ -721,16 +683,15 @@ impl Market {
     /// Drops a listing whose owner no longer holds the name, and a sale
     /// whose captured note is no longer live. A scan calls this before
     /// the block's memos, so a finished sale does not block them.
-    pub fn reconcile(
-        &mut self,
-        live: impl Fn(&Name) -> Option<(UnifiedAddress, NameCommitment)>,
-        height: BlockHeight,
-    ) {
-        let lost = self.listings.lost(|name| live(name).map(|(ua, _)| ua));
-        for name in lost {
-            self.listings.delist(&name);
+    pub fn reconcile(&mut self, registry: &mut Registry, height: BlockHeight) {
+        for name in registry.reconcile_listings() {
             self.record(height, MarketEvent::Delist { name });
         }
+        let live = |name: &Name| {
+            registry
+                .record(name)
+                .map(|record| (record.ua.clone(), record.commitment))
+        };
         let stale: Vec<OtpCode> = self
             .challenges
             .iter()
@@ -749,17 +710,17 @@ impl Market {
     }
 
     /// Drops entries from blocks above `height` and rebuilds the rest.
-    pub fn truncate_to(&mut self, height: BlockHeight) {
+    pub fn truncate_to(&mut self, registry: &mut Registry, height: BlockHeight) {
         self.events.retain(|event| event.height <= height);
         let events = std::mem::take(&mut self.events);
         self.sales = SaleQueue::new();
-        self.listings = ListingBook::new();
+        registry.clear_listings();
         self.challenges.clear();
         for stamped in &events {
             match &stamped.event {
-                MarketEvent::List { listing } => self.listings.insert(listing.as_ref().clone()),
+                MarketEvent::List { listing } => registry.restore_listing(listing.as_ref().clone()),
                 MarketEvent::Delist { name } => {
-                    self.listings.delist(name);
+                    registry.remove_listing(name);
                 }
                 MarketEvent::Open { sale } => self.sales.restore(sale.as_ref().clone()),
                 MarketEvent::Paid { name, code } => self.sales.mark_paid(name, code),
@@ -792,25 +753,18 @@ impl Market {
         self.events.push(Stamped { height, event });
     }
 
-    pub fn price(&self, name: &Name) -> Option<Zatoshis> {
-        self.listings.get(name).map(|listing| listing.price)
-    }
-
-    /// Lists when `owner` is the controller and no buy is open.
+    /// Lists when the registry confirms the controller and no buy is open.
     pub fn list(
         &mut self,
+        registry: &mut Registry,
         listing: &Listing,
-        owner: &UnifiedAddress,
         height: BlockHeight,
     ) -> Result<(), MarketRefusal> {
-        if !is_owner_listing(owner, &listing.ua, &listing.pay_to) {
-            return Err(MarketRefusal::NotOwner);
-        }
         if self.sales.is_open(&listing.name) {
             return Err(MarketRefusal::BuyOpen);
         }
         let listing = listing.clone();
-        self.listings.insert(listing.clone());
+        registry.list(listing.clone())?;
         self.record(
             height,
             MarketEvent::List {
@@ -823,20 +777,15 @@ impl Market {
     /// Delists when `ua` still owns the name and no buy is open.
     pub fn delist(
         &mut self,
+        registry: &mut Registry,
         name: &Name,
         ua: &UnifiedAddress,
-        owner: &UnifiedAddress,
         height: BlockHeight,
     ) -> Result<(), MarketRefusal> {
         if self.sales.is_open(name) {
             return Err(MarketRefusal::BuyOpen);
         }
-        if ua != owner {
-            return Err(MarketRefusal::NotOwner);
-        }
-        if !self.listings.delist(name) {
-            return Err(MarketRefusal::NotListed);
-        }
+        registry.delist(name, ua)?;
         self.record(height, MarketEvent::Delist { name: name.clone() });
         Ok(())
     }
@@ -846,6 +795,7 @@ impl Market {
     #[allow(clippy::too_many_arguments)]
     pub fn open_buy(
         &mut self,
+        registry: &Registry,
         name: &Name,
         bob: &UnifiedAddress,
         owner: &UnifiedAddress,
@@ -858,7 +808,7 @@ impl Market {
         height: BlockHeight,
     ) -> Result<BuyOtp, MarketRefusal> {
         let (pay_to, price) = {
-            let Some(listing) = self.listings.get(name) else {
+            let Some(listing) = registry.listing(name) else {
                 return Err(MarketRefusal::NotListed);
             };
             if !is_owner_listing(owner, &listing.ua, &listing.pay_to) {
@@ -968,20 +918,20 @@ impl Market {
     /// returns `code`.
     pub fn propose_delist(
         &mut self,
+        registry: &Registry,
         name: &Name,
         ua: &UnifiedAddress,
-        owner: &UnifiedAddress,
         code: OtpCode,
         mtp: Timestamp,
         height: BlockHeight,
     ) -> Result<(), MarketRefusal> {
-        if ua != owner {
+        if registry.record(name).is_none_or(|record| record.ua != *ua) {
             return Err(MarketRefusal::NotOwner);
         }
         if self.sales.is_open(name) {
             return Err(MarketRefusal::BuyOpen);
         }
-        if self.listings.get(name).is_none() {
+        if registry.listing(name).is_none() {
             return Err(MarketRefusal::NotListed);
         }
         if self
@@ -1012,11 +962,11 @@ impl Market {
     }
 
     /// Applies the challenge `response` names, when the code matches and
-    /// `owner` is still the controller. A matching code spends the challenge.
+    /// the named address is still the controller. A matching code spends the challenge.
     pub fn answer(
         &mut self,
+        registry: &mut Registry,
         response: &OtpMemo,
-        owner: Option<&UnifiedAddress>,
         height: BlockHeight,
     ) -> bool {
         if !response.action.is_list() && !response.action.is_delist() {
@@ -1050,15 +1000,12 @@ impl Market {
             if self.sales.is_open(challenge.name()) {
                 return true;
             }
-            let Some(owner) = owner else {
-                return true;
-            };
             match &challenge.kind {
                 ChallengeKind::List(listing) => {
-                    let _ = self.list(listing, owner, height);
+                    let _ = self.list(registry, listing, height);
                 }
                 ChallengeKind::Delist { name, ua } => {
-                    let _ = self.delist(name, ua, owner, height);
+                    let _ = self.delist(registry, name, ua, height);
                 }
             }
             return true;
@@ -1177,11 +1124,7 @@ impl Market {
                 None
             }
             MarketRequest::Delist { name, ua } => {
-                let Some(owner) = registry
-                    .record(name)
-                    .filter(|record| record.ua == *ua)
-                    .map(|record| record.ua.clone())
-                else {
+                if registry.record(name).is_none_or(|record| record.ua != *ua) {
                     tracing::info!(
                         %txid,
                         name = %name.as_str(),
@@ -1198,7 +1141,7 @@ impl Market {
                     return None;
                 }
                 let code = key.delist_otp(&txid, name);
-                match self.propose_delist(name, ua, &owner, code, mtp, height) {
+                match self.propose_delist(registry, name, ua, code, mtp, height) {
                     Ok(()) => {}
                     Err(MarketRefusal::BuyOpen) => tracing::info!(
                         %txid,
@@ -1244,6 +1187,7 @@ impl Market {
                     return None;
                 }
                 match self.open_buy(
+                    registry,
                     name,
                     bob,
                     &owner,
@@ -1485,17 +1429,51 @@ mod tests {
         }
     }
 
-    fn listed(price: u64) -> (Market, UnifiedAddress, TransparentAddress) {
-        let (owner, pay_to) = alice();
-        let mut market = Market::new();
-        market.list(&list_for(price), &owner, height()).unwrap();
-        (market, owner, pay_to)
+    fn nf(seed: u8) -> orchard::note::Nullifier {
+        let mut bytes = [0; 32];
+        bytes[0] = seed;
+        orchard::note::Nullifier::from_bytes(&bytes).unwrap()
     }
 
-    fn buying(price: u64) -> (Market, UnifiedAddress, TransparentAddress, BuyOtp) {
-        let (mut market, owner, pay_to) = listed(price);
+    fn sale_registry() -> Registry {
+        let mut registry = Registry::new();
+        for (index, text) in ["alice", "zed"].into_iter().enumerate() {
+            let anchor = nf(10 + index as u8);
+            registry.adopt_anchor(BlockHeight::from_u32(0), anchor);
+            let note = NameNote::Claim {
+                name: Name::parse(text).unwrap(),
+                ua: alice().0,
+                expires_at: Expiry::Never,
+            };
+            assert!(registry.accept_claim(
+                &MainNetwork,
+                &note,
+                nf(20 + index as u8),
+                Some(nf(40 + index as u8)),
+                &[anchor],
+                height(),
+                mtp(),
+                BlockHeight::from_u32(41),
+            ));
+        }
+        registry
+    }
+
+    fn listed(price: u64) -> (Market, Registry, UnifiedAddress, TransparentAddress) {
+        let (owner, pay_to) = alice();
+        let mut registry = sale_registry();
+        let mut market = Market::new();
+        market
+            .list(&mut registry, &list_for(price), height())
+            .unwrap();
+        (market, registry, owner, pay_to)
+    }
+
+    fn buying(price: u64) -> (Market, Registry, UnifiedAddress, TransparentAddress, BuyOtp) {
+        let (mut market, registry, owner, pay_to) = listed(price);
         let otp = market
             .open_buy(
+                &registry,
                 &name(),
                 &bob(),
                 &owner,
@@ -1508,23 +1486,23 @@ mod tests {
                 height(),
             )
             .unwrap();
-        (market, owner, pay_to, otp)
+        (market, registry, owner, pay_to, otp)
     }
 
     #[test]
     fn a_delist_during_a_buy_leaves_the_listing() {
-        let (mut market, owner, _, _) = buying(150_000_000);
+        let (mut market, mut registry, owner, _, _) = buying(150_000_000);
         assert_eq!(
-            market.delist(&name(), &owner, &owner, height()),
+            market.delist(&mut registry, &name(), &owner, height()),
             Err(MarketRefusal::BuyOpen)
         );
-        assert_eq!(market.price(&name()), Some(zats(150_000_000)));
+        assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
         assert!(!market.allows_transition(&name()));
     }
 
     #[test]
     fn a_relist_during_a_buy_keeps_the_price() {
-        let (mut market, owner, pay_to, _) = buying(150_000_000);
+        let (mut market, mut registry, owner, pay_to, _) = buying(150_000_000);
         let higher = Listing {
             name: name(),
             ua: owner.clone(),
@@ -1532,15 +1510,15 @@ mod tests {
             price: zats(200_000_000),
         };
         assert_eq!(
-            market.list(&higher, &owner, height()),
+            market.list(&mut registry, &higher, height()),
             Err(MarketRefusal::BuyOpen)
         );
-        assert_eq!(market.price(&name()), Some(zats(150_000_000)));
+        assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
     }
 
     #[test]
     fn an_update_or_release_waits_while_a_buy_is_open() {
-        let (mut market, owner, _, _) = buying(150_000_000);
+        let (mut market, mut registry, owner, _, _) = buying(150_000_000);
         // The same gate refuses an update, a release, an OTP response,
         // and a lifecycle release.
         assert!(!market.allows_transition(&name()));
@@ -1549,28 +1527,31 @@ mod tests {
             height(),
         );
         assert!(market.allows_transition(&name()));
-        assert!(market.delist(&name(), &owner, &owner, height()).is_ok());
-        assert_eq!(market.price(&name()), None);
+        assert!(market
+            .delist(&mut registry, &name(), &owner, height())
+            .is_ok());
+        assert_eq!(registry.price(&name()), None);
     }
 
     #[test]
     fn a_paid_buy_still_holds_the_name() {
-        let (mut market, owner, pay_to, otp) = buying(150_000_000);
+        let (mut market, mut registry, owner, pay_to, otp) = buying(150_000_000);
         let paid = zats(150_000_000 + otp_amount(&otp.code).into_u64());
         market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
         assert!(market.is_paid(&name()));
         assert!(!market.allows_transition(&name()));
         assert_eq!(
-            market.delist(&name(), &owner, &owner, height()),
+            market.delist(&mut registry, &name(), &owner, height()),
             Err(MarketRefusal::BuyOpen)
         );
     }
 
     #[test]
     fn a_buy_does_not_open_while_a_note_is_pending_or_the_term_is_due() {
-        let (mut market, owner, _) = listed(150_000_000);
+        let (mut market, registry, owner, _) = listed(150_000_000);
         assert!(matches!(
             market.open_buy(
+                &registry,
                 &name(),
                 &bob(),
                 &owner,
@@ -1586,6 +1567,7 @@ mod tests {
         ));
         assert!(matches!(
             market.open_buy(
+                &registry,
                 &name(),
                 &bob(),
                 &owner,
@@ -1604,9 +1586,10 @@ mod tests {
 
     #[test]
     fn a_second_buy_does_not_open() {
-        let (mut market, owner, _, _) = buying(150_000_000);
+        let (mut market, registry, owner, _, _) = buying(150_000_000);
         assert!(matches!(
             market.open_buy(
+                &registry,
                 &name(),
                 &bob(),
                 &owner,
@@ -1624,9 +1607,10 @@ mod tests {
 
     #[test]
     fn a_buy_does_not_open_for_a_stranger_or_an_unlisted_name() {
-        let (mut market, _, _) = listed(150_000_000);
+        let (mut market, registry, _, _) = listed(150_000_000);
         assert!(matches!(
             market.open_buy(
+                &registry,
                 &name(),
                 &bob(),
                 &bob(),
@@ -1643,6 +1627,7 @@ mod tests {
         let mut bare = Market::new();
         assert!(matches!(
             bare.open_buy(
+                &Registry::new(),
                 &name(),
                 &bob(),
                 &bob(),
@@ -1661,6 +1646,7 @@ mod tests {
     #[test]
     fn a_stranger_cannot_list_or_delist() {
         let (owner, pay_to) = alice();
+        let mut registry = sale_registry();
         let mut market = Market::new();
         let foreign = Listing {
             name: name(),
@@ -1669,27 +1655,34 @@ mod tests {
             price: zats(150_000_000),
         };
         assert_eq!(
-            market.list(&foreign, &owner, height()),
+            market.list(&mut registry, &foreign, height()),
             Err(MarketRefusal::NotOwner)
         );
         assert_eq!(
-            market.list(&list_for(150_000_000), &bob(), height()),
+            market.list(
+                &mut registry,
+                &Listing {
+                    ua: bob(),
+                    ..list_for(150_000_000)
+                },
+                height()
+            ),
             Err(MarketRefusal::NotOwner)
         );
         market
-            .list(&list_for(150_000_000), &owner, height())
+            .list(&mut registry, &list_for(150_000_000), height())
             .unwrap();
         assert_eq!(
-            market.delist(&name(), &bob(), &owner, height()),
+            market.delist(&mut registry, &name(), &bob(), height()),
             Err(MarketRefusal::NotOwner)
         );
-        assert_eq!(market.price(&name()), Some(zats(150_000_000)));
+        assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
         assert_eq!(pay_to, TransparentAddress::PublicKeyHash([0x11; 20]));
     }
 
     #[test]
     fn a_payment_must_be_the_price_plus_the_code() {
-        let (mut market, owner, pay_to, otp) = buying(150_000_000);
+        let (mut market, _registry, owner, pay_to, otp) = buying(150_000_000);
         let exact = zats(150_000_000 + otp_amount(&otp.code).into_u64());
         let short = zats(exact.into_u64() - 1);
         market.observe(|_| Some(owner.clone()), &[(pay_to, short)], mtp(), height());
@@ -1714,7 +1707,7 @@ mod tests {
     #[test]
     fn a_tail_digit_payment_does_not_count() {
         // The last six digits are the code. The amount minus the price is not.
-        let (mut market, owner, pay_to, otp) = buying(100_900_000);
+        let (mut market, _registry, owner, pay_to, otp) = buying(100_900_000);
         let code = otp_amount(&otp.code).into_u64();
         let price = 100_900_000u64;
         let tail = (price / 1_000_000 + 1) * 1_000_000 + code;
@@ -1730,25 +1723,31 @@ mod tests {
 
     #[test]
     fn a_payment_after_the_code_expires_does_not_count() {
-        let (mut market, owner, pay_to, otp) = buying(150_000_000);
+        let (mut market, mut registry, owner, pay_to, otp) = buying(150_000_000);
         let exact = zats(150_000_000 + otp_amount(&otp.code).into_u64());
         let later = Timestamp::from_seconds(1_700_000_000 + D_OTP).unwrap();
         market.expire(later, height());
         market.observe(|_| Some(owner.clone()), &[(pay_to, exact)], later, height());
         assert!(!market.is_open(&name()));
-        assert!(market.delist(&name(), &owner, &owner, height()).is_ok());
+        assert!(market
+            .delist(&mut registry, &name(), &owner, height())
+            .is_ok());
     }
 
     #[test]
     fn a_rollback_keeps_blocks_that_are_still_valid() {
         let (owner, pay_to) = alice();
+        let mut registry = sale_registry();
         let mut market = Market::new();
         let low = BlockHeight::from_u32(10);
         let high = BlockHeight::from_u32(20);
-        market.list(&list_for(100_000_000), &owner, low).unwrap();
+        market
+            .list(&mut registry, &list_for(100_000_000), low)
+            .unwrap();
         let code = OtpCode::for_test(*b"123456");
         let otp = market
             .open_buy(
+                &registry,
                 &name(),
                 &bob(),
                 &owner,
@@ -1766,15 +1765,15 @@ mod tests {
         market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), high);
         assert!(market.is_paid(&name()));
 
-        market.truncate_to(low);
-        assert_eq!(market.price(&name()), Some(zats(100_000_000)));
+        market.truncate_to(&mut registry, low);
+        assert_eq!(registry.price(&name()), Some(zats(100_000_000)));
         assert!(market.is_open(&name()));
         assert!(!market.is_paid(&name()));
         market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), high);
         assert!(market.is_paid(&name()));
 
-        market.truncate_to(BlockHeight::from_u32(5));
-        assert_eq!(market.price(&name()), None);
+        market.truncate_to(&mut registry, BlockHeight::from_u32(5));
+        assert_eq!(registry.price(&name()), None);
         assert!(!market.is_open(&name()));
     }
 
@@ -1798,13 +1797,14 @@ mod tests {
     #[test]
     fn a_list_waits_for_the_controllers_code() {
         let (owner, pay_to) = alice();
+        let mut registry = sale_registry();
         let mut market = Market::new();
         let code = OtpCode::for_test(*b"042831");
         let request = list_for(150_000_000);
         market
             .propose_list(&request, &owner, code.clone(), mtp(), height())
             .unwrap();
-        assert_eq!(market.price(&name()), None);
+        assert_eq!(registry.price(&name()), None);
         let wrong = OtpMemo {
             code: OtpCode::for_test(*b"000000"),
             name: name(),
@@ -1812,8 +1812,8 @@ mod tests {
             ua: owner.clone(),
             listing: Some((pay_to, zats(150_000_000))),
         };
-        assert!(!market.answer(&wrong, Some(&owner), height()));
-        assert_eq!(market.price(&name()), None);
+        assert!(!market.answer(&mut registry, &wrong, height()));
+        assert_eq!(registry.price(&name()), None);
         let other_price = OtpMemo {
             code: code.clone(),
             name: name(),
@@ -1821,8 +1821,8 @@ mod tests {
             ua: owner.clone(),
             listing: Some((pay_to, zats(1))),
         };
-        assert!(!market.answer(&other_price, Some(&owner), height()));
-        assert_eq!(market.price(&name()), None);
+        assert!(!market.answer(&mut registry, &other_price, height()));
+        assert_eq!(registry.price(&name()), None);
         let right = OtpMemo {
             code,
             name: name(),
@@ -1830,14 +1830,15 @@ mod tests {
             ua: owner.clone(),
             listing: Some((pay_to, zats(150_000_000))),
         };
-        assert!(market.answer(&right, Some(&owner), height()));
-        assert_eq!(market.price(&name()), Some(zats(150_000_000)));
+        assert!(market.answer(&mut registry, &right, height()));
+        assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
         assert_eq!(pay_to, request.pay_to);
     }
 
     #[test]
     fn a_stranger_cannot_open_a_list_challenge() {
         let (owner, _) = alice();
+        let mut registry = sale_registry();
         let mut market = Market::new();
         assert_eq!(
             market.propose_list(&list_for(1), &bob(), OtpCode::generate(), mtp(), height()),
@@ -1862,22 +1863,23 @@ mod tests {
                 zats(150_000_000),
             )),
         };
-        assert!(!market.answer(&stranger, Some(&owner), height()));
-        assert_eq!(market.price(&name()), None);
+        assert!(!market.answer(&mut registry, &stranger, height()));
+        assert_eq!(registry.price(&name()), None);
     }
 
     #[test]
     fn a_delist_waits_for_the_controllers_code() {
         let (owner, _) = alice();
+        let mut registry = sale_registry();
         let mut market = Market::new();
         market
-            .list(&list_for(150_000_000), &owner, height())
+            .list(&mut registry, &list_for(150_000_000), height())
             .unwrap();
         let code = OtpCode::for_test(*b"042831");
         market
-            .propose_delist(&name(), &owner, &owner, code.clone(), mtp(), height())
+            .propose_delist(&registry, &name(), &owner, code.clone(), mtp(), height())
             .unwrap();
-        assert_eq!(market.price(&name()), Some(zats(150_000_000)));
+        assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
         let right = OtpMemo {
             code,
             name: name(),
@@ -1885,33 +1887,35 @@ mod tests {
             ua: owner.clone(),
             listing: None,
         };
-        assert!(market.answer(&right, Some(&owner), height()));
-        assert_eq!(market.price(&name()), None);
+        assert!(market.answer(&mut registry, &right, height()));
+        assert_eq!(registry.price(&name()), None);
     }
 
     #[test]
     fn one_output_settles_one_sale() {
         let (owner, pay_to) = alice();
+        let mut registry = sale_registry();
         let mut market = Market::new();
         market
-            .list(&list_for(100_000_000), &owner, height())
+            .list(&mut registry, &list_for(100_000_000), height())
             .unwrap();
         let second = Name::parse("zed").unwrap();
         market
             .list(
+                &mut registry,
                 &Listing {
                     name: second.clone(),
                     ua: owner.clone(),
                     pay_to,
                     price: zats(100_000_000),
                 },
-                &owner,
                 height(),
             )
             .unwrap();
         let code = OtpCode::for_test(*b"123456");
         market
             .open_buy(
+                &registry,
                 &name(),
                 &bob(),
                 &owner,
@@ -1926,6 +1930,7 @@ mod tests {
             .unwrap();
         market
             .open_buy(
+                &registry,
                 &second,
                 &bob(),
                 &owner,
@@ -1947,17 +1952,19 @@ mod tests {
     #[test]
     fn an_expired_buy_does_not_take_a_later_payment() {
         let (owner, pay_to) = alice();
+        let mut registry = sale_registry();
         let mut market = Market::new();
         let open_at = BlockHeight::from_u32(10);
         let expired_at = BlockHeight::from_u32(15);
         let next_at = BlockHeight::from_u32(16);
         let paid_at = BlockHeight::from_u32(20);
         market
-            .list(&list_for(100_000_000), &owner, open_at)
+            .list(&mut registry, &list_for(100_000_000), open_at)
             .unwrap();
         let first = OtpCode::for_test(*b"111111");
         market
             .open_buy(
+                &registry,
                 &name(),
                 &bob(),
                 &owner,
@@ -1976,6 +1983,7 @@ mod tests {
         let second = OtpCode::for_test(*b"222222");
         market
             .open_buy(
+                &registry,
                 &name(),
                 &bob(),
                 &owner,
@@ -1992,11 +2000,11 @@ mod tests {
         market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], later, paid_at);
         assert!(market.is_paid(&name()));
 
-        market.truncate_to(paid_at);
+        market.truncate_to(&mut registry, paid_at);
         assert!(market.is_paid(&name()));
         assert!(market.is_open(&name()));
 
-        market.truncate_to(open_at);
+        market.truncate_to(&mut registry, open_at);
         assert!(market.is_open(&name()));
         assert!(!market.is_paid(&name()));
         let first_paid = zats(100_000_000 + otp_amount(&OtpCode::for_test(*b"111111")).into_u64());
@@ -2012,6 +2020,7 @@ mod tests {
     #[test]
     fn a_code_already_open_does_not_open_another_challenge() {
         let (owner, _) = alice();
+        let mut registry = sale_registry();
         let mut market = Market::new();
         let code = OtpCode::for_test(*b"042831");
         market
@@ -2029,10 +2038,10 @@ mod tests {
             Err(MarketRefusal::CodeTaken)
         );
         market
-            .list(&list_for(150_000_000), &owner, height())
+            .list(&mut registry, &list_for(150_000_000), height())
             .unwrap();
         assert_eq!(
-            market.propose_delist(&name(), &owner, &owner, code, mtp(), height()),
+            market.propose_delist(&registry, &name(), &owner, code, mtp(), height()),
             Err(MarketRefusal::CodeTaken)
         );
         assert_eq!(
@@ -2065,6 +2074,7 @@ mod tests {
     #[test]
     fn a_rollback_submits_an_open_code() {
         let (owner, _) = alice();
+        let mut registry = sale_registry();
         let mut market = Market::new();
         let code = OtpCode::for_test(*b"042831");
         market
@@ -2080,16 +2090,17 @@ mod tests {
         assert!(market
             .unrelayed_challenges(|_| Some(owner.clone()))
             .is_empty());
-        market.truncate_to(height());
+        market.truncate_to(&mut registry, height());
         assert_eq!(
             market.unrelayed_challenges(|_| Some(owner.clone())).len(),
             1
         );
 
-        let (mut market, owner, _) = listed(100_000_000);
+        let (mut market, mut registry, owner, _) = listed(100_000_000);
         let buy = OtpCode::for_test(*b"123456");
         market
             .open_buy(
+                &registry,
                 &name(),
                 &bob(),
                 &owner,
@@ -2104,32 +2115,34 @@ mod tests {
             .unwrap();
         market.relayed(&name());
         assert!(market.unrelayed().is_empty());
-        market.truncate_to(height());
+        market.truncate_to(&mut registry, height());
         assert_eq!(market.unrelayed().len(), 1);
     }
 
     #[test]
     fn a_buy_whose_payment_is_already_open_stays_closed() {
         let (owner, pay_to) = alice();
+        let mut registry = sale_registry();
         let mut market = Market::new();
         let second = Name::parse("zed").unwrap();
         market
-            .list(&list_for(100_000_000), &owner, height())
+            .list(&mut registry, &list_for(100_000_000), height())
             .unwrap();
         market
             .list(
+                &mut registry,
                 &Listing {
                     name: second.clone(),
                     ua: owner.clone(),
                     pay_to,
                     price: zats(100_000_001),
                 },
-                &owner,
                 height(),
             )
             .unwrap();
         market
             .open_buy(
+                &registry,
                 &name(),
                 &bob(),
                 &owner,
@@ -2144,6 +2157,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             market.open_buy(
+                &registry,
                 &second,
                 &bob(),
                 &owner,
@@ -2160,6 +2174,7 @@ mod tests {
         assert!(!market.is_open(&second));
         market
             .open_buy(
+                &registry,
                 &second,
                 &bob(),
                 &owner,
@@ -2177,34 +2192,191 @@ mod tests {
 
     #[test]
     fn a_listing_leaves_when_she_no_longer_holds_the_name() {
-        let (owner, _) = alice();
-        let mut market = Market::new();
+        let (mut market, mut registry, owner, _) = listed(100_000_000);
         let listed_at = height();
-        market
-            .list(&list_for(100_000_000), &owner, listed_at)
-            .unwrap();
         let later = BlockHeight::from_u32(2);
-        market.reconcile(|_| None, later);
-        assert_eq!(market.price(&name()), None);
-        market.truncate_to(listed_at);
-        assert_eq!(market.price(&name()), Some(zats(100_000_000)));
+        market.reconcile(&mut registry, later);
+        assert_eq!(registry.price(&name()), Some(zats(100_000_000)));
 
-        market.reconcile(|_| Some((owner.clone(), held())), later);
-        assert_eq!(market.price(&name()), Some(zats(100_000_000)));
-        market.reconcile(|_| Some((bob(), held())), later);
-        assert_eq!(market.price(&name()), None);
+        let record = registry.record(&name()).unwrap().clone();
+        let note = NameNote::Update {
+            name: name(),
+            ua: bob(),
+            expires_at: Expiry::Never,
+            prev: record.commitment,
+        };
+        assert!(registry.accept_update(
+            &MainNetwork,
+            &note,
+            nf(30),
+            &[record.predecessor_nullifier],
+            later,
+            mtp(),
+        ));
+        assert_eq!(
+            registry.list(list_for(100_000_000)),
+            Err(MarketRefusal::NotOwner)
+        );
+        assert_eq!(
+            registry.delist(&name(), &owner),
+            Err(MarketRefusal::NotOwner)
+        );
+        market.reconcile(&mut registry, later);
+        assert_eq!(registry.price(&name()), None);
+        market.truncate_to(&mut registry, later);
+        assert!(registry.listing(&name()).is_none());
+        registry.truncate_to_height(listed_at);
+        market.truncate_to(&mut registry, listed_at);
+        assert_eq!(registry.record(&name()).unwrap().ua, owner);
+        assert_eq!(registry.price(&name()), Some(zats(100_000_000)));
+
+        let record = registry.record(&name()).unwrap().clone();
+        let release = NameNote::Release {
+            name: name(),
+            ua: owner,
+            prev: record.commitment,
+        };
+        assert!(registry.accept_release(
+            &MainNetwork,
+            &release,
+            nf(31),
+            &[record.predecessor_nullifier],
+            later,
+            mtp(),
+        ));
+        market.reconcile(&mut registry, later);
+        assert_eq!(registry.price(&name()), None);
+    }
+
+    #[test]
+    fn registry_listing_state_drives_a_complete_sale() {
+        let mut registry = sale_registry();
+        let mut market = Market::new();
+        let key = AccessCodeDerivationKey::from_seed(&[0x22; 32]);
+        let fee_rule = FeeRule::standard();
+        let fee = (fee_rule.marginal_fee() * FEE_ACTIONS).unwrap();
+        let request = MarketRequest::List(list_for(100_000_000));
+        market.admit(
+            TxId::from_bytes([1; 32]),
+            &request,
+            fee,
+            &registry,
+            &fee_rule,
+            height(),
+            mtp(),
+            |_| false,
+            &key,
+        );
+        assert!(registry.listing(&name()).is_none());
+        let challenge = market
+            .unrelayed_challenges(|name| registry.record(name).map(|r| r.ua.clone()))
+            .remove(0);
+        assert!(market.answer(&mut registry, &challenge, height()));
+        assert_eq!(registry.price(&name()), Some(zats(100_000_000)));
+        let record = registry.record(&name()).unwrap().clone();
+
+        let buy_at = BlockHeight::from_u32(2);
+        assert_eq!(
+            market.admit(
+                TxId::from_bytes([2; 32]),
+                &MarketRequest::Buy {
+                    name: name(),
+                    ua: bob()
+                },
+                fee,
+                &registry,
+                &fee_rule,
+                buy_at,
+                mtp(),
+                |_| false,
+                &key
+            ),
+            Some(name())
+        );
+        let otp = market.unrelayed().remove(0);
+        market.seal_replayed_buys();
+        // Startup seals historical challenges; replay must keep the buy payable
+        // and must restore listings into the existing registry.
+        market.truncate_to(&mut registry, buy_at);
+        assert!(market.unrelayed().is_empty());
+        market.observe(
+            |name| registry.record(name).map(|r| r.ua.clone()),
+            &[(
+                alice().1,
+                zats(100_000_000 + otp_amount(&otp.code).into_u64()),
+            )],
+            mtp(),
+            buy_at,
+        );
+        let notes = market.poll(&registry, |_| false, buy_at);
+        assert_eq!(notes.len(), 1);
+        let sold_at = BlockHeight::from_u32(3);
+        assert!(registry.accept_sale(
+            &MainNetwork,
+            &notes[0],
+            nf(30),
+            &[record.predecessor_nullifier],
+            sold_at,
+            mtp()
+        ));
+        market.reconcile(&mut registry, sold_at);
+        assert_eq!(registry.record(&name()).unwrap().ua, bob());
+        assert!(registry.listing(&name()).is_none());
+        assert!(!market.is_open(&name()));
+
+        registry.truncate_to_height(buy_at);
+        market.truncate_to(&mut registry, buy_at);
+        assert_eq!(registry.record(&name()).unwrap().ua, record.ua);
+        assert_eq!(registry.price(&name()), Some(zats(100_000_000)));
+        assert!(market.is_paid(&name()));
+        assert_eq!(market.poll(&registry, |_| false, buy_at).len(), 1);
+    }
+
+    #[test]
+    fn listing_replay_preserves_records_and_the_latest_protection_snapshot() {
+        use crate::mint::presale::ProtectionStatus;
+        use std::collections::BTreeMap;
+
+        let (mut market, mut registry, _, _) = listed(100_000_000);
+        let record = registry.record(&name()).unwrap().clone();
+        let protected = Name::parse("reserved").unwrap();
+        registry.replace_protected(BTreeMap::from([(
+            protected.clone(),
+            ProtectionStatus::Forever,
+        )]));
+        let later = BlockHeight::from_u32(2);
+        market
+            .list(&mut registry, &list_for(200_000_000), later)
+            .unwrap();
+        registry.replace_protected(BTreeMap::from([(
+            protected.clone(),
+            ProtectionStatus::WithExpiry(mtp()),
+        )]));
+        registry.truncate_to_height(height());
+        market.truncate_to(&mut registry, height());
+        assert_eq!(registry.price(&name()), Some(zats(100_000_000)));
+        assert_eq!(registry.record(&name()), Some(&record));
+        assert_eq!(registry.record_history(&name()), &[record]);
+        assert_eq!(
+            registry.protection_status(&protected),
+            ProtectionStatus::WithExpiry(mtp())
+        );
+        assert!(!registry.is_protected(&protected, mtp()));
+        assert!(registry.record(&protected).is_none());
     }
 
     #[test]
     fn a_buy_read_from_the_chain_stays_payable_and_unsent() {
         let (owner, pay_to) = alice();
+        let mut registry = sale_registry();
         let mut market = Market::new();
         market
-            .list(&list_for(100_000_000), &owner, height())
+            .list(&mut registry, &list_for(100_000_000), height())
             .unwrap();
         let code = OtpCode::for_test(*b"123456");
         market
             .open_buy(
+                &registry,
                 &name(),
                 &bob(),
                 &owner,
@@ -2220,25 +2392,26 @@ mod tests {
         assert_eq!(market.unrelayed().len(), 1);
         market.seal_replayed_buys();
         assert!(market.unrelayed().is_empty());
-        market.truncate_to(height());
+        market.truncate_to(&mut registry, height());
         assert!(market.is_open(&name()));
         assert!(market.unrelayed().is_empty());
 
         let second = Name::parse("zed").unwrap();
         market
             .list(
+                &mut registry,
                 &Listing {
                     name: second.clone(),
                     ua: owner.clone(),
                     pay_to,
                     price: zats(50_000_000),
                 },
-                &owner,
                 height(),
             )
             .unwrap();
         market
             .open_buy(
+                &registry,
                 &second,
                 &bob(),
                 &owner,
