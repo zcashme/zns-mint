@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-11-03 — The market checks its own challenges
+
+- `allows_challenge` rules on update and release only.
+  `challengeable` is the clock and pending-note gate a market
+  challenge passes before it is sent. The market checks the owner.
+
 ## 2026-11-02 — A list challenge must be the controller
 
 - A list challenge is allowed when the request UA is the live

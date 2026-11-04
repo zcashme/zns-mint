@@ -21,9 +21,7 @@ use zns_mint::mint::presale;
 use zns_mint::mint::pricing::{fetch_round, Oracle};
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
-use zns_mint::mint::{
-    relay, relay_buy, relay_challenge, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
-};
+use zns_mint::mint::{relay, relay_buy, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::zcash::{TipSession, TransportError, RETRY_PAUSE};
 
 #[tokio::main]
@@ -286,6 +284,21 @@ async fn main() {
             );
             for (txid, inbound, paid) in arrivals {
                 match inbound {
+                    MintInbound::Market(request) => {
+                        if let Some(name) = market.admit(
+                            txid,
+                            &request,
+                            paid,
+                            &registry,
+                            &fee_rule,
+                            next_height,
+                            block_mtp,
+                            |name| name_notes.note_pending(name),
+                            &access_code_key,
+                        ) {
+                            challenges.drop_challenges(&name);
+                        }
+                    }
                     MintInbound::Request(request) => {
                         requests.record(txid, request, paid, next_height);
                     }
@@ -363,9 +376,7 @@ async fn main() {
                         let authorized = match &sent.request {
                             Request::Update { .. } => registry.authorize_update(&sent, block_mtp),
                             Request::Release { .. } => registry.authorize_release(&sent),
-                            Request::Claim { .. }
-                            | Request::List { .. }
-                            | Request::Delist { .. } => continue,
+                            Request::Claim { .. } => continue,
                         };
                         let Some(note) = authorized else {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
@@ -384,33 +395,6 @@ async fn main() {
                         }
                         if rest > Zatoshis::ZERO {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, rest);
-                        }
-                    }
-                    MintInbound::List(_) | MintInbound::Delist(_) | MintInbound::Buy(_) => {
-                        if let Some(name) = market.admit(
-                            txid,
-                            &inbound,
-                            paid,
-                            &registry,
-                            &fee_rule,
-                            next_height,
-                            block_mtp,
-                            |name| name_notes.note_pending(name),
-                            |name| access_code_key.buy_otp(&txid, name),
-                            |inbound| match inbound {
-                                MintInbound::List(list) => Some(access_code_key.list_otp(
-                                    &txid,
-                                    &list.name,
-                                    list.price,
-                                    &list.pay_to,
-                                )),
-                                MintInbound::Delist(delist) => {
-                                    Some(access_code_key.delist_otp(&txid, &delist.name))
-                                }
-                                _ => None,
-                            },
-                        ) {
-                            challenges.drop_challenges(&name);
                         }
                     }
                     MintInbound::Unrecognized => {
@@ -612,7 +596,6 @@ async fn main() {
                     }
                     challenges.admit(request.clone(), mtp_now);
                 }
-                Request::List { .. } | Request::Delist { .. } => {}
             }
         }
 
@@ -636,7 +619,7 @@ async fn main() {
                 &fee_rule,
                 &record.ua,
                 &source,
-                &pending,
+                &pending.memo(),
                 "tip",
             )
             .await
@@ -645,35 +628,26 @@ async fn main() {
             }
         }
 
-        for pending in market.unrelayed_challenges() {
-            if !market.allows_transition(pending.request.name()) {
-                continue;
-            }
-            let Some(record) =
-                registry.authorize_challenge(&name_notes, &pending.request, target_height, mtp_now)
-            else {
-                continue;
-            };
-            let challenge = treasury::OtpChallenge {
-                request: pending.request.clone(),
-                code: pending.code.clone(),
-                expires_at: pending.expires_at,
-                attempts: 0,
-            };
-            if relay_challenge(
+        for challenge in market.unrelayed_challenges(|name| {
+            registry
+                .challengeable(&name_notes, name, target_height, mtp_now)
+                .map(|record| record.ua.clone())
+        }) {
+            if relay(
                 &network,
                 &mut wallet,
                 &treasury_keys,
                 &sapling_spend,
                 &sapling_output,
                 &fee_rule,
-                &record.ua,
+                &challenge.ua,
                 &source,
                 &challenge,
+                "market",
             )
             .await
             {
-                market.challenge_relayed(&pending.code);
+                market.challenge_relayed(&challenge.code);
             }
         }
 

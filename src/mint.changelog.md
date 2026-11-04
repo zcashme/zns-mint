@@ -1,5 +1,14 @@
 # Mint live-work design record
 
+## 2026-11-03 — Name requests and market requests
+
+- `MintInbound::Market` carries a `MarketRequest`: a list, a delist,
+  or a buy. `Request` is a claim, an update, or a release. Both decode
+  through `decode_zns`, which refuses a field left unread. The separate
+  list, delist, and buy inbound variants are gone, and `Action` has no
+  `Buy`.
+- `relay` takes the `OtpMemo` it sends. `relay_challenge` is gone.
+
 ## 2026-11-02 — A list waits for the controller's code
 
 - `ZNS:otp` accepts the verbs `list` and `delist`. A list sentence also

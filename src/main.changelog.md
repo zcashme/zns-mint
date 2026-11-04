@@ -1,5 +1,12 @@
 # main.changelog.md
 
+## 2026-11-03 — Name requests and market requests
+
+- A list, delist, or buy arrives as `MintInbound::Market` and goes to
+  `Market::admit`. A market challenge is sent through `relay` once
+  `Registry::challengeable` passes and the market finds the owner
+  unchanged.
+
 ## 2026-11-02 — A rollback keeps sales from blocks that remain
 
 - The market from boot is the one the loop runs. A rollback drops

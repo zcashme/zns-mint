@@ -1,5 +1,11 @@
 # Boot module changelog
 
+## 2026-11-03 — Name requests and market requests
+
+- The sync replays `MintInbound::Market` through `Market::admit`, as
+  the main loop does. Claims, updates, and releases no longer reach
+  the market.
+
 ## 2026-11-02 — Boot keeps the sale market it reads
 
 - The sync applies list, delist, buy, payment, and expiry and returns

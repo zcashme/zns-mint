@@ -25,6 +25,7 @@ use zcash_protocol::value::Zatoshis;
 use zip32::AccountId;
 
 use sapling::circuit::{OutputParameters, SpendParameters};
+use std::str::Split;
 use tokio::sync::mpsc;
 
 use crate::wallet::Wallet;
@@ -32,7 +33,7 @@ use crate::zcash::{CanonicalBlockSource, ChainClient, MempoolChangeKind, Mempool
 use crate::TreasuryKeys;
 
 use presale::AccessCode;
-use treasury::{OtpChallenge, OtpCode};
+use treasury::OtpCode;
 
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
@@ -144,7 +145,7 @@ impl Action {
     }
 }
 
-/// An authorized transition the loop is about to assemble.
+/// A name request, decoded before authorization.
 ///
 /// Built by the Treasury memo grammar (`Request::decode`); memo bytes
 /// stay on that parser. Claims carry a term (`forever` or `<N>y`) and
@@ -173,20 +174,6 @@ pub enum Request {
         name: Name,
         ua: UnifiedAddress,
     },
-    /// List the name at `pay_to` for `price`, once the controller returns
-    /// the challenge.
-    List {
-        name: Name,
-        ua: UnifiedAddress,
-        pay_to: TransparentAddress,
-        price: Zatoshis,
-    },
-    /// Take the name off the market, once the controller returns the
-    /// challenge.
-    Delist {
-        name: Name,
-        ua: UnifiedAddress,
-    },
 }
 
 impl Request {
@@ -195,9 +182,7 @@ impl Request {
         match self {
             Request::Claim { name, .. }
             | Request::Update { name, .. }
-            | Request::Release { name, .. }
-            | Request::List { name, .. }
-            | Request::Delist { name, .. } => name,
+            | Request::Release { name, .. } => name,
         }
     }
 
@@ -206,8 +191,6 @@ impl Request {
             Request::Claim { .. } => Action::Claim,
             Request::Update { .. } => Action::Update,
             Request::Release { .. } => Action::Release,
-            Request::List { .. } => Action::List,
-            Request::Delist { .. } => Action::Delist,
         }
     }
 
@@ -216,9 +199,7 @@ impl Request {
         match self {
             Request::Claim { ua, .. }
             | Request::Update { ua, .. }
-            | Request::Release { ua, .. }
-            | Request::List { ua, .. }
-            | Request::Delist { ua, .. } => ua,
+            | Request::Release { ua, .. } => ua,
         }
     }
 
@@ -229,73 +210,72 @@ impl Request {
     /// - `ZNS:update:<none | <N>y | forever>:<name>:<ua>`
     /// - `ZNS:release:<name>:<ua>`
     fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Option<Request> {
-        let text = match Memo::try_from(memo).ok()? {
-            Memo::Text(text) => text,
-            _ => return None,
-        };
-
-        let mut fields = text.split(':');
-        if fields.next()? != "ZNS" {
-            return None;
-        }
-        let action = Action::parse(fields.next()?)?;
-        // A sale is a name note the mint signs. A list or a delist is a
-        // controller challenge parsed by its own memo.
-        if action.is_sale() || action.is_list() || action.is_delist() {
-            return None;
-        }
-
-        // Claims may lead with a pre-sale code; the discriminator is whether
-        // the next field is a term. Updates say `none`, `<N>y`, or `forever`.
-        let (claim_code, term) = match action {
-            Action::Claim => {
+        decode_zns(memo, |verb, fields| match verb {
+            // Claims may lead with a pre-sale code; the discriminator is
+            // whether the next field is a term.
+            "claim" => {
                 let first = fields.next()?;
-                if first.is_empty() {
-                    return None;
-                }
-                if let Some(term) = Term::parse(first) {
-                    (None, Some(term))
-                } else {
-                    let code = AccessCode::parse(first)?;
-                    let term = Term::parse(fields.next()?)?;
-                    (Some(code), Some(term))
-                }
+                let (code, term) = match Term::parse(first) {
+                    Some(term) => (None, term),
+                    None => (
+                        Some(AccessCode::parse(first)?),
+                        Term::parse(fields.next()?)?,
+                    ),
+                };
+                let (name, ua) = decode_name_and_ua(network, fields)?;
+                Some(Request::Claim {
+                    name,
+                    ua,
+                    term,
+                    code,
+                })
             }
-            Action::Update => {
+            "update" => {
                 let term = match fields.next()? {
                     "none" => None,
                     "forever" => Some(Term::Forever),
                     field => Some(Term::parse(field)?),
                 };
-                (None, term)
+                let (name, ua) = decode_name_and_ua(network, fields)?;
+                Some(Request::Update { name, ua, term })
             }
-            Action::Release => (None, None),
-            Action::Sale => unreachable!("a sale is not a request"),
-            Action::List | Action::Delist => unreachable!("a listing is not this request"),
-        };
-
-        let name = Name::parse(fields.next()?)?;
-        let ua_str = fields.next()?;
-        if ua_str.is_empty() || fields.next().is_some() {
-            return None;
-        }
-        let ua = decode_controller_ua(network, ua_str)?;
-
-        Some(match (action, term) {
-            (Action::Claim, Some(term)) => Request::Claim {
-                name,
-                ua,
-                term,
-                code: claim_code,
-            },
-            (Action::Update, _) => Request::Update { name, ua, term },
-            (Action::Release, _) => Request::Release { name, ua },
-            // A claim always carries a term.
-            (Action::Claim, None) => unreachable!("claims always carry a term"),
-            (Action::Sale, _) => unreachable!("a sale is not a request"),
-            (Action::List | Action::Delist, _) => unreachable!("a listing is not this request"),
+            "release" => {
+                decode_name_and_ua(network, fields).map(|(name, ua)| Request::Release { name, ua })
+            }
+            _ => None,
         })
     }
+}
+
+/// Runs `parse` on the verb and the fields after it in a `ZNS:<verb>:…`
+/// text memo. A field `parse` leaves unread refuses the memo.
+pub(crate) fn decode_zns<T>(
+    memo: &MemoBytes,
+    parse: impl FnOnce(&str, &mut Split<'_, char>) -> Option<T>,
+) -> Option<T> {
+    let Memo::Text(text) = Memo::try_from(memo).ok()? else {
+        return None;
+    };
+    let mut fields = text.split(':');
+    if fields.next()? != "ZNS" {
+        return None;
+    }
+    let verb = fields.next()?;
+    let value = parse(verb, &mut fields)?;
+    fields.next().is_none().then_some(value)
+}
+
+/// The `<name>:<ua>` pair every request names.
+pub(crate) fn decode_name_and_ua<P: Parameters>(
+    network: &P,
+    fields: &mut Split<'_, char>,
+) -> Option<(Name, UnifiedAddress)> {
+    let name = Name::parse(fields.next()?)?;
+    let ua = fields.next()?;
+    if ua.is_empty() {
+        return None;
+    }
+    Some((name, decode_controller_ua(network, ua)?))
 }
 
 /// A mint-issued challenge to a wallet, proving that the wallet controls a name via shielded-memos.
@@ -396,35 +376,25 @@ pub enum MintInbound {
     /// A request — a user's proposed transition, decoded from a Treasury
     /// memo; the Registry's `authorize_*` family rules on it.
     Request(Request),
+    /// A list, delist, or buy; [`sale::Market::admit`] rules on it.
+    Market(sale::MarketRequest),
     /// An OTP response — the relay memo returned; the OTP queue takes it.
     Response(OtpMemo),
-    /// Alice lists the name she owns, at the transparent receiver on
-    /// her controller address, for a price of at most eight decimals.
-    List(sale::ListRequest),
-    /// Alice takes her listing down. The controller must still own the name.
-    Delist(sale::DelistRequest),
-    /// A buy request: Bob asks for a listed name. The sale queue sends
-    /// him a buy OTP. The price and address are Alice's listing.
-    Buy(sale::BuyRequest),
     /// A payment with no parseable message: the deciding pass logs it once and
     /// the sweep keeps the value; the queue names it by its txid.
     Unrecognized,
 }
 
 impl MintInbound {
-    /// Classifies one Treasury memo: OTP response, request, or
-    /// unrecognized payment. Called once per memo, at block application.
+    /// Classifies one Treasury memo: OTP response, name request, market
+    /// request, or unrecognized payment. Called once per memo, at block application.
     pub fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Self {
         if let Some(response) = OtpMemo::decode(network, memo) {
             Self::Response(response)
-        } else if let Some(buy) = sale::BuyRequest::decode(network, memo) {
-            Self::Buy(buy)
-        } else if let Some(list) = sale::ListRequest::decode(network, memo) {
-            Self::List(list)
-        } else if let Some(delist) = sale::DelistRequest::decode(network, memo) {
-            Self::Delist(delist)
         } else if let Some(request) = Request::decode(network, memo) {
             Self::Request(request)
+        } else if let Some(request) = sale::MarketRequest::decode(network, memo) {
+            Self::Market(request)
         } else {
             Self::Unrecognized
         }
@@ -749,8 +719,8 @@ pub fn apply_block<P: Parameters + Send + 'static>(
 // OtpMemo submission
 // ===========================================================================
 
-/// Builds and submits the challenge for a request already admitted to
-/// `OtpQueue`. Returns false when Treasury funds or node acceptance defer it.
+/// Builds and submits a controller challenge. Returns false when Treasury
+/// funds or node acceptance defer it.
 #[allow(clippy::too_many_arguments)]
 pub async fn relay<P: Parameters + Send + 'static>(
     network: &P,
@@ -761,20 +731,19 @@ pub async fn relay<P: Parameters + Send + 'static>(
     fee_rule: &FeeRule,
     controller_ua: &UnifiedAddress,
     source: &CanonicalBlockSource,
-    challenge: &OtpChallenge,
+    challenge: &OtpMemo,
     lane: &'static str,
 ) -> bool {
-    let request = &challenge.request;
-    let memo = match challenge.memo().encode(network) {
+    let memo = match challenge.encode(network) {
         Some(memo) => memo,
-        None if request.action().is_claim() => {
+        None if challenge.action.is_claim() => {
             unreachable!("claims never enter the controller challenge relay")
         }
         None => {
             tracing::error!(
                 lane,
-                name = %request.name().as_str(),
-                action = request.action().as_str(),
+                name = %challenge.name.as_str(),
+                action = challenge.action.as_str(),
                 "controller challenge memo exceeds the ZIP-302 512-byte limit"
             );
             return false;
@@ -795,8 +764,8 @@ pub async fn relay<P: Parameters + Send + 'static>(
             tracing::warn!(
                 lane,
                 %error,
-                name = %request.name().as_str(),
-                action = request.action().as_str(),
+                name = %challenge.name.as_str(),
+                action = challenge.action.as_str(),
                 "controller challenge not built"
             );
             return false;
@@ -806,81 +775,16 @@ pub async fn relay<P: Parameters + Send + 'static>(
         tracing::info!(
             lane,
             txid = %transaction.txid(),
-            name = %request.name().as_str(),
-            action = request.action().as_str(),
+            name = %challenge.name.as_str(),
+            action = challenge.action.as_str(),
             "controller challenged"
         );
         true
     } else {
         tracing::debug!(
             lane,
-            name = %request.name().as_str(),
-            action = request.action().as_str(),
-            "controller challenge rejected — deferred"
-        );
-        false
-    }
-}
-
-/// Submits a list or delist challenge. The memo verb is `list` or
-/// `delist`, so it cannot be read as an update or a release. Returns
-/// false when Treasury funds or node acceptance defer it.
-#[allow(clippy::too_many_arguments)]
-pub async fn relay_challenge<P: Parameters + Send + 'static>(
-    network: &P,
-    wallet: &mut Wallet<P>,
-    treasury_keys: &TreasuryKeys,
-    spend_prover: &SpendParameters,
-    output_prover: &OutputParameters,
-    fee_rule: &FeeRule,
-    controller_ua: &UnifiedAddress,
-    source: &CanonicalBlockSource,
-    challenge: &OtpChallenge,
-) -> bool {
-    let memo = match challenge.memo().encode(network) {
-        Some(memo) => memo,
-        None => {
-            tracing::error!(
-                name = %challenge.request.name().as_str(),
-                action = challenge.request.action().as_str(),
-                "controller challenge memo exceeds the ZIP-302 512-byte limit"
-            );
-            return false;
-        }
-    };
-    let transaction = match treasury::challenge(
-        network,
-        wallet,
-        treasury_keys,
-        spend_prover,
-        output_prover,
-        fee_rule,
-        controller_ua,
-        memo,
-    ) {
-        Ok(transaction) => transaction,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                name = %challenge.request.name().as_str(),
-                action = challenge.request.action().as_str(),
-                "controller challenge not built"
-            );
-            return false;
-        }
-    };
-    if source.submit(&transaction, "controller challenge").await {
-        tracing::info!(
-            txid = %transaction.txid(),
-            name = %challenge.request.name().as_str(),
-            action = challenge.request.action().as_str(),
-            "controller challenged"
-        );
-        true
-    } else {
-        tracing::debug!(
-            name = %challenge.request.name().as_str(),
-            action = challenge.request.action().as_str(),
+            name = %challenge.name.as_str(),
+            action = challenge.action.as_str(),
             "controller challenge rejected — deferred"
         );
         false
@@ -977,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_exactly_the_three_request_forms() {
+    fn accepts_the_existing_request_forms() {
         let network = MainNetwork;
 
         assert!(matches!(
@@ -1052,19 +956,30 @@ mod tests {
     }
 
     #[test]
-    fn rejects_extra_field_and_non_zns_and_invalid_name() {
-        let network = MainNetwork;
-        assert!(Request::decode(
-            &network,
-            &padded(&format!("ZNS:release:alice:{TEST_UA}:004206"))
-        )
-        .is_none());
-        assert!(Request::decode(&network, &padded("hello world")).is_none());
-        assert!(Request::decode(
-            &network,
-            &padded(&format!("ZNS:claim:forever:INVALID:{TEST_UA}"))
-        )
-        .is_none());
+    fn rejects_malformed_requests() {
+        let t1 = Address::Transparent(TransparentAddress::PublicKeyHash([0x11; 20]))
+            .encode(&MainNetwork);
+        for text in [
+            "hello world".to_owned(),
+            format!("ZNS:release:alice:{TEST_UA}:004206"),
+            format!("ZNS:claim:forever:INVALID:{TEST_UA}"),
+            format!("ZNS:list:alice:{TEST_UA}:{t1}"),
+            format!("ZNS:list:alice:{TEST_UA}:{t1}:1.123456789"),
+            format!("ZNS:list:alice:{TEST_UA}:{t1}:1.5:extra"),
+            format!("ZNS:delist:alice:{TEST_UA}:extra"),
+            format!("ZNS:buy:alice:{TEST_UA}:extra"),
+            "ZNS:buy:alice".to_owned(),
+            "ZNS:delist:alice".to_owned(),
+            format!("ZNS:sale:alice:{TEST_UA}"),
+        ] {
+            assert!(
+                matches!(
+                    MintInbound::decode(&MainNetwork, &padded(&text)),
+                    MintInbound::Unrecognized
+                ),
+                "accepted {text}"
+            );
+        }
     }
 
     #[test]
@@ -1076,8 +991,6 @@ mod tests {
         m[400] = 1; // garbage inside the zero tail
         let memo = MemoBytes::from_bytes(&m).expect("a 512-byte memo fits");
         // The tail lands inside the terminal UA field — nothing parses.
-        assert!(Request::decode(&network, &memo).is_none());
-        assert!(OtpMemo::decode(&network, &memo).is_none());
         assert!(matches!(
             MintInbound::decode(&network, &memo),
             MintInbound::Unrecognized
@@ -1147,37 +1060,41 @@ mod tests {
     }
 
     #[test]
-    fn largest_known_receiver_ua_is_accepted() {
-        let network = MainNetwork;
-        // The corpus vector carries every known receiver kind — the
-        // longest address shape the guard admits.
-        assert!(TEST_UA.len() > 200);
-        assert!(Request::decode(
-            &network,
-            &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"))
-        )
-        .is_some());
-    }
-
-    #[test]
     fn decode_classifies_each_kind() {
-        let network = MainNetwork;
-
-        let response = padded(&format!("ZNS:otp:417293:alice:update:{TEST_UA}"));
+        let t1 = Address::Transparent(TransparentAddress::PublicKeyHash([0x11; 20]))
+            .encode(&MainNetwork);
+        for (text, action) in [
+            (format!("ZNS:claim:forever:alice:{TEST_UA}"), Action::Claim),
+            (format!("ZNS:update:none:alice:{TEST_UA}"), Action::Update),
+            (format!("ZNS:release:alice:{TEST_UA}"), Action::Release),
+        ] {
+            assert!(
+                matches!(
+                    MintInbound::decode(&MainNetwork, &padded(&text)),
+                    MintInbound::Request(request) if request.action() == action
+                ),
+                "misclassified {text}"
+            );
+        }
+        for text in [
+            format!("ZNS:list:alice:{TEST_UA}:{t1}:1.5"),
+            format!("ZNS:delist:alice:{TEST_UA}"),
+            format!("ZNS:buy:alice:{TEST_UA}"),
+        ] {
+            assert!(
+                matches!(
+                    MintInbound::decode(&MainNetwork, &padded(&text)),
+                    MintInbound::Market(_)
+                ),
+                "misclassified {text}"
+            );
+        }
         assert!(matches!(
-            MintInbound::decode(&network, &response),
+            MintInbound::decode(
+                &MainNetwork,
+                &padded(&format!("ZNS:otp:417293:alice:update:{TEST_UA}"))
+            ),
             MintInbound::Response(_)
-        ));
-        let request = padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"));
-        assert!(matches!(
-            MintInbound::decode(&network, &request),
-            MintInbound::Request(_)
-        ));
-        // A bare payment: the queue names it by its txid.
-        let garbage = padded("hello world");
-        assert!(matches!(
-            MintInbound::decode(&network, &garbage),
-            MintInbound::Unrecognized
         ));
     }
 

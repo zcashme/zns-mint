@@ -1,5 +1,15 @@
 # Sale module changelog
 
+## 2026-11-03 — Name requests and market requests
+
+- `MarketRequest` replaces `ListRequest`, `DelistRequest`, and
+  `BuyRequest`. `list` and `propose_list` take a `Listing`, and
+  `open_buy` takes the name and the buyer. `admit` derives the list,
+  delist, and buy codes from the access-code key.
+- `unrelayed_challenges` returns the memo for each challenge whose
+  owner still holds the name on its terms. That check was the
+  Registry's.
+
 ## 2026-11-02 — Listings and sales are read again from the chain
 
 - A list or a delist waits until the controller returns the challenge.
