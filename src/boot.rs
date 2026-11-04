@@ -658,7 +658,7 @@ impl Boot<Network> {
                         market.answer(response, owner.as_ref(), next_height);
                     }
                 }
-                if let crate::mint::MintInbound::Request(request) = &inbound {
+                if let crate::mint::MintInbound::Market(request) = &inbound {
                     market.admit(
                         txid,
                         request,
@@ -668,19 +668,7 @@ impl Boot<Network> {
                         next_height,
                         block_mtp,
                         |_| false,
-                        |name| access_code_key.buy_otp(&txid, name),
-                        |request| match request {
-                            crate::mint::Request::List {
-                                name,
-                                price,
-                                pay_to,
-                                ..
-                            } => Some(access_code_key.list_otp(&txid, name, *price, pay_to)),
-                            crate::mint::Request::Delist { name, .. } => {
-                                Some(access_code_key.delist_otp(&txid, name))
-                            }
-                            _ => None,
-                        },
+                        &access_code_key,
                     );
                 }
             }

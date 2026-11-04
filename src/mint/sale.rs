@@ -13,11 +13,48 @@ use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::TxId;
 
+use crate::mint::presale::AccessCodeDerivationKey;
 use crate::mint::registry::Registry;
 use crate::mint::treasury::{OtpCode, D_OTP, FEE_ACTIONS, MAX_ATTEMPTS};
 use crate::mint::{
-    Action, Expiry, Name, NameCommitment, NameNote, OtpMemo, Request, Timestamp, UnifiedAddress,
+    decode_name_and_ua, decode_zns, Action, Expiry, Name, NameCommitment, NameNote, OtpMemo,
+    Timestamp, UnifiedAddress,
 };
+
+/// A list, delist, or buy, decoded before the market rules on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MarketRequest {
+    /// Alice lists the name she owns, at the transparent receiver on her
+    /// controller address, once she returns the challenge.
+    List(Listing),
+    /// Alice takes her listing down, once she returns the challenge.
+    Delist { name: Name, ua: UnifiedAddress },
+    /// Bob asks for a listed name. `ua` is where the buy OTP goes.
+    Buy { name: Name, ua: UnifiedAddress },
+}
+
+impl MarketRequest {
+    /// `ZNS:list:<name>:<ua>:<t1>:<price>`, `ZNS:delist:<name>:<ua>`, or
+    /// `ZNS:buy:<name>:<ua>`.
+    pub fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Option<Self> {
+        decode_zns(memo, |verb, fields| match verb {
+            "list" => {
+                let (name, ua) = decode_name_and_ua(network, fields)?;
+                Some(Self::List(Listing {
+                    name,
+                    ua,
+                    pay_to: decode_t1(network, fields.next()?)?,
+                    price: decode_zec(fields.next()?)?,
+                }))
+            }
+            "delist" => {
+                decode_name_and_ua(network, fields).map(|(name, ua)| Self::Delist { name, ua })
+            }
+            "buy" => decode_name_and_ua(network, fields).map(|(name, ua)| Self::Buy { name, ua }),
+            _ => None,
+        })
+    }
+}
 
 /// The listing is from the current owner, and the transparent address
 /// is the receiver on her controller address.
@@ -170,7 +207,8 @@ impl SaleQueue {
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         &mut self,
-        request: &Request,
+        name: &Name,
+        bob: &UnifiedAddress,
         alice: UnifiedAddress,
         pay_to: TransparentAddress,
         price: Zatoshis,
@@ -179,16 +217,13 @@ impl SaleQueue {
         code: OtpCode,
         mtp: Timestamp,
     ) -> Option<BuyOtp> {
-        let Request::Buy { .. } = request else {
-            return None;
-        };
-        if self.sales.iter().any(|sale| sale.name == *request.name()) {
+        if self.sales.iter().any(|sale| sale.name == *name) {
             return None;
         }
         let expires_at = Timestamp::from_seconds(mtp.as_seconds() + D_OTP).ok()?;
         self.sales.push(Sale {
-            name: request.name().clone(),
-            bob: request.ua().clone(),
+            name: name.clone(),
+            bob: bob.clone(),
             alice,
             held,
             term,
@@ -202,8 +237,8 @@ impl SaleQueue {
         });
         Some(BuyOtp {
             code,
-            name: request.name().clone(),
-            ua: request.ua().clone(),
+            name: name.clone(),
+            ua: bob.clone(),
         })
     }
 
@@ -556,19 +591,8 @@ impl MarketChallenge {
         }
     }
 
-    fn same_list(&self, request: &Request) -> bool {
-        let Request::List { pay_to, price, .. } = request else {
-            return false;
-        };
-        match &self.kind {
-            ChallengeKind::List(listing) => {
-                listing.name == *request.name()
-                    && listing.ua == *request.ua()
-                    && listing.pay_to == *pay_to
-                    && listing.price == *price
-            }
-            ChallengeKind::Delist { .. } => false,
-        }
+    fn same_list(&self, listing: &Listing) -> bool {
+        matches!(&self.kind, ChallengeKind::List(held) if held.as_ref() == listing)
     }
 
     fn same_terms(&self, response: &OtpMemo) -> bool {
@@ -776,31 +800,17 @@ impl Market {
     /// Lists when `owner` is the controller and no buy is open.
     pub fn list(
         &mut self,
-        request: &Request,
+        listing: &Listing,
         owner: &UnifiedAddress,
         height: BlockHeight,
     ) -> Result<(), MarketRefusal> {
-        let Request::List {
-            name,
-            ua,
-            pay_to,
-            price,
-        } = request
-        else {
-            return Err(MarketRefusal::NotOwner);
-        };
-        if !is_owner_listing(owner, request.ua(), pay_to) {
+        if !is_owner_listing(owner, &listing.ua, &listing.pay_to) {
             return Err(MarketRefusal::NotOwner);
         }
-        if self.sales.is_open(request.name()) {
+        if self.sales.is_open(&listing.name) {
             return Err(MarketRefusal::BuyOpen);
         }
-        let listing = Listing {
-            name: name.clone(),
-            ua: ua.clone(),
-            pay_to: *pay_to,
-            price: *price,
-        };
+        let listing = listing.clone();
         self.listings.insert(listing.clone());
         self.record(
             height,
@@ -837,7 +847,8 @@ impl Market {
     #[allow(clippy::too_many_arguments)]
     pub fn open_buy(
         &mut self,
-        request: &Request,
+        name: &Name,
+        bob: &UnifiedAddress,
         owner: &UnifiedAddress,
         term: Expiry,
         held: NameCommitment,
@@ -848,7 +859,7 @@ impl Market {
         height: BlockHeight,
     ) -> Result<BuyOtp, MarketRefusal> {
         let (pay_to, price) = {
-            let Some(listing) = self.listings.get(request.name()) else {
+            let Some(listing) = self.listings.get(name) else {
                 return Err(MarketRefusal::NotListed);
             };
             if !is_owner_listing(owner, &listing.ua, &listing.pay_to) {
@@ -867,16 +878,26 @@ impl Market {
         }
         let otp = self
             .sales
-            .open(request, owner.clone(), pay_to, price, term, held, code, mtp)
+            .open(
+                name,
+                bob,
+                owner.clone(),
+                pay_to,
+                price,
+                term,
+                held,
+                code,
+                mtp,
+            )
             .ok_or(MarketRefusal::AlreadyOpen)?;
-        let sale = self.sales.get(request.name()).expect("just opened").clone();
+        let sale = self.sales.get(name).expect("just opened").clone();
         self.record(
             height,
             MarketEvent::Open {
                 sale: Box::new(sale),
             },
         );
-        self.close_challenges_for(request.name(), height);
+        self.close_challenges_for(name, height);
         Ok(otp)
     }
 
@@ -908,25 +929,22 @@ impl Market {
     /// returns `code`.
     pub fn propose_list(
         &mut self,
-        request: &Request,
+        listing: &Listing,
         owner: &UnifiedAddress,
         code: OtpCode,
         mtp: Timestamp,
         height: BlockHeight,
     ) -> Result<(), MarketRefusal> {
-        let Request::List { pay_to, price, .. } = request else {
-            return Err(MarketRefusal::NotOwner);
-        };
-        if !is_owner_listing(owner, request.ua(), pay_to) {
+        if !is_owner_listing(owner, &listing.ua, &listing.pay_to) {
             return Err(MarketRefusal::NotOwner);
         }
-        if self.sales.is_open(request.name()) {
+        if self.sales.is_open(&listing.name) {
             return Err(MarketRefusal::BuyOpen);
         }
         if self
             .challenges
             .iter()
-            .any(|challenge| challenge.same_list(request))
+            .any(|challenge| challenge.same_list(listing))
         {
             return Ok(());
         }
@@ -935,12 +953,7 @@ impl Market {
         }
         self.push_challenge(
             MarketChallenge {
-                kind: ChallengeKind::List(Box::new(Listing {
-                    name: request.name().clone(),
-                    ua: request.ua().clone(),
-                    pay_to: *pay_to,
-                    price: *price,
-                })),
+                kind: ChallengeKind::List(Box::new(listing.clone())),
                 code,
                 expires_at: Timestamp::from_seconds(mtp.as_seconds() + D_OTP)
                     .expect("challenge expiry fits a timestamp"),
@@ -1043,13 +1056,7 @@ impl Market {
             };
             match &challenge.kind {
                 ChallengeKind::List(listing) => {
-                    let request = Request::List {
-                        name: listing.name.clone(),
-                        ua: listing.ua.clone(),
-                        pay_to: listing.pay_to,
-                        price: listing.price,
-                    };
-                    let _ = self.list(&request, owner, height);
+                    let _ = self.list(listing, owner, height);
                 }
                 ChallengeKind::Delist { name, ua } => {
                     let _ = self.delist(name, ua, owner, height);
@@ -1121,125 +1128,125 @@ impl Market {
     pub fn admit(
         &mut self,
         txid: TxId,
-        request: &Request,
+        request: &MarketRequest,
         paid: Zatoshis,
         registry: &Registry,
         fee_rule: &FeeRule,
         height: BlockHeight,
         mtp: Timestamp,
         pending: impl Fn(&Name) -> bool,
-        code_for: impl Fn(&Name) -> OtpCode,
-        challenge_code: impl Fn(&Request) -> Option<OtpCode>,
+        key: &AccessCodeDerivationKey,
     ) -> Option<Name> {
         let fee_ok = (fee_rule.marginal_fee() * FEE_ACTIONS).is_some_and(|fee| paid >= fee);
         match request {
-            list @ Request::List { .. } => {
-                let Some(record) = registry.record(list.name()) else {
+            MarketRequest::List(listing) => {
+                let Some(record) = registry.record(&listing.name) else {
                     tracing::info!(
                         %txid,
-                        name = %list.name().as_str(),
+                        name = %listing.name.as_str(),
                         "list fee kept: name is not live"
                     );
                     return None;
                 };
-                if !fee_ok || record.is_release_due(mtp) || pending(list.name()) {
+                if !fee_ok || record.is_release_due(mtp) || pending(&listing.name) {
                     tracing::info!(
                         %txid,
-                        name = %list.name().as_str(),
+                        name = %listing.name.as_str(),
                         "list fee kept: listing not opened"
                     );
                     return None;
                 }
-                let code = challenge_code(request)?;
-                match self.propose_list(list, &record.ua, code, mtp, height) {
+                let code = key.list_otp(&txid, &listing.name, listing.price, &listing.pay_to);
+                match self.propose_list(listing, &record.ua, code, mtp, height) {
                     Ok(()) => {}
                     Err(MarketRefusal::BuyOpen) => tracing::info!(
                         %txid,
-                        name = %list.name().as_str(),
+                        name = %listing.name.as_str(),
                         "list fee kept: a buy is open"
                     ),
                     Err(MarketRefusal::CodeTaken) => tracing::info!(
                         %txid,
-                        name = %list.name().as_str(),
+                        name = %listing.name.as_str(),
                         "list fee kept: that code is already open"
                     ),
                     Err(_) => tracing::info!(
                         %txid,
-                        name = %list.name().as_str(),
+                        name = %listing.name.as_str(),
                         "list fee kept: lister is not the owner"
                     ),
                 }
                 None
             }
-            delist @ Request::Delist { .. } => {
+            MarketRequest::Delist { name, ua } => {
                 let Some(owner) = registry
-                    .record(delist.name())
-                    .filter(|record| record.ua == *delist.ua())
+                    .record(name)
+                    .filter(|record| record.ua == *ua)
                     .map(|record| record.ua.clone())
                 else {
                     tracing::info!(
                         %txid,
-                        name = %delist.name().as_str(),
+                        name = %name.as_str(),
                         "delist fee kept: listing unchanged"
                     );
                     return None;
                 };
-                if !fee_ok || pending(delist.name()) {
+                if !fee_ok || pending(name) {
                     tracing::info!(
                         %txid,
-                        name = %delist.name().as_str(),
+                        name = %name.as_str(),
                         "delist fee kept: listing unchanged"
                     );
                     return None;
                 }
-                let code = challenge_code(request)?;
-                match self.propose_delist(delist.name(), delist.ua(), &owner, code, mtp, height) {
+                let code = key.delist_otp(&txid, name);
+                match self.propose_delist(name, ua, &owner, code, mtp, height) {
                     Ok(()) => {}
                     Err(MarketRefusal::BuyOpen) => tracing::info!(
                         %txid,
-                        name = %delist.name().as_str(),
+                        name = %name.as_str(),
                         "delist fee kept: a buy is open"
                     ),
                     Err(MarketRefusal::CodeTaken) => tracing::info!(
                         %txid,
-                        name = %delist.name().as_str(),
+                        name = %name.as_str(),
                         "delist fee kept: that code is already open"
                     ),
                     Err(_) => tracing::info!(
                         %txid,
-                        name = %delist.name().as_str(),
+                        name = %name.as_str(),
                         "delist fee kept: listing unchanged"
                     ),
                 }
                 None
             }
-            buy @ Request::Buy { .. } => {
-                let Some(record) = registry.record(buy.name()) else {
+            MarketRequest::Buy { name, ua: bob } => {
+                let Some(record) = registry.record(name) else {
                     tracing::info!(
                         %txid,
-                        name = %buy.name().as_str(),
+                        name = %name.as_str(),
                         paid = paid.into_u64(),
                         "buy fee kept: name is not live"
                     );
                     return None;
                 };
                 let release_due = record.is_release_due(mtp);
-                let note_pending = pending(buy.name());
+                let note_pending = pending(name);
                 let owner = record.ua.clone();
                 let term = record.expires_at;
                 let held = record.commitment;
-                let code = code_for(buy.name());
+                let code = key.buy_otp(&txid, name);
                 if !fee_ok {
                     tracing::info!(
                         %txid,
-                        name = %buy.name().as_str(),
+                        name = %name.as_str(),
                         paid = paid.into_u64(),
                         "buy fee kept: sale not opened"
                     );
                     return None;
                 }
                 match self.open_buy(
-                    buy,
+                    name,
+                    bob,
                     &owner,
                     term,
                     held,
@@ -1249,11 +1256,11 @@ impl Market {
                     mtp,
                     height,
                 ) {
-                    Ok(_) => Some(buy.name().clone()),
+                    Ok(_) => Some(name.clone()),
                     Err(MarketRefusal::NotListed) => {
                         tracing::info!(
                             %txid,
-                            name = %buy.name().as_str(),
+                            name = %name.as_str(),
                             "buy fee kept: name is not listed"
                         );
                         None
@@ -1261,7 +1268,7 @@ impl Market {
                     Err(MarketRefusal::AlreadyOpen) => {
                         tracing::info!(
                             %txid,
-                            name = %buy.name().as_str(),
+                            name = %name.as_str(),
                             "buy fee kept: sale already open"
                         );
                         None
@@ -1269,7 +1276,7 @@ impl Market {
                     Err(MarketRefusal::PaymentTaken) => {
                         tracing::info!(
                             %txid,
-                            name = %buy.name().as_str(),
+                            name = %name.as_str(),
                             "buy fee kept: that payment is already open"
                         );
                         None
@@ -1277,7 +1284,7 @@ impl Market {
                     Err(_) => {
                         tracing::info!(
                             %txid,
-                            name = %buy.name().as_str(),
+                            name = %name.as_str(),
                             paid = paid.into_u64(),
                             "buy fee kept: sale not opened"
                         );
@@ -1285,7 +1292,6 @@ impl Market {
                     }
                 }
             }
-            _ => None,
         }
     }
 }
@@ -1313,12 +1319,10 @@ mod tests {
     fn buy_memo_names_the_name_and_the_buyer() {
         let network = MainNetwork;
         let memo = padded(&format!("ZNS:buy:alice:{TEST_UA}"));
-        let buy = Request::decode(&network, &memo).expect("buy memo");
         assert!(matches!(
             crate::mint::MintInbound::decode(&network, &memo),
-            crate::mint::MintInbound::Request(Request::Buy { .. })
+            crate::mint::MintInbound::Market(MarketRequest::Buy { name, .. }) if name.as_str() == "alice"
         ));
-        assert_eq!(buy.name().as_str(), "alice");
     }
 
     #[test]
@@ -1339,21 +1343,15 @@ mod tests {
             owner.encode(&network),
             t1()
         ));
-        let list = Request::decode(&network, &memo).expect("list memo");
-        let Request::List {
-            pay_to: listed_to,
-            price,
-            ..
-        } = &list
-        else {
+        let Some(MarketRequest::List(list)) = MarketRequest::decode(&network, &memo) else {
             panic!("expected list")
         };
-        assert!(is_owner_listing(&owner, list.ua(), listed_to));
-        assert_eq!(*price, Zatoshis::from_u64(150_000_000).unwrap());
+        assert!(is_owner_listing(&owner, &list.ua, &list.pay_to));
+        assert_eq!(list.price, Zatoshis::from_u64(150_000_000).unwrap());
         let other = TransparentAddress::PublicKeyHash([0x22; 20]);
-        assert!(!is_owner_listing(&owner, list.ua(), &other));
-        assert!(!is_owner_listing(&base, list.ua(), listed_to));
-        assert!(Request::decode(
+        assert!(!is_owner_listing(&owner, &list.ua, &other));
+        assert!(!is_owner_listing(&base, &list.ua, &list.pay_to));
+        assert!(MarketRequest::decode(
             &network,
             &padded(&format!(
                 "ZNS:list:alice:{}:{}:1.123456789",
@@ -1368,11 +1366,9 @@ mod tests {
     fn delist_names_the_owner() {
         let network = MainNetwork;
         let memo = padded(&format!("ZNS:delist:alice:{TEST_UA}"));
-        let delist = Request::decode(&network, &memo).expect("delist memo");
-        assert_eq!(delist.name().as_str(), "alice");
         assert!(matches!(
             crate::mint::MintInbound::decode(&network, &memo),
-            crate::mint::MintInbound::Request(Request::Delist { .. })
+            crate::mint::MintInbound::Market(MarketRequest::Delist { name, .. }) if name.as_str() == "alice"
         ));
     }
 
@@ -1418,15 +1414,13 @@ mod tests {
 
     #[test]
     fn an_unpaid_sale_expires_with_the_code() {
-        let network = MainNetwork;
-        let request =
-            Request::decode(&network, &padded(&format!("ZNS:buy:alice:{TEST_UA}"))).unwrap();
         let mut sales = SaleQueue::new();
         let mtp = Timestamp::from_seconds(1_700_000_000).unwrap();
         assert!(sales
             .open(
-                &request,
-                request.ua().clone(),
+                &name(),
+                &bob(),
+                bob(),
                 TransparentAddress::PublicKeyHash([0x11; 20]),
                 Zatoshis::from_u64(150_000_000).unwrap(),
                 Expiry::Never,
@@ -1436,10 +1430,10 @@ mod tests {
             )
             .is_some());
         assert_eq!(sales.unrelayed().len(), 1);
-        assert!(sales.is_open(request.name()));
+        assert!(sales.is_open(&name()));
         sales.expire(Timestamp::from_seconds(1_700_000_000 + D_OTP).unwrap());
         assert!(sales.unrelayed().is_empty());
-        assert!(!sales.is_open(request.name()));
+        assert!(!sales.is_open(&name()));
     }
 
     fn alice() -> (UnifiedAddress, TransparentAddress) {
@@ -1482,20 +1476,13 @@ mod tests {
         BlockHeight::from_u32(1)
     }
 
-    fn list_for(price: u64) -> Request {
+    fn list_for(price: u64) -> Listing {
         let (ua, pay_to) = alice();
-        Request::List {
+        Listing {
             name: name(),
             ua,
             pay_to,
             price: zats(price),
-        }
-    }
-
-    fn buy_for() -> Request {
-        Request::Buy {
-            name: name(),
-            ua: bob(),
         }
     }
 
@@ -1510,7 +1497,8 @@ mod tests {
         let (mut market, owner, pay_to) = listed(price);
         let otp = market
             .open_buy(
-                &buy_for(),
+                &name(),
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -1538,7 +1526,7 @@ mod tests {
     #[test]
     fn a_relist_during_a_buy_keeps_the_price() {
         let (mut market, owner, pay_to, _) = buying(150_000_000);
-        let higher = Request::List {
+        let higher = Listing {
             name: name(),
             ua: owner.clone(),
             pay_to,
@@ -1584,7 +1572,8 @@ mod tests {
         let (mut market, owner, _) = listed(150_000_000);
         assert!(matches!(
             market.open_buy(
-                &buy_for(),
+                &name(),
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -1598,7 +1587,8 @@ mod tests {
         ));
         assert!(matches!(
             market.open_buy(
-                &buy_for(),
+                &name(),
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -1618,7 +1608,8 @@ mod tests {
         let (mut market, owner, _, _) = buying(150_000_000);
         assert!(matches!(
             market.open_buy(
-                &buy_for(),
+                &name(),
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -1637,7 +1628,8 @@ mod tests {
         let (mut market, _, _) = listed(150_000_000);
         assert!(matches!(
             market.open_buy(
-                &buy_for(),
+                &name(),
+                &bob(),
                 &bob(),
                 Expiry::Never,
                 held(),
@@ -1652,7 +1644,8 @@ mod tests {
         let mut bare = Market::new();
         assert!(matches!(
             bare.open_buy(
-                &buy_for(),
+                &name(),
+                &bob(),
                 &bob(),
                 Expiry::Never,
                 held(),
@@ -1670,7 +1663,7 @@ mod tests {
     fn a_stranger_cannot_list_or_delist() {
         let (owner, pay_to) = alice();
         let mut market = Market::new();
-        let foreign = Request::List {
+        let foreign = Listing {
             name: name(),
             ua: owner.clone(),
             pay_to: TransparentAddress::PublicKeyHash([0x22; 20]),
@@ -1757,7 +1750,8 @@ mod tests {
         let code = OtpCode::for_test(*b"123456");
         let otp = market
             .open_buy(
-                &buy_for(),
+                &name(),
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -1839,14 +1833,7 @@ mod tests {
         };
         assert!(market.answer(&right, Some(&owner), height()));
         assert_eq!(market.price(&name()), Some(zats(150_000_000)));
-        let Request::List {
-            pay_to: requested_to,
-            ..
-        } = request
-        else {
-            panic!("expected list")
-        };
-        assert_eq!(pay_to, requested_to);
+        assert_eq!(pay_to, request.pay_to);
     }
 
     #[test]
@@ -1913,7 +1900,7 @@ mod tests {
         let second = Name::parse("zed").unwrap();
         market
             .list(
-                &Request::List {
+                &Listing {
                     name: second.clone(),
                     ua: owner.clone(),
                     pay_to,
@@ -1926,7 +1913,8 @@ mod tests {
         let code = OtpCode::for_test(*b"123456");
         market
             .open_buy(
-                &buy_for(),
+                &name(),
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -1939,10 +1927,8 @@ mod tests {
             .unwrap();
         market
             .open_buy(
-                &Request::Buy {
-                    name: second.clone(),
-                    ua: bob(),
-                },
+                &second,
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -1973,7 +1959,8 @@ mod tests {
         let first = OtpCode::for_test(*b"111111");
         market
             .open_buy(
-                &buy_for(),
+                &name(),
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -1990,7 +1977,8 @@ mod tests {
         let second = OtpCode::for_test(*b"222222");
         market
             .open_buy(
-                &buy_for(),
+                &name(),
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -2103,7 +2091,8 @@ mod tests {
         let buy = OtpCode::for_test(*b"123456");
         market
             .open_buy(
-                &buy_for(),
+                &name(),
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -2130,7 +2119,7 @@ mod tests {
             .unwrap();
         market
             .list(
-                &Request::List {
+                &Listing {
                     name: second.clone(),
                     ua: owner.clone(),
                     pay_to,
@@ -2142,7 +2131,8 @@ mod tests {
             .unwrap();
         market
             .open_buy(
-                &buy_for(),
+                &name(),
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -2155,10 +2145,8 @@ mod tests {
             .unwrap();
         assert!(matches!(
             market.open_buy(
-                &Request::Buy {
-                    name: second.clone(),
-                    ua: bob(),
-                },
+                &second,
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -2173,10 +2161,8 @@ mod tests {
         assert!(!market.is_open(&second));
         market
             .open_buy(
-                &Request::Buy {
-                    name: second.clone(),
-                    ua: bob(),
-                },
+                &second,
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -2220,7 +2206,8 @@ mod tests {
         let code = OtpCode::for_test(*b"123456");
         market
             .open_buy(
-                &buy_for(),
+                &name(),
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),
@@ -2241,7 +2228,7 @@ mod tests {
         let second = Name::parse("zed").unwrap();
         market
             .list(
-                &Request::List {
+                &Listing {
                     name: second.clone(),
                     ua: owner.clone(),
                     pay_to,
@@ -2253,10 +2240,8 @@ mod tests {
             .unwrap();
         market
             .open_buy(
-                &Request::Buy {
-                    name: second.clone(),
-                    ua: bob(),
-                },
+                &second,
+                &bob(),
                 &owner,
                 Expiry::Never,
                 held(),

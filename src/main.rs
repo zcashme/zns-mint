@@ -284,11 +284,7 @@ async fn main() {
             );
             for (txid, inbound, paid) in arrivals {
                 match inbound {
-                    MintInbound::Request(
-                        request @ (Request::List { .. }
-                        | Request::Delist { .. }
-                        | Request::Buy { .. }),
-                    ) => {
+                    MintInbound::Market(request) => {
                         if let Some(name) = market.admit(
                             txid,
                             &request,
@@ -298,19 +294,7 @@ async fn main() {
                             next_height,
                             block_mtp,
                             |name| name_notes.note_pending(name),
-                            |name| access_code_key.buy_otp(&txid, name),
-                            |request| match request {
-                                Request::List {
-                                    name,
-                                    price,
-                                    pay_to,
-                                    ..
-                                } => Some(access_code_key.list_otp(&txid, name, *price, pay_to)),
-                                Request::Delist { name, .. } => {
-                                    Some(access_code_key.delist_otp(&txid, name))
-                                }
-                                _ => None,
-                            },
+                            &access_code_key,
                         ) {
                             challenges.drop_challenges(&name);
                         }
@@ -392,10 +376,7 @@ async fn main() {
                         let authorized = match &sent.request {
                             Request::Update { .. } => registry.authorize_update(&sent, block_mtp),
                             Request::Release { .. } => registry.authorize_release(&sent),
-                            Request::Claim { .. }
-                            | Request::List { .. }
-                            | Request::Delist { .. }
-                            | Request::Buy { .. } => continue,
+                            Request::Claim { .. } => continue,
                         };
                         let Some(note) = authorized else {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
@@ -615,7 +596,6 @@ async fn main() {
                     }
                     challenges.admit(request.clone(), mtp_now);
                 }
-                Request::List { .. } | Request::Delist { .. } | Request::Buy { .. } => {}
             }
         }
 

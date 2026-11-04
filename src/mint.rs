@@ -25,6 +25,7 @@ use zcash_protocol::value::Zatoshis;
 use zip32::AccountId;
 
 use sapling::circuit::{OutputParameters, SpendParameters};
+use std::str::Split;
 use tokio::sync::mpsc;
 
 use crate::wallet::Wallet;
@@ -73,8 +74,6 @@ pub enum Action {
     Release,
     /// Spends the holder's note and binds the buyer. The name stays live.
     Sale,
-    /// A request to buy a listed name. Not a name note.
-    Buy,
     /// A controller challenge that lists the name. Not a name note.
     List,
     /// A controller challenge that removes a listing. Not a name note.
@@ -89,7 +88,6 @@ impl Action {
             Action::Update => "update",
             Action::Release => "release",
             Action::Sale => "sale",
-            Action::Buy => "buy",
             Action::List => "list",
             Action::Delist => "delist",
         }
@@ -102,7 +100,6 @@ impl Action {
             "update" => Some(Action::Update),
             "release" => Some(Action::Release),
             "sale" => Some(Action::Sale),
-            "buy" => Some(Action::Buy),
             "list" => Some(Action::List),
             "delist" => Some(Action::Delist),
             _ => None,
@@ -153,8 +150,7 @@ impl Action {
 /// Built by the Treasury memo grammar (`Request::decode`); memo bytes
 /// stay on that parser. Claims carry a term (`forever` or `<N>y`) and
 /// an optional leading pre-sale access code; updates carry `none`
-/// (carried forward), `<N>y`, or `forever` — the upgrade. List and
-/// delist requests need controller confirmation; buys open a payment code.
+/// (carried forward), `<N>y`, or `forever` — the upgrade.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// Create a new registration; the term slot is never empty.
@@ -178,25 +174,6 @@ pub enum Request {
         name: Name,
         ua: UnifiedAddress,
     },
-    /// Buy a listed name; the reply carries its payment code.
-    Buy {
-        name: Name,
-        ua: UnifiedAddress,
-    },
-    /// List the name at `pay_to` for `price`, once the controller returns
-    /// the challenge.
-    List {
-        name: Name,
-        ua: UnifiedAddress,
-        pay_to: TransparentAddress,
-        price: Zatoshis,
-    },
-    /// Take the name off the market, once the controller returns the
-    /// challenge.
-    Delist {
-        name: Name,
-        ua: UnifiedAddress,
-    },
 }
 
 impl Request {
@@ -205,10 +182,7 @@ impl Request {
         match self {
             Request::Claim { name, .. }
             | Request::Update { name, .. }
-            | Request::Release { name, .. }
-            | Request::List { name, .. }
-            | Request::Delist { name, .. }
-            | Request::Buy { name, .. } => name,
+            | Request::Release { name, .. } => name,
         }
     }
 
@@ -217,9 +191,6 @@ impl Request {
             Request::Claim { .. } => Action::Claim,
             Request::Update { .. } => Action::Update,
             Request::Release { .. } => Action::Release,
-            Request::List { .. } => Action::List,
-            Request::Delist { .. } => Action::Delist,
-            Request::Buy { .. } => Action::Buy,
         }
     }
 
@@ -228,10 +199,7 @@ impl Request {
         match self {
             Request::Claim { ua, .. }
             | Request::Update { ua, .. }
-            | Request::Release { ua, .. }
-            | Request::List { ua, .. }
-            | Request::Delist { ua, .. }
-            | Request::Buy { ua, .. } => ua,
+            | Request::Release { ua, .. } => ua,
         }
     }
 
@@ -241,83 +209,73 @@ impl Request {
     ///   code leading: `ZNS:claim:<code>:<term>:<name>:<ua>`
     /// - `ZNS:update:<none | <N>y | forever>:<name>:<ua>`
     /// - `ZNS:release:<name>:<ua>`
-    /// - `ZNS:list:<name>:<ua>:<t1>:<price>`
-    /// - `ZNS:delist:<name>:<ua>`
-    /// - `ZNS:buy:<name>:<ua>`
     fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Option<Request> {
-        let text = match Memo::try_from(memo).ok()? {
-            Memo::Text(text) => text,
-            _ => return None,
-        };
-
-        let mut fields = text.split(':');
-        if fields.next()? != "ZNS" {
-            return None;
-        }
-        let action = Action::parse(fields.next()?)?;
-        // A sale is a name note the mint signs, never a request.
-        if action.is_sale() {
-            return None;
-        }
-
-        // Claims may lead with a pre-sale code; the discriminator is whether
-        // the next field is a term. Updates say `none`, `<N>y`, or `forever`.
-        let (claim_code, term) = match action {
-            Action::Claim => {
+        decode_zns(memo, |verb, fields| match verb {
+            // Claims may lead with a pre-sale code; the discriminator is
+            // whether the next field is a term.
+            "claim" => {
                 let first = fields.next()?;
-                if first.is_empty() {
-                    return None;
-                }
-                if let Some(term) = Term::parse(first) {
-                    (None, Some(term))
-                } else {
-                    let code = AccessCode::parse(first)?;
-                    let term = Term::parse(fields.next()?)?;
-                    (Some(code), Some(term))
-                }
+                let (code, term) = match Term::parse(first) {
+                    Some(term) => (None, term),
+                    None => (
+                        Some(AccessCode::parse(first)?),
+                        Term::parse(fields.next()?)?,
+                    ),
+                };
+                let (name, ua) = decode_name_and_ua(network, fields)?;
+                Some(Request::Claim {
+                    name,
+                    ua,
+                    term,
+                    code,
+                })
             }
-            Action::Update => {
+            "update" => {
                 let term = match fields.next()? {
                     "none" => None,
                     "forever" => Some(Term::Forever),
                     field => Some(Term::parse(field)?),
                 };
-                (None, term)
+                let (name, ua) = decode_name_and_ua(network, fields)?;
+                Some(Request::Update { name, ua, term })
             }
-            Action::Release | Action::List | Action::Delist | Action::Buy => (None, None),
-            Action::Sale => unreachable!("a sale is not a request"),
-        };
-
-        let name = Name::parse(fields.next()?)?;
-        let ua_str = fields.next()?;
-        if ua_str.is_empty() {
-            return None;
-        }
-        let ua = decode_controller_ua(network, ua_str)?;
-
-        let request = match (action, term) {
-            (Action::Claim, Some(term)) => Request::Claim {
-                name,
-                ua,
-                term,
-                code: claim_code,
-            },
-            (Action::Update, _) => Request::Update { name, ua, term },
-            (Action::Release, _) => Request::Release { name, ua },
-            // A claim always carries a term.
-            (Action::Claim, None) => unreachable!("claims always carry a term"),
-            (Action::Sale, _) => unreachable!("a sale is not a request"),
-            (Action::List, _) => Request::List {
-                name,
-                ua,
-                pay_to: sale::decode_t1(network, fields.next()?)?,
-                price: sale::decode_zec(fields.next()?)?,
-            },
-            (Action::Delist, _) => Request::Delist { name, ua },
-            (Action::Buy, _) => Request::Buy { name, ua },
-        };
-        fields.next().is_none().then_some(request)
+            "release" => {
+                decode_name_and_ua(network, fields).map(|(name, ua)| Request::Release { name, ua })
+            }
+            _ => None,
+        })
     }
+}
+
+/// Runs `parse` on the verb and the fields after it in a `ZNS:<verb>:…`
+/// text memo. A field `parse` leaves unread refuses the memo.
+pub(crate) fn decode_zns<T>(
+    memo: &MemoBytes,
+    parse: impl FnOnce(&str, &mut Split<'_, char>) -> Option<T>,
+) -> Option<T> {
+    let Memo::Text(text) = Memo::try_from(memo).ok()? else {
+        return None;
+    };
+    let mut fields = text.split(':');
+    if fields.next()? != "ZNS" {
+        return None;
+    }
+    let verb = fields.next()?;
+    let value = parse(verb, &mut fields)?;
+    fields.next().is_none().then_some(value)
+}
+
+/// The `<name>:<ua>` pair every request names.
+pub(crate) fn decode_name_and_ua<P: Parameters>(
+    network: &P,
+    fields: &mut Split<'_, char>,
+) -> Option<(Name, UnifiedAddress)> {
+    let name = Name::parse(fields.next()?)?;
+    let ua = fields.next()?;
+    if ua.is_empty() {
+        return None;
+    }
+    Some((name, decode_controller_ua(network, ua)?))
 }
 
 /// A mint-issued challenge to a wallet, proving that the wallet controls a name via shielded-memos.
@@ -418,6 +376,8 @@ pub enum MintInbound {
     /// A request — a user's proposed transition, decoded from a Treasury
     /// memo; the Registry's `authorize_*` family rules on it.
     Request(Request),
+    /// A list, delist, or buy; [`sale::Market::admit`] rules on it.
+    Market(sale::MarketRequest),
     /// An OTP response — the relay memo returned; the OTP queue takes it.
     Response(OtpMemo),
     /// A payment with no parseable message: the deciding pass logs it once and
@@ -433,6 +393,8 @@ impl MintInbound {
             Self::Response(response)
         } else if let Some(request) = Request::decode(network, memo) {
             Self::Request(request)
+        } else if let Some(request) = sale::MarketRequest::decode(network, memo) {
+            Self::Market(request)
         } else {
             Self::Unrecognized
         }
@@ -670,7 +632,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                             block_mtp,
                         ),
                         Action::Claim => unreachable!("claims are routed above"),
-                        Action::List | Action::Delist | Action::Buy => false,
+                        Action::List | Action::Delist => false,
                     }
                 };
                 if accepted {
@@ -1105,14 +1067,24 @@ mod tests {
             (format!("ZNS:claim:forever:alice:{TEST_UA}"), Action::Claim),
             (format!("ZNS:update:none:alice:{TEST_UA}"), Action::Update),
             (format!("ZNS:release:alice:{TEST_UA}"), Action::Release),
-            (format!("ZNS:list:alice:{TEST_UA}:{t1}:1.5"), Action::List),
-            (format!("ZNS:delist:alice:{TEST_UA}"), Action::Delist),
-            (format!("ZNS:buy:alice:{TEST_UA}"), Action::Buy),
         ] {
             assert!(
                 matches!(
                     MintInbound::decode(&MainNetwork, &padded(&text)),
                     MintInbound::Request(request) if request.action() == action
+                ),
+                "misclassified {text}"
+            );
+        }
+        for text in [
+            format!("ZNS:list:alice:{TEST_UA}:{t1}:1.5"),
+            format!("ZNS:delist:alice:{TEST_UA}"),
+            format!("ZNS:buy:alice:{TEST_UA}"),
+        ] {
+            assert!(
+                matches!(
+                    MintInbound::decode(&MainNetwork, &padded(&text)),
+                    MintInbound::Market(_)
                 ),
                 "misclassified {text}"
             );
