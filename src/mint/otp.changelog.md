@@ -1,5 +1,10 @@
 # `mint/otp.rs` design record
 
+## 2026-11-03 — A challenge holds an update or a release
+
+- `Request` has no list or delist, so `OtpChallenge::memo` never
+  carries a listing. Market challenges stay with the market.
+
 ## 2026-10-26 — A challenge is keyed by its whole request (#381)
 
 - Name, verb, address and term are the key. Two terms are two

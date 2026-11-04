@@ -145,7 +145,7 @@ impl Action {
     }
 }
 
-/// A Treasury request, decoded before authorization.
+/// A name request, decoded before authorization.
 ///
 /// Built by the Treasury memo grammar (`Request::decode`); memo bytes
 /// stay on that parser. Claims carry a term (`forever` or `<N>y`) and
@@ -386,8 +386,8 @@ pub enum MintInbound {
 }
 
 impl MintInbound {
-    /// Classifies one Treasury memo: OTP response, request, or
-    /// unrecognized payment. Called once per memo, at block application.
+    /// Classifies one Treasury memo: OTP response, name request, market
+    /// request, or unrecognized payment. Called once per memo, at block application.
     pub fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Self {
         if let Some(response) = OtpMemo::decode(network, memo) {
             Self::Response(response)

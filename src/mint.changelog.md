@@ -1,8 +1,13 @@
 # Mint live-work design record
 
-## 2026-11-03 — Unify inbound requests
+## 2026-11-03 — Name requests and market requests
 
-- All six request verbs decode through `Request` and arrive as `MintInbound::Request`. Removed the separate list, delist, and buy inbound variants and request structs.
+- `MintInbound::Market` carries a `MarketRequest`: a list, a delist,
+  or a buy. `Request` is a claim, an update, or a release. Both decode
+  through `decode_zns`, which refuses a field left unread. The separate
+  list, delist, and buy inbound variants are gone, and `Action` has no
+  `Buy`.
+- `relay` takes the `OtpMemo` it sends. `relay_challenge` is gone.
 
 ## 2026-11-02 — A list waits for the controller's code
 
