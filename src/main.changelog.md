@@ -1,16 +1,11 @@
 # main.changelog.md
 
-## 2026-11-03 — A shielded request can be challenged before it is mined
+## 2026-11-04 — A shielded request is challenged from the mempool (#361)
 
-- An update or release paid from shielded notes gets its code while the
-  request is still in the mempool, and only when a mined request would
-  have earned that code. A request that spends transparent coins waits
-  for a block. A transaction that names several names gets one code;
-  the rest wait with it.
-- Mining the request is what lets the mint accept or refuse it. Her
-  reply is held until then. If the request disappears, the reply is
-  refunded. `zns_mint_zero_conf_relays_lost` counts a code already sent
-  for a request that never landed.
+- A shielded update or release gets its code from the mempool; one
+  per transaction. A transparent spend waits for its block.
+- A response counts once the wallet holds its request mined; else it
+  is refunded.
 
 ## 2026-11-02 — A rollback keeps sales from blocks that remain
 

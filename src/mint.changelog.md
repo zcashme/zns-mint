@@ -1,9 +1,8 @@
 # Mint live-work design record
 
-## 2026-11-03 — A transparent spend waits for a block
+## 2026-11-04 — A transparent spend waits for a block (#361)
 
-- A mempool transaction that spends transparent coins is challenged
-  from the block that mines it.
+- `spends_transparent` keeps such a request on the block path.
 
 ## 2026-11-02 — A list waits for the controller's code
 

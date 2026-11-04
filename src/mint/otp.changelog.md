@@ -1,14 +1,10 @@
 # `mint/otp.rs` design record
 
-## 2026-11-03 — A reply waits until the request is mined
+## 2026-11-04 — A challenge carries its request's txid (#361)
 
-- A code sent from the mempool is spent only once the mint has accepted
-  the mined request. A reply that arrives earlier is held. A wrong
-  guess while the request is unmined does not count toward the six.
-- If the request disappears after the code was sent, the mint remembers
-  the challenge and will not send another code for it from the mempool.
-  The next request has to be mined. A request that disappears before
-  any code is sent leaves that chance open.
+- `admit` takes it, `complete` returns it. A repeat request hands a
+  live challenge its txid.
+- `holds`: the mempool opens only new challenges.
 
 ## 2026-10-26 — A challenge is keyed by its whole request (#381)
 
