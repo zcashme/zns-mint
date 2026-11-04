@@ -2,6 +2,8 @@
 //! to buy it, and a payment of her price plus the buy OTP makes the
 //! mint hand the name to Bob. The note is a sale, so the name stays live.
 
+use std::collections::BTreeMap;
+
 use transparent::address::TransparentAddress;
 use zcash_keys::address::Address;
 use zcash_primitives::block::Block;
@@ -477,28 +479,27 @@ pub struct Listing {
 /// Alice's open listings.
 #[derive(Default)]
 pub struct ListingBook {
-    listings: Vec<Listing>,
+    listings: BTreeMap<Name, Listing>,
 }
 
 impl ListingBook {
     pub fn new() -> Self {
         Self {
-            listings: Vec::new(),
+            listings: BTreeMap::new(),
         }
     }
 
     pub fn get(&self, name: &Name) -> Option<&Listing> {
-        self.listings.iter().find(|listing| listing.name == *name)
+        self.listings.get(name)
     }
 
     fn insert(&mut self, listing: Listing) {
-        self.listings.retain(|kept| kept.name != listing.name);
-        self.listings.push(listing);
+        self.listings.insert(listing.name.clone(), listing);
     }
 
     fn lost(&self, holder: impl Fn(&Name) -> Option<UnifiedAddress>) -> Vec<Name> {
         self.listings
-            .iter()
+            .values()
             .filter(|listing| holder(&listing.name).as_ref() != Some(&listing.ua))
             .map(|listing| listing.name.clone())
             .collect()
@@ -506,9 +507,7 @@ impl ListingBook {
 
     /// Removes the listing. The caller has checked that `ua` owns the name.
     pub fn delist(&mut self, name: &Name) -> bool {
-        let before = self.listings.len();
-        self.listings.retain(|listing| listing.name != *name);
-        self.listings.len() != before
+        self.listings.remove(name).is_some()
     }
 }
 
