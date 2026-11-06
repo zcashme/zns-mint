@@ -6,7 +6,7 @@
 mod otp;
 mod refund;
 
-pub use otp::{OtpChallenge, OtpCode, OtpQueue, D_OTP, MAX_ATTEMPTS};
+pub use otp::{AuctionBind, OtpChallenge, OtpCode, OtpQueue, D_OTP, MAX_ATTEMPTS};
 pub use refund::{access_code_penalty, RefundQueue, RefundRequest, FEE_ACTIONS};
 
 use std::convert::Infallible;
@@ -108,11 +108,24 @@ pub fn issue_refund<P: Parameters>(
     refund: &RefundRequest,
 ) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
     let to = Address::Unified(Box::new(refund.recipient().clone()));
-    let request = TransactionRequest::new(vec![Payment::without_memo(
-        to.to_zcash_address(network),
-        refund.amount(),
-    )])
-    .expect("one payment is a valid ZIP 321 request");
+    let payment = match refund.note() {
+        Some(text) => {
+            let memo =
+                MemoBytes::from_bytes(text.as_bytes()).expect("a return sentence fits a memo");
+            Payment::new(
+                to.to_zcash_address(network),
+                Some(refund.amount()),
+                Some(memo),
+                None,
+                None,
+                vec![],
+            )
+            .expect("a shielded recipient can carry the return sentence")
+        }
+        None => Payment::without_memo(to.to_zcash_address(network), refund.amount()),
+    };
+    let request =
+        TransactionRequest::new(vec![payment]).expect("one payment is a valid ZIP 321 request");
     let proposal = match propose_transfer::<_, _, _, _, Infallible>(
         wallet,
         network,
@@ -426,7 +439,9 @@ mod tests {
             },
             Action::Release => Request::Release { name, ua },
             Action::Sale => panic!("a sale is not a request"),
-            Action::List | Action::Delist => panic!("a listing challenge is not this request"),
+            Action::List | Action::Delist | Action::Auction => {
+                panic!("a listing challenge is not this request")
+            }
         }
     }
 

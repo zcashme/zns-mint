@@ -651,7 +651,10 @@ impl Boot<Network> {
             );
             for (txid, inbound, paid) in arrivals {
                 if let crate::mint::MintInbound::Response(response) = &inbound {
-                    if response.action.is_list() || response.action.is_delist() {
+                    if response.action.is_list()
+                        || response.action.is_delist()
+                        || response.action.is_auction()
+                    {
                         let owner = registry
                             .record(&response.name)
                             .map(|record| record.ua.clone());
@@ -659,6 +662,8 @@ impl Boot<Network> {
                     }
                 }
                 if let crate::mint::MintInbound::Market(request) = &inbound {
+                    // A returned intent is not sent from a scan. The live
+                    // loop sends it when the intent is first admitted.
                     market.admit(
                         txid,
                         request,

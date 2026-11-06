@@ -1,5 +1,10 @@
 # `mint/otp.rs` design record
 
+## 2026-11-05 — An auction challenge binds the clock
+
+- `OtpCode::auction` is HMAC-SHA256 over the request, both prices,
+  both blocks, and the t1. A rescan yields the same code.
+
 ## 2026-11-03 — A challenge holds an update or a release
 
 - `Request` has no list or delist, so `OtpChallenge::memo` never

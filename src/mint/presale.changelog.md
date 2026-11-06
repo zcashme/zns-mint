@@ -1,5 +1,10 @@
 # `mint/presale.rs` design record
 
+## 2026-11-05 — An auction challenge binds the clock
+
+- `auction_otp` derives the controller code from the access-code key,
+  the request, both prices, both blocks, and the t1.
+
 ## 2026-11-02 — The buy code is derived from the buy transaction
 
 - `buy_otp` is the six-digit code for that txid and name under the
