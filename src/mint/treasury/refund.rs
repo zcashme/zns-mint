@@ -105,12 +105,23 @@ impl RefundQueue {
         note: Option<String>,
     ) {
         let Some(amount) = refund_output(refundable, fee_rule) else {
-            tracing::info!(
-                %txid,
-                name = %name.as_str(),
-                refundable = refundable.into_u64(),
-                "payment kept"
-            );
+            // Nothing is queued. The sentence stays on this record.
+            if let Some(sentence) = note.as_deref() {
+                tracing::info!(
+                    %txid,
+                    name = %name.as_str(),
+                    refundable = refundable.into_u64(),
+                    note = sentence,
+                    "payment kept"
+                );
+            } else {
+                tracing::info!(
+                    %txid,
+                    name = %name.as_str(),
+                    refundable = refundable.into_u64(),
+                    "payment kept"
+                );
+            }
             return;
         };
         tracing::info!(
@@ -251,6 +262,18 @@ mod tests {
             );
         }
         assert!(queue.due(deep()).is_empty());
+
+        let mut noted = RefundQueue::default();
+        noted.admit_with_note(
+            &FeeRule::standard(),
+            TxId::from_bytes([1; 32]),
+            &ua(),
+            &alice(),
+            BlockHeight::from_u32(10),
+            withheld(),
+            Some("ZNS:held:alice:1700000600".to_string()),
+        );
+        assert!(noted.is_empty());
     }
 
     #[test]

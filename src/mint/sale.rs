@@ -241,6 +241,9 @@ struct Sale {
     term: Expiry,
     /// The quote is a clock price, frozen for [`D_DUTCH`].
     dutch: bool,
+    /// When the quote stops being payable. A clock sale keeps it after
+    /// the payment matches, so a later intent can be told the deadline.
+    until: Timestamp,
     phase: Phase,
 }
 
@@ -284,6 +287,7 @@ impl SaleQueue {
             held,
             term,
             dutch,
+            until: expires_at,
             phase: Phase::Paying {
                 code: code.clone(),
                 pay_to,
@@ -416,16 +420,11 @@ impl SaleQueue {
         self.sales.iter().find(|sale| sale.name == *name)
     }
 
-    /// When a clock quote is still waiting for its payment.
+    /// The deadline on an open clock sale. The name stays reserved after
+    /// the payment matches, until the sale note is signed.
     fn dutch_hold(&self, name: &Name) -> Option<Timestamp> {
         let sale = self.get(name)?;
-        if !sale.dutch {
-            return None;
-        }
-        match &sale.phase {
-            Phase::Paying { expires_at, .. } => Some(*expires_at),
-            Phase::Paid => None,
-        }
+        sale.dutch.then_some(sale.until)
     }
 
     fn restore(&mut self, sale: Sale) {
@@ -640,10 +639,26 @@ pub enum MarketRefusal {
     PaymentTaken,
     /// The clock has not reached its start block.
     Early { start: BlockHeight },
-    /// A clock quote is still waiting for its payment.
+    /// A clock sale still reserves the name.
     Held { until: Timestamp },
     /// The end is not after the start, or the price does not fall.
     BadClock,
+    /// This block is after the clock's end.
+    Ended,
+}
+
+/// A clock lists through its end block. A later height leaves the book.
+fn clock_ready(ask: &Ask, height: BlockHeight) -> Result<(), MarketRefusal> {
+    let Ask::Dutch(clock) = ask else {
+        return Ok(());
+    };
+    if !clock.is_valid() {
+        return Err(MarketRefusal::BadClock);
+    }
+    if height > clock.end {
+        return Err(MarketRefusal::Ended);
+    }
+    Ok(())
 }
 
 /// A list or delist waiting for the controller's code.
@@ -963,11 +978,7 @@ impl Market {
         owner: &UnifiedAddress,
         height: BlockHeight,
     ) -> Result<(), MarketRefusal> {
-        if let Ask::Dutch(clock) = &listing.ask {
-            if !clock.is_valid() {
-                return Err(MarketRefusal::BadClock);
-            }
-        }
+        clock_ready(&listing.ask, height)?;
         if !is_owner_listing(owner, &listing.ua, &listing.pay_to) {
             return Err(MarketRefusal::NotOwner);
         }
@@ -1117,11 +1128,7 @@ impl Market {
         mtp: Timestamp,
         height: BlockHeight,
     ) -> Result<(), MarketRefusal> {
-        if let Ask::Dutch(clock) = &listing.ask {
-            if !clock.is_valid() {
-                return Err(MarketRefusal::BadClock);
-            }
-        }
+        clock_ready(&listing.ask, height)?;
         if !is_owner_listing(owner, &listing.ua, &listing.pay_to) {
             return Err(MarketRefusal::NotOwner);
         }
@@ -1376,6 +1383,11 @@ impl Market {
                         %txid,
                         name = %listing.name.as_str(),
                         "list fee kept: the clock does not fall"
+                    ),
+                    Err(MarketRefusal::Ended) => tracing::info!(
+                        %txid,
+                        name = %listing.name.as_str(),
+                        "list fee kept: the clock has ended"
                     ),
                     Err(_) => tracing::info!(
                         %txid,
@@ -2807,5 +2819,81 @@ mod tests {
         market.expire(after, at);
         assert!(!market.is_open(&name()));
         assert_eq!(market.quote(&name(), at), Some(zats(70_000_000)));
+    }
+
+    #[test]
+    fn a_reply_after_the_end_leaves_the_flat_listing() {
+        let (owner, _) = alice();
+        let mut market = Market::new();
+        market
+            .list(&list_for(150_000_000), &owner, height())
+            .unwrap();
+        let code = OtpCode::for_test(*b"042831");
+        market
+            .propose_list(&clock_for(10, 20), &owner, code, mtp(), height())
+            .unwrap();
+        let memo = market
+            .unrelayed_challenges(|_| Some(owner.clone()))
+            .remove(0);
+        let after = BlockHeight::from_u32(21);
+        assert!(market.answer(&memo, Some(&owner), after));
+        assert_eq!(market.price(&name()), Some(zats(150_000_000)));
+        assert!(matches!(
+            market.list(&clock_for(10, 20), &owner, after),
+            Err(MarketRefusal::Ended)
+        ));
+        assert_eq!(market.price(&name()), Some(zats(150_000_000)));
+        assert!(market
+            .list(&clock_for(10, 20), &owner, BlockHeight::from_u32(20))
+            .is_ok());
+        assert_eq!(
+            market.quote(&name(), BlockHeight::from_u32(20)),
+            Some(zats(40_000_000))
+        );
+    }
+
+    #[test]
+    fn a_paid_clock_keeps_the_hold_through_a_replay() {
+        let (owner, pay_to) = alice();
+        let mut market = Market::new();
+        let at = BlockHeight::from_u32(15);
+        let paid_at = BlockHeight::from_u32(16);
+        market.list(&clock_for(10, 20), &owner, at).unwrap();
+        let code = OtpCode::for_test(*b"042831");
+        market
+            .open_buy(
+                &name(),
+                &bob(),
+                &owner,
+                Expiry::Never,
+                held(),
+                false,
+                false,
+                code.clone(),
+                mtp(),
+                at,
+            )
+            .unwrap();
+        let until = Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH).unwrap();
+        let paid = zats(70_000_000 + otp_amount(&code).into_u64());
+        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), paid_at);
+        assert!(market.is_paid(&name()));
+        market.truncate_to(paid_at);
+        assert!(market.is_paid(&name()));
+        assert!(matches!(
+            market.open_buy(
+                &name(),
+                &bob(),
+                &owner,
+                Expiry::Never,
+                held(),
+                false,
+                false,
+                OtpCode::for_test(*b"111111"),
+                mtp(),
+                paid_at,
+            ),
+            Err(MarketRefusal::Held { until: held_until }) if held_until == until
+        ));
     }
 }

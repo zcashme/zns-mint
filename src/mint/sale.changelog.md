@@ -1,5 +1,12 @@
 # Sale module changelog
 
+## 2026-11-06 — A late clock reply leaves the book, and a paid hold still returns
+
+- A reply after the end block does not install the clock. The end
+  block itself still lists. A flat listing already there stays.
+- After the clock payment matches, the name stays reserved until the
+  sale note is signed. A later intent is returned with that deadline.
+
 ## 2026-11-05 — A listing can be a dutch clock
 
 - `ZNS:auction` names the start price, the minimum, and the start and
