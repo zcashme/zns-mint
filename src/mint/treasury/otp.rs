@@ -14,6 +14,15 @@ pub const D_OTP: i64 = 1800;
 /// fixes the maximum number of verification attempts).
 pub const MAX_ATTEMPTS: u32 = 6;
 
+/// The prices and blocks an auction challenge binds.
+#[derive(Clone, Copy)]
+pub struct AuctionBind {
+    pub start_price: u64,
+    pub min_price: u64,
+    pub start: u32,
+    pub end: u32,
+}
+
 /// A six-digit one-time passcode.
 #[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct OtpCode(u32);
@@ -54,6 +63,30 @@ impl OtpCode {
         mac.update(txid);
         mac.update(name);
         mac.update(&price.to_be_bytes());
+        mac.update(pay_to);
+        Self::from_mac(mac)
+    }
+
+    /// The auction challenge for this request. The same inputs yield the
+    /// same code, so a rescan matches the controller's reply.
+    pub fn auction(
+        key: &[u8],
+        txid: &[u8; 32],
+        name: &[u8],
+        bind: AuctionBind,
+        pay_to: &[u8],
+    ) -> Self {
+        use hmac::{Hmac, KeyInit, Mac};
+        use sha2::Sha256;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+        mac.update(b"ZNS:auctionotp");
+        mac.update(txid);
+        mac.update(name);
+        mac.update(&bind.start_price.to_be_bytes());
+        mac.update(&bind.min_price.to_be_bytes());
+        mac.update(&bind.start.to_be_bytes());
+        mac.update(&bind.end.to_be_bytes());
         mac.update(pay_to);
         Self::from_mac(mac)
     }
@@ -133,6 +166,7 @@ impl OtpChallenge {
             action: self.request.action(),
             ua: self.request.ua().clone(),
             listing: None,
+            clock: None,
         }
     }
 }

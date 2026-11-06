@@ -186,6 +186,7 @@ async fn main() {
             challenges = OtpQueue::new();
             market.truncate_to(&mut registry, rewound);
             market.expire(
+                &mut registry,
                 mtp.current().expect("FATAL: MTP unavailable after reorg"),
                 rewound,
             );
@@ -272,12 +273,12 @@ async fn main() {
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
             challenges.expire(block_mtp);
-            market.expire(block_mtp, next_height);
+            market.expire(&mut registry, block_mtp, next_height);
             market.reconcile(&mut registry, next_height);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Market(request) => {
-                        if let Some(name) = market.admit(
+                        let admitted = market.admit(
                             txid,
                             &request,
                             paid,
@@ -287,8 +288,20 @@ async fn main() {
                             block_mtp,
                             |name| name_notes.note_pending(name),
                             &access_code_key,
-                        ) {
+                        );
+                        if let Some(name) = admitted.opened {
                             challenges.drop_challenges(&name);
+                        }
+                        if let Some(back) = admitted.returned {
+                            refunds.admit_with_note(
+                                &fee_rule,
+                                txid,
+                                &back.recipient,
+                                &back.name,
+                                next_height,
+                                paid,
+                                Some(back.note),
+                            );
                         }
                     }
                     MintInbound::Request(request) => {
@@ -299,7 +312,10 @@ async fn main() {
                     // A refused response goes back to the memo address,
                     // less the refund fee.
                     MintInbound::Response(response) => {
-                        if response.action.is_list() || response.action.is_delist() {
+                        if response.action.is_list()
+                            || response.action.is_delist()
+                            || response.action.is_auction()
+                        {
                             market.answer(&mut registry, &response, next_height);
                             refunds.admit(
                                 &fee_rule,

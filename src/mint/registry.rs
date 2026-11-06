@@ -8,13 +8,14 @@ pub use anchor_pool::{is_ceremony_fill, ANCHOR_POOL_SIZE};
 
 use crate::mint::note::NameNoteQueue;
 use crate::mint::presale::ProtectionStatus;
-use crate::mint::sale::{is_owner_listing, Listing, MarketRefusal};
+use crate::mint::sale::{is_owner_listing, Ask, Listing, MarketRefusal};
 use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
 use zcash_primitives::transaction::builder::default_tx_expiry_delta;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
+use zcash_protocol::value::Zatoshis;
 
 // ---------------------------------------------------------------------------
 // NameRecord — a confirmed state in one name's chain
@@ -165,8 +166,33 @@ impl Registry {
         self.listings.get(name)
     }
 
-    pub fn price(&self, name: &Name) -> Option<zcash_protocol::value::Zatoshis> {
-        self.listing(name).map(|listing| listing.price)
+    pub fn price(&self, name: &Name) -> Option<Zatoshis> {
+        match &self.listing(name)?.ask {
+            Ask::Flat(price) => Some(*price),
+            Ask::Dutch(_) => None,
+        }
+    }
+
+    /// The price a buyer would be quoted for an intent in `height`.
+    pub fn quote(&self, name: &Name, height: BlockHeight) -> Option<Zatoshis> {
+        match &self.listing(name)?.ask {
+            Ask::Flat(price) => Some(*price),
+            Ask::Dutch(clock) => clock.price_at(height),
+        }
+    }
+
+    /// A clock listing leaves on the block after its end. An open hold
+    /// stays until its buyer pays or the ten minutes pass.
+    pub(crate) fn finish_clocks(&mut self, height: BlockHeight) -> Vec<Name> {
+        let mut done = Vec::new();
+        self.listings.retain(|name, listing| match &listing.ask {
+            Ask::Dutch(clock) if height > clock.end => {
+                done.push(name.clone());
+                false
+            }
+            _ => true,
+        });
+        done
     }
 
     /// The market has completed the controller challenge and checked open buys.

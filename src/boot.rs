@@ -638,15 +638,20 @@ impl Boot<Network> {
             let block_mtp = mtp
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
-            market.expire(block_mtp, next_height);
+            market.expire(&mut registry, block_mtp, next_height);
             market.reconcile(&mut registry, next_height);
             for (txid, inbound, paid) in arrivals {
                 if let crate::mint::MintInbound::Response(response) = &inbound {
-                    if response.action.is_list() || response.action.is_delist() {
+                    if response.action.is_list()
+                        || response.action.is_delist()
+                        || response.action.is_auction()
+                    {
                         market.answer(&mut registry, response, next_height);
                     }
                 }
                 if let crate::mint::MintInbound::Market(request) = &inbound {
+                    // A returned intent is not sent from a scan. The live
+                    // loop sends it when the intent is first admitted.
                     market.admit(
                         txid,
                         request,

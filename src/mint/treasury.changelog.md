@@ -1,5 +1,15 @@
 # Treasury design record
 
+## 2026-11-06 — A kept exact-fee return logs its sentence
+
+- An intent that pays only the fee is not queued. The kept-payment
+  log carries the `ZNS:held` or `ZNS:wait` sentence.
+
+## 2026-11-05 — A returned intent carries its sentence
+
+- `admit_with_note` stores a sentence on the refund. The built
+  payment carries that memo. A refund with no sentence is unchanged.
+
 ## 2026-10-30 — Challenge inputs and change follow the controller pool (#365)
 
 - Challenges to Sapling-only controllers spend Sapling and return change to

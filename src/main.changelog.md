@@ -1,5 +1,10 @@
 # main.changelog.md
 
+## 2026-11-05 — A refused dutch intent is returned with a sentence
+
+- When a dutch buy does not open, the intent payment goes back with
+  the market's sentence. A flat buy that does not open keeps its fee.
+
 ## 2026-11-03 — Name requests and market requests
 
 - A list, delist, or buy arrives as `MintInbound::Market` and goes to

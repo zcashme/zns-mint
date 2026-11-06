@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::mint::registry::Registry;
-use crate::mint::treasury::OtpCode;
+use crate::mint::treasury::{AuctionBind, OtpCode};
 use crate::mint::Name;
 use zcash_protocol::TxId;
 use zns_canon::access_code::purpose_key;
@@ -373,6 +373,27 @@ impl AccessCodeDerivationKey {
             txid.as_ref(),
             name.as_str().as_bytes(),
             price.into_u64(),
+            hash,
+        )
+    }
+
+    /// The auction challenge for this request. A rescan yields the same code.
+    pub fn auction_otp(
+        &self,
+        txid: &TxId,
+        name: &Name,
+        bind: AuctionBind,
+        pay_to: &transparent::address::TransparentAddress,
+    ) -> OtpCode {
+        let hash = match pay_to {
+            transparent::address::TransparentAddress::PublicKeyHash(hash) => hash,
+            transparent::address::TransparentAddress::ScriptHash(hash) => hash,
+        };
+        OtpCode::auction(
+            self.0.as_ref(),
+            txid.as_ref(),
+            name.as_str().as_bytes(),
+            bind,
             hash,
         )
     }

@@ -1,5 +1,10 @@
 # Boot module changelog
 
+## 2026-11-05 — A scan applies an auction reply and does not return it
+
+- An auction challenge is answered the same way as a list. A dutch
+  intent that does not win is not paid back from the scan.
+
 ## 2026-11-03 — Name requests and market requests
 
 - The sync replays `MintInbound::Market` through `Market::admit`, as
