@@ -1595,6 +1595,8 @@ fn returned_intent(
 mod tests {
     use super::*;
     use crate::mint::decode_controller_ua;
+    use crate::mint::treasury::RefundQueue;
+    use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
     use zcash_protocol::consensus::MainNetwork;
     use zcash_protocol::memo::Memo;
 
@@ -2895,5 +2897,176 @@ mod tests {
             ),
             Err(MarketRefusal::Held { until: held_until }) if held_until == until
         ));
+    }
+
+    fn nf(seed: u8) -> orchard::note::Nullifier {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        orchard::note::Nullifier::from_bytes(&bytes)
+            .into_option()
+            .expect("test nullifier")
+    }
+
+    /// Alice holds the name, so a buy can be admitted.
+    fn live() -> Registry {
+        let (ua, _) = alice();
+        let mut registry = Registry::new();
+        let anchor = nf(1);
+        registry.adopt_anchor(BlockHeight::from_u32(9), anchor);
+        let note = NameNote::Claim {
+            name: name(),
+            ua,
+            expires_at: Expiry::Never,
+        };
+        assert!(registry.accept_claim(
+            &MainNetwork,
+            &note,
+            nf(2),
+            Some(nf(3)),
+            &[anchor],
+            BlockHeight::from_u32(10),
+            mtp(),
+            BlockHeight::from_u32(40),
+        ));
+        registry
+    }
+
+    fn derivation() -> AccessCodeDerivationKey {
+        AccessCodeDerivationKey::from_seed(&[0x22; 32])
+    }
+
+    fn intent_fee() -> Zatoshis {
+        (MARGINAL_FEE * FEE_ACTIONS).unwrap()
+    }
+
+    fn buy_of_alice() -> MarketRequest {
+        MarketRequest::Buy {
+            name: name(),
+            ua: bob(),
+        }
+    }
+
+    fn admit_buy(
+        market: &mut Market,
+        registry: &Registry,
+        tx: u8,
+        paid: Zatoshis,
+        height: BlockHeight,
+    ) -> Admission {
+        market.admit(
+            TxId::from_bytes([tx; 32]),
+            &buy_of_alice(),
+            paid,
+            registry,
+            &FeeRule::standard(),
+            height,
+            mtp(),
+            |_| false,
+            &derivation(),
+        )
+    }
+
+    /// The return, less the refund fee, as the run loop would queue it.
+    fn queued(back: &ReturnedIntent, paid: Zatoshis, height: BlockHeight) -> RefundQueue {
+        let mut queue = RefundQueue::default();
+        queue.admit_with_note(
+            &FeeRule::standard(),
+            TxId::from_bytes([9; 32]),
+            &back.recipient,
+            &back.name,
+            height,
+            paid,
+            Some(back.note.clone()),
+        );
+        queue
+    }
+
+    fn due_note(queue: &RefundQueue) -> (Zatoshis, String) {
+        let due = queue.due(BlockHeight::from_u32(1_000));
+        assert_eq!(due.len(), 1);
+        (due[0].amount(), due[0].note().unwrap().to_string())
+    }
+
+    #[test]
+    fn a_second_intent_in_the_block_is_returned() {
+        let registry = live();
+        let (owner, _) = alice();
+        let mut market = Market::new();
+        let at = BlockHeight::from_u32(15);
+        market.list(&clock_for(10, 20), &owner, at).unwrap();
+        let first = admit_buy(&mut market, &registry, 1, zats(1_000_000), at);
+        assert!(first.opened.is_some());
+        assert!(first.returned.is_none());
+
+        let second = admit_buy(&mut market, &registry, 2, zats(1_000_000), at);
+        let back = second.returned.expect("the second intent is returned");
+        let until = Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH).unwrap();
+        assert_eq!(back.recipient, bob());
+        assert_eq!(back.note, format!("ZNS:held:alice:{}", until.as_seconds()));
+        let (amount, note) = due_note(&queued(&back, zats(1_000_000), at));
+        assert_eq!(amount, zats(500_000));
+        assert_eq!(note, back.note);
+
+        let exact = admit_buy(&mut market, &registry, 3, intent_fee(), at);
+        let kept = exact.returned.expect("an exact fee is still a return");
+        assert_eq!(kept.note, back.note);
+        assert!(queued(&kept, intent_fee(), at).is_empty());
+    }
+
+    #[test]
+    fn an_intent_before_the_start_is_returned() {
+        let registry = live();
+        let (owner, _) = alice();
+        let mut market = Market::new();
+        let early = BlockHeight::from_u32(9);
+        market.list(&clock_for(10, 20), &owner, early).unwrap();
+        let admitted = admit_buy(&mut market, &registry, 1, zats(1_000_000), early);
+        let back = admitted.returned.expect("the clock has not started");
+        assert_eq!(back.recipient, bob());
+        assert_eq!(back.note, "ZNS:wait:alice:10");
+        let (amount, note) = due_note(&queued(&back, zats(1_000_000), early));
+        assert_eq!(amount, zats(500_000));
+        assert_eq!(note, back.note);
+    }
+
+    #[test]
+    fn an_intent_after_the_payment_is_returned() {
+        let registry = live();
+        let (owner, pay_to) = alice();
+        let mut market = Market::new();
+        let at = BlockHeight::from_u32(15);
+        let later = BlockHeight::from_u32(16);
+        market.list(&clock_for(10, 20), &owner, at).unwrap();
+        let txid = TxId::from_bytes([1; 32]);
+        let first = market.admit(
+            txid,
+            &buy_of_alice(),
+            zats(1_000_000),
+            &registry,
+            &FeeRule::standard(),
+            at,
+            mtp(),
+            |_| false,
+            &derivation(),
+        );
+        assert!(first.opened.is_some());
+        let code = derivation().buy_otp(&txid, &name());
+        let settlement = zats(70_000_000 + otp_amount(&code).into_u64());
+        market.observe(
+            |_| Some(owner.clone()),
+            &[(pay_to, settlement)],
+            mtp(),
+            later,
+        );
+        assert!(market.is_paid(&name()));
+
+        let next = admit_buy(&mut market, &registry, 2, zats(1_000_000), later);
+        let back = next.returned.expect("the paid sale still holds the name");
+        let until = Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH).unwrap();
+        assert_eq!(back.recipient, bob());
+        assert_eq!(back.note, format!("ZNS:held:alice:{}", until.as_seconds()));
+        let (amount, note) = due_note(&queued(&back, zats(1_000_000), later));
+        assert_eq!(amount, zats(500_000));
+        assert_eq!(note, back.note);
     }
 }
