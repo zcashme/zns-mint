@@ -7,7 +7,6 @@ use anchor_pool::AnchorPool;
 pub use anchor_pool::{is_ceremony_fill, ANCHOR_POOL_SIZE};
 
 use crate::mint::note::NameNoteQueue;
-use crate::mint::presale::ProtectionStatus;
 use crate::mint::sale::{is_owner_listing, Ask, Listing, MarketRefusal};
 use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, Term, UnifiedAddress};
@@ -120,16 +119,14 @@ impl std::fmt::Debug for NameRecord {
 // Registry — tip records, per-name chains, and anchor lineage
 // ---------------------------------------------------------------------------
 
-/// Name ownership and history, current protection and listings, and the
-/// anchor lineage pool.
+/// Name ownership and history, current listings, and the anchor lineage
+/// pool.
 #[derive(Default)]
 pub struct Registry {
     /// Names that are live at the applied tip. Released names are absent.
     records: BTreeMap<Name, NameRecord>,
     /// All confirmed records for each name, in canonical application order.
     history: BTreeMap<Name, Vec<NameRecord>>,
-    /// Latest complete external snapshot; independent of chain rollback.
-    protected: BTreeMap<Name, ProtectionStatus>,
     /// Current listings, rebuilt from the market event log on rollback.
     listings: BTreeMap<Name, Listing>,
     anchors: AnchorPool,
@@ -139,27 +136,6 @@ impl Registry {
     /// Empty state; boot sync adopts the ceremony's anchor pool.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Protection snapshot, judged against MTP without modifying stored facts.
-    pub fn protection_status(&self, name: &Name) -> ProtectionStatus {
-        self.protected
-            .get(name)
-            .copied()
-            .unwrap_or(ProtectionStatus::Unprotected)
-    }
-
-    pub fn is_protected(&self, name: &Name, mtp: Timestamp) -> bool {
-        match self.protection_status(name) {
-            ProtectionStatus::Unprotected => false,
-            ProtectionStatus::Forever => true,
-            ProtectionStatus::WithExpiry(expiry) => mtp < expiry,
-        }
-    }
-
-    /// Install a complete external snapshot. Chain rollback does not rewind it.
-    pub fn replace_protected(&mut self, protected: BTreeMap<Name, ProtectionStatus>) {
-        self.protected = protected;
     }
 
     pub fn listing(&self, name: &Name) -> Option<&Listing> {

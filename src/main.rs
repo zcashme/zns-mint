@@ -47,6 +47,7 @@ async fn main() {
         mut oracle,
         mut challenges,
         access_code_key,
+        mut protected_names,
         presale_client,
         mut fee_rule,
         mut registry,
@@ -436,7 +437,7 @@ async fn main() {
             .expect("FATAL: MTP unavailable at the applied tip");
         // The tip check below covers the price round and the pre-sale
         // read alike. Only the read's unspent timeout can delay the pass.
-        let (round, ()) = tokio::join!(fetch_round(), presale_read.install(&mut registry));
+        let (round, ()) = tokio::join!(fetch_round(), presale_read.install(&mut protected_names));
         // The rate when the requests below were first seen: a day this
         // round publishes does not reprice them.
         let rate = oracle.current();
@@ -513,7 +514,7 @@ async fn main() {
                         refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         continue;
                     };
-                    if !registry.is_protected(name, mtp_now) {
+                    if !protected_names.is_protected(name, mtp_now) {
                         refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         continue;
                     }

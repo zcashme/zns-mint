@@ -22,7 +22,7 @@ use std::str::FromStr;
 
 use crate::mint::mtp::MtpTracker;
 use crate::mint::note::NameNoteQueue;
-use crate::mint::presale::{self, AccessCodeDerivationKey, HttpsClient};
+use crate::mint::presale::{self, AccessCodeDerivationKey, HttpsClient, ProtectedNames};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
 use crate::mint::sale::{transparent_payments, Market};
@@ -98,11 +98,13 @@ pub struct Boot<P: Parameters> {
     pub challenges: OtpQueue,
     /// TEE-derived access-code key (HMAC purpose key, not the root)
     pub access_code_key: AccessCodeDerivationKey,
+    /// must not: fail-closed at birth — the table or no start
+    pub protected_names: ProtectedNames,
     /// initialized: the one client every pre-sale read goes through
     pub presale_client: HttpsClient,
     /// must not: fail-closed at birth — the node's fee rate or no start
     pub fee_rule: FeeRule,
-    /// produced: chain state replayed and initial protection snapshot fetched
+    /// produced: scanned and verified during boot sync
     pub registry: Registry,
     /// initialized: pending Name Note authorizations
     pub name_notes: NameNoteQueue,
@@ -734,8 +736,6 @@ impl Boot<Network> {
             tokio::time::sleep(zcash::RETRY_PAUSE).await;
         };
 
-        registry.replace_protected(protected_names);
-
         // The challenge memory: empty by construction, filled by the run
         // loop as update/release relays are issued.
         let challenges = OtpQueue::new();
@@ -813,6 +813,7 @@ impl Boot<Network> {
             oracle,
             challenges,
             access_code_key,
+            protected_names,
             presale_client,
             fee_rule,
             registry,

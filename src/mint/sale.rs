@@ -2524,36 +2524,18 @@ mod tests {
     }
 
     #[test]
-    fn listing_replay_preserves_records_and_the_latest_protection_snapshot() {
-        use crate::mint::presale::ProtectionStatus;
-        use std::collections::BTreeMap;
-
+    fn listing_replay_preserves_ownership_records_and_history() {
         let (mut market, mut registry, _, _) = listed(100_000_000);
         let record = registry.record(&name()).unwrap().clone();
-        let protected = Name::parse("reserved").unwrap();
-        registry.replace_protected(BTreeMap::from([(
-            protected.clone(),
-            ProtectionStatus::Forever,
-        )]));
         let later = BlockHeight::from_u32(2);
         market
             .list(&mut registry, &list_for(200_000_000), later)
             .unwrap();
-        registry.replace_protected(BTreeMap::from([(
-            protected.clone(),
-            ProtectionStatus::WithExpiry(mtp()),
-        )]));
         registry.truncate_to_height(height());
         market.truncate_to(&mut registry, height());
         assert_eq!(registry.price(&name()), Some(zats(100_000_000)));
         assert_eq!(registry.record(&name()), Some(&record));
         assert_eq!(registry.record_history(&name()), &[record]);
-        assert_eq!(
-            registry.protection_status(&protected),
-            ProtectionStatus::WithExpiry(mtp())
-        );
-        assert!(!registry.is_protected(&protected, mtp()));
-        assert!(registry.record(&protected).is_none());
     }
 
     #[test]
