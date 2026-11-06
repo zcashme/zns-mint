@@ -112,7 +112,7 @@ pub struct Boot<P: Parameters> {
     pub requests: RequestQueue,
     /// initialized: refunds due
     pub refunds: RefundQueue,
-    /// Listings and open sales read from the chain during boot sync.
+    /// Open sales, challenges, and market events read from the chain during boot sync.
     pub market: Market,
     /// The exact encoded identity written to the boot identity document.
     pub treasury_address: String,
@@ -640,25 +640,15 @@ impl Boot<Network> {
             let block_mtp = mtp
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
-            market.expire(block_mtp, next_height);
-            market.reconcile(
-                |name| {
-                    registry
-                        .record(name)
-                        .map(|record| (record.ua.clone(), record.commitment))
-                },
-                next_height,
-            );
+            market.expire(&mut registry, block_mtp, next_height);
+            market.reconcile(&mut registry, next_height);
             for (txid, inbound, paid) in arrivals {
                 if let crate::mint::MintInbound::Response(response) = &inbound {
                     if response.action.is_list()
                         || response.action.is_delist()
                         || response.action.is_auction()
                     {
-                        let owner = registry
-                            .record(&response.name)
-                            .map(|record| record.ua.clone());
-                        market.answer(response, owner.as_ref(), next_height);
+                        market.answer(&mut registry, response, next_height);
                     }
                 }
                 if let crate::mint::MintInbound::Market(request) = &inbound {

@@ -185,8 +185,9 @@ async fn main() {
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
-            market.truncate_to(rewound);
+            market.truncate_to(&mut registry, rewound);
             market.expire(
+                &mut registry,
                 mtp.current().expect("FATAL: MTP unavailable after reorg"),
                 rewound,
             );
@@ -273,15 +274,8 @@ async fn main() {
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
             challenges.expire(block_mtp);
-            market.expire(block_mtp, next_height);
-            market.reconcile(
-                |name| {
-                    registry
-                        .record(name)
-                        .map(|record| (record.ua.clone(), record.commitment))
-                },
-                next_height,
-            );
+            market.expire(&mut registry, block_mtp, next_height);
+            market.reconcile(&mut registry, next_height);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Market(request) => {
@@ -323,10 +317,7 @@ async fn main() {
                             || response.action.is_delist()
                             || response.action.is_auction()
                         {
-                            let owner = registry
-                                .record(&response.name)
-                                .map(|record| record.ua.clone());
-                            market.answer(&response, owner.as_ref(), next_height);
+                            market.answer(&mut registry, &response, next_height);
                             refunds.admit(
                                 &fee_rule,
                                 txid,
