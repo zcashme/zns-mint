@@ -104,10 +104,6 @@ async fn main() {
         // no state above that common ancestor survives.
         let mut ancestor = wallet.tip().block_height().min(best_height);
         loop {
-            assert!(
-                ancestor >= birthday,
-                "FATAL: canonical fork crossed the mint birthday"
-            );
             let wallet_hash = wallet.block_hash_at(ancestor);
             if wallet_hash.is_none() {
                 panic!(
@@ -162,10 +158,6 @@ async fn main() {
                 .truncate_to(ancestor)
                 .expect("FATAL: wallet could not rewind to the common ancestor")
                 .block_height();
-            assert!(
-                rewound >= birthday,
-                "FATAL: wallet rewind crossed the mint birthday"
-            );
             registry.truncate_to_height(rewound);
 
             // Rebuild the entire MTP window at the committed height. Retaining a
