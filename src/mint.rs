@@ -78,6 +78,9 @@ pub enum Action {
     List,
     /// A controller challenge that removes a listing. Not a name note.
     Delist,
+    /// A controller challenge that lists the name on a falling clock.
+    /// Not a name note.
+    Auction,
 }
 
 impl Action {
@@ -90,6 +93,7 @@ impl Action {
             Action::Sale => "sale",
             Action::List => "list",
             Action::Delist => "delist",
+            Action::Auction => "auction",
         }
     }
 
@@ -102,6 +106,7 @@ impl Action {
             "sale" => Some(Action::Sale),
             "list" => Some(Action::List),
             "delist" => Some(Action::Delist),
+            "auction" => Some(Action::Auction),
             _ => None,
         }
     }
@@ -136,6 +141,11 @@ impl Action {
     /// True when this action is a delist challenge.
     pub const fn is_delist(self) -> bool {
         matches!(self, Action::Delist)
+    }
+
+    /// True when this action is a dutch-clock challenge.
+    pub const fn is_auction(self) -> bool {
+        matches!(self, Action::Auction)
     }
 
     /// True when this action spends the registration's current note as
@@ -288,6 +298,8 @@ pub struct OtpMemo {
     pub ua: UnifiedAddress,
     /// The t1 and price on a list challenge. Absent for every other verb.
     pub listing: Option<(TransparentAddress, Zatoshis)>,
+    /// The t1 and clock on an auction challenge. Absent for every other verb.
+    pub clock: Option<(TransparentAddress, sale::Clock)>,
 }
 
 impl OtpMemo {
@@ -306,6 +318,18 @@ impl OtpMemo {
                 self.ua.encode(network),
                 Address::Transparent(*pay_to).encode(network),
                 sale::encode_zec(*price),
+            )
+        } else if self.action.is_auction() {
+            let (pay_to, clock) = self.clock.as_ref()?;
+            format!(
+                "ZNS:otp:{otp}:{}:auction:{}:{}:{}:{}:{}:{}",
+                self.name.as_str(),
+                self.ua.encode(network),
+                Address::Transparent(*pay_to).encode(network),
+                sale::encode_zec(clock.start_price),
+                sale::encode_zec(clock.min_price),
+                u32::from(clock.start),
+                u32::from(clock.end),
             )
         } else {
             format!(
@@ -340,23 +364,44 @@ impl OtpMemo {
         let name = Name::parse(parts[3])?;
         // A challenge is an update, a release, a list, or a delist.
         let action = Action::parse(parts[4]).filter(|action| {
-            action.is_update() || action.is_release() || action.is_list() || action.is_delist()
+            action.is_update()
+                || action.is_release()
+                || action.is_list()
+                || action.is_delist()
+                || action.is_auction()
         })?;
 
-        // A list sentence carries the t1 and the price. The other verbs stay six fields.
-        let (ua, listing) = if action.is_list() {
+        // A list sentence carries the t1 and the price. An auction sentence
+        // carries the t1 and the clock. The other verbs stay six fields.
+        let (ua, listing, clock) = if action.is_list() {
             if parts.len() != 8 {
                 return None;
             }
             let ua = decode_controller_ua(network, parts[5])?;
             let pay_to = sale::decode_t1(network, parts[6])?;
             let price = sale::decode_zec(parts[7])?;
-            (ua, Some((pay_to, price)))
+            (ua, Some((pay_to, price)), None)
+        } else if action.is_auction() {
+            if parts.len() != 11 {
+                return None;
+            }
+            let ua = decode_controller_ua(network, parts[5])?;
+            let pay_to = sale::decode_t1(network, parts[6])?;
+            let clock = sale::Clock {
+                start_price: sale::decode_zec(parts[7])?,
+                min_price: sale::decode_zec(parts[8])?,
+                start: sale::decode_height(parts[9])?,
+                end: sale::decode_height(parts[10])?,
+            };
+            if !clock.is_valid() {
+                return None;
+            }
+            (ua, None, Some((pay_to, clock)))
         } else {
             if parts.len() != 6 {
                 return None;
             }
-            (decode_controller_ua(network, parts[5])?, None)
+            (decode_controller_ua(network, parts[5])?, None, None)
         };
 
         Some(Self {
@@ -365,6 +410,7 @@ impl OtpMemo {
             action,
             ua,
             listing,
+            clock,
         })
     }
 }
@@ -632,7 +678,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                             block_mtp,
                         ),
                         Action::Claim => unreachable!("claims are routed above"),
-                        Action::List | Action::Delist => false,
+                        Action::List | Action::Delist | Action::Auction => false,
                     }
                 };
                 if accepted {
@@ -1110,6 +1156,7 @@ mod tests {
                 action,
                 ua: ua.clone(),
                 listing: None,
+                clock: None,
             };
             let memo = challenge.encode(&network).expect("non-claims encode");
             assert_eq!(OtpMemo::decode(&network, &memo), Some(challenge));
@@ -1121,6 +1168,7 @@ mod tests {
             action: Action::Claim,
             ua: ua.clone(),
             listing: None,
+            clock: None,
         };
         assert!(claim.encode(&network).is_none());
 
@@ -1132,6 +1180,7 @@ mod tests {
             action: Action::List,
             ua,
             listing: Some((pay_to, price)),
+            clock: None,
         };
         let memo = list.encode(&network).expect("a list sentence encodes");
         assert_eq!(OtpMemo::decode(&network, &memo), Some(list));

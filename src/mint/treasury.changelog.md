@@ -1,5 +1,10 @@
 # Treasury design record
 
+## 2026-11-05 — A returned intent carries its sentence
+
+- `admit_with_note` stores a sentence on the refund. The built
+  payment carries that memo. A refund with no sentence is unchanged.
+
 ## 2026-10-30 — Challenge inputs and change follow the controller pool (#365)
 
 - Challenges to Sapling-only controllers spend Sapling and return change to

@@ -285,7 +285,7 @@ async fn main() {
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Market(request) => {
-                        if let Some(name) = market.admit(
+                        let admitted = market.admit(
                             txid,
                             &request,
                             paid,
@@ -295,8 +295,20 @@ async fn main() {
                             block_mtp,
                             |name| name_notes.note_pending(name),
                             &access_code_key,
-                        ) {
+                        );
+                        if let Some(name) = admitted.opened {
                             challenges.drop_challenges(&name);
+                        }
+                        if let Some(back) = admitted.returned {
+                            refunds.admit_with_note(
+                                &fee_rule,
+                                txid,
+                                &back.recipient,
+                                &back.name,
+                                next_height,
+                                paid,
+                                Some(back.note),
+                            );
                         }
                     }
                     MintInbound::Request(request) => {
@@ -307,7 +319,10 @@ async fn main() {
                     // A refused response goes back to the memo address,
                     // less the refund fee.
                     MintInbound::Response(response) => {
-                        if response.action.is_list() || response.action.is_delist() {
+                        if response.action.is_list()
+                            || response.action.is_delist()
+                            || response.action.is_auction()
+                        {
                             let owner = registry
                                 .record(&response.name)
                                 .map(|record| record.ua.clone());

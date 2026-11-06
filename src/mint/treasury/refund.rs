@@ -41,6 +41,8 @@ pub struct RefundRequest {
     amount: Zatoshis,
     name: Name,
     height: BlockHeight,
+    /// A sentence sent with the payment. Absent on a plain refund.
+    note: Option<String>,
 }
 
 impl RefundRequest {
@@ -59,6 +61,11 @@ impl RefundRequest {
 
     pub fn name(&self) -> &Name {
         &self.name
+    }
+
+    /// The sentence that rides with this payment, when it has one.
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
     }
 }
 
@@ -82,6 +89,21 @@ impl RefundQueue {
         height: BlockHeight,
         refundable: Zatoshis,
     ) {
+        self.admit_with_note(fee_rule, txid, recipient, name, height, refundable, None);
+    }
+
+    /// [`admit`](Self::admit), and `note` is paid back with the zatoshis.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_with_note(
+        &mut self,
+        fee_rule: &FeeRule,
+        txid: TxId,
+        recipient: &UnifiedAddress,
+        name: &Name,
+        height: BlockHeight,
+        refundable: Zatoshis,
+        note: Option<String>,
+    ) {
         let Some(amount) = refund_output(refundable, fee_rule) else {
             tracing::info!(
                 %txid,
@@ -104,6 +126,7 @@ impl RefundQueue {
             amount,
             name: name.clone(),
             height,
+            note,
         });
     }
 
@@ -194,6 +217,24 @@ mod tests {
             (price - access_code_penalty(price)).unwrap(),
         );
         assert_eq!(queue.due(deep())[0].amount(), zats(490_000));
+    }
+
+    #[test]
+    fn a_return_keeps_its_sentence() {
+        let mut queue = RefundQueue::default();
+        queue.admit_with_note(
+            &FeeRule::standard(),
+            TxId::from_bytes([1; 32]),
+            &ua(),
+            &alice(),
+            BlockHeight::from_u32(10),
+            zats(1_000_000),
+            Some("ZNS:held:alice:1700000600".to_string()),
+        );
+        assert_eq!(
+            queue.due(deep())[0].note(),
+            Some("ZNS:held:alice:1700000600")
+        );
     }
 
     #[test]

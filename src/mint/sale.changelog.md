@@ -1,5 +1,17 @@
 # Sale module changelog
 
+## 2026-11-05 — A listing can be a dutch clock
+
+- `ZNS:auction` names the start price, the minimum, and the start and
+  end blocks. The price falls in whole zatoshis. The end block is the
+  last that sells, and the next block takes the listing down.
+- The first buy in a block wins and is told
+  `ZNS:dutch:<code>:<name>:<ua>:<price>:<until>`. That price stays for
+  ten minutes. He pays it plus the code.
+- A later intent while the name is held comes back, less the refund
+  fee, with `ZNS:held`. An intent before the clock starts comes back
+  with `ZNS:wait`.
+
 ## 2026-11-03 — Name requests and market requests
 
 - `MarketRequest` replaces `ListRequest`, `DelistRequest`, and

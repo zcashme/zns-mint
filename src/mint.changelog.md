@@ -1,5 +1,11 @@
 # Mint live-work design record
 
+## 2026-11-05 — An auction challenge carries the clock
+
+- `Action::Auction` is the controller challenge for a dutch listing.
+  The sentence carries the t1, both prices, and both blocks. A flat
+  list sentence is unchanged.
+
 ## 2026-11-03 — Name requests and market requests
 
 - `MintInbound::Market` carries a `MarketRequest`: a list, a delist,
