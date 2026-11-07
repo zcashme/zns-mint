@@ -166,13 +166,7 @@ async fn main() {
             mtp = zns_mint::mint::mtp::MtpTracker::default();
             mtp.backfill(rewound, |height| {
                 let source = source.clone();
-                async move {
-                    let (_, _, timestamp) = source.get_block_header(height).await?;
-                    Ok::<_, TransportError>(
-                        u32::try_from(timestamp.as_seconds())
-                            .expect("Zcash header timestamps fit u32"),
-                    )
-                }
+                async move { source.header_time(height).await }
             })
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
