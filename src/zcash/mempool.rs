@@ -13,9 +13,13 @@ impl ChainClient {
     /// Opens the gRPC stream of mempool changes as `(MempoolChangeKind, TxId)`
     /// pairs.
     ///
-    /// `Added` fires on verification into the mempool, `Mined` on mining into
-    /// a best-chain block, and `Invalidated` on removal by a mined spend
-    /// conflict or by expiry at the new tip. The mined id equals the `TxId`
+    /// `Added` fires when a verified transaction enters the mempool, again
+    /// after a mempool reset. `Mined` fires only for mempool transactions in
+    /// a block that grows the tip by one. `Invalidated` covers every other
+    /// exit: failed or timed-out verification, a refused insert, a mined
+    /// spend conflict, expiry, and a transaction mined while verifying or
+    /// across a reset. A reset and ZIP-401 eviction of other transactions
+    /// emit nothing; a lagging subscriber's stream ends. The mined id equals the `TxId`
     /// for every transaction version the mint builds; the auth digest is
     /// discarded. Reorgs emit nothing for transactions that were in abandoned
     /// blocks. Stream endings — silent or errored — mean reconnect; what a
