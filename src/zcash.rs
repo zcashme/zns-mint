@@ -1,12 +1,4 @@
 //! The seam between the mint and its Zebra full node.
-//!
-//! One node, two dialects: gRPC streams announce change, JSON-RPC answers
-//! questions. The files are the conversations — the chain, the mempool,
-//! submission — and this root is what they share: the error policy, the wire
-//! machinery, and the display-order decoding. The chain file also owns the
-//! tip stream's lifecycle ([`TipSession`]): the orchestrator wakes on it,
-//! but never sees transport state. The node's identity is not on the wire:
-//! it is the SEV-SNP measurement of the image this process lives in.
 
 pub mod chain;
 pub mod fees;
@@ -192,16 +184,10 @@ pub struct RpcError {
 }
 
 impl RpcError {
-    /// Bitcoin Core / Zebra RPC error -27: transaction already in chain.
-    pub fn is_tx_already_in_chain(&self) -> bool {
-        self.code == -27
-    }
-
-    /// The node already has this transaction in its mempool. The message
-    /// is the discriminator: -26 is also a policy rejection.
+    /// Zebra's `MempoolError::InMempool`, which shares -1 with every other
+    /// mempool refusal.
     pub fn is_already_in_mempool(&self) -> bool {
-        let message = self.message.to_ascii_lowercase();
-        message.contains("already in mempool") || message.contains("already in the mempool")
+        self.message == "transaction already exists in mempool"
     }
 }
 
