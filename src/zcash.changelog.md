@@ -1,5 +1,13 @@
 # Zcash I/O changelog
 
+## 2026-11-07 — Submission reads Zebra's own replies
+
+- `SubmitOutcome::Mined` and `RpcError::is_tx_already_in_chain` are gone:
+  Zebra 7.0.0's `sendrawtransaction` never answers -27.
+- `is_already_in_mempool` matches Zebra's exact `MempoolError::InMempool`
+  message, `transaction already exists in mempool`, so resending a
+  transaction the node holds reads as accepted, not rejected.
+
 ## 2026-10-23 — The node's fee rate (#357)
 
 - `CanonicalBlockSource::standard_fee` reads `getstandardfee` and returns
