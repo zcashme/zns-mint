@@ -184,11 +184,6 @@ pub struct RpcError {
 }
 
 impl RpcError {
-    /// Bitcoin Core / Zebra RPC error -27: transaction already in chain.
-    pub fn is_tx_already_in_chain(&self) -> bool {
-        self.code == -27
-    }
-
     /// The node already has this transaction in its mempool. The message
     /// is the discriminator: -26 is also a policy rejection.
     pub fn is_already_in_mempool(&self) -> bool {
