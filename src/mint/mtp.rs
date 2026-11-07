@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 use time::Timestamp;
-use zcash_protocol::consensus::{BlockHeight, NetworkType, Parameters};
+use zcash_protocol::consensus::BlockHeight;
 
 /// The MTP window size, a Zcash consensus constant
 const MTP_WINDOW: usize = 11;
@@ -97,20 +97,9 @@ impl MtpTracker {
         )
     }
 
-    /// Checks a new header against its preceding median, before updating the
-    /// window. Near genesis the median uses all available preceding blocks.
-    /// The upper bound starts at mainnet height 2 and testnet height 653606
-    /// (including Zebra's regtest network). Genesis has no preceding median.
-    /// The full node owns the separate acceptance check against its own clock.
-    pub fn header_time_ok(
-        &self,
-        network: &impl Parameters,
-        height: BlockHeight,
-        timestamp: u32,
-    ) -> Result<(), &'static str> {
-        if height == BlockHeight::from_u32(0) {
-            return Ok(());
-        }
+    /// Checks the next header against the preceding 11-block median.
+    /// The mint processes blocks after activation of both timestamp bounds.
+    pub fn header_time_ok(&self, timestamp: u32) -> Result<(), &'static str> {
         let median = self
             .current()
             .ok_or("preceding median unavailable")?
@@ -119,12 +108,7 @@ impl MtpTracker {
         if timestamp <= median {
             return Err("block time is not after the previous median");
         }
-        // Zcash protocol specification §7.6, Block Header Encoding and Consensus.
-        let max_time_enforced = match network.network_type() {
-            NetworkType::Main => u32::from(height) >= 2,
-            NetworkType::Test | NetworkType::Regtest => u32::from(height) >= 653_606,
-        };
-        if max_time_enforced && timestamp > median + MAX_TIME_SINCE_MEDIAN {
+        if timestamp > median + MAX_TIME_SINCE_MEDIAN {
             return Err("block time is more than 90 minutes past the previous median");
         }
         Ok(())
@@ -142,7 +126,6 @@ mod tests {
     use std::convert::Infallible;
 
     use super::*;
-    use zcash_protocol::consensus::{MAIN_NETWORK, TEST_NETWORK};
 
     const DAY: i64 = 86_400;
 
@@ -246,44 +229,11 @@ mod tests {
             tracker.update(h(height as u32), time);
         }
         assert_eq!(tracker.current(), Some(t(140)));
-        assert!(tracker.header_time_ok(&MAIN_NETWORK, h(11), 141).is_ok());
-        assert!(tracker.header_time_ok(&MAIN_NETWORK, h(11), 140).is_err());
-        assert!(tracker.header_time_ok(&MAIN_NETWORK, h(11), 139).is_err());
-        assert!(tracker
-            .header_time_ok(&MAIN_NETWORK, h(11), 140 + 90 * 60)
-            .is_ok());
-        assert!(tracker
-            .header_time_ok(&MAIN_NETWORK, h(11), 140 + 90 * 60 + 1)
-            .is_err());
-    }
-
-    #[test]
-    fn short_windows_follow_network_activation_heights() {
-        let mut tracker = born();
-        assert!(tracker.header_time_ok(&MAIN_NETWORK, h(0), 0).is_ok());
-        assert!(tracker.header_time_ok(&MAIN_NETWORK, h(1), 1).is_err());
-        tracker.update(h(0), 1_000_000);
-        // The lower bound already applies with only the genesis predecessor.
-        assert!(tracker
-            .header_time_ok(&MAIN_NETWORK, h(1), 1_000_000)
-            .is_err());
-        let too_late = 1_000_000 + 90 * 60 + 1;
-        assert!(tracker
-            .header_time_ok(&MAIN_NETWORK, h(1), too_late)
-            .is_ok());
-        tracker.update(h(1), 1_000_000);
-        assert!(tracker
-            .header_time_ok(&MAIN_NETWORK, h(2), too_late)
-            .is_err());
-        assert!(tracker
-            .header_time_ok(&TEST_NETWORK, h(653_605), too_late)
-            .is_ok());
-        assert!(tracker
-            .header_time_ok(&TEST_NETWORK, h(653_606), too_late)
-            .is_err());
-        assert!(tracker
-            .header_time_ok(&TEST_NETWORK, h(653_605), 1_000_000)
-            .is_err());
+        assert!(tracker.header_time_ok(141).is_ok());
+        assert!(tracker.header_time_ok(140).is_err());
+        assert!(tracker.header_time_ok(139).is_err());
+        assert!(tracker.header_time_ok(140 + 90 * 60).is_ok());
+        assert!(tracker.header_time_ok(140 + 90 * 60 + 1).is_err());
     }
 
     #[test]
@@ -292,9 +242,7 @@ mod tests {
         for i in 0..11 {
             tracker.update(h(i), u32::MAX - 1);
         }
-        assert!(tracker
-            .header_time_ok(&MAIN_NETWORK, h(11), u32::MAX)
-            .is_ok());
+        assert!(tracker.header_time_ok(u32::MAX).is_ok());
     }
 
     #[tokio::test]

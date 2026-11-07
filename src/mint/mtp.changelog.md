@@ -5,8 +5,8 @@
 - Move median validation into `MtpTracker`; remove `zcash::adopt`, its
   historical block pins, and their boot check and fixtures.
 - Stop comparing headers with the mint machine's clock. New headers must
-  exceed their preceding median; the 90-minute upper bound applies from
-  mainnet height 2 and testnet/regtest height 653606, matching Zebra.
+  exceed their preceding median and be at most 90 minutes ahead of it.
+  Both bounds are active at the heights the mint processes.
 - Backfill seeds the window without validating headers against incomplete
   predecessor context. Boot and live scanning validate subsequent headers
   before updating the window.
