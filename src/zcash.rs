@@ -184,11 +184,10 @@ pub struct RpcError {
 }
 
 impl RpcError {
-    /// The node already has this transaction in its mempool. The message
-    /// is the discriminator: -26 is also a policy rejection.
+    /// Zebra's `MempoolError::InMempool`, which shares -1 with every other
+    /// mempool refusal.
     pub fn is_already_in_mempool(&self) -> bool {
-        let message = self.message.to_ascii_lowercase();
-        message.contains("already in mempool") || message.contains("already in the mempool")
+        self.message == "transaction already exists in mempool"
     }
 }
 
