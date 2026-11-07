@@ -15,11 +15,6 @@ const PAYMENT_ZEC: f64 = 2.0;
 
 const SYNC_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// This test's spending plan — claim, update, and release, each followed
-/// by an OTP echo payment, plus fees with margin — as the spendable
-/// shielded balance the wallet must hold before the run starts.
-const USER_BUDGET_ZATS: u64 = 1_200_000_000;
-
 /// A funded Zallet wallet playing the user.
 pub struct User {
     pub zallet: Zallet,
@@ -32,6 +27,10 @@ pub struct User {
 }
 
 impl User {
+    /// Spendable shielded funds for claim, update, release, OTP
+    /// echoes, and fees with margin. Both funding paths use this budget.
+    pub const BUDGET_ZATS: u64 = 1_200_000_000;
+
     /// Bring up a funded user: fresh wallet, mature coinbase, and a
     /// shielded balance, with the wallet synced to the chain.
     ///
@@ -61,7 +60,7 @@ impl User {
         zebra.generate_blocks(1).await?;
         let target = zebra.tip_height().await?;
         zallet.wait_until_synced(target, SYNC_TIMEOUT).await?;
-        wait_until_shielded(&zallet, USER_BUDGET_ZATS, SYNC_TIMEOUT).await?;
+        wait_until_shielded(&zallet, Self::BUDGET_ZATS, SYNC_TIMEOUT).await?;
 
         let ua = zallet.orchard_ua().await?;
         Ok(Self {

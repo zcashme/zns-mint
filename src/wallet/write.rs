@@ -18,9 +18,9 @@ use zcash_client_backend::data_api::{
     error::RewindError,
     locking::{LockError, LockOwner, OutputLockStore},
     scanning::ScanPriority,
-    AccountBirthday, AccountPurpose, DecryptedTransaction, ScannedBlock, ScannedBundles,
-    SentTransaction, SentTransactionOutput, TransactionStatus, TransactionsInvolvingAddress,
-    WalletWrite,
+    AccountBirthday, AccountPurpose, BlockMetadata, DecryptedTransaction, ScannedBlock,
+    ScannedBundles, SentTransaction, SentTransactionOutput, TransactionStatus,
+    TransactionsInvolvingAddress, WalletWrite,
 };
 use zcash_client_backend::wallet::{
     NoteId, OutputRef, Recipient, WalletIronwoodOutput, WalletTransparentOutput,
@@ -359,15 +359,11 @@ where
 /// pools, so anchors stay computable per block. Uses `ShardTree::checkpoint`
 /// so checkpoints written without an append are pruned too.
 fn ensure_block_checkpoint<H, const DEPTH: u8, const SHARD_HEIGHT: u8>(
-    tree: &mut ShardTree<
-        shardtree::store::memory::MemoryShardStore<H, BlockHeight>,
-        DEPTH,
-        SHARD_HEIGHT,
-    >,
+    tree: &mut ShardTree<MemoryShardStore<H, BlockHeight>, DEPTH, SHARD_HEIGHT>,
     height: BlockHeight,
 ) -> Result<(), WalletError>
 where
-    shardtree::store::memory::MemoryShardStore<H, BlockHeight>:
+    MemoryShardStore<H, BlockHeight>:
         ShardStore<H = H, CheckpointId = BlockHeight, Error = Infallible>,
     H: Hashable + PartialEq + Clone,
 {
@@ -393,17 +389,13 @@ where
 /// belongs to the block's last commitment; a marked Name Note that is not
 /// last must not claim it.
 fn append_block_commitments<H, Nf, const DEPTH: u8, const SHARD_HEIGHT: u8>(
-    tree: &mut ShardTree<
-        shardtree::store::memory::MemoryShardStore<H, BlockHeight>,
-        DEPTH,
-        SHARD_HEIGHT,
-    >,
+    tree: &mut ShardTree<MemoryShardStore<H, BlockHeight>, DEPTH, SHARD_HEIGHT>,
     bundles: &ScannedBundles<H, Nf>,
     height: BlockHeight,
     marks: &[H],
 ) -> Result<(), WalletError>
 where
-    shardtree::store::memory::MemoryShardStore<H, BlockHeight>:
+    MemoryShardStore<H, BlockHeight>:
         ShardStore<H = H, CheckpointId = BlockHeight, Error = Infallible>,
     H: Hashable + PartialEq + Clone,
 {
@@ -470,7 +462,7 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         &mut self,
         _account_name: &str,
         _seed: &SecretVec<u8>,
-        _account_index: zip32::AccountId,
+        _account_index: AccountId,
         _birthday: &AccountBirthday,
         _key_source: Option<&str>,
     ) -> Result<(Self::Account, UnifiedSpendingKey), WalletError> {
@@ -491,6 +483,11 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
 
     fn delete_account(&mut self, _account: AccountId) -> Result<(), WalletError> {
         // The namespace cannot survive deletion of either account.
+        Err(WalletError::FixedAccountsOnly)
+    }
+
+    fn set_account_name(&mut self, _account: AccountId, _name: &str) -> Result<(), WalletError> {
+        // Accounts 0 and 1 are named by their role, not by a stored name.
         Err(WalletError::FixedAccountsOnly)
     }
 
@@ -534,7 +531,7 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<AccountId>>,
     ) -> Result<(), WalletError> {
-        self.put_blocks_marked(from_state, blocks, &[])
+        self.put_blocks_marked(&super::block_metadata(from_state), blocks, &[])
     }
 
     fn put_received_transparent_utxo(
@@ -910,7 +907,7 @@ impl<P: Parameters> Wallet<P> {
     /// per-height checkpoint is `ensure_block_checkpoint`'s to create.
     pub(crate) fn put_blocks_marked(
         &mut self,
-        from_state: &ChainState,
+        from_tip: &BlockMetadata,
         blocks: Vec<ScannedBlock<AccountId>>,
         marks: &[orchard::tree::MerkleHashOrchard],
     ) -> Result<(), WalletError> {
@@ -919,9 +916,9 @@ impl<P: Parameters> Wallet<P> {
         };
 
         // Continuity: the batch must start exactly at the block after
-        // `from_state`, heights must be sequential, and `from_state` must be
+        // `from_tip`, heights must be sequential, and `from_tip` must be
         // the wallet's applied tip. All checks run before any mutation.
-        if next_height(from_state.block_height()) != first.height() {
+        if next_height(from_tip.block_height()) != first.height() {
             return Err(WalletError::ChainDiscontinuity(first.height()));
         }
         for pair in blocks.windows(2) {
@@ -930,8 +927,8 @@ impl<P: Parameters> Wallet<P> {
             }
         }
         match self.blocks.last_key_value() {
-            Some((&applied_tip, metadata)) if applied_tip == from_state.block_height() => {
-                if metadata.block_hash() != from_state.block_hash() {
+            Some((&applied_tip, metadata)) if applied_tip == from_tip.block_height() => {
+                if metadata.block_hash() != from_tip.block_hash() {
                     return Err(WalletError::ChainDiscontinuity(applied_tip));
                 }
             }
@@ -939,12 +936,12 @@ impl<P: Parameters> Wallet<P> {
             // a from-state above it: both would desynchronize note commitment
             // positions.
             Some((&applied_tip, _)) => return Err(WalletError::ChainDiscontinuity(applied_tip)),
-            // First batch: `from_state` must be the recorded boot origin.
+            // First batch: `from_tip` must be the recorded boot origin.
             None => {
-                if from_state.block_height() != self.seed.block_height()
-                    || from_state.block_hash() != self.seed.block_hash()
+                if from_tip.block_height() != self.seed.block_height()
+                    || from_tip.block_hash() != self.seed.block_hash()
                 {
-                    return Err(WalletError::ChainDiscontinuity(from_state.block_height()));
+                    return Err(WalletError::ChainDiscontinuity(from_tip.block_height()));
                 }
             }
         }
@@ -1629,7 +1626,7 @@ mod tests {
                     false,
                     Position::from(u64::from(base) + 2),
                     None,
-                    zip32::AccountId::const_from_u32(0),
+                    AccountId::const_from_u32(0),
                     Some(zip32::Scope::External),
                 ),
             );

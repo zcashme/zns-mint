@@ -1,5 +1,82 @@
 # Treasury design record
 
+## 2026-11-06 — A kept exact-fee return logs its sentence
+
+- An intent that pays only the fee is not queued. The kept-payment
+  log carries the `ZNS:held` or `ZNS:wait` sentence.
+
+## 2026-11-05 — A returned intent carries its sentence
+
+- `admit_with_note` stores a sentence on the refund. The built
+  payment carries that memo. A refund with no sentence is unchanged.
+
+## 2026-10-30 — Challenge inputs and change follow the controller pool (#365)
+
+- Challenges to Sapling-only controllers spend Sapling and return change to
+  Sapling. Controllers with an Orchard receiver use Ironwood inputs and
+  change. The pool choices are inline in `challenge`, without a helper.
+- A Sapling-funded zero-value challenge exposes only its fee in the Sapling
+  value balance. It does not move Treasury change into Ironwood.
+- A challenge waits when its selected pool lacks spendable funds. The
+  incoming request's payment pool does not determine challenge funding.
+
+## 2026-10-30 — Separate Treasury funding from recipient pools (#365)
+
+- Refunds may spend Sapling or Ironwood, with change in Ironwood, regardless
+  of the recipient's receiver pool. Cross-pool refunds are allowed and
+  expose the net amount crossing each pool, including Sapling value moved
+  into Ironwood change.
+- Zero-value challenges spend Ironwood only and return change to Ironwood,
+  including challenges to Sapling-only controllers. They do not require a
+  Sapling reserve or move positive value across the Sapling turnstile.
+- Vault sweeps still spend Ironwood only. Refund eligibility, amounts and
+  queue behavior are unchanged.
+
+## 2026-10-29 — Treasury pool policy (#365)
+
+- The vault sweep spends Ironwood only. Sapling notes remain available for
+  refunds and challenges to Sapling-only recipients; those transactions use
+  Sapling inputs and change. Recipients with Orchard use Ironwood inputs.
+- Refunds and challenges require enough spendable funds in the chosen pool;
+  they do not fall back to another pool. Sapling spends publish a Sapling
+  value balance, including the transaction fee.
+
+## 2026-10-29 — A refund withholds a hundred actions
+
+- A refund is the payment minus `FEE_ACTIONS`, a hundred actions at the
+  node's rate: 100,000 zats at 1,000 per action.
+
+## 2026-10-24 — Underpaid payments are refunded (#372)
+
+- A refund is the payment minus ten actions at the node's rate. It
+  returns to the memo address. A payment within the fee is kept.
+- Refund a claim for no code, an unlisted name, a payment below the quote,
+  a wrong code once the quote is covered (keep 1%), or a name registered
+  or queued.
+- Refund an OTP response when no live challenge matches (a wrong
+  code, or a right one whose challenge was dropped), a renewal or upgrade
+  below its quote (that OTP can be sent again), or a name that became due
+  for release after its challenge was issued. An unparsed memo leaves its
+  payment with the mint.
+- Build a refund on the tip after its payment. Drop it if that block
+  is orphaned. The sweep waits while one is queued. Try again next tip
+  until the node accepts it; the wallet then owns the transaction.
+
+## 2026-10-24 — Treasury payments pay the node's fee rate (#357)
+
+- `sweep_to_vault` and `challenge` take the node's `FeeRule` and call
+  upstream's `propose_transfer` with a `SingleOutputChangeStrategy` over
+  it. `propose_standard_transfer_to_address` takes only
+  `StandardFeeRule::Zip317`, so it is no longer used.
+- Change follows the wallet's dust line:
+  `DustOutputPolicy::new(DustAction::Reject, Some(MARGINAL_FEE))`. At a
+  rate below 5,000 the default threshold would let the change strategy
+  create change the wallet never selects. Name Note change is built by
+  hand and keeps no such rule; it is that small only when the Treasury
+  is nearly empty.
+- Send-max and the payment pass `wallet::CONFIRMATIONS`, so both halves
+  of a sweep see the same notes.
+
 ## 2026-10-15 — `RequestQueue::names` (#342)
 
 - Names every request pending decision, borrowed, for the request state
@@ -97,6 +174,7 @@
 
 - `sweep_to_vault` builds a sweep when called; `main` owns the once-per-day
   gate and invokes it only when catch-up advances the mint's day.
+
 ## 2026-09-24 — A skipped build names the failure
 
 - `sweep_to_vault` returns `Ok(None)` only when there is nothing to

@@ -1,5 +1,35 @@
 # Zcash I/O changelog
 
+## 2026-11-07 — The seam keeps only what Zebra exercises
+
+- `header_time` reads the raw `getblockheader` and returns the header's
+  `u32` time; `get_block_header` and `BlockHeaderResponse` are gone.
+- `TransportError::HttpStatus` is gone.
+- `submit()` no longer has a panic arm for non-retryable errors.
+
+## 2026-11-07 — Submission reads Zebra's own replies
+
+- `SubmitOutcome::Mined` and `RpcError::is_tx_already_in_chain` are gone:
+  Zebra 7.0.0's `sendrawtransaction` never answers -27.
+- `is_already_in_mempool` matches Zebra's exact `MempoolError::InMempool`
+  message, `transaction already exists in mempool`, so resending a
+  transaction the node holds reads as accepted, not rejected.
+
+## 2026-10-23 — The node's fee rate (#357)
+
+- `CanonicalBlockSource::standard_fee` reads `getstandardfee` and returns
+  a ZIP 317 `FeeRule` at that per-action rate. Estimator version 0 only;
+  zero, out-of-range, or null answers are refused. No fixed rate stands
+  in for a refused answer: the mint runs its own node.
+
+## 2026-10-23 — A header is adopted only inside the time window
+
+- The node has to serve one pinned block, hashed locally. Regtest
+  has no pinned block.
+- Each adopted header's time has to be after the previous median and
+  at most 90 minutes past it, once eleven times are recorded, and at
+  most two hours ahead of the mint.
+
 ## 2026-10-13 — The announcement is the answer (#344)
 
 - Upstream receipts first: Zebra's `ChainTipChange` pushes on reorgs

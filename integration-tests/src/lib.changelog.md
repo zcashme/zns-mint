@@ -1,5 +1,13 @@
 # lib.changelog.md
 
+## 2026-10-20
+
+- `mint_identity_strings` derives the Treasury address with
+  `zns_mint::boot::TREASURY_ADDRESS_REQUEST`, so the identity document
+  check follows the mint's own derivation (#365). The e2e still pays the
+  index-0 Orchard address, which for the dev seed is no longer the
+  identity UA's receiver: a payment to the earlier address is read.
+
 ## 2026-10-10
 
 - `DEV_SEED` moves to zns-canon (`regtest::DEV_SEED`) — one all-zero

@@ -13,14 +13,12 @@ impl ChainClient {
     /// Opens the gRPC stream of mempool changes as `(MempoolChangeKind, TxId)`
     /// pairs.
     ///
-    /// `Added` fires on verification into the mempool, `Mined` on mining into
-    /// a best-chain block, and `Invalidated` on removal by a mined spend
-    /// conflict or by expiry at the new tip. The mined id equals the `TxId`
-    /// for every transaction version the mint builds; the auth digest is
-    /// discarded. Reorgs emit nothing for transactions that were in abandoned
-    /// blocks. Stream endings — silent or errored — mean reconnect; what a
-    /// gap missed, the block path decides — the re-baseline the doc once
-    /// promised is deliberately not built (best-effort is the doctrine).
+    /// The mined id equals the `TxId` for every transaction version the mint
+    /// builds; the auth digest is discarded. Reorgs emit nothing for
+    /// transactions that were in abandoned blocks. Stream endings — silent or
+    /// errored — mean reconnect; what a gap missed, the block path decides —
+    /// the re-baseline the doc once promised is deliberately not built
+    /// (best-effort is the doctrine).
     pub async fn mempool_events(
         &mut self,
     ) -> Result<impl Stream<Item = Result<(MempoolChangeKind, TxId), TransportError>>, TransportError>

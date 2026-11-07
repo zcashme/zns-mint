@@ -7,6 +7,8 @@ use zcash_protocol::consensus::BlockHeight;
 
 /// The MTP window size, a Zcash consensus constant
 const MTP_WINDOW: usize = 11;
+/// Consensus upper bound on a header's time relative to its preceding median.
+const MAX_TIME_SINCE_MEDIAN: i64 = 90 * 60;
 
 /// The mint's birthday: the MTP of the birthday block, set once at
 /// boot by [`MtpTracker::born`] and never changed after.
@@ -44,6 +46,8 @@ impl MtpTracker {
 
     /// Fills the tracker with the block timestamps ending at `till`, so
     /// MTP is available immediately at boot and after reorgs.
+    /// These seed headers do not include their preceding windows; Zebra
+    /// validates them. Subsequent blocks are checked by [`Self::header_time_ok`].
     pub async fn backfill<F, Fut, E>(&mut self, till: BlockHeight, mut fetch: F) -> Result<(), E>
     where
         F: FnMut(BlockHeight) -> Fut,
@@ -91,6 +95,23 @@ impl MtpTracker {
             Timestamp::from_seconds(stamps[stamps.len() / 2] as i64)
                 .expect("block timestamp is a valid u32, always fits in Timestamp"),
         )
+    }
+
+    /// Checks the next header against the preceding 11-block median.
+    /// The mint processes blocks after activation of both timestamp bounds.
+    pub fn header_time_ok(&self, timestamp: u32) -> Result<(), &'static str> {
+        let median = self
+            .current()
+            .ok_or("preceding median unavailable")?
+            .as_seconds();
+        let timestamp = i64::from(timestamp);
+        if timestamp <= median {
+            return Err("block time is not after the previous median");
+        }
+        if timestamp > median + MAX_TIME_SINCE_MEDIAN {
+            return Err("block time is more than 90 minutes past the previous median");
+        }
+        Ok(())
     }
 
     /// Reorg Handler to drops entries above `height`
@@ -194,6 +215,44 @@ mod tests {
 
         tracker.truncate_to(h(4));
         assert_eq!(tracker.current_day(), Some(0));
+    }
+
+    #[test]
+    fn header_time_is_checked_against_the_preceding_median() {
+        let mut tracker = born();
+        // Deliberately unordered times: the previous header can be later
+        // than the new one, provided the new time exceeds the median.
+        for (height, time) in [100, 90, 140, 120, 110, 130, 160, 150, 180, 170, 200]
+            .into_iter()
+            .enumerate()
+        {
+            tracker.update(h(height as u32), time);
+        }
+        assert_eq!(tracker.current(), Some(t(140)));
+        assert!(tracker.header_time_ok(141).is_ok());
+        assert!(tracker.header_time_ok(140).is_err());
+        assert!(tracker.header_time_ok(139).is_err());
+        assert!(tracker.header_time_ok(140 + 90 * 60).is_ok());
+        assert!(tracker.header_time_ok(140 + 90 * 60 + 1).is_err());
+    }
+
+    #[test]
+    fn header_validation_has_no_machine_clock_bound() {
+        let mut tracker = born();
+        for i in 0..11 {
+            tracker.update(h(i), u32::MAX - 1);
+        }
+        assert!(tracker.header_time_ok(u32::MAX).is_ok());
+    }
+
+    #[tokio::test]
+    async fn backfill_seeds_times_without_checking_missing_predecessor_context() {
+        let mut tracker = born();
+        tracker
+            .backfill(h(20), |_| async { Ok::<_, Infallible>(u32::MAX) })
+            .await
+            .unwrap();
+        assert_eq!(tracker.current(), Some(t(i64::from(u32::MAX))));
     }
 
     #[tokio::test]

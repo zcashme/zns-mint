@@ -34,39 +34,31 @@ async fn boot_then_claim_update_release() -> Result<()> {
 
     let mut zebra = Zebrad::start().await?;
 
-    // Funder coinbase first: mined before the chain's first shielded tx,
-    // or the funder's transparent balance never appears (zallet
-    // v0.1.0-beta.3 retrieval stall).
-    let mut funder = fixture::Zallet::init(&zebra)?;
-    zebra.restart_with_miner(&funder.miner_address).await?;
-    zebra
-        .generate_blocks(fixture::NU6_3_ACTIVATION_HEIGHT + fixture::COINBASE_MATURITY + 2)
-        .await?;
-
-    // User second: its shield is the chain's first shielded tx; its
-    // restart drops only the funder's unfinalized tail.
-    let user = fixture::User::fund(&mut zebra, 7).await?;
+    // Only the funder mines coinbase. This switches the miner on an
+    // empty chain, then matures and shields its rewards. Fund the user
+    // by transfer so no funded chain is restarted during setup.
+    let funder = fixture::User::fund(&mut zebra, 7).await?;
+    fixture::wait_until_shielded(
+        &funder.zallet,
+        fixture::User::BUDGET_ZATS + fixture::TREASURY_PAYMENT_ZATS * 2,
+        SYNC_TIMEOUT,
+    )
+    .await?;
+    let user =
+        fixture::User::fund_attached(&mut zebra, &funder, fixture::User::BUDGET_ZATS).await?;
     eprintln!("user miner: {}", user.miner_address);
     eprintln!("user UA: {}", user.ua);
 
-    funder.start_daemon().await?;
+    // The transfer spends the funder's shielded note. Wait for its
+    // confirmed change to be scanned before paying the Treasury.
     let tip = zebra.tip_height().await?;
-    funder.wait_until_synced(tip, SYNC_TIMEOUT).await?;
-
-    // Wait for a floor, not the node's full mature truth — the funder
-    // only needs the 1-ZEC Treasury payment, and CI's zallet credits it
-    // only its deep-finalized core.
-    fixture::wait_until_sees_coinbase(&funder, fixture::TREASURY_PAYMENT_ZATS * 2, SYNC_TIMEOUT)
+    funder.zallet.wait_until_synced(tip, SYNC_TIMEOUT).await?;
+    fixture::wait_until_shielded(&funder.zallet, fixture::TREASURY_PAYMENT_ZATS, SYNC_TIMEOUT)
         .await?;
-    funder.shield_coinbase().await?;
-    zebra.generate_blocks(1).await?;
-    let tip = zebra.tip_height().await?;
-    funder.wait_until_synced(tip, SYNC_TIMEOUT).await?;
-    fixture::wait_until_shielded(&funder, fixture::TREASURY_PAYMENT_ZATS, SYNC_TIMEOUT).await?;
 
     let network = fixture::regtest_network();
     let (taddr, _) = fixture::treasury_taddr(&network, &fixture::DEV_SEED)?;
-    fixture::fund_treasury(&funder, &zebra, &taddr).await?;
+    fixture::fund_treasury(&funder.zallet, &zebra, &taddr).await?;
 
     // The funder holds no mint authority: gone before boot.
     drop(funder);

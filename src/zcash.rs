@@ -1,14 +1,7 @@
 //! The seam between the mint and its Zebra full node.
-//!
-//! One node, two dialects: gRPC streams announce change, JSON-RPC answers
-//! questions. The files are the conversations — the chain, the mempool,
-//! submission — and this root is what they share: the error policy, the wire
-//! machinery, and the display-order decoding. The chain file also owns the
-//! tip stream's lifecycle ([`TipSession`]): the orchestrator wakes on it,
-//! but never sees transport state. The node's identity is not on the wire:
-//! it is the SEV-SNP measurement of the image this process lives in.
 
 pub mod chain;
+pub mod fees;
 pub mod mempool;
 pub mod submit;
 
@@ -19,12 +12,13 @@ pub use zebra_indexer_proto::MempoolChangeKind;
 
 use std::{any::type_name, fmt, time::Duration};
 
-use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
+use hyper::body::Bytes;
 use hyper::Request;
 use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
 use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use zcash_protocol::constants::MAX_BLOCK_BYTES;
 
 /// The wait between retries of a retryable transport call.
@@ -72,8 +66,8 @@ impl JsonRpc {
         params: T,
     ) -> Result<Option<R>, TransportError> {
         let req = RpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: method.to_string(),
+            jsonrpc: "2.0",
+            method,
             params,
             id: 0,
         };
@@ -81,19 +75,13 @@ impl JsonRpc {
         // has infallible Serialize.
         let body = serde_json::to_string(&req).expect("serializing our own request cannot fail");
 
-        let (status, body_bytes) = self.round_trip(body).await?;
+        let body_bytes = self.round_trip(body).await?;
 
-        // Parse the envelope regardless of HTTP status; status is the
-        // fallback, never the first word.
         let response: RpcResponse<R> = serde_json::from_slice(&body_bytes)
             .map_err(|_| TransportError::BadNodeData(type_name::<R>()))?;
 
         if let Some(error) = response.error {
             return Err(TransportError::Rpc(error));
-        }
-
-        if !status.is_success() {
-            return Err(TransportError::HttpStatus(status.as_u16()));
         }
 
         Ok(response.result)
@@ -103,7 +91,7 @@ impl JsonRpc {
     /// consensus and covered by one deadline, headers through the last
     /// byte. A stalled body times out; an oversized one is bad node
     /// data, not transport.
-    async fn round_trip(&self, body: String) -> Result<(http::StatusCode, Bytes), TransportError> {
+    async fn round_trip(&self, body: String) -> Result<Bytes, TransportError> {
         // The request is entirely static, so building it cannot fail.
         let request = Request::builder()
             .method("POST")
@@ -112,9 +100,8 @@ impl JsonRpc {
             .body(Full::new(Bytes::from(body)))
             .expect("building the static request cannot fail");
 
-        let (status, body) = tokio::time::timeout(REQUEST_TIMEOUT, async {
+        tokio::time::timeout(REQUEST_TIMEOUT, async {
             let response = self.client.request(request).await?;
-            let status = response.status();
             let bytes = Limited::new(response.into_body(), MAX_RESPONSE_BYTES)
                 .collect()
                 .await
@@ -125,18 +112,10 @@ impl JsonRpc {
                     Err(_) => TransportError::BadNodeData("response exceeds the size cap"),
                 })?
                 .to_bytes();
-            Ok::<_, TransportError>((status, bytes))
+            Ok::<_, TransportError>(bytes)
         })
         .await
-        .map_err(|_| TransportError::Timeout)??;
-
-        Ok((status, body))
-    }
-}
-
-impl Default for JsonRpc {
-    fn default() -> Self {
-        Self::new()
+        .map_err(|_| TransportError::Timeout)?
     }
 }
 
@@ -172,49 +151,34 @@ impl CanonicalBlockSource {
 // Envelopes and the error policy
 // ============================================================================
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-struct RpcRequest<T> {
-    jsonrpc: String,
-    method: String,
+#[derive(Serialize)]
+struct RpcRequest<'a, T> {
+    jsonrpc: &'static str,
+    method: &'a str,
     params: T,
     id: i32,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Deserialize)]
 struct RpcResponse<T> {
-    id: i64,
-    jsonrpc: Option<String>,
     result: Option<T>,
     error: Option<RpcError>,
 }
 
 /// A JSON-RPC error object, as answered by the node.
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Deserialize, Debug, Error)]
+#[error("RPC error {code}: {message}")]
 pub struct RpcError {
     code: i64,
     message: String,
     data: Option<serde_json::Value>,
 }
 
-impl fmt::Display for RpcError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "RPC error {}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for RpcError {}
-
 impl RpcError {
-    /// Bitcoin Core / Zebra RPC error -27: transaction already in chain.
-    pub fn is_tx_already_in_chain(&self) -> bool {
-        self.code == -27
-    }
-
-    /// The node already has this transaction in its mempool. The message
-    /// is the discriminator: -26 is also a policy rejection.
+    /// Zebra's `MempoolError::InMempool`, which shares -1 with every other
+    /// mempool refusal.
     pub fn is_already_in_mempool(&self) -> bool {
-        let message = self.message.to_ascii_lowercase();
-        message.contains("already in mempool") || message.contains("already in the mempool")
+        self.message == "transaction already exists in mempool"
     }
 }
 
@@ -233,7 +197,7 @@ pub(crate) fn not_on_best_chain(error: TransportError) -> TransportError {
 }
 
 /// Everything that can go wrong talking to the node, classified once.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum TransportError {
     #[error("hyper-util client error: {0}")]
     Client(#[from] hyper_util::client::legacy::Error),
@@ -241,8 +205,6 @@ pub enum TransportError {
     Hyper(#[from] hyper::Error),
     #[error("request timeout")]
     Timeout,
-    #[error("HTTP {0}")]
-    HttpStatus(u16),
     #[error("bad node data for {0}")]
     BadNodeData(&'static str),
     #[error("bad checkpoint: {0}")]
@@ -265,8 +227,6 @@ impl TransportError {
             Self::Client(_)
                 | Self::Hyper(_)
                 | Self::Timeout
-                | Self::HttpStatus(429)
-                | Self::HttpStatus(500..=599)
                 | Self::BadNodeData(_)
                 | Self::BadCheckpoint(_)
         ) || matches!(

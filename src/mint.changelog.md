@@ -1,14 +1,62 @@
 # Mint live-work design record
 
-## 2026-10-22 — Claims open without an access code (#360)
+## 2026-11-07 — Claims open without an access code (#360)
 
-- The deciding pass refuses a claim only when its name is protected at
-  the tip MTP and the memo lacks that name's access code. An absent or
-  lapsed row is open to the first sufficient payment, and a code on an
-  unprotected name is ignored. This reopens what #340 closed for the
-  early-access period; price, payment, availability and earliest-
-  payment ordering are unchanged. One refusal log replaces the three
-  early-access stages.
+- Only a name protected at the tip MTP needs its access code. Without a
+  code its claim is refunded; with a wrong code it is refunded less the
+  access-code penalty. Any other name claims without a code, and a code
+  on it is ignored.
+
+## 2026-11-05 — An auction challenge carries the clock
+
+- `Action::Auction` is the controller challenge for a dutch listing.
+  The sentence carries the t1, both prices, and both blocks. A flat
+  list sentence is unchanged.
+
+## 2026-11-03 — Name requests and market requests
+
+- `MintInbound::Market` carries a `MarketRequest`: a list, a delist,
+  or a buy. `Request` is a claim, an update, or a release. Both decode
+  through `decode_zns`, which refuses a field left unread. The separate
+  list, delist, and buy inbound variants are gone, and `Action` has no
+  `Buy`.
+- `relay` takes the `OtpMemo` it sends. `relay_challenge` is gone.
+
+## 2026-11-02 — A list waits for the controller's code
+
+- `ZNS:otp` accepts the verbs `list` and `delist`. A list sentence also
+  carries the t1 and the price. The listing changes when the controller
+  returns that code. The list fee stays.
+
+## 2026-11-01 — A buy is its own inbound, answered by a buy OTP
+
+- `MintInbound::List` and `Delist` are Alice's listing. `Buy` is
+  `ZNS:buy:<name>:<ua>`. The reply `relay_buy` sends is `ZNS:buyotp`,
+  which does not decode as a challenge. The list, delist, and OTP
+  fees stay with the treasury.
+
+## 2026-10-31 — The wallet owns continuous scan state (#309)
+
+- `apply_block` no longer takes a caller-fetched `ChainState`. It
+  requires the next height and matching parent hash against the wallet
+  tip, scans with that metadata, and appends to the existing trees.
+
+## 2026-10-26 — The inbound kinds are request, OTP response, unrecognized (#383)
+
+- `MintInbound::Echo` is `MintInbound::Response`: the relay memo
+  returned, which the OTP queue takes. No behaviour change.
+
+## 2026-10-20 — Controllers need any shielded receiver (#365)
+
+- `decode_controller_ua` accepts a UA with a Sapling or an Orchard
+  receiver; it no longer requires Orchard. The relay lane challenges a
+  Sapling-only controller at its Sapling receiver (the backend routes a
+  UA payment Orchard, else Sapling), and the OTP response returns
+  through the Treasury's Sapling intake. Unknown receivers, metadata
+  items, and revisions other than R0 stay refused; an R0 UA is never
+  transparent-only, and the explicit shielded check holds for R2 (#358).
+- Existing records are unchanged: every UA admitted before is admitted
+  now, and `NameNote::decode` never required Orchard.
 
 ## 2026-10-13 — Early-access regime: claims deny by default (#340)
 

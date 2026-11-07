@@ -32,14 +32,13 @@ use transparent::builder::{
 use transparent::bundle::OutPoint;
 use transparent::keys::{IncomingViewingKey, NonHardenedChildIndex};
 use zcash_keys::encoding::encode_transparent_address_p;
-use zcash_keys::keys::{UnifiedAddressRequest, UnifiedSpendingKey};
+use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_primitives::transaction::builder::cached_orchard_proving_key;
 use zcash_primitives::transaction::components::orchard::bundle_version_for_branch;
 use zcash_primitives::transaction::fees::transparent::InputSize;
 use zcash_primitives::transaction::fees::zip317::FeeRule as Zip317;
 use zcash_primitives::transaction::fees::FeeRule as _;
-use zcash_primitives::transaction::sighash::{signature_hash, SignableInput};
-use zcash_primitives::transaction::txid::TxIdDigester;
+use zcash_primitives::transaction::sighash::{PrecomputedSighashData, SignableInput};
 use zcash_primitives::transaction::{self, Transaction, TransactionData};
 use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
 use zcash_protocol::local_consensus::LocalNetwork;
@@ -334,13 +333,15 @@ pub fn assemble_v6_transparent_ironwood<P: Parameters>(
         None,
         Some(ironwood.clone()),
     );
-    let txid_parts = unauthed.digest(TxIdDigester);
+    let sighash = PrecomputedSighashData::new_zip244(unauthed)
+        .unwrap_or_else(|_| unreachable!("v6 signs under ZIP 244"));
 
     let transparent = transparent
         .map(|b| {
             b.apply_signatures(
                 |index| {
-                    *signature_hash(&unauthed, &SignableInput::Transparent(index), &txid_parts)
+                    *sighash
+                        .signature_hash(&SignableInput::Transparent(index))
                         .as_ref()
                 },
                 signing,
@@ -357,7 +358,7 @@ pub fn assemble_v6_transparent_ironwood<P: Parameters>(
         )?
         .prepare(
             UnwrapErr(SysRng),
-            *signature_hash(&unauthed, &SignableInput::Shielded, &txid_parts).as_ref(),
+            *sighash.signature_hash(&SignableInput::Shielded).as_ref(),
         )
         .finalize()?;
 
@@ -527,7 +528,7 @@ pub fn mint_identity_strings() -> (String, String) {
         .expect("registry usk")
         .to_unified_full_viewing_key();
     let (treasury_addr, _) = treasury_fvk
-        .default_address(UnifiedAddressRequest::SHIELDED)
+        .default_address(zns_mint::boot::TREASURY_ADDRESS_REQUEST)
         .expect("treasury default address");
     (
         treasury_addr.encode(&network),

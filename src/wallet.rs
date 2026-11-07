@@ -12,6 +12,7 @@ use std::convert::Infallible;
 
 use incrementalmerkletree::{Address, Marking, Retention};
 use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTree};
+use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::scanning::ScanningKeys;
 use zcash_client_backend::{
     data_api::chain::{ChainState, CommitmentTreeRoot},
@@ -32,6 +33,11 @@ use zcash_protocol::{
 use zip32::AccountId;
 
 use crate::mint::TREASURY_ACCOUNT;
+
+/// One confirmation for every note, trusted or not. The mint never varies
+/// it: every library call that takes a policy passes this one, so balance
+/// reads, send-max and payments all see the same notes.
+pub const CONFIRMATIONS: ConfirmationsPolicy = ConfirmationsPolicy::MIN;
 
 /// The shard store's error type is [`Infallible`]. Callers use this so a
 /// store failure is not read as a missing checkpoint.
@@ -63,14 +69,13 @@ pub(crate) type TreeError = ShardTreeError<Infallible>;
 
 /// The in-memory wallet for the two fixed mint accounts.
 ///
-/// Owned shielded pools are Sapling (Treasury cold path —
-/// `sweep_sapling_to_vault`) and Ironwood (Registry Name Notes and Treasury
-/// operating pool). The ordinary Orchard commitment tree is kept only so
-/// scanned blocks can append and checkpoint Orchard commitments in order;
-/// this wallet never persists ordinary-Orchard received notes, nullifiers, or
-/// spends. Under NU6.3 those inbound payments cannot arise; if a scanned
-/// block still surfaces one, `put_blocks` refuses it rather than dropping
-/// value.
+/// Owned shielded pools are Sapling (Treasury payments) and Ironwood
+/// (Registry Name Notes and Treasury payments). The ordinary Orchard commitment
+/// tree is kept only so scanned blocks can append and checkpoint Orchard
+/// commitments in order; this wallet never persists ordinary-Orchard received
+/// notes, nullifiers, or spends. Under NU6.3 those inbound payments cannot
+/// arise; if a scanned block still surfaces one, `put_blocks` refuses it rather
+/// than dropping value.
 pub struct Wallet<P: Parameters> {
     /// The consensus parameters of the network this wallet's accounts were
     /// derived for. The single authority for network context inside the
@@ -362,7 +367,6 @@ pub(crate) mod testing {
     use incrementalmerkletree::{Hashable, Position};
     use secrecy::{ExposeSecret, SecretVec};
     use shardtree::store::ShardStore;
-    use std::collections::BTreeSet;
     use zcash_client_backend::data_api::anchor_retention::AnchorRetentionInterval;
     use zcash_client_backend::{
         data_api::{
@@ -383,7 +387,7 @@ pub(crate) mod testing {
     impl DataStoreFactory for Factory {
         type Error = WalletError;
         type AccountId = AccountId;
-        type Account = super::read::FixedAccount;
+        type Account = read::FixedAccount;
         type DsError = WalletError;
         type DataStore = Wallet<LocalNetwork>;
 
@@ -435,7 +439,7 @@ pub(crate) mod testing {
         // `TestBuilder::build` may already have written the birthday
         // frontier and shard roots through the public tree API; replacing
         // the wallet would discard them.
-        let frontier_loaded = super::from_infallible(
+        let frontier_loaded = from_infallible(
             wallet
                 .sapling_tree
                 .store()

@@ -1,11 +1,20 @@
 # happy_path.changelog.md
 
-## 2026-10-22
+## 2026-11-07
 
-- The happy path claims `alice` with a code-free memo, as before #341:
-  `alice` holds no `zn_names` row, so open registration (#360) lets it
-  through. Update and release follow on `alice`; the access-code helper
-  is gone.
+- The happy path claims, updates and releases `alice` with no access
+  code. `alice` has no `zn_names` row, so the claim is open (#360). The
+  access-code helper is gone.
+
+## 2026-10-31
+
+- Bootstrap one coinbase-funded wallet, then fund the user through a
+  shielded transfer with the existing `User::fund_attached` helper.
+  Switch miners only on the empty chain, before any rewards exist.
+  This removes the funded-chain restart and the dependency on Zebra's
+  periodic non-finalized backup, replacing the extra-1,000-block
+  workaround. Assert the funder has the user and Treasury budgets
+  before sending either payment.
 
 ## 2026-10-12
 

@@ -2,17 +2,25 @@
 //! derivation.
 //!
 
+use std::collections::HashMap;
+
 use orchard::note::Psi;
 use time::Timestamp;
 use zcash_address::unified::Encoding;
+use zcash_client_backend::data_api::DecryptedTransaction;
+use zcash_client_backend::{decrypt_transaction, TransferType};
 use zcash_keys::address::UnifiedAddress;
-use zcash_primitives::transaction::TxId;
+use zcash_keys::keys::UnifiedFullViewingKey;
+use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::memo::MemoBytes;
+use zcash_protocol::value::Zatoshis;
+use zip32::AccountId;
 
 pub mod assemble;
 
 use crate::mint::registry::Registry;
-use crate::mint::{Action, Name, NameCommitment, LIVENESS_INTERVAL};
+use crate::mint::{Action, Name, NameCommitment, LIVENESS_INTERVAL, TREASURY_ACCOUNT};
 use crate::RegistryKeys;
 
 /// A Name transition (§3.2), typed so every action carries exactly its
@@ -40,6 +48,14 @@ pub enum NameNote {
         ua: UnifiedAddress,
         prev: NameCommitment,
     },
+    /// Hand the name to a buyer. Spends the holder's note, binds `ua`
+    /// for `expires_at`, and leaves the name live.
+    Sale {
+        name: Name,
+        ua: UnifiedAddress,
+        expires_at: Expiry,
+        prev: NameCommitment,
+    },
 }
 
 impl NameNote {
@@ -47,7 +63,8 @@ impl NameNote {
         match self {
             NameNote::Claim { name, .. }
             | NameNote::Update { name, .. }
-            | NameNote::Release { name, .. } => name,
+            | NameNote::Release { name, .. }
+            | NameNote::Sale { name, .. } => name,
         }
     }
 
@@ -56,6 +73,7 @@ impl NameNote {
             NameNote::Claim { .. } => Action::Claim,
             NameNote::Update { .. } => Action::Update,
             NameNote::Release { .. } => Action::Release,
+            NameNote::Sale { .. } => Action::Sale,
         }
     }
 
@@ -64,16 +82,17 @@ impl NameNote {
         match self {
             NameNote::Claim { ua, .. }
             | NameNote::Update { ua, .. }
-            | NameNote::Release { ua, .. } => ua,
+            | NameNote::Release { ua, .. }
+            | NameNote::Sale { ua, .. } => ua,
         }
     }
 
     /// The committed expiration; absent only for a release.
     pub fn expires_at(&self) -> Option<Expiry> {
         match self {
-            NameNote::Claim { expires_at, .. } | NameNote::Update { expires_at, .. } => {
-                Some(*expires_at)
-            }
+            NameNote::Claim { expires_at, .. }
+            | NameNote::Update { expires_at, .. }
+            | NameNote::Sale { expires_at, .. } => Some(*expires_at),
             NameNote::Release { .. } => None,
         }
     }
@@ -82,7 +101,9 @@ impl NameNote {
     pub fn prev_rcm(&self) -> Option<NameCommitment> {
         match self {
             NameNote::Claim { .. } => None,
-            NameNote::Update { prev, .. } | NameNote::Release { prev, .. } => Some(*prev),
+            NameNote::Update { prev, .. }
+            | NameNote::Release { prev, .. }
+            | NameNote::Sale { prev, .. } => Some(*prev),
         }
     }
 
@@ -91,7 +112,7 @@ impl NameNote {
     pub fn rcm<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Scalar {
         let verb = self.action().as_str().as_bytes();
         let name = self.name().as_str().as_bytes();
-        let ua = self.ua().encode_receiver_preserving(params);
+        let ua = self.ua().encode(params);
         let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
         zns_rcm(verb, name, ua.as_bytes(), &expiry, &prev)
@@ -110,7 +131,7 @@ impl NameNote {
     pub fn psi<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Base {
         let verb = self.action().as_str().as_bytes();
         let name = self.name().as_str().as_bytes();
-        let ua = self.ua().encode_receiver_preserving(params);
+        let ua = self.ua().encode(params);
         let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
         zns_psi(verb, name, ua.as_bytes(), &expiry, &prev)
@@ -123,7 +144,7 @@ impl NameNote {
     /// `decode_controller_ua` bounds the address to known receivers, and
     /// the time crate bounds the expiry.
     pub fn encode<P: Parameters>(&self, params: &P) -> [u8; 512] {
-        let ua_field = self.ua().encode_receiver_preserving(params);
+        let ua_field = self.ua().encode(params);
         let verb = self.action().as_str();
         let hex_rcm = hex::encode(self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]));
         let expires_field = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
@@ -328,7 +349,7 @@ fn tagged_zns_hash(
     expires_at: &[u8],
     prev_rcm: &[u8; 32],
 ) -> [u8; 64] {
-    let mut h = blake2b_simd::Params::new().hash_length(64).to_state();
+    let mut h = blake2b_simd::State::new();
     let mut absorb = |b: &[u8]| {
         h.update(&(b.len() as u32).to_le_bytes());
         h.update(b);
@@ -340,10 +361,7 @@ fn tagged_zns_hash(
     absorb(ua);
     absorb(expires_at);
     h.update(prev_rcm);
-
-    let mut out = [0u8; 64];
-    out.copy_from_slice(h.finalize().as_bytes());
-    out
+    *h.finalize().as_array()
 }
 
 impl NameNote {
@@ -352,7 +370,7 @@ impl NameNote {
     /// Accepts exactly the canonical encoding: trailing-zero stripping, the
     /// six-field grammar, canonical decimal or `none` expiry, 64-char lowercase
     /// hex predecessor, action-consistent fields (release: a valid UA and `none`
-    /// expiry; claim: zero predecessor; update/release: nonzero predecessor),
+    /// expiry; claim: zero predecessor; update, release, and sale: nonzero predecessor),
     /// and a re-encode that reproduces the input byte-for-byte.
     pub fn decode<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<Self> {
         let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
@@ -374,7 +392,7 @@ impl NameNote {
             if net != params.network_type() || revision != zcash_address::unified::Revision::R0 {
                 return None;
             }
-            zcash_keys::address::UnifiedAddress::try_from(container).ok()?
+            UnifiedAddress::try_from(container).ok()?
         };
         let expires_at = Expiry::parse(parts[4])?;
 
@@ -389,6 +407,7 @@ impl NameNote {
         hex::decode_to_slice(parts[5], &mut prev_rcm_bytes).ok()?;
 
         let note = match Action::parse(parts[1])? {
+            Action::List | Action::Delist | Action::Auction => return None,
             Action::Claim => {
                 if prev_rcm_bytes != [0u8; 32] || ua_str.is_empty() {
                     return None;
@@ -404,6 +423,17 @@ impl NameNote {
                     return None;
                 }
                 NameNote::Update {
+                    name,
+                    ua,
+                    expires_at,
+                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                }
+            }
+            Action::Sale => {
+                if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                    return None;
+                }
+                NameNote::Sale {
                     name,
                     ua,
                     expires_at,
@@ -535,87 +565,88 @@ pub fn decrypt_name_notes<P: Parameters>(
     candidates
 }
 
-/// Trial-decrypts the block's Ironwood actions sent to the Treasury's
-/// external address, exposing each `(txid, action index, memo)`. The
-/// upstream scanner deliberately drops note plaintexts; request memos
+/// Trial-decrypts the block's Sapling outputs and Ironwood actions sent to
+/// the Treasury's external addresses, exposing each `(txid, paid, memo)`.
+/// The upstream scanner deliberately drops note plaintexts; request memos
 /// arrive through this pass instead.
-pub fn decrypt_treasury_memos(
+pub fn decrypt_treasury_memos<P: Parameters>(
+    network: &P,
     block: &Block,
+    height: BlockHeight,
     treasury_keys: &crate::TreasuryKeys,
-) -> Vec<(
-    zcash_primitives::transaction::TxId,
-    usize,
-    zcash_protocol::value::Zatoshis,
-    zcash_protocol::memo::MemoBytes,
-)> {
+) -> Vec<(TxId, Zatoshis, MemoBytes)> {
+    let ufvks = treasury_ufvk(treasury_keys);
     let mut memos = Vec::new();
     for tx in block.vtx() {
-        for (action_index, paid, memo) in
-            decrypt_treasury_tx_with_fvk(tx, &treasury_keys.orchard_fvk())
-        {
-            memos.push((tx.txid(), action_index, paid, memo));
+        let decrypted = decrypt_transaction(network, Some(height), None, tx, &ufvks);
+        for (paid, memo) in treasury_payments(&decrypted) {
+            memos.push((tx.txid(), paid, memo));
         }
     }
     memos
 }
 
-/// Trial-decrypts one transaction's Ironwood actions using the Treasury's
-/// viewing capability. Intended for mempool transactions, whose memos are
-/// not yet available through block scanning.
-pub fn decrypt_treasury_transaction(
-    tx: &zcash_primitives::transaction::Transaction,
+/// Trial-decrypts one transaction's Sapling outputs and Ironwood actions
+/// using the Treasury's viewing capability. Intended for mempool
+/// transactions, whose memos are not yet available through block scanning;
+/// `tip_height` is the chain tip the transaction would follow.
+pub fn decrypt_treasury_transaction<P: Parameters>(
+    network: &P,
+    tx: &Transaction,
+    tip_height: BlockHeight,
     treasury_keys: &crate::TreasuryKeys,
-) -> Vec<(
-    usize,
-    zcash_protocol::value::Zatoshis,
-    zcash_protocol::memo::MemoBytes,
-)> {
-    decrypt_treasury_tx_with_fvk(tx, &treasury_keys.orchard_fvk())
+) -> Vec<(Zatoshis, MemoBytes)> {
+    let ufvks = treasury_ufvk(treasury_keys);
+    treasury_payments(&decrypt_transaction(
+        network,
+        None,
+        Some(tip_height),
+        tx,
+        &ufvks,
+    ))
 }
 
-/// The viewing-key implementation shared by block and mempool memo scans.
-fn decrypt_treasury_tx_with_fvk(
-    tx: &zcash_primitives::transaction::Transaction,
-    treasury_fvk: &orchard::keys::FullViewingKey,
-) -> Vec<(
-    usize,
-    zcash_protocol::value::Zatoshis,
-    zcash_protocol::memo::MemoBytes,
-)> {
-    let ivk = treasury_fvk
-        .to_ivk(orchard::keys::Scope::External)
-        .prepare();
+/// The Treasury UFVK, keyed as upstream's decryption takes it.
+fn treasury_ufvk(treasury_keys: &crate::TreasuryKeys) -> HashMap<AccountId, UnifiedFullViewingKey> {
+    HashMap::from([(TREASURY_ACCOUNT, treasury_keys.fvk())])
+}
 
-    let mut memos = Vec::new();
-    let Some(bundle) = tx.ironwood_bundle() else {
-        return memos;
-    };
-    if bundle.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3() {
-        return memos;
-    }
-    for (action_index, action) in bundle.actions().iter().enumerate() {
-        let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
-        if let Some((note, _recipient, memo)) =
-            zcash_note_encryption::try_note_decryption(&domain, &ivk, action)
-        {
-            let paid = zcash_protocol::value::Zatoshis::from_u64(note.value().inner())
-                .expect("note values are consensus-bounded");
-            let memo = zcash_protocol::memo::MemoBytes::from_bytes(&memo)
-                .expect("a decrypted memo is 512 bytes");
-            memos.push((action_index, paid, memo));
+/// The payments to the Treasury's external addresses: Sapling outputs,
+/// then Ironwood actions, each in bundle order. Change is not a payment.
+fn treasury_payments(
+    decrypted: &DecryptedTransaction<Transaction, AccountId>,
+) -> Vec<(Zatoshis, MemoBytes)> {
+    let mut payments = Vec::new();
+    for output in decrypted.sapling_outputs() {
+        if output.transfer_type() == TransferType::Incoming {
+            payments.push((output.note_value(), output.memo().clone()));
         }
     }
-    memos
+    for output in decrypted.ironwood_outputs() {
+        if output.transfer_type() == TransferType::Incoming {
+            let (note, _pool) = output.note();
+            let paid = Zatoshis::from_u64(note.value().inner())
+                .expect("Ironwood note value is validated by consensus");
+            payments.push((paid, output.memo().clone()));
+        }
+    }
+    payments
 }
 
 // ---------------------------------------------------------------------------
 // NameNoteQueue — Name Notes through canonical resolution
 // ---------------------------------------------------------------------------
 
-/// An outstanding authorization or its canonical observation.
+/// An outstanding authorization, a broadcast still inside its expiry
+/// window, or the canonical observation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NameNoteState {
     Authorized,
+    /// Submitted. The transaction can confirm while the applied tip is
+    /// below `expiry`.
+    Sent {
+        expiry: BlockHeight,
+    },
     Seen,
 }
 
@@ -677,6 +708,32 @@ impl NameNoteQueue {
         }
     }
 
+    /// Records that `name`'s authorized order was broadcast, valid below
+    /// `expiry`.
+    pub fn mark_sent(&mut self, name: &Name, expiry: BlockHeight) {
+        let state = self
+            .orders
+            .iter_mut()
+            .find_map(|(note, _, state)| {
+                (*state == NameNoteState::Authorized && note.name() == name).then_some(state)
+            })
+            .expect("FATAL: no authorized order owns this name");
+        *state = NameNoteState::Sent { expiry };
+    }
+
+    /// Returns a broadcast order to [`NameNoteState::Authorized`] once the
+    /// applied tip can no longer mine it. The last valid block is the one
+    /// before `expiry`.
+    pub fn expire_sent(&mut self, tip: BlockHeight) {
+        for (_, _, state) in &mut self.orders {
+            if let NameNoteState::Sent { expiry } = *state {
+                if tip + 1 >= expiry {
+                    *state = NameNoteState::Authorized;
+                }
+            }
+        }
+    }
+
     /// Whether an unresolved order owns this name. `Seen` orders
     /// remain for reorg tracking but no longer reserve the name.
     pub fn note_pending(&self, name: &Name) -> bool {
@@ -694,11 +751,12 @@ impl NameNoteQueue {
             .collect()
     }
 
-    /// The name of every outstanding authorized order, borrowed.
+    /// The name of every order not yet seen, borrowed. A broadcast order
+    /// is included.
     pub fn authorized_names(&self) -> impl Iterator<Item = &Name> {
         self.orders
             .iter()
-            .filter(|(_, _, state)| *state == NameNoteState::Authorized)
+            .filter(|(_, _, state)| *state != NameNoteState::Seen)
             .map(|(note, _, _)| note.name())
     }
 
@@ -716,7 +774,7 @@ impl NameNoteQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA;
+    use zcash_primitives::transaction::builder::BLOSSOM_DEFAULT_TX_EXPIRY_DELTA;
     use zcash_protocol::consensus::MAIN_NETWORK;
 
     /// A real mainnet UA with every known receiver kind — Orchard,
@@ -1061,7 +1119,7 @@ mod tests {
             &[first_anchor],
             height(100),
             mtp,
-            height(100) + DEFAULT_TX_EXPIRY_DELTA,
+            height(100) + BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         let release = NameNote::Release {
@@ -1093,7 +1151,7 @@ mod tests {
             &[second_anchor],
             height(130),
             mtp,
-            height(130) + DEFAULT_TX_EXPIRY_DELTA,
+            height(130) + BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         (registry, release, reclaim)
@@ -1158,7 +1216,7 @@ mod tests {
             &[anchor],
             height(100),
             mtp,
-            height(100) + DEFAULT_TX_EXPIRY_DELTA,
+            height(100) + BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         let mut queue = NameNoteQueue::default();
@@ -1188,7 +1246,7 @@ mod tests {
             &[anchor],
             height(100),
             mtp,
-            height(100) + DEFAULT_TX_EXPIRY_DELTA,
+            height(100) + BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         let mut queue = NameNoteQueue::default();
@@ -1289,6 +1347,31 @@ mod tests {
         assert_eq!(names, ["alice", "carol"]);
         let borrowed: Vec<&str> = queue.authorized_names().map(Name::as_str).collect();
         assert_eq!(borrowed, ["alice", "carol"]);
+    }
+
+    /// A broadcast order is not built or dropped while its transaction can
+    /// still confirm. Past the expiry height it is authorized again.
+    #[test]
+    fn a_sent_order_stays_until_its_expiry_height() {
+        let claim = NameNote::Claim {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+        };
+        let mut queue = NameNoteQueue::default();
+        let expiry = BlockHeight::from_u32(51);
+        queue.admit(BlockHeight::from_u32(10), claim.clone());
+        queue.mark_sent(claim.name(), expiry);
+
+        assert!(queue.authorized_notes().is_empty());
+        assert!(queue.note_pending(claim.name()));
+        assert_eq!(queue.authorized_names().count(), 1);
+
+        queue.expire_sent(BlockHeight::from_u32(49));
+        assert!(queue.authorized_notes().is_empty());
+
+        queue.expire_sent(BlockHeight::from_u32(50));
+        assert_eq!(queue.authorized_notes(), vec![claim]);
     }
 
     #[test]

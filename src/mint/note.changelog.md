@@ -1,5 +1,47 @@
 # `mint/note.rs` design record
 
+## 2026-11-02 — A sale note binds the buyer
+
+- `ZNS:sale` spends the holder's note and binds the buyer for the
+  captured term. The name stays live. The verb is `sale`, so a
+  resolver can tell a new holder from an address change.
+
+## 2026-10-26 — The UA is encoded with `encode` (#390)
+
+- Stable `zcash_keys` folds `encode_receiver_preserving` into
+  `encode`, which keeps every receiver. rcm, ψ and the memo are
+  byte-identical; the canon vectors pass unchanged.
+
+## 2026-10-23 — Name Notes pay the node's fee rate (#357)
+
+- `assemble::prepare` takes the node's `FeeRule` for the fee loop and
+  the builder, in place of `StandardFeeRule::Zip317`.
+
+## 2026-10-23 — A broadcast order stays until its expiry height
+
+- `NameNoteState::Sent` stores the expiry height of a submitted
+  transaction. The enactment loop builds and drops only `Authorized`
+  orders, so a broadcast update is not signed again and is not dropped
+  while it can still confirm.
+- When the applied tip reaches that height, the order returns to
+  `Authorized`. `authorized_names` still includes a sent order.
+
+## 2026-10-20 — Treasury memos arrive from both shielded pools (#365)
+
+- `decrypt_treasury_memos` and `decrypt_treasury_transaction` read the
+  Treasury's Sapling outputs as well as its Ironwood actions, through
+  upstream's `decrypt_transaction` under the Treasury UFVK. Only
+  `TransferType::Incoming` outputs count, so Treasury change is never
+  read as a request. The testnet Treasury UA already advertised a
+  Sapling receiver; a request paid there was swept as balance and never
+  read.
+- Upstream applies the ZIP 212 rule at the mined height, or at the tip
+  plus one for a mempool transaction: past the grace period on mainnet
+  and testnet, but not yet on regtest, which activates Canopy near
+  genesis.
+- Arrivals lose their action index. Nothing read it, and Sapling output
+  indices would collide with Ironwood action indices.
+
 ## 2026-10-15 — `NameNoteQueue::authorized_names` (#342)
 
 - Names every outstanding authorized order, borrowed, for the request

@@ -11,9 +11,6 @@ use super::{JsonRpc, TransportError};
 pub enum SubmitOutcome {
     /// The node admitted the transaction to its mempool.
     Accepted,
-    /// The node reports the transaction is already in the chain (−27) — an
-    /// earlier broadcast was mined; also success.
-    Mined,
     /// The node rejected the transaction under its consensus or policy
     /// rules: an answer, not a transport failure.
     Rejected(TransportError),
@@ -37,7 +34,7 @@ impl super::CanonicalBlockSource {
     pub async fn submit(&self, tx: &Transaction, label: &'static str) -> bool {
         loop {
             match self.send_transaction(tx).await {
-                Ok(SubmitOutcome::Accepted | SubmitOutcome::Mined) => {
+                Ok(SubmitOutcome::Accepted) => {
                     tracing::info!(txid = %tx.txid(), what = label, "submitted");
                     return true;
                 }
@@ -45,7 +42,7 @@ impl super::CanonicalBlockSource {
                     tracing::error!(%error, txid = %tx.txid(), what = label, "rejected");
                     return false;
                 }
-                Err(error) if error.is_retryable() => {
+                Err(error) => {
                     tracing::warn!(
                         %error,
                         txid = %tx.txid(),
@@ -54,7 +51,6 @@ impl super::CanonicalBlockSource {
                     );
                     tokio::time::sleep(RETRY_PAUSE).await;
                 }
-                Err(error) => panic!("FATAL: {label} submission failed: {error}"),
             }
         }
     }
@@ -85,9 +81,6 @@ impl super::CanonicalBlockSource {
                     "sendrawtransaction named a different transaction",
                 ))),
             },
-            Err(TransportError::Rpc(ref rpc)) if rpc.is_tx_already_in_chain() => {
-                Ok(SubmitOutcome::Mined)
-            }
             Err(TransportError::Rpc(ref rpc)) if rpc.is_already_in_mempool() => {
                 Ok(SubmitOutcome::Accepted)
             }

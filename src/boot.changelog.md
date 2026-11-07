@@ -1,6 +1,80 @@
 # Boot module changelog
 
+## 2026-11-05 — A scan applies an auction reply and does not return it
+
+- An auction challenge is answered the same way as a list. A dutch
+  intent that does not win is not paid back from the scan.
+
+## 2026-11-03 — Name requests and market requests
+
+- The sync replays `MintInbound::Market` through `Market::admit`, as
+  the main loop does. Claims, updates, and releases no longer reach
+  the market.
+
+## 2026-11-02 — Boot keeps the sale market it reads
+
+- The sync applies list, delist, buy, payment, and expiry and returns
+  that market. A buy read there stays payable and its code stays
+  unsent. A list or delist applies when its challenge reply is in the
+  chain. A sale whose note is already in the registry leaves before
+  the next block's memos. Other treasury memos stay balance.
+## 2026-11-02 — The seed fingerprint is the custody manifest
+
+- Boot accepts the seed named by `seed_fingerprint` in
+  `keys/zns_custody_manifest.toml` when the capsule matches it. An
+  attested build also requires the keygen report to bind that value.
+- `deployment/seed_fingerprint.txt` is not a build input.
+
+## 2026-10-31 — Replay continues the initialized wallet trees (#309)
+
+- Boot still fetches the origin tree state and completed subtree roots.
+  Replay applies each successor using the wallet's cursor instead of
+  fetching another tree state before every block.
+
 Tracks design-relevant changes to `src/boot.rs`.
+
+## 2026-10-26 — No response list (#383)
+
+- `Boot` no longer carries a list of pending OTP responses; a response
+  is ruled on when its block is applied.
+
+## 2026-10-26 — The keygen report has to cover the capsule file
+
+- Boot verifies `keys/zns_attestation.bin` for the capsule file on
+  disk. A missing report, or one that does not cover that file,
+  refuses boot.
+
+## 2026-10-24 — The fee rate or no start (#357)
+
+- Boot reads the node's fee rate after the price fetch and hands it to
+  the run loop as `Boot::fee_rule`. Like every other node read in boot,
+  it is tried once and a failure is fatal.
+
+## 2026-10-23 — Boot checks the pinned block, then each header's time
+
+- Before the scan, boot requires the node to serve the pinned block.
+  Regtest has no pinned block.
+- Each synced block's time has to be after the previous median, at
+  most 90 minutes past it, and at most two hours ahead of the mint.
+
+## 2026-10-22 — No pre-sale refresh handle (#371)
+
+- `Boot` no longer carries `presale_refresh`: the run loop reads the
+  table on every tip pass. It carries `presale_client` instead, the
+  one client the boot read and every pass read share. The boot read
+  is unchanged — no table, no start.
+
+## 2026-10-20 — The Treasury identity always carries a Sapling receiver (#365)
+
+- `mint_identity` derives the Treasury address with
+  `TREASURY_ADDRESS_REQUEST`: Orchard and Sapling required, transparent
+  omitted. `SHIELDED` only allowed Sapling, so the address came out
+  Orchard-only whenever diversifier index 0 was not a Sapling diversifier
+  (the published mainnet identity was Orchard-only).
+- For such seeds the identity moves to the first index valid for both
+  pools, so the identity UA and the attestation report data change.
+  Payments to the earlier address are still read: intake decrypts with
+  the Treasury's incoming viewing keys, which cover every diversifier.
 
 ## 2026-10-11 — A resealed capsule does not have to match the keygen report
 

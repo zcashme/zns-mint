@@ -6,9 +6,8 @@ use futures_util::StreamExt as _;
 use incrementalmerkletree::frontier::Frontier;
 use sapling::Node as SaplingNode;
 use serde::Deserialize;
-use time::Timestamp;
 use zcash_client_backend::data_api::chain::{ChainState, CommitmentTreeRoot};
-use zcash_primitives::block::{Block, BlockHash};
+use zcash_primitives::block::{Block, BlockHash, BlockHeader};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::constants::MAX_BLOCK_BYTES;
@@ -75,7 +74,6 @@ impl ChainClient {
             .into_inner())
     }
 
-    /// Change-only tip stream.
     pub(crate) async fn chain_tip_change_stream(&mut self) -> Result<TipStream, TransportError> {
         self.0
             .chain_tip_change(Empty {})
@@ -85,7 +83,6 @@ impl ChainClient {
     }
 }
 
-/// The live gRPC tip stream: one notification per canonical tip change.
 pub(crate) type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
 
 /// A tip announcement, decoded: `(height, hash)` from one message.
@@ -93,11 +90,8 @@ pub(crate) type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
 pub(crate) fn tip_height_hash(
     tip: &BlockHashAndHeight,
 ) -> Result<(BlockHeight, BlockHash), TransportError> {
-    let bytes = tip
-        .hash_display_order()
-        .ok_or(TransportError::BadNodeData("tip hash length"))?;
     let hash =
-        block_hash_from_display(bytes).ok_or(TransportError::BadNodeData("tip hash length"))?;
+        block_hash_from_display(&tip.hash).ok_or(TransportError::BadNodeData("tip hash length"))?;
     Ok((BlockHeight::from_u32(tip.height), hash))
 }
 
@@ -112,7 +106,6 @@ pub struct TipSession {
 }
 
 impl TipSession {
-    /// Subscribes to the change-only tip stream.
     pub async fn open(client: ChainClient) -> Self {
         let stream = Self::subscribe(client.clone()).await;
         Self { client, stream }
@@ -137,9 +130,7 @@ impl TipSession {
                     source.canonical_tip().await
                 }
             },
-            // The stream died: read the tip first, then resubscribe —
-            // the fresh stream starts empty, so no buffered frame can
-            // predate the read and fake a rewind.
+            // The stream died: read the tip first, then resubscribe.
             Some(Err(error)) => {
                 tracing::warn!(%error, "Zebra tip stream failed; reading the tip, then repairing");
                 let best = source.canonical_tip().await;
@@ -281,34 +272,20 @@ impl JsonRpc {
         subtrees_response_to_roots(response, pool, start_index)
     }
 
-    /// Fetches a block header as `(hash, height, time)`, for MTP backfill.
-    pub async fn get_block_header(
-        &self,
-        height: BlockHeight,
-    ) -> Result<(BlockHash, BlockHeight, Timestamp), TransportError> {
+    /// Fetches a block header's time, for MTP backfill.
+    pub async fn header_time(&self, height: BlockHeight) -> Result<u32, TransportError> {
         loop {
             let result: Result<_, TransportError> = async {
-                let response: BlockHeaderResponse = self
-                    .send_request("getblockheader", (u32::from(height).to_string(), true))
+                let raw: String = self
+                    .send_request("getblockheader", (u32::from(height).to_string(), false))
                     .await
                     .map_err(not_on_best_chain)?
                     .ok_or(TransportError::BadNodeData("getblockheader returned null"))?;
-
-                if response.height != u32::from(height) {
-                    return Err(TransportError::BadNodeData(
-                        "getblockheader answered a different height than requested",
-                    ));
-                }
-
-                let display_bytes = hex::decode(&response.hash)
-                    .map_err(|_| TransportError::BadNodeData("getblockheader hash hex"))?;
-                let hash = block_hash_from_display(&display_bytes)
-                    .ok_or(TransportError::BadNodeData("getblockheader hash length"))?;
-
-                let time = Timestamp::from_seconds(response.time as i64)
-                    .map_err(|_| TransportError::BadNodeData("getblockheader time"))?;
-
-                Ok((hash, BlockHeight::from_u32(response.height), time))
+                let bytes = hex::decode(raw)
+                    .map_err(|_| TransportError::BadNodeData("getblockheader hex"))?;
+                let header = BlockHeader::read(&bytes[..])
+                    .map_err(|_| TransportError::BadNodeData("getblockheader header"))?;
+                Ok(header.time)
             }
             .await;
 
@@ -330,7 +307,7 @@ impl JsonRpc {
     }
 }
 
-impl super::CanonicalBlockSource {
+impl CanonicalBlockSource {
     /// Returns the exact `(height, hash)` pair for the current best-chain
     /// tip, parsed from one `getblockchaininfo` response so observations
     /// from different tips cannot be combined.
@@ -395,13 +372,8 @@ impl super::CanonicalBlockSource {
         self.rpc.get_subtree_roots(pool, start_index).await
     }
 
-    /// A block header's `(hash, height, time)` (see the `get_block_header`
-    /// JSON-RPC reader).
-    pub async fn get_block_header(
-        &self,
-        height: BlockHeight,
-    ) -> Result<(BlockHash, BlockHeight, Timestamp), TransportError> {
-        self.rpc.get_block_header(height).await
+    pub async fn header_time(&self, height: BlockHeight) -> Result<u32, TransportError> {
+        self.rpc.header_time(height).await
     }
 }
 
@@ -426,13 +398,6 @@ impl BlockchainInfo {
 
         Ok((BlockHeight::from_u32(self.blocks), hash))
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct BlockHeaderResponse {
-    hash: String,
-    height: u32,
-    time: u32,
 }
 
 /// The `z_getsubtreesbyindex` answer.
