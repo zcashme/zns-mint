@@ -543,9 +543,6 @@ impl Boot<Network> {
             "boot: wallet born complete from the origin checkpoint"
         );
 
-        #[cfg(not(feature = "regtest"))]
-        zcash::adopt::require_pinned(&source).await;
-
         // 3d. The mint's birthday: a throwaway window ending at the
         // birthday block, whose median is the birthday block's MTP —
         // the day-zero anchor for `current_day`.
@@ -619,8 +616,7 @@ impl Boot<Network> {
                 .get_block(&network, next_height)
                 .await
                 .expect("FATAL: block unavailable during boot sync");
-            let wall = time::OffsetDateTime::now_utc().unix_timestamp();
-            mtp.header_time_ok(block.header().time, wall)
+            mtp.header_time_ok(&network, next_height, block.header().time)
                 .unwrap_or_else(|reason| {
                     panic!("FATAL: {reason} at height {}", u32::from(next_height))
                 });

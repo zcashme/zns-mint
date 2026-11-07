@@ -3,10 +3,12 @@ use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 use time::Timestamp;
-use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::consensus::{BlockHeight, NetworkType, Parameters};
 
 /// The MTP window size, a Zcash consensus constant
 const MTP_WINDOW: usize = 11;
+/// Consensus upper bound on a header's time relative to its preceding median.
+const MAX_TIME_SINCE_MEDIAN: i64 = 90 * 60;
 
 /// The mint's birthday: the MTP of the birthday block, set once at
 /// boot by [`MtpTracker::born`] and never changed after.
@@ -44,6 +46,8 @@ impl MtpTracker {
 
     /// Fills the tracker with the block timestamps ending at `till`, so
     /// MTP is available immediately at boot and after reorgs.
+    /// These seed headers do not include their preceding windows; Zebra
+    /// validates them. Subsequent blocks are checked by [`Self::header_time_ok`].
     pub async fn backfill<F, Fut, E>(&mut self, till: BlockHeight, mut fetch: F) -> Result<(), E>
     where
         F: FnMut(BlockHeight) -> Fut,
@@ -55,9 +59,6 @@ impl MtpTracker {
         for h in start..=till_u32 {
             let height = BlockHeight::from_u32(h);
             let timestamp = fetch(height).await?;
-            let wall = time::OffsetDateTime::now_utc().unix_timestamp();
-            self.header_time_ok(timestamp, wall)
-                .unwrap_or_else(|reason| panic!("FATAL: {reason} at height {h}"));
             self.update(height, timestamp);
         }
 
@@ -96,16 +97,37 @@ impl MtpTracker {
         )
     }
 
-    /// Whether `timestamp` can be the next header. The 90-minute bound
-    /// applies once eleven times are recorded. Before that, the bound
-    /// is the mint's time.
-    pub fn header_time_ok(&self, timestamp: u32, wall: i64) -> Result<(), &'static str> {
-        crate::zcash::adopt::block_time_ok(
-            self.current().map(|stamp| stamp.as_seconds()),
-            timestamp,
-            wall,
-            self.blocktimes.len() >= MTP_WINDOW,
-        )
+    /// Checks a new header against its preceding median, before updating the
+    /// window. Near genesis the median uses all available preceding blocks.
+    /// The upper bound starts at mainnet height 2 and testnet height 653606
+    /// (including Zebra's regtest network). Genesis has no preceding median.
+    /// The full node owns the separate acceptance check against its own clock.
+    pub fn header_time_ok(
+        &self,
+        network: &impl Parameters,
+        height: BlockHeight,
+        timestamp: u32,
+    ) -> Result<(), &'static str> {
+        if height == BlockHeight::from_u32(0) {
+            return Ok(());
+        }
+        let median = self
+            .current()
+            .ok_or("preceding median unavailable")?
+            .as_seconds();
+        let timestamp = i64::from(timestamp);
+        if timestamp <= median {
+            return Err("block time is not after the previous median");
+        }
+        // Zcash protocol specification §7.6, Block Header Encoding and Consensus.
+        let max_time_enforced = match network.network_type() {
+            NetworkType::Main => u32::from(height) >= 2,
+            NetworkType::Test | NetworkType::Regtest => u32::from(height) >= 653_606,
+        };
+        if max_time_enforced && timestamp > median + MAX_TIME_SINCE_MEDIAN {
+            return Err("block time is more than 90 minutes past the previous median");
+        }
+        Ok(())
     }
 
     /// Reorg Handler to drops entries above `height`
@@ -120,6 +142,7 @@ mod tests {
     use std::convert::Infallible;
 
     use super::*;
+    use zcash_protocol::consensus::{MAIN_NETWORK, TEST_NETWORK};
 
     const DAY: i64 = 86_400;
 
@@ -212,17 +235,76 @@ mod tests {
     }
 
     #[test]
-    fn the_ninety_minute_bound_starts_when_the_window_is_full() {
+    fn header_time_is_checked_against_the_preceding_median() {
         let mut tracker = born();
-        let wall = 2_000_000;
-        assert!(tracker.header_time_ok(1_500_000, wall).is_ok());
-        for i in 0..11 {
-            tracker.update(h(i), 1_000_000);
+        // Deliberately unordered times: the previous header can be later
+        // than the new one, provided the new time exceeds the median.
+        for (height, time) in [100, 90, 140, 120, 110, 130, 160, 150, 180, 170, 200]
+            .into_iter()
+            .enumerate()
+        {
+            tracker.update(h(height as u32), time);
         }
-        assert!(tracker.header_time_ok(1_000_000 + 90 * 60, wall).is_ok());
+        assert_eq!(tracker.current(), Some(t(140)));
+        assert!(tracker.header_time_ok(&MAIN_NETWORK, h(11), 141).is_ok());
+        assert!(tracker.header_time_ok(&MAIN_NETWORK, h(11), 140).is_err());
+        assert!(tracker.header_time_ok(&MAIN_NETWORK, h(11), 139).is_err());
         assert!(tracker
-            .header_time_ok(1_000_000 + 90 * 60 + 1, wall)
+            .header_time_ok(&MAIN_NETWORK, h(11), 140 + 90 * 60)
+            .is_ok());
+        assert!(tracker
+            .header_time_ok(&MAIN_NETWORK, h(11), 140 + 90 * 60 + 1)
             .is_err());
+    }
+
+    #[test]
+    fn short_windows_follow_network_activation_heights() {
+        let mut tracker = born();
+        assert!(tracker.header_time_ok(&MAIN_NETWORK, h(0), 0).is_ok());
+        assert!(tracker.header_time_ok(&MAIN_NETWORK, h(1), 1).is_err());
+        tracker.update(h(0), 1_000_000);
+        // The lower bound already applies with only the genesis predecessor.
+        assert!(tracker
+            .header_time_ok(&MAIN_NETWORK, h(1), 1_000_000)
+            .is_err());
+        let too_late = 1_000_000 + 90 * 60 + 1;
+        assert!(tracker
+            .header_time_ok(&MAIN_NETWORK, h(1), too_late)
+            .is_ok());
+        tracker.update(h(1), 1_000_000);
+        assert!(tracker
+            .header_time_ok(&MAIN_NETWORK, h(2), too_late)
+            .is_err());
+        assert!(tracker
+            .header_time_ok(&TEST_NETWORK, h(653_605), too_late)
+            .is_ok());
+        assert!(tracker
+            .header_time_ok(&TEST_NETWORK, h(653_606), too_late)
+            .is_err());
+        assert!(tracker
+            .header_time_ok(&TEST_NETWORK, h(653_605), 1_000_000)
+            .is_err());
+    }
+
+    #[test]
+    fn header_validation_has_no_machine_clock_bound() {
+        let mut tracker = born();
+        for i in 0..11 {
+            tracker.update(h(i), u32::MAX - 1);
+        }
+        assert!(tracker
+            .header_time_ok(&MAIN_NETWORK, h(11), u32::MAX)
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn backfill_seeds_times_without_checking_missing_predecessor_context() {
+        let mut tracker = born();
+        tracker
+            .backfill(h(20), |_| async { Ok::<_, Infallible>(u32::MAX) })
+            .await
+            .unwrap();
+        assert_eq!(tracker.current(), Some(t(i64::from(u32::MAX))));
     }
 
     #[tokio::test]
