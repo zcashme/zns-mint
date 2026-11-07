@@ -1,5 +1,12 @@
 # Mint live-work design record
 
+## 2026-11-07 — Claims open without an access code (#360)
+
+- Only a name protected at the tip MTP needs its access code. Without a
+  code its claim is refunded; with a wrong code it is refunded less the
+  access-code penalty. Any other name claims without a code, and a code
+  on it is ignored.
+
 ## 2026-11-05 — An auction challenge carries the clock
 
 - `Action::Auction` is the controller challenge for a dutch listing.
@@ -50,13 +57,6 @@
   transparent-only, and the explicit shielded check holds for R2 (#358).
 - Existing records are unchanged: every UA admitted before is admitted
   now, and `NameNote::decode` never required Orchard.
-
-## 2026-10-13 — Early-access regime: claims deny by default (#340)
-
-- The deciding pass refuses every claim that lacks its name's listing
-  or its per-name access code; three refusal stages log separately
-  (no code, wrong code, not listed). Codeless claim memos still decode
-  — the wire form is unchanged; the gate is the refusing pass.
 
 ## 2026-09-29 — Pre-birthday blocks restore wallet history only (#239)
 

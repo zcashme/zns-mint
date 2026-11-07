@@ -494,12 +494,9 @@ async fn main() {
                     term,
                     code,
                 } => {
-                    // Early access: only a listed name, with its code.
-                    let Some(offered) = code.as_ref() else {
-                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
-                        continue;
-                    };
-                    if !protected_names.is_protected(name, mtp_now) {
+                    // A protected name claims only with its code.
+                    let protected = protected_names.is_protected(name, mtp_now);
+                    if protected && code.is_none() {
                         refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         continue;
                     }
@@ -518,7 +515,7 @@ async fn main() {
                         refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         continue;
                     }
-                    if !access_code_key.accepts(name, Some(offered)) {
+                    if protected && !access_code_key.accepts(name, code.as_ref()) {
                         tracing::info!(%txid, name = %name.as_str(), "wrong access code");
                         refunds.admit(
                             &fee_rule,

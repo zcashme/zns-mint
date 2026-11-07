@@ -1,5 +1,11 @@
 # happy_path.changelog.md
 
+## 2026-11-07
+
+- The happy path claims, updates and releases `alice` with no access
+  code. `alice` has no `zn_names` row, so the claim is open (#360). The
+  access-code helper is gone.
+
 ## 2026-10-31
 
 - Bootstrap one coinbase-funded wallet, then fund the user through a
