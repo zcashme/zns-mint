@@ -42,7 +42,7 @@ impl super::CanonicalBlockSource {
                     tracing::error!(%error, txid = %tx.txid(), what = label, "rejected");
                     return false;
                 }
-                Err(error) if error.is_retryable() => {
+                Err(error) => {
                     tracing::warn!(
                         %error,
                         txid = %tx.txid(),
@@ -51,7 +51,6 @@ impl super::CanonicalBlockSource {
                     );
                     tokio::time::sleep(RETRY_PAUSE).await;
                 }
-                Err(error) => panic!("FATAL: {label} submission failed: {error}"),
             }
         }
     }
