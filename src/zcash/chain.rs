@@ -75,7 +75,7 @@ impl ChainClient {
             .into_inner())
     }
 
-    /// Change-only tip stream.
+    /// Zebra's best tip, sent once on subscribe and again on every change.
     pub(crate) async fn chain_tip_change_stream(&mut self) -> Result<TipStream, TransportError> {
         self.0
             .chain_tip_change(Empty {})
@@ -85,7 +85,8 @@ impl ChainClient {
     }
 }
 
-/// The live gRPC tip stream: one notification per canonical tip change.
+/// The live gRPC tip stream. Zebra coalesces changes, so heights can be
+/// skipped, and a reorg arrives only as a new `(height, hash)`.
 pub(crate) type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
 
 /// A tip announcement, decoded: `(height, hash)` from one message.
@@ -109,7 +110,7 @@ pub struct TipSession {
 }
 
 impl TipSession {
-    /// Subscribes to the change-only tip stream.
+    /// Subscribes to the tip stream.
     pub async fn open(client: ChainClient) -> Self {
         let stream = Self::subscribe(client.clone()).await;
         Self { client, stream }
@@ -135,8 +136,9 @@ impl TipSession {
                 }
             },
             // The stream died: read the tip first, then resubscribe —
-            // the fresh stream starts empty, so no buffered frame can
-            // predate the read and fake a rewind.
+            // the fresh stream's first frame is Zebra's tip read after
+            // ours, so no buffered frame can predate the read and fake a
+            // rewind.
             Some(Err(error)) => {
                 tracing::warn!(%error, "Zebra tip stream failed; reading the tip, then repairing");
                 let best = source.canonical_tip().await;
