@@ -14,7 +14,7 @@ use std::{any::type_name, fmt, time::Duration};
 
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Bytes;
-use hyper::{Request, StatusCode};
+use hyper::Request;
 use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
 use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
@@ -75,19 +75,13 @@ impl JsonRpc {
         // has infallible Serialize.
         let body = serde_json::to_string(&req).expect("serializing our own request cannot fail");
 
-        let (status, body_bytes) = self.round_trip(body).await?;
+        let body_bytes = self.round_trip(body).await?;
 
-        // Parse the envelope regardless of HTTP status; status is the
-        // fallback, never the first word.
         let response: RpcResponse<R> = serde_json::from_slice(&body_bytes)
             .map_err(|_| TransportError::BadNodeData(type_name::<R>()))?;
 
         if let Some(error) = response.error {
             return Err(TransportError::Rpc(error));
-        }
-
-        if !status.is_success() {
-            return Err(TransportError::HttpStatus(status.as_u16()));
         }
 
         Ok(response.result)
@@ -97,7 +91,7 @@ impl JsonRpc {
     /// consensus and covered by one deadline, headers through the last
     /// byte. A stalled body times out; an oversized one is bad node
     /// data, not transport.
-    async fn round_trip(&self, body: String) -> Result<(StatusCode, Bytes), TransportError> {
+    async fn round_trip(&self, body: String) -> Result<Bytes, TransportError> {
         // The request is entirely static, so building it cannot fail.
         let request = Request::builder()
             .method("POST")
@@ -106,9 +100,8 @@ impl JsonRpc {
             .body(Full::new(Bytes::from(body)))
             .expect("building the static request cannot fail");
 
-        let (status, body) = tokio::time::timeout(REQUEST_TIMEOUT, async {
+        tokio::time::timeout(REQUEST_TIMEOUT, async {
             let response = self.client.request(request).await?;
-            let status = response.status();
             let bytes = Limited::new(response.into_body(), MAX_RESPONSE_BYTES)
                 .collect()
                 .await
@@ -119,12 +112,10 @@ impl JsonRpc {
                     Err(_) => TransportError::BadNodeData("response exceeds the size cap"),
                 })?
                 .to_bytes();
-            Ok::<_, TransportError>((status, bytes))
+            Ok::<_, TransportError>(bytes)
         })
         .await
-        .map_err(|_| TransportError::Timeout)??;
-
-        Ok((status, body))
+        .map_err(|_| TransportError::Timeout)?
     }
 }
 
@@ -214,8 +205,6 @@ pub enum TransportError {
     Hyper(#[from] hyper::Error),
     #[error("request timeout")]
     Timeout,
-    #[error("HTTP {0}")]
-    HttpStatus(u16),
     #[error("bad node data for {0}")]
     BadNodeData(&'static str),
     #[error("bad checkpoint: {0}")]
@@ -238,8 +227,6 @@ impl TransportError {
             Self::Client(_)
                 | Self::Hyper(_)
                 | Self::Timeout
-                | Self::HttpStatus(429)
-                | Self::HttpStatus(500..=599)
                 | Self::BadNodeData(_)
                 | Self::BadCheckpoint(_)
         ) || matches!(

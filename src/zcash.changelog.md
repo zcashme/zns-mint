@@ -1,5 +1,12 @@
 # Zcash I/O changelog
 
+## 2026-11-07 — The seam keeps only what Zebra exercises
+
+- `header_time` reads the raw `getblockheader` and returns the header's
+  `u32` time; `get_block_header` and `BlockHeaderResponse` are gone.
+- `TransportError::HttpStatus` is gone.
+- `submit()` no longer has a panic arm for non-retryable errors.
+
 ## 2026-11-07 — Submission reads Zebra's own replies
 
 - `SubmitOutcome::Mined` and `RpcError::is_tx_already_in_chain` are gone:

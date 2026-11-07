@@ -550,13 +550,7 @@ impl Boot<Network> {
         birthday
             .backfill(mint_birthday, |height| {
                 let source = source.clone();
-                async move {
-                    let (_, _, timestamp) = source.get_block_header(height).await?;
-                    Ok::<_, zcash::TransportError>(
-                        u32::try_from(timestamp.as_seconds())
-                            .expect("Zcash block-header timestamps are u32 seconds"),
-                    )
-                }
+                async move { source.header_time(height).await }
             })
             .await
             .expect("FATAL: birthday MTP backfill from Zebra failed");
@@ -569,13 +563,7 @@ impl Boot<Network> {
         // checkpoint, so the MTP window is complete before the first scan.
         mtp.backfill(checkpoint_height, |height| {
             let source = source.clone();
-            async move {
-                let (_, _, timestamp) = source.get_block_header(height).await?;
-                Ok::<_, zcash::TransportError>(
-                    u32::try_from(timestamp.as_seconds())
-                        .expect("Zcash block-header timestamps are u32 seconds"),
-                )
-            }
+            async move { source.header_time(height).await }
         })
         .await
         .expect("FATAL: MTP backfill from Zebra failed");
