@@ -5,6 +5,14 @@
 - `OtpCode::auction` is HMAC-SHA256 over the request, both prices,
   both blocks, and the t1. A rescan yields the same code.
 
+## 2026-11-04 — A challenge carries its request's txid (#361)
+
+- `admit` takes it, `complete` returns it. A repeat request hands a
+  live challenge its txid.
+- `holds`: the mempool opens only new challenges.
+- `backing` reads the txid and leaves the challenge. `rebind` points
+  a live challenge at a mined repeat.
+
 ## 2026-11-03 — A challenge holds an update or a release
 
 - `Request` has no list or delist, so `OtpChallenge::memo` never

@@ -13,6 +13,10 @@
   The sentence carries the t1, both prices, and both blocks. A flat
   list sentence is unchanged.
 
+## 2026-11-04 — A transparent spend waits for a block (#361)
+
+- `spends_transparent` keeps such a request on the block path.
+
 ## 2026-11-03 — Name requests and market requests
 
 - `MintInbound::Market` carries a `MarketRequest`: a list, a delist,
