@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use futures_util::StreamExt as _;
+use futures_util::{FutureExt as _, StreamExt as _};
 use incrementalmerkletree::frontier::Frontier;
 use sapling::Node as SaplingNode;
 use serde::Deserialize;
@@ -111,13 +111,20 @@ impl TipSession {
         Self { client, stream }
     }
 
-    /// One tip per wake-up: the announcement, or a canonical-tip read
-    /// when the stream dies or the push is malformed.
+    /// One tip per wake-up: the newest queued announcement, or a
+    /// canonical-tip read when the stream dies or the push is malformed.
     pub async fn next_tip(
         &mut self,
         source: &CanonicalBlockSource,
     ) -> Result<(BlockHeight, BlockHash), TransportError> {
-        match self.stream.next().await {
+        let mut next = self.stream.next().await;
+        while let Some(Ok(_)) = next {
+            match self.stream.next().now_or_never() {
+                Some(queued) => next = queued,
+                None => break,
+            }
+        }
+        match next {
             // A push: Zebra's own state watch, read at wake time.
             Some(Ok(notification)) => match tip_height_hash(&notification) {
                 Ok(tip) => {
