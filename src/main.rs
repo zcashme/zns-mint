@@ -79,9 +79,6 @@ async fn main() {
         "mint awaiting Zebra tips"
     );
 
-    // The tip session owns the stream: announcements are the answer,
-    // failures repair and read the canonical tip. The loop never sees
-    // transport state.
     let mut connection = TipSession::open(chain.clone()).await;
     let (mempool_tx, mut mempool_rx) = mpsc::channel(64);
     tokio::spawn(zns_mint::mint::watch_mempool(chain, mempool_tx));
