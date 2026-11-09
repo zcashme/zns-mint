@@ -1,5 +1,12 @@
 # Zcash I/O changelog
 
+## 2026-11-09 — A wake-up takes the newest queued tip
+
+- `TipSession::next_tip` takes every tip push already queued behind the
+  one it received and returns the last, so a backlog costs one pass, not
+  one per push. A queued stream error or end still reads the exact tip
+  and resubscribes.
+
 ## 2026-11-07 — The seam keeps only what Zebra exercises
 
 - `header_time` reads the raw `getblockheader` and returns the header's

@@ -79,9 +79,6 @@ async fn main() {
         "mint awaiting Zebra tips"
     );
 
-    // The tip session owns the stream: announcements are the answer,
-    // failures repair and read the canonical tip. The loop never sees
-    // transport state.
     let mut connection = TipSession::open(chain.clone()).await;
     let (mempool_tx, mut mempool_rx) = mpsc::channel(64);
     tokio::spawn(zns_mint::mint::watch_mempool(chain, mempool_tx));
@@ -97,17 +94,16 @@ async fn main() {
                 .chain(name_notes.authorized_names()),
             challenges.relayed(),
         );
-        // The tip read stays pinned, on its own handle, across mempool
-        // events. A reconnect pause runs to the end.
-        let tip_source = source.clone();
-        let mut tip_wait = std::pin::pin!(connection.next_tip(&tip_source));
+        // The tip read stays pinned across mempool events. A reconnect
+        // pause runs to the end.
+        let mut tip_wait = std::pin::pin!(connection.next_tip(&source));
         let best_height = loop {
             tokio::select! {
                 biased;
                 tip = &mut tip_wait => {
                     break tip
                         .unwrap_or_else(|error| {
-                            panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
+                            panic!("FATAL: Zebra could not answer its tip: {error}")
                         })
                         .0;
                 }
