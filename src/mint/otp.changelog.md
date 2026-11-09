@@ -2,23 +2,21 @@
 
 ## 2026-11-09 — An `OtpChallenge` can challenge a list or a delist (#446)
 
+- `OtpQueue` holds list and delist challenges with update and release
+  ones, under the same rules: a random code (§5), regenerated on a
+  clash; an answer only once relayed; wrong answers counted against
+  relayed challenges; dropped when a transition is admitted for the
+  name, and on a rollback.
 - `OtpChallenge::memo` carries the t1 and the price or auction terms of
   a `Request::List`. Update and release memos are unchanged.
-- `held_by` and `same_terms` move here from the marketplace's challenge.
-- `ChallengeState` is exported from `treasury`.
-- `OtpQueue` holds the list and delist challenges as
-  `listing_challenges`. `open_listing_challenge`,
-  `answer_listing_challenge`, `unrelayed_listing_challenges`,
-  `listing_challenge_relayed`, `reconcile_listing_challenges`, and
-  `close_listing_challenges_for` keep the marketplace's rules: a code
-  derived from the request, an answer that needs no relay, and a
-  challenge that closes when its owner changes. An answer's code is
-  compared in constant time. `expire` closes them too.
+- `complete` also checks that an answer repeats the challenge's terms
+  (`same_terms`). An update or release answer carries none.
 - `relay_seen` takes a relay read back from the chain: the challenge it
   names takes its code and counts as relayed.
-- A rollback drops list and delist challenges with the rest of the
-  queue; they are no longer rebuilt. A request in a block the rollback
-  removed opens the same challenge when that block is applied again.
+- `OtpCode::list`, `auction`, and `delist` are gone. A list or delist
+  code derived from the access-code key could be computed by anyone
+  holding that key, which the issuer of pre-sale codes does.
+- `ChallengeState` is exported from `treasury`.
 
 ## 2026-11-09 — The auction challenge binds the sale's `AuctionTerms`
 

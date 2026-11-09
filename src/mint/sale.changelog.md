@@ -4,16 +4,15 @@
 
 - `MarketRequest` is gone. `Market::admit` takes a `Request`; a claim,
   update, or release changes nothing.
-- A list or delist challenge is an `OtpChallenge` holding the
-  `Request::List` or `Request::Delist` it challenges, kept in
-  `OtpQueue`. `MarketChallenge`, `ChallengeKind`, `Market.challenges`,
-  and the `Challenge` and `ChallengeClosed` marketplace events are
-  gone; a repeat is the same request. `Market::truncate_to` no longer
-  rebuilds challenges.
-- `admit`, `propose_list`, `propose_delist`, and `answer` take the
-  `OtpQueue`. A buy that opens closes the name's list and delist
-  challenges in `admit`. `unrelayed_challenges` and
-  `challenge_relayed` move to `OtpQueue`.
+- A list or delist challenge is an `OtpChallenge` in `OtpQueue`.
+  `MarketChallenge`, `ChallengeKind`, `Market.challenges`, the
+  `Challenge` and `ChallengeClosed` marketplace events,
+  `unrelayed_challenges`, and `challenge_relayed` are gone.
+  `Market::truncate_to` no longer rebuilds challenges.
+- `propose_list` and `propose_delist` take the request's txid and admit
+  it to the `OtpQueue`; `answer` completes it there. `CodeTaken` is
+  gone: a random code is drawn again instead.
+- A buy that opens drops the name's challenges in `admit`.
 
 ## 2026-11-09 — An auction's terms are `AuctionTerms`
 

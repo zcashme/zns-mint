@@ -4,10 +4,10 @@
 
 - The block pass sends `Request::List`, `Delist`, and `Buy` to
   `market.admit`, and records claims, updates, and releases, as before.
-- List and delist challenges live in `challenges`. The block pass
-  reconciles them with the registry, and the tip pass relays them. A
-  rollback replaces the queue, so it drops them with update and
-  release challenges.
+- List and delist challenges live in `challenges` and are relayed by
+  the same tip-pass loop as update and release, so the marketplace's
+  separate relay loop is gone. A rollback drops them with the rest.
+- A buy's challenge drop happens in `market.admit`.
 
 ## 2026-11-09 — The tip wait borrows the loop's node handle
 

@@ -1,5 +1,10 @@
 # `mint/presale.rs` design record
 
+## 2026-11-09 — The access-code key derives no challenge codes (#446)
+
+- `list_otp`, `auction_otp`, and `delist_otp` are gone. Only `buy_otp`
+  still derives from this key.
+
 ## 2026-11-05 — An auction challenge binds the clock
 
 - `auction_otp` derives the controller code from the access-code key,

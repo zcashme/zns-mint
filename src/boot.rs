@@ -629,9 +629,6 @@ impl Boot<Network> {
             market.expire(&mut registry, block_mtp, next_height);
             challenges.expire(block_mtp);
             market.reconcile(&mut registry, next_height);
-            challenges.reconcile_listing_challenges(|name| {
-                registry.record(name).map(|record| record.ua.clone())
-            });
             // The codes this mint sent before the sync: an answer in the
             // history matches the code its owner was sent.
             for relay in &relays {

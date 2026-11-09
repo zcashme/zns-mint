@@ -7,7 +7,7 @@
 - The sync builds `challenges` alongside the marketplace and hands it
   to `main`, holding the list and delist challenges it read.
 - Each block's relays reach `relay_seen` before its answers, so an
-  answer in the history matches the code its owner was sent.
+  answer in the history matches the random code its owner was sent.
 
 ## 2026-11-05 — A scan applies an auction reply and does not return it
 

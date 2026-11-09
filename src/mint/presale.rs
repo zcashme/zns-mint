@@ -23,7 +23,6 @@ use time::{OffsetDateTime, Timestamp};
 use tokio::task::JoinHandle;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::mint::sale::AuctionTerms;
 use crate::mint::treasury::OtpCode;
 use crate::mint::Name;
 use zcash_protocol::TxId;
@@ -379,53 +378,6 @@ impl AccessCodeDerivationKey {
     /// same code. Two names in one transaction get two codes.
     pub fn buy_otp(&self, txid: &TxId, name: &Name) -> OtpCode {
         OtpCode::buy(self.0.as_ref(), txid.as_ref(), name.as_str().as_bytes())
-    }
-
-    /// The list challenge for this request. A rescan yields the same code.
-    pub fn list_otp(
-        &self,
-        txid: &TxId,
-        name: &Name,
-        price: zcash_protocol::value::Zatoshis,
-        pay_to: &transparent::address::TransparentAddress,
-    ) -> OtpCode {
-        let hash = match pay_to {
-            transparent::address::TransparentAddress::PublicKeyHash(hash) => hash,
-            transparent::address::TransparentAddress::ScriptHash(hash) => hash,
-        };
-        OtpCode::list(
-            self.0.as_ref(),
-            txid.as_ref(),
-            name.as_str().as_bytes(),
-            price.into_u64(),
-            hash,
-        )
-    }
-
-    /// The auction challenge for this request. A rescan yields the same code.
-    pub fn auction_otp(
-        &self,
-        txid: &TxId,
-        name: &Name,
-        terms: &AuctionTerms,
-        pay_to: &transparent::address::TransparentAddress,
-    ) -> OtpCode {
-        let hash = match pay_to {
-            transparent::address::TransparentAddress::PublicKeyHash(hash) => hash,
-            transparent::address::TransparentAddress::ScriptHash(hash) => hash,
-        };
-        OtpCode::auction(
-            self.0.as_ref(),
-            txid.as_ref(),
-            name.as_str().as_bytes(),
-            terms,
-            hash,
-        )
-    }
-
-    /// The delist challenge for this request. A rescan yields the same code.
-    pub fn delist_otp(&self, txid: &TxId, name: &Name) -> OtpCode {
-        OtpCode::delist(self.0.as_ref(), txid.as_ref(), name.as_str().as_bytes())
     }
 
     /// Does `offered` match the code for `name`? Missing never

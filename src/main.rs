@@ -384,9 +384,6 @@ async fn main() {
             }
             market.expire(&mut registry, block_mtp, next_height);
             market.reconcile(&mut registry, next_height);
-            challenges.reconcile_listing_challenges(|name| {
-                registry.record(name).map(|record| record.ua.clone())
-            });
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(
@@ -404,9 +401,6 @@ async fn main() {
                             |name| name_notes.note_pending(name),
                             &access_code_key,
                         );
-                        if let Some(name) = admitted.opened {
-                            challenges.drop_challenges(&name);
-                        }
                         if let Some(back) = admitted.returned {
                             refunds.admit_with_note(
                                 &fee_rule,
@@ -759,32 +753,6 @@ async fn main() {
             .await
             {
                 challenges.challenge_issued(&pending);
-            }
-        }
-
-        for pending in challenges.unrelayed_listing_challenges(
-            |name| market.allows_transition(name),
-            |name| {
-                registry
-                    .challengeable(&name_notes, name, target_height, mtp_now)
-                    .map(|record| record.ua.clone())
-            },
-        ) {
-            if relay(
-                &network,
-                &mut wallet,
-                &treasury_keys,
-                &sapling_spend,
-                &sapling_output,
-                &fee_rule,
-                pending.request.ua(),
-                &source,
-                &pending.memo(),
-                "market",
-            )
-            .await
-            {
-                challenges.listing_challenge_relayed(&pending.code);
             }
         }
 
