@@ -35,12 +35,9 @@ impl ChainClient {
                 let kind = message
                     .kind()
                     .ok_or(TransportError::BadNodeData("mempool change type"))?;
-                let mut txid_bytes = [0u8; 32];
-                txid_bytes.copy_from_slice(
-                    message
-                        .tx_hash_display_order()
-                        .ok_or(TransportError::BadNodeData("mempool tx hash"))?,
-                );
+                let mut txid_bytes = *message
+                    .tx_hash_display_order()
+                    .ok_or(TransportError::BadNodeData("mempool tx hash"))?;
                 txid_bytes.reverse();
                 let txid = TxId::from_bytes(txid_bytes);
                 Ok((kind, txid))

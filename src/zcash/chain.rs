@@ -96,8 +96,10 @@ pub(crate) type TipStream = tonic::codec::Streaming<BlockHashAndHeight>;
 pub(crate) fn tip_height_hash(
     tip: &BlockHashAndHeight,
 ) -> Result<(BlockHeight, BlockHash), TransportError> {
-    let hash =
-        block_hash_from_display(&tip.hash).ok_or(TransportError::BadNodeData("tip hash length"))?;
+    let hash = tip
+        .hash_display_order()
+        .map(block_hash_from_display)
+        .ok_or(TransportError::BadNodeData("tip hash length"))?;
     Ok((BlockHeight::from_u32(tip.height), hash))
 }
 
@@ -180,15 +182,10 @@ impl TipSession {
 }
 
 /// Reverses Zebra's display-order bytes into a `BlockHash`.
-pub(crate) fn block_hash_from_display(bytes: &[u8]) -> Option<BlockHash> {
-    if bytes.len() == 32 {
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(bytes);
-        arr.reverse();
-        Some(BlockHash(arr))
-    } else {
-        None
-    }
+pub(crate) fn block_hash_from_display(bytes: &[u8; 32]) -> BlockHash {
+    let mut arr = *bytes;
+    arr.reverse();
+    BlockHash(arr)
 }
 
 /// Parses an Indexer block answer under the compiled consensus parameters
@@ -332,7 +329,9 @@ impl CanonicalBlockSource {
     /// whole-block fetch per step — rare path, loopback, accepted.
     pub async fn get_block_hash(&self, height: BlockHeight) -> Result<BlockHash, TransportError> {
         let fetched = self.chain.clone().block_and_hash(height).await?;
-        block_hash_from_display(&fetched.hash)
+        fetched
+            .hash_display_order()
+            .map(block_hash_from_display)
             .ok_or(TransportError::BadNodeData("indexer block hash length"))
     }
 
