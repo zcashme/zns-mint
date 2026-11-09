@@ -6,7 +6,9 @@ use time::{Duration, Timestamp};
 use zcash_primitives::transaction::TxId;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::mint::sale::{is_owner_listing, Ask, AuctionTerms};
+use zcash_protocol::consensus::BlockHeight;
+
+use crate::mint::sale::{is_owner_listing, Ask, AuctionTerms, MarketRefusal};
 use crate::mint::{Name, OtpMemo, Request, UnifiedAddress};
 
 /// Thirty minutes; §5.3: D_OTP.
@@ -221,13 +223,27 @@ pub enum ChallengeState {
     Relayed,
 }
 
-/// Issued challenges, in order, each with the txid of the request it
-/// answers. Every challenge was issued against its name's current
-/// record: the run loop drops a name's challenges when it admits a
-/// transition for that name.
+/// Issued challenges, in order.
+///
+/// An update or release challenge carries the txid of the request it
+/// answers. It was issued against its name's current record: the run
+/// loop drops a name's challenges when it admits a transition for that
+/// name, and a rollback drops them all.
+///
+/// A list or delist challenge carries a code derived from its request,
+/// so a scan opens the same challenge again. It closes when its owner no
+/// longer holds the name, and a rollback rebuilds it from `listing_history`.
 #[derive(Clone)]
 pub struct OtpQueue {
     challenges: Vec<(OtpChallenge, ChallengeState, TxId)>,
+    listing_challenges: Vec<(OtpChallenge, ChallengeState)>,
+    listing_history: Vec<(BlockHeight, ListingChallengeEvent)>,
+}
+
+#[derive(Clone)]
+enum ListingChallengeEvent {
+    Opened(Box<OtpChallenge>),
+    Closed(OtpCode),
 }
 
 impl Default for OtpQueue {
@@ -240,7 +256,187 @@ impl OtpQueue {
     pub fn new() -> Self {
         Self {
             challenges: Vec::new(),
+            listing_challenges: Vec::new(),
+            listing_history: Vec::new(),
         }
+    }
+
+    /// Opens a list or delist challenge for `request`. A repeat of an
+    /// open request keeps its challenge. Another open list or delist
+    /// challenge carrying `code` refuses it.
+    pub fn open_listing_challenge(
+        &mut self,
+        request: Request,
+        code: OtpCode,
+        mtp: Timestamp,
+        height: BlockHeight,
+    ) -> Result<(), MarketRefusal> {
+        if self
+            .listing_challenges
+            .iter()
+            .any(|(challenge, _)| challenge.request == request)
+        {
+            return Ok(());
+        }
+        if self
+            .listing_challenges
+            .iter()
+            .any(|(challenge, _)| challenge.code == code)
+        {
+            return Err(MarketRefusal::CodeTaken);
+        }
+        let challenge = OtpChallenge {
+            request,
+            code,
+            expires_at: mtp + Duration::seconds(D_OTP),
+            attempts: 0,
+        };
+        self.listing_history.push((
+            height,
+            ListingChallengeEvent::Opened(Box::new(challenge.clone())),
+        ));
+        self.listing_challenges
+            .push((challenge, ChallengeState::Requested));
+        Ok(())
+    }
+
+    /// The list or delist challenge `response` answers: same name,
+    /// address, action, code, and terms. A match spends the challenge
+    /// and returns its request. A miss counts against every challenge
+    /// the response names; [`MAX_ATTEMPTS`] misses close one.
+    pub fn answer_listing_challenge(
+        &mut self,
+        response: &OtpMemo,
+        height: BlockHeight,
+    ) -> Option<Request> {
+        let named: Vec<usize> = self
+            .listing_challenges
+            .iter()
+            .enumerate()
+            .filter(|(_, (challenge, _))| {
+                challenge.request.name() == &response.name
+                    && challenge.request.ua() == &response.ua
+                    && challenge.request.action() == response.action
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if let Some(index) = named.iter().copied().find(|&index| {
+            let (challenge, _) = &self.listing_challenges[index];
+            bool::from(challenge.code.0.ct_eq(&response.code.0)) && challenge.same_terms(response)
+        }) {
+            let (challenge, _) = self.listing_challenges.remove(index);
+            self.listing_history.push((
+                height,
+                ListingChallengeEvent::Closed(challenge.code.clone()),
+            ));
+            return Some(challenge.request);
+        }
+        for index in named.into_iter().rev() {
+            let (challenge, _) = &mut self.listing_challenges[index];
+            challenge.attempts += 1;
+            if challenge.attempts >= MAX_ATTEMPTS {
+                let code = challenge.code.clone();
+                self.close_listing_challenge(code, height);
+            }
+        }
+        None
+    }
+
+    /// List and delist challenges not yet sent, for names `open`
+    /// allows, while `owner` still holds the name on the terms each
+    /// one names.
+    pub fn unrelayed_listing_challenges(
+        &self,
+        open: impl Fn(&Name) -> bool,
+        owner: impl Fn(&Name) -> Option<UnifiedAddress>,
+    ) -> Vec<OtpChallenge> {
+        self.listing_challenges
+            .iter()
+            .filter(|(challenge, state)| {
+                *state == ChallengeState::Requested && open(challenge.request.name())
+            })
+            .filter(|(challenge, _)| {
+                owner(challenge.request.name()).is_some_and(|ua| challenge.held_by(&ua))
+            })
+            .map(|(challenge, _)| challenge.clone())
+            .collect()
+    }
+
+    /// The node accepted the list or delist challenge memo. Its history
+    /// keeps it requested, so a rollback submits that code.
+    pub fn listing_challenge_relayed(&mut self, code: &OtpCode) {
+        for (challenge, state) in &mut self.listing_challenges {
+            if &challenge.code == code {
+                *state = ChallengeState::Relayed;
+            }
+        }
+    }
+
+    /// Closes a list or delist challenge whose name `owner` no longer
+    /// gives to the address it names.
+    pub fn reconcile_listing_challenges(
+        &mut self,
+        owner: impl Fn(&Name) -> Option<UnifiedAddress>,
+        height: BlockHeight,
+    ) {
+        let stale: Vec<OtpCode> = self
+            .listing_challenges
+            .iter()
+            .filter(|(challenge, _)| {
+                owner(challenge.request.name()).is_none_or(|ua| ua != *challenge.request.ua())
+            })
+            .map(|(challenge, _)| challenge.code.clone())
+            .collect();
+        for code in stale {
+            self.close_listing_challenge(code, height);
+        }
+    }
+
+    /// Closes every list and delist challenge for `name`.
+    pub fn close_listing_challenges_for(&mut self, name: &Name, height: BlockHeight) {
+        let codes: Vec<OtpCode> = self
+            .listing_challenges
+            .iter()
+            .filter(|(challenge, _)| challenge.request.name() == name)
+            .map(|(challenge, _)| challenge.code.clone())
+            .collect();
+        for code in codes {
+            self.close_listing_challenge(code, height);
+        }
+    }
+
+    /// Rollback: drops every update and release challenge, and rebuilds
+    /// the list and delist challenges from the history at or below
+    /// `height`.
+    pub fn truncate_to(&mut self, height: BlockHeight) {
+        self.challenges.clear();
+        self.listing_history.retain(|(at, _)| *at <= height);
+        self.listing_challenges.clear();
+        for (_, event) in &self.listing_history {
+            match event {
+                ListingChallengeEvent::Opened(challenge) => {
+                    if !self
+                        .listing_challenges
+                        .iter()
+                        .any(|(held, _)| held.code == challenge.code)
+                    {
+                        self.listing_challenges
+                            .push((challenge.as_ref().clone(), ChallengeState::Requested));
+                    }
+                }
+                ListingChallengeEvent::Closed(code) => {
+                    self.listing_challenges
+                        .retain(|(challenge, _)| &challenge.code != code);
+                }
+            }
+        }
+    }
+
+    fn close_listing_challenge(&mut self, code: OtpCode, height: BlockHeight) {
+        self.listing_challenges
+            .retain(|(challenge, _)| challenge.code != code);
+        self.listing_history
+            .push((height, ListingChallengeEvent::Closed(code)));
     }
 
     /// Issues a challenge for `request` unless one is live. Its code is
@@ -331,10 +527,20 @@ impl OtpQueue {
             .collect()
     }
 
-    /// Drops every challenge whose window closed by `mtp`.
-    pub fn expire(&mut self, mtp: Timestamp) {
+    /// Drops every challenge whose window closed by `mtp`, at block
+    /// `height`.
+    pub fn expire(&mut self, mtp: Timestamp, height: BlockHeight) {
         self.challenges
             .retain(|(challenge, _, _)| mtp < challenge.expires_at);
+        let expired: Vec<OtpCode> = self
+            .listing_challenges
+            .iter()
+            .filter(|(challenge, _)| mtp >= challenge.expires_at)
+            .map(|(challenge, _)| challenge.code.clone())
+            .collect();
+        for code in expired {
+            self.close_listing_challenge(code, height);
+        }
     }
 
     /// Drops every challenge for `name`, once a transition is admitted.
@@ -500,7 +706,7 @@ mod tests {
         q.challenge_issued(&sent);
         assert_eq!(q.relayed().collect::<Vec<_>>(), [sent.request.name()]);
         assert_eq!(q.unrelayed().collect::<Vec<_>>(), [unsent.request.name()]);
-        q.expire(sent.expires_at);
+        q.expire(sent.expires_at, BlockHeight::from_u32(1));
         assert_eq!(q.relayed().count(), 0);
         assert_eq!(q.unrelayed().count(), 0);
     }
@@ -597,7 +803,7 @@ mod tests {
         let pending = admit(&mut q, update("alice"), *b"123456");
         q.challenge_issued(&pending);
 
-        q.expire(pending.expires_at);
+        q.expire(pending.expires_at, BlockHeight::from_u32(1));
         assert!(q.complete(&response_for(&pending, *b"123456")).is_none());
         assert_eq!(q.relayed().count(), 0);
     }

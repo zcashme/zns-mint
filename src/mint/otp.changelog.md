@@ -4,8 +4,19 @@
 
 - `OtpChallenge::memo` carries the t1 and the price or auction terms of
   a `Request::List`. Update and release memos are unchanged.
-- `held_by` and `same_terms` move here from the market's challenge.
+- `held_by` and `same_terms` move here from the marketplace's challenge.
 - `ChallengeState` is exported from `treasury`.
+- `OtpQueue` holds the list and delist challenges as
+  `listing_challenges`, with `listing_history` for a rollback.
+  `open_listing_challenge`, `answer_listing_challenge`,
+  `unrelayed_listing_challenges`, `listing_challenge_relayed`,
+  `reconcile_listing_challenges`, and `close_listing_challenges_for`
+  keep the marketplace's rules: a code derived from the request, an
+  answer that needs no relay, and a challenge that closes when its
+  owner changes. An answer's code is compared in constant time.
+- `expire` takes the block height, and closes list and delist
+  challenges too. `truncate_to` drops update and release challenges,
+  as replacing the queue did, and rebuilds list and delist challenges.
 
 ## 2026-11-09 — The auction challenge binds the sale's `AuctionTerms`
 

@@ -4,6 +4,8 @@
 
 - `Request::List`, `Delist`, and `Buy` go through `Market::admit`, as
   `MintInbound::Market` did.
+- The sync builds `challenges` alongside the marketplace and hands it
+  to `main`, holding the list and delist challenges it read.
 
 ## 2026-11-05 — A scan applies an auction reply and does not return it
 

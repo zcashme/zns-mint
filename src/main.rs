@@ -21,7 +21,7 @@ use zns_mint::mint::note::assemble;
 use zns_mint::mint::presale;
 use zns_mint::mint::pricing::{fetch_round, Oracle};
 use zns_mint::mint::treasury;
-use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
+use zns_mint::mint::treasury::access_code_penalty;
 use zns_mint::mint::{
     relay, relay_buy, spends_transparent, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
@@ -267,13 +267,11 @@ async fn main() {
             })
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
-            challenges = OtpQueue::new();
+            let rewound_mtp = mtp.current().expect("FATAL: MTP unavailable after reorg");
+            challenges.truncate_to(rewound);
             market.truncate_to(&mut registry, rewound);
-            market.expire(
-                &mut registry,
-                mtp.current().expect("FATAL: MTP unavailable after reorg"),
-                rewound,
-            );
+            market.expire(&mut registry, rewound_mtp, rewound);
+            challenges.expire(rewound_mtp, rewound);
             name_notes.rewind_to(rewound);
             name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
@@ -358,7 +356,7 @@ async fn main() {
             let block_mtp = mtp
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
-            challenges.expire(block_mtp);
+            challenges.expire(block_mtp, next_height);
             // A mined repeat takes the code before this block's replies
             // are read. The fee and the authorization are the same ones
             // the request pass requires.
@@ -384,6 +382,10 @@ async fn main() {
             }
             market.expire(&mut registry, block_mtp, next_height);
             market.reconcile(&mut registry, next_height);
+            challenges.reconcile_listing_challenges(
+                |name| registry.record(name).map(|record| record.ua.clone()),
+                next_height,
+            );
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(
@@ -394,6 +396,7 @@ async fn main() {
                             &request,
                             paid,
                             &registry,
+                            &mut challenges,
                             &fee_rule,
                             next_height,
                             block_mtp,
@@ -431,7 +434,7 @@ async fn main() {
                             || response.action.is_delist()
                             || response.action.is_auction()
                         {
-                            market.answer(&mut registry, &response, next_height);
+                            market.answer(&mut registry, &mut challenges, &response, next_height);
                             refunds.admit(
                                 &fee_rule,
                                 txid,
@@ -758,11 +761,14 @@ async fn main() {
             }
         }
 
-        for challenge in market.unrelayed_challenges(|name| {
-            registry
-                .challengeable(&name_notes, name, target_height, mtp_now)
-                .map(|record| record.ua.clone())
-        }) {
+        for pending in challenges.unrelayed_listing_challenges(
+            |name| market.allows_transition(name),
+            |name| {
+                registry
+                    .challengeable(&name_notes, name, target_height, mtp_now)
+                    .map(|record| record.ua.clone())
+            },
+        ) {
             if relay(
                 &network,
                 &mut wallet,
@@ -770,14 +776,14 @@ async fn main() {
                 &sapling_spend,
                 &sapling_output,
                 &fee_rule,
-                &challenge.ua,
+                pending.request.ua(),
                 &source,
-                &challenge,
+                &pending.memo(),
                 "market",
             )
             .await
             {
-                market.challenge_relayed(&challenge.code);
+                challenges.listing_challenge_relayed(&pending.code);
             }
         }
 

@@ -4,10 +4,15 @@
 
 - `MarketRequest` is gone. `Market::admit` takes a `Request`; a claim,
   update, or release changes nothing.
-- A market challenge is an `OtpChallenge` holding the `Request::List`
-  or `Request::Delist` it challenges, with its `ChallengeState`.
-  `MarketChallenge` and `ChallengeKind` are gone; a repeat is the same
-  request.
+- A list or delist challenge is an `OtpChallenge` holding the
+  `Request::List` or `Request::Delist` it challenges, kept in
+  `OtpQueue`. `MarketChallenge`, `ChallengeKind`, `Market.challenges`,
+  and the `Challenge` and `ChallengeClosed` marketplace events are
+  gone; a repeat is the same request.
+- `admit`, `propose_list`, `propose_delist`, and `answer` take the
+  `OtpQueue`. A buy that opens closes the name's list and delist
+  challenges in `admit`. `unrelayed_challenges` and
+  `challenge_relayed` move to `OtpQueue`.
 
 ## 2026-11-09 — An auction's terms are `AuctionTerms`
 

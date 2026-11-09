@@ -17,9 +17,7 @@ use zcash_protocol::TxId;
 
 use crate::mint::presale::AccessCodeDerivationKey;
 use crate::mint::registry::Registry;
-use crate::mint::treasury::{
-    ChallengeState, OtpChallenge, OtpCode, D_OTP, FEE_ACTIONS, MAX_ATTEMPTS,
-};
+use crate::mint::treasury::{OtpCode, OtpQueue, D_OTP, FEE_ACTIONS};
 use crate::mint::{
     Expiry, Name, NameCommitment, NameNote, OtpMemo, Request, Timestamp, UnifiedAddress,
 };
@@ -577,8 +575,6 @@ enum MarketEvent {
     Paid { name: Name, code: OtpCode },
     Expire { name: Name },
     Close { name: Name },
-    Challenge { challenge: Box<OtpChallenge> },
-    ChallengeClosed { code: OtpCode },
 }
 
 struct Stamped {
@@ -592,8 +588,6 @@ struct Stamped {
 #[derive(Default)]
 pub struct Market {
     sales: SaleQueue,
-    /// List and delist challenges, each a `Request::List` or `Request::Delist`.
-    challenges: Vec<(OtpChallenge, ChallengeState)>,
     events: Vec<Stamped>,
 }
 
@@ -655,23 +649,14 @@ impl Market {
         }
     }
 
-    /// Drops unpaid sales and controller challenges whose time has
-    /// passed, and an auction listing on the block after its end.
+    /// Drops unpaid sales whose time has passed, and an auction listing
+    /// on the block after its end.
     pub fn expire(&mut self, registry: &mut Registry, mtp: Timestamp, height: BlockHeight) {
         for name in registry.delist_ended_auctions(height) {
             self.record(height, MarketEvent::Delist { name });
         }
         for name in self.sales.expire(mtp) {
             self.record(height, MarketEvent::Expire { name });
-        }
-        let expired: Vec<OtpCode> = self
-            .challenges
-            .iter()
-            .filter(|(challenge, _)| mtp >= challenge.expires_at)
-            .map(|(challenge, _)| challenge.code.clone())
-            .collect();
-        for code in expired {
-            self.close_challenge(code, height);
         }
     }
 
@@ -687,18 +672,6 @@ impl Market {
                 .record(name)
                 .map(|record| (record.ua.clone(), record.commitment))
         };
-        let stale: Vec<OtpCode> = self
-            .challenges
-            .iter()
-            .filter(|(challenge, _)| match live(challenge.request.name()) {
-                Some((ua, _)) => ua != *challenge.request.ua(),
-                None => true,
-            })
-            .map(|(challenge, _)| challenge.code.clone())
-            .collect();
-        for code in stale {
-            self.close_challenge(code, height);
-        }
         for name in self.sales.reconcile(live) {
             self.record(height, MarketEvent::Close { name });
         }
@@ -710,7 +683,6 @@ impl Market {
         let events = std::mem::take(&mut self.events);
         self.sales = SaleQueue::new();
         registry.clear_listings();
-        self.challenges.clear();
         for stamped in &events {
             match &stamped.event {
                 MarketEvent::List { listing } => registry.restore_listing(listing.as_ref().clone()),
@@ -722,10 +694,6 @@ impl Market {
                 MarketEvent::Expire { name } | MarketEvent::Close { name } => {
                     self.sales.close(name);
                 }
-                MarketEvent::Challenge { challenge } => {
-                    self.restore_challenge(challenge.as_ref().clone());
-                }
-                MarketEvent::ChallengeClosed { code } => self.drop_challenge(code),
             }
         }
         self.events = events;
@@ -860,42 +828,14 @@ impl Market {
                 sale: Box::new(sale),
             },
         );
-        self.close_challenges_for(name, height);
         Ok(otp)
     }
 
-    /// Controller challenges not yet sent, while `owner` still holds the
-    /// name on the terms each one names.
-    pub fn unrelayed_challenges(
-        &self,
-        owner: impl Fn(&Name) -> Option<UnifiedAddress>,
-    ) -> Vec<OtpMemo> {
-        self.challenges
-            .iter()
-            .filter(|(challenge, state)| {
-                *state == ChallengeState::Requested && !self.sales.is_open(challenge.request.name())
-            })
-            .filter(|(challenge, _)| {
-                owner(challenge.request.name()).is_some_and(|ua| challenge.held_by(&ua))
-            })
-            .map(|(challenge, _)| challenge.memo())
-            .collect()
-    }
-
-    /// The node accepted the challenge memo. The challenge event keeps
-    /// it requested, so a rollback submits that code.
-    pub fn challenge_relayed(&mut self, code: &OtpCode) {
-        for (challenge, state) in &mut self.challenges {
-            if &challenge.code == code {
-                *state = ChallengeState::Relayed;
-            }
-        }
-    }
-
-    /// Records a list challenge. The listing changes when the controller
+    /// Opens a list challenge. The listing changes when the controller
     /// returns `code`.
     pub fn propose_list(
         &mut self,
+        challenges: &mut OtpQueue,
         listing: &Listing,
         owner: &UnifiedAddress,
         code: OtpCode,
@@ -909,13 +849,15 @@ impl Market {
         if self.sales.is_open(&listing.name) {
             return Err(MarketRefusal::BuyOpen);
         }
-        self.open_challenge(Request::List(listing.clone()), code, mtp, height)
+        challenges.open_listing_challenge(Request::List(listing.clone()), code, mtp, height)
     }
 
-    /// Records a delist challenge. The listing leaves when the controller
+    /// Opens a delist challenge. The listing leaves when the controller
     /// returns `code`.
+    #[allow(clippy::too_many_arguments)]
     pub fn propose_delist(
         &mut self,
+        challenges: &mut OtpQueue,
         registry: &Registry,
         name: &Name,
         ua: &UnifiedAddress,
@@ -936,46 +878,15 @@ impl Market {
             name: name.clone(),
             ua: ua.clone(),
         };
-        self.open_challenge(request, code, mtp, height)
+        challenges.open_listing_challenge(request, code, mtp, height)
     }
 
-    /// A repeat of an open request keeps its challenge. Another open
-    /// challenge carrying `code` refuses it.
-    fn open_challenge(
-        &mut self,
-        request: Request,
-        code: OtpCode,
-        mtp: Timestamp,
-        height: BlockHeight,
-    ) -> Result<(), MarketRefusal> {
-        if self
-            .challenges
-            .iter()
-            .any(|(challenge, _)| challenge.request == request)
-        {
-            return Ok(());
-        }
-        if self.code_is_open(&code) {
-            return Err(MarketRefusal::CodeTaken);
-        }
-        self.push_challenge(
-            OtpChallenge {
-                request,
-                code,
-                expires_at: Timestamp::from_seconds(mtp.as_seconds() + D_OTP)
-                    .expect("challenge expiry fits a timestamp"),
-                attempts: 0,
-            },
-            height,
-        );
-        Ok(())
-    }
-
-    /// Applies the challenge `response` names, when the code matches and
-    /// the named address is still the controller. A matching code spends the challenge.
+    /// Applies the list or delist challenge `response` answers, unless a
+    /// buy opened since. A matching code spends the challenge.
     pub fn answer(
         &mut self,
         registry: &mut Registry,
+        challenges: &mut OtpQueue,
         response: &OtpMemo,
         height: BlockHeight,
     ) -> bool {
@@ -985,106 +896,25 @@ impl Market {
         {
             return false;
         }
-        let named: Vec<usize> = self
-            .challenges
-            .iter()
-            .enumerate()
-            .filter(|(_, (challenge, _))| {
-                challenge.request.name() == &response.name
-                    && challenge.request.ua() == &response.ua
-                    && challenge.request.action() == response.action
-            })
-            .map(|(index, _)| index)
-            .collect();
-        if named.is_empty() {
+        let Some(request) = challenges.answer_listing_challenge(response, height) else {
             return false;
-        }
-        if let Some(index) = named.iter().copied().find(|&index| {
-            let (challenge, _) = &self.challenges[index];
-            challenge.code == response.code && challenge.same_terms(response)
-        }) {
-            let (challenge, _) = self.challenges.remove(index);
-            self.record(
-                height,
-                MarketEvent::ChallengeClosed {
-                    code: challenge.code.clone(),
-                },
-            );
-            if self.sales.is_open(challenge.request.name()) {
-                return true;
-            }
-            match &challenge.request {
-                Request::List(listing) => {
-                    let _ = self.list(registry, listing, height);
-                }
-                Request::Delist { name, ua } => {
-                    let _ = self.delist(registry, name, ua, height);
-                }
-                Request::Claim { .. }
-                | Request::Update { .. }
-                | Request::Release { .. }
-                | Request::Buy { .. } => {}
-            }
+        };
+        if self.sales.is_open(request.name()) {
             return true;
         }
-        for index in named.into_iter().rev() {
-            let (challenge, _) = &mut self.challenges[index];
-            challenge.attempts += 1;
-            if challenge.attempts >= MAX_ATTEMPTS {
-                let code = challenge.code.clone();
-                self.close_challenge(code, height);
+        match &request {
+            Request::List(listing) => {
+                let _ = self.list(registry, listing, height);
             }
+            Request::Delist { name, ua } => {
+                let _ = self.delist(registry, name, ua, height);
+            }
+            Request::Claim { .. }
+            | Request::Update { .. }
+            | Request::Release { .. }
+            | Request::Buy { .. } => {}
         }
-        false
-    }
-
-    fn code_is_open(&self, code: &OtpCode) -> bool {
-        self.challenges
-            .iter()
-            .any(|(challenge, _)| &challenge.code == code)
-    }
-
-    fn push_challenge(&mut self, challenge: OtpChallenge, height: BlockHeight) {
-        self.record(
-            height,
-            MarketEvent::Challenge {
-                challenge: Box::new(challenge.clone()),
-            },
-        );
-        self.challenges.push((challenge, ChallengeState::Requested));
-    }
-
-    fn restore_challenge(&mut self, challenge: OtpChallenge) {
-        if self
-            .challenges
-            .iter()
-            .any(|(held, _)| held.code == challenge.code)
-        {
-            return;
-        }
-        self.challenges.push((challenge, ChallengeState::Requested));
-    }
-
-    fn drop_challenge(&mut self, code: &OtpCode) {
-        self.challenges
-            .retain(|(challenge, _)| &challenge.code != code);
-    }
-
-    fn close_challenge(&mut self, code: OtpCode, height: BlockHeight) {
-        self.drop_challenge(&code);
-        self.record(height, MarketEvent::ChallengeClosed { code });
-    }
-
-    fn close_challenges_for(&mut self, name: &Name, height: BlockHeight) {
-        let codes: Vec<OtpCode> = self
-            .challenges
-            .iter()
-            .filter(|(challenge, _)| challenge.request.name() == name)
-            .map(|(challenge, _)| challenge.code.clone())
-            .collect();
-        for code in codes {
-            self.close_challenge(code, height);
-        }
+        true
     }
 
     /// Applies one list, delist, or buy; any other request changes
@@ -1097,6 +927,7 @@ impl Market {
         request: &Request,
         paid: Zatoshis,
         registry: &Registry,
+        challenges: &mut OtpQueue,
         fee_rule: &FeeRule,
         height: BlockHeight,
         mtp: Timestamp,
@@ -1131,7 +962,7 @@ impl Market {
                         key.auction_otp(&txid, &listing.name, terms, &listing.pay_to)
                     }
                 };
-                match self.propose_list(listing, &record.ua, code, mtp, height) {
+                match self.propose_list(challenges, listing, &record.ua, code, mtp, height) {
                     Ok(()) => {}
                     Err(MarketRefusal::BuyOpen) => tracing::info!(
                         %txid,
@@ -1179,7 +1010,7 @@ impl Market {
                     return Admission::none();
                 }
                 let code = key.delist_otp(&txid, name);
-                match self.propose_delist(registry, name, ua, code, mtp, height) {
+                match self.propose_delist(challenges, registry, name, ua, code, mtp, height) {
                     Ok(()) => {}
                     Err(MarketRefusal::BuyOpen) => tracing::info!(
                         %txid,
@@ -1237,7 +1068,10 @@ impl Market {
                     mtp,
                     height,
                 ) {
-                    Ok(_) => Admission::opened(name.clone()),
+                    Ok(_) => {
+                        challenges.close_listing_challenges_for(name, height);
+                        Admission::opened(name.clone())
+                    }
                     Err(MarketRefusal::Held { until }) => {
                         tracing::info!(
                             %txid,
@@ -1914,10 +1748,18 @@ mod tests {
         let (owner, pay_to) = alice();
         let mut registry = sale_registry();
         let mut market = Market::new();
+        let mut challenges = OtpQueue::new();
         let code = OtpCode::for_test(*b"042831");
         let request = list_for(150_000_000);
         market
-            .propose_list(&request, &owner, code.clone(), mtp(), height())
+            .propose_list(
+                &mut challenges,
+                &request,
+                &owner,
+                code.clone(),
+                mtp(),
+                height(),
+            )
             .unwrap();
         assert_eq!(registry.price(&name()), None);
         let wrong = OtpMemo {
@@ -1928,7 +1770,7 @@ mod tests {
             listing: Some((pay_to, zats(150_000_000))),
             auction: None,
         };
-        assert!(!market.answer(&mut registry, &wrong, height()));
+        assert!(!market.answer(&mut registry, &mut challenges, &wrong, height()));
         assert_eq!(registry.price(&name()), None);
         let other_price = OtpMemo {
             code: code.clone(),
@@ -1938,7 +1780,7 @@ mod tests {
             listing: Some((pay_to, zats(1))),
             auction: None,
         };
-        assert!(!market.answer(&mut registry, &other_price, height()));
+        assert!(!market.answer(&mut registry, &mut challenges, &other_price, height()));
         assert_eq!(registry.price(&name()), None);
         let right = OtpMemo {
             code,
@@ -1948,7 +1790,7 @@ mod tests {
             listing: Some((pay_to, zats(150_000_000))),
             auction: None,
         };
-        assert!(market.answer(&mut registry, &right, height()));
+        assert!(market.answer(&mut registry, &mut challenges, &right, height()));
         assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
         assert_eq!(pay_to, request.pay_to);
     }
@@ -1958,12 +1800,21 @@ mod tests {
         let (owner, _) = alice();
         let mut registry = sale_registry();
         let mut market = Market::new();
+        let mut challenges = OtpQueue::new();
         assert_eq!(
-            market.propose_list(&list_for(1), &bob(), OtpCode::generate(), mtp(), height()),
+            market.propose_list(
+                &mut challenges,
+                &list_for(1),
+                &bob(),
+                OtpCode::generate(),
+                mtp(),
+                height()
+            ),
             Err(MarketRefusal::NotOwner)
         );
         market
             .propose_list(
+                &mut challenges,
                 &list_for(150_000_000),
                 &owner,
                 OtpCode::for_test(*b"042831"),
@@ -1982,7 +1833,7 @@ mod tests {
             )),
             auction: None,
         };
-        assert!(!market.answer(&mut registry, &stranger, height()));
+        assert!(!market.answer(&mut registry, &mut challenges, &stranger, height()));
         assert_eq!(registry.price(&name()), None);
     }
 
@@ -1994,9 +1845,18 @@ mod tests {
         market
             .list(&mut registry, &list_for(150_000_000), height())
             .unwrap();
+        let mut challenges = OtpQueue::new();
         let code = OtpCode::for_test(*b"042831");
         market
-            .propose_delist(&registry, &name(), &owner, code.clone(), mtp(), height())
+            .propose_delist(
+                &mut challenges,
+                &registry,
+                &name(),
+                &owner,
+                code.clone(),
+                mtp(),
+                height(),
+            )
             .unwrap();
         assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
         let right = OtpMemo {
@@ -2007,7 +1867,7 @@ mod tests {
             listing: None,
             auction: None,
         };
-        assert!(market.answer(&mut registry, &right, height()));
+        assert!(market.answer(&mut registry, &mut challenges, &right, height()));
         assert_eq!(registry.price(&name()), None);
     }
 
@@ -2142,9 +2002,11 @@ mod tests {
         let (owner, _) = alice();
         let mut registry = sale_registry();
         let mut market = Market::new();
+        let mut challenges = OtpQueue::new();
         let code = OtpCode::for_test(*b"042831");
         market
             .propose_list(
+                &mut challenges,
                 &list_for(150_000_000),
                 &owner,
                 code.clone(),
@@ -2154,18 +2016,35 @@ mod tests {
             .unwrap();
         let cheaper = list_for(1);
         assert_eq!(
-            market.propose_list(&cheaper, &owner, code.clone(), mtp(), height()),
+            market.propose_list(
+                &mut challenges,
+                &cheaper,
+                &owner,
+                code.clone(),
+                mtp(),
+                height()
+            ),
             Err(MarketRefusal::CodeTaken)
         );
         market
             .list(&mut registry, &list_for(150_000_000), height())
             .unwrap();
         assert_eq!(
-            market.propose_delist(&registry, &name(), &owner, code, mtp(), height()),
+            market.propose_delist(
+                &mut challenges,
+                &registry,
+                &name(),
+                &owner,
+                code,
+                mtp(),
+                height()
+            ),
             Err(MarketRefusal::CodeTaken)
         );
         assert_eq!(
-            market.unrelayed_challenges(|_| Some(owner.clone())).len(),
+            challenges
+                .unrelayed_listing_challenges(|_| true, |_| Some(owner.clone()))
+                .len(),
             1
         );
     }
@@ -2174,8 +2053,10 @@ mod tests {
     fn a_challenge_is_sent_only_while_she_holds_the_name() {
         let (owner, _) = alice();
         let mut market = Market::new();
+        let mut challenges = OtpQueue::new();
         market
             .propose_list(
+                &mut challenges,
                 &list_for(150_000_000),
                 &owner,
                 OtpCode::for_test(*b"042831"),
@@ -2184,11 +2065,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            market.unrelayed_challenges(|_| Some(owner.clone())).len(),
+            challenges
+                .unrelayed_listing_challenges(|_| true, |_| Some(owner.clone()))
+                .len(),
             1
         );
-        assert!(market.unrelayed_challenges(|_| Some(bob())).is_empty());
-        assert!(market.unrelayed_challenges(|_| None).is_empty());
+        assert!(challenges
+            .unrelayed_listing_challenges(|_| true, |_| Some(bob()))
+            .is_empty());
+        assert!(challenges
+            .unrelayed_listing_challenges(|_| true, |_| None)
+            .is_empty());
     }
 
     #[test]
@@ -2196,9 +2083,11 @@ mod tests {
         let (owner, _) = alice();
         let mut registry = sale_registry();
         let mut market = Market::new();
+        let mut challenges = OtpQueue::new();
         let code = OtpCode::for_test(*b"042831");
         market
             .propose_list(
+                &mut challenges,
                 &list_for(150_000_000),
                 &owner,
                 code.clone(),
@@ -2206,13 +2095,16 @@ mod tests {
                 height(),
             )
             .unwrap();
-        market.challenge_relayed(&code);
-        assert!(market
-            .unrelayed_challenges(|_| Some(owner.clone()))
+        challenges.listing_challenge_relayed(&code);
+        assert!(challenges
+            .unrelayed_listing_challenges(|_| true, |_| Some(owner.clone()))
             .is_empty());
         market.truncate_to(&mut registry, height());
+        challenges.truncate_to(height());
         assert_eq!(
-            market.unrelayed_challenges(|_| Some(owner.clone())).len(),
+            challenges
+                .unrelayed_listing_challenges(|_| true, |_| Some(owner.clone()))
+                .len(),
             1
         );
 
@@ -2664,18 +2556,27 @@ mod tests {
         let (owner, _) = alice();
         let mut registry = sale_registry();
         let mut market = Market::new();
+        let mut challenges = OtpQueue::new();
         let code = OtpCode::for_test(*b"042831");
         market
-            .propose_list(&auction_listing(10, 20), &owner, code, mtp(), height())
+            .propose_list(
+                &mut challenges,
+                &auction_listing(10, 20),
+                &owner,
+                code,
+                mtp(),
+                height(),
+            )
             .unwrap();
         assert_eq!(registry.quote(&name(), BlockHeight::from_u32(15)), None);
-        let memo = market
-            .unrelayed_challenges(|_| Some(owner.clone()))
-            .remove(0);
+        let memo = challenges
+            .unrelayed_listing_challenges(|_| true, |_| Some(owner.clone()))
+            .remove(0)
+            .memo();
         assert!(memo.action.is_auction());
         let encoded = memo.encode(&MainNetwork).unwrap();
         assert_eq!(OtpMemo::decode(&MainNetwork, &encoded), Some(memo.clone()));
-        assert!(market.answer(&mut registry, &memo, height()));
+        assert!(market.answer(&mut registry, &mut challenges, &memo, height()));
         assert_eq!(
             registry.quote(&name(), BlockHeight::from_u32(10)),
             Some(zats(100_000_000))
@@ -2734,15 +2635,24 @@ mod tests {
         market
             .list(&mut registry, &list_for(150_000_000), height())
             .unwrap();
+        let mut challenges = OtpQueue::new();
         let code = OtpCode::for_test(*b"042831");
         market
-            .propose_list(&auction_listing(10, 20), &owner, code, mtp(), height())
+            .propose_list(
+                &mut challenges,
+                &auction_listing(10, 20),
+                &owner,
+                code,
+                mtp(),
+                height(),
+            )
             .unwrap();
-        let memo = market
-            .unrelayed_challenges(|_| Some(owner.clone()))
-            .remove(0);
+        let memo = challenges
+            .unrelayed_listing_challenges(|_| true, |_| Some(owner.clone()))
+            .remove(0)
+            .memo();
         let after = BlockHeight::from_u32(21);
-        assert!(market.answer(&mut registry, &memo, after));
+        assert!(market.answer(&mut registry, &mut challenges, &memo, after));
         assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
         assert!(matches!(
             market.list(&mut registry, &auction_listing(10, 20), after),
@@ -2847,6 +2757,7 @@ mod tests {
             &buy_of_alice(),
             paid,
             registry,
+            &mut OtpQueue::new(),
             &FeeRule::standard(),
             height,
             mtp(),
@@ -2936,6 +2847,7 @@ mod tests {
             &buy_of_alice(),
             zats(1_000_000),
             &registry,
+            &mut OtpQueue::new(),
             &FeeRule::standard(),
             at,
             mtp(),
