@@ -1,5 +1,11 @@
 # main.changelog.md
 
+## 2026-11-09 — The tip wait borrows the loop's node handle
+
+- The tip read takes `&source` instead of a clone.
+- When Zebra cannot answer its tip, the panic reads `FATAL: Zebra could
+  not answer its tip`.
+
 ## 2026-11-09 — The post-catch-up tip check keeps only the arms that run
 
 - The tip check after catch-up no longer matches a retryable error or
