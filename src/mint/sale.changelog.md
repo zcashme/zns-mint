@@ -1,5 +1,16 @@
 # Sale module changelog
 
+## 2026-11-09 — An auction's terms are `AuctionTerms`
+
+- `Clock` is `AuctionTerms`: the four values a `ZNS:auction` memo
+  carries. "Clock" now means only time and the §4.5 clocks.
+- `BadClock` is `BadTerms`, `clock_ready` is `listable`, and
+  `Registry::finish_clocks` is `delist_ended_auctions`.
+- An auction listing hands its `AuctionTerms` to `auction_otp`
+  instead of converting them to integers.
+- Log lines: "list fee kept: bad auction terms", "list fee kept: the
+  auction has ended", "buy returned: the auction has not started".
+
 ## 2026-11-06 — A late clock reply leaves the book, and a paid hold still returns
 
 - A reply after the end block does not install the clock. The end

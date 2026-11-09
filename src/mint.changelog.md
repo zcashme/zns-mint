@@ -1,5 +1,10 @@
 # Mint live-work design record
 
+## 2026-11-09 — An auction challenge carries its terms
+
+- `OtpMemo.clock` is `OtpMemo.auction`: the t1 and the
+  `sale::AuctionTerms`.
+
 ## 2026-11-07 — Claims open without an access code (#360)
 
 - Only a name protected at the tip MTP needs its access code. Without a

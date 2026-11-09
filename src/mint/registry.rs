@@ -153,16 +153,16 @@ impl Registry {
     pub fn quote(&self, name: &Name, height: BlockHeight) -> Option<Zatoshis> {
         match &self.listing(name)?.ask {
             Ask::Flat(price) => Some(*price),
-            Ask::Dutch(clock) => clock.price_at(height),
+            Ask::Dutch(terms) => terms.price_at(height),
         }
     }
 
-    /// A clock listing leaves on the block after its end. An open hold
+    /// An auction listing leaves on the block after its end. An open hold
     /// stays until its buyer pays or the ten minutes pass.
-    pub(crate) fn finish_clocks(&mut self, height: BlockHeight) -> Vec<Name> {
+    pub(crate) fn delist_ended_auctions(&mut self, height: BlockHeight) -> Vec<Name> {
         let mut done = Vec::new();
         self.listings.retain(|name, listing| match &listing.ask {
-            Ask::Dutch(clock) if height > clock.end => {
+            Ask::Dutch(terms) if height > terms.end => {
                 done.push(name.clone());
                 false
             }

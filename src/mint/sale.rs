@@ -17,7 +17,7 @@ use zcash_protocol::TxId;
 
 use crate::mint::presale::AccessCodeDerivationKey;
 use crate::mint::registry::Registry;
-use crate::mint::treasury::{AuctionBind, OtpCode, D_OTP, FEE_ACTIONS, MAX_ATTEMPTS};
+use crate::mint::treasury::{OtpCode, D_OTP, FEE_ACTIONS, MAX_ATTEMPTS};
 use crate::mint::{
     decode_name_and_ua, decode_zns, Action, Expiry, Name, NameCommitment, NameNote, OtpMemo,
     Timestamp, UnifiedAddress,
@@ -53,20 +53,20 @@ impl MarketRequest {
             "auction" => {
                 let (name, ua) = decode_name_and_ua(network, fields)?;
                 let pay_to = decode_t1(network, fields.next()?)?;
-                let clock = Clock {
+                let terms = AuctionTerms {
                     start_price: decode_zec(fields.next()?)?,
                     min_price: decode_zec(fields.next()?)?,
                     start: decode_height(fields.next()?)?,
                     end: decode_height(fields.next()?)?,
                 };
-                if !clock.is_valid() {
+                if !terms.is_valid() {
                     return None;
                 }
                 Some(Self::List(Listing {
                     name,
                     ua,
                     pay_to,
-                    ask: Ask::Dutch(clock),
+                    ask: Ask::Dutch(terms),
                 }))
             }
             "delist" => {
@@ -95,12 +95,12 @@ pub struct BuyOtp {
     pub code: OtpCode,
     pub name: Name,
     pub ua: UnifiedAddress,
-    /// The frozen clock price and the time the hold ends.
+    /// The frozen auction price and the time the hold ends.
     pub dutch: Option<(Zatoshis, Timestamp)>,
 }
 
 impl BuyOtp {
-    /// `ZNS:buyotp:<code>:<name>:<ua>`. A clock quote is
+    /// `ZNS:buyotp:<code>:<name>:<ua>`. An auction quote is
     /// `ZNS:dutch:<code>:<name>:<ua>:<price>:<until>`.
     pub fn encode<P: Parameters>(&self, network: &P) -> Option<MemoBytes> {
         let otp: String = self.code.digits().into_iter().map(|b| b as char).collect();
@@ -123,7 +123,7 @@ impl BuyOtp {
     }
 }
 
-/// Ten minutes. A clock quote stays payable for this long.
+/// Ten minutes. An auction quote stays payable for this long.
 pub const D_DUTCH: i64 = 600;
 
 /// A public-key-hash transparent address on this network. TEX and
@@ -237,9 +237,9 @@ struct Sale {
     /// The live note when the buy opened. A later note ends the sale.
     held: NameCommitment,
     term: Expiry,
-    /// The quote is a clock price, frozen for [`D_DUTCH`].
+    /// The quote is an auction price, frozen for [`D_DUTCH`].
     dutch: bool,
-    /// When the quote stops being payable. A clock sale keeps it after
+    /// When the quote stops being payable. An auction sale keeps it after
     /// the payment matches, so a later intent can be told the deadline.
     until: Timestamp,
     phase: Phase,
@@ -258,7 +258,7 @@ impl SaleQueue {
 
     /// Opens a sale and returns the OTP to send Bob. `None` when this
     /// name already has one. A flat quote stays payable for [`D_OTP`].
-    /// A clock quote stays payable for [`D_DUTCH`].
+    /// An auction quote stays payable for [`D_DUTCH`].
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         &mut self,
@@ -418,7 +418,7 @@ impl SaleQueue {
         self.sales.iter().find(|sale| sale.name == *name)
     }
 
-    /// The deadline on an open clock sale. The name stays reserved after
+    /// The deadline on an open auction sale. The name stays reserved after
     /// the payment matches, until the sale note is signed.
     fn dutch_hold(&self, name: &Name) -> Option<Timestamp> {
         let sale = self.get(name)?;
@@ -535,17 +535,17 @@ impl SaleQueue {
     }
 }
 
-/// A falling price. The start block quotes `start_price`. The end
+/// An auction's terms. The start block quotes `start_price`. The end
 /// block quotes `min_price` and is the last block that sells.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Clock {
+pub struct AuctionTerms {
     pub start_price: Zatoshis,
     pub min_price: Zatoshis,
     pub start: BlockHeight,
     pub end: BlockHeight,
 }
 
-impl Clock {
+impl AuctionTerms {
     /// The end is after the start, and the price falls.
     pub fn is_valid(&self) -> bool {
         self.end > self.start && self.start_price > self.min_price
@@ -564,12 +564,12 @@ impl Clock {
     }
 }
 
-/// What the buyer pays. A flat price is the listing. A clock price is
+/// What the buyer pays. A flat price is the listing. An auction price is
 /// the price of the block his intent is mined in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ask {
     Flat(Zatoshis),
-    Dutch(Clock),
+    Dutch(AuctionTerms),
 }
 
 /// One listing per name. Rebuilt from the chain on startup.
@@ -600,25 +600,25 @@ pub enum MarketRefusal {
     CodeTaken,
     /// An open buy already pays this address the same total.
     PaymentTaken,
-    /// The clock has not reached its start block.
+    /// The auction has not reached its start block.
     Early { start: BlockHeight },
-    /// A clock sale still reserves the name.
+    /// An auction sale still reserves the name.
     Held { until: Timestamp },
     /// The end is not after the start, or the price does not fall.
-    BadClock,
-    /// This block is after the clock's end.
+    BadTerms,
+    /// This block is after the auction's end block.
     Ended,
 }
 
-/// A clock lists through its end block. A later height leaves the book.
-fn clock_ready(ask: &Ask, height: BlockHeight) -> Result<(), MarketRefusal> {
-    let Ask::Dutch(clock) = ask else {
+/// An auction lists through its end block. A later height leaves the book.
+fn listable(ask: &Ask, height: BlockHeight) -> Result<(), MarketRefusal> {
+    let Ask::Dutch(terms) = ask else {
         return Ok(());
     };
-    if !clock.is_valid() {
-        return Err(MarketRefusal::BadClock);
+    if !terms.is_valid() {
+        return Err(MarketRefusal::BadTerms);
     }
-    if height > clock.end {
+    if height > terms.end {
         return Err(MarketRefusal::Ended);
     }
     Ok(())
@@ -666,10 +666,10 @@ impl MarketChallenge {
     }
 
     fn memo(&self) -> OtpMemo {
-        let (listing, clock) = match &self.kind {
+        let (listing, auction) = match &self.kind {
             ChallengeKind::List(listed) => match &listed.ask {
                 Ask::Flat(price) => (Some((listed.pay_to, *price)), None),
-                Ask::Dutch(clock) => (None, Some((listed.pay_to, clock.clone()))),
+                Ask::Dutch(terms) => (None, Some((listed.pay_to, terms.clone()))),
             },
             ChallengeKind::Delist { .. } => (None, None),
         };
@@ -679,7 +679,7 @@ impl MarketChallenge {
             action: self.action(),
             ua: self.ua().clone(),
             listing,
-            clock,
+            auction,
         }
     }
 
@@ -698,17 +698,19 @@ impl MarketChallenge {
         match &self.kind {
             ChallengeKind::List(listing) => match &listing.ask {
                 Ask::Flat(price) => {
-                    response.clock.is_none()
+                    response.auction.is_none()
                         && response.listing.as_ref().is_some_and(|(pay_to, quoted)| {
                             *pay_to == listing.pay_to && quoted == price
                         })
                 }
-                Ask::Dutch(clock) => response
-                    .clock
+                Ask::Dutch(terms) => response
+                    .auction
                     .as_ref()
-                    .is_some_and(|(pay_to, quoted)| *pay_to == listing.pay_to && quoted == clock),
+                    .is_some_and(|(pay_to, quoted)| *pay_to == listing.pay_to && quoted == terms),
             },
-            ChallengeKind::Delist { .. } => response.listing.is_none() && response.clock.is_none(),
+            ChallengeKind::Delist { .. } => {
+                response.listing.is_none() && response.auction.is_none()
+            }
         }
     }
 
@@ -808,9 +810,9 @@ impl Market {
     }
 
     /// Drops unpaid sales and controller challenges whose time has
-    /// passed, and a clock listing on the block after its end.
+    /// passed, and an auction listing on the block after its end.
     pub fn expire(&mut self, registry: &mut Registry, mtp: Timestamp, height: BlockHeight) {
-        for name in registry.finish_clocks(height) {
+        for name in registry.delist_ended_auctions(height) {
             self.record(height, MarketEvent::Delist { name });
         }
         for name in self.sales.expire(mtp) {
@@ -907,7 +909,7 @@ impl Market {
         listing: &Listing,
         height: BlockHeight,
     ) -> Result<(), MarketRefusal> {
-        clock_ready(&listing.ask, height)?;
+        listable(&listing.ask, height)?;
         if self.sales.is_open(&listing.name) {
             return Err(MarketRefusal::BuyOpen);
         }
@@ -970,11 +972,11 @@ impl Market {
             }
             match &listing.ask {
                 Ask::Flat(price) => (listing.pay_to, *price, false),
-                Ask::Dutch(clock) => {
-                    if height < clock.start {
-                        return Err(MarketRefusal::Early { start: clock.start });
+                Ask::Dutch(terms) => {
+                    if height < terms.start {
+                        return Err(MarketRefusal::Early { start: terms.start });
                     }
-                    let Some(price) = clock.price_at(height) else {
+                    let Some(price) = terms.price_at(height) else {
                         return Err(MarketRefusal::NotListed);
                     };
                     (listing.pay_to, price, true)
@@ -1050,7 +1052,7 @@ impl Market {
         mtp: Timestamp,
         height: BlockHeight,
     ) -> Result<(), MarketRefusal> {
-        clock_ready(&listing.ask, height)?;
+        listable(&listing.ask, height)?;
         if !is_owner_listing(owner, &listing.ua, &listing.pay_to) {
             return Err(MarketRefusal::NotOwner);
         }
@@ -1274,17 +1276,9 @@ impl Market {
                 }
                 let code = match &listing.ask {
                     Ask::Flat(price) => key.list_otp(&txid, &listing.name, *price, &listing.pay_to),
-                    Ask::Dutch(clock) => key.auction_otp(
-                        &txid,
-                        &listing.name,
-                        AuctionBind {
-                            start_price: clock.start_price.into_u64(),
-                            min_price: clock.min_price.into_u64(),
-                            start: u32::from(clock.start),
-                            end: u32::from(clock.end),
-                        },
-                        &listing.pay_to,
-                    ),
+                    Ask::Dutch(terms) => {
+                        key.auction_otp(&txid, &listing.name, terms, &listing.pay_to)
+                    }
                 };
                 match self.propose_list(listing, &record.ua, code, mtp, height) {
                     Ok(()) => {}
@@ -1298,15 +1292,15 @@ impl Market {
                         name = %listing.name.as_str(),
                         "list fee kept: that code is already open"
                     ),
-                    Err(MarketRefusal::BadClock) => tracing::info!(
+                    Err(MarketRefusal::BadTerms) => tracing::info!(
                         %txid,
                         name = %listing.name.as_str(),
-                        "list fee kept: the clock does not fall"
+                        "list fee kept: bad auction terms"
                     ),
                     Err(MarketRefusal::Ended) => tracing::info!(
                         %txid,
                         name = %listing.name.as_str(),
-                        "list fee kept: the clock has ended"
+                        "list fee kept: the auction has ended"
                     ),
                     Err(_) => tracing::info!(
                         %txid,
@@ -1408,7 +1402,7 @@ impl Market {
                         tracing::info!(
                             %txid,
                             name = %name.as_str(),
-                            "buy returned: the clock has not started"
+                            "buy returned: the auction has not started"
                         );
                         Admission {
                             opened: None,
@@ -2081,7 +2075,7 @@ mod tests {
             action: Action::List,
             ua: owner.clone(),
             listing: Some((pay_to, zats(150_000_000))),
-            clock: None,
+            auction: None,
         };
         assert!(!market.answer(&mut registry, &wrong, height()));
         assert_eq!(registry.price(&name()), None);
@@ -2091,7 +2085,7 @@ mod tests {
             action: Action::List,
             ua: owner.clone(),
             listing: Some((pay_to, zats(1))),
-            clock: None,
+            auction: None,
         };
         assert!(!market.answer(&mut registry, &other_price, height()));
         assert_eq!(registry.price(&name()), None);
@@ -2101,7 +2095,7 @@ mod tests {
             action: Action::List,
             ua: owner.clone(),
             listing: Some((pay_to, zats(150_000_000))),
-            clock: None,
+            auction: None,
         };
         assert!(market.answer(&mut registry, &right, height()));
         assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
@@ -2135,7 +2129,7 @@ mod tests {
                 TransparentAddress::PublicKeyHash([0x11; 20]),
                 zats(150_000_000),
             )),
-            clock: None,
+            auction: None,
         };
         assert!(!market.answer(&mut registry, &stranger, height()));
         assert_eq!(registry.price(&name()), None);
@@ -2160,7 +2154,7 @@ mod tests {
             action: Action::Delist,
             ua: owner.clone(),
             listing: None,
-            clock: None,
+            auction: None,
         };
         assert!(market.answer(&mut registry, &right, height()));
         assert_eq!(registry.price(&name()), None);
@@ -2605,13 +2599,13 @@ mod tests {
         assert!(market.is_paid(&name()));
     }
 
-    fn clock_for(start: u32, end: u32) -> Listing {
+    fn auction_listing(start: u32, end: u32) -> Listing {
         let (ua, pay_to) = alice();
         Listing {
             name: name(),
             ua,
             pay_to,
-            ask: Ask::Dutch(Clock {
+            ask: Ask::Dutch(AuctionTerms {
                 start_price: zats(100_000_000),
                 min_price: zats(40_000_000),
                 start: BlockHeight::from_u32(start),
@@ -2621,27 +2615,27 @@ mod tests {
     }
 
     #[test]
-    fn the_clock_falls_in_whole_zatoshis() {
-        let clock = Clock {
+    fn the_auction_price_falls_in_whole_zatoshis() {
+        let terms = AuctionTerms {
             start_price: zats(100_000_000),
             min_price: zats(40_000_000),
             start: BlockHeight::from_u32(10),
             end: BlockHeight::from_u32(20),
         };
         assert_eq!(
-            clock.price_at(BlockHeight::from_u32(10)),
+            terms.price_at(BlockHeight::from_u32(10)),
             Some(zats(100_000_000))
         );
         assert_eq!(
-            clock.price_at(BlockHeight::from_u32(15)),
+            terms.price_at(BlockHeight::from_u32(15)),
             Some(zats(70_000_000))
         );
         assert_eq!(
-            clock.price_at(BlockHeight::from_u32(20)),
+            terms.price_at(BlockHeight::from_u32(20)),
             Some(zats(40_000_000))
         );
-        assert_eq!(clock.price_at(BlockHeight::from_u32(9)), None);
-        assert_eq!(clock.price_at(BlockHeight::from_u32(21)), None);
+        assert_eq!(terms.price_at(BlockHeight::from_u32(9)), None);
+        assert_eq!(terms.price_at(BlockHeight::from_u32(21)), None);
     }
 
     #[test]
@@ -2650,7 +2644,9 @@ mod tests {
         let mut registry = sale_registry();
         let mut market = Market::new();
         let at = BlockHeight::from_u32(15);
-        market.list(&mut registry, &clock_for(10, 20), at).unwrap();
+        market
+            .list(&mut registry, &auction_listing(10, 20), at)
+            .unwrap();
         let code = OtpCode::for_test(*b"042831");
         let otp = market
             .open_buy(
@@ -2710,7 +2706,7 @@ mod tests {
         let mut market = Market::new();
         let early = BlockHeight::from_u32(9);
         market
-            .list(&mut registry, &clock_for(10, 20), early)
+            .list(&mut registry, &auction_listing(10, 20), early)
             .unwrap();
         assert!(matches!(
             market.open_buy(
@@ -2745,7 +2741,9 @@ mod tests {
         let mut registry = sale_registry();
         let mut market = Market::new();
         let at = BlockHeight::from_u32(20);
-        market.list(&mut registry, &clock_for(10, 20), at).unwrap();
+        market
+            .list(&mut registry, &auction_listing(10, 20), at)
+            .unwrap();
         let code = OtpCode::for_test(*b"042831");
         market
             .open_buy(
@@ -2779,7 +2777,7 @@ mod tests {
     }
 
     #[test]
-    fn an_auction_memo_names_the_clock() {
+    fn an_auction_memo_decodes_only_falling_terms() {
         let network = MainNetwork;
         let (owner, _) = alice();
         let memo = padded(&format!(
@@ -2792,7 +2790,7 @@ mod tests {
         };
         assert_eq!(
             list.ask,
-            Ask::Dutch(Clock {
+            Ask::Dutch(AuctionTerms {
                 start_price: zats(100_000_000),
                 min_price: zats(40_000_000),
                 start: BlockHeight::from_u32(10),
@@ -2811,13 +2809,13 @@ mod tests {
     }
 
     #[test]
-    fn an_auction_challenge_lists_the_clock() {
+    fn an_auction_challenge_lists_its_terms() {
         let (owner, _) = alice();
         let mut registry = sale_registry();
         let mut market = Market::new();
         let code = OtpCode::for_test(*b"042831");
         market
-            .propose_list(&clock_for(10, 20), &owner, code, mtp(), height())
+            .propose_list(&auction_listing(10, 20), &owner, code, mtp(), height())
             .unwrap();
         assert_eq!(registry.quote(&name(), BlockHeight::from_u32(15)), None);
         let memo = market
@@ -2847,7 +2845,9 @@ mod tests {
         let mut registry = sale_registry();
         let mut market = Market::new();
         let at = BlockHeight::from_u32(15);
-        market.list(&mut registry, &clock_for(10, 20), at).unwrap();
+        market
+            .list(&mut registry, &auction_listing(10, 20), at)
+            .unwrap();
         market
             .open_buy(
                 &registry,
@@ -2885,7 +2885,7 @@ mod tests {
             .unwrap();
         let code = OtpCode::for_test(*b"042831");
         market
-            .propose_list(&clock_for(10, 20), &owner, code, mtp(), height())
+            .propose_list(&auction_listing(10, 20), &owner, code, mtp(), height())
             .unwrap();
         let memo = market
             .unrelayed_challenges(|_| Some(owner.clone()))
@@ -2894,12 +2894,16 @@ mod tests {
         assert!(market.answer(&mut registry, &memo, after));
         assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
         assert!(matches!(
-            market.list(&mut registry, &clock_for(10, 20), after),
+            market.list(&mut registry, &auction_listing(10, 20), after),
             Err(MarketRefusal::Ended)
         ));
         assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
         assert!(market
-            .list(&mut registry, &clock_for(10, 20), BlockHeight::from_u32(20),)
+            .list(
+                &mut registry,
+                &auction_listing(10, 20),
+                BlockHeight::from_u32(20),
+            )
             .is_ok());
         assert_eq!(
             registry.quote(&name(), BlockHeight::from_u32(20)),
@@ -2908,13 +2912,15 @@ mod tests {
     }
 
     #[test]
-    fn a_paid_clock_keeps_the_hold_through_a_replay() {
+    fn a_paid_auction_buy_keeps_the_hold_through_a_replay() {
         let (owner, pay_to) = alice();
         let mut registry = sale_registry();
         let mut market = Market::new();
         let at = BlockHeight::from_u32(15);
         let paid_at = BlockHeight::from_u32(16);
-        market.list(&mut registry, &clock_for(10, 20), at).unwrap();
+        market
+            .list(&mut registry, &auction_listing(10, 20), at)
+            .unwrap();
         let code = OtpCode::for_test(*b"042831");
         market
             .open_buy(
@@ -3024,7 +3030,9 @@ mod tests {
         let mut registry = sale_registry();
         let mut market = Market::new();
         let at = BlockHeight::from_u32(15);
-        market.list(&mut registry, &clock_for(10, 20), at).unwrap();
+        market
+            .list(&mut registry, &auction_listing(10, 20), at)
+            .unwrap();
         let first = admit_buy(&mut market, &registry, 1, zats(1_000_000), at);
         assert!(first.opened.is_some());
         assert!(first.returned.is_none());
@@ -3050,10 +3058,10 @@ mod tests {
         let mut market = Market::new();
         let early = BlockHeight::from_u32(9);
         market
-            .list(&mut registry, &clock_for(10, 20), early)
+            .list(&mut registry, &auction_listing(10, 20), early)
             .unwrap();
         let admitted = admit_buy(&mut market, &registry, 1, zats(1_000_000), early);
-        let back = admitted.returned.expect("the clock has not started");
+        let back = admitted.returned.expect("the auction has not started");
         assert_eq!(back.recipient, bob());
         assert_eq!(back.note, "ZNS:wait:alice:10");
         let (amount, note) = due_note(&queued(&back, zats(1_000_000), early));
@@ -3068,7 +3076,9 @@ mod tests {
         let mut market = Market::new();
         let at = BlockHeight::from_u32(15);
         let later = BlockHeight::from_u32(16);
-        market.list(&mut registry, &clock_for(10, 20), at).unwrap();
+        market
+            .list(&mut registry, &auction_listing(10, 20), at)
+            .unwrap();
         let txid = TxId::from_bytes([1; 32]);
         let first = market.admit(
             txid,

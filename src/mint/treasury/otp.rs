@@ -6,6 +6,7 @@ use time::{Duration, Timestamp};
 use zcash_primitives::transaction::TxId;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::mint::sale::AuctionTerms;
 use crate::mint::{Name, OtpMemo, Request};
 
 /// Thirty minutes; §5.3: D_OTP.
@@ -14,15 +15,6 @@ pub const D_OTP: i64 = 1800;
 /// Wrong OTP responses tolerated per challenge (§5: the deployment
 /// fixes the maximum number of verification attempts).
 pub const MAX_ATTEMPTS: u32 = 6;
-
-/// The prices and blocks an auction challenge binds.
-#[derive(Clone, Copy)]
-pub struct AuctionBind {
-    pub start_price: u64,
-    pub min_price: u64,
-    pub start: u32,
-    pub end: u32,
-}
 
 /// A six-digit one-time passcode.
 #[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
@@ -74,7 +66,7 @@ impl OtpCode {
         key: &[u8],
         txid: &[u8; 32],
         name: &[u8],
-        bind: AuctionBind,
+        terms: &AuctionTerms,
         pay_to: &[u8],
     ) -> Self {
         use hmac::{Hmac, KeyInit, Mac};
@@ -84,10 +76,10 @@ impl OtpCode {
         mac.update(b"ZNS:auctionotp");
         mac.update(txid);
         mac.update(name);
-        mac.update(&bind.start_price.to_be_bytes());
-        mac.update(&bind.min_price.to_be_bytes());
-        mac.update(&bind.start.to_be_bytes());
-        mac.update(&bind.end.to_be_bytes());
+        mac.update(&terms.start_price.into_u64().to_be_bytes());
+        mac.update(&terms.min_price.into_u64().to_be_bytes());
+        mac.update(&u32::from(terms.start).to_be_bytes());
+        mac.update(&u32::from(terms.end).to_be_bytes());
         mac.update(pay_to);
         Self::from_mac(mac)
     }
@@ -167,7 +159,7 @@ impl OtpChallenge {
             action: self.request.action(),
             ua: self.request.ua().clone(),
             listing: None,
-            clock: None,
+            auction: None,
         }
     }
 }

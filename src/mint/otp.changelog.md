@@ -1,5 +1,10 @@
 # `mint/otp.rs` design record
 
+## 2026-11-09 — The auction challenge binds the sale's `AuctionTerms`
+
+- `OtpCode::auction` takes `&sale::AuctionTerms`; `AuctionBind` is gone. The
+  MAC input bytes are unchanged, so every code stays the same.
+
 ## 2026-11-05 — An auction challenge binds the clock
 
 - `OtpCode::auction` is HMAC-SHA256 over the request, both prices,
