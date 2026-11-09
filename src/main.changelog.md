@@ -1,5 +1,14 @@
 # main.changelog.md
 
+## 2026-11-09 — A list, delist, or buy arrives as a `Request` (#446)
+
+- The block pass sends `Request::List`, `Delist`, and `Buy` to
+  `market.admit`, and records claims, updates, and releases, as before.
+- List and delist challenges live in `challenges` and are relayed by
+  the same tip-pass loop as update and release, so the marketplace's
+  separate relay loop is gone. A rollback drops them with the rest.
+- A buy's challenge drop happens in `market.admit`.
+
 ## 2026-11-09 — The tip wait borrows the loop's node handle
 
 - The tip read takes `&source` instead of a clone.

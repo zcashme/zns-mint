@@ -77,8 +77,9 @@ impl NameRecord {
     }
 
     /// The clock-and-verb check behind [`Registry::authorize_challenge`]:
-    /// release from this record's controller, forever names take no
-    /// term. Claims are never challenged.
+    /// release, list, and delist from this record's controller, a list
+    /// at the transparent receiver on her address, and forever names
+    /// take no term. Claims and buys are never challenged.
     fn allows_challenge(
         &self,
         request: &Request,
@@ -90,8 +91,9 @@ impl NameRecord {
         }
         match request {
             Request::Update { term, .. } => !(self.expires_at == Expiry::Never && term.is_some()),
-            Request::Release { ua, .. } => *ua == self.ua,
-            Request::Claim { .. } => false,
+            Request::Release { ua, .. } | Request::Delist { ua, .. } => *ua == self.ua,
+            Request::List(listing) => is_owner_listing(&self.ua, &listing.ua, &listing.pay_to),
+            Request::Claim { .. } | Request::Buy { .. } => false,
         }
     }
 
@@ -318,23 +320,6 @@ impl Registry {
         record
             .allows_challenge(request, trigger_height, mtp_now)
             .then(|| record.clone())
-    }
-
-    /// The record a market challenge goes to, under the same gate as
-    /// [`Self::authorize_challenge`]. The market rules on the verb.
-    pub fn challengeable(
-        &self,
-        name_notes: &NameNoteQueue,
-        name: &Name,
-        trigger_height: BlockHeight,
-        mtp_now: Timestamp,
-    ) -> Option<&NameRecord> {
-        if name_notes.note_pending(name) {
-            return None;
-        }
-        self.records
-            .get(name)
-            .filter(|record| record.is_challengeable(trigger_height, mtp_now))
     }
 
     /// The record for a name at the applied tip. Released names are absent.

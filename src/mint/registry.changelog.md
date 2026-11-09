@@ -2,6 +2,13 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-11-09 — List and delist are challenged here (#446)
+
+- `allows_challenge` allows a list from the controller at the
+  transparent receiver on her address, and a delist from the
+  controller. It refuses a buy, as it refuses a claim.
+- `challengeable` is gone; `authorize_challenge` gates every relay.
+
 ## 2026-11-03 — The market checks its own challenges
 
 - `allows_challenge` rules on update and release only.

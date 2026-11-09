@@ -1,5 +1,23 @@
 # `mint/otp.rs` design record
 
+## 2026-11-09 — An `OtpChallenge` can challenge a list or a delist (#446)
+
+- `OtpQueue` holds list and delist challenges with update and release
+  ones, under the same rules: a random code (§5), regenerated on a
+  clash; an answer only once relayed; wrong answers counted against
+  relayed challenges; dropped when a transition is admitted for the
+  name, and on a rollback.
+- `OtpChallenge::memo` carries the t1 and the price or auction terms of
+  a `Request::List`. Update and release memos are unchanged.
+- `complete` also checks that an answer repeats the challenge's terms
+  (`same_terms`). An update or release answer carries none.
+- `relay_seen` takes a relay read back from the chain: the challenge it
+  names takes its code and counts as relayed.
+- `OtpCode::list`, `auction`, and `delist` are gone. A list or delist
+  code derived from the access-code key could be computed by anyone
+  holding that key, which the issuer of pre-sale codes does.
+- `ChallengeState` is exported from `treasury`.
+
 ## 2026-11-09 — The auction challenge binds the sale's `AuctionTerms`
 
 - `OtpCode::auction` takes `&sale::AuctionTerms`; `AuctionBind` is gone. The

@@ -1,5 +1,14 @@
 # Boot module changelog
 
+## 2026-11-09 — The sync replays a list, delist, or buy `Request` (#446)
+
+- `Request::List`, `Delist`, and `Buy` go through `Market::admit`, as
+  `MintInbound::Market` did.
+- The sync builds `challenges` alongside the marketplace and hands it
+  to `main`, holding the list and delist challenges it read.
+- Each block's relays reach `relay_seen` before its answers, so an
+  answer in the history matches the random code its owner was sent.
+
 ## 2026-11-05 — A scan applies an auction reply and does not return it
 
 - An auction challenge is answered the same way as a list. A dutch

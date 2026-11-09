@@ -94,7 +94,8 @@ pub struct Boot<P: Parameters> {
     pub mtp: MtpTracker,
     /// must not: fail-closed at birth — the first price or no start
     pub oracle: Oracle,
-    /// boot-initialized faculty: born empty, filled by `main`
+    /// produced: list and delist challenges read from the chain during
+    /// boot sync; update and release challenges are filled by `main`
     pub challenges: OtpQueue,
     /// TEE-derived access-code key (HMAC purpose key, not the root)
     pub access_code_key: AccessCodeDerivationKey,
@@ -112,7 +113,7 @@ pub struct Boot<P: Parameters> {
     pub requests: RequestQueue,
     /// initialized: refunds due
     pub refunds: RefundQueue,
-    /// Open sales, challenges, and market events read from the chain during boot sync.
+    /// Open sales and marketplace events read from the chain during boot sync.
     pub market: Market,
     /// The exact encoded identity written to the boot identity document.
     pub treasury_address: String,
@@ -596,6 +597,7 @@ impl Boot<Network> {
             "boot: fee rate read"
         );
         let mut market = Market::new();
+        let mut challenges = OtpQueue::new();
         while wallet.tip().block_height() < best_height {
             let from_height = wallet.tip().block_height();
             let next_height = from_height + 1;
@@ -610,7 +612,7 @@ impl Boot<Network> {
                 });
 
             let payments = transparent_payments(&block);
-            let arrivals = crate::mint::apply_block(
+            let (arrivals, relays) = crate::mint::apply_block(
                 &network,
                 mint_birthday,
                 &registry_keys,
@@ -625,17 +627,28 @@ impl Boot<Network> {
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
             market.expire(&mut registry, block_mtp, next_height);
+            challenges.expire(block_mtp);
             market.reconcile(&mut registry, next_height);
+            // The codes this mint sent before the sync: an answer in the
+            // history matches the code its owner was sent.
+            for relay in &relays {
+                challenges.relay_seen(relay);
+            }
             for (txid, inbound, paid) in arrivals {
                 if let crate::mint::MintInbound::Response(response) = &inbound {
                     if response.action.is_list()
                         || response.action.is_delist()
                         || response.action.is_auction()
                     {
-                        market.answer(&mut registry, response, next_height);
+                        market.answer(&mut registry, &mut challenges, response, next_height);
                     }
                 }
-                if let crate::mint::MintInbound::Market(request) = &inbound {
+                if let crate::mint::MintInbound::Request(
+                    request @ (crate::mint::Request::List(_)
+                    | crate::mint::Request::Delist { .. }
+                    | crate::mint::Request::Buy { .. }),
+                ) = &inbound
+                {
                     // A returned intent is not sent from a scan. The live
                     // loop sends it when the intent is first admitted.
                     market.admit(
@@ -643,6 +656,7 @@ impl Boot<Network> {
                         request,
                         paid,
                         &registry,
+                        &mut challenges,
                         &fee_rule,
                         next_height,
                         block_mtp,
@@ -720,9 +734,6 @@ impl Boot<Network> {
             tokio::time::sleep(zcash::RETRY_PAUSE).await;
         };
 
-        // The challenge memory: empty by construction, filled by the run
-        // loop as update/release relays are issued.
-        let challenges = OtpQueue::new();
         let name_notes = NameNoteQueue::default();
         let requests = RequestQueue::default();
         let refunds = RefundQueue::default();
@@ -1567,7 +1578,7 @@ mod tests {
                 tree_size +=
                     u32::try_from(block.vtx()[0].ironwood_bundle().unwrap().actions().len())
                         .unwrap();
-                let arrivals = crate::mint::apply_block(
+                let (arrivals, _) = crate::mint::apply_block(
                     &network,
                     birthday,
                     &registry_keys,

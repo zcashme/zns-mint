@@ -1,5 +1,10 @@
 # `mint/note.rs` design record
 
+## 2026-11-09 — The Treasury's sent memos are kept (#446)
+
+- `decrypt_treasury_memos` also returns the memos of the Treasury's
+  outgoing outputs, which `decrypt_transaction` already recovers.
+
 ## 2026-11-02 — A sale note binds the buyer
 
 - `ZNS:sale` spends the holder's note and binds the buyer for the

@@ -341,7 +341,7 @@ async fn main() {
                 });
 
             let payments = zns_mint::mint::sale::transparent_payments(&block);
-            let arrivals = zns_mint::mint::apply_block(
+            let (arrivals, _) = zns_mint::mint::apply_block(
                 &network,
                 birthday,
                 &registry_keys,
@@ -386,21 +386,21 @@ async fn main() {
             market.reconcile(&mut registry, next_height);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
-                    MintInbound::Market(request) => {
+                    MintInbound::Request(
+                        request @ (Request::List(_) | Request::Delist { .. } | Request::Buy { .. }),
+                    ) => {
                         let admitted = market.admit(
                             txid,
                             &request,
                             paid,
                             &registry,
+                            &mut challenges,
                             &fee_rule,
                             next_height,
                             block_mtp,
                             |name| name_notes.note_pending(name),
                             &access_code_key,
                         );
-                        if let Some(name) = admitted.opened {
-                            challenges.drop_challenges(&name);
-                        }
                         if let Some(back) = admitted.returned {
                             refunds.admit_with_note(
                                 &fee_rule,
@@ -413,7 +413,11 @@ async fn main() {
                             );
                         }
                     }
-                    MintInbound::Request(request) => {
+                    MintInbound::Request(
+                        request @ (Request::Claim { .. }
+                        | Request::Update { .. }
+                        | Request::Release { .. }),
+                    ) => {
                         requests.record(txid, request, paid, next_height);
                     }
                     // The right code spends its OTP, and the transition it
@@ -425,7 +429,7 @@ async fn main() {
                             || response.action.is_delist()
                             || response.action.is_auction()
                         {
-                            market.answer(&mut registry, &response, next_height);
+                            market.answer(&mut registry, &mut challenges, &response, next_height);
                             refunds.admit(
                                 &fee_rule,
                                 txid,
@@ -507,7 +511,10 @@ async fn main() {
                         let authorized = match &sent.request {
                             Request::Update { .. } => registry.authorize_update(&sent, block_mtp),
                             Request::Release { .. } => registry.authorize_release(&sent),
-                            Request::Claim { .. } => continue,
+                            Request::Claim { .. }
+                            | Request::List(_)
+                            | Request::Delist { .. }
+                            | Request::Buy { .. } => continue,
                         };
                         let Some(note) = authorized else {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
@@ -715,6 +722,8 @@ async fn main() {
                     }
                     challenges.admit(request.clone(), txid, mtp_now);
                 }
+                // The market admits these at their block; they are never recorded.
+                Request::List(_) | Request::Delist { .. } | Request::Buy { .. } => {}
             }
         }
 
@@ -744,29 +753,6 @@ async fn main() {
             .await
             {
                 challenges.challenge_issued(&pending);
-            }
-        }
-
-        for challenge in market.unrelayed_challenges(|name| {
-            registry
-                .challengeable(&name_notes, name, target_height, mtp_now)
-                .map(|record| record.ua.clone())
-        }) {
-            if relay(
-                &network,
-                &mut wallet,
-                &treasury_keys,
-                &sapling_spend,
-                &sapling_output,
-                &fee_rule,
-                &challenge.ua,
-                &source,
-                &challenge,
-                "market",
-            )
-            .await
-            {
-                market.challenge_relayed(&challenge.code);
             }
         }
 

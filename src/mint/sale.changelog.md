@@ -1,5 +1,19 @@
 # Sale module changelog
 
+## 2026-11-09 — List, delist, and buy are `Request` variants (#446)
+
+- `MarketRequest` is gone. `Market::admit` takes a `Request`; a claim,
+  update, or release changes nothing.
+- A list or delist challenge is an `OtpChallenge` in `OtpQueue`.
+  `MarketChallenge`, `ChallengeKind`, `Market.challenges`, the
+  `Challenge` and `ChallengeClosed` marketplace events,
+  `unrelayed_challenges`, and `challenge_relayed` are gone.
+  `Market::truncate_to` no longer rebuilds challenges.
+- `propose_list` and `propose_delist` take the request's txid and admit
+  it to the `OtpQueue`; `answer` completes it there. `CodeTaken` is
+  gone: a random code is drawn again instead.
+- A buy that opens drops the name's challenges in `admit`.
+
 ## 2026-11-09 — An auction's terms are `AuctionTerms`
 
 - `Clock` is `AuctionTerms`: the four values a `ZNS:auction` memo

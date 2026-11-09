@@ -6,7 +6,7 @@ use time::{Duration, Timestamp};
 use zcash_primitives::transaction::TxId;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::mint::sale::AuctionTerms;
+use crate::mint::sale::Ask;
 use crate::mint::{Name, OtpMemo, Request};
 
 /// Thirty minutes; §5.3: D_OTP.
@@ -40,58 +40,6 @@ impl OtpCode {
         let mut mac =
             Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
         mac.update(b"ZNS:buyotp");
-        mac.update(txid);
-        mac.update(name);
-        Self::from_mac(mac)
-    }
-
-    /// The list challenge for this request. The same inputs yield the
-    /// same code, so a rescan matches the controller's reply.
-    pub fn list(key: &[u8], txid: &[u8; 32], name: &[u8], price: u64, pay_to: &[u8]) -> Self {
-        use hmac::{Hmac, KeyInit, Mac};
-        use sha2::Sha256;
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
-        mac.update(b"ZNS:listotp");
-        mac.update(txid);
-        mac.update(name);
-        mac.update(&price.to_be_bytes());
-        mac.update(pay_to);
-        Self::from_mac(mac)
-    }
-
-    /// The auction challenge for this request. The same inputs yield the
-    /// same code, so a rescan matches the controller's reply.
-    pub fn auction(
-        key: &[u8],
-        txid: &[u8; 32],
-        name: &[u8],
-        terms: &AuctionTerms,
-        pay_to: &[u8],
-    ) -> Self {
-        use hmac::{Hmac, KeyInit, Mac};
-        use sha2::Sha256;
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
-        mac.update(b"ZNS:auctionotp");
-        mac.update(txid);
-        mac.update(name);
-        mac.update(&terms.start_price.into_u64().to_be_bytes());
-        mac.update(&terms.min_price.into_u64().to_be_bytes());
-        mac.update(&u32::from(terms.start).to_be_bytes());
-        mac.update(&u32::from(terms.end).to_be_bytes());
-        mac.update(pay_to);
-        Self::from_mac(mac)
-    }
-
-    /// The delist challenge for this request. The same inputs yield the
-    /// same code, so a rescan matches the controller's reply.
-    pub fn delist(key: &[u8], txid: &[u8; 32], name: &[u8]) -> Self {
-        use hmac::{Hmac, KeyInit, Mac};
-        use sha2::Sha256;
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
-        mac.update(b"ZNS:delistotp");
         mac.update(txid);
         mac.update(name);
         Self::from_mac(mac)
@@ -151,15 +99,51 @@ impl OtpChallenge {
         correct
     }
 
-    /// The controller-facing projection.
+    /// The controller-facing projection. A list challenge carries the
+    /// t1 and the price or the auction terms she is authorizing.
     pub fn memo(&self) -> OtpMemo {
+        let (listing, auction) = match &self.request {
+            Request::List(listed) => match &listed.ask {
+                Ask::Flat(price) => (Some((listed.pay_to, *price)), None),
+                Ask::Dutch(terms) => (None, Some((listed.pay_to, terms.clone()))),
+            },
+            Request::Claim { .. }
+            | Request::Update { .. }
+            | Request::Release { .. }
+            | Request::Delist { .. }
+            | Request::Buy { .. } => (None, None),
+        };
         OtpMemo {
             code: self.code.clone(),
             name: self.request.name().clone(),
             action: self.request.action(),
             ua: self.request.ua().clone(),
-            listing: None,
-            auction: None,
+            listing,
+            auction,
+        }
+    }
+
+    /// `response` repeats the t1 and the price or auction terms this
+    /// challenge names, and no others.
+    pub fn same_terms(&self, response: &OtpMemo) -> bool {
+        match &self.request {
+            Request::List(listing) => match &listing.ask {
+                Ask::Flat(price) => {
+                    response.auction.is_none()
+                        && response.listing.as_ref().is_some_and(|(pay_to, quoted)| {
+                            *pay_to == listing.pay_to && quoted == price
+                        })
+                }
+                Ask::Dutch(terms) => response
+                    .auction
+                    .as_ref()
+                    .is_some_and(|(pay_to, quoted)| *pay_to == listing.pay_to && quoted == terms),
+            },
+            Request::Claim { .. }
+            | Request::Update { .. }
+            | Request::Release { .. }
+            | Request::Delist { .. }
+            | Request::Buy { .. } => response.listing.is_none() && response.auction.is_none(),
         }
     }
 }
@@ -192,6 +176,21 @@ impl OtpQueue {
     pub fn new() -> Self {
         Self {
             challenges: Vec::new(),
+        }
+    }
+
+    /// A relay the Treasury sent, read back from the chain: the
+    /// challenge it names takes its code and counts as relayed.
+    pub fn relay_seen(&mut self, relay: &OtpMemo) {
+        for (challenge, state, _) in &mut self.challenges {
+            if challenge.request.name() == &relay.name
+                && challenge.request.ua() == &relay.ua
+                && challenge.request.action() == relay.action
+                && challenge.same_terms(relay)
+            {
+                challenge.code = relay.code.clone();
+                *state = ChallengeState::Relayed;
+            }
         }
     }
 
@@ -295,9 +294,9 @@ impl OtpQueue {
             .retain(|(challenge, _, _)| challenge.request.name() != name);
     }
 
-    /// The right code removes and returns its challenge, with the txid
-    /// of the request it answers. A wrong one counts against every
-    /// challenge the response names.
+    /// The right code, with the terms the challenge names, removes and
+    /// returns its challenge, with the txid of the request it answers.
+    /// A wrong one counts against every challenge the response names.
     pub fn complete(&mut self, response: &OtpMemo) -> Option<(OtpChallenge, TxId)> {
         let named = |challenge: &OtpChallenge, state: &ChallengeState| {
             *state == ChallengeState::Relayed
@@ -306,7 +305,9 @@ impl OtpQueue {
                 && challenge.request.ua() == &response.ua
         };
         let right = self.challenges.iter().position(|(challenge, state, _)| {
-            named(challenge, state) && bool::from(challenge.code.0.ct_eq(&response.code.0))
+            named(challenge, state)
+                && bool::from(challenge.code.0.ct_eq(&response.code.0))
+                && challenge.same_terms(response)
         });
         if let Some(index) = right {
             let (mut challenge, _, txid) = self.challenges.remove(index);
