@@ -1,5 +1,10 @@
 # Sale module changelog
 
+## 2026-11-09 — The list challenge passes the listing's `Clock`
+
+- A Dutch listing hands its `Clock` to `auction_otp` instead of
+  converting it to integers.
+
 ## 2026-11-06 — A late clock reply leaves the book, and a paid hold still returns
 
 - A reply after the end block does not install the clock. The end

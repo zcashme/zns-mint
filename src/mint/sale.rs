@@ -17,7 +17,7 @@ use zcash_protocol::TxId;
 
 use crate::mint::presale::AccessCodeDerivationKey;
 use crate::mint::registry::Registry;
-use crate::mint::treasury::{AuctionBind, OtpCode, D_OTP, FEE_ACTIONS, MAX_ATTEMPTS};
+use crate::mint::treasury::{OtpCode, D_OTP, FEE_ACTIONS, MAX_ATTEMPTS};
 use crate::mint::{
     decode_name_and_ua, decode_zns, Action, Expiry, Name, NameCommitment, NameNote, OtpMemo,
     Timestamp, UnifiedAddress,
@@ -1274,17 +1274,9 @@ impl Market {
                 }
                 let code = match &listing.ask {
                     Ask::Flat(price) => key.list_otp(&txid, &listing.name, *price, &listing.pay_to),
-                    Ask::Dutch(clock) => key.auction_otp(
-                        &txid,
-                        &listing.name,
-                        AuctionBind {
-                            start_price: clock.start_price.into_u64(),
-                            min_price: clock.min_price.into_u64(),
-                            start: u32::from(clock.start),
-                            end: u32::from(clock.end),
-                        },
-                        &listing.pay_to,
-                    ),
+                    Ask::Dutch(clock) => {
+                        key.auction_otp(&txid, &listing.name, clock, &listing.pay_to)
+                    }
                 };
                 match self.propose_list(listing, &record.ua, code, mtp, height) {
                     Ok(()) => {}
