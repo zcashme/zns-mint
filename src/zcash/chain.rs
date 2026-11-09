@@ -12,7 +12,9 @@ use zcash_primitives::block::{Block, BlockHash, BlockHeader};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::constants::MAX_BLOCK_BYTES;
-use zebra_indexer_proto::{BlockAndHash, BlockHashAndHeight, BlockRequest, Empty, ZebraClient};
+use zebra_indexer_proto::{
+    BlockAndHash, BlockHashAndHeight, BlockRequest, Empty, HashOrHeight, ZebraClient,
+};
 
 use super::{
     not_on_best_chain, CanonicalBlockSource, JsonRpc, TransportError, REQUEST_TIMEOUT, RETRY_PAUSE,
@@ -62,14 +64,17 @@ impl ChainClient {
     /// One `Indexer.GetBlock` by height: the block's raw consensus bytes
     /// and its wire hash, from the node's best chain. A miss answers
     /// `not_found` — the verdict [`not_on_best_chain`] turns into a
-    /// re-converge, never a retry.
+    /// re-converge, never a retry. A height above the highest Zebra serves
+    /// is that same verdict.
     pub(crate) async fn block_and_hash(
         &mut self,
         height: BlockHeight,
     ) -> Result<BlockAndHash, TransportError> {
+        let request = BlockRequest::new(HashOrHeight::Height(u32::from(height)))
+            .ok_or(TransportError::NotOnBestChain)?;
         Ok(self
             .0
-            .get_block(block_request_at_height(height))
+            .get_block(request)
             .await
             .map_err(|status| not_on_best_chain(status.into()))?
             .into_inner())
@@ -183,16 +188,6 @@ pub(crate) fn block_hash_from_display(bytes: &[u8]) -> Option<BlockHash> {
         Some(BlockHash(arr))
     } else {
         None
-    }
-}
-
-/// A height on the `BlockRequest` wire: exactly four big-endian bytes —
-/// 32 would name a hash instead (the server reads the length: a 32-byte
-/// value is a display-order hash, a 4-byte value is a big-endian height,
-/// anything else is rejected as `invalid_argument`).
-fn block_request_at_height(height: BlockHeight) -> BlockRequest {
-    BlockRequest {
-        hash_or_height: u32::from(height).to_be_bytes().to_vec(),
     }
 }
 
@@ -784,20 +779,6 @@ mod tests {
             chain_state_from_rpc_response(garbage),
             Err(TransportError::BadNodeData(_))
         ));
-    }
-
-    #[test]
-    fn block_requests_name_heights_as_four_big_endian_bytes() {
-        // The protocol reads 32 bytes as a hash; four bytes must name a
-        // height, or the fetch silently means something else.
-        for (height, wire) in [
-            (BlockHeight::from_u32(0), vec![0, 0, 0, 0]),
-            (BlockHeight::from_u32(1), vec![0, 0, 0, 1]),
-            (BlockHeight::from_u32(1000), vec![0, 0, 3, 232]),
-            (BlockHeight::from_u32(u32::MAX), vec![255, 255, 255, 255]),
-        ] {
-            assert_eq!(block_request_at_height(height).hash_or_height, wire);
-        }
     }
 
     /// Upstream's own mainnet block fixture (zcash_primitives 0.30.1,
