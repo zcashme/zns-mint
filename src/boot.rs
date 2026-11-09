@@ -612,7 +612,7 @@ impl Boot<Network> {
                 });
 
             let payments = transparent_payments(&block);
-            let arrivals = crate::mint::apply_block(
+            let (arrivals, relays) = crate::mint::apply_block(
                 &network,
                 mint_birthday,
                 &registry_keys,
@@ -632,6 +632,11 @@ impl Boot<Network> {
             challenges.reconcile_listing_challenges(|name| {
                 registry.record(name).map(|record| record.ua.clone())
             });
+            // The codes this mint sent before the sync: an answer in the
+            // history matches the code its owner was sent.
+            for relay in &relays {
+                challenges.relay_seen(relay);
+            }
             for (txid, inbound, paid) in arrivals {
                 if let crate::mint::MintInbound::Response(response) = &inbound {
                     if response.action.is_list()
@@ -1576,7 +1581,7 @@ mod tests {
                 tree_size +=
                     u32::try_from(block.vtx()[0].ironwood_bundle().unwrap().actions().len())
                         .unwrap();
-                let arrivals = crate::mint::apply_block(
+                let (arrivals, _) = crate::mint::apply_block(
                     &network,
                     birthday,
                     &registry_keys,

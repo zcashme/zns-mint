@@ -14,6 +14,8 @@
   derived from the request, an answer that needs no relay, and a
   challenge that closes when its owner changes. An answer's code is
   compared in constant time. `expire` closes them too.
+- `relay_seen` takes a relay read back from the chain: the challenge it
+  names takes its code and counts as relayed.
 - A rollback drops list and delist challenges with the rest of the
   queue; they are no longer rebuilt. A request in a block the rollback
   removed opens the same challenge when that block is applied again.

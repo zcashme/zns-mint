@@ -7,6 +7,8 @@
   is gone; a list, delist, or buy arrives as `MintInbound::Request`.
 - `Request::action` is `List` or `Auction` for a listing, `Delist` for a
   delist, and `Sale` for a buy.
+- `apply_block` also returns the OTP relays the Treasury sent in the
+  block, read with its outgoing viewing key.
 
 ## 2026-11-09 — An auction challenge carries its terms
 

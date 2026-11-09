@@ -326,6 +326,21 @@ impl OtpQueue {
             .collect()
     }
 
+    /// A relay the Treasury sent, read back from the chain: the
+    /// challenge it names takes its code and counts as relayed.
+    pub fn relay_seen(&mut self, relay: &OtpMemo) {
+        for (challenge, state) in &mut self.listing_challenges {
+            if challenge.request.name() == &relay.name
+                && challenge.request.ua() == &relay.ua
+                && challenge.request.action() == relay.action
+                && challenge.same_terms(relay)
+            {
+                challenge.code = relay.code.clone();
+                *state = ChallengeState::Relayed;
+            }
+        }
+    }
+
     /// The node accepted the memo.
     pub fn listing_challenge_relayed(&mut self, code: &OtpCode) {
         for (challenge, state) in &mut self.listing_challenges {
