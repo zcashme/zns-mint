@@ -6,7 +6,7 @@ use time::{Duration, Timestamp};
 use zcash_primitives::transaction::TxId;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::mint::sale::Clock;
+use crate::mint::sale::AuctionTerms;
 use crate::mint::{Name, OtpMemo, Request};
 
 /// Thirty minutes; §5.3: D_OTP.
@@ -62,7 +62,13 @@ impl OtpCode {
 
     /// The auction challenge for this request. The same inputs yield the
     /// same code, so a rescan matches the controller's reply.
-    pub fn auction(key: &[u8], txid: &[u8; 32], name: &[u8], clock: &Clock, pay_to: &[u8]) -> Self {
+    pub fn auction(
+        key: &[u8],
+        txid: &[u8; 32],
+        name: &[u8],
+        terms: &AuctionTerms,
+        pay_to: &[u8],
+    ) -> Self {
         use hmac::{Hmac, KeyInit, Mac};
         use sha2::Sha256;
         let mut mac =
@@ -70,10 +76,10 @@ impl OtpCode {
         mac.update(b"ZNS:auctionotp");
         mac.update(txid);
         mac.update(name);
-        mac.update(&clock.start_price.into_u64().to_be_bytes());
-        mac.update(&clock.min_price.into_u64().to_be_bytes());
-        mac.update(&u32::from(clock.start).to_be_bytes());
-        mac.update(&u32::from(clock.end).to_be_bytes());
+        mac.update(&terms.start_price.into_u64().to_be_bytes());
+        mac.update(&terms.min_price.into_u64().to_be_bytes());
+        mac.update(&u32::from(terms.start).to_be_bytes());
+        mac.update(&u32::from(terms.end).to_be_bytes());
         mac.update(pay_to);
         Self::from_mac(mac)
     }
@@ -153,7 +159,7 @@ impl OtpChallenge {
             action: self.request.action(),
             ua: self.request.ua().clone(),
             listing: None,
-            clock: None,
+            auction: None,
         }
     }
 }

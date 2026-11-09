@@ -23,7 +23,7 @@ use time::{OffsetDateTime, Timestamp};
 use tokio::task::JoinHandle;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::mint::sale::Clock;
+use crate::mint::sale::AuctionTerms;
 use crate::mint::treasury::OtpCode;
 use crate::mint::Name;
 use zcash_protocol::TxId;
@@ -407,7 +407,7 @@ impl AccessCodeDerivationKey {
         &self,
         txid: &TxId,
         name: &Name,
-        clock: &Clock,
+        terms: &AuctionTerms,
         pay_to: &transparent::address::TransparentAddress,
     ) -> OtpCode {
         let hash = match pay_to {
@@ -418,7 +418,7 @@ impl AccessCodeDerivationKey {
             self.0.as_ref(),
             txid.as_ref(),
             name.as_str().as_bytes(),
-            clock,
+            terms,
             hash,
         )
     }

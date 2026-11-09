@@ -78,7 +78,7 @@ pub enum Action {
     List,
     /// A controller challenge that removes a listing. Not a name note.
     Delist,
-    /// A controller challenge that lists the name on a falling clock.
+    /// A controller challenge that lists the name at a falling price.
     /// Not a name note.
     Auction,
 }
@@ -143,7 +143,7 @@ impl Action {
         matches!(self, Action::Delist)
     }
 
-    /// True when this action is a dutch-clock challenge.
+    /// True when this action is an auction challenge.
     pub const fn is_auction(self) -> bool {
         matches!(self, Action::Auction)
     }
@@ -298,8 +298,8 @@ pub struct OtpMemo {
     pub ua: UnifiedAddress,
     /// The t1 and price on a list challenge. Absent for every other verb.
     pub listing: Option<(TransparentAddress, Zatoshis)>,
-    /// The t1 and clock on an auction challenge. Absent for every other verb.
-    pub clock: Option<(TransparentAddress, sale::Clock)>,
+    /// The t1 and terms on an auction challenge. Absent for every other verb.
+    pub auction: Option<(TransparentAddress, sale::AuctionTerms)>,
 }
 
 impl OtpMemo {
@@ -320,16 +320,16 @@ impl OtpMemo {
                 sale::encode_zec(*price),
             )
         } else if self.action.is_auction() {
-            let (pay_to, clock) = self.clock.as_ref()?;
+            let (pay_to, terms) = self.auction.as_ref()?;
             format!(
                 "ZNS:otp:{otp}:{}:auction:{}:{}:{}:{}:{}:{}",
                 self.name.as_str(),
                 self.ua.encode(network),
                 Address::Transparent(*pay_to).encode(network),
-                sale::encode_zec(clock.start_price),
-                sale::encode_zec(clock.min_price),
-                u32::from(clock.start),
-                u32::from(clock.end),
+                sale::encode_zec(terms.start_price),
+                sale::encode_zec(terms.min_price),
+                u32::from(terms.start),
+                u32::from(terms.end),
             )
         } else {
             format!(
@@ -372,8 +372,8 @@ impl OtpMemo {
         })?;
 
         // A list sentence carries the t1 and the price. An auction sentence
-        // carries the t1 and the clock. The other verbs stay six fields.
-        let (ua, listing, clock) = if action.is_list() {
+        // carries the t1 and the terms. The other verbs stay six fields.
+        let (ua, listing, auction) = if action.is_list() {
             if parts.len() != 8 {
                 return None;
             }
@@ -387,16 +387,16 @@ impl OtpMemo {
             }
             let ua = decode_controller_ua(network, parts[5])?;
             let pay_to = sale::decode_t1(network, parts[6])?;
-            let clock = sale::Clock {
+            let terms = sale::AuctionTerms {
                 start_price: sale::decode_zec(parts[7])?,
                 min_price: sale::decode_zec(parts[8])?,
                 start: sale::decode_height(parts[9])?,
                 end: sale::decode_height(parts[10])?,
             };
-            if !clock.is_valid() {
+            if !terms.is_valid() {
                 return None;
             }
-            (ua, None, Some((pay_to, clock)))
+            (ua, None, Some((pay_to, terms)))
         } else {
             if parts.len() != 6 {
                 return None;
@@ -410,7 +410,7 @@ impl OtpMemo {
             action,
             ua,
             listing,
-            clock,
+            auction,
         })
     }
 }
@@ -1163,7 +1163,7 @@ mod tests {
                 action,
                 ua: ua.clone(),
                 listing: None,
-                clock: None,
+                auction: None,
             };
             let memo = challenge.encode(&network).expect("non-claims encode");
             assert_eq!(OtpMemo::decode(&network, &memo), Some(challenge));
@@ -1175,7 +1175,7 @@ mod tests {
             action: Action::Claim,
             ua: ua.clone(),
             listing: None,
-            clock: None,
+            auction: None,
         };
         assert!(claim.encode(&network).is_none());
 
@@ -1187,7 +1187,7 @@ mod tests {
             action: Action::List,
             ua,
             listing: Some((pay_to, price)),
-            clock: None,
+            auction: None,
         };
         let memo = list.encode(&network).expect("a list sentence encodes");
         assert_eq!(OtpMemo::decode(&network, &memo), Some(list));
