@@ -572,21 +572,8 @@ async fn main() {
         // round publishes does not reprice them.
         let rate = oracle.current();
         oracle.accumulate(round, today, mtp_now);
-        // Transient or unusable tip data → skip this rule pass and wait
-        // for another notification; a chain race re-converges.
         let exact_tip = match source.canonical_tip().await {
             Ok(tip) => tip,
-            Err(error) if error.is_retryable() => {
-                tracing::warn!(
-                    %error,
-                    "post-catch-up tip unavailable; skipping rules until next notification"
-                );
-                continue;
-            }
-            Err(TransportError::NotOnBestChain) => {
-                tracing::warn!("tip lane returned NotOnBestChain; re-converging");
-                continue 'run;
-            }
             Err(error) => {
                 tracing::error!(%error, "post-catch-up tip unusable; skipping rules this notification");
                 continue;
