@@ -19,64 +19,8 @@ use crate::mint::presale::AccessCodeDerivationKey;
 use crate::mint::registry::Registry;
 use crate::mint::treasury::{OtpCode, D_OTP, FEE_ACTIONS, MAX_ATTEMPTS};
 use crate::mint::{
-    decode_name_and_ua, decode_zns, Action, Expiry, Name, NameCommitment, NameNote, OtpMemo,
-    Timestamp, UnifiedAddress,
+    Action, Expiry, Name, NameCommitment, NameNote, OtpMemo, Request, Timestamp, UnifiedAddress,
 };
-
-/// A list, delist, or buy, decoded before the market rules on it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MarketRequest {
-    /// Alice lists the name she owns, at the transparent receiver on her
-    /// controller address, once she returns the challenge.
-    List(Listing),
-    /// Alice takes her listing down, once she returns the challenge.
-    Delist { name: Name, ua: UnifiedAddress },
-    /// Bob asks for a listed name. `ua` is where the buy OTP goes.
-    Buy { name: Name, ua: UnifiedAddress },
-}
-
-impl MarketRequest {
-    /// `ZNS:list:<name>:<ua>:<t1>:<price>`,
-    /// `ZNS:auction:<name>:<ua>:<t1>:<start>:<min>:<start-block>:<end-block>`,
-    /// `ZNS:delist:<name>:<ua>`, or `ZNS:buy:<name>:<ua>`.
-    pub fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Option<Self> {
-        decode_zns(memo, |verb, fields| match verb {
-            "list" => {
-                let (name, ua) = decode_name_and_ua(network, fields)?;
-                Some(Self::List(Listing {
-                    name,
-                    ua,
-                    pay_to: decode_t1(network, fields.next()?)?,
-                    ask: Ask::Flat(decode_zec(fields.next()?)?),
-                }))
-            }
-            "auction" => {
-                let (name, ua) = decode_name_and_ua(network, fields)?;
-                let pay_to = decode_t1(network, fields.next()?)?;
-                let terms = AuctionTerms {
-                    start_price: decode_zec(fields.next()?)?,
-                    min_price: decode_zec(fields.next()?)?,
-                    start: decode_height(fields.next()?)?,
-                    end: decode_height(fields.next()?)?,
-                };
-                if !terms.is_valid() {
-                    return None;
-                }
-                Some(Self::List(Listing {
-                    name,
-                    ua,
-                    pay_to,
-                    ask: Ask::Dutch(terms),
-                }))
-            }
-            "delist" => {
-                decode_name_and_ua(network, fields).map(|(name, ua)| Self::Delist { name, ua })
-            }
-            "buy" => decode_name_and_ua(network, fields).map(|(name, ua)| Self::Buy { name, ua }),
-            _ => None,
-        })
-    }
-}
 
 /// The listing is from the current owner, and the transparent address
 /// is the receiver on her controller address.
@@ -1240,13 +1184,14 @@ impl Market {
         }
     }
 
-    /// Applies one list, delist, or buy. `opened` is a buy the caller
-    /// drops challenges for. `returned` is an intent payment to send back.
+    /// Applies one list, delist, or buy; any other request changes
+    /// nothing. `opened` is a buy the caller drops challenges for.
+    /// `returned` is an intent payment to send back.
     #[allow(clippy::too_many_arguments)]
     pub fn admit(
         &mut self,
         txid: TxId,
-        request: &MarketRequest,
+        request: &Request,
         paid: Zatoshis,
         registry: &Registry,
         fee_rule: &FeeRule,
@@ -1257,7 +1202,10 @@ impl Market {
     ) -> Admission {
         let fee_ok = (fee_rule.marginal_fee() * FEE_ACTIONS).is_some_and(|fee| paid >= fee);
         match request {
-            MarketRequest::List(listing) => {
+            Request::Claim { .. } | Request::Update { .. } | Request::Release { .. } => {
+                Admission::none()
+            }
+            Request::List(listing) => {
                 let Some(record) = registry.record(&listing.name) else {
                     tracing::info!(
                         %txid,
@@ -1310,7 +1258,7 @@ impl Market {
                 }
                 Admission::none()
             }
-            MarketRequest::Delist { name, ua } => {
+            Request::Delist { name, ua } => {
                 if registry.record(name).is_none_or(|record| record.ua != *ua) {
                     tracing::info!(
                         %txid,
@@ -1348,7 +1296,7 @@ impl Market {
                 }
                 Admission::none()
             }
-            MarketRequest::Buy { name, ua: bob } => {
+            Request::Buy { name, ua: bob } => {
                 let Some(record) = registry.record(name) else {
                     tracing::info!(
                         %txid,
@@ -1528,7 +1476,7 @@ mod tests {
         let memo = padded(&format!("ZNS:buy:alice:{TEST_UA}"));
         assert!(matches!(
             crate::mint::MintInbound::decode(&network, &memo),
-            crate::mint::MintInbound::Market(MarketRequest::Buy { name, .. }) if name.as_str() == "alice"
+            crate::mint::MintInbound::Request(Request::Buy { name, .. }) if name.as_str() == "alice"
         ));
     }
 
@@ -1550,7 +1498,7 @@ mod tests {
             owner.encode(&network),
             t1()
         ));
-        let Some(MarketRequest::List(list)) = MarketRequest::decode(&network, &memo) else {
+        let Some(Request::List(list)) = Request::decode(&network, &memo) else {
             panic!("expected list")
         };
         assert!(is_owner_listing(&owner, &list.ua, &list.pay_to));
@@ -1561,7 +1509,7 @@ mod tests {
         let other = TransparentAddress::PublicKeyHash([0x22; 20]);
         assert!(!is_owner_listing(&owner, &list.ua, &other));
         assert!(!is_owner_listing(&base, &list.ua, &list.pay_to));
-        assert!(MarketRequest::decode(
+        assert!(Request::decode(
             &network,
             &padded(&format!(
                 "ZNS:list:alice:{}:{}:1.123456789",
@@ -1578,7 +1526,7 @@ mod tests {
         let memo = padded(&format!("ZNS:delist:alice:{TEST_UA}"));
         assert!(matches!(
             crate::mint::MintInbound::decode(&network, &memo),
-            crate::mint::MintInbound::Market(MarketRequest::Delist { name, .. }) if name.as_str() == "alice"
+            crate::mint::MintInbound::Request(Request::Delist { name, .. }) if name.as_str() == "alice"
         ));
     }
 
@@ -2785,7 +2733,7 @@ mod tests {
             owner.encode(&network),
             t1()
         ));
-        let Some(MarketRequest::List(list)) = MarketRequest::decode(&network, &memo) else {
+        let Some(Request::List(list)) = Request::decode(&network, &memo) else {
             panic!("expected auction")
         };
         assert_eq!(
@@ -2977,8 +2925,8 @@ mod tests {
         (MARGINAL_FEE * FEE_ACTIONS).unwrap()
     }
 
-    fn buy_of_alice() -> MarketRequest {
-        MarketRequest::Buy {
+    fn buy_of_alice() -> Request {
+        Request::Buy {
             name: name(),
             ua: bob(),
         }

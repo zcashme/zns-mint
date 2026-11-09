@@ -1,5 +1,10 @@
 # main.changelog.md
 
+## 2026-11-09 — A list, delist, or buy arrives as a `Request` (#446)
+
+- The block pass sends `Request::List`, `Delist`, and `Buy` to
+  `market.admit`, and records claims, updates, and releases, as before.
+
 ## 2026-11-09 — The tip wait borrows the loop's node handle
 
 - The tip read takes `&source` instead of a clone.

@@ -184,6 +184,19 @@ pub enum Request {
         name: Name,
         ua: UnifiedAddress,
     },
+    /// Alice lists the name she owns, at the transparent receiver on her
+    /// controller address, once she returns the challenge.
+    List(sale::Listing),
+    /// Alice takes her listing down, once she returns the challenge.
+    Delist {
+        name: Name,
+        ua: UnifiedAddress,
+    },
+    /// Bob asks for a listed name. `ua` is where the buy OTP goes.
+    Buy {
+        name: Name,
+        ua: UnifiedAddress,
+    },
 }
 
 impl Request {
@@ -192,15 +205,25 @@ impl Request {
         match self {
             Request::Claim { name, .. }
             | Request::Update { name, .. }
-            | Request::Release { name, .. } => name,
+            | Request::Release { name, .. }
+            | Request::Delist { name, .. }
+            | Request::Buy { name, .. } => name,
+            Request::List(listing) => &listing.name,
         }
     }
 
+    /// A buy asks for a sale.
     pub fn action(&self) -> Action {
         match self {
             Request::Claim { .. } => Action::Claim,
             Request::Update { .. } => Action::Update,
             Request::Release { .. } => Action::Release,
+            Request::List(listing) => match listing.ask {
+                sale::Ask::Flat(_) => Action::List,
+                sale::Ask::Dutch(_) => Action::Auction,
+            },
+            Request::Delist { .. } => Action::Delist,
+            Request::Buy { .. } => Action::Sale,
         }
     }
 
@@ -209,7 +232,10 @@ impl Request {
         match self {
             Request::Claim { ua, .. }
             | Request::Update { ua, .. }
-            | Request::Release { ua, .. } => ua,
+            | Request::Release { ua, .. }
+            | Request::Delist { ua, .. }
+            | Request::Buy { ua, .. } => ua,
+            Request::List(listing) => &listing.ua,
         }
     }
 
@@ -219,7 +245,11 @@ impl Request {
     ///   code leading: `ZNS:claim:<code>:<term>:<name>:<ua>`
     /// - `ZNS:update:<none | <N>y | forever>:<name>:<ua>`
     /// - `ZNS:release:<name>:<ua>`
-    fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Option<Request> {
+    /// - `ZNS:list:<name>:<ua>:<t1>:<price>`
+    /// - `ZNS:auction:<name>:<ua>:<t1>:<start>:<min>:<start-block>:<end-block>`
+    /// - `ZNS:delist:<name>:<ua>`
+    /// - `ZNS:buy:<name>:<ua>`
+    pub(crate) fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Option<Request> {
         decode_zns(memo, |verb, fields| match verb {
             // Claims may lead with a pre-sale code; the discriminator is
             // whether the next field is a term.
@@ -251,6 +281,40 @@ impl Request {
             }
             "release" => {
                 decode_name_and_ua(network, fields).map(|(name, ua)| Request::Release { name, ua })
+            }
+            "list" => {
+                let (name, ua) = decode_name_and_ua(network, fields)?;
+                Some(Request::List(sale::Listing {
+                    name,
+                    ua,
+                    pay_to: sale::decode_t1(network, fields.next()?)?,
+                    ask: sale::Ask::Flat(sale::decode_zec(fields.next()?)?),
+                }))
+            }
+            "auction" => {
+                let (name, ua) = decode_name_and_ua(network, fields)?;
+                let pay_to = sale::decode_t1(network, fields.next()?)?;
+                let terms = sale::AuctionTerms {
+                    start_price: sale::decode_zec(fields.next()?)?,
+                    min_price: sale::decode_zec(fields.next()?)?,
+                    start: sale::decode_height(fields.next()?)?,
+                    end: sale::decode_height(fields.next()?)?,
+                };
+                if !terms.is_valid() {
+                    return None;
+                }
+                Some(Request::List(sale::Listing {
+                    name,
+                    ua,
+                    pay_to,
+                    ask: sale::Ask::Dutch(terms),
+                }))
+            }
+            "delist" => {
+                decode_name_and_ua(network, fields).map(|(name, ua)| Request::Delist { name, ua })
+            }
+            "buy" => {
+                decode_name_and_ua(network, fields).map(|(name, ua)| Request::Buy { name, ua })
             }
             _ => None,
         })
@@ -419,11 +483,10 @@ impl OtpMemo {
 /// Classified once, at block application; the deciding pass resolves.
 #[derive(Clone, Debug)]
 pub enum MintInbound {
-    /// A request — a user's proposed transition, decoded from a Treasury
-    /// memo; the Registry's `authorize_*` family rules on it.
+    /// A request decoded from a Treasury memo. A claim, update, or
+    /// release goes to the Registry's `authorize_*` family; a list,
+    /// delist, or buy to [`sale::Market::admit`].
     Request(Request),
-    /// A list, delist, or buy; [`sale::Market::admit`] rules on it.
-    Market(sale::MarketRequest),
     /// An OTP response — the relay memo returned; the OTP queue takes it.
     Response(OtpMemo),
     /// A payment with no parseable message: the deciding pass logs it once and
@@ -432,15 +495,13 @@ pub enum MintInbound {
 }
 
 impl MintInbound {
-    /// Classifies one Treasury memo: OTP response, name request, market
-    /// request, or unrecognized payment. Called once per memo, at block application.
+    /// Classifies one Treasury memo: OTP response, request, or
+    /// unrecognized payment. Called once per memo, at block application.
     pub fn decode<P: Parameters>(network: &P, memo: &MemoBytes) -> Self {
         if let Some(response) = OtpMemo::decode(network, memo) {
             Self::Response(response)
         } else if let Some(request) = Request::decode(network, memo) {
             Self::Request(request)
-        } else if let Some(request) = sale::MarketRequest::decode(network, memo) {
-            Self::Market(request)
         } else {
             Self::Unrecognized
         }
@@ -1137,7 +1198,9 @@ mod tests {
             assert!(
                 matches!(
                     MintInbound::decode(&MainNetwork, &padded(&text)),
-                    MintInbound::Market(_)
+                    MintInbound::Request(
+                        Request::List(_) | Request::Delist { .. } | Request::Buy { .. }
+                    )
                 ),
                 "misclassified {text}"
             );

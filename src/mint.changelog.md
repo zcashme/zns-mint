@@ -1,5 +1,13 @@
 # Mint live-work design record
 
+## 2026-11-09 — Every request verb is a `Request` (#446)
+
+- `Request` gains `List(sale::Listing)`, `Delist`, and `Buy`, decoded by
+  `Request::decode` from the same memos as before. `MintInbound::Market`
+  is gone; a list, delist, or buy arrives as `MintInbound::Request`.
+- `Request::action` is `List` or `Auction` for a listing, `Delist` for a
+  delist, and `Sale` for a buy.
+
 ## 2026-11-09 — An auction challenge carries its terms
 
 - `OtpMemo.clock` is `OtpMemo.auction`: the t1 and the

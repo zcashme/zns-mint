@@ -1,5 +1,10 @@
 # Sale module changelog
 
+## 2026-11-09 — List, delist, and buy are `Request` variants (#446)
+
+- `MarketRequest` is gone. `Market::admit` takes a `Request`; a claim,
+  update, or release changes nothing.
+
 ## 2026-11-09 — An auction's terms are `AuctionTerms`
 
 - `Clock` is `AuctionTerms`: the four values a `ZNS:auction` memo

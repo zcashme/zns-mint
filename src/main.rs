@@ -386,7 +386,9 @@ async fn main() {
             market.reconcile(&mut registry, next_height);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
-                    MintInbound::Market(request) => {
+                    MintInbound::Request(
+                        request @ (Request::List(_) | Request::Delist { .. } | Request::Buy { .. }),
+                    ) => {
                         let admitted = market.admit(
                             txid,
                             &request,
@@ -413,7 +415,11 @@ async fn main() {
                             );
                         }
                     }
-                    MintInbound::Request(request) => {
+                    MintInbound::Request(
+                        request @ (Request::Claim { .. }
+                        | Request::Update { .. }
+                        | Request::Release { .. }),
+                    ) => {
                         requests.record(txid, request, paid, next_height);
                     }
                     // The right code spends its OTP, and the transition it
@@ -507,7 +513,10 @@ async fn main() {
                         let authorized = match &sent.request {
                             Request::Update { .. } => registry.authorize_update(&sent, block_mtp),
                             Request::Release { .. } => registry.authorize_release(&sent),
-                            Request::Claim { .. } => continue,
+                            Request::Claim { .. }
+                            | Request::List(_)
+                            | Request::Delist { .. }
+                            | Request::Buy { .. } => continue,
                         };
                         let Some(note) = authorized else {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
@@ -715,6 +724,8 @@ async fn main() {
                     }
                     challenges.admit(request.clone(), txid, mtp_now);
                 }
+                // The market admits these at their block; they are never recorded.
+                Request::List(_) | Request::Delist { .. } | Request::Buy { .. } => {}
             }
         }
 

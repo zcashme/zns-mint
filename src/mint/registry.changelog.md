@@ -2,6 +2,11 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-11-09 — A market request is never challenged here (#446)
+
+- `allows_challenge` refuses `Request::List`, `Delist`, and `Buy`, as it
+  refuses a claim.
+
 ## 2026-11-03 — The market checks its own challenges
 
 - `allows_challenge` rules on update and release only.

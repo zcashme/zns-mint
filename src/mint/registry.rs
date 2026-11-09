@@ -91,7 +91,10 @@ impl NameRecord {
         match request {
             Request::Update { term, .. } => !(self.expires_at == Expiry::Never && term.is_some()),
             Request::Release { ua, .. } => *ua == self.ua,
-            Request::Claim { .. } => false,
+            Request::Claim { .. }
+            | Request::List(_)
+            | Request::Delist { .. }
+            | Request::Buy { .. } => false,
         }
     }
 

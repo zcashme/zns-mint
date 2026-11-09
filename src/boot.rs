@@ -635,7 +635,12 @@ impl Boot<Network> {
                         market.answer(&mut registry, response, next_height);
                     }
                 }
-                if let crate::mint::MintInbound::Market(request) = &inbound {
+                if let crate::mint::MintInbound::Request(
+                    request @ (crate::mint::Request::List(_)
+                    | crate::mint::Request::Delist { .. }
+                    | crate::mint::Request::Buy { .. }),
+                ) = &inbound
+                {
                     // A returned intent is not sent from a scan. The live
                     // loop sends it when the intent is first admitted.
                     market.admit(
