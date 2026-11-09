@@ -106,7 +106,7 @@ async fn main() {
                 tip = &mut tip_wait => {
                     break tip
                         .unwrap_or_else(|error| {
-                            panic!("FATAL: Zebra returned an invalid canonical tip: {error}")
+                            panic!("FATAL: Zebra could not answer its tip: {error}")
                         })
                         .0;
                 }
