@@ -97,10 +97,9 @@ async fn main() {
                 .chain(name_notes.authorized_names()),
             challenges.relayed(),
         );
-        // The tip read stays pinned, on its own handle, across mempool
-        // events. A reconnect pause runs to the end.
-        let tip_source = source.clone();
-        let mut tip_wait = std::pin::pin!(connection.next_tip(&tip_source));
+        // The tip read stays pinned across mempool events. A reconnect
+        // pause runs to the end.
+        let mut tip_wait = std::pin::pin!(connection.next_tip(&source));
         let best_height = loop {
             tokio::select! {
                 biased;
