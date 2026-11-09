@@ -81,6 +81,7 @@ zebra-indexer-proto = "2.5"
 # Transparent components are unused (its address is not published).
 zcash_keys = { version = "0.17", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
 zcash_protocol = { version = "0.11", default-features = false }
+zcash_encoding = "0.5"
 
 # Address parsing for OTP relay (extracting Orchard receiver from UA string).
 # Already a transitive dep via zcash_keys; listed direct for importability.

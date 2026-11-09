@@ -1,5 +1,11 @@
 # Zcash I/O changelog
 
+## 2026-11-09 — JSON-RPC block hashes decode through `ReverseHex`
+
+- `canonical_tip` and `chain_state_from_rpc_response` read Zebra's
+  reversed-hex block hashes with `zcash_encoding::ReverseHex::decode`.
+  Bad hex or a wrong length is still `BadNodeData`.
+
 ## 2026-11-09 — A wake-up takes the newest queued tip
 
 - `TipSession::next_tip` takes every tip push already queued behind the

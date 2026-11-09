@@ -7,6 +7,7 @@ use incrementalmerkletree::frontier::Frontier;
 use sapling::Node as SaplingNode;
 use serde::Deserialize;
 use zcash_client_backend::data_api::chain::{ChainState, CommitmentTreeRoot};
+use zcash_encoding::ReverseHex;
 use zcash_primitives::block::{Block, BlockHash, BlockHeader};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -378,10 +379,9 @@ pub struct BlockchainInfo {
 impl BlockchainInfo {
     /// Parses the height/hash pair carried by this one response.
     pub fn canonical_tip(&self) -> Result<(BlockHeight, BlockHash), TransportError> {
-        let display_bytes = hex::decode(&self.bestblockhash)
-            .map_err(|_| TransportError::BadNodeData("bestblockhash hex"))?;
-        let hash = block_hash_from_display(&display_bytes)
-            .ok_or(TransportError::BadNodeData("bestblockhash length"))?;
+        let hash = ReverseHex::decode(&self.bestblockhash)
+            .map(BlockHash)
+            .ok_or(TransportError::BadNodeData("bestblockhash"))?;
 
         Ok((BlockHeight::from_u32(self.blocks), hash))
     }
@@ -497,10 +497,9 @@ fn chain_state_from_rpc_response(
         .ok_or(TransportError::BadNodeData("missing Ironwood finalState"))?;
     let ironwood_tree = decode_tree::<MerkleHashOrchard>(&ironwood_final_state, "Ironwood")?;
 
-    let expected_hash_bytes =
-        hex::decode(&response.hash).map_err(|_| TransportError::BadNodeData("invalid hash hex"))?;
-    let expected_hash = block_hash_from_display(&expected_hash_bytes)
-        .ok_or(TransportError::BadNodeData("malformed 32-byte hash"))?;
+    let expected_hash = ReverseHex::decode(&response.hash)
+        .map(BlockHash)
+        .ok_or(TransportError::BadNodeData("tree state hash"))?;
 
     Ok(ChainState::new(
         BlockHeight::from_u32(response.height),
