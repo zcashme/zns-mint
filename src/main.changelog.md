@@ -1,5 +1,11 @@
 # main.changelog.md
 
+## 2026-11-09 — The post-catch-up tip check keeps only the arms that run
+
+- The tip check after catch-up no longer matches a retryable error or
+  `NotOnBestChain`. `canonical_tip()` retries transport failures itself,
+  and `getblockchaininfo` errors never become `NotOnBestChain`.
+
 ## 2026-11-05 — A refused dutch intent is returned with a sentence
 
 - When a dutch buy does not open, the intent payment goes back with

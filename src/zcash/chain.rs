@@ -234,27 +234,7 @@ impl JsonRpc {
         chain_state_from_rpc_response(response)
     }
 
-    /// Fetches every completed subtree root for one shielded pool, from
-    /// `start_index` upward, via Zebra's `z_getsubtreesbyindex`.
-    ///
-    /// `pool` is a Zebra pool name (`"sapling"`, `"orchard"`, `"ironwood"`).
-    /// The mint's boot fetches Sapling and Ironwood only; Orchard is
-    /// intentionally omitted — see the boot sequence.
-    ///
-    /// Each returned root pairs the shard's immutable subtree root hash
-    /// with the block height at which the shard completed
-    /// (`CommitmentTreeRoot::from_parts`). Zebra only ever returns
-    /// completed shards, never the rightmost partial one — that comes from
-    /// `z_gettreestate` (see [`Self::chain_state_at`]).
-    ///
-    /// Byte order: subtree `root` hex is canonical [`HashSer`] bytes, not
-    /// display-order reversal. Zebra's RPC does
-    /// `sapling: node.to_bytes().encode_hex()` and
-    /// `orchard|ironwood: node.encode_hex()` where orchard `encode_hex` is
-    /// `to_repr()` with no reverse (`zcashd` also does not reverse subtree
-    /// roots). Contrast `z_gettreestate` `finalRoot`, which *is* display-order
-    /// — we never parse that field. `finalState` is the HashSer tree, same
-    /// convention as these roots.
+    /// Every completed subtree root for `pool` from `start_index`, via `z_getsubtreesbyindex`.
     pub async fn get_subtree_roots<Node>(
         &self,
         pool: &'static str,
