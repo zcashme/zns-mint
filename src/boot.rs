@@ -833,8 +833,7 @@ async fn connect_zebra() -> ChainClient {
         "boot: zebra json-rpc liveness ok"
     );
 
-    // gRPC liveness; the tip stream is change-only, so the boot tip comes
-    // from the getblockchaininfo answer above.
+    // gRPC liveness
     let mut chain = ChainClient::connect()
         .await
         .expect("FATAL: Zebra gRPC unreachable or timed out");

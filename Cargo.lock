@@ -4971,9 +4971,9 @@ dependencies = [
 
 [[package]]
 name = "zebra-indexer-proto"
-version = "2.5.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54778f59bae3641a85595d5df5e64386f2b59912a6bb79d8de7a024a14166c3d"
+checksum = "1cf5555ef6a8efe982fed0203932ab764e5b8778501dd3772843be6c7f47b0a7"
 dependencies = [
  "prost",
  "serde",

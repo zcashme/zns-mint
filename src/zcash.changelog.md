@@ -1,5 +1,16 @@
 # Zcash I/O changelog
 
+## 2026-11-09 — zebra-indexer-proto 3.0 encodes the gRPC field rules
+
+- `block_and_hash` builds its request with `BlockRequest::new`; a height
+  above the highest Zebra serves is `NotOnBestChain`.
+  `block_request_at_height` and its test are gone.
+- Tip, block and mempool hashes decode through the crate's 32-byte
+  accessors; `block_hash_from_display` only reverses. The `BadNodeData`
+  messages are unchanged.
+- `integration-tests/Cargo.lock` carries `zcash_encoding` again, so the
+  integration clippy passes under `--locked`.
+
 ## 2026-11-09 — JSON-RPC block hashes decode through `ReverseHex`
 
 - `canonical_tip` and `chain_state_from_rpc_response` read Zebra's

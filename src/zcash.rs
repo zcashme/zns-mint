@@ -233,9 +233,7 @@ impl TransportError {
             self,
             Self::Tonic(status) if matches!(
                 status.code(),
-                // Unavailable: the proto crate's protocol notes — a stream
-                // or connection that ended. Cancelled: the endpoint's
-                // REQUEST_TIMEOUT firing — tonic maps the client-side
+                // Cancelled: the endpoint's REQUEST_TIMEOUT firing — tonic maps the client-side
                 // deadline to cancelled, never deadline-exceeded
                 // (find_status_in_source_chain). DeadlineExceeded: a
                 // server-enforced deadline, which none sets today.
