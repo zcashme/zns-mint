@@ -571,51 +571,38 @@ fn listable(ask: &Ask, height: BlockHeight) -> Result<(), MarketRefusal> {
 /// A list or delist waiting for the controller's code.
 #[derive(Clone)]
 struct MarketChallenge {
-    kind: ChallengeKind,
+    /// A `Request::List` or a `Request::Delist`.
+    request: Request,
     code: OtpCode,
     expires_at: Timestamp,
     relayed: bool,
     attempts: u32,
 }
 
-#[derive(Clone)]
-enum ChallengeKind {
-    List(Box<Listing>),
-    Delist { name: Name, ua: Box<UnifiedAddress> },
-}
-
 impl MarketChallenge {
     fn name(&self) -> &Name {
-        match &self.kind {
-            ChallengeKind::List(listing) => &listing.name,
-            ChallengeKind::Delist { name, .. } => name,
-        }
+        self.request.name()
     }
 
     fn ua(&self) -> &UnifiedAddress {
-        match &self.kind {
-            ChallengeKind::List(listing) => &listing.ua,
-            ChallengeKind::Delist { ua, .. } => ua.as_ref(),
-        }
+        self.request.ua()
     }
 
     fn action(&self) -> Action {
-        match &self.kind {
-            ChallengeKind::List(listing) => match &listing.ask {
-                Ask::Flat(_) => Action::List,
-                Ask::Dutch(_) => Action::Auction,
-            },
-            ChallengeKind::Delist { .. } => Action::Delist,
-        }
+        self.request.action()
     }
 
     fn memo(&self) -> OtpMemo {
-        let (listing, auction) = match &self.kind {
-            ChallengeKind::List(listed) => match &listed.ask {
+        let (listing, auction) = match &self.request {
+            Request::List(listed) => match &listed.ask {
                 Ask::Flat(price) => (Some((listed.pay_to, *price)), None),
                 Ask::Dutch(terms) => (None, Some((listed.pay_to, terms.clone()))),
             },
-            ChallengeKind::Delist { .. } => (None, None),
+            Request::Claim { .. }
+            | Request::Update { .. }
+            | Request::Release { .. }
+            | Request::Delist { .. }
+            | Request::Buy { .. } => (None, None),
         };
         OtpMemo {
             code: self.code.clone(),
@@ -628,19 +615,19 @@ impl MarketChallenge {
     }
 
     fn held_by(&self, owner: &UnifiedAddress) -> bool {
-        match &self.kind {
-            ChallengeKind::List(listing) => is_owner_listing(owner, &listing.ua, &listing.pay_to),
-            ChallengeKind::Delist { ua, .. } => ua.as_ref() == owner,
+        match &self.request {
+            Request::List(listing) => is_owner_listing(owner, &listing.ua, &listing.pay_to),
+            Request::Claim { .. }
+            | Request::Update { .. }
+            | Request::Release { .. }
+            | Request::Delist { .. }
+            | Request::Buy { .. } => self.ua() == owner,
         }
     }
 
-    fn same_list(&self, listing: &Listing) -> bool {
-        matches!(&self.kind, ChallengeKind::List(held) if held.as_ref() == listing)
-    }
-
     fn same_terms(&self, response: &OtpMemo) -> bool {
-        match &self.kind {
-            ChallengeKind::List(listing) => match &listing.ask {
+        match &self.request {
+            Request::List(listing) => match &listing.ask {
                 Ask::Flat(price) => {
                     response.auction.is_none()
                         && response.listing.as_ref().is_some_and(|(pay_to, quoted)| {
@@ -652,19 +639,11 @@ impl MarketChallenge {
                     .as_ref()
                     .is_some_and(|(pay_to, quoted)| *pay_to == listing.pay_to && quoted == terms),
             },
-            ChallengeKind::Delist { .. } => {
-                response.listing.is_none() && response.auction.is_none()
-            }
-        }
-    }
-
-    fn same_delist(&self, name: &Name, ua: &UnifiedAddress) -> bool {
-        match &self.kind {
-            ChallengeKind::Delist {
-                name: held,
-                ua: owner,
-            } => held == name && owner.as_ref() == ua,
-            ChallengeKind::List(_) => false,
+            Request::Claim { .. }
+            | Request::Update { .. }
+            | Request::Release { .. }
+            | Request::Delist { .. }
+            | Request::Buy { .. } => response.listing.is_none() && response.auction.is_none(),
         }
     }
 }
@@ -1003,10 +982,11 @@ impl Market {
         if self.sales.is_open(&listing.name) {
             return Err(MarketRefusal::BuyOpen);
         }
+        let request = Request::List(listing.clone());
         if self
             .challenges
             .iter()
-            .any(|challenge| challenge.same_list(listing))
+            .any(|challenge| challenge.request == request)
         {
             return Ok(());
         }
@@ -1015,7 +995,7 @@ impl Market {
         }
         self.push_challenge(
             MarketChallenge {
-                kind: ChallengeKind::List(Box::new(listing.clone())),
+                request,
                 code,
                 expires_at: Timestamp::from_seconds(mtp.as_seconds() + D_OTP)
                     .expect("challenge expiry fits a timestamp"),
@@ -1047,10 +1027,14 @@ impl Market {
         if registry.listing(name).is_none() {
             return Err(MarketRefusal::NotListed);
         }
+        let request = Request::Delist {
+            name: name.clone(),
+            ua: ua.clone(),
+        };
         if self
             .challenges
             .iter()
-            .any(|challenge| challenge.same_delist(name, ua))
+            .any(|challenge| challenge.request == request)
         {
             return Ok(());
         }
@@ -1059,10 +1043,7 @@ impl Market {
         }
         self.push_challenge(
             MarketChallenge {
-                kind: ChallengeKind::Delist {
-                    name: name.clone(),
-                    ua: Box::new(ua.clone()),
-                },
+                request,
                 code,
                 expires_at: Timestamp::from_seconds(mtp.as_seconds() + D_OTP)
                     .expect("challenge expiry fits a timestamp"),
@@ -1116,13 +1097,17 @@ impl Market {
             if self.sales.is_open(challenge.name()) {
                 return true;
             }
-            match &challenge.kind {
-                ChallengeKind::List(listing) => {
+            match &challenge.request {
+                Request::List(listing) => {
                     let _ = self.list(registry, listing, height);
                 }
-                ChallengeKind::Delist { name, ua } => {
+                Request::Delist { name, ua } => {
                     let _ = self.delist(registry, name, ua, height);
                 }
+                Request::Claim { .. }
+                | Request::Update { .. }
+                | Request::Release { .. }
+                | Request::Buy { .. } => {}
             }
             return true;
         }

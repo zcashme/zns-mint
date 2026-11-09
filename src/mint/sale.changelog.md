@@ -4,6 +4,8 @@
 
 - `MarketRequest` is gone. `Market::admit` takes a `Request`; a claim,
   update, or release changes nothing.
+- A `MarketChallenge` holds the `Request::List` or `Request::Delist` it
+  challenges. `ChallengeKind` is gone; a repeat is the same request.
 
 ## 2026-11-09 — An auction's terms are `AuctionTerms`
 
