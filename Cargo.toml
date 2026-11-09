@@ -72,7 +72,7 @@ zcash_note_encryption = "0.5"
 # available (orchard itself uses `default-features = false`).
 rand = "0.10"
 
-zebra-indexer-proto = "2.5"
+zebra-indexer-proto = "3.0"
 
 # Key derivation (ZIP-32 Orchard)
 # Treasury (account 0) is user-facing and accepts Orchard + Sapling + Transparent
