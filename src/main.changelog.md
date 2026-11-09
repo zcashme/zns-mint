@@ -6,8 +6,8 @@
   `market.admit`, and records claims, updates, and releases, as before.
 - List and delist challenges live in `challenges`. The block pass
   reconciles them with the registry, and the tip pass relays them. A
-  rollback calls `challenges.truncate_to` instead of replacing the
-  queue.
+  rollback replaces the queue, so it drops them with update and
+  release challenges.
 
 ## 2026-11-09 — The tip wait borrows the loop's node handle
 

@@ -627,12 +627,11 @@ impl Boot<Network> {
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
             market.expire(&mut registry, block_mtp, next_height);
-            challenges.expire(block_mtp, next_height);
+            challenges.expire(block_mtp);
             market.reconcile(&mut registry, next_height);
-            challenges.reconcile_listing_challenges(
-                |name| registry.record(name).map(|record| record.ua.clone()),
-                next_height,
-            );
+            challenges.reconcile_listing_challenges(|name| {
+                registry.record(name).map(|record| record.ua.clone())
+            });
             for (txid, inbound, paid) in arrivals {
                 if let crate::mint::MintInbound::Response(response) = &inbound {
                     if response.action.is_list()

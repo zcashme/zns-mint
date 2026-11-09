@@ -8,7 +8,8 @@
   `Request::List` or `Request::Delist` it challenges, kept in
   `OtpQueue`. `MarketChallenge`, `ChallengeKind`, `Market.challenges`,
   and the `Challenge` and `ChallengeClosed` marketplace events are
-  gone; a repeat is the same request.
+  gone; a repeat is the same request. `Market::truncate_to` no longer
+  rebuilds challenges.
 - `admit`, `propose_list`, `propose_delist`, and `answer` take the
   `OtpQueue`. A buy that opens closes the name's list and delist
   challenges in `admit`. `unrelayed_challenges` and

@@ -849,12 +849,11 @@ impl Market {
         if self.sales.is_open(&listing.name) {
             return Err(MarketRefusal::BuyOpen);
         }
-        challenges.open_listing_challenge(Request::List(listing.clone()), code, mtp, height)
+        challenges.open_listing_challenge(Request::List(listing.clone()), code, mtp)
     }
 
     /// Opens a delist challenge. The listing leaves when the controller
     /// returns `code`.
-    #[allow(clippy::too_many_arguments)]
     pub fn propose_delist(
         &mut self,
         challenges: &mut OtpQueue,
@@ -863,7 +862,6 @@ impl Market {
         ua: &UnifiedAddress,
         code: OtpCode,
         mtp: Timestamp,
-        height: BlockHeight,
     ) -> Result<(), MarketRefusal> {
         if registry.record(name).is_none_or(|record| record.ua != *ua) {
             return Err(MarketRefusal::NotOwner);
@@ -878,7 +876,7 @@ impl Market {
             name: name.clone(),
             ua: ua.clone(),
         };
-        challenges.open_listing_challenge(request, code, mtp, height)
+        challenges.open_listing_challenge(request, code, mtp)
     }
 
     /// Applies the list or delist challenge `response` answers, unless a
@@ -896,7 +894,7 @@ impl Market {
         {
             return false;
         }
-        let Some(request) = challenges.answer_listing_challenge(response, height) else {
+        let Some(request) = challenges.answer_listing_challenge(response) else {
             return false;
         };
         if self.sales.is_open(request.name()) {
@@ -1010,7 +1008,7 @@ impl Market {
                     return Admission::none();
                 }
                 let code = key.delist_otp(&txid, name);
-                match self.propose_delist(challenges, registry, name, ua, code, mtp, height) {
+                match self.propose_delist(challenges, registry, name, ua, code, mtp) {
                     Ok(()) => {}
                     Err(MarketRefusal::BuyOpen) => tracing::info!(
                         %txid,
@@ -1069,7 +1067,7 @@ impl Market {
                     height,
                 ) {
                     Ok(_) => {
-                        challenges.close_listing_challenges_for(name, height);
+                        challenges.close_listing_challenges_for(name);
                         Admission::opened(name.clone())
                     }
                     Err(MarketRefusal::Held { until }) => {
@@ -1855,7 +1853,6 @@ mod tests {
                 &owner,
                 code.clone(),
                 mtp(),
-                height(),
             )
             .unwrap();
         assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
@@ -2030,15 +2027,7 @@ mod tests {
             .list(&mut registry, &list_for(150_000_000), height())
             .unwrap();
         assert_eq!(
-            market.propose_delist(
-                &mut challenges,
-                &registry,
-                &name(),
-                &owner,
-                code,
-                mtp(),
-                height()
-            ),
+            market.propose_delist(&mut challenges, &registry, &name(), &owner, code, mtp()),
             Err(MarketRefusal::CodeTaken)
         );
         assert_eq!(
@@ -2080,34 +2069,6 @@ mod tests {
 
     #[test]
     fn a_rollback_submits_an_open_code() {
-        let (owner, _) = alice();
-        let mut registry = sale_registry();
-        let mut market = Market::new();
-        let mut challenges = OtpQueue::new();
-        let code = OtpCode::for_test(*b"042831");
-        market
-            .propose_list(
-                &mut challenges,
-                &list_for(150_000_000),
-                &owner,
-                code.clone(),
-                mtp(),
-                height(),
-            )
-            .unwrap();
-        challenges.listing_challenge_relayed(&code);
-        assert!(challenges
-            .unrelayed_listing_challenges(|_| true, |_| Some(owner.clone()))
-            .is_empty());
-        market.truncate_to(&mut registry, height());
-        challenges.truncate_to(height());
-        assert_eq!(
-            challenges
-                .unrelayed_listing_challenges(|_| true, |_| Some(owner.clone()))
-                .len(),
-            1
-        );
-
         let (mut market, mut registry, owner, _) = listed(100_000_000);
         let buy = OtpCode::for_test(*b"123456");
         market

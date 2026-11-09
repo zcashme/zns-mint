@@ -21,7 +21,7 @@ use zns_mint::mint::note::assemble;
 use zns_mint::mint::presale;
 use zns_mint::mint::pricing::{fetch_round, Oracle};
 use zns_mint::mint::treasury;
-use zns_mint::mint::treasury::access_code_penalty;
+use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
 use zns_mint::mint::{
     relay, relay_buy, spends_transparent, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
@@ -267,11 +267,13 @@ async fn main() {
             })
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
-            let rewound_mtp = mtp.current().expect("FATAL: MTP unavailable after reorg");
-            challenges.truncate_to(rewound);
+            challenges = OtpQueue::new();
             market.truncate_to(&mut registry, rewound);
-            market.expire(&mut registry, rewound_mtp, rewound);
-            challenges.expire(rewound_mtp, rewound);
+            market.expire(
+                &mut registry,
+                mtp.current().expect("FATAL: MTP unavailable after reorg"),
+                rewound,
+            );
             name_notes.rewind_to(rewound);
             name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
@@ -356,7 +358,7 @@ async fn main() {
             let block_mtp = mtp
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
-            challenges.expire(block_mtp, next_height);
+            challenges.expire(block_mtp);
             // A mined repeat takes the code before this block's replies
             // are read. The fee and the authorization are the same ones
             // the request pass requires.
@@ -382,10 +384,9 @@ async fn main() {
             }
             market.expire(&mut registry, block_mtp, next_height);
             market.reconcile(&mut registry, next_height);
-            challenges.reconcile_listing_challenges(
-                |name| registry.record(name).map(|record| record.ua.clone()),
-                next_height,
-            );
+            challenges.reconcile_listing_challenges(|name| {
+                registry.record(name).map(|record| record.ua.clone())
+            });
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(
