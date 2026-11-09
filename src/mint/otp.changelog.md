@@ -1,5 +1,12 @@
 # `mint/otp.rs` design record
 
+## 2026-11-09 — An `OtpChallenge` can challenge a list or a delist (#446)
+
+- `OtpChallenge::memo` carries the t1 and the price or auction terms of
+  a `Request::List`. Update and release memos are unchanged.
+- `held_by` and `same_terms` move here from the market's challenge.
+- `ChallengeState` is exported from `treasury`.
+
 ## 2026-11-09 — The auction challenge binds the sale's `AuctionTerms`
 
 - `OtpCode::auction` takes `&sale::AuctionTerms`; `AuctionBind` is gone. The

@@ -6,8 +6,8 @@ use time::{Duration, Timestamp};
 use zcash_primitives::transaction::TxId;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::mint::sale::AuctionTerms;
-use crate::mint::{Name, OtpMemo, Request};
+use crate::mint::sale::{is_owner_listing, Ask, AuctionTerms};
+use crate::mint::{Name, OtpMemo, Request, UnifiedAddress};
 
 /// Thirty minutes; §5.3: D_OTP.
 pub const D_OTP: i64 = 1800;
@@ -151,15 +151,63 @@ impl OtpChallenge {
         correct
     }
 
-    /// The controller-facing projection.
+    /// The controller-facing projection. A list challenge carries the
+    /// t1 and the price or the auction terms she is authorizing.
     pub fn memo(&self) -> OtpMemo {
+        let (listing, auction) = match &self.request {
+            Request::List(listed) => match &listed.ask {
+                Ask::Flat(price) => (Some((listed.pay_to, *price)), None),
+                Ask::Dutch(terms) => (None, Some((listed.pay_to, terms.clone()))),
+            },
+            Request::Claim { .. }
+            | Request::Update { .. }
+            | Request::Release { .. }
+            | Request::Delist { .. }
+            | Request::Buy { .. } => (None, None),
+        };
         OtpMemo {
             code: self.code.clone(),
             name: self.request.name().clone(),
             action: self.request.action(),
             ua: self.request.ua().clone(),
-            listing: None,
-            auction: None,
+            listing,
+            auction,
+        }
+    }
+
+    /// `owner` still holds the name on the terms this challenge names.
+    pub fn held_by(&self, owner: &UnifiedAddress) -> bool {
+        match &self.request {
+            Request::List(listing) => is_owner_listing(owner, &listing.ua, &listing.pay_to),
+            Request::Claim { .. }
+            | Request::Update { .. }
+            | Request::Release { .. }
+            | Request::Delist { .. }
+            | Request::Buy { .. } => self.request.ua() == owner,
+        }
+    }
+
+    /// `response` repeats the t1 and the price or auction terms this
+    /// challenge names, and no others.
+    pub fn same_terms(&self, response: &OtpMemo) -> bool {
+        match &self.request {
+            Request::List(listing) => match &listing.ask {
+                Ask::Flat(price) => {
+                    response.auction.is_none()
+                        && response.listing.as_ref().is_some_and(|(pay_to, quoted)| {
+                            *pay_to == listing.pay_to && quoted == price
+                        })
+                }
+                Ask::Dutch(terms) => response
+                    .auction
+                    .as_ref()
+                    .is_some_and(|(pay_to, quoted)| *pay_to == listing.pay_to && quoted == terms),
+            },
+            Request::Claim { .. }
+            | Request::Update { .. }
+            | Request::Release { .. }
+            | Request::Delist { .. }
+            | Request::Buy { .. } => response.listing.is_none() && response.auction.is_none(),
         }
     }
 }
