@@ -21,4 +21,4 @@ thiserror = "1"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
-zns-canon = { git = "https://github.com/zcashme/zns-canon.git", branch = "main" }
+zns-canon = { path = "../canon" }

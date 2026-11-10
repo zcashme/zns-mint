@@ -5224,6 +5224,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "zns-migrate"
+version = "0.1.0"
+dependencies = [
+ "blake2b_simd",
+ "hex",
+ "libc",
+ "rand 0.10.3",
+ "secrecy",
+ "serde",
+ "thiserror 1.0.69",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+ "zip32",
+ "zns-canon",
+]
+
+[[package]]
 name = "zns-mint"
 version = "0.1.0"
 dependencies = [
