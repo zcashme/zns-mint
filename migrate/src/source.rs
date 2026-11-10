@@ -274,7 +274,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(transport::CUSTODY_MANIFEST_FILE), b"birthday = 1").unwrap();
-        // Only the manifest is read: no zns_mint.conf or ceremony_state.toml beside it.
         let manifest = read_custody_manifest(&dir.join("zns_seed.capsule")).unwrap();
         assert_eq!(manifest, b"birthday = 1");
 
