@@ -1,45 +1,36 @@
 [package]
-name = "zns-mint-integration-tests"
-version = "0.0.0"
+name = "zns-integration-tests"
+version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
+license = "MIT"
 publish = false
-description = "Boot-completion harness: real regtest Zebra, a Zallet-funded Treasury, and the dev ceremony Boot::start() requires"
-
-[lib]
-path = "src/fixture/mod.rs"
-
-[workspace]
+description = "Cross-stack harness for ZNS: zebra, mint, resolver"
 
 [dependencies]
 anyhow = "1"
-blake2b_simd = "1"
 hex = "0.4"
 rand = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 secp256k1 = "0.33"
-secrecy = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "default-tls"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
-zip32 = "0.3"
 
 # Same ZNS Ironwood graph as zns-mint (patched orchard + zcash_primitives).
+orchard = { version = "0.16", default-features = false, features = ["unsafe-zns", "circuit", "multicore"] }
 transparent = { package = "zcash_transparent", version = "0.11", default-features = false, features = ["transparent-inputs"] }
 zcash_keys = { version = "0.17", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
 zcash_primitives = { version = "0.31", default-features = false, features = ["std", "circuits", "multicore", "transparent-inputs", "unsafe-zns"] }
-zcash_protocol = "0.11"
+zcash_protocol = { version = "0.11", default-features = false, features = ["local-consensus"] }
 zcash_script = "0.6"
-orchard = { version = "0.16.0", default-features = false, features = ["unsafe-zns", "circuit", "multicore"] }
-# The independent Name Note decoder the happy path asserts with (same tag
-# as zns-integration-tests; `decrypt` is the Ironwood trial-decrypt scan).
+zip32 = "0.3"
+# `decrypt` is zns-verify's ZnsIronwoodDomain scan (unified with the orchard
+# patch below). Ceremony/claim still need orchard for proving.
 zns-verify = { version = "0.2", features = ["decrypt"] }
-
-# The mint under test, linked in-process: regtest selects non-tee.
-zns-mint = { path = "../mint", features = ["regtest"] }
-# Zebra + Zallet process harness, tracks main.
-zns-integration-tests = { git = "https://github.com/zcashme/zns-integration-tests.git", branch = "main" }
-zns-canon = { git = "https://github.com/zcashme/zns-canon.git", branch = "main" }
+# Public key for sealing the all-zero test capsule. A release build cannot use this.
+zns-canon = { git = "https://github.com/zcashme/zns-canon.git", branch = "main", features = ["non-tee"] }
 
 [patch.crates-io]
 orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0" }
