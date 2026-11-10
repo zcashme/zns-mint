@@ -90,12 +90,7 @@ struct SealedCeremony {
 /// finished and whose capsule is worthless. A missing file is fine. Removing
 /// a symlink removes the link, not its target.
 fn wipe_incomplete() {
-    for path in [
-        CAPSULE_FILE,
-        ATTESTATION_FILE,
-        "keys/zns_mint.conf",
-        "keys/ceremony_state.toml",
-    ] {
+    for path in [CAPSULE_FILE, ATTESTATION_FILE] {
         match fs::remove_file(path) {
             Ok(()) => tracing::warn!(path, "removed incomplete ceremony artifact"),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
