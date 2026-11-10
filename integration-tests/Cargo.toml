@@ -9,6 +9,7 @@ description = "Cross-stack harness for ZNS: zebra, mint, resolver"
 
 [dependencies]
 anyhow = "1"
+blake2b_simd = "1"
 hex = "0.4"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
@@ -30,7 +31,9 @@ zip32 = "0.3"
 # patch below). Ceremony/claim still need orchard for proving.
 zns-verify = { version = "0.2", features = ["decrypt"] }
 # Public key for sealing the all-zero test capsule. A release build cannot use this.
-zns-canon = { git = "https://github.com/zcashme/zns-canon.git", branch = "main", features = ["non-tee"] }
+zns-canon = { path = "../canon", features = ["non-tee"] }
+# The mint under test, linked in-process by `fixture`: regtest selects non-tee.
+zns-mint = { path = "../mint", features = ["regtest"] }
 
 [patch.crates-io]
 orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0" }

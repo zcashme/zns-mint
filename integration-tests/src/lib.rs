@@ -5,6 +5,7 @@ mod binaries;
 mod ceremony;
 mod child;
 mod claim;
+pub mod fixture;
 mod harness;
 mod mint;
 mod non_request;

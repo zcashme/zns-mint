@@ -5,16 +5,14 @@
 //! — then author the 40-anchor Registry ceremony plus their own Ironwood
 //! funding. One transaction, one input, the whole ownership flow.
 //!
-//! Vendored from `zns-integration-tests` `src/ceremony.rs` and `src/tx.rs`
-//! at f28fabfb56e4962a7e95283134791fb41c51337c (themselves adapted from
-//! zns-keygen's anchor builder), with two deliberate divergences:
+//! A copy of this crate's `ceremony` and `tx` modules as of
+//! zns-integration-tests f28fabfb56e4962a7e95283134791fb41c51337c
+//! (themselves adapted from zns-keygen's anchor builder), with two
+//! deliberate divergences:
 //! 1. no coinbase-maturity filter on the Treasury input — the funding
 //!    payment is a regular UTXO, not coinbase;
 //! 2. no ceremony-tx cache — the funding txid is random, so a cached
 //!    ceremony transaction cannot be reproducible across runs.
-//!
-//! Process plumbing comes from the `zns-integration-tests` harness;
-//! every assertion lives in this repo.
 
 use std::time::{Duration, Instant};
 
@@ -45,8 +43,8 @@ use zcash_protocol::local_consensus::LocalNetwork;
 use zcash_protocol::value::{ZatBalance, Zatoshis};
 use zip32::AccountId;
 
-pub use zns_integration_tests::Zallet;
-use zns_integration_tests::Zebrad;
+pub use crate::Zallet;
+use crate::Zebrad;
 
 mod phases;
 mod stack;

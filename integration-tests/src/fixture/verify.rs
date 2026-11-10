@@ -8,11 +8,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use zcash_primitives::block::Block;
-use zns_integration_tests::Zebrad;
 use zns_verify::{zns_psi_rcm, NameNote};
 
-use crate::{account_usk, regtest_network, DEV_SEED};
-use zns_integration_tests::Mint;
+use super::{account_usk, regtest_network, DEV_SEED};
+use crate::{Mint, Zebrad};
 
 /// Whitepaper §3.5 Registry `(g_d, pk_d)` for the all-zero seed (ZIP-32 is
 /// network-independent, so a non-tee regtest matches the mainnet vector).

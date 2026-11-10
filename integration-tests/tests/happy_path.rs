@@ -8,10 +8,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use zcash_protocol::consensus::BlockHeight;
+use zns_integration_tests::fixture::{self, claim, release, update, Stack};
 use zns_integration_tests::{zallet_bin, zebrad_bin, Mint, Zebrad};
 use zns_mint::boot::Boot;
-use zns_mint_integration_tests as fixture;
-use zns_mint_integration_tests::{claim, release, update, Stack};
 
 const SYNC_TIMEOUT: Duration = Duration::from_secs(300);
 const BOOT_TIMEOUT: Duration = Duration::from_secs(1800);

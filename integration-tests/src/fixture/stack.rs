@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 
-use zns_integration_tests::{Mint, Zebrad};
+use crate::{Mint, Zebrad};
 
-use crate::user::User;
+use super::user::User;
 
 pub struct Stack {
     pub zebra: Zebrad,
