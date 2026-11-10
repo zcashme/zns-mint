@@ -1,5 +1,5 @@
-# Tests, clippy, rustfmt, docs, and coverage on PRs and master, one job
-# per crate. A failing test or a new clippy warning turns the PR red.
+# Tests, clippy, rustfmt and docs on PRs and master. A failing test or a
+# new clippy warning turns the PR red.
 # Cargo commands pass --locked, so a manifest change has to update Cargo.lock.
 name: CI
 
@@ -21,7 +21,7 @@ env:
 
 jobs:
   fmt:
-    name: rustfmt
+    name: Rustfmt
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -39,8 +39,15 @@ jobs:
         working-directory: integration-tests
         run: cargo fmt --check
 
-  canon:
-    name: canon
+  # Clippy and Test each cover the whole workspace, so the shared
+  # dependency graph compiles once per job. A cargo invocation unifies
+  # features across the packages it builds, so each pass names only
+  # packages whose features may meet: no default feature turns on canon's
+  # non-tee, and mint's regtest turns it on anyway. The network features
+  # are mutually exclusive within a crate, so --all-features would fail
+  # by design. keygen compiles only on x86_64 Linux with RDSEED.
+  clippy:
+    name: Clippy
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -55,22 +62,19 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: clippy (default)
-        run: cargo clippy --locked -p zns-canon --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      - name: clippy (non-tee)
-        run: cargo clippy --locked -p zns-canon --all-targets --features non-tee -- -D warnings
+      - name: clippy (testnet)
+        run: cargo clippy --locked -p zns-mint -p zns-keygen --all-targets --features zns-mint/testnet,zns-keygen/testnet -- -D warnings
 
-      - name: test (default)
-        run: cargo test --locked -p zns-canon
-
-      - name: test (non-tee)
-        run: cargo test --locked -p zns-canon --features non-tee
+      - name: clippy (regtest, non-tee)
+        run: cargo clippy --locked -p zns-mint -p zns-canon --all-targets --features zns-mint/regtest,zns-canon/non-tee -- -D warnings
 
       - name: docs
-        run: cargo doc --locked -p zns-canon --no-deps
+        run: cargo doc --locked --workspace --no-deps
 
-  mint:
-    name: mint
+  test:
+    name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -78,131 +82,64 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, llvm-tools-preview
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-
-      # Network features are mutually exclusive (lib.rs compile_error), so
-      # clippy runs every supported combination explicitly. --all-features
-      # would enable testnet and regtest together and fail by design.
-      - name: clippy (default)
-        run: cargo clippy --locked -p zns-mint --all-targets -- -D warnings
-
-      - name: clippy (testnet)
-        run: cargo clippy --locked -p zns-mint --all-targets --features testnet -- -D warnings
-
-      - name: clippy (regtest)
-        run: cargo clippy --locked -p zns-mint --all-targets --features regtest -- -D warnings
-
       - name: test (default)
-        run: cargo test --locked -p zns-mint
+        run: cargo test --locked --workspace
 
-      - name: test (regtest)
+      - name: test (mint regtest)
         run: cargo test --locked -p zns-mint --features regtest
 
-      - name: docs
-        run: cargo doc --locked -p zns-mint --no-deps
+      - name: test (canon non-tee)
+        run: cargo test --locked -p zns-canon --features non-tee
 
-      - name: coverage
-        run: |
-          cargo llvm-cov --locked -p zns-mint --features regtest --html --output-dir coverage
-          cargo llvm-cov report --lcov --output-path lcov.info
-
-      - name: Upload coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-mint
-          path: |
-            lcov.info
-            coverage/
-          if-no-files-found: error
-
-  # mainnet and testnet are mutually exclusive, so keygen cannot use
-  # --all-features. It only compiles on x86_64 Linux with RDSEED.
-  keygen:
-    name: keygen
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, llvm-tools-preview
-
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-
-      - name: clippy (mainnet)
-        run: cargo clippy --locked -p zns-keygen --all-targets -- -D warnings
-
-      - name: clippy (testnet)
-        run: cargo clippy --locked -p zns-keygen --all-targets --features testnet -- -D warnings
-
-      - name: test (mainnet)
-        run: cargo test --locked -p zns-keygen
-
-      - name: test (testnet)
+      - name: test (keygen testnet)
         run: cargo test --locked -p zns-keygen --features testnet
 
-      - name: docs
-        run: cargo doc --locked -p zns-keygen --no-deps
-
-      - name: coverage
-        run: |
-          cargo llvm-cov --locked -p zns-keygen --html --output-dir coverage
-          cargo llvm-cov report --lcov --output-path lcov.info
-
-      - name: Upload coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-keygen
-          path: |
-            lcov.info
-            coverage/
-          if-no-files-found: error
-
-  migrate:
-    name: migrate
+  # Whether a pull request touches anything the integration tests build:
+  # the mint, canon, the harness, or the workspace's build inputs. keygen
+  # and migrate are not part of it.
+  changes:
+    name: Check changed files
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      e2e: ${{ steps.filter.outputs.e2e }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - id: filter
+        uses: dorny/paths-filter@v3
         with:
-          components: clippy
+          filters: |
+            e2e:
+              - 'mint/**'
+              - 'canon/**'
+              - 'integration-tests/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/ci.yml'
 
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-
-      - name: clippy
-        run: cargo clippy --locked -p zns-migrate --all-targets -- -D warnings
-
-      - name: test
-        run: cargo test --locked -p zns-migrate
-
-      - name: docs
-        run: cargo doc --locked -p zns-migrate --no-deps
-
-  # Boot → claim → update → release in one run. Needs mint, so unit
+  # Boot → claim → update → release in one run. Needs Test, so unit
   # failures skip it. The ceremony is re-proved every run: a random
-  # funding txid cannot be cached.
+  # funding txid cannot be cached. A push to master always runs it.
   e2e:
-    name: integration-tests (boot to happy path)
-    needs: mint
+    name: Integration tests
+    needs: [test, changes]
+    if: github.event_name == 'push' || needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # zallet-zebra reads zebrad's state directly; Zebra 7 writes format
+    # v29, which no zallet release reads yet. Move to the first release
+    # that does.
+    env:
+      ZALLET_REF: aec7f3fa8397ef17b2852dc6835572d6e623b1a2
     steps:
       - uses: actions/checkout@v4
 
@@ -217,14 +154,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
-      # zallet-zebra reads zebrad's state directly; Zebra 7 writes format
-      # v29, which no zallet release reads yet. Move to the first release
-      # that does.
+      # The built binary is cached under its pinned commit, so zallet is
+      # checked out and compiled only when ZALLET_REF changes. A cold
+      # release build takes more than ten minutes, so the binary is saved
+      # as soon as it exists, not at the end of a job that may fail.
+      - name: Restore zallet binary
+        id: zallet
+        uses: actions/cache/restore@v4
+        with:
+          path: zallet-bin
+          key: zallet-zebra-${{ runner.os }}-${{ env.ZALLET_REF }}
+
       - name: Checkout zallet
+        if: steps.zallet.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:
           repository: zcash/zallet
-          ref: aec7f3fa8397ef17b2852dc6835572d6e623b1a2
+          ref: ${{ env.ZALLET_REF }}
           path: zallet
 
       - name: Cache cargo registry and targets
@@ -233,7 +179,6 @@ jobs:
           workspaces: |
             . -> target
             integration-tests -> target
-            zallet/backends/zebra -> target
 
       - name: Download zebrad and Sapling params
         run: |
@@ -253,10 +198,24 @@ jobs:
           echo "ZCASH_PARAMS_DIR=$RUNNER_TEMP/params" >> "$GITHUB_ENV"
 
       - name: Build zallet (zebra backend)
+        if: steps.zallet.outputs.cache-hit != 'true'
         working-directory: zallet/backends/zebra
         run: |
           cargo build --locked --release
-          echo "ZALLET_BIN=$PWD/target/release/zallet-zebra" >> "$GITHUB_ENV"
+          mkdir -p "$GITHUB_WORKSPACE/zallet-bin"
+          cp target/release/zallet-zebra "$GITHUB_WORKSPACE/zallet-bin/"
+
+      - name: Save zallet binary
+        if: steps.zallet.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: zallet-bin
+          key: ${{ steps.zallet.outputs.cache-primary-key }}
+
+      - name: Use the zallet binary
+        run: |
+          test -x zallet-bin/zallet-zebra
+          echo "ZALLET_BIN=$PWD/zallet-bin/zallet-zebra" >> "$GITHUB_ENV"
 
       - name: clippy
         working-directory: integration-tests

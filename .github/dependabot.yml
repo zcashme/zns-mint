@@ -13,9 +13,6 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
-    # Patch-level (non-breaking) updates are safe to auto-merge via Mergify.
-    # Semver-minor updates need a review; major/breaking updates need manual
-    # review (Mergify's `security` label + review gate applies).
 
   - package-ecosystem: "cargo"
     directory: "/integration-tests" # outside the workspace, own Cargo.lock
