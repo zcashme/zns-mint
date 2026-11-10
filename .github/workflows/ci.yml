@@ -85,12 +85,41 @@ jobs:
       - name: test (keygen testnet)
         run: cargo test --locked -p zns-keygen --features testnet
 
+  # Whether a pull request touches anything e2e builds: the mint, canon,
+  # the harness, or the workspace's build inputs. keygen and migrate are
+  # not part of it.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            e2e:
+              - 'mint/**'
+              - 'canon/**'
+              - 'integration-tests/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/ci.yml'
+
   # Boot → claim → update → release in one run. Needs the workspace job,
   # so unit failures skip it. The ceremony is re-proved every run: a
-  # random funding txid cannot be cached.
+  # random funding txid cannot be cached. A push to master always runs it.
   e2e:
     name: integration-tests (boot to happy path)
-    needs: workspace
+    needs: [workspace, changes]
+    if: github.event_name == 'push' || needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     # zallet-zebra reads zebrad's state directly; Zebra 7 writes format
