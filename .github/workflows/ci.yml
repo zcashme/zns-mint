@@ -76,14 +76,13 @@ jobs:
       - name: docs
         run: cargo doc --locked --workspace --no-deps
 
+      # mint's regtest tests and keygen's mainnet tests run once, under
+      # the coverage steps below.
       - name: test (default)
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --exclude zns-keygen
 
       - name: test (canon non-tee)
         run: cargo test --locked -p zns-canon --features non-tee
-
-      - name: test (mint regtest)
-        run: cargo test --locked -p zns-mint --features regtest
 
       - name: test (keygen testnet)
         run: cargo test --locked -p zns-keygen --features testnet
