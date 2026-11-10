@@ -56,7 +56,7 @@ http-body-util = "0.1"
 # tonic — direct listing adds no code.
 futures-util = "0.3"
 hex = "0.4"
-zns-canon = { git = "https://github.com/zcashme/zns-canon.git", branch = "main" }
+zns-canon = { path = "../canon" }
 incrementalmerkletree = "0.9"
 
 # ZNS payload (rcm, ψ) derivation: BLAKE2b-512 wide-reduced into Pallas field

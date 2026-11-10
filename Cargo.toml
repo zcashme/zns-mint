@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["mint"]
+members = ["canon", "mint"]
 # non-tee is on in every integration-tests build. Outside the workspace,
 # feature unification cannot carry it into a release binary.
 exclude = ["integration-tests"]
