@@ -5,6 +5,9 @@ edition = "2021"
 publish = false
 description = "Boot-completion harness: real regtest Zebra, a Zallet-funded Treasury, and the dev ceremony Boot::start() requires"
 
+[lib]
+path = "src/fixture/mod.rs"
+
 [workspace]
 
 [dependencies]
