@@ -29,8 +29,7 @@ unseals anything. The directory is an untrusted one-shot channel:
 
 Source copies the custody manifest in the open from the input capsule's
 directory and publishes it beside the ciphertext; it is the only ceremony
-file on the channel. A leftover zns_mint.conf or ceremony_state.toml in
-the channel blocks the attempt from starting. The seed stays sealed.
+file on the channel. The seed stays sealed.
 Use a fresh directory for each attempt. The capsule stays outside it.
 Target will not overwrite an existing capsule unless
 --replace-after-verified-migration is set.
