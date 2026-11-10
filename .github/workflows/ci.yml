@@ -21,7 +21,7 @@ env:
 
 jobs:
   fmt:
-    name: rustfmt
+    name: Rustfmt
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -39,17 +39,17 @@ jobs:
         working-directory: integration-tests
         run: cargo fmt --check
 
-  # One job, so the shared dependency graph compiles once. A cargo
-  # invocation unifies features across the packages it builds, so each
-  # pass names only packages whose features may meet: no default feature
-  # turns on canon's non-tee, and mint's regtest turns it on anyway. The
-  # network features are mutually exclusive within a crate, so
-  # --all-features would fail by design. keygen compiles only on x86_64
-  # Linux with RDSEED.
-  workspace:
-    name: workspace
+  # Clippy and Test each cover the whole workspace, so the shared
+  # dependency graph compiles once per job. A cargo invocation unifies
+  # features across the packages it builds, so each pass names only
+  # packages whose features may meet: no default feature turns on canon's
+  # non-tee, and mint's regtest turns it on anyway. The network features
+  # are mutually exclusive within a crate, so --all-features would fail
+  # by design. keygen compiles only on x86_64 Linux with RDSEED.
+  clippy:
+    name: Clippy
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -73,6 +73,19 @@ jobs:
       - name: docs
         run: cargo doc --locked --workspace --no-deps
 
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
       - name: test (default)
         run: cargo test --locked --workspace
 
@@ -85,11 +98,11 @@ jobs:
       - name: test (keygen testnet)
         run: cargo test --locked -p zns-keygen --features testnet
 
-  # Whether a pull request touches anything e2e builds: the mint, canon,
-  # the harness, or the workspace's build inputs. keygen and migrate are
-  # not part of it.
+  # Whether a pull request touches anything the integration tests build:
+  # the mint, canon, the harness, or the workspace's build inputs. keygen
+  # and migrate are not part of it.
   changes:
-    name: changes
+    name: Check changed files
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -113,12 +126,12 @@ jobs:
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yml'
 
-  # Boot → claim → update → release in one run. Needs the workspace job,
-  # so unit failures skip it. The ceremony is re-proved every run: a
-  # random funding txid cannot be cached. A push to master always runs it.
+  # Boot → claim → update → release in one run. Needs Test, so unit
+  # failures skip it. The ceremony is re-proved every run: a random
+  # funding txid cannot be cached. A push to master always runs it.
   e2e:
-    name: integration-tests (boot to happy path)
-    needs: [workspace, changes]
+    name: Integration tests
+    needs: [test, changes]
     if: github.event_name == 'push' || needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
