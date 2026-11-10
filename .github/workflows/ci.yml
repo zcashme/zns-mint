@@ -1,5 +1,5 @@
-# Tests, clippy, rustfmt, docs, and coverage on PRs and master.
-# A failing test or a new clippy warning turns the PR red.
+# Tests, clippy, rustfmt, docs, and coverage on PRs and master, one job
+# per crate. A failing test or a new clippy warning turns the PR red.
 # Cargo commands pass --locked, so a manifest change has to update Cargo.lock.
 name: CI
 
@@ -7,6 +7,10 @@ on:
   push:
     branches: [master]
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -16,8 +20,57 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  ci:
-    name: test
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: rustfmt (workspace)
+        run: cargo fmt --all --check
+
+      - name: rustfmt (integration-tests)
+        working-directory: integration-tests
+        run: cargo fmt --check
+
+  canon:
+    name: canon
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: clippy (default)
+        run: cargo clippy --locked -p zns-canon --all-targets -- -D warnings
+
+      - name: clippy (non-tee)
+        run: cargo clippy --locked -p zns-canon --all-targets --features non-tee -- -D warnings
+
+      - name: test (default)
+        run: cargo test --locked -p zns-canon
+
+      - name: test (non-tee)
+        run: cargo test --locked -p zns-canon --features non-tee
+
+      - name: docs
+        run: cargo doc --locked -p zns-canon --no-deps
+
+  mint:
+    name: mint
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -26,16 +79,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy, llvm-tools-preview
+          components: clippy, llvm-tools-preview
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-
-      - name: rustfmt
-        run: cargo fmt --check
 
       # Network features are mutually exclusive (lib.rs compile_error), so
       # clippy runs every supported combination explicitly. --all-features
@@ -66,18 +116,91 @@ jobs:
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
-          name: coverage
+          name: coverage-mint
           path: |
             lcov.info
             coverage/
           if-no-files-found: error
 
-  # Boot → claim → update → release in one run. Needs ci, so unit
+  # mainnet and testnet are mutually exclusive, so keygen cannot use
+  # --all-features. It only compiles on x86_64 Linux with RDSEED.
+  keygen:
+    name: keygen
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, llvm-tools-preview
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: clippy (mainnet)
+        run: cargo clippy --locked -p zns-keygen --all-targets -- -D warnings
+
+      - name: clippy (testnet)
+        run: cargo clippy --locked -p zns-keygen --all-targets --features testnet -- -D warnings
+
+      - name: test (mainnet)
+        run: cargo test --locked -p zns-keygen
+
+      - name: test (testnet)
+        run: cargo test --locked -p zns-keygen --features testnet
+
+      - name: docs
+        run: cargo doc --locked -p zns-keygen --no-deps
+
+      - name: coverage
+        run: |
+          cargo llvm-cov --locked -p zns-keygen --html --output-dir coverage
+          cargo llvm-cov report --lcov --output-path lcov.info
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-keygen
+          path: |
+            lcov.info
+            coverage/
+          if-no-files-found: error
+
+  migrate:
+    name: migrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: clippy
+        run: cargo clippy --locked -p zns-migrate --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --locked -p zns-migrate
+
+      - name: docs
+        run: cargo doc --locked -p zns-migrate --no-deps
+
+  # Boot → claim → update → release in one run. Needs mint, so unit
   # failures skip it. The ceremony is re-proved every run: a random
   # funding txid cannot be cached.
   e2e:
-    name: e2e (boot to happy path)
-    needs: ci
+    name: integration-tests (boot to happy path)
+    needs: mint
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -86,7 +209,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
 
       # zebra-indexer-proto (tonic/prost) needs protoc at build time.
       - name: Install protoc
@@ -135,13 +258,13 @@ jobs:
           cargo build --locked --release
           echo "ZALLET_BIN=$PWD/target/release/zallet-zebra" >> "$GITHUB_ENV"
 
-      - name: rustfmt (integration)
-        working-directory: integration-tests
-        run: cargo fmt --check
-
-      - name: clippy (integration)
+      - name: clippy
         working-directory: integration-tests
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: test (lib)
+        working-directory: integration-tests
+        run: cargo test --locked --lib
 
       - name: Build mint for e2e
         run: |
@@ -155,6 +278,4 @@ jobs:
 
       - name: boot to happy path
         working-directory: integration-tests
-        env:
-          ZNS_MINT_DIR: ${{ github.workspace }}/mint
         run: cargo test --locked --test happy_path -- --nocapture
