@@ -155,10 +155,12 @@ jobs:
           sudo apt-get install -y protobuf-compiler
 
       # The built binary is cached under its pinned commit, so zallet is
-      # checked out and compiled only when ZALLET_REF changes.
-      - name: Cache zallet binary
+      # checked out and compiled only when ZALLET_REF changes. A cold
+      # release build takes more than ten minutes, so the binary is saved
+      # as soon as it exists, not at the end of a job that may fail.
+      - name: Restore zallet binary
         id: zallet
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: zallet-bin
           key: zallet-zebra-${{ runner.os }}-${{ env.ZALLET_REF }}
@@ -202,6 +204,13 @@ jobs:
           cargo build --locked --release
           mkdir -p "$GITHUB_WORKSPACE/zallet-bin"
           cp target/release/zallet-zebra "$GITHUB_WORKSPACE/zallet-bin/"
+
+      - name: Save zallet binary
+        if: steps.zallet.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: zallet-bin
+          key: ${{ steps.zallet.outputs.cache-primary-key }}
 
       - name: Use the zallet binary
         run: |
