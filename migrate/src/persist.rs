@@ -295,19 +295,19 @@ mod tests {
     fn commit_files_links_every_staged_file() {
         let root = scratch("commit");
         let capsule = root.join("zns_seed.capsule");
-        let mint = root.join("zns_mint.conf");
+        let manifest = root.join("zns_custody_manifest.toml");
         let staged_capsule = stage(&capsule, b"capsule").unwrap();
-        let staged_mint = stage_file(&mint, b"mint", 0o644).unwrap();
+        let staged_manifest = stage_file(&manifest, b"manifest", 0o644).unwrap();
         commit_files(
             vec![
                 (staged_capsule, capsule.clone()),
-                (staged_mint, mint.clone()),
+                (staged_manifest, manifest.clone()),
             ],
             false,
         )
         .unwrap();
         assert_eq!(fs::read(&capsule).unwrap(), b"capsule");
-        assert_eq!(fs::read(&mint).unwrap(), b"mint");
+        assert_eq!(fs::read(&manifest).unwrap(), b"manifest");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -319,21 +319,21 @@ mod tests {
         fs::create_dir(&keys).unwrap();
         fs::create_dir(&blocked).unwrap();
         let capsule = keys.join("zns_seed.capsule");
-        let mint = blocked.join("zns_mint.conf");
+        let manifest = blocked.join("zns_custody_manifest.toml");
         let staged_capsule = stage(&capsule, b"new-capsule").unwrap();
-        let staged_mint = stage_file(&mint, b"network = test", 0o600).unwrap();
+        let staged_manifest = stage_file(&manifest, b"birthday = 1", 0o644).unwrap();
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o555)).unwrap();
         let err = commit_files(
             vec![
                 (staged_capsule, capsule.clone()),
-                (staged_mint, mint.clone()),
+                (staged_manifest, manifest.clone()),
             ],
             false,
         )
         .unwrap_err();
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(!capsule.exists(), "{err}");
-        assert!(!mint.exists(), "{err}");
+        assert!(!manifest.exists(), "{err}");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -346,12 +346,15 @@ mod tests {
         fs::create_dir(&blocked).unwrap();
         let capsule = keys.join("zns_seed.capsule");
         fs::write(&capsule, b"old-capsule").unwrap();
-        let mint = blocked.join("zns_mint.conf");
+        let manifest = blocked.join("zns_custody_manifest.toml");
         let staged_capsule = stage(&capsule, b"new-capsule").unwrap();
-        let staged_mint = stage_file(&mint, b"network = test", 0o600).unwrap();
+        let staged_manifest = stage_file(&manifest, b"birthday = 1", 0o644).unwrap();
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o555)).unwrap();
         let err = commit_files(
-            vec![(staged_capsule, capsule.clone()), (staged_mint, mint)],
+            vec![
+                (staged_capsule, capsule.clone()),
+                (staged_manifest, manifest),
+            ],
             true,
         )
         .unwrap_err();
