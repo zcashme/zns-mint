@@ -1,5 +1,5 @@
-# Tests, clippy, rustfmt, docs, and coverage on PRs and master, one job
-# per crate. A failing test or a new clippy warning turns the PR red.
+# Tests, clippy, rustfmt and docs on PRs and master. A failing test or a
+# new clippy warning turns the PR red.
 # Cargo commands pass --locked, so a manifest change has to update Cargo.lock.
 name: CI
 
@@ -56,13 +56,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, llvm-tools-preview
+          components: clippy
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: clippy (default)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -76,40 +73,17 @@ jobs:
       - name: docs
         run: cargo doc --locked --workspace --no-deps
 
-      # mint's regtest tests and keygen's mainnet tests run once, under
-      # the coverage steps below.
       - name: test (default)
-        run: cargo test --locked --workspace --exclude zns-keygen
+        run: cargo test --locked --workspace
+
+      - name: test (mint regtest)
+        run: cargo test --locked -p zns-mint --features regtest
 
       - name: test (canon non-tee)
         run: cargo test --locked -p zns-canon --features non-tee
 
       - name: test (keygen testnet)
         run: cargo test --locked -p zns-keygen --features testnet
-
-      - name: coverage (mint regtest)
-        run: |
-          cargo llvm-cov --locked -p zns-mint --features regtest --html --output-dir coverage-mint
-          cargo llvm-cov report --lcov --output-path coverage-mint/lcov.info
-
-      - name: coverage (keygen mainnet)
-        run: |
-          cargo llvm-cov --locked -p zns-keygen --html --output-dir coverage-keygen
-          cargo llvm-cov report --lcov --output-path coverage-keygen/lcov.info
-
-      - name: Upload coverage (mint)
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-mint
-          path: coverage-mint/
-          if-no-files-found: error
-
-      - name: Upload coverage (keygen)
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-keygen
-          path: coverage-keygen/
-          if-no-files-found: error
 
   # Boot → claim → update → release in one run. Needs the workspace job,
   # so unit failures skip it. The ceremony is re-proved every run: a
