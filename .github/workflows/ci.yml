@@ -93,6 +93,11 @@ jobs:
     needs: workspace
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # zallet-zebra reads zebrad's state directly; Zebra 7 writes format
+    # v29, which no zallet release reads yet. Move to the first release
+    # that does.
+    env:
+      ZALLET_REF: aec7f3fa8397ef17b2852dc6835572d6e623b1a2
     steps:
       - uses: actions/checkout@v4
 
@@ -107,14 +112,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
-      # zallet-zebra reads zebrad's state directly; Zebra 7 writes format
-      # v29, which no zallet release reads yet. Move to the first release
-      # that does.
+      # The built binary is cached under its pinned commit, so zallet is
+      # checked out and compiled only when ZALLET_REF changes.
+      - name: Cache zallet binary
+        id: zallet
+        uses: actions/cache@v4
+        with:
+          path: zallet-bin
+          key: zallet-zebra-${{ runner.os }}-${{ env.ZALLET_REF }}
+
       - name: Checkout zallet
+        if: steps.zallet.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:
           repository: zcash/zallet
-          ref: aec7f3fa8397ef17b2852dc6835572d6e623b1a2
+          ref: ${{ env.ZALLET_REF }}
           path: zallet
 
       - name: Cache cargo registry and targets
@@ -123,7 +135,6 @@ jobs:
           workspaces: |
             . -> target
             integration-tests -> target
-            zallet/backends/zebra -> target
 
       - name: Download zebrad and Sapling params
         run: |
@@ -143,10 +154,17 @@ jobs:
           echo "ZCASH_PARAMS_DIR=$RUNNER_TEMP/params" >> "$GITHUB_ENV"
 
       - name: Build zallet (zebra backend)
+        if: steps.zallet.outputs.cache-hit != 'true'
         working-directory: zallet/backends/zebra
         run: |
           cargo build --locked --release
-          echo "ZALLET_BIN=$PWD/target/release/zallet-zebra" >> "$GITHUB_ENV"
+          mkdir -p "$GITHUB_WORKSPACE/zallet-bin"
+          cp target/release/zallet-zebra "$GITHUB_WORKSPACE/zallet-bin/"
+
+      - name: Use the zallet binary
+        run: |
+          test -x zallet-bin/zallet-zebra
+          echo "ZALLET_BIN=$PWD/zallet-bin/zallet-zebra" >> "$GITHUB_ENV"
 
       - name: clippy
         working-directory: integration-tests
