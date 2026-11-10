@@ -1,5 +1,11 @@
 # happy_path.changelog.md
 
+## 2026-11-10
+
+- The fixture is `zns_integration_tests::fixture`: the mint's e2e crate
+  and the harness are one crate in this workspace's `integration-tests/`.
+  The test body is unchanged.
+
 ## 2026-11-07
 
 - The happy path claims, updates and releases `alice` with no access
