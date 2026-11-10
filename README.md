@@ -1,5 +1,15 @@
 # Zcash Name Service
 
+| Folder | Crate | What it is |
+|---|---|---|
+| `mint/` | `zns-mint` | The mint, described below |
+| `keygen/` | `zns-keygen` | The ceremony that creates the seed, seals it to the guest, and funds the anchors |
+| `migrate/` | `zns-migrate` | Moves a sealed seed from one guest to the next release's guest |
+| `canon/` | `zns-canon` | Formats and checks all three share: capsule, custody manifest, attestation, upgrade document, access codes |
+| `integration-tests/` | `zns-integration-tests` | Regtest Zebra, a Zallet user and the mint, end to end |
+
+The first four are one Cargo workspace with one `Cargo.lock`. `integration-tests/` sits outside it: it turns on canon's `non-tee`, which a release build must never see.
+
 The mint sells names on Zcash. A name is a short word that points at a Zcash address. You pay the mint, and the mint writes that binding into a shielded note on the chain. Anyone can then look the name up.
 
 The mint runs inside a hardware trusted execution environment, in the same guest as a Zebra full node. Zebra is the mint's view of the chain. The mint asks Zebra for each new block, reads the payments inside it, and hands Zebra the transactions that record a name. The seed that spends those notes is sealed to that guest.
