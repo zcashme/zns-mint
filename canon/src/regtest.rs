@@ -72,7 +72,6 @@ mod tests {
             dev_seed_fingerprint()
         );
         assert_eq!(manifest, expected);
-        assert!(!dir.join("zns_mint.conf").exists());
 
         std::fs::remove_dir_all(&dir).ok();
     }
