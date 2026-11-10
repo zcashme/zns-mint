@@ -147,7 +147,7 @@ pub fn derive_sealing_key(_context: &[u8]) -> Result<SealingKey, TeeError> {
     let request = DerivedKey::new(false, guest_fields, 0, 0, 0, None);
     firmware
         .get_derived_key(Some(1), request)
-        .map(|key| SealingKey::new(key))
+        .map(SealingKey::new)
         .map_err(|e| TeeError::SealingKey(format!("SEV-SNP get_derived_key: {e}")))
 }
 
