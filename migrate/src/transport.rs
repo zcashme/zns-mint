@@ -25,9 +25,7 @@ pub const SOURCE_ATTESTATION_FILE: &str = "source_attestation.bin";
 pub const RECEIPT_FILE: &str = "receipt.bin";
 pub const RECEIPT_ATTESTATION_FILE: &str = "receipt_attestation.bin";
 pub const SOURCE_READY_FILE: &str = "source.ready";
-pub const MINT_CONF_FILE: &str = "zns_mint.conf";
 pub const CUSTODY_MANIFEST_FILE: &str = "zns_custody_manifest.toml";
-pub const CEREMONY_STATE_FILE: &str = "ceremony_state.toml";
 const READY_MAGIC: &[u8] = b"ZNS_MIGRATE_READY_V1";
 const ATTESTATION_MAX: usize = 4096;
 pub const CEREMONY_MAX: usize = 1024 * 1024;
@@ -38,9 +36,7 @@ const PROTOCOL_FILES: &[&str] = &[
     ATTESTATION_FILE,
     ENCRYPTED_SEED_FILE,
     SOURCE_ATTESTATION_FILE,
-    MINT_CONF_FILE,
     CUSTODY_MANIFEST_FILE,
-    CEREMONY_STATE_FILE,
     RECEIPT_FILE,
     RECEIPT_ATTESTATION_FILE,
 ];
@@ -508,21 +504,12 @@ mod tests {
     }
 
     #[test]
-    fn ceremony_files_roundtrip_and_a_leftover_blocks_begin() {
+    fn the_custody_manifest_is_the_only_ceremony_file() {
         let dir = scratch("ceremony");
         let transport = DirTransport::open(&dir, Duration::from_millis(80)).unwrap();
         let err = transport.publish_ceremony("notes.txt", b"no").unwrap_err();
         assert!(err.to_string().contains("not a ceremony file"));
 
-        // The custody manifest is the only ceremony file on the channel.
-        let err = transport
-            .publish_ceremony(MINT_CONF_FILE, b"network = test")
-            .unwrap_err();
-        assert!(err.to_string().contains("not a ceremony file"));
-        let err = transport
-            .publish_ceremony(CEREMONY_STATE_FILE, b"state = 1")
-            .unwrap_err();
-        assert!(err.to_string().contains("not a ceremony file"));
         transport
             .publish_ceremony(CUSTODY_MANIFEST_FILE, b"birthday = 1")
             .unwrap();
@@ -530,11 +517,6 @@ mod tests {
             transport.wait_ceremony(CUSTODY_MANIFEST_FILE).unwrap(),
             b"birthday = 1"
         );
-
-        // A planted legacy file still blocks the attempt from starting.
-        fs::write(dir.join(MINT_CONF_FILE), b"network = test").unwrap();
-        let err = transport.source_begin().unwrap_err();
-        assert!(err.to_string().contains("already contains zns_mint.conf"));
         let _ = fs::remove_dir_all(&dir);
     }
 
