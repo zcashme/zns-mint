@@ -39,40 +39,17 @@ jobs:
         working-directory: integration-tests
         run: cargo fmt --check
 
-  canon:
-    name: canon
+  # One job, so the shared dependency graph compiles once. A cargo
+  # invocation unifies features across the packages it builds, so each
+  # pass names only packages whose features may meet: no default feature
+  # turns on canon's non-tee, and mint's regtest turns it on anyway. The
+  # network features are mutually exclusive within a crate, so
+  # --all-features would fail by design. keygen compiles only on x86_64
+  # Linux with RDSEED.
+  workspace:
+    name: workspace
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-
-      - name: clippy (default)
-        run: cargo clippy --locked -p zns-canon --all-targets -- -D warnings
-
-      - name: clippy (non-tee)
-        run: cargo clippy --locked -p zns-canon --all-targets --features non-tee -- -D warnings
-
-      - name: test (default)
-        run: cargo test --locked -p zns-canon
-
-      - name: test (non-tee)
-        run: cargo test --locked -p zns-canon --features non-tee
-
-      - name: docs
-        run: cargo doc --locked -p zns-canon --no-deps
-
-  mint:
-    name: mint
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -87,120 +64,60 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      # Network features are mutually exclusive (lib.rs compile_error), so
-      # clippy runs every supported combination explicitly. --all-features
-      # would enable testnet and regtest together and fail by design.
       - name: clippy (default)
-        run: cargo clippy --locked -p zns-mint --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: clippy (testnet)
-        run: cargo clippy --locked -p zns-mint --all-targets --features testnet -- -D warnings
+        run: cargo clippy --locked -p zns-mint -p zns-keygen --all-targets --features zns-mint/testnet,zns-keygen/testnet -- -D warnings
 
-      - name: clippy (regtest)
-        run: cargo clippy --locked -p zns-mint --all-targets --features regtest -- -D warnings
-
-      - name: test (default)
-        run: cargo test --locked -p zns-mint
-
-      - name: test (regtest)
-        run: cargo test --locked -p zns-mint --features regtest
+      - name: clippy (regtest, non-tee)
+        run: cargo clippy --locked -p zns-mint -p zns-canon --all-targets --features zns-mint/regtest,zns-canon/non-tee -- -D warnings
 
       - name: docs
-        run: cargo doc --locked -p zns-mint --no-deps
+        run: cargo doc --locked --workspace --no-deps
 
-      - name: coverage
+      - name: test (default)
+        run: cargo test --locked --workspace
+
+      - name: test (canon non-tee)
+        run: cargo test --locked -p zns-canon --features non-tee
+
+      - name: test (mint regtest)
+        run: cargo test --locked -p zns-mint --features regtest
+
+      - name: test (keygen testnet)
+        run: cargo test --locked -p zns-keygen --features testnet
+
+      - name: coverage (mint regtest)
         run: |
-          cargo llvm-cov --locked -p zns-mint --features regtest --html --output-dir coverage
-          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov --locked -p zns-mint --features regtest --html --output-dir coverage-mint
+          cargo llvm-cov report --lcov --output-path coverage-mint/lcov.info
 
-      - name: Upload coverage
+      - name: coverage (keygen mainnet)
+        run: |
+          cargo llvm-cov --locked -p zns-keygen --html --output-dir coverage-keygen
+          cargo llvm-cov report --lcov --output-path coverage-keygen/lcov.info
+
+      - name: Upload coverage (mint)
         uses: actions/upload-artifact@v4
         with:
           name: coverage-mint
-          path: |
-            lcov.info
-            coverage/
+          path: coverage-mint/
           if-no-files-found: error
 
-  # mainnet and testnet are mutually exclusive, so keygen cannot use
-  # --all-features. It only compiles on x86_64 Linux with RDSEED.
-  keygen:
-    name: keygen
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, llvm-tools-preview
-
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-
-      - name: clippy (mainnet)
-        run: cargo clippy --locked -p zns-keygen --all-targets -- -D warnings
-
-      - name: clippy (testnet)
-        run: cargo clippy --locked -p zns-keygen --all-targets --features testnet -- -D warnings
-
-      - name: test (mainnet)
-        run: cargo test --locked -p zns-keygen
-
-      - name: test (testnet)
-        run: cargo test --locked -p zns-keygen --features testnet
-
-      - name: docs
-        run: cargo doc --locked -p zns-keygen --no-deps
-
-      - name: coverage
-        run: |
-          cargo llvm-cov --locked -p zns-keygen --html --output-dir coverage
-          cargo llvm-cov report --lcov --output-path lcov.info
-
-      - name: Upload coverage
+      - name: Upload coverage (keygen)
         uses: actions/upload-artifact@v4
         with:
           name: coverage-keygen
-          path: |
-            lcov.info
-            coverage/
+          path: coverage-keygen/
           if-no-files-found: error
 
-  migrate:
-    name: migrate
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-
-      - name: clippy
-        run: cargo clippy --locked -p zns-migrate --all-targets -- -D warnings
-
-      - name: test
-        run: cargo test --locked -p zns-migrate
-
-      - name: docs
-        run: cargo doc --locked -p zns-migrate --no-deps
-
-  # Boot → claim → update → release in one run. Needs mint, so unit
-  # failures skip it. The ceremony is re-proved every run: a random
-  # funding txid cannot be cached.
+  # Boot → claim → update → release in one run. Needs the workspace job,
+  # so unit failures skip it. The ceremony is re-proved every run: a
+  # random funding txid cannot be cached.
   e2e:
     name: integration-tests (boot to happy path)
-    needs: mint
+    needs: workspace
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
