@@ -2,9 +2,8 @@
 
 Local process harness for the Zcash Name Service: `zebrad` (regtest), a real
 [`zallet`](https://github.com/zcash/zallet) wallet as the user, and
-[`zns-mint`](https://github.com/zcashme/zns-mint). Mint is built with
-`--features regtest` from `../zns-mint` (override with
-`$ZNS_MINT_DIR` / `$ZNS_MINT_BIN`). If no capsule is provided, the harness
+`zns-mint`. Mint is built with `--features regtest` from this workspace
+(override with `$ZNS_MINT_BIN`). If no capsule is provided, the harness
 seals an all-zero seed with the public test key.
 
 Before mint starts, the harness mines 104 blocks and publishes a **dev**
@@ -20,10 +19,8 @@ wallet (encryption identity, generated mnemonic, account 0 + miner
 address), mines coinbase to it, shields with `z_shieldcoinbase`, and pays
 claims through `z_sendfromaccount`.
 
-The end-to-end claim test was removed: since zns-mint#341 every claim needs
-a pre-sale access code, which it did not send. The claim → update →
-release flow is covered by zns-mint's `integration-tests` (`happy_path`),
-which uses this harness.
+The claim → update → release flow is `tests/happy_path.rs`, built on the
+`fixture` module.
 
 ## License
 

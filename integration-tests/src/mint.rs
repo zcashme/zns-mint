@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use tempfile::TempDir;
 
-use crate::binaries::{cargo_build_bin_with, mint_bin_override, sibling_dir};
+use crate::binaries::{cargo_build_bin_with, mint_bin_override, repo_root};
 use crate::child::ChildProcess;
 
 /// Halo2 in a debug mint binary is too slow for vault sweep. Regtest
@@ -34,9 +34,9 @@ impl Mint {
             return Ok(bin);
         }
         cargo_build_bin_with(
-            &sibling_dir("zns-mint"),
+            &repo_root(),
             "zns-mint",
-            &["--features", "regtest"],
+            &["-p", "zns-mint", "--features", "regtest"],
             MINT_DEV_OPT,
         )
     }
@@ -132,6 +132,6 @@ fn capsule_source() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let sibling = sibling_dir("zns-mint").join("keys/zns_seed.capsule");
-    sibling.is_file().then_some(sibling)
+    let local = repo_root().join("keys/zns_seed.capsule");
+    local.is_file().then_some(local)
 }

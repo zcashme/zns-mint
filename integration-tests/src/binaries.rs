@@ -5,22 +5,26 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-/// Directory of this crate (the integration-tests repo root).
+/// Directory of this crate (`integration-tests/`).
 pub fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Sibling checkout next to this repo, or `$ZNS_MINT_DIR` / `$ZNS_RESOLVER_DIR`.
+/// The workspace root: zns-mint builds here, into `target/`.
+pub fn repo_root() -> PathBuf {
+    crate_dir().join("..")
+}
+
+/// Sibling checkout next to this repo, or `$ZNS_RESOLVER_DIR`.
 pub fn sibling_dir(name: &str) -> PathBuf {
     let env_key = match name {
-        "zns-mint" => "ZNS_MINT_DIR",
         "zns-resolver" => "ZNS_RESOLVER_DIR",
         other => panic!("unknown sibling repo {other}"),
     };
     if let Ok(p) = std::env::var(env_key) {
         return PathBuf::from(p);
     }
-    crate_dir().join("..").join(name)
+    repo_root().join("..").join(name)
 }
 
 /// `$<env_var>` if it points at a file, else `name` on `$PATH`.
