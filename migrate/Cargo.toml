@@ -1,0 +1,24 @@
+[package]
+name = "zns-migrate"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+
+[features]
+default = []
+
+[dependencies]
+blake2b_simd = "1"
+hex = "0.4"
+libc = "0.2"
+rand = "0.10"
+secrecy = "0.8"
+zip32 = "0.3"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+zns-canon = { path = "../canon" }

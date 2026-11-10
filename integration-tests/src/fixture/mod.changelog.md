@@ -1,4 +1,10 @@
-# lib.changelog.md
+# fixture/mod.changelog.md
+
+## 2026-11-10
+
+- This crate root becomes the harness's `fixture` module (it was
+  `src/lib.rs` of zns-mint-integration-tests). Harness items come through
+  `crate::`, the fixture's own through `super::`. No behaviour change.
 
 ## 2026-10-20
 

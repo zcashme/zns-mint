@@ -1,0 +1,125 @@
+[package]
+name = "zns-mint"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[features]
+regtest = ["zcash_protocol/local-consensus", "non-tee"]
+testnet = []
+# Dev escape hatch: public sealing keys, no attestation. Release-blocked in lib.rs.
+non-tee = ["zns-canon/non-tee"]
+
+[[bin]]
+name = "zns-mint"
+path = "src/main.rs"
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+zeroize = { version = "1.7", features = ["zeroize_derive"] }
+subtle = "2.5"
+secrecy = "0.8"
+sha2 = { version = "0.11", features = ["zeroize"] }
+hmac = "0.13"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Keygen's `keys/zns_custody_manifest.toml`: network, seed fingerprint, anchor, birthday.
+toml = "1"
+# `O_NOFOLLOW` when opening the keygen attestation report.
+libc = "0.2"
+# Exchange price parsing: `Decimal` deserializes a JSON price string
+# ("41.53") or number directly, so no hand-rolled decimal parser is needed.
+rust_decimal = { version = "1.42", features = ["serde"] }
+# `OffsetDateTime` for `SentTransaction::new` (zcash_client_backend data-api);
+# same crate upstream depends on, lockfile-shared at 0.3.x.
+time = { version = "0.3", features = ["parsing"] }
+# JSON-RPC transport over plaintext HTTP/1.1 to the local Zebra node (same
+# TEE). tonic, hyper, hyper-util and http-body-util are already compiled via
+# tonic/gRPC — listing them as direct deps just makes them importable. `http`
+# and `bytes` types come through hyper's re-exports. No TLS on this transport.
+tonic = "0.14"
+# `server` serves the metrics page (src/metrics.rs); the exporter's own
+# listener compiled the same feature.
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "webpki-roots"] }
+# ureq (the AMD KDS fetch) enables rustls/ring and hyper-rustls enables
+# rustls/aws-lc-rs. Boot installs this provider as the process default.
+rustls = { version = "0.23", default-features = false, features = ["std", "aws-lc-rs"] }
+http-body-util = "0.1"
+# `StreamExt`/`Stream` for the mempool stream adaptor. Already compiled via
+# tonic — direct listing adds no code.
+futures-util = "0.3"
+hex = "0.4"
+zns-canon = { path = "../canon" }
+incrementalmerkletree = "0.9"
+
+# ZNS payload (rcm, ψ) derivation: BLAKE2b-512 wide-reduced into Pallas field
+# elements. Both are already transitive deps (via zcash_spec / orchard); pulling
+# them direct adds no new compiled code to the graph.
+blake2b_simd = "1"
+pasta_curves = "0.6"
+
+zcash_note_encryption = "0.5"
+
+# CSPRNG for Orchard spend-auth + binding nonces in the signer. Already a
+# transitive dep (orchard); pulled direct with default features so `SysRng` is
+# available (orchard itself uses `default-features = false`).
+rand = "0.10"
+
+zebra-indexer-proto = "3.0"
+
+# Key derivation (ZIP-32 Orchard)
+# Treasury (account 0) is user-facing and accepts Orchard + Sapling + Transparent
+# payments from users. Registry (account 1) is name-notes-only (Orchard). Both
+# accounts derive all enabled pools via `from_seed`; the Registry's Sapling and
+# Transparent components are unused (its address is not published).
+zcash_keys = { version = "0.17", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
+zcash_protocol = { version = "0.11", default-features = false }
+zcash_encoding = "0.5"
+
+# Address parsing for OTP relay (extracting Orchard receiver from UA string).
+# Already a transitive dep via zcash_keys; listed direct for importability.
+zcash_address = "0.14"
+
+# Transparent key types (Treasury accepts transparent payments from users).
+# The workspace crate is `zcash_transparent`, published as `transparent`.
+transparent = { package = "zcash_transparent", version = "0.11", default-features = false }
+zip32 = "0.3"
+
+# Block parsing
+zcash_primitives = { version = "0.31", default-features = false, features = ["unsafe-zns", "non-standard-fees"] }
+sapling = { package = "sapling-crypto", version = "0.9", default-features = false, features = ["multicore"] }
+
+# ZIP-321 payment requests for upstream proposal construction
+# (`propose_transfer` consumes a `zip321::TransactionRequest`).
+zip321 = "0.10"
+
+# Full-block wallet scanning. `transparent-inputs` enables transparent UTXO
+# detection (Treasury accepts transparent payments from users).
+zcash_client_backend = { version = "0.25", default-features = false, features = ["orchard", "transparent-inputs"] }
+
+# Orchard with the `unsafe-zns` feature: Name Notes override the standard
+# note commitment so a note commits to a ZNS payload. The fork lives at
+# https://github.com/zcashme/orchard and is unified with the librustzcash
+# graph via the [patch.crates-io] git tag. zns-mint calls
+# `Builder::add_zns_output` / `add_zns_spend` directly, so this is a
+# first-class dep, not just a transitive one.
+orchard = { version = "0.16.0", default-features = false, features = ["unsafe-zns", "circuit", "multicore"] }
+shardtree = "0.8"
+metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+
+# Upstream ZIP-316 unified test vectors for the key-derivation regression
+# tests (`zcash_address::test_vectors::UNIFIED` is gated behind the crate's
+# `test-dependencies` feature). Dev-only; never part of a release build.
+[dev-dependencies]
+zcash_address = { version = "0.14", features = ["test-dependencies"] }
+# Upstream wallet conformance corpus. Keep this feature out of release builds;
+# both patched cryptography crates must preserve it when their tags change.
+zcash_client_backend = { version = "0.25", default-features = false, features = ["test-dependencies"] }

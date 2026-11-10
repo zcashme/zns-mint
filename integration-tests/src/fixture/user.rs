@@ -4,10 +4,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde_json::json;
-use zns_integration_tests::treasury_ua;
-use zns_integration_tests::Zebrad;
 
-use crate::{mature_coinbase_zats, wait_until_sees_coinbase, wait_until_shielded, Zallet};
+use super::{mature_coinbase_zats, wait_until_sees_coinbase, wait_until_shielded, Zallet};
+use crate::{treasury_ua, Zebrad};
 
 /// ZEC per request payment. Deliberately overpays the oracle-priced fees:
 /// intake is fail-closed and an underpay is a dead attempt.
@@ -45,7 +44,7 @@ impl User {
         let mut zallet = Zallet::init(zebra)?;
         zebra.restart_with_miner(&zallet.miner_address).await?;
         zebra
-            .generate_blocks(crate::COINBASE_MATURITY + mature_coinbases)
+            .generate_blocks(super::COINBASE_MATURITY + mature_coinbases)
             .await?;
         let target = zebra.tip_height().await?;
 

@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde_json::json;
 
-use crate::stack::Stack;
-use crate::verify::{
+use super::stack::Stack;
+use super::verify::{
     block_contains_txid, challenge_txid, registration_txid, registry_commitment_keys,
     wait_for_verified_name_note, VerifiedNameNote,
 };
