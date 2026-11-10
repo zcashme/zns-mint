@@ -41,26 +41,26 @@ jobs:
       # clippy runs every supported combination explicitly. --all-features
       # would enable testnet and regtest together and fail by design.
       - name: clippy (default)
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked -p zns-mint --all-targets -- -D warnings
 
       - name: clippy (testnet)
-        run: cargo clippy --locked --all-targets --features testnet -- -D warnings
+        run: cargo clippy --locked -p zns-mint --all-targets --features testnet -- -D warnings
 
       - name: clippy (regtest)
-        run: cargo clippy --locked --all-targets --features regtest -- -D warnings
+        run: cargo clippy --locked -p zns-mint --all-targets --features regtest -- -D warnings
 
       - name: test (default)
-        run: cargo test --locked
+        run: cargo test --locked -p zns-mint
 
       - name: test (regtest)
-        run: cargo test --locked --features regtest
+        run: cargo test --locked -p zns-mint --features regtest
 
       - name: docs
-        run: cargo doc --locked --no-deps
+        run: cargo doc --locked -p zns-mint --no-deps
 
       - name: coverage
         run: |
-          cargo llvm-cov --locked --features regtest --html --output-dir coverage
+          cargo llvm-cov --locked -p zns-mint --features regtest --html --output-dir coverage
           cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload coverage
@@ -149,12 +149,12 @@ jobs:
             --config profile.dev.package.orchard.opt-level=3 \
             --config profile.dev.package.halo2_proofs.opt-level=3 \
             --config profile.dev.package.halo2_gadgets.opt-level=3 \
-            build --locked --bin zns-mint --features regtest
+            build --locked -p zns-mint --bin zns-mint --features regtest
           test -x target/debug/zns-mint
           echo "ZNS_MINT_BIN=$PWD/target/debug/zns-mint" >> "$GITHUB_ENV"
 
       - name: boot to happy path
         working-directory: integration-tests
         env:
-          ZNS_MINT_DIR: ${{ github.workspace }}
+          ZNS_MINT_DIR: ${{ github.workspace }}/mint
         run: cargo test --locked --test happy_path -- --nocapture

@@ -115,13 +115,6 @@ shardtree = "0.8"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 
-
-# Also redirect `zcash_primitives` to the ZNS fork so the transaction
-# Builder can compose Name Notes (add_zns_spend / add_zns_output).
-[patch.crates-io]
-orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0" }
-zcash_primitives = { git = "https://github.com/zcashme/zns-zcash_primitives.git", tag = "zns-zcash_primitives-v0.31.0" }
-
 # Upstream ZIP-316 unified test vectors for the key-derivation regression
 # tests (`zcash_address::test_vectors::UNIFIED` is gated behind the crate's
 # `test-dependencies` feature). Dev-only; never part of a release build.

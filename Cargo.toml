@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["mint"]
+# non-tee is on in every integration-tests build. Outside the workspace,
+# feature unification cannot carry it into a release binary.
+exclude = ["integration-tests"]
+
+# Every member builds against the ZNS forks: Name Notes override the
+# standard note commitment (`unsafe-zns`), and the transaction Builder
+# composes them (add_zns_spend / add_zns_output).
+[patch.crates-io]
+orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0" }
+zcash_primitives = { git = "https://github.com/zcashme/zns-zcash_primitives.git", tag = "zns-zcash_primitives-v0.31.0" }

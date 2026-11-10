@@ -33,7 +33,7 @@ orchard = { version = "0.16.0", default-features = false, features = ["unsafe-zn
 zns-verify = { version = "0.2", features = ["decrypt"] }
 
 # The mint under test, linked in-process: regtest selects non-tee.
-zns-mint = { path = "..", features = ["regtest"] }
+zns-mint = { path = "../mint", features = ["regtest"] }
 # Zebra + Zallet process harness, tracks main.
 zns-integration-tests = { git = "https://github.com/zcashme/zns-integration-tests.git", branch = "main" }
 zns-canon = { git = "https://github.com/zcashme/zns-canon.git", branch = "main" }
