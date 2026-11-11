@@ -32,8 +32,8 @@ const REFUND_NAME: &str = "alice";
 /// Above the withheld refund fee (10 marginal actions), and below
 /// [`REFUND_NAME`]'s forever price of $300 while ZEC is under $3,000.
 const REFUND_ZEC: f64 = 0.1;
-/// One claim payment, in zatoshis. Matches `CLAIM_PAYMENT_ZEC`.
-const CLAIM_ZATS: u64 = 200_000_000;
+/// One claim payment. Matches `CLAIM_PAYMENT_ZEC`.
+const CLAIM_ZEC: f64 = 2.0;
 
 const SCAN_TIMEOUT: Duration = Duration::from_secs(120);
 const DECIDE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -57,9 +57,8 @@ pub async fn run(stack: &mut Stack) -> Result<()> {
 /// A refund admitted for the tip payment is dropped with that block.
 /// The same raw transaction, mined on the new chain, is refunded once.
 async fn refunds(stack: &mut Stack) -> Result<()> {
-    sync_wallet(stack).await?;
     let memo = format!("ZNS:claim:forever:{REFUND_NAME}:{}", stack.user.ua);
-    let txid = stack.user.pay_treasury_amount(&memo, REFUND_ZEC).await?;
+    let txid = pay_treasury(stack, &memo, REFUND_ZEC).await?;
     eprintln!("refund payment {txid}");
     stack.zebra.generate_blocks(1).await?;
     let height = wait_tx_height(stack, &txid).await?;
@@ -135,11 +134,6 @@ async fn refunds(stack: &mut Stack) -> Result<()> {
     {
         bail!("refund {refund_txid} left height {refund_height}");
     }
-    stack
-        .user
-        .zallet
-        .wait_until_synced(tip, SCAN_TIMEOUT)
-        .await?;
     eprintln!("refund: rebroadcast {txid} at {replayed} refunded once as {refund_txid}");
     Ok(())
 }
@@ -153,7 +147,7 @@ async fn claim_protected(stack: &mut Stack, name: &str) -> Result<(String, Verif
     );
     let mark = stack.mint.log_text().len();
     let scan_from = stack.zebra.tip_height().await?;
-    let pay = stack.user.pay_treasury(&memo).await?;
+    let pay = pay_treasury(stack, &memo, CLAIM_ZEC).await?;
     eprintln!("claim {name} payment {pay}");
     stack.zebra.generate_blocks(1).await?;
     let note = wait_name_note(stack, mark, scan_from, name, &pay).await?;
@@ -269,13 +263,6 @@ async fn orphan_payment(
         bail!("orphaned {name} note {} is still canonical", note.txid);
     }
     wait_state(stack, name, None, DECIDE_TIMEOUT).await?;
-    sync_wallet(stack).await?;
-    // A claim payment has to be spendable before the reclaim send.
-    stack
-        .user
-        .zallet
-        .wait_until_shielded(CLAIM_ZATS, SCAN_TIMEOUT)
-        .await?;
     let (_pay, reclaimed) = claim_protected(stack, name).await?;
     if reclaimed.txid == note.txid {
         bail!("reclaimed {name} reused the orphaned note {}", note.txid);
@@ -292,7 +279,7 @@ async fn orphan_payment(
 async fn otp_wipe(stack: &mut Stack, name: &str) -> Result<()> {
     let request = format!("ZNS:update:none:{name}:{}", stack.user.ua);
     let mark = stack.mint.log_text().len();
-    let pay = stack.user.pay_treasury(&request).await?;
+    let pay = pay_treasury(stack, &request, CLAIM_ZEC).await?;
     eprintln!("update payment {pay}");
     stack.zebra.generate_blocks(1).await?;
     let challenge = wait_challenge(stack, mark, name, &pay).await?;
@@ -321,11 +308,10 @@ async fn otp_wipe(stack: &mut Stack, name: &str) -> Result<()> {
         bail!("otp reorg dropped the update payment {pay}");
     }
     wait_state(stack, name, None, DECIDE_TIMEOUT).await?;
-    sync_wallet(stack).await?;
 
     let echo = format!("ZNS:otp:{code}:{name}:update:{}", stack.user.ua);
     let echo_mark = stack.mint.log_text().len();
-    let echo_txid = stack.user.pay_treasury_amount(&echo, REFUND_ZEC).await?;
+    let echo_txid = pay_treasury(stack, &echo, REFUND_ZEC).await?;
     eprintln!("stale otp echo {echo_txid}");
     stack.zebra.generate_blocks(1).await?;
     let echo_height = wait_tx_height(stack, &echo_txid).await?;
@@ -344,7 +330,7 @@ async fn otp_wipe(stack: &mut Stack, name: &str) -> Result<()> {
     }
 
     let fresh_mark = stack.mint.log_text().len();
-    let fresh_pay = stack.user.pay_treasury(&request).await?;
+    let fresh_pay = pay_treasury(stack, &request, CLAIM_ZEC).await?;
     eprintln!("fresh update payment {fresh_pay}");
     stack.zebra.generate_blocks(1).await?;
     let fresh = wait_challenge(stack, fresh_mark, name, &fresh_pay).await?;
@@ -589,16 +575,20 @@ async fn wait_for(
     }
 }
 
-/// Wallet tip height and block hash are Zebra's current block, and the
-/// wallet is unlocked and fully synced there.
-async fn sync_wallet(stack: &mut Stack) -> Result<()> {
+/// Pay the Treasury `zec` once the wallet is at Zebra's tip block and holds
+/// that much spendable. After a reorg the wallet can still be on the
+/// orphaned chain, and Zebra rejects a spend built on its anchor.
+async fn pay_treasury(stack: &mut Stack, memo: &str, zec: f64) -> Result<String> {
     let tip = stack.zebra.tip_height().await?;
     let hash = stack.zebra.block_hash(tip).await?;
-    stack
-        .user
-        .zallet
+    let zallet = &stack.user.zallet;
+    zallet
         .wait_until_canonical(tip, &hash, SCAN_TIMEOUT)
-        .await
+        .await?;
+    zallet
+        .wait_until_shielded((zec * 1e8).round() as u64, SCAN_TIMEOUT)
+        .await?;
+    stack.user.pay_treasury_amount(memo, zec).await
 }
 
 fn ensure_running(stack: &mut Stack) -> Result<()> {
