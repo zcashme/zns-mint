@@ -520,7 +520,10 @@ impl SaleQueue {
                 closed.push(sale.name.clone());
                 return false;
             };
-            if record.ua == sale.bob || record.ua != sale.alice || record.commitment != sale.held {
+            if *record.ua() == sale.bob
+                || *record.ua() != sale.alice
+                || record.commitment != sale.held
+            {
                 closed.push(sale.name.clone());
                 return false;
             }
@@ -725,7 +728,7 @@ impl Market {
         let live = |name: &Name| {
             registry
                 .record(name)
-                .map(|record| (record.ua.clone(), record.commitment))
+                .map(|record| (record.ua().clone(), record.commitment))
         };
         for name in self.sales.reconcile(live) {
             self.record(height, MarketEvent::Close { name });
@@ -919,7 +922,7 @@ impl Market {
         txid: TxId,
         mtp: Timestamp,
     ) -> Result<(), MarketRefusal> {
-        if registry.record(name).is_none_or(|record| record.ua != *ua) {
+        if registry.record(name).is_none_or(|record| record.ua() != ua) {
             return Err(MarketRefusal::NotOwner);
         }
         if self.sales.is_open(name) {
@@ -1011,7 +1014,7 @@ impl Market {
                     );
                     return Admission::none();
                 }
-                match self.propose_list(challenges, listing, &record.ua, txid, mtp, height) {
+                match self.propose_list(challenges, listing, record.ua(), txid, mtp, height) {
                     Ok(()) => {}
                     Err(MarketRefusal::BuyOpen) => tracing::info!(
                         %txid,
@@ -1037,7 +1040,7 @@ impl Market {
                 Admission::none()
             }
             Request::Delist { name, ua } => {
-                if registry.record(name).is_none_or(|record| record.ua != *ua) {
+                if registry.record(name).is_none_or(|record| record.ua() != ua) {
                     tracing::info!(
                         %txid,
                         name = %name.as_str(),
@@ -1080,8 +1083,8 @@ impl Market {
                 };
                 let release_due = record.is_release_due(mtp);
                 let note_pending = pending(name);
-                let owner = record.ua.clone();
-                let term = record.expires_at;
+                let owner = record.ua().clone();
+                let term = record.expires_at();
                 let held = record.commitment;
                 let code = key.buy_otp(&txid, name);
                 if !fee_ok {
@@ -2212,7 +2215,7 @@ mod tests {
         assert!(registry.listing(&name()).is_none());
         registry.truncate_to_height(listed_at);
         market.truncate_to(&mut registry, listed_at);
-        assert_eq!(registry.record(&name()).unwrap().ua, owner);
+        assert_eq!(*registry.record(&name()).unwrap().ua(), owner);
         assert_eq!(registry.price(&name()), Some(zats(100_000_000)));
 
         let record = registry.record(&name()).unwrap().clone();

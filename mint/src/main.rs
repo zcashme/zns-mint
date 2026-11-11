@@ -160,7 +160,7 @@ async fn main() {
                     }
                     registry
                         .authorize_challenge(&name_notes, &request, target_height, mtp_now)
-                        .map(|record| (request, record.ua.clone()))
+                        .map(|record| (request, record.ua().clone()))
                 });
                 let Some((request, ua)) = candidate else {
                     continue;
@@ -547,7 +547,7 @@ async fn main() {
                 }
             }
             market.observe(
-                |name| registry.record(name).map(|record| record.ua.clone()),
+                |name| registry.record(name).map(|record| record.ua().clone()),
                 &payments,
                 block_mtp,
                 next_height,
@@ -745,7 +745,7 @@ async fn main() {
                 &sapling_spend,
                 &sapling_output,
                 &fee_rule,
-                &record.ua,
+                record.ua(),
                 &source,
                 &pending.memo(),
                 "tip",

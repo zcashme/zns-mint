@@ -20,13 +20,11 @@ use zcash_protocol::value::Zatoshis;
 // NameRecord — a confirmed state in one name's chain
 // ---------------------------------------------------------------------------
 
-/// One confirmed state in a name's chain.
+/// One confirmed state in a name's chain: the note that set it, and what
+/// the chain says about that note.
 #[derive(Clone, PartialEq, Eq)]
 pub struct NameRecord {
-    pub name: Name,
-    pub action: Action,
-    pub ua: UnifiedAddress,
-    pub expires_at: Expiry,
+    pub note: NameNote,
     pub commitment: NameCommitment,
     pub confirmed_height: BlockHeight,
     pub release_deadline: Timestamp,
@@ -34,6 +32,32 @@ pub struct NameRecord {
 }
 
 impl NameRecord {
+    pub fn name(&self) -> &Name {
+        self.note.name()
+    }
+
+    pub fn action(&self) -> Action {
+        self.note.action()
+    }
+
+    /// The bound address, or the released one.
+    pub fn ua(&self) -> &UnifiedAddress {
+        self.note.ua()
+    }
+
+    /// The purchased term. A release has none, and reads as `Never`.
+    pub fn expires_at(&self) -> Expiry {
+        self.note.expires_at().unwrap_or(Expiry::Never)
+    }
+
+    /// The terms when this note is a list or an auction.
+    pub fn listing(&self) -> Option<&Listing> {
+        match &self.note {
+            NameNote::List { listing, .. } => Some(listing),
+            _ => None,
+        }
+    }
+
     /// The §4.5 clocks, fired: the term lapsed or the liveness
     /// deadline reached at `mtp`.
     pub fn is_release_due(&self, mtp: Timestamp) -> bool {
@@ -42,7 +66,7 @@ impl NameRecord {
 
     /// The §4.5.2 term test at `mtp`.
     pub fn has_expired(&self, mtp: Timestamp) -> bool {
-        self.expires_at.expired(mtp)
+        self.expires_at().expired(mtp)
     }
 
     /// The name's state as of `note` taking effect at `confirmed_height`:
@@ -56,10 +80,7 @@ impl NameRecord {
         mtp: Timestamp,
     ) -> Self {
         Self {
-            name: note.name().clone(),
-            action: note.action(),
-            ua: note.ua().clone(),
-            expires_at: note.expires_at().unwrap_or(Expiry::Never),
+            note: note.clone(),
             commitment: note.commitment(params),
             confirmed_height,
             release_deadline: Timestamp::from_seconds(
@@ -90,9 +111,9 @@ impl NameRecord {
             return false;
         }
         match request {
-            Request::Update { term, .. } => !(self.expires_at == Expiry::Never && term.is_some()),
-            Request::Release { ua, .. } | Request::Delist { ua, .. } => *ua == self.ua,
-            Request::List(listing) => is_owner_listing(&self.ua, &listing.ua, &listing.pay_to),
+            Request::Update { term, .. } => !(self.expires_at() == Expiry::Never && term.is_some()),
+            Request::Release { ua, .. } | Request::Delist { ua, .. } => ua == self.ua(),
+            Request::List(listing) => is_owner_listing(self.ua(), &listing.ua, &listing.pay_to),
             Request::Claim { .. } | Request::Buy { .. } => false,
         }
     }
@@ -107,9 +128,7 @@ impl NameRecord {
 impl std::fmt::Debug for NameRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NameRecord")
-            .field("name", &self.name)
-            .field("action", &self.action)
-            .field("ua", &self.ua)
+            .field("note", &self.note)
             .field("commitment", &self.commitment)
             .field("confirmed_height", &self.confirmed_height)
             .field("predecessor_nullifier", &self.predecessor_nullifier)
@@ -126,11 +145,11 @@ fn carries_forward(note: &NameNote, record: &NameRecord) -> bool {
             expires_at,
             ..
         } => {
-            *expires_at == record.expires_at
-                && is_owner_listing(&record.ua, &listing.ua, &listing.pay_to)
+            *expires_at == record.expires_at()
+                && is_owner_listing(record.ua(), &listing.ua, &listing.pay_to)
         }
         NameNote::Delist { ua, expires_at, .. } => {
-            *expires_at == record.expires_at && *ua == record.ua
+            *expires_at == record.expires_at() && ua == record.ua()
         }
         _ => true,
     }
@@ -195,7 +214,7 @@ impl Registry {
     /// The market has completed the controller challenge and checked open buys.
     pub(crate) fn list(&mut self, listing: Listing) -> Result<(), MarketRefusal> {
         let owner = self.record(&listing.name).ok_or(MarketRefusal::NotOwner)?;
-        if !is_owner_listing(&owner.ua, &listing.ua, &listing.pay_to) {
+        if !is_owner_listing(owner.ua(), &listing.ua, &listing.pay_to) {
             return Err(MarketRefusal::NotOwner);
         }
         self.restore_listing(listing);
@@ -203,7 +222,7 @@ impl Registry {
     }
 
     pub(crate) fn delist(&mut self, name: &Name, ua: &UnifiedAddress) -> Result<(), MarketRefusal> {
-        if self.record(name).is_none_or(|record| record.ua != *ua) {
+        if self.record(name).is_none_or(|record| record.ua() != ua) {
             return Err(MarketRefusal::NotOwner);
         }
         self.remove_listing(name)
@@ -218,7 +237,7 @@ impl Registry {
             let live = self
                 .records
                 .get(name)
-                .is_some_and(|record| record.ua == listing.ua);
+                .is_some_and(|record| *record.ua() == listing.ua);
             if !live {
                 lost.push(name.clone());
             }
@@ -273,7 +292,7 @@ impl Registry {
         if record.is_release_due(mtp) {
             return None;
         }
-        let expires_at = record.expires_at.extend(*term, mtp)?;
+        let expires_at = record.expires_at().extend(*term, mtp)?;
         Some(NameNote::Update {
             name: name.clone(),
             ua: ua.clone(),
@@ -288,7 +307,7 @@ impl Registry {
             return None;
         };
         let record = self.record(name)?;
-        if record.ua != *ua {
+        if record.ua() != ua {
             return None;
         }
         Some(NameNote::Release {
@@ -368,7 +387,7 @@ impl Registry {
                     name.clone(),
                     NameNote::Release {
                         name: name.clone(),
-                        ua: record.ua.clone(),
+                        ua: record.ua().clone(),
                         prev: record.commitment,
                     },
                 )
@@ -452,7 +471,7 @@ impl Registry {
         };
         let released = latest.confirmed_height;
         let delta = default_tx_expiry_delta(BranchId::for_height(params, released));
-        latest.action.is_release() && expiry <= released + delta
+        latest.action().is_release() && expiry <= released + delta
     }
 
     /// Offers a confirmed update, release, sale, list, or delist; true when
@@ -498,7 +517,7 @@ impl Registry {
     ) {
         let release = NameNote::Release {
             name: name.clone(),
-            ua: record.ua.clone(),
+            ua: record.ua().clone(),
             prev: record.commitment,
         };
         self.set_record(NameRecord::create(params, &release, nullifier, height, mtp));
@@ -549,21 +568,27 @@ impl Registry {
             let Some(record) = self.record(&name).cloned() else {
                 continue;
             };
-            let mut released_record = record;
-            released_record.action = Action::Release;
-            released_record.confirmed_height = height;
-            self.set_record(released_record);
+            let released = NameNote::Release {
+                name: name.clone(),
+                ua: record.ua().clone(),
+                prev: record.commitment,
+            };
+            self.set_record(NameRecord {
+                note: released,
+                confirmed_height: height,
+                ..record
+            });
         }
     }
 
     fn set_record(&mut self, record: NameRecord) {
-        let name = record.name.clone();
+        let name = record.name().clone();
         let history = self.history.entry(name.clone()).or_default();
         if let Some(previous) = history.last() {
             debug_assert!(previous.confirmed_height <= record.confirmed_height);
         }
         history.push(record.clone());
-        if record.action.is_release() {
+        if record.action().is_release() {
             self.records.remove(&name);
         } else {
             self.records.insert(name, record);
@@ -610,8 +635,11 @@ impl Registry {
 
         self.records.clear();
         for records in self.history.values() {
-            if let Some(record) = records.last().filter(|record| !record.action.is_release()) {
-                self.records.insert(record.name.clone(), record.clone());
+            if let Some(record) = records
+                .last()
+                .filter(|record| !record.action().is_release())
+            {
+                self.records.insert(record.name().clone(), record.clone());
             }
         }
         self.anchors.truncate_to(height);
@@ -685,11 +713,28 @@ mod tests {
         release_deadline: i64,
         seed: u8,
     ) -> NameRecord {
+        let ua = test_ua();
+        let note = match action {
+            Action::Claim => NameNote::Claim {
+                name,
+                ua,
+                expires_at,
+            },
+            Action::Update => NameNote::Update {
+                name,
+                ua,
+                expires_at,
+                prev: commitment(seed.wrapping_sub(1)),
+            },
+            Action::Release => NameNote::Release {
+                name,
+                ua,
+                prev: commitment(seed.wrapping_sub(1)),
+            },
+            other => panic!("no test record for {other:?}"),
+        };
         NameRecord {
-            name,
-            action,
-            ua: test_ua(),
-            expires_at,
+            note,
             commitment: commitment(seed),
             confirmed_height: BlockHeight::from_u32(100),
             release_deadline: ts(release_deadline),
@@ -751,7 +796,7 @@ mod tests {
         let record = registry.record(name).expect("name is live").clone();
         let note = NameNote::Release {
             name: name.clone(),
-            ua: record.ua.clone(),
+            ua: record.ua().clone(),
             prev: record.commitment,
         };
         assert!(registry.accept_transition(
@@ -1172,12 +1217,12 @@ mod tests {
 
         let history = r.record_history(&name);
         assert_eq!(history.len(), 3);
-        assert_eq!(history[0].name, name);
-        assert_eq!(history[0].action, Action::Claim);
+        assert_eq!(*history[0].name(), name);
+        assert_eq!(history[0].action(), Action::Claim);
         assert_eq!(history[0].confirmed_height, BlockHeight::from_u32(100));
-        assert_eq!(history[1].action, Action::Update);
+        assert_eq!(history[1].action(), Action::Update);
         assert_eq!(history[1].confirmed_height, BlockHeight::from_u32(120));
-        assert_eq!(history[2].action, Action::Release);
+        assert_eq!(history[2].action(), Action::Release);
         assert_eq!(history[2].confirmed_height, BlockHeight::from_u32(140));
         assert!(r.record(&name).is_none());
         assert_eq!(r.record_history(&name).last(), history.last());
@@ -1204,14 +1249,14 @@ mod tests {
         r.truncate_to_height(BlockHeight::from_u32(140));
         assert_eq!(r.record_history(&alice).len(), 3);
         assert_eq!(
-            r.record_history(&alice).last().unwrap().action,
+            r.record_history(&alice).last().unwrap().action(),
             Action::Release
         );
         assert!(r.record(&alice).is_none());
 
         r.truncate_to_height(BlockHeight::from_u32(130));
         assert_eq!(r.record_history(&alice).len(), 2);
-        assert_eq!(r.record(&alice).unwrap().action, Action::Update);
+        assert_eq!(r.record(&alice).unwrap().action(), Action::Update);
         assert_eq!(r.record_history(&bob).len(), 1);
         assert!(r.record(&bob).is_some());
 
@@ -1332,7 +1377,7 @@ mod tests {
             .record_history(&test_name())
             .last()
             .expect("release retained in history");
-        assert_eq!(alice.action, Action::Release);
+        assert_eq!(alice.action(), Action::Release);
         assert_eq!(alice.predecessor_nullifier, nullifier(1));
         assert!(r.record(&Name::parse("bob").unwrap()).is_none());
         assert!(!r.anchor_pool().contains(&anchor));
@@ -1354,7 +1399,7 @@ mod tests {
             .record_history(&test_name())
             .last()
             .expect("release retained in history");
-        assert_eq!(alice.action, Action::Release);
+        assert_eq!(alice.action(), Action::Release);
         assert_eq!(alice.predecessor_nullifier, nullifier(1));
     }
 
@@ -1387,7 +1432,7 @@ mod tests {
             ts(1_000_000_000),
         ));
         let rec = r.record(&test_name()).expect("alice still bound");
-        assert_eq!(rec.action, Action::Update);
+        assert_eq!(rec.action(), Action::Update);
         assert_eq!(rec.predecessor_nullifier, succ);
     }
 
@@ -1429,9 +1474,9 @@ mod tests {
             ts(1_000_000_000),
         ));
         let rec = r.record(&test_name()).expect("the name stays live");
-        assert_eq!(rec.action, Action::Sale);
-        assert_eq!(rec.ua, bob);
-        assert_eq!(rec.expires_at, term);
+        assert_eq!(rec.action(), Action::Sale);
+        assert_eq!(*rec.ua(), bob);
+        assert_eq!(rec.expires_at(), term);
         assert_eq!(rec.predecessor_nullifier, succ);
     }
 
@@ -1471,11 +1516,11 @@ mod tests {
 
         let mut r = live_alice(term, 3_000_000_000);
         assert!(accept(&mut r, &list(term)));
-        assert_eq!(r.record(&test_name()).unwrap().action, Action::List);
+        assert_eq!(r.record(&test_name()).unwrap().action(), Action::List);
 
         let mut r = live_alice(term, 3_000_000_000);
         assert!(accept(&mut r, &delist(alice.clone())));
-        assert_eq!(r.record(&test_name()).unwrap().action, Action::Delist);
+        assert_eq!(r.record(&test_name()).unwrap().action(), Action::Delist);
 
         for note in [list(Expiry::Never), delist(bob_ua())] {
             let mut r = live_alice(term, 3_000_000_000);
@@ -1501,8 +1546,8 @@ mod tests {
             mtp,
         ));
         let rec = r.record(&test_name()).expect("alice still bound");
-        assert_eq!(rec.action, Action::Update);
-        assert_eq!(rec.expires_at, Expiry::At(ts(2_000_000_000)));
+        assert_eq!(rec.action(), Action::Update);
+        assert_eq!(rec.expires_at(), Expiry::At(ts(2_000_000_000)));
         assert_eq!(rec.predecessor_nullifier, succ);
         assert_eq!(
             rec.release_deadline,
@@ -1525,8 +1570,8 @@ mod tests {
             ts(1_000_000_000),
         ));
         let rec = r.record(&test_name()).expect("alice still bound");
-        assert_eq!(rec.action, Action::Update);
-        assert_eq!(rec.expires_at, Expiry::Never);
+        assert_eq!(rec.action(), Action::Update);
+        assert_eq!(rec.expires_at(), Expiry::Never);
         assert_eq!(rec.predecessor_nullifier, succ);
     }
 
@@ -1561,7 +1606,7 @@ mod tests {
             .record_history(&test_name())
             .last()
             .expect("release retained in history");
-        assert_eq!(alice.action, Action::Release);
+        assert_eq!(alice.action(), Action::Release);
         assert_eq!(alice.predecessor_nullifier, nullifier(1));
         assert!(!r.anchor_pool().contains(&nullifier(9)));
         assert_eq!(
@@ -1594,7 +1639,7 @@ mod tests {
             .record_history(&test_name())
             .last()
             .expect("release retained in history");
-        assert_eq!(alice.action, Action::Release);
+        assert_eq!(alice.action(), Action::Release);
         assert_eq!(alice.predecessor_nullifier, nullifier(20));
     }
 
@@ -1620,7 +1665,7 @@ mod tests {
             .record_history(&test_name())
             .last()
             .expect("release retained in history");
-        assert_eq!(rec.action, Action::Release);
+        assert_eq!(rec.action(), Action::Release);
         assert_eq!(rec.predecessor_nullifier, succ);
     }
 

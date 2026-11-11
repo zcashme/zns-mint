@@ -663,7 +663,7 @@ impl Boot<Network> {
                 }
             }
             market.observe(
-                |name| registry.record(name).map(|record| record.ua.clone()),
+                |name| registry.record(name).map(|record| record.ua().clone()),
                 &payments,
                 block_mtp,
                 next_height,
@@ -1643,10 +1643,10 @@ mod tests {
                     assert!(stored.is_none());
                 } else {
                     let record = registry.record(&name).unwrap();
-                    assert_eq!(record.action, Action::Claim);
+                    assert_eq!(record.action(), Action::Claim);
                     assert_eq!(record.commitment, payload.commitment(&network));
-                    assert_eq!(&record.ua, payload.ua());
-                    assert_eq!(record.expires_at, Expiry::Never);
+                    assert_eq!(record.ua(), payload.ua());
+                    assert_eq!(record.expires_at(), Expiry::Never);
                     assert_eq!(record.confirmed_height, claim_height);
                     assert_eq!(record.predecessor_nullifier, candidate.nullifier);
                     assert_eq!(registry.record_history(&name).len(), 1);
