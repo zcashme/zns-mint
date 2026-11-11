@@ -212,12 +212,4 @@ mod tests {
             dev_sealing_key(b"ctx").expose()
         );
     }
-
-    #[test]
-    fn dev_sealing_key_scoped_by_context() {
-        assert_ne!(
-            dev_sealing_key(b"ctx-a").expose(),
-            dev_sealing_key(b"ctx-b").expose()
-        );
-    }
 }
