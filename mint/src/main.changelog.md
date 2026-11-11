@@ -7,6 +7,8 @@
   `authorize_list` or `authorize_delist` and `name_notes.admit`. Its
   payment is refunded as before.
 - `market.truncate_to` and `market.expire` no longer take the registry.
+- A queued list, auction, or delist is dropped, like an update, once the
+  tip median would release the name. The log reads "transition dropped".
 
 ## 2026-11-11 — Each pass records its round in the rate window (#466)
 
