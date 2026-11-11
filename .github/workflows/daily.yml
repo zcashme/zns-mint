@@ -1,0 +1,108 @@
+# End-to-end suites too slow for the pull-request gate. Pull requests run
+# only the happy path (ci.yml); these run once a day on master and on a
+# manual run.
+name: Daily
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  reorg:
+    name: Reorg
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # Same zallet pin as ci.yml's e2e job, so both share its cached binary.
+    env:
+      ZALLET_REF: aec7f3fa8397ef17b2852dc6835572d6e623b1a2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Restore zallet binary
+        id: zallet
+        uses: actions/cache/restore@v4
+        with:
+          path: zallet-bin
+          key: zallet-zebra-${{ runner.os }}-${{ env.ZALLET_REF }}
+
+      - name: Checkout zallet
+        if: steps.zallet.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: zcash/zallet
+          ref: ${{ env.ZALLET_REF }}
+          path: zallet
+
+      - name: Cache cargo registry and targets
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            integration-tests -> target
+
+      - name: Download zebrad and Sapling params
+        run: |
+          mkdir -p "$RUNNER_TEMP/zebrad" "$RUNNER_TEMP/params"
+          cd "$RUNNER_TEMP/zebrad"
+          base="https://github.com/ZcashFoundation/zebra/releases/download/v7.0.0"
+          asset="zebrad-7.0.0-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -O "$base/$asset" -O "$base/$asset.sha256"
+          sha256sum -c "$asset.sha256"
+          tar -xzf "$asset"
+          find . -maxdepth 3 -type f -name zebrad -exec mv {} ./zebrad \;
+          chmod +x ./zebrad
+          for p in sapling-spend.params sapling-output.params; do
+            curl -L --fail -o "$RUNNER_TEMP/params/$p" "https://download.z.cash/downloads/$p"
+          done
+          echo "ZEBRAD_BIN=$RUNNER_TEMP/zebrad/zebrad" >> "$GITHUB_ENV"
+          echo "ZCASH_PARAMS_DIR=$RUNNER_TEMP/params" >> "$GITHUB_ENV"
+
+      - name: Build zallet (zebra backend)
+        if: steps.zallet.outputs.cache-hit != 'true'
+        working-directory: zallet/backends/zebra
+        run: |
+          cargo build --locked --release
+          mkdir -p "$GITHUB_WORKSPACE/zallet-bin"
+          cp target/release/zallet-zebra "$GITHUB_WORKSPACE/zallet-bin/"
+
+      - name: Save zallet binary
+        if: steps.zallet.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: zallet-bin
+          key: ${{ steps.zallet.outputs.cache-primary-key }}
+
+      - name: Use the zallet binary
+        run: |
+          test -x zallet-bin/zallet-zebra
+          echo "ZALLET_BIN=$PWD/zallet-bin/zallet-zebra" >> "$GITHUB_ENV"
+
+      - name: Build mint
+        run: |
+          cargo \
+            --config profile.dev.package.orchard.opt-level=3 \
+            --config profile.dev.package.halo2_proofs.opt-level=3 \
+            --config profile.dev.package.halo2_gadgets.opt-level=3 \
+            build --locked -p zns-mint --bin zns-mint --features regtest
+          test -x target/debug/zns-mint
+          echo "ZNS_MINT_BIN=$PWD/target/debug/zns-mint" >> "$GITHUB_ENV"
+
+      - name: reorg queues
+        working-directory: integration-tests
+        run: cargo test --locked --test reorg -- --nocapture
