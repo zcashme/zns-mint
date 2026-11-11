@@ -15,18 +15,6 @@ pub fn repo_root() -> PathBuf {
     crate_dir().join("..")
 }
 
-/// Sibling checkout next to this repo, or `$ZNS_RESOLVER_DIR`.
-pub fn sibling_dir(name: &str) -> PathBuf {
-    let env_key = match name {
-        "zns-resolver" => "ZNS_RESOLVER_DIR",
-        other => panic!("unknown sibling repo {other}"),
-    };
-    if let Ok(p) = std::env::var(env_key) {
-        return PathBuf::from(p);
-    }
-    repo_root().join("..").join(name)
-}
-
 /// `$<env_var>` if it points at a file, else `name` on `$PATH`.
 pub fn resolve_bin(env_var: &str, name: &str) -> Option<PathBuf> {
     if let Ok(p) = std::env::var(env_var) {
@@ -46,10 +34,6 @@ pub fn mint_bin_override() -> Option<PathBuf> {
     resolve_bin("ZNS_MINT_BIN", "zns-mint")
 }
 
-pub fn resolver_bin_override() -> Option<PathBuf> {
-    resolve_bin("ZNS_RESOLVER_BIN", "zns-resolver")
-}
-
 /// The `zallet` binary: a backend binary (`zallet-zebra`), which shares
 /// zallet's full CLI surface.
 pub fn zallet_bin() -> Option<PathBuf> {
@@ -64,24 +48,16 @@ fn which(name: &str) -> Option<PathBuf> {
     })
 }
 
-/// `cargo build --bin <bin>` in `dir`, returning `target/debug/<bin>`.
-pub fn cargo_build_bin(dir: &Path, bin: &str, extra_args: &[&str]) -> Result<PathBuf> {
-    cargo_build_bin_with(dir, bin, extra_args, &[])
-}
-
-/// Like [`cargo_build_bin`], with extra `cargo` flags before the subcommand
-/// (`--config`, …).
-pub fn cargo_build_bin_with(
+/// `cargo <cargo_flags> build --bin <bin> <extra_args>` in `dir`, returning
+/// `target/debug/<bin>`.
+pub fn cargo_build_bin(
     dir: &Path,
     bin: &str,
     extra_args: &[&str],
     cargo_flags: &[&str],
 ) -> Result<PathBuf> {
     if !dir.is_dir() {
-        bail!(
-            "{} is not a directory — clone the sibling repo or set the matching ZNS_*_DIR",
-            dir.display()
-        );
+        bail!("{} is not a directory", dir.display());
     }
     let mut cmd = Command::new("cargo");
     cmd.current_dir(dir)

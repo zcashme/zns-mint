@@ -111,6 +111,23 @@ pub fn account_usk(
     .map_err(|e| anyhow!("ZIP-32 USK account {account}: {e}"))
 }
 
+/// The Treasury's Orchard-only UA (ZIP-32 account 0, j=0 external): where
+/// the user pays request memos.
+pub fn treasury_ua() -> Result<String> {
+    let network = regtest_network();
+    let usk = account_usk(&network, &DEV_SEED, 0)?;
+    let fvk = orchard::keys::FullViewingKey::from(usk.orchard());
+    zcash_keys::address::UnifiedAddress::from_receivers(
+        Some(fvk.address_at(0u32, orchard::keys::Scope::External)),
+        None,
+        None,
+        None,
+        None,
+    )
+    .ok_or_else(|| anyhow!("orchard-only UA"))
+    .map(|ua| ua.encode(&network))
+}
+
 /// The Treasury's transparent P2PKH (ZIP-32 account 0, j=0 external).
 pub fn treasury_taddr(
     network: &LocalNetwork,
