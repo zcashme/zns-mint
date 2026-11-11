@@ -1,5 +1,10 @@
 # Boot module changelog
 
+## 2026-11-11 — The first round opens the rate window (#466)
+
+- Boot builds the oracle with `Oracle::new(price)`. It no longer reads
+  MTP or the MTP day for it.
+
 ## 2026-11-11 — The sealing key takes no context (#460)
 
 - `sealing_key()` takes no argument. The SEV-SNP key has never used

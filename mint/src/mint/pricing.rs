@@ -1,6 +1,7 @@
-//! Daily USD/ZEC pricing.
+//! USD/ZEC pricing.
 //!
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use http_body_util::{BodyExt, Empty, Limited};
@@ -10,7 +11,6 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 use rust_decimal::Decimal;
-use time::Timestamp;
 use zcash_protocol::value::{Zatoshis, COIN};
 
 use crate::mint::{Name, Term};
@@ -76,10 +76,6 @@ const EXCHANGES: [Exchange; 9] = [
 /// median quorum (N < 3), only Gemini's own quote publishes; no
 /// two-source mean is ever taken.
 const TRUSTED: &str = "gemini";
-
-/// A day publishes only when at least this share of its fetch attempts
-/// landed a price.
-const MIN_DAY_SUCCESS_PERCENT: u64 = 50;
 
 /// Timeout duration for one source end-to-end (connect + request + body).
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -282,32 +278,22 @@ fn forever_usd(name: &Name) -> u64 {
 // Oracle
 // ===========================================================================
 
-/// The daily-rate oracle: the zats-per-USD rate, republished daily as
-/// a time-weighted average of that day's pricing rounds.
+/// The rounds the rate is taken over. A buyer who pays the spot price of
+/// any of them pays enough.
+const WINDOW: usize = 120;
+
+/// The zats-per-USD rate: the lowest of the last [`WINDOW`] rounds that
+/// returned a price.
 pub struct Oracle {
-    /// Zats per USD, published daily. Set at construction, never cleared.
-    daily_rate: Zatoshis,
-    /// Days passed since the mint's birthday.
-    current_day: i64,
-    /// Accumulated sum of TWAP accumulator: Σ(price × seconds) for the current day so far.
-    acc_sum: Decimal,
-    /// Accumulated seconds of TWAP accumulator: Σ(seconds) for the current day so far.
-    acc_seconds: u64,
-    /// The USD per ZEC price of the most recent round, stored for time-weighting
-    last_price: Decimal,
-    /// The Unix timestamp (seconds, MTP) of the most recent accumulation round.
-    last_ts: i64,
-    /// Fetch attempts counted toward the current day, success or fail.
-    rounds_attempted: u32,
-    /// Attempts that produced a usable price.
-    rounds_seen: u32,
+    /// Never empty: a round with no price leaves the window as it is.
+    rates: VecDeque<Zatoshis>,
 }
 
 /// ZEC price (USD per ZEC) → rate (zats per USD): 10^8 zats over the
 /// price, rounded up so a quote never lands below its USD tariff.
 fn zats_per_usd(usd_per_zec: Decimal) -> Option<Zatoshis> {
     if usd_per_zec <= Decimal::ZERO {
-        tracing::warn!("pricing publish refused: non-positive daily average");
+        tracing::warn!(price = %usd_per_zec, "pricing round dropped: non-positive");
         return None;
     }
     u64::try_from((Decimal::from(COIN) / usd_per_zec).ceil())
@@ -316,73 +302,29 @@ fn zats_per_usd(usd_per_zec: Decimal) -> Option<Zatoshis> {
 }
 
 impl Oracle {
-    /// Creates the oracle from the first successful pricing round: the
-    /// spot price is the rate until the first rollover publishes a day.
-    pub fn new(initial_price: Decimal, today: i64, now: Timestamp) -> Self {
-        let now_secs = now.as_seconds();
+    /// Creates the oracle from the first successful pricing round.
+    pub fn new(initial_price: Decimal) -> Self {
+        let rate =
+            zats_per_usd(initial_price).expect("an in-range price always yields a positive rate");
         Self {
-            daily_rate: zats_per_usd(initial_price)
-                .expect("an in-range price always yields a positive rate"),
-            current_day: today,
-            acc_sum: Decimal::ZERO,
-            acc_seconds: 0,
-            last_price: initial_price,
-            last_ts: now_secs,
-            rounds_attempted: 0,
-            rounds_seen: 0,
+            rates: VecDeque::from([rate]),
         }
     }
 
-    /// The current published rate of ZEC in zats per USD.
+    /// The rate in zats per USD.
     pub fn current(&self) -> Zatoshis {
-        self.daily_rate
+        *self.rates.iter().min().expect("the window is never empty")
     }
 
-    /// Folds one round into the day's TWAP. A new day publishes only when
-    /// at least half of that day's fetches landed; thinner days keep their rate.
-    pub fn accumulate(&mut self, price: Option<Decimal>, today: i64, now: Timestamp) {
-        let now_secs = now.as_seconds();
-
-        if now_secs < self.last_ts {
-            // A reorg rewound MTP behind the last round: those seconds
-            // are already billed — the round lands when the scan returns.
-            return;
-        }
-
-        if today > self.current_day {
-            if self.acc_seconds > 0
-                && u64::from(self.rounds_seen).saturating_mul(100)
-                    >= u64::from(self.rounds_attempted).saturating_mul(MIN_DAY_SUCCESS_PERCENT)
-            {
-                if let Some(rate) = zats_per_usd(self.acc_sum / Decimal::from(self.acc_seconds)) {
-                    self.daily_rate = rate;
-                }
-            }
-            self.acc_sum = Decimal::ZERO;
-            self.acc_seconds = 0;
-            self.rounds_attempted = 0;
-            self.rounds_seen = 0;
-            self.current_day = today;
-        }
-
-        self.rounds_attempted = self.rounds_attempted.saturating_add(1);
-
-        let Some(price) = price else {
+    /// Adds one round to the window, dropping the oldest past [`WINDOW`].
+    pub fn record(&mut self, price: Option<Decimal>) {
+        let Some(rate) = price.and_then(zats_per_usd) else {
             return;
         };
-
-        if price <= Decimal::ZERO {
-            tracing::warn!(price = %price, "pricing observation dropped: non-positive");
-            return;
+        self.rates.push_back(rate);
+        if self.rates.len() > WINDOW {
+            self.rates.pop_front();
         }
-
-        let elapsed = (now_secs - self.last_ts) as u64;
-        self.acc_sum += self.last_price * Decimal::from(elapsed);
-        self.acc_seconds += elapsed;
-
-        self.last_price = price;
-        self.last_ts = now_secs;
-        self.rounds_seen = self.rounds_seen.saturating_add(1);
     }
 
     /// Registration quote in zats at the published rate. `None` when the
@@ -424,7 +366,7 @@ mod tests {
     #[test]
     fn construction_publishes_spot_and_quotes() {
         // $1,000/ZEC ⇒ rate 100,000 zats per dollar, from the first round.
-        let oracle = Oracle::new(Decimal::from(1_000), 0, Timestamp::from_seconds(0).unwrap());
+        let oracle = Oracle::new(Decimal::from(1_000));
         assert_eq!(oracle.current().into_u64(), 100_000);
 
         let short = Name::parse("a").unwrap();
@@ -441,7 +383,7 @@ mod tests {
     /// `quote_at` prices at the rate given; `quote` passes the published one.
     #[test]
     fn a_quote_at_a_given_rate() {
-        let oracle = Oracle::new(Decimal::from(1_000), 0, Timestamp::from_seconds(0).unwrap());
+        let oracle = Oracle::new(Decimal::from(1_000));
         let name = Name::parse("purple").unwrap();
         let rate = Zatoshis::const_from_u64(200_000);
         let quote = Oracle::quote_at(rate, &name, Term::Years(1)).unwrap();
@@ -458,7 +400,7 @@ mod tests {
     #[test]
     fn quote_prices_claims_by_term() {
         // $1,000/ZEC ⇒ rate 100,000 zats per dollar, from the first round.
-        let oracle = Oracle::new(Decimal::from(1_000), 0, Timestamp::from_seconds(0).unwrap());
+        let oracle = Oracle::new(Decimal::from(1_000));
 
         // Every tariff tier: lengths 1–5 pay the annual schedule, longer
         // names the flat minimum. The one-year quote is the tier's base.
@@ -492,175 +434,35 @@ mod tests {
         }
     }
 
+    /// A buyer who paid the spot price of any round in the window pays
+    /// enough: the rate is the window's lowest.
     #[test]
-    fn accumulate_weights_the_day_and_publishes_on_rollover() {
-        let mut oracle = Oracle::new(Decimal::from(800), 0, Timestamp::from_seconds(0).unwrap());
-        assert_eq!(oracle.current().into_u64(), 125_000);
-
-        // A day runs to its last observation: day 0 holds only the price
-        // standing before 43,200 s, and the interval crossing the
-        // boundary is billed into the new day. Same-day rounds never
-        // publish.
-        oracle.accumulate(
-            Some(Decimal::from(900)),
-            0,
-            Timestamp::from_seconds(43_200).unwrap(),
-        );
-        assert_eq!(oracle.current().into_u64(), 125_000);
-        oracle.accumulate(
-            Some(Decimal::from(900)),
-            1,
-            Timestamp::from_seconds(86_400).unwrap(),
-        );
-        // Rollover publishes day 0's average — 800, not 850: the 900
-        // never weighed into the day it was seen in.
-        assert_eq!(oracle.current().into_u64(), 125_000);
-
-        // Day 1 held 900 across both halves; the day-2 rollover
-        // publishes it: ceil(100,000,000 / 900) = 111,112.
-        oracle.accumulate(
-            Some(Decimal::from(800)),
-            1,
-            Timestamp::from_seconds(129_600).unwrap(),
-        );
-        oracle.accumulate(
-            Some(Decimal::from(800)),
-            2,
-            Timestamp::from_seconds(172_800).unwrap(),
-        );
-        assert_eq!(oracle.current().into_u64(), 111_112);
+    fn the_rate_is_the_lowest_in_the_window() {
+        let mut oracle = Oracle::new(Decimal::from(1_000));
+        oracle.record(Some(Decimal::from(1_250)));
+        assert_eq!(oracle.current().into_u64(), 80_000);
+        oracle.record(Some(Decimal::from(900)));
+        assert_eq!(oracle.current().into_u64(), 80_000);
     }
 
     #[test]
-    fn an_empty_day_carries_the_rate() {
-        // No round lands in day 1; at day 2's first successful round the
-        // rollover finds an empty day and yesterday's rate stands — the
-        // rate never drifts toward a stale spot.
-        let mut oracle = Oracle::new(Decimal::from(800), 0, Timestamp::from_seconds(0).unwrap());
-        oracle.accumulate(None, 1, Timestamp::from_seconds(90_000).unwrap());
-        oracle.accumulate(
-            Some(Decimal::from(50)),
-            2,
-            Timestamp::from_seconds(200_000).unwrap(),
-        );
-        assert_eq!(oracle.current().into_u64(), 125_000);
-    }
-
-    #[test]
-    fn failed_rounds_carry_the_rate_until_a_round_lands() {
-        let mut oracle = Oracle::new(Decimal::from(800), 0, Timestamp::from_seconds(0).unwrap());
-        // Day 0→1: day 0 accumulated nothing, so the rollover publishes
-        // nothing and the rate carries; the boundary-crossing interval
-        // bills the carried price into day 1.
-        oracle.accumulate(
-            Some(Decimal::from(900)),
-            1,
-            Timestamp::from_seconds(86_400).unwrap(),
-        );
-        assert_eq!(oracle.current().into_u64(), 125_000);
-
-        // Two dead rounds — nothing moves, not even the day.
-        oracle.accumulate(None, 1, Timestamp::from_seconds(86_401).unwrap());
-        oracle.accumulate(None, 2, Timestamp::from_seconds(172_800).unwrap());
-        assert_eq!(oracle.current().into_u64(), 125_000);
-
-        // Recovery publishes day 1's carried average (800): the rate that
-        // stood through the outage stands after it.
-        oracle.accumulate(
-            Some(Decimal::from(850)),
-            2,
-            Timestamp::from_seconds(172_860).unwrap(),
-        );
-        assert_eq!(oracle.current().into_u64(), 125_000);
-    }
-
-    #[test]
-    fn a_thin_day_keeps_yesterdays_rate() {
-        let mut oracle = Oracle::new(Decimal::from(800), 0, Timestamp::from_seconds(0).unwrap());
-        // Close day 0 at 800 and open day 1 weighting 900.
-        oracle.accumulate(
-            Some(Decimal::from(900)),
-            0,
-            Timestamp::from_seconds(43_200).unwrap(),
-        );
-        oracle.accumulate(
-            Some(Decimal::from(900)),
-            1,
-            Timestamp::from_seconds(86_400).unwrap(),
-        );
-        assert_eq!(oracle.current().into_u64(), 125_000);
-
-        // Day 1: one success and two misses (1/3). Rollover refuses the
-        // 900 TWAP and yesterday's 800 rate stands.
-        oracle.accumulate(None, 1, Timestamp::from_seconds(86_401).unwrap());
-        oracle.accumulate(None, 1, Timestamp::from_seconds(86_402).unwrap());
-        oracle.accumulate(
-            Some(Decimal::from(800)),
-            2,
-            Timestamp::from_seconds(172_800).unwrap(),
-        );
-        assert_eq!(oracle.current().into_u64(), 125_000);
-    }
-
-    #[test]
-    fn a_half_successful_day_publishes() {
-        let mut oracle = Oracle::new(Decimal::from(800), 0, Timestamp::from_seconds(0).unwrap());
-        oracle.accumulate(
-            Some(Decimal::from(900)),
-            0,
-            Timestamp::from_seconds(43_200).unwrap(),
-        );
-        oracle.accumulate(
-            Some(Decimal::from(900)),
-            1,
-            Timestamp::from_seconds(86_400).unwrap(),
-        );
-        assert_eq!(oracle.current().into_u64(), 125_000);
-
-        // Day 1: one success and one miss (1/2). Rollover publishes 900.
-        oracle.accumulate(None, 1, Timestamp::from_seconds(86_401).unwrap());
-        oracle.accumulate(
-            Some(Decimal::from(800)),
-            2,
-            Timestamp::from_seconds(172_800).unwrap(),
-        );
-        assert_eq!(oracle.current().into_u64(), 111_112);
-    }
-
-    #[test]
-    fn reorg_rewind_never_publishes() {
-        let mut oracle = Oracle::new(Decimal::from(1_000), 0, Timestamp::from_seconds(0).unwrap());
-        oracle.accumulate(
-            Some(Decimal::from(1_000)),
-            0,
-            Timestamp::from_seconds(90_000).unwrap(),
-        );
+    fn a_round_leaves_the_window_after_window_more() {
+        let mut oracle = Oracle::new(Decimal::from(1_250));
+        for _ in 1..WINDOW {
+            oracle.record(Some(Decimal::from(1_000)));
+        }
+        assert_eq!(oracle.current().into_u64(), 80_000);
+        oracle.record(Some(Decimal::from(1_000)));
         assert_eq!(oracle.current().into_u64(), 100_000);
+    }
 
-        // A reorg rewinds MTP back into day 0.
-        oracle.accumulate(
-            Some(Decimal::from(1_000)),
-            0,
-            Timestamp::from_seconds(80_000).unwrap(),
-        );
-        assert_eq!(oracle.current().into_u64(), 100_000);
-
-        // The scan returns to the present: still no publish — the stored
-        // current_day prevents a spurious rollover.
-        oracle.accumulate(
-            Some(Decimal::from(1_000)),
-            0,
-            Timestamp::from_seconds(95_000).unwrap(),
-        );
-        assert_eq!(oracle.current().into_u64(), 100_000);
-
-        // The genuine day-1 rollover publishes the day's average — every
-        // price was 1,000, so the same rate.
-        oracle.accumulate(
-            Some(Decimal::from(1_000)),
-            1,
-            Timestamp::from_seconds(172_800).unwrap(),
-        );
+    /// An outage keeps the window it had, so the rate never goes empty.
+    #[test]
+    fn a_round_with_no_price_keeps_the_window() {
+        let mut oracle = Oracle::new(Decimal::from(1_000));
+        for _ in 0..2 * WINDOW {
+            oracle.record(None);
+        }
         assert_eq!(oracle.current().into_u64(), 100_000);
     }
 

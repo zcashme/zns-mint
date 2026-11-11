@@ -1,5 +1,10 @@
 # main.changelog.md
 
+## 2026-11-11 — Each pass records its round in the rate window (#466)
+
+- The pass calls `oracle.record(round)`. The oracle no longer takes
+  `today` or `mtp_now`. `today` still drives the vault sweep.
+
 ## 2026-11-09 — A list, delist, or buy arrives as a `Request` (#446)
 
 - The block pass sends `Request::List`, `Delist`, and `Buy` to

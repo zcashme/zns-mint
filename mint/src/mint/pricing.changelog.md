@@ -1,5 +1,16 @@
 # Pricing changelog
 
+## 2026-11-11 — The rate is the lowest of the last 120 rounds (#466)
+
+- `Oracle` holds the zats-per-USD rate of the last `WINDOW` (120)
+  rounds that returned a price. `current()` is the lowest of them, so
+  a buyer who paid the spot price of any of those rounds pays enough.
+- `record(round)` replaces `accumulate(round, today, now)`. A round
+  with no price changes nothing, so an outage keeps the window it had.
+- `new(price)` takes the first round alone.
+- The daily TWAP, the day rollover, `MIN_DAY_SUCCESS_PERCENT`, and the
+  MTP rewind guard are gone.
+
 ## 2026-10-29 — The challenge fee leaves the oracle
 
 - `challenge_fee` and `challenge_fee_at` are gone.

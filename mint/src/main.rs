@@ -571,10 +571,10 @@ async fn main() {
         // The tip check below covers the price round and the pre-sale
         // read alike. Only the read's unspent timeout can delay the pass.
         let (round, ()) = tokio::join!(fetch_round(), presale_read.install(&mut protected_names));
-        // The rate when the requests below were first seen: a day this
-        // round publishes does not reprice them.
+        // The rate when the requests below were first seen: this round
+        // does not reprice them.
         let rate = oracle.current();
-        oracle.accumulate(round, today, mtp_now);
+        oracle.record(round);
         let exact_tip = match source.canonical_tip().await {
             Ok(tip) => tip,
             Err(error) => {
