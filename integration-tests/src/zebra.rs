@@ -32,6 +32,8 @@ pub struct Zebrad {
     net_port: u16,
     pub rpc_port: u16,
     pub indexer_port: u16,
+    /// The highest tip an `invalidateblock` left behind.
+    orphaned_tip: u32,
     _dir: tempfile::TempDir,
 }
 
@@ -78,6 +80,7 @@ impl Zebrad {
             net_port,
             rpc_port: ZEBRA_JSON_RPC_PORT,
             indexer_port: ZEBRA_INDEXER_PORT,
+            orphaned_tip: 0,
             _dir: dir,
         };
         zebrad.wait_until_rpc_up().await?;
@@ -260,7 +263,7 @@ impl Zebrad {
     /// The best chain shortens to `ancestor`. The mint treats that as a
     /// reorg. `ancestor` has to sit inside Zebra's non-finalized window
     /// and at or above the mint birthday; a deeper invalidate fails closed.
-    pub async fn invalidate_above(&self, ancestor: u32) -> Result<()> {
+    pub async fn invalidate_above(&mut self, ancestor: u32) -> Result<()> {
         let tip = self.tip_height().await?;
         if ancestor >= tip {
             bail!("ancestor {ancestor} is not below tip {tip}");
@@ -269,6 +272,7 @@ impl Zebrad {
         self.rpc("invalidateblock", json!([hash]))
             .await
             .with_context(|| format!("invalidateblock {hash} (height {})", ancestor + 1))?;
+        self.orphaned_tip = self.orphaned_tip.max(tip);
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let now = self.tip_height().await?;
@@ -280,6 +284,18 @@ impl Zebrad {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+    }
+
+    /// Mine until the best chain is longer than every fork `invalidate_above`
+    /// left behind. zallet-zebra's chain syncer never drops an invalidated
+    /// block, and keeps that fork as its best chain until Zebra's chain has
+    /// more work, which on regtest means more blocks.
+    pub async fn outgrow_orphaned_forks(&self) -> Result<()> {
+        let tip = self.tip_height().await?;
+        if tip <= self.orphaned_tip {
+            self.generate_blocks(self.orphaned_tip + 1 - tip).await?;
+        }
+        Ok(())
     }
 
     /// Ironwood note-commitment tree root at the current tip.

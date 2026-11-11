@@ -576,9 +576,11 @@ async fn wait_for(
 }
 
 /// Pay the Treasury `zec` once the wallet is at Zebra's tip block and holds
-/// that much spendable. After a reorg the wallet can still be on the
-/// orphaned chain, and Zebra rejects a spend built on its anchor.
+/// that much spendable. After a reorg the wallet stays on the orphaned fork
+/// until Zebra's chain outgrows it, and Zebra rejects a spend built on that
+/// fork's anchor.
 async fn pay_treasury(stack: &mut Stack, memo: &str, zec: f64) -> Result<String> {
+    stack.zebra.outgrow_orphaned_forks().await?;
     let tip = stack.zebra.tip_height().await?;
     let hash = stack.zebra.block_hash(tip).await?;
     let zallet = &stack.user.zallet;
