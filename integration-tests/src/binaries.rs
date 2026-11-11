@@ -1,4 +1,4 @@
-//! Locate sibling checkouts and on-disk binaries.
+//! Locate and build the binaries the stack runs.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

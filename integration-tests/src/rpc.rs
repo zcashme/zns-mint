@@ -1,4 +1,4 @@
-//! JSON-RPC helper for zebrad and the resolver.
+//! JSON-RPC helper for zebrad.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};

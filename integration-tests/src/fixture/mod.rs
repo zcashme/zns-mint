@@ -5,10 +5,9 @@
 //! — then author the 40-anchor Registry ceremony plus their own Ironwood
 //! funding. One transaction, one input, the whole ownership flow.
 //!
-//! A copy of this crate's `ceremony` and `tx` modules as of
-//! zns-integration-tests f28fabfb56e4962a7e95283134791fb41c51337c
-//! (themselves adapted from zns-keygen's anchor builder), with two
-//! deliberate divergences:
+//! Adapted from the `ceremony` and `tx` modules of zns-integration-tests
+//! f28fabfb56e4962a7e95283134791fb41c51337c (themselves adapted from
+//! zns-keygen's anchor builder), with two deliberate divergences:
 //! 1. no coinbase-maturity filter on the Treasury input — the funding
 //!    payment is a regular UTXO, not coinbase;
 //! 2. no ceremony-tx cache — the funding txid is random, so a cached
