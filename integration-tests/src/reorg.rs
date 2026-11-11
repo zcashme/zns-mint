@@ -10,9 +10,8 @@
 //!   still canonical. The spent request is not re-decided, so the old code
 //!   does nothing and a new payment is what starts a new challenge.
 //!
-//! `zcash` and `zebra` both have to be protected for the whole run. The
-//! mint refunds a claim of a name that is not. `zcash` is the name the
-//! mint e2e already claims.
+//! `zcash` and `zebra` both have to be protected for the whole run.
+//! `zcash` is the name the mint e2e already claims.
 
 use std::time::{Duration, Instant};
 
@@ -27,10 +26,11 @@ use crate::verify::{wait_for_verified_name_note, VerifiedNameNote};
 const KEEP: &str = "zcash";
 /// The name a later reorg drops. Must be protected, same as [`KEEP`].
 const DROP: &str = "zebra";
-/// Unprotected claim with no access code: admitted, then refunded.
-const REFUND_NAME: &str = "reorgpay";
+/// A forever claim paid below its price: admitted, then refunded.
+const REFUND_NAME: &str = "alice";
 
-/// Above the withheld refund fee (10 marginal actions). Not a claim price.
+/// Above the withheld refund fee (10 marginal actions), and below
+/// [`REFUND_NAME`]'s forever price of $300 while ZEC is under $3,000.
 const REFUND_ZEC: f64 = 0.1;
 /// One claim payment, in zatoshis. Matches `CLAIM_PAYMENT_ZEC`.
 const CLAIM_ZATS: u64 = 200_000_000;
