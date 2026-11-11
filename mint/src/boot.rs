@@ -623,23 +623,15 @@ impl Boot<Network> {
             let block_mtp = mtp
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
-            market.expire(&mut registry, block_mtp, next_height);
+            market.expire(block_mtp, next_height);
             challenges.expire(block_mtp);
-            market.reconcile(&mut registry, next_height);
+            market.reconcile(&registry, next_height);
             // The codes this mint sent before the sync: an answer in the
             // history matches the code its owner was sent.
             for relay in &relays {
                 challenges.relay_seen(relay);
             }
             for (txid, inbound, paid) in arrivals {
-                if let crate::mint::MintInbound::Response(response) = &inbound {
-                    if response.action.is_list()
-                        || response.action.is_delist()
-                        || response.action.is_auction()
-                    {
-                        market.answer(&mut registry, &mut challenges, response, next_height);
-                    }
-                }
                 if let crate::mint::MintInbound::Request(
                     request @ (crate::mint::Request::List(_)
                     | crate::mint::Request::Delist { .. }

@@ -7,7 +7,7 @@ use anchor_pool::AnchorPool;
 pub use anchor_pool::{is_ceremony_fill, ANCHOR_POOL_SIZE};
 
 use crate::mint::note::NameNoteQueue;
-use crate::mint::sale::{is_owner_listing, Ask, Listing, MarketRefusal};
+use crate::mint::sale::{is_owner_listing, listable, Ask, Listing};
 use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
@@ -167,8 +167,6 @@ pub struct Registry {
     records: BTreeMap<Name, NameRecord>,
     /// All confirmed records for each name, in canonical application order.
     history: BTreeMap<Name, Vec<NameRecord>>,
-    /// Current listings, rebuilt from the market event log on rollback.
-    listings: BTreeMap<Name, Listing>,
     anchors: AnchorPool,
 }
 
@@ -178,8 +176,10 @@ impl Registry {
         Self::default()
     }
 
+    /// The listing on the name's current note. Any later note ends it,
+    /// and an auction past its end block quotes no price.
     pub fn listing(&self, name: &Name) -> Option<&Listing> {
-        self.listings.get(name)
+        self.record(name)?.listing()
     }
 
     pub fn price(&self, name: &Name) -> Option<Zatoshis> {
@@ -197,67 +197,48 @@ impl Registry {
         }
     }
 
-    /// An auction listing leaves on the block after its end. An open hold
-    /// stays until its buyer pays or the ten minutes pass.
-    pub(crate) fn delist_ended_auctions(&mut self, height: BlockHeight) -> Vec<Name> {
-        let mut done = Vec::new();
-        self.listings.retain(|name, listing| match &listing.ask {
-            Ask::Dutch(terms) if height > terms.end => {
-                done.push(name.clone());
-                false
-            }
-            _ => true,
-        });
-        done
-    }
-
-    /// The market has completed the controller challenge and checked open buys.
-    pub(crate) fn list(&mut self, listing: Listing) -> Result<(), MarketRefusal> {
-        let owner = self.record(&listing.name).ok_or(MarketRefusal::NotOwner)?;
-        if !is_owner_listing(owner.ua(), &listing.ua, &listing.pay_to) {
-            return Err(MarketRefusal::NotOwner);
+    /// The list law: the owner lists at her own t1, on terms that are
+    /// still listable at `height`, before either clock fires. The note
+    /// carries her UA and term forward. `None` means unlawful.
+    pub fn authorize_list(
+        &self,
+        pending: &OtpChallenge,
+        mtp: Timestamp,
+        height: BlockHeight,
+    ) -> Option<NameNote> {
+        let Request::List(listing) = &pending.request else {
+            return None;
+        };
+        let record = self.record(&listing.name)?;
+        if record.is_release_due(mtp)
+            || !is_owner_listing(record.ua(), &listing.ua, &listing.pay_to)
+            || listable(&listing.ask, height).is_err()
+        {
+            return None;
         }
-        self.restore_listing(listing);
-        Ok(())
+        Some(NameNote::List {
+            listing: listing.clone(),
+            expires_at: record.expires_at(),
+            prev: record.commitment,
+        })
     }
 
-    pub(crate) fn delist(&mut self, name: &Name, ua: &UnifiedAddress) -> Result<(), MarketRefusal> {
-        if self.record(name).is_none_or(|record| record.ua() != ua) {
-            return Err(MarketRefusal::NotOwner);
+    /// The delist law: the owner takes down a listing before either
+    /// clock fires. `None` means unlawful.
+    pub fn authorize_delist(&self, pending: &OtpChallenge, mtp: Timestamp) -> Option<NameNote> {
+        let Request::Delist { name, ua } = &pending.request else {
+            return None;
+        };
+        let record = self.record(name)?;
+        if record.is_release_due(mtp) || record.ua() != ua || record.listing().is_none() {
+            return None;
         }
-        self.remove_listing(name)
-            .then_some(())
-            .ok_or(MarketRefusal::NotListed)
-    }
-
-    /// Remove listings whose controller no longer holds the name.
-    pub(crate) fn reconcile_listings(&mut self) -> Vec<Name> {
-        let mut lost = Vec::new();
-        self.listings.retain(|name, listing| {
-            let live = self
-                .records
-                .get(name)
-                .is_some_and(|record| *record.ua() == listing.ua);
-            if !live {
-                lost.push(name.clone());
-            }
-            live
-        });
-        lost
-    }
-
-    // Market event replay applies historical listing facts without checking
-    // ownership at the current tip. Later delist events restore the final state.
-    pub(crate) fn restore_listing(&mut self, listing: Listing) {
-        self.listings.insert(listing.name.clone(), listing);
-    }
-
-    pub(crate) fn remove_listing(&mut self, name: &Name) -> bool {
-        self.listings.remove(name).is_some()
-    }
-
-    pub(crate) fn clear_listings(&mut self) {
-        self.listings.clear();
+        Some(NameNote::Delist {
+            name: name.clone(),
+            ua: ua.clone(),
+            expires_at: record.expires_at(),
+            prev: record.commitment,
+        })
     }
 
     /// The claim law. `None` means unlawful.
@@ -1478,6 +1459,75 @@ mod tests {
         assert_eq!(*rec.ua(), bob);
         assert_eq!(rec.expires_at(), term);
         assert_eq!(rec.predecessor_nullifier, succ);
+    }
+
+    /// The owner lists at her own t1 on terms still listable, and
+    /// delists only a listing; both stop once a clock fires. Each note
+    /// carries her UA and term forward.
+    #[test]
+    fn list_and_delist_laws() {
+        use crate::mint::sale::AuctionTerms;
+        use crate::mint::treasury::{OtpCode, D_OTP};
+
+        let term = Expiry::At(ts(2_000_000_000));
+        let alice = test_ua();
+        let challenge = |request| OtpChallenge {
+            request,
+            code: OtpCode::for_test(*b"123456"),
+            attempts: 0,
+            expires_at: ts(1_000_000_000 + D_OTP),
+        };
+        let listing = |ua: UnifiedAddress, ask| Listing {
+            name: test_name(),
+            pay_to: *alice.transparent().unwrap(),
+            ua,
+            ask,
+        };
+        let flat = Ask::Flat(Zatoshis::from_u64(500_000_000).unwrap());
+        let mtp = ts(1_000_000_000);
+        let at = BlockHeight::from_u32(101);
+        let r = live_alice(term, 3_000_000_000);
+
+        let list = challenge(Request::List(listing(alice.clone(), flat.clone())));
+        let note = r.authorize_list(&list, mtp, at).unwrap();
+        assert_eq!(note.expires_at(), Some(term));
+        assert_eq!(note.prev_rcm(), Some(commitment(1)));
+        let by_bob = challenge(Request::List(listing(bob_ua(), flat.clone())));
+        assert!(r.authorize_list(&by_bob, mtp, at).is_none());
+        let ended = challenge(Request::List(listing(
+            alice.clone(),
+            Ask::Dutch(AuctionTerms {
+                start_price: Zatoshis::from_u64(9).unwrap(),
+                min_price: Zatoshis::from_u64(1).unwrap(),
+                start: BlockHeight::from_u32(10),
+                end: BlockHeight::from_u32(20),
+            }),
+        )));
+        assert!(r.authorize_list(&ended, mtp, at).is_none());
+        assert!(r.authorize_list(&list, ts(3_000_000_000), at).is_none());
+
+        let delist = challenge(Request::Delist {
+            name: test_name(),
+            ua: alice.clone(),
+        });
+        assert!(r.authorize_delist(&delist, mtp).is_none(), "not listed");
+        let mut r = r;
+        assert!(r.accept_transition(
+            &MAIN_NETWORK,
+            &note,
+            nullifier(20),
+            &[nullifier(1)],
+            at,
+            mtp
+        ));
+        let note = r.authorize_delist(&delist, mtp).unwrap();
+        assert_eq!(note.ua(), &alice);
+        assert_eq!(note.expires_at(), Some(term));
+        let by_bob = challenge(Request::Delist {
+            name: test_name(),
+            ua: bob_ua(),
+        });
+        assert!(r.authorize_delist(&by_bob, mtp).is_none());
     }
 
     /// A list or a delist repeats the owner and the term. One that

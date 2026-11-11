@@ -268,9 +268,8 @@ async fn main() {
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
-            market.truncate_to(&mut registry, rewound);
+            market.truncate_to(rewound);
             market.expire(
-                &mut registry,
                 mtp.current().expect("FATAL: MTP unavailable after reorg"),
                 rewound,
             );
@@ -382,8 +381,8 @@ async fn main() {
                 }
                 challenges.rebind(request, *txid);
             }
-            market.expire(&mut registry, block_mtp, next_height);
-            market.reconcile(&mut registry, next_height);
+            market.expire(block_mtp, next_height);
+            market.reconcile(&registry, next_height);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(
@@ -425,23 +424,9 @@ async fn main() {
                     // A refused response goes back to the memo address,
                     // less the refund fee.
                     MintInbound::Response(response) => {
-                        if response.action.is_list()
-                            || response.action.is_delist()
-                            || response.action.is_auction()
-                        {
-                            market.answer(&mut registry, &mut challenges, &response, next_height);
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                &response.ua,
-                                &response.name,
-                                next_height,
-                                paid,
-                            );
-                            continue;
-                        }
                         // A buy holds the name. A code already issued cannot
-                        // apply an update or a release, and its payment returns.
+                        // apply an update, release, list, or delist, and its
+                        // payment returns.
                         if !market.allows_transition(&response.name) {
                             challenges.drop_challenges(&response.name);
                             refunds.admit(
@@ -511,10 +496,11 @@ async fn main() {
                         let authorized = match &sent.request {
                             Request::Update { .. } => registry.authorize_update(&sent, block_mtp),
                             Request::Release { .. } => registry.authorize_release(&sent),
-                            Request::Claim { .. }
-                            | Request::List(_)
-                            | Request::Delist { .. }
-                            | Request::Buy { .. } => continue,
+                            Request::List(_) => {
+                                registry.authorize_list(&sent, block_mtp, next_height)
+                            }
+                            Request::Delist { .. } => registry.authorize_delist(&sent, block_mtp),
+                            Request::Claim { .. } | Request::Buy { .. } => continue,
                         };
                         let Some(note) = authorized else {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
