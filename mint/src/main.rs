@@ -160,7 +160,7 @@ async fn main() {
                     }
                     registry
                         .authorize_challenge(&name_notes, &request, target_height, mtp_now)
-                        .map(|record| (request, record.ua.clone()))
+                        .map(|record| (request, record.ua().clone()))
                 });
                 let Some((request, ua)) = candidate else {
                     continue;
@@ -268,9 +268,8 @@ async fn main() {
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
-            market.truncate_to(&mut registry, rewound);
+            market.truncate_to(rewound);
             market.expire(
-                &mut registry,
                 mtp.current().expect("FATAL: MTP unavailable after reorg"),
                 rewound,
             );
@@ -382,8 +381,8 @@ async fn main() {
                 }
                 challenges.rebind(request, *txid);
             }
-            market.expire(&mut registry, block_mtp, next_height);
-            market.reconcile(&mut registry, next_height);
+            market.expire(block_mtp, next_height);
+            market.reconcile(&registry, next_height);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(
@@ -425,23 +424,9 @@ async fn main() {
                     // A refused response goes back to the memo address,
                     // less the refund fee.
                     MintInbound::Response(response) => {
-                        if response.action.is_list()
-                            || response.action.is_delist()
-                            || response.action.is_auction()
-                        {
-                            market.answer(&mut registry, &mut challenges, &response, next_height);
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                &response.ua,
-                                &response.name,
-                                next_height,
-                                paid,
-                            );
-                            continue;
-                        }
                         // A buy holds the name. A code already issued cannot
-                        // apply an update or a release, and its payment returns.
+                        // apply an update, release, list, or delist, and its
+                        // payment returns.
                         if !market.allows_transition(&response.name) {
                             challenges.drop_challenges(&response.name);
                             refunds.admit(
@@ -511,10 +496,11 @@ async fn main() {
                         let authorized = match &sent.request {
                             Request::Update { .. } => registry.authorize_update(&sent, block_mtp),
                             Request::Release { .. } => registry.authorize_release(&sent),
-                            Request::Claim { .. }
-                            | Request::List(_)
-                            | Request::Delist { .. }
-                            | Request::Buy { .. } => continue,
+                            Request::List(_) => {
+                                registry.authorize_list(&sent, block_mtp, next_height)
+                            }
+                            Request::Delist { .. } => registry.authorize_delist(&sent, block_mtp),
+                            Request::Claim { .. } | Request::Buy { .. } => continue,
                         };
                         let Some(note) = authorized else {
                             refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
@@ -547,7 +533,7 @@ async fn main() {
                 }
             }
             market.observe(
-                |name| registry.record(name).map(|record| record.ua.clone()),
+                |name| registry.record(name).map(|record| record.ua().clone()),
                 &payments,
                 block_mtp,
                 next_height,
@@ -745,7 +731,7 @@ async fn main() {
                 &sapling_spend,
                 &sapling_output,
                 &fee_rule,
-                &record.ua,
+                record.ua(),
                 &source,
                 &pending.memo(),
                 "tip",
@@ -785,18 +771,20 @@ async fn main() {
         // A broadcast order whose expiry height has passed can be signed
         // again, or dropped below once the tip median would release it.
         name_notes.expire_sent(tip);
-        // Drop an update the tip median would already release, so a
-        // release note can be admitted below. A broadcast still inside
-        // its expiry window stays.
+        // Drop an update, list, or delist the tip median would already
+        // release, so a release note can be admitted below. A broadcast
+        // still inside its expiry window stays.
         for note in name_notes.authorized_notes() {
-            if note.action().is_update()
+            let action = note.action();
+            if (action.is_update() || action.is_list() || action.is_auction() || action.is_delist())
                 && registry
                     .record(note.name())
                     .is_some_and(|record| record.is_release_due(mtp_now))
             {
                 tracing::info!(
                     name = %note.name().as_str(),
-                    "update dropped: the tip median would release the name"
+                    action = action.as_str(),
+                    "transition dropped: the tip median would release the name"
                 );
                 name_notes.drop_note(note.name());
             }

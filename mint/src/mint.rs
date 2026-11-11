@@ -16,7 +16,6 @@ pub use zcash_keys::address::UnifiedAddress;
 
 use transparent::address::TransparentAddress;
 use zcash_address::unified::{Container as _, Encoding};
-use zcash_keys::address::Address;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
@@ -74,12 +73,11 @@ pub enum Action {
     Release,
     /// Spends the holder's note and binds the buyer. The name stays live.
     Sale,
-    /// A controller challenge that lists the name. Not a name note.
+    /// Lists the name at a fixed price.
     List,
-    /// A controller challenge that removes a listing. Not a name note.
+    /// Removes a listing.
     Delist,
-    /// A controller challenge that lists the name at a falling price.
-    /// Not a name note.
+    /// Lists the name at a falling price.
     Auction,
 }
 
@@ -282,32 +280,14 @@ impl Request {
             "release" => {
                 decode_name_and_ua(network, fields).map(|(name, ua)| Request::Release { name, ua })
             }
-            "list" => {
+            "list" | "auction" => {
                 let (name, ua) = decode_name_and_ua(network, fields)?;
-                Some(Request::List(sale::Listing {
-                    name,
-                    ua,
-                    pay_to: sale::decode_t1(network, fields.next()?)?,
-                    ask: sale::Ask::Flat(sale::decode_zec(fields.next()?)?),
-                }))
-            }
-            "auction" => {
-                let (name, ua) = decode_name_and_ua(network, fields)?;
-                let pay_to = sale::decode_t1(network, fields.next()?)?;
-                let terms = sale::AuctionTerms {
-                    start_price: sale::decode_zec(fields.next()?)?,
-                    min_price: sale::decode_zec(fields.next()?)?,
-                    start: sale::decode_height(fields.next()?)?,
-                    end: sale::decode_height(fields.next()?)?,
-                };
-                if !terms.is_valid() {
-                    return None;
-                }
+                let (pay_to, ask) = sale::decode_terms(network, Action::parse(verb)?, fields)?;
                 Some(Request::List(sale::Listing {
                     name,
                     ua,
                     pay_to,
-                    ask: sale::Ask::Dutch(terms),
+                    ask,
                 }))
             }
             "delist" => {
@@ -374,26 +354,29 @@ impl OtpMemo {
             return None;
         }
         let otp: String = self.code.digits().into_iter().map(|b| b as char).collect();
-        let text = if self.action.is_list() {
+        let terms = if self.action.is_list() {
             let (pay_to, price) = self.listing.as_ref()?;
-            format!(
-                "ZNS:otp:{otp}:{}:list:{}:{}:{}",
-                self.name.as_str(),
-                self.ua.encode(network),
-                Address::Transparent(*pay_to).encode(network),
-                sale::encode_zec(*price),
-            )
+            Some(sale::encode_terms(
+                network,
+                pay_to,
+                &sale::Ask::Flat(*price),
+            ))
         } else if self.action.is_auction() {
             let (pay_to, terms) = self.auction.as_ref()?;
+            Some(sale::encode_terms(
+                network,
+                pay_to,
+                &sale::Ask::Dutch(terms.clone()),
+            ))
+        } else {
+            None
+        };
+        let text = if let Some(terms) = terms {
             format!(
-                "ZNS:otp:{otp}:{}:auction:{}:{}:{}:{}:{}:{}",
+                "ZNS:otp:{otp}:{}:{}:{}:{terms}",
                 self.name.as_str(),
+                self.action.as_str(),
                 self.ua.encode(network),
-                Address::Transparent(*pay_to).encode(network),
-                sale::encode_zec(terms.start_price),
-                sale::encode_zec(terms.min_price),
-                u32::from(terms.start),
-                u32::from(terms.end),
             )
         } else {
             format!(
@@ -437,30 +420,15 @@ impl OtpMemo {
 
         // A list sentence carries the t1 and the price. An auction sentence
         // carries the t1 and the terms. The other verbs stay six fields.
-        let (ua, listing, auction) = if action.is_list() {
-            if parts.len() != 8 {
+        let (ua, listing, auction) = if action.is_list() || action.is_auction() {
+            if parts.len() != if action.is_list() { 8 } else { 11 } {
                 return None;
             }
             let ua = decode_controller_ua(network, parts[5])?;
-            let pay_to = sale::decode_t1(network, parts[6])?;
-            let price = sale::decode_zec(parts[7])?;
-            (ua, Some((pay_to, price)), None)
-        } else if action.is_auction() {
-            if parts.len() != 11 {
-                return None;
+            match sale::decode_terms(network, action, &mut parts[6..].iter().copied())? {
+                (pay_to, sale::Ask::Flat(price)) => (ua, Some((pay_to, price)), None),
+                (pay_to, sale::Ask::Dutch(terms)) => (ua, None, Some((pay_to, terms))),
             }
-            let ua = decode_controller_ua(network, parts[5])?;
-            let pay_to = sale::decode_t1(network, parts[6])?;
-            let terms = sale::AuctionTerms {
-                start_price: sale::decode_zec(parts[7])?,
-                min_price: sale::decode_zec(parts[8])?,
-                start: sale::decode_height(parts[9])?,
-                end: sale::decode_height(parts[10])?,
-            };
-            if !terms.is_valid() {
-                return None;
-            }
-            (ua, None, Some((pay_to, terms)))
         } else {
             if parts.len() != 6 {
                 return None;
@@ -714,34 +682,14 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                         expiry,
                     )
                 } else {
-                    match action {
-                        Action::Update => registry.accept_update(
-                            network,
-                            &candidate.payload,
-                            candidate.nullifier,
-                            &nfs,
-                            height,
-                            block_mtp,
-                        ),
-                        Action::Release => registry.accept_release(
-                            network,
-                            &candidate.payload,
-                            candidate.nullifier,
-                            &nfs,
-                            height,
-                            block_mtp,
-                        ),
-                        Action::Sale => registry.accept_sale(
-                            network,
-                            &candidate.payload,
-                            candidate.nullifier,
-                            &nfs,
-                            height,
-                            block_mtp,
-                        ),
-                        Action::Claim => unreachable!("claims are routed above"),
-                        Action::List | Action::Delist | Action::Auction => false,
-                    }
+                    registry.accept_transition(
+                        network,
+                        &candidate.payload,
+                        candidate.nullifier,
+                        &nfs,
+                        height,
+                        block_mtp,
+                    )
                 };
                 if accepted {
                     accepted_name_notes.push(*index);
@@ -982,6 +930,7 @@ pub async fn watch_mempool(chain: ChainClient, sender: mpsc::Sender<(MempoolChan
 mod tests {
     use super::*;
     use zcash_address::unified::{Address as Ua, Receiver, Revision, Uitem};
+    use zcash_keys::address::Address;
     use zcash_protocol::consensus::MainNetwork;
 
     const TEST_UA: &str = "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k";

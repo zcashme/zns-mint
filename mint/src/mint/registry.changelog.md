@@ -2,6 +2,24 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-11-11 — A listing is the name's current list note (#465)
+
+- `NameRecord` holds the note that set it; `name()`, `action()`,
+  `ua()`, `expires_at()`, and `listing()` read from it.
+  `mark_released` records a release note.
+- `listing`, `price`, and `quote` read the current record. The
+  `listings` map, `list`, `delist`, `reconcile_listings`,
+  `restore_listing`, `remove_listing`, `clear_listings`, and
+  `delist_ended_auctions` are gone. A rollback rewinds a listing with
+  its record.
+- `authorize_list` and `authorize_delist` build the notes a list or
+  delist response authorizes, as `authorize_update` does.
+- `accept_update`, `accept_release`, and `accept_sale` are one
+  `accept_transition`, which also takes list and delist. A list,
+  delist, or sale that does not carry the record forward releases the
+  name, as a wrong predecessor does.
+- `sale_transfer` and an accepted sale require a list note before it.
+
 ## 2026-11-09 — List and delist are challenged here (#446)
 
 - `allows_challenge` allows a list from the controller at the

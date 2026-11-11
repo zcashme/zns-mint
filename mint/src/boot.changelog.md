@@ -1,5 +1,10 @@
 # Boot module changelog
 
+## 2026-11-11 — The sync reads listings from Name Notes (#465)
+
+- The sync no longer replays list and delist answers. A listing is the
+  confirmed list note, which `apply_block` applies.
+
 ## 2026-11-11 — The first round opens the rate window (#466)
 
 - Boot builds the oracle with `Oracle::new(price)`. It no longer reads

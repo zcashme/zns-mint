@@ -263,7 +263,7 @@ fn apply(registry: &mut Registry, event: &Event) {
                 expires_at: expiry(*expires_at_secs),
                 prev: record.commitment,
             };
-            let ok = registry.accept_update(
+            let ok = registry.accept_transition(
                 &MainNetwork,
                 &note,
                 nf(nullifier),
@@ -295,7 +295,7 @@ fn apply(registry: &mut Registry, event: &Event) {
                 ua: parse_ua(ua),
                 prev: record.commitment,
             };
-            let ok = registry.accept_release(
+            let ok = registry.accept_transition(
                 &MainNetwork,
                 &note,
                 nf(nullifier),
@@ -320,7 +320,7 @@ fn snapshot(registry: &Registry, after_event: usize) -> Snapshot {
     anchor_pool.sort();
     let records: BTreeMap<String, RecordSnapshot> = registry
         .name_chain()
-        .map(|record| (record.name.as_str().to_owned(), record_snapshot(record)))
+        .map(|record| (record.name().as_str().to_owned(), record_snapshot(record)))
         .collect();
     Snapshot {
         after_event,
@@ -331,13 +331,13 @@ fn snapshot(registry: &Registry, after_event: usize) -> Snapshot {
 }
 
 fn record_snapshot(record: &zns_mint::mint::registry::NameRecord) -> RecordSnapshot {
-    let ua_str = Address::Unified(Box::new(record.ua.clone())).encode(&MainNetwork);
-    let expires_at_secs = match record.expires_at {
+    let ua_str = Address::Unified(Box::new(record.ua().clone())).encode(&MainNetwork);
+    let expires_at_secs = match record.expires_at() {
         Expiry::Never => None,
         Expiry::At(t) => Some(t.as_seconds()),
     };
     RecordSnapshot {
-        action: match record.action {
+        action: match record.action() {
             Action::Claim => "claim".to_owned(),
             Action::Update => "update".to_owned(),
             Action::Release => "release".to_owned(),
