@@ -73,12 +73,11 @@ pub enum Action {
     Release,
     /// Spends the holder's note and binds the buyer. The name stays live.
     Sale,
-    /// A controller challenge that lists the name. Not a name note.
+    /// Lists the name at a fixed price.
     List,
-    /// A controller challenge that removes a listing. Not a name note.
+    /// Removes a listing.
     Delist,
-    /// A controller challenge that lists the name at a falling price.
-    /// Not a name note.
+    /// Lists the name at a falling price.
     Auction,
 }
 

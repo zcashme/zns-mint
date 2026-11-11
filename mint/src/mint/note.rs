@@ -20,6 +20,7 @@ use zip32::AccountId;
 pub mod assemble;
 
 use crate::mint::registry::Registry;
+use crate::mint::sale::{decode_terms, encode_terms, Listing};
 use crate::mint::{Action, Name, NameCommitment, LIVENESS_INTERVAL, TREASURY_ACCOUNT};
 use crate::RegistryKeys;
 
@@ -56,6 +57,21 @@ pub enum NameNote {
         expires_at: Expiry,
         prev: NameCommitment,
     },
+    /// Put the name up for sale on `listing`'s terms. The owner's UA and
+    /// `expires_at` carry forward unchanged.
+    List {
+        listing: Listing,
+        expires_at: Expiry,
+        prev: NameCommitment,
+    },
+    /// Take the name off the market. `ua` and `expires_at` carry forward
+    /// unchanged.
+    Delist {
+        name: Name,
+        ua: UnifiedAddress,
+        expires_at: Expiry,
+        prev: NameCommitment,
+    },
 }
 
 impl NameNote {
@@ -64,7 +80,9 @@ impl NameNote {
             NameNote::Claim { name, .. }
             | NameNote::Update { name, .. }
             | NameNote::Release { name, .. }
-            | NameNote::Sale { name, .. } => name,
+            | NameNote::Sale { name, .. }
+            | NameNote::Delist { name, .. } => name,
+            NameNote::List { listing, .. } => &listing.name,
         }
     }
 
@@ -74,6 +92,8 @@ impl NameNote {
             NameNote::Update { .. } => Action::Update,
             NameNote::Release { .. } => Action::Release,
             NameNote::Sale { .. } => Action::Sale,
+            NameNote::List { listing, .. } => listing.ask.action(),
+            NameNote::Delist { .. } => Action::Delist,
         }
     }
 
@@ -83,7 +103,9 @@ impl NameNote {
             NameNote::Claim { ua, .. }
             | NameNote::Update { ua, .. }
             | NameNote::Release { ua, .. }
-            | NameNote::Sale { ua, .. } => ua,
+            | NameNote::Sale { ua, .. }
+            | NameNote::Delist { ua, .. } => ua,
+            NameNote::List { listing, .. } => &listing.ua,
         }
     }
 
@@ -92,7 +114,9 @@ impl NameNote {
         match self {
             NameNote::Claim { expires_at, .. }
             | NameNote::Update { expires_at, .. }
-            | NameNote::Sale { expires_at, .. } => Some(*expires_at),
+            | NameNote::Sale { expires_at, .. }
+            | NameNote::List { expires_at, .. }
+            | NameNote::Delist { expires_at, .. } => Some(*expires_at),
             NameNote::Release { .. } => None,
         }
     }
@@ -103,7 +127,19 @@ impl NameNote {
             NameNote::Claim { .. } => None,
             NameNote::Update { prev, .. }
             | NameNote::Release { prev, .. }
-            | NameNote::Sale { prev, .. } => Some(*prev),
+            | NameNote::Sale { prev, .. }
+            | NameNote::List { prev, .. }
+            | NameNote::Delist { prev, .. } => Some(*prev),
+        }
+    }
+
+    /// A listing's terms as the memo writes them; absent for every other verb.
+    fn terms<P: Parameters>(&self, params: &P) -> Option<String> {
+        match self {
+            NameNote::List { listing, .. } => {
+                Some(encode_terms(params, &listing.pay_to, &listing.ask))
+            }
+            _ => None,
         }
     }
 
@@ -114,8 +150,16 @@ impl NameNote {
         let name = self.name().as_str().as_bytes();
         let ua = self.ua().encode(params);
         let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
+        let terms = self.terms(params);
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
-        zns_rcm(verb, name, ua.as_bytes(), &expiry, &prev)
+        zns_rcm(
+            verb,
+            name,
+            ua.as_bytes(),
+            &expiry,
+            terms.as_deref().map(str::as_bytes),
+            &prev,
+        )
     }
 
     /// The note's ZNS commitment: the rcm wrapped as the chain's
@@ -133,8 +177,16 @@ impl NameNote {
         let name = self.name().as_str().as_bytes();
         let ua = self.ua().encode(params);
         let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
+        let terms = self.terms(params);
         let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
-        zns_psi(verb, name, ua.as_bytes(), &expiry, &prev)
+        zns_psi(
+            verb,
+            name,
+            ua.as_bytes(),
+            &expiry,
+            terms.as_deref().map(str::as_bytes),
+            &prev,
+        )
     }
 
     /// Encodes into the canonical zero-padded 512-byte memo under `params`.
@@ -142,19 +194,23 @@ impl NameNote {
     /// Total over valid `NameNote`s — the memo always fits, because every
     /// field is validated at construction: `Name::parse` bounds the name,
     /// `decode_controller_ua` bounds the address to known receivers, and
-    /// the time crate bounds the expiry.
+    /// the time crate bounds the expiry. The longest, an auction with a
+    /// 63-byte name and a three-receiver UA, is 461 bytes on mainnet and
+    /// 468 on regtest.
     pub fn encode<P: Parameters>(&self, params: &P) -> [u8; 512] {
         let ua_field = self.ua().encode(params);
         let verb = self.action().as_str();
         let hex_rcm = hex::encode(self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]));
         let expires_field = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
+        let terms = self.terms(params).map(|t| t + ":").unwrap_or_default();
         let memo_string = format!(
-            "ZNS:{}:{}:{}:{}:{}",
+            "ZNS:{}:{}:{}:{}:{}{}",
             verb,
             self.name().as_str(),
             ua_field,
             // `b"none"` or canonical ASCII digits — always UTF-8.
             String::from_utf8(expires_field).unwrap(),
+            terms,
             hex_rcm,
         );
         let mut memo = [0u8; 512];
@@ -305,6 +361,7 @@ fn zns_rcm(
     name: &[u8],
     ua: &[u8],
     expires_at: &[u8],
+    terms: Option<&[u8]>,
     prev_rcm_bytes: &[u8; 32],
 ) -> pasta_curves::pallas::Scalar {
     use pasta_curves::group::ff::FromUniformBytes;
@@ -314,6 +371,7 @@ fn zns_rcm(
         name,
         ua,
         expires_at,
+        terms,
         prev_rcm_bytes,
     ))
 }
@@ -326,6 +384,7 @@ fn zns_psi(
     name: &[u8],
     ua: &[u8],
     expires_at: &[u8],
+    terms: Option<&[u8]>,
     prev_rcm_bytes: &[u8; 32],
 ) -> pasta_curves::pallas::Base {
     use pasta_curves::group::ff::FromUniformBytes;
@@ -335,18 +394,22 @@ fn zns_psi(
         name,
         ua,
         expires_at,
+        terms,
         prev_rcm_bytes,
     ))
 }
 
 /// The domain-tagged, length-prefixed BLAKE2b-512 of σ (§3.3).
 /// Field order: `LP(T) || LP(t) || LP(α) || LP(n) || LP(u) || LP(e) || p`.
+/// A list or an auction absorbs its terms as `LP(terms)` before `p`. The
+/// verb comes first, so no other transition hashes the same input.
 fn tagged_zns_hash(
     field_tag: &[u8],
     verb: &[u8],
     name: &[u8],
     ua: &[u8],
     expires_at: &[u8],
+    terms: Option<&[u8]>,
     prev_rcm: &[u8; 32],
 ) -> [u8; 64] {
     let mut h = blake2b_simd::State::new();
@@ -360,6 +423,9 @@ fn tagged_zns_hash(
     absorb(name);
     absorb(ua);
     absorb(expires_at);
+    if let Some(terms) = terms {
+        absorb(terms);
+    }
     h.update(prev_rcm);
     *h.finalize().as_array()
 }
@@ -368,9 +434,10 @@ impl NameNote {
     /// Decodes a 512-byte memo into a typed [`NameNote`].
     ///
     /// Accepts exactly the canonical encoding: trailing-zero stripping, the
-    /// six-field grammar, canonical decimal or `none` expiry, 64-char lowercase
+    /// six-field grammar (a list or an auction puts its terms before the
+    /// predecessor), canonical decimal or `none` expiry, 64-char lowercase
     /// hex predecessor, action-consistent fields (release: a valid UA and `none`
-    /// expiry; claim: zero predecessor; update, release, and sale: nonzero predecessor),
+    /// expiry; claim: zero predecessor; every other verb: nonzero predecessor),
     /// and a re-encode that reproduces the input byte-for-byte.
     pub fn decode<P: Parameters>(params: &P, memo: &[u8; 512]) -> Option<Self> {
         let end = memo.iter().position(|&b| b == 0).unwrap_or(memo.len());
@@ -379,8 +446,22 @@ impl NameNote {
         }
         let memo_str = std::str::from_utf8(&memo[..end]).ok()?;
 
-        let parts: Vec<&str> = memo_str.split(':').collect();
-        if parts.len() != 6 || parts[0] != "ZNS" {
+        let mut parts: Vec<&str> = memo_str.split(':').collect();
+        if parts.len() < 6 || parts[0] != "ZNS" {
+            return None;
+        }
+        let action = Action::parse(parts[1])?;
+        let terms = if action.is_list() || action.is_auction() {
+            let mut fields = parts.drain(5..parts.len() - 1);
+            let terms = decode_terms(params, action, &mut fields)?;
+            if fields.next().is_some() {
+                return None;
+            }
+            Some(terms)
+        } else {
+            None
+        };
+        if parts.len() != 6 {
             return None;
         }
 
@@ -406,8 +487,34 @@ impl NameNote {
         }
         hex::decode_to_slice(parts[5], &mut prev_rcm_bytes).ok()?;
 
-        let note = match Action::parse(parts[1])? {
-            Action::List | Action::Delist | Action::Auction => return None,
+        let note = match action {
+            Action::List | Action::Auction => {
+                let (pay_to, ask) = terms?;
+                if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                    return None;
+                }
+                NameNote::List {
+                    listing: Listing {
+                        name,
+                        ua,
+                        pay_to,
+                        ask,
+                    },
+                    expires_at,
+                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                }
+            }
+            Action::Delist => {
+                if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                    return None;
+                }
+                NameNote::Delist {
+                    name,
+                    ua,
+                    expires_at,
+                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                }
+            }
             Action::Claim => {
                 if prev_rcm_bytes != [0u8; 32] || ua_str.is_empty() {
                     return None;
@@ -793,6 +900,8 @@ impl NameNoteQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mint::sale::{Ask, AuctionTerms};
+    use crate::mint::MAX_NAME_LEN;
     use zcash_primitives::transaction::builder::BLOSSOM_DEFAULT_TX_EXPIRY_DELTA;
     use zcash_protocol::consensus::MAIN_NETWORK;
 
@@ -860,11 +969,161 @@ mod tests {
             Some(&update)
         );
 
-        let release = NameNote::Release { name, ua, prev };
+        let release = NameNote::Release {
+            name: name.clone(),
+            ua: ua.clone(),
+            prev,
+        };
         assert_eq!(
             NameNote::decode(&MAIN_NETWORK, &release.encode(&MAIN_NETWORK)).as_ref(),
             Some(&release)
         );
+
+        for ask in [flat(5), dutch()] {
+            let list = list_note(name.clone(), ask, Expiry::At(t), prev);
+            assert_eq!(
+                NameNote::decode(&MAIN_NETWORK, &list.encode(&MAIN_NETWORK)).as_ref(),
+                Some(&list)
+            );
+        }
+
+        let delist = NameNote::Delist {
+            name,
+            ua,
+            expires_at: Expiry::At(t),
+            prev,
+        };
+        assert_eq!(
+            NameNote::decode(&MAIN_NETWORK, &delist.encode(&MAIN_NETWORK)).as_ref(),
+            Some(&delist)
+        );
+    }
+
+    fn flat(zec: u64) -> Ask {
+        Ask::Flat(Zatoshis::from_u64(zec * 100_000_000).unwrap())
+    }
+
+    fn dutch() -> Ask {
+        Ask::Dutch(AuctionTerms {
+            start_price: Zatoshis::from_u64(900_000_000).unwrap(),
+            min_price: Zatoshis::from_u64(100_000_000).unwrap(),
+            start: BlockHeight::from_u32(3_000_000),
+            end: BlockHeight::from_u32(3_001_000),
+        })
+    }
+
+    fn list_note(name: Name, ask: Ask, expires_at: Expiry, prev: NameCommitment) -> NameNote {
+        let ua = test_ua();
+        NameNote::List {
+            listing: Listing {
+                name,
+                pay_to: *ua.transparent().unwrap(),
+                ua,
+                ask,
+            },
+            expires_at,
+            prev,
+        }
+    }
+
+    /// The verb names the listing's ask, and the terms sit between the
+    /// expiry and the predecessor.
+    #[test]
+    fn a_listing_writes_its_terms_before_the_predecessor() {
+        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
+        let t1 = zcash_keys::address::Address::Transparent(*test_ua().transparent().unwrap())
+            .encode(&MAIN_NETWORK);
+        let text = |note: &NameNote| {
+            let memo = note.encode(&MAIN_NETWORK);
+            let end = memo.iter().position(|&b| b == 0).unwrap();
+            String::from_utf8(memo[..end].to_vec()).unwrap()
+        };
+        let hex_prev = hex::encode(prev.to_bytes());
+
+        let list = list_note(test_name(), flat(5), Expiry::Never, prev);
+        assert_eq!(
+            text(&list),
+            format!("ZNS:list:alice:{TEST_UA}:none:{t1}:5:{hex_prev}")
+        );
+        let auction = list_note(test_name(), dutch(), Expiry::Never, prev);
+        assert_eq!(
+            text(&auction),
+            format!("ZNS:auction:alice:{TEST_UA}:none:{t1}:9:1:3000000:3001000:{hex_prev}")
+        );
+    }
+
+    /// The longest Name Note is an auction with a 63-byte name, the
+    /// longest mainnet UA, the latest expiry, and the largest prices.
+    #[test]
+    fn the_longest_auction_fits_the_memo() {
+        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
+        let max = Zatoshis::from_u64(2_099_999_999_999_999).unwrap();
+        let ask = Ask::Dutch(AuctionTerms {
+            start_price: max,
+            min_price: Zatoshis::from_u64(2_099_999_999_999_998).unwrap(),
+            start: BlockHeight::from_u32(u32::MAX - 1),
+            end: BlockHeight::from_u32(u32::MAX),
+        });
+        let name = Name::parse(&"a".repeat(MAX_NAME_LEN)).unwrap();
+        let latest = Timestamp::from_seconds(Timestamp::MAX.as_seconds()).unwrap();
+        let note = list_note(name, ask, Expiry::At(latest), prev);
+        let memo = note.encode(&MAIN_NETWORK);
+        let len = memo.iter().position(|&b| b == 0).unwrap();
+        assert_eq!(len, 461);
+        assert_eq!(NameNote::decode(&MAIN_NETWORK, &memo), Some(note));
+    }
+
+    /// A list carries exactly two terms and an auction five; delist,
+    /// like update, carries none.
+    #[test]
+    fn a_listing_with_the_wrong_terms_is_refused() {
+        let prev = hex::encode([1u8; 32]);
+        let t1 = zcash_keys::address::Address::Transparent(*test_ua().transparent().unwrap())
+            .encode(&MAIN_NETWORK);
+        for text in [
+            format!("ZNS:list:alice:{TEST_UA}:none:{t1}:{prev}"),
+            format!("ZNS:list:alice:{TEST_UA}:none:{t1}:5:5:{prev}"),
+            format!("ZNS:list:alice:{TEST_UA}:none:{prev}"),
+            format!("ZNS:auction:alice:{TEST_UA}:none:{t1}:9:1:3000000:{prev}"),
+            // The price must fall.
+            format!("ZNS:auction:alice:{TEST_UA}:none:{t1}:1:9:3000000:3001000:{prev}"),
+            format!("ZNS:delist:alice:{TEST_UA}:none:{t1}:5:{prev}"),
+            format!("ZNS:update:alice:{TEST_UA}:none:{t1}:5:{prev}"),
+            // Every listing verb spends a predecessor.
+            format!("ZNS:delist:alice:{TEST_UA}:none:{}", hex::encode([0u8; 32])),
+        ] {
+            let mut memo = [0u8; 512];
+            memo[..text.len()].copy_from_slice(text.as_bytes());
+            assert!(NameNote::decode(&MAIN_NETWORK, &memo).is_none(), "{text}");
+        }
+    }
+
+    /// The terms are part of the commitment, and a delist does not
+    /// commit to the same opening as an update with the same fields.
+    #[test]
+    fn openings_bind_the_listing_terms() {
+        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
+        let five = list_note(test_name(), flat(5), Expiry::Never, prev);
+        let six = list_note(test_name(), flat(6), Expiry::Never, prev);
+        let auction = list_note(test_name(), dutch(), Expiry::Never, prev);
+        assert_ne!(five.rcm(&MAIN_NETWORK), six.rcm(&MAIN_NETWORK));
+        assert_ne!(five.psi(&MAIN_NETWORK), six.psi(&MAIN_NETWORK));
+        assert_ne!(five.rcm(&MAIN_NETWORK), auction.rcm(&MAIN_NETWORK));
+
+        let delist = NameNote::Delist {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+            prev,
+        };
+        let update = NameNote::Update {
+            name: test_name(),
+            ua: test_ua(),
+            expires_at: Expiry::Never,
+            prev,
+        };
+        assert_ne!(delist.rcm(&MAIN_NETWORK), update.rcm(&MAIN_NETWORK));
+        assert_ne!(delist.psi(&MAIN_NETWORK), update.psi(&MAIN_NETWORK));
     }
 
     /// §3.5: a memo whose UA is not a valid ZIP 316 address decodes to no

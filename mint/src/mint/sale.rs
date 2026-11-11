@@ -160,6 +160,16 @@ pub(crate) fn encode_terms<P: Parameters>(
     }
 }
 
+impl Ask {
+    /// The verb a listing with this ask is written under.
+    pub fn action(&self) -> Action {
+        match self {
+            Ask::Flat(_) => Action::List,
+            Ask::Dutch(_) => Action::Auction,
+        }
+    }
+}
+
 /// `price` as ZEC text that [`decode_zec`] accepts. Whole zatoshis
 /// stay an integer. A fraction drops trailing zeros.
 pub(crate) fn encode_zec(price: Zatoshis) -> String {
