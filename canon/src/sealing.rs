@@ -88,20 +88,16 @@ impl Drop for SealingKey {
 #[cfg(feature = "non-tee")]
 const DEV_SEALING_DOMAIN: &[u8] = b"ZNS_DEV/sealing-key/v1";
 
-/// Development sealing key (`non-tee` builds): deterministic SHA-256 over a public domain
-/// string and the caller's context. **Anyone can derive this key** — it
+/// Development sealing key (`non-tee` builds): SHA-256 of a public domain
+/// string. **Anyone can derive this key** — it
 /// exists so development builds can seal and unseal their own capsules
 /// off the enclave. A dev-key boot cannot unseal a production capsule:
 /// the AEAD tag is the boundary between the two worlds.
 #[cfg(feature = "non-tee")]
-pub fn dev_sealing_key(context: &[u8]) -> SealingKey {
+pub fn dev_sealing_key() -> SealingKey {
     use sha2::{Digest, Sha256};
 
-    let mut h = Sha256::new();
-    h.update(DEV_SEALING_DOMAIN);
-    h.update((context.len() as u32).to_le_bytes());
-    h.update(context);
-    SealingKey::new(h.finalize().into())
+    SealingKey::new(Sha256::digest(DEV_SEALING_DOMAIN).into())
 }
 
 /// Derives the per-instance sealing key from the SEV-SNP firmware:
@@ -115,6 +111,23 @@ pub fn dev_sealing_key(context: &[u8]) -> SealingKey {
 /// them makes the key brittle to launch-blob drift. VCEK
 /// (`root_key_select = false`) is stable across reboots; VMRK is random
 /// per launch without a Migration Agent and would brick the capsule on
+/// first reboot.
+#[cfg(target_os = "linux")]
+pub fn derive_sealing_key() -> Result<SealingKey, TeeError> {
+    use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
+
+    let mut firmware =
+        Firmware::open().map_err(|e| guest_open_error(e, "firmware open", TeeError::SealingKey))?;
+    let mut guest_fields = GuestFieldSelect::default();
+    guest_fields.set_guest_policy(true);
+    guest_fields.set_measurement(true);
+    let request = DerivedKey::new(false, guest_fields, 0, 0, 0, None);
+    firmware
+        .get_derived_key(Some(1), request)
+        .map(SealingKey::new)
+        .map_err(|e| TeeError::SealingKey(format!("SEV-SNP get_derived_key: {e}")))
+}
+
 /// Classifies a guest-firmware open failure. A missing `/dev/sev-guest`
 /// means "this is not an SNP guest" — [`TeeError::Unavailable`], the
 /// promised off-platform signal. Any other failure is operational for
@@ -132,23 +145,6 @@ fn guest_open_error(
     } else {
         operational(format!("SEV-SNP {operation}: {e}"))
     }
-}
-
-/// first reboot.
-#[cfg(target_os = "linux")]
-pub fn derive_sealing_key(_context: &[u8]) -> Result<SealingKey, TeeError> {
-    use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
-
-    let mut firmware =
-        Firmware::open().map_err(|e| guest_open_error(e, "firmware open", TeeError::SealingKey))?;
-    let mut guest_fields = GuestFieldSelect::default();
-    guest_fields.set_guest_policy(true);
-    guest_fields.set_measurement(true);
-    let request = DerivedKey::new(false, guest_fields, 0, 0, 0, None);
-    firmware
-        .get_derived_key(Some(1), request)
-        .map(SealingKey::new)
-        .map_err(|e| TeeError::SealingKey(format!("SEV-SNP get_derived_key: {e}")))
 }
 
 /// Requests an attestation report from the AMD Secure Processor whose
@@ -169,7 +165,7 @@ pub fn get_attestation(report_data: &[u8; 64]) -> Result<Attestation, TeeError> 
 /// [`TeeError::Unavailable`] at runtime. Development uses
 /// [`dev_sealing_key`] and simply has no attestation.
 #[cfg(not(target_os = "linux"))]
-pub fn derive_sealing_key(_context: &[u8]) -> Result<SealingKey, TeeError> {
+pub fn derive_sealing_key() -> Result<SealingKey, TeeError> {
     Err(TeeError::Unavailable)
 }
 
@@ -182,13 +178,12 @@ pub fn get_attestation(_report_data: &[u8; 64]) -> Result<Attestation, TeeError>
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(all(test, feature = "non-tee"))]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
     /// The missing-device classification: NotFound is the promised
     /// off-platform signal, everything else stays operational.
-    #[cfg(target_os = "linux")]
     #[test]
     fn missing_guest_device_is_unavailable() {
         use std::io::ErrorKind;
@@ -203,21 +198,5 @@ mod tests {
             guest_open_error(denied, "firmware open", TeeError::SealingKey),
             TeeError::SealingKey(_)
         ));
-    }
-
-    #[test]
-    fn dev_sealing_key_is_deterministic() {
-        assert_eq!(
-            dev_sealing_key(b"ctx").expose(),
-            dev_sealing_key(b"ctx").expose()
-        );
-    }
-
-    #[test]
-    fn dev_sealing_key_scoped_by_context() {
-        assert_ne!(
-            dev_sealing_key(b"ctx-a").expose(),
-            dev_sealing_key(b"ctx-b").expose()
-        );
     }
 }

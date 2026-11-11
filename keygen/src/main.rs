@@ -113,7 +113,7 @@ fn seal_seed() -> SealedCeremony {
         let funding = TreasuryFundingInfo::derive(&NETWORK, seed.expose_secret());
 
         tracing::info!("=== SEALING ===");
-        let sealing_key = zns_canon::sealing::derive_sealing_key(capsule::CAPSULE_KEY_CONTEXT)
+        let sealing_key = zns_canon::sealing::derive_sealing_key()
             .unwrap_or_else(|error| panic!("FATAL: derive sealing key: {error}"));
         let capsule = capsule::seal_seed(&sealing_key, &seed, &mut RdseedRng)
             .unwrap_or_else(|error| panic!("FATAL: seal capsule: {error}"));
@@ -172,7 +172,7 @@ fn build_anchor(
         .unwrap_or_else(|error| panic!("FATAL: read capsule: {error}"));
     let capsule = capsule::parse_capsule(&capsule_bytes)
         .unwrap_or_else(|error| panic!("FATAL: parse capsule: {error}"));
-    let sealing_key = zns_canon::sealing::derive_sealing_key(capsule::CAPSULE_KEY_CONTEXT)
+    let sealing_key = zns_canon::sealing::derive_sealing_key()
         .unwrap_or_else(|error| panic!("FATAL: derive sealing key: {error}"));
     let seed = capsule::unseal_seed(&sealing_key, &capsule)
         .unwrap_or_else(|error| panic!("FATAL: unseal capsule: {error}"));

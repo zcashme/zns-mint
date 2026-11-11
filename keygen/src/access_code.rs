@@ -16,7 +16,7 @@ use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroize;
 use zns_canon::access_code::{ISSUER_PUBLIC_KEY, purpose, seed_scalar};
-use zns_canon::capsule::{self, CAPSULE_KEY_CONTEXT, SEED_LEN};
+use zns_canon::capsule::{self, SEED_LEN};
 
 const CAPSULE_FILE: &str = "keys/zns_seed.capsule";
 
@@ -70,7 +70,7 @@ fn open_seed() -> Secret<[u8; SEED_LEN]> {
         .unwrap_or_else(|error| panic!("FATAL: read capsule: {error}"));
     let capsule = capsule::parse_capsule(&capsule_bytes)
         .unwrap_or_else(|error| panic!("FATAL: parse capsule: {error}"));
-    let sealing_key = zns_canon::sealing::derive_sealing_key(CAPSULE_KEY_CONTEXT)
+    let sealing_key = zns_canon::sealing::derive_sealing_key()
         .unwrap_or_else(|error| panic!("FATAL: derive sealing key: {error}"));
     capsule::unseal_seed(&sealing_key, &capsule)
         .unwrap_or_else(|error| panic!("FATAL: unseal capsule: {error}"))

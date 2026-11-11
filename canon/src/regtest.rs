@@ -5,7 +5,7 @@ use secrecy::Secret;
 use std::path::Path;
 use zip32::fingerprint::SeedFingerprint;
 
-use crate::capsule::{self, CAPSULE_KEY_CONTEXT};
+use crate::capsule;
 use crate::sealing::dev_sealing_key;
 
 /// 32 zero bytes. Every dev key derives from it.
@@ -27,7 +27,7 @@ pub fn write_dev_keys(
     let dir = dir.as_ref();
     std::fs::create_dir_all(dir)?;
 
-    let key = dev_sealing_key(CAPSULE_KEY_CONTEXT);
+    let key = dev_sealing_key();
     let sealed = capsule::seal_seed(&key, &Secret::new(DEV_SEED), &mut rand::rngs::SysRng)
         .map_err(std::io::Error::other)?;
     let blob = capsule::serialize_capsule(&sealed).expect("a fresh capsule serializes");
@@ -60,8 +60,7 @@ mod tests {
         let blob = std::fs::read(dir.join("zns_seed.capsule")).expect("capsule file");
         let capsule = capsule::parse_capsule(&blob).expect("capsule parses");
         assert_eq!(capsule.fingerprint, dev_seed_fingerprint().to_bytes());
-        let seed = capsule::unseal_seed(&dev_sealing_key(CAPSULE_KEY_CONTEXT), &capsule)
-            .expect("dev capsule unseals");
+        let seed = capsule::unseal_seed(&dev_sealing_key(), &capsule).expect("dev capsule unseals");
         assert_eq!(seed.expose_secret(), &DEV_SEED);
 
         // Display form on both sides, so a hex-encoded fingerprint fails here.

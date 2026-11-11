@@ -62,9 +62,7 @@ pub(crate) fn execute(args: cli::Args) -> Result<(), MigrateError> {
     manifest::authorize(&loaded, &args.upgrade_document, &args.attestation_bundle)?;
     // Migration attests every step, so it runs only on the enclave: derive
     // the hardware sealing key once and pass it through.
-    let sealing_key =
-        zns_canon::sealing::derive_sealing_key(zns_canon::capsule::CAPSULE_KEY_CONTEXT)
-            .map_err(MigrateError::Tee)?;
+    let sealing_key = zns_canon::sealing::derive_sealing_key().map_err(MigrateError::Tee)?;
     match args.role {
         cli::Role::Source => source::run(&sealing_key, &args, &loaded, &channel),
         cli::Role::Target => target::run(&sealing_key, &args, &loaded, &channel),
