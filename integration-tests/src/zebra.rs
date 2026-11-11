@@ -32,6 +32,8 @@ pub struct Zebrad {
     net_port: u16,
     pub rpc_port: u16,
     pub indexer_port: u16,
+    /// The highest tip an `invalidateblock` left behind.
+    orphaned_tip: u32,
     _dir: tempfile::TempDir,
 }
 
@@ -78,6 +80,7 @@ impl Zebrad {
             net_port,
             rpc_port: ZEBRA_JSON_RPC_PORT,
             indexer_port: ZEBRA_INDEXER_PORT,
+            orphaned_tip: 0,
             _dir: dir,
         };
         zebrad.wait_until_rpc_up().await?;
@@ -180,6 +183,119 @@ impl Zebrad {
         let child = spawn_zebrad(&self.bin, &self.config_path, &self.log_path)?;
         self.child = ChildProcess::new("zebrad", child, Some(self.log_path.clone()));
         self.wait_until_rpc_up().await
+    }
+
+    /// Canonical block hash at `height` (`getblockhash`).
+    pub async fn block_hash(&self, height: u32) -> Result<String> {
+        let hash = self
+            .rpc("getblockhash", json!([height]))
+            .await
+            .with_context(|| format!("getblockhash {height}"))?;
+        hash.as_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("getblockhash {height} was not a string: {hash}"))
+    }
+
+    /// Transaction ids in the block at `height`.
+    pub async fn block_txids(&self, height: u32) -> Result<Vec<String>> {
+        let block = self
+            .rpc("getblock", json!([height.to_string(), 1]))
+            .await
+            .with_context(|| format!("getblock {height}"))?;
+        let txs = block
+            .get("tx")
+            .and_then(|t| t.as_array())
+            .ok_or_else(|| anyhow!("getblock {height} has no tx list: {block}"))?;
+        txs.iter()
+            .map(|tx| {
+                tx.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow!("getblock {height} tx was not a string"))
+            })
+            .collect()
+    }
+
+    /// Serialized transaction hex. The transaction has to be in a block or
+    /// the mempool.
+    pub async fn raw_transaction(&self, txid: &str) -> Result<String> {
+        let tx = self
+            .rpc("getrawtransaction", json!([txid, 0]))
+            .await
+            .with_context(|| format!("getrawtransaction {txid}"))?;
+        tx.as_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("getrawtransaction {txid} was not hex: {tx}"))
+    }
+
+    /// Broadcast a signed transaction. Zebra's duplicate-mempool answer,
+    /// `transaction already exists in mempool`, is success: the caller mines it.
+    pub async fn submit_raw(&self, raw_hex: &str) -> Result<()> {
+        match self.rpc("sendrawtransaction", json!([raw_hex])).await {
+            Ok(_) => Ok(()),
+            Err(error)
+                if error
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("transaction already exists in mempool") =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error.context("sendrawtransaction")),
+        }
+    }
+
+    /// Height of `txid` on the best chain in `[from, tip]`, if it is still there.
+    pub async fn find_tx_height(&self, txid: &str, from: u32) -> Result<Option<u32>> {
+        let tip = self.tip_height().await?;
+        if from > tip {
+            return Ok(None);
+        }
+        for height in (from..=tip).rev() {
+            if self.block_txids(height).await?.iter().any(|tx| tx == txid) {
+                return Ok(Some(height));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Drop the block above `ancestor` and every descendant.
+    ///
+    /// The best chain shortens to `ancestor`. The mint treats that as a
+    /// reorg. `ancestor` has to sit inside Zebra's non-finalized window
+    /// and at or above the mint birthday; a deeper invalidate fails closed.
+    pub async fn invalidate_above(&mut self, ancestor: u32) -> Result<()> {
+        let tip = self.tip_height().await?;
+        if ancestor >= tip {
+            bail!("ancestor {ancestor} is not below tip {tip}");
+        }
+        let hash = self.block_hash(ancestor + 1).await?;
+        self.rpc("invalidateblock", json!([hash]))
+            .await
+            .with_context(|| format!("invalidateblock {hash} (height {})", ancestor + 1))?;
+        self.orphaned_tip = self.orphaned_tip.max(tip);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let now = self.tip_height().await?;
+            if now == ancestor {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!("invalidateblock left tip {now}, wanted {ancestor}");
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Mine until the best chain is longer than every fork `invalidate_above`
+    /// left behind. zallet-zebra's chain syncer never drops an invalidated
+    /// block, and keeps that fork as its best chain until Zebra's chain has
+    /// more work, which on regtest means more blocks.
+    pub async fn outgrow_orphaned_forks(&self) -> Result<()> {
+        let tip = self.tip_height().await?;
+        if tip <= self.orphaned_tip {
+            self.generate_blocks(self.orphaned_tip + 1 - tip).await?;
+        }
+        Ok(())
     }
 
     /// Ironwood note-commitment tree root at the current tip.
