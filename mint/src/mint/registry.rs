@@ -137,7 +137,8 @@ impl std::fmt::Debug for NameRecord {
 }
 
 /// A list or a delist changes neither the owner nor the term: it repeats
-/// both from `record`, and a list pays the owner's own t1.
+/// both from `record`, and a list pays the owner's own t1. A sale spends
+/// a list note and repeats its term.
 fn carries_forward(note: &NameNote, record: &NameRecord) -> bool {
     match note {
         NameNote::List {
@@ -151,6 +152,9 @@ fn carries_forward(note: &NameNote, record: &NameRecord) -> bool {
         NameNote::Delist { ua, expires_at, .. } => {
             *expires_at == record.expires_at() && ua == record.ua()
         }
+        NameNote::Sale { expires_at, .. } => {
+            *expires_at == record.expires_at() && record.listing().is_some()
+        }
         _ => true,
     }
 }
@@ -159,8 +163,8 @@ fn carries_forward(note: &NameNote, record: &NameRecord) -> bool {
 // Registry — tip records, per-name chains, and anchor lineage
 // ---------------------------------------------------------------------------
 
-/// Name ownership and history, current listings, and the anchor lineage
-/// pool.
+/// Name ownership and history, and the anchor lineage pool. A name's
+/// listing is its current list note.
 #[derive(Default)]
 pub struct Registry {
     /// Names that are live at the applied tip. Released names are absent.
@@ -298,9 +302,9 @@ impl Registry {
         })
     }
 
-    /// The note a sale signs. It spends the live record and binds `bob`
-    /// for the term the sale captured, while `held` is still that record.
-    /// The name stays live.
+    /// The note a sale signs. It spends the name's list note and binds
+    /// `bob` for the term the sale captured, while `held` is still that
+    /// note. The name stays live.
     pub fn sale_transfer(
         &self,
         name: &Name,
@@ -309,7 +313,7 @@ impl Registry {
         held: NameCommitment,
     ) -> Option<NameNote> {
         let record = self.record(name)?;
-        if record.commitment != held {
+        if record.commitment != held || record.listing().is_none() {
             return None;
         }
         Some(NameNote::Sale {
@@ -1433,32 +1437,74 @@ mod tests {
 
     #[test]
     fn accept_sale_binds_the_buyer_and_leaves_the_name_live() {
-        let mut r = live_alice(Expiry::At(ts(2_000_000_000)), 3_000_000_000);
         let term = Expiry::At(ts(2_000_000_000));
+        let mut r = live_alice(term, 3_000_000_000);
         let bob = bob_ua();
+        let at = BlockHeight::from_u32(101);
+        let mtp = ts(1_000_000_000);
+        // Only a listed name sells.
+        assert!(r
+            .sale_transfer(&test_name(), &bob, term, commitment(1))
+            .is_none());
+        let alice = test_ua();
+        let list = NameNote::List {
+            listing: Listing {
+                name: test_name(),
+                pay_to: *alice.transparent().unwrap(),
+                ua: alice,
+                ask: Ask::Flat(Zatoshis::from_u64(500_000_000).unwrap()),
+            },
+            expires_at: term,
+            prev: commitment(1),
+        };
+        assert!(r.accept_transition(
+            &MAIN_NETWORK,
+            &list,
+            nullifier(20),
+            &[nullifier(1)],
+            at,
+            mtp
+        ));
+        let held = r.record(&test_name()).unwrap().commitment;
         assert!(r
             .sale_transfer(&test_name(), &bob, term, commitment(2))
             .is_none());
         let note = r
-            .sale_transfer(&test_name(), &bob, term, commitment(1))
+            .sale_transfer(&test_name(), &bob, term, held)
             .expect("alice holds the captured note");
         assert!(note.action().is_sale());
         assert!(!note.action().is_update());
         assert_eq!(note.ua(), &bob);
-        let succ = nullifier(20);
-        assert!(r.accept_transition(
-            &MAIN_NETWORK,
-            &note,
-            succ,
-            &[nullifier(1)],
-            BlockHeight::from_u32(101),
-            ts(1_000_000_000),
-        ));
+        let succ = nullifier(21);
+        assert!(r.accept_transition(&MAIN_NETWORK, &note, succ, &[nullifier(20)], at, mtp));
         let rec = r.record(&test_name()).expect("the name stays live");
         assert_eq!(rec.action(), Action::Sale);
         assert_eq!(*rec.ua(), bob);
         assert_eq!(rec.expires_at(), term);
         assert_eq!(rec.predecessor_nullifier, succ);
+    }
+
+    /// A sale that does not spend a list note spent the name's note
+    /// without following it, so the name is released.
+    #[test]
+    fn a_sale_of_an_unlisted_name_releases_it() {
+        let term = Expiry::At(ts(2_000_000_000));
+        let mut r = live_alice(term, 3_000_000_000);
+        let sale = NameNote::Sale {
+            name: test_name(),
+            ua: bob_ua(),
+            expires_at: term,
+            prev: commitment(1),
+        };
+        assert!(!r.accept_transition(
+            &MAIN_NETWORK,
+            &sale,
+            nullifier(20),
+            &[nullifier(1)],
+            BlockHeight::from_u32(101),
+            ts(1_000_000_000),
+        ));
+        assert!(r.is_available(&test_name()));
     }
 
     /// The owner lists at her own t1 on terms still listable, and
