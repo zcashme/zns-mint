@@ -111,6 +111,23 @@ pub fn dev_sealing_key() -> SealingKey {
 /// them makes the key brittle to launch-blob drift. VCEK
 /// (`root_key_select = false`) is stable across reboots; VMRK is random
 /// per launch without a Migration Agent and would brick the capsule on
+/// first reboot.
+#[cfg(target_os = "linux")]
+pub fn derive_sealing_key() -> Result<SealingKey, TeeError> {
+    use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
+
+    let mut firmware =
+        Firmware::open().map_err(|e| guest_open_error(e, "firmware open", TeeError::SealingKey))?;
+    let mut guest_fields = GuestFieldSelect::default();
+    guest_fields.set_guest_policy(true);
+    guest_fields.set_measurement(true);
+    let request = DerivedKey::new(false, guest_fields, 0, 0, 0, None);
+    firmware
+        .get_derived_key(Some(1), request)
+        .map(SealingKey::new)
+        .map_err(|e| TeeError::SealingKey(format!("SEV-SNP get_derived_key: {e}")))
+}
+
 /// Classifies a guest-firmware open failure. A missing `/dev/sev-guest`
 /// means "this is not an SNP guest" — [`TeeError::Unavailable`], the
 /// promised off-platform signal. Any other failure is operational for
@@ -128,23 +145,6 @@ fn guest_open_error(
     } else {
         operational(format!("SEV-SNP {operation}: {e}"))
     }
-}
-
-/// first reboot.
-#[cfg(target_os = "linux")]
-pub fn derive_sealing_key() -> Result<SealingKey, TeeError> {
-    use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
-
-    let mut firmware =
-        Firmware::open().map_err(|e| guest_open_error(e, "firmware open", TeeError::SealingKey))?;
-    let mut guest_fields = GuestFieldSelect::default();
-    guest_fields.set_guest_policy(true);
-    guest_fields.set_measurement(true);
-    let request = DerivedKey::new(false, guest_fields, 0, 0, 0, None);
-    firmware
-        .get_derived_key(Some(1), request)
-        .map(SealingKey::new)
-        .map_err(|e| TeeError::SealingKey(format!("SEV-SNP get_derived_key: {e}")))
 }
 
 /// Requests an attestation report from the AMD Secure Processor whose
