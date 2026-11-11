@@ -1,5 +1,18 @@
 # `mint/note.rs` design record
 
+## 2026-11-11 — List, auction, and delist are Name Notes (#465)
+
+- `NameNote::List` carries a `Listing` and the carried-forward expiry.
+  Its verb is `list` for a flat ask and `auction` for a falling one:
+  `ZNS:list:<name>:<ua>:<expiry>:<t1>:<price>:<prev>`, and
+  `ZNS:auction:<name>:<ua>:<expiry>:<t1>:<start>:<min>:<start-block>:<end-block>:<prev>`.
+- `NameNote::Delist` has the update shape: `ZNS:delist:<name>:<ua>:<expiry>:<prev>`.
+- rcm and ψ absorb a list's or an auction's terms as one more
+  length-prefixed field before `p`. Every other verb hashes as before;
+  the canon vectors pass unchanged.
+- The longest note, a maximal auction, is 461 bytes on mainnet and 468
+  on regtest.
+
 ## 2026-11-09 — The Treasury's sent memos are kept (#446)
 
 - `decrypt_treasury_memos` also returns the memos of the Treasury's

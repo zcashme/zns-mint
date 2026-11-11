@@ -623,23 +623,15 @@ impl Boot<Network> {
             let block_mtp = mtp
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
-            market.expire(&mut registry, block_mtp, next_height);
+            market.expire(block_mtp, next_height);
             challenges.expire(block_mtp);
-            market.reconcile(&mut registry, next_height);
+            market.reconcile(&registry, next_height);
             // The codes this mint sent before the sync: an answer in the
             // history matches the code its owner was sent.
             for relay in &relays {
                 challenges.relay_seen(relay);
             }
             for (txid, inbound, paid) in arrivals {
-                if let crate::mint::MintInbound::Response(response) = &inbound {
-                    if response.action.is_list()
-                        || response.action.is_delist()
-                        || response.action.is_auction()
-                    {
-                        market.answer(&mut registry, &mut challenges, response, next_height);
-                    }
-                }
                 if let crate::mint::MintInbound::Request(
                     request @ (crate::mint::Request::List(_)
                     | crate::mint::Request::Delist { .. }
@@ -663,7 +655,7 @@ impl Boot<Network> {
                 }
             }
             market.observe(
-                |name| registry.record(name).map(|record| record.ua.clone()),
+                |name| registry.record(name).map(|record| record.ua().clone()),
                 &payments,
                 block_mtp,
                 next_height,
@@ -1643,10 +1635,10 @@ mod tests {
                     assert!(stored.is_none());
                 } else {
                     let record = registry.record(&name).unwrap();
-                    assert_eq!(record.action, Action::Claim);
+                    assert_eq!(record.action(), Action::Claim);
                     assert_eq!(record.commitment, payload.commitment(&network));
-                    assert_eq!(&record.ua, payload.ua());
-                    assert_eq!(record.expires_at, Expiry::Never);
+                    assert_eq!(record.ua(), payload.ua());
+                    assert_eq!(record.expires_at(), Expiry::Never);
                     assert_eq!(record.confirmed_height, claim_height);
                     assert_eq!(record.predecessor_nullifier, candidate.nullifier);
                     assert_eq!(registry.record_history(&name).len(), 1);

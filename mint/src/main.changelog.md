@@ -1,5 +1,15 @@
 # main.changelog.md
 
+## 2026-11-11 — A list or delist response queues a Name Note (#465)
+
+- A list or delist response takes the update and release path: the
+  buy hold, the backed request, one note in flight, then
+  `authorize_list` or `authorize_delist` and `name_notes.admit`. Its
+  payment is refunded as before.
+- `market.truncate_to` and `market.expire` no longer take the registry.
+- A queued list, auction, or delist is dropped, like an update, once the
+  tip median would release the name. The log reads "transition dropped".
+
 ## 2026-11-11 — Each pass records its round in the rate window (#466)
 
 - The pass calls `oracle.record(round)`. The oracle no longer takes

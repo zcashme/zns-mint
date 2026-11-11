@@ -1,5 +1,16 @@
 # Sale module changelog
 
+## 2026-11-11 — The market holds buys; the chain holds listings (#465)
+
+- `Market::answer`, `Market::list`, `Market::delist`, and the
+  `MarketEvent::List` and `Delist` events are gone. A completed list or
+  delist challenge authorizes a Name Note in the scan loop.
+- `Market::expire` and `reconcile` no longer touch listings, and
+  `truncate_to` rebuilds only the buys.
+- `decode_terms` and `encode_terms` read and write a listing's terms
+  for requests, challenges, and Name Notes. `listable` is
+  `pub(crate)`, and `Ask::action` names the verb.
+
 ## 2026-11-09 — List, delist, and buy are `Request` variants (#446)
 
 - `MarketRequest` is gone. `Market::admit` takes a `Request`; a claim,

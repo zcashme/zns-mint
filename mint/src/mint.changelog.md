@@ -1,5 +1,14 @@
 # Mint live-work design record
 
+## 2026-11-11 — The scan accepts list and delist notes (#465)
+
+- `apply_block` hands every confirmed note after a claim to
+  `Registry::accept_transition`, so list and delist notes are no longer
+  dropped.
+- `Request::decode` and `OtpMemo` use `sale::decode_terms` and
+  `encode_terms`.
+- `Action::List`, `Delist`, and `Auction` are Name Note verbs.
+
 ## 2026-11-09 — Every request verb is a `Request` (#446)
 
 - `Request` gains `List(sale::Listing)`, `Delist`, and `Buy`, decoded by
