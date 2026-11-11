@@ -105,7 +105,7 @@ The mint also releases a name on its own when the paid term ends, or when about 
 
 ## Payment
 
-Shorter names cost more per year. The price is in dollars, then converted to ZEC at the mint's daily rate.
+Shorter names cost more per year. The price is in dollars, then converted to ZEC at the highest ZEC price of the mint's last 120 price checks, about one per block.
 
 | Length        | One year   | Forever |
 | ------------- | ---------- | ------- |
