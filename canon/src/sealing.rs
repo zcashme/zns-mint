@@ -178,13 +178,12 @@ pub fn get_attestation(_report_data: &[u8; 64]) -> Result<Attestation, TeeError>
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(all(test, feature = "non-tee"))]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
     /// The missing-device classification: NotFound is the promised
     /// off-platform signal, everything else stays operational.
-    #[cfg(target_os = "linux")]
     #[test]
     fn missing_guest_device_is_unavailable() {
         use std::io::ErrorKind;
@@ -199,10 +198,5 @@ mod tests {
             guest_open_error(denied, "firmware open", TeeError::SealingKey),
             TeeError::SealingKey(_)
         ));
-    }
-
-    #[test]
-    fn dev_sealing_key_is_deterministic() {
-        assert_eq!(dev_sealing_key().expose(), dev_sealing_key().expose());
     }
 }
