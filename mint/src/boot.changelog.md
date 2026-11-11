@@ -1,5 +1,12 @@
 # Boot module changelog
 
+## 2026-11-11 — The sealing key takes no context (#460)
+
+- `sealing_key()` takes no argument. The SEV-SNP key has never used
+  one, and the capsule was the only caller. The hardware key does not
+  change. The `non-tee` key is now SHA-256 of its domain string, so a
+  dev capsule sealed before this no longer opens.
+
 ## 2026-11-09 — The sync replays a list, delist, or buy `Request` (#446)
 
 - `Request::List`, `Delist`, and `Buy` go through `Market::admit`, as

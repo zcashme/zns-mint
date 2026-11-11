@@ -42,11 +42,6 @@ pub const CIPHERTEXT_LEN: usize = SEED_LEN + TAG_LEN;
 /// postcard length bytes. A longer file is not a capsule.
 pub const CAPSULE_LEN: usize = MAGIC.len() + 32 + 1 + NONCE_LEN + 1 + CIPHERTEXT_LEN;
 
-/// The context string passed to [`crate::sealing::derive_sealing_key`] when
-/// deriving the capsule AEAD key. A single well-known context today; extra
-/// contexts are cheap to add.
-pub const CAPSULE_KEY_CONTEXT: &[u8] = b"ZNS_SEED/capsule/v1";
-
 /// Errors from capsule sealing, parsing, and unsealing.
 #[derive(Debug, Error)]
 pub enum CapsuleError {

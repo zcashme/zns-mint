@@ -34,9 +34,7 @@ use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::chain::ChainState;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
-use zns_canon::capsule::{
-    hash as capsule_hash, parse_capsule, read_capsule_file, unseal_seed, CAPSULE_KEY_CONTEXT,
-};
+use zns_canon::capsule::{hash as capsule_hash, parse_capsule, read_capsule_file, unseal_seed};
 #[cfg(not(feature = "non-tee"))]
 use zns_canon::sealing::derive_sealing_key;
 #[cfg(feature = "non-tee")]
@@ -47,14 +45,14 @@ use zns_canon::sealing::{SealingKey, TeeError};
 
 /// `non-tee` builds use the public test key, even on an SNP guest.
 /// Hardware builds require the guest sealing key.
-fn sealing_key(context: &[u8]) -> Result<SealingKey, TeeError> {
+fn sealing_key() -> Result<SealingKey, TeeError> {
     #[cfg(feature = "non-tee")]
     {
-        Ok(dev_sealing_key(context))
+        Ok(dev_sealing_key())
     }
     #[cfg(not(feature = "non-tee"))]
     {
-        derive_sealing_key(context)
+        derive_sealing_key()
     }
 }
 
@@ -480,8 +478,7 @@ impl Boot<Network> {
             #[cfg(not(feature = "non-tee"))]
             require_keygen_attestation(&blob, &expected);
             tracing::info!("boot: resolving capsule sealing key");
-            let capsule_key =
-                sealing_key(CAPSULE_KEY_CONTEXT).expect("FATAL: sealing key unavailable");
+            let capsule_key = sealing_key().expect("FATAL: sealing key unavailable");
             let seed = unseal_seed(&capsule_key, &capsule)
                 .expect("FATAL: failed to unseal seed. Capsule tampering, wrong TEE, or wrong capsule for this instance.");
             let access_code_key = AccessCodeDerivationKey::from_seed(seed.expose_secret());

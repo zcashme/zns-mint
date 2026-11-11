@@ -88,20 +88,16 @@ impl Drop for SealingKey {
 #[cfg(feature = "non-tee")]
 const DEV_SEALING_DOMAIN: &[u8] = b"ZNS_DEV/sealing-key/v1";
 
-/// Development sealing key (`non-tee` builds): deterministic SHA-256 over a public domain
-/// string and the caller's context. **Anyone can derive this key** — it
+/// Development sealing key (`non-tee` builds): SHA-256 of a public domain
+/// string. **Anyone can derive this key** — it
 /// exists so development builds can seal and unseal their own capsules
 /// off the enclave. A dev-key boot cannot unseal a production capsule:
 /// the AEAD tag is the boundary between the two worlds.
 #[cfg(feature = "non-tee")]
-pub fn dev_sealing_key(context: &[u8]) -> SealingKey {
+pub fn dev_sealing_key() -> SealingKey {
     use sha2::{Digest, Sha256};
 
-    let mut h = Sha256::new();
-    h.update(DEV_SEALING_DOMAIN);
-    h.update((context.len() as u32).to_le_bytes());
-    h.update(context);
-    SealingKey::new(h.finalize().into())
+    SealingKey::new(Sha256::digest(DEV_SEALING_DOMAIN).into())
 }
 
 /// Derives the per-instance sealing key from the SEV-SNP firmware:
@@ -136,7 +132,7 @@ fn guest_open_error(
 
 /// first reboot.
 #[cfg(target_os = "linux")]
-pub fn derive_sealing_key(_context: &[u8]) -> Result<SealingKey, TeeError> {
+pub fn derive_sealing_key() -> Result<SealingKey, TeeError> {
     use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
 
     let mut firmware =
@@ -169,7 +165,7 @@ pub fn get_attestation(report_data: &[u8; 64]) -> Result<Attestation, TeeError> 
 /// [`TeeError::Unavailable`] at runtime. Development uses
 /// [`dev_sealing_key`] and simply has no attestation.
 #[cfg(not(target_os = "linux"))]
-pub fn derive_sealing_key(_context: &[u8]) -> Result<SealingKey, TeeError> {
+pub fn derive_sealing_key() -> Result<SealingKey, TeeError> {
     Err(TeeError::Unavailable)
 }
 
@@ -207,9 +203,6 @@ mod tests {
 
     #[test]
     fn dev_sealing_key_is_deterministic() {
-        assert_eq!(
-            dev_sealing_key(b"ctx").expose(),
-            dev_sealing_key(b"ctx").expose()
-        );
+        assert_eq!(dev_sealing_key().expose(), dev_sealing_key().expose());
     }
 }
