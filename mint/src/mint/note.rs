@@ -1405,7 +1405,7 @@ mod tests {
             ua: ua.clone(),
             prev: registry.record(&name).unwrap().commitment,
         };
-        assert!(registry.accept_release(
+        assert!(registry.accept_transition(
             &MAIN_NETWORK,
             &release,
             test_nullifier(12),

@@ -2190,7 +2190,7 @@ mod tests {
             expires_at: Expiry::Never,
             prev: record.commitment,
         };
-        assert!(registry.accept_update(
+        assert!(registry.accept_transition(
             &MainNetwork,
             &note,
             nf(30),
@@ -2221,7 +2221,7 @@ mod tests {
             ua: owner,
             prev: record.commitment,
         };
-        assert!(registry.accept_release(
+        assert!(registry.accept_transition(
             &MainNetwork,
             &release,
             nf(31),

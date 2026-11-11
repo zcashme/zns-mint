@@ -117,6 +117,25 @@ impl std::fmt::Debug for NameRecord {
     }
 }
 
+/// A list or a delist changes neither the owner nor the term: it repeats
+/// both from `record`, and a list pays the owner's own t1.
+fn carries_forward(note: &NameNote, record: &NameRecord) -> bool {
+    match note {
+        NameNote::List {
+            listing,
+            expires_at,
+            ..
+        } => {
+            *expires_at == record.expires_at
+                && is_owner_listing(&record.ua, &listing.ua, &listing.pay_to)
+        }
+        NameNote::Delist { ua, expires_at, .. } => {
+            *expires_at == record.expires_at && *ua == record.ua
+        }
+        _ => true,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registry — tip records, per-name chains, and anchor lineage
 // ---------------------------------------------------------------------------
@@ -436,10 +455,11 @@ impl Registry {
         latest.action.is_release() && expiry <= released + delta
     }
 
-    /// Offers a confirmed update candidate; true when the transaction
-    /// spent this name's current note. A signed update renews, and the
-    /// new liveness deadline starts at this block's median.
-    pub fn accept_update<P: Parameters>(
+    /// Offers a confirmed update, release, sale, list, or delist; true when
+    /// the transaction spent this name's current note and the note follows
+    /// it. The new liveness deadline starts at this block's median, and
+    /// releases stay legal after either clock.
+    pub fn accept_transition<P: Parameters>(
         &mut self,
         params: &P,
         note: &NameNote,
@@ -448,7 +468,7 @@ impl Registry {
         height: BlockHeight,
         mtp: Timestamp,
     ) -> bool {
-        assert!(matches!(note, NameNote::Update { .. }));
+        assert!(!matches!(note, NameNote::Claim { .. }));
         let Some(record) = self.predecessor_spent(note, nfs) else {
             // Unbacked, or malformed (an anchor, extra names, an
             // already released record): the pool and the records
@@ -456,59 +476,8 @@ impl Registry {
             self.follow_spends(nfs, height);
             return false;
         };
-        if note.prev_rcm() != Some(record.commitment) {
+        if note.prev_rcm() != Some(record.commitment) || !carries_forward(note, &record) {
             // The predecessor was spent whatever the note claims.
-            self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
-            return false;
-        }
-        self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
-        true
-    }
-
-    /// Offers a confirmed release candidate; true when the transaction
-    /// spent this name's current note. Releases stay legal after either clock.
-    pub fn accept_release<P: Parameters>(
-        &mut self,
-        params: &P,
-        note: &NameNote,
-        nullifier: orchard::note::Nullifier,
-        nfs: &[orchard::note::Nullifier],
-        height: BlockHeight,
-        mtp: Timestamp,
-    ) -> bool {
-        assert!(matches!(note, NameNote::Release { .. }));
-        let Some(record) = self.predecessor_spent(note, nfs) else {
-            // Malformed: the pool and the records still follow what
-            // the chain spent.
-            self.follow_spends(nfs, height);
-            return false;
-        };
-        if note.prev_rcm() != Some(record.commitment) {
-            // The predecessor was spent whatever the note claims.
-            self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
-            return false;
-        }
-        self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
-        true
-    }
-
-    /// Offers a confirmed sale. The transaction spent this name's current
-    /// note, and the buyer is bound for the term the note carries.
-    pub fn accept_sale<P: Parameters>(
-        &mut self,
-        params: &P,
-        note: &NameNote,
-        nullifier: orchard::note::Nullifier,
-        nfs: &[orchard::note::Nullifier],
-        height: BlockHeight,
-        mtp: Timestamp,
-    ) -> bool {
-        assert!(matches!(note, NameNote::Sale { .. }));
-        let Some(record) = self.predecessor_spent(note, nfs) else {
-            self.follow_spends(nfs, height);
-            return false;
-        };
-        if note.prev_rcm() != Some(record.commitment) {
             self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
             return false;
         }
@@ -768,7 +737,7 @@ mod tests {
             expires_at: Expiry::Never,
             prev: record.commitment,
         };
-        assert!(registry.accept_update(
+        assert!(registry.accept_transition(
             &MAIN_NETWORK,
             &note,
             nullifier(note_seed),
@@ -785,7 +754,7 @@ mod tests {
             ua: record.ua.clone(),
             prev: record.commitment,
         };
-        assert!(registry.accept_release(
+        assert!(registry.accept_transition(
             &MAIN_NETWORK,
             &note,
             nullifier(note_seed),
@@ -1409,7 +1378,7 @@ mod tests {
         let mut r = live_alice(Expiry::At(ts(2_000_000_000)), 2_000_000_000);
         let note = update_for_alice(Expiry::At(ts(2_100_000_000)), 1);
         let succ = nullifier(20);
-        assert!(r.accept_update(
+        assert!(r.accept_transition(
             &MAIN_NETWORK,
             &note,
             succ,
@@ -1451,7 +1420,7 @@ mod tests {
         assert!(!note.action().is_update());
         assert_eq!(note.ua(), &bob);
         let succ = nullifier(20);
-        assert!(r.accept_sale(
+        assert!(r.accept_transition(
             &MAIN_NETWORK,
             &note,
             succ,
@@ -1466,6 +1435,55 @@ mod tests {
         assert_eq!(rec.predecessor_nullifier, succ);
     }
 
+    /// A list or a delist repeats the owner and the term. One that
+    /// changes either spent the name's note without following it, so
+    /// the name is released, as for a wrong predecessor.
+    #[test]
+    fn a_listing_note_must_carry_the_record_forward() {
+        let term = Expiry::At(ts(2_000_000_000));
+        let alice = test_ua();
+        let list = |expires_at| NameNote::List {
+            listing: Listing {
+                name: test_name(),
+                ua: alice.clone(),
+                pay_to: *alice.transparent().unwrap(),
+                ask: Ask::Flat(Zatoshis::from_u64(500_000_000).unwrap()),
+            },
+            expires_at,
+            prev: commitment(1),
+        };
+        let delist = |ua| NameNote::Delist {
+            name: test_name(),
+            ua,
+            expires_at: term,
+            prev: commitment(1),
+        };
+        let accept = |r: &mut Registry, note: &NameNote| {
+            r.accept_transition(
+                &MAIN_NETWORK,
+                note,
+                nullifier(20),
+                &[nullifier(1)],
+                BlockHeight::from_u32(101),
+                ts(1_000_000_000),
+            )
+        };
+
+        let mut r = live_alice(term, 3_000_000_000);
+        assert!(accept(&mut r, &list(term)));
+        assert_eq!(r.record(&test_name()).unwrap().action, Action::List);
+
+        let mut r = live_alice(term, 3_000_000_000);
+        assert!(accept(&mut r, &delist(alice.clone())));
+        assert_eq!(r.record(&test_name()).unwrap().action, Action::Delist);
+
+        for note in [list(Expiry::Never), delist(bob_ua())] {
+            let mut r = live_alice(term, 3_000_000_000);
+            assert!(!accept(&mut r, &note), "{note:?}");
+            assert!(r.is_available(&test_name()), "{note:?}");
+        }
+    }
+
     /// A confirmed update renews after the predecessor's term has passed.
     /// The new liveness deadline starts at this block's median.
     #[test]
@@ -1474,7 +1492,7 @@ mod tests {
         let note = update_for_alice(Expiry::At(ts(2_000_000_000)), 1);
         let succ = nullifier(20);
         let mtp = ts(1_000_000_000);
-        assert!(r.accept_update(
+        assert!(r.accept_transition(
             &MAIN_NETWORK,
             &note,
             succ,
@@ -1498,7 +1516,7 @@ mod tests {
         let mut r = live_alice(Expiry::Never, 1_000_000_000);
         let note = update_for_alice(Expiry::Never, 1);
         let succ = nullifier(20);
-        assert!(r.accept_update(
+        assert!(r.accept_transition(
             &MAIN_NETWORK,
             &note,
             succ,
@@ -1530,7 +1548,7 @@ mod tests {
         // Well-formed update that also spends a claim anchor: rejected,
         // and the chain facts still land — alice's note was consumed,
         // so she is marked released, and the anchor retires.
-        assert!(!r.accept_update(
+        assert!(!r.accept_transition(
             &MAIN_NETWORK,
             &note,
             nullifier(20),
@@ -1563,7 +1581,7 @@ mod tests {
 
         // Alice's note was spent whatever the payload claims: the name
         // is released, bound to the successor nullifier it received.
-        assert!(!r.accept_update(
+        assert!(!r.accept_transition(
             &MAIN_NETWORK,
             &wrong_prev,
             nullifier(20),
@@ -1589,7 +1607,7 @@ mod tests {
             prev: commitment(1),
         };
         let succ = nullifier(20);
-        assert!(r.accept_release(
+        assert!(r.accept_transition(
             &MAIN_NETWORK,
             &note,
             succ,

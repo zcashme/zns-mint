@@ -682,34 +682,14 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                         expiry,
                     )
                 } else {
-                    match action {
-                        Action::Update => registry.accept_update(
-                            network,
-                            &candidate.payload,
-                            candidate.nullifier,
-                            &nfs,
-                            height,
-                            block_mtp,
-                        ),
-                        Action::Release => registry.accept_release(
-                            network,
-                            &candidate.payload,
-                            candidate.nullifier,
-                            &nfs,
-                            height,
-                            block_mtp,
-                        ),
-                        Action::Sale => registry.accept_sale(
-                            network,
-                            &candidate.payload,
-                            candidate.nullifier,
-                            &nfs,
-                            height,
-                            block_mtp,
-                        ),
-                        Action::Claim => unreachable!("claims are routed above"),
-                        Action::List | Action::Delist | Action::Auction => false,
-                    }
+                    registry.accept_transition(
+                        network,
+                        &candidate.payload,
+                        candidate.nullifier,
+                        &nfs,
+                        height,
+                        block_mtp,
+                    )
                 };
                 if accepted {
                     accepted_name_notes.push(*index);

@@ -263,7 +263,7 @@ fn apply(registry: &mut Registry, event: &Event) {
                 expires_at: expiry(*expires_at_secs),
                 prev: record.commitment,
             };
-            let ok = registry.accept_update(
+            let ok = registry.accept_transition(
                 &MainNetwork,
                 &note,
                 nf(nullifier),
@@ -295,7 +295,7 @@ fn apply(registry: &mut Registry, event: &Event) {
                 ua: parse_ua(ua),
                 prev: record.commitment,
             };
-            let ok = registry.accept_release(
+            let ok = registry.accept_transition(
                 &MainNetwork,
                 &note,
                 nf(nullifier),
