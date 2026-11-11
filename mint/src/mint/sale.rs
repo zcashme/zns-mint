@@ -19,7 +19,7 @@ use crate::mint::presale::AccessCodeDerivationKey;
 use crate::mint::registry::Registry;
 use crate::mint::treasury::{OtpCode, OtpQueue, D_OTP, FEE_ACTIONS};
 use crate::mint::{
-    Expiry, Name, NameCommitment, NameNote, OtpMemo, Request, Timestamp, UnifiedAddress,
+    Action, Expiry, Name, NameCommitment, NameNote, OtpMemo, Request, Timestamp, UnifiedAddress,
 };
 
 /// The listing is from the current owner, and the transparent address
@@ -111,6 +111,53 @@ pub(crate) fn decode_height(text: &str) -> Option<BlockHeight> {
         return None;
     }
     text.parse::<u32>().ok().map(BlockHeight::from_u32)
+}
+
+/// The fields after the UA in a list or an auction: `<t1>:<price>`, or
+/// `<t1>:<start>:<min>:<start-block>:<end-block>`. Any other verb has none.
+pub(crate) fn decode_terms<'a, P: Parameters>(
+    network: &P,
+    action: Action,
+    fields: &mut impl Iterator<Item = &'a str>,
+) -> Option<(TransparentAddress, Ask)> {
+    let pay_to = match action {
+        Action::List | Action::Auction => decode_t1(network, fields.next()?)?,
+        _ => return None,
+    };
+    let ask = if action.is_list() {
+        Ask::Flat(decode_zec(fields.next()?)?)
+    } else {
+        let terms = AuctionTerms {
+            start_price: decode_zec(fields.next()?)?,
+            min_price: decode_zec(fields.next()?)?,
+            start: decode_height(fields.next()?)?,
+            end: decode_height(fields.next()?)?,
+        };
+        if !terms.is_valid() {
+            return None;
+        }
+        Ask::Dutch(terms)
+    };
+    Some((pay_to, ask))
+}
+
+/// The inverse of [`decode_terms`].
+pub(crate) fn encode_terms<P: Parameters>(
+    network: &P,
+    pay_to: &TransparentAddress,
+    ask: &Ask,
+) -> String {
+    let t1 = Address::Transparent(*pay_to).encode(network);
+    match ask {
+        Ask::Flat(price) => format!("{t1}:{}", encode_zec(*price)),
+        Ask::Dutch(terms) => format!(
+            "{t1}:{}:{}:{}:{}",
+            encode_zec(terms.start_price),
+            encode_zec(terms.min_price),
+            u32::from(terms.start),
+            u32::from(terms.end),
+        ),
+    }
 }
 
 /// `price` as ZEC text that [`decode_zec`] accepts. Whole zatoshis
