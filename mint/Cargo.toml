@@ -104,12 +104,10 @@ zip321 = "0.10"
 # detection (Treasury accepts transparent payments from users).
 zcash_client_backend = { version = "0.25", default-features = false, features = ["orchard", "transparent-inputs"] }
 
-# Orchard with the `unsafe-zns` feature: Name Notes override the standard
-# note commitment so a note commits to a ZNS payload. The fork lives at
+# Orchard with the `unsafe-zns` feature, for `RandomSeedBytes`: a Name Note
+# is built from an rseed derived from its record. The fork lives at
 # https://github.com/zcashme/orchard and is unified with the librustzcash
-# graph via the [patch.crates-io] git tag. zns-mint calls
-# `Builder::add_zns_output` / `add_zns_spend` directly, so this is a
-# first-class dep, not just a transitive one.
+# graph via the [patch.crates-io] git tag.
 orchard = { version = "0.16.0", default-features = false, features = ["unsafe-zns", "circuit", "multicore"] }
 shardtree = "0.8"
 metrics = "0.24.6"

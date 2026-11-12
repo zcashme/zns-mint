@@ -1,13 +1,11 @@
 //! Upstream write-side wallet operations: [`OutputLockStore`] and
-//! [`WalletWrite`] — plus the ZNS Name Note ingestion lane, which the
-//! upstream write surface cannot express (see [`Wallet::store_name_note`]).
+//! [`WalletWrite`].
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::time::SystemTime;
 
 use incrementalmerkletree::{Hashable, Marking, Position, Retention};
-use orchard::note::Psi;
 use secrecy::SecretVec;
 use shardtree::store::memory::MemoryShardStore;
 use shardtree::store::ShardStore;
@@ -22,9 +20,7 @@ use zcash_client_backend::data_api::{
     ScannedBundles, SentTransaction, SentTransactionOutput, TransactionStatus,
     TransactionsInvolvingAddress, WalletWrite,
 };
-use zcash_client_backend::wallet::{
-    NoteId, OutputRef, Recipient, WalletIronwoodOutput, WalletTransparentOutput,
-};
+use zcash_client_backend::wallet::{NoteId, OutputRef, Recipient, WalletTransparentOutput};
 use zcash_keys::address::UnifiedAddress;
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey, UnifiedSpendingKey};
 use zcash_primitives::transaction::{Transaction, TxId};
@@ -37,7 +33,6 @@ use super::{
     read::{next_height, WalletError},
     TreeError, Wallet, MAX_CHECKPOINTS,
 };
-use crate::mint::REGISTRY_ACCOUNT;
 
 impl<P: Parameters> Wallet<P> {
     /// Returns the account that owns a wallet output, if the reference
@@ -60,7 +55,7 @@ impl<P: Parameters> Wallet<P> {
             // receives, stores, or spends transparent money.
             PoolType::TRANSPARENT => None,
             // Ordinary Orchard deliberately has no received-note table;
-            // `put_blocks_marked` rejects decryptable Orchard outputs.
+            // `put_blocks_after` rejects decryptable Orchard outputs.
             PoolType::Shielded(ShieldedPool::Orchard) => None,
         }
     }
@@ -392,7 +387,6 @@ fn append_block_commitments<H, Nf, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     tree: &mut ShardTree<MemoryShardStore<H, BlockHeight>, DEPTH, SHARD_HEIGHT>,
     bundles: &ScannedBundles<H, Nf>,
     height: BlockHeight,
-    marks: &[H],
 ) -> Result<(), WalletError>
 where
     MemoryShardStore<H, BlockHeight>:
@@ -400,12 +394,7 @@ where
     H: Hashable + PartialEq + Clone,
 {
     for (commitment, retention) in bundles.commitments() {
-        let retention = if marks.contains(commitment) {
-            Retention::Marked
-        } else {
-            *retention
-        };
-        tree.append(commitment.clone(), retention)?;
+        tree.append(commitment.clone(), *retention)?;
     }
 
     // Reconcile the two position authorities: the block's chain metadata
@@ -531,7 +520,7 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         from_state: &ChainState,
         blocks: Vec<ScannedBlock<AccountId>>,
     ) -> Result<(), WalletError> {
-        self.put_blocks_marked(&super::block_metadata(from_state), blocks, &[])
+        self.put_blocks_after(&super::block_metadata(from_state), blocks)
     }
 
     fn put_received_transparent_utxo(
@@ -899,17 +888,12 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
 }
 
 impl<P: Parameters> Wallet<P> {
-    /// [`WalletWrite::put_blocks`], with the accepted Name Note commitments
-    /// marked: the scanner cannot decrypt ZNS-domain outputs, so they
-    /// would otherwise enter the Ironwood tree Ephemeral — prunable, and
-    /// then the note has no witness. Marking is plain `Retention::Marked`,
-    /// exactly as the scanner retains mid-block decrypted notes; the
+    /// [`WalletWrite::put_blocks`] from the applied tip `from_tip`. The
     /// per-height checkpoint is `ensure_block_checkpoint`'s to create.
-    pub(crate) fn put_blocks_marked(
+    pub(crate) fn put_blocks_after(
         &mut self,
         from_tip: &BlockMetadata,
         blocks: Vec<ScannedBlock<AccountId>>,
-        marks: &[orchard::tree::MerkleHashOrchard],
     ) -> Result<(), WalletError> {
         let Some(first) = blocks.first() else {
             return Ok(());
@@ -965,9 +949,9 @@ impl<P: Parameters> Wallet<P> {
         let mut ironwood_tree = clone_shard_tree(&self.ironwood_tree)?;
         for block in &blocks {
             let height = block.height();
-            append_block_commitments(&mut sapling_tree, block.sapling(), height, &[])?;
-            append_block_commitments(&mut orchard_tree, block.orchard(), height, &[])?;
-            append_block_commitments(&mut ironwood_tree, block.ironwood(), height, marks)?;
+            append_block_commitments(&mut sapling_tree, block.sapling(), height)?;
+            append_block_commitments(&mut orchard_tree, block.orchard(), height)?;
+            append_block_commitments(&mut ironwood_tree, block.ironwood(), height)?;
         }
         self.sapling_tree = sapling_tree;
         self.orchard_tree = orchard_tree;
@@ -1017,7 +1001,7 @@ impl<P: Parameters> Wallet<P> {
             // to a wallet that scans contiguously from its birthday — and
             // owned spends never appear in it. (A note cannot be spent in
             // the block that creates it, and the mint applies one block per
-            // `put_blocks_marked` call, so same-batch create-and-spend
+            // `put_blocks_after` call, so same-batch create-and-spend
             // cannot arise.)
             for wtx in block.transactions() {
                 let txid = wtx.txid();
@@ -1042,166 +1026,12 @@ impl<P: Parameters> Wallet<P> {
         }
         Ok(())
     }
-
-    /// Stores one decrypted ZNS Name Note as the Registry account's ordinary
-    /// received Ironwood note, at its consensus-derived tree position.
-    ///
-    /// The standard scanning lane cannot see Name Notes (its domain re-derives
-    /// the commitment from rseed and rejects the ZNS-derived cmx), so the
-    /// orchestrator's ZNS pass supplies them here, after `put_blocks_marked`
-    /// has committed the block. The caller derives `position` from that same
-    /// scanned block before moving it into `put_blocks_marked`.
-    ///
-    /// `nullifier` was derived by the ZNS decryption pass from the same
-    /// authenticated `(rcm, psi)` pair that reproduced the action's cmx. The
-    /// ordinary rseed-derived nullifier never matches a Name Note spend.
-    ///
-    /// `rcm` and `psi` are that ZNS pair, from the transition, not the
-    /// note's rseed. The leaf is `zns_cmx(rcm, psi)`.
-    ///
-    /// Returns [`WalletError::InvalidNameNote`] when the arguments contradict
-    /// applied state: the height must be an applied block, the txid must
-    /// already be mined at that height, the ZNS cmx must be the leaf at
-    /// `position`, and a retry must repeat every stored field.
-    #[allow(clippy::too_many_arguments)]
-    pub fn store_name_note(
-        &mut self,
-        height: BlockHeight,
-        position: Position,
-        txid: TxId,
-        action_index: usize,
-        note: orchard::note::Note,
-        rcm: orchard::note::NoteCommitTrapdoor,
-        psi: pasta_curves::pallas::Base,
-        nullifier: orchard::note::Nullifier,
-        ephemeral_key: zcash_note_encryption::EphemeralKeyBytes,
-        memo: [u8; 512],
-    ) -> Result<(), WalletError> {
-        if !self.blocks.contains_key(&height) {
-            return Err(WalletError::InvalidNameNote(
-                "height is not an applied block",
-            ));
-        }
-        match self.transaction_statuses.get(&txid) {
-            Some(TransactionStatus::Mined(mined)) if *mined == height => {}
-            Some(TransactionStatus::Mined(_)) => {
-                return Err(WalletError::InvalidNameNote(
-                    "txid is mined at a different height",
-                ));
-            }
-            Some(_) => {
-                return Err(WalletError::InvalidNameNote(
-                    "txid is not mined in the main chain",
-                ));
-            }
-            None => {
-                return Err(WalletError::InvalidNameNote(
-                    "txid was not applied with put_blocks",
-                ));
-            }
-        }
-        let output_index = u16::try_from(action_index)
-            .map_err(|_| WalletError::InvalidNameNote("Ironwood action index does not fit u16"))?;
-        let note_id = NoteId::new(txid, ShieldedPool::Ironwood, output_index);
-
-        // Nullifier collision: a different NoteId with the same nullifier
-        // means the nullifier was derived from a different note — refused.
-        if let Some(owner) = self.ironwood_nullifiers.get(&nullifier) {
-            if *owner != note_id {
-                return Err(WalletError::InvalidNameNote(
-                    "nullifier already identifies a different Ironwood note",
-                ));
-            }
-        }
-        // The leaf is the ZNS cmx. The rseed commitment is a different value
-        // and is not what the tree stored.
-        let path = self
-            .ironwood_witness(position, height)
-            .map_err(WalletError::CommitmentTree)?
-            .ok_or(WalletError::InvalidNameNote(
-                "no Ironwood witness at position for this height",
-            ))?;
-        let cmx = note
-            .zns_cmx(rcm, Psi::from_inner(psi))
-            .ok_or(WalletError::InvalidNameNote(
-                "ZNS commitment is the identity",
-            ))?;
-        let leaf = orchard::tree::MerkleHashOrchard::from_cmx(&cmx);
-        let computed_root = path.root(leaf);
-        let anchor = self
-            .ironwood_anchor(height)
-            .map_err(WalletError::CommitmentTree)?
-            .ok_or(WalletError::InvalidNameNote(
-                "no Ironwood anchor at height for binding check",
-            ))?;
-        if computed_root.to_bytes() != anchor.to_bytes() {
-            return Err(WalletError::InvalidNameNote(
-                "note commitment does not match tree root at height",
-            ));
-        }
-
-        // Byte-identical retry (uncommitted fields): if the NoteId exists,
-        // every stored field must match byte-for-byte; any divergence is a
-        // refusal, not a silent overwrite.
-        if let Some(existing) = self.ironwood_notes.get(&note_id) {
-            if existing.note_commitment_tree_position() != position
-                || existing.nf().copied() != Some(nullifier)
-                || existing.note().0 != note
-                || existing.ephemeral_key().as_ref() != ephemeral_key.as_ref()
-                || existing.note().1 != orchard::ValuePool::Ironwood
-                || existing.account_id() != &REGISTRY_ACCOUNT
-                || existing.recipient_key_scope() != Some(zip32::Scope::External)
-            {
-                return Err(WalletError::InvalidNameNote(
-                    "NoteId exists with divergent fields",
-                ));
-            }
-            // Compare memo byte-for-byte via PartialEq on Memo.
-            let existing_memo = self.memos.get(&note_id);
-            let new_memo = Memo::Future(
-                zcash_protocol::memo::MemoBytes::from_bytes(&memo).map_err(|_| {
-                    WalletError::InvalidNameNote("memo bytes are not valid MemoBytes")
-                })?,
-            );
-            if existing_memo != Some(&new_memo) {
-                return Err(WalletError::InvalidNameNote(
-                    "NoteId exists with divergent memo",
-                ));
-            }
-            // Idempotent no-op: byte-identical retry succeeds without mutation.
-            return Ok(());
-        }
-
-        let memo = Memo::Future(
-            zcash_protocol::memo::MemoBytes::from_bytes(&memo)
-                .map_err(|_| WalletError::InvalidNameNote("memo bytes are not valid MemoBytes"))?,
-        );
-
-        self.ironwood_notes.insert(
-            note_id,
-            WalletIronwoodOutput::from_parts(
-                action_index,
-                ephemeral_key,
-                (note, orchard::ValuePool::Ironwood),
-                false,
-                position,
-                Some(nullifier),
-                REGISTRY_ACCOUNT,
-                Some(zip32::Scope::External),
-            ),
-        );
-        self.ironwood_nullifiers.insert(nullifier, note_id);
-        self.memos.insert(note_id, memo);
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Wallet, WalletError, MAX_CHECKPOINTS};
-    use crate::mint::REGISTRY_ACCOUNT;
     use incrementalmerkletree::frontier::Frontier;
-    use orchard::note::Psi;
     use zcash_client_backend::data_api::chain::ChainState;
     use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore};
     use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
@@ -2074,162 +1904,5 @@ mod tests {
             Err(WalletError::TruncationTargetUnavailable(height)) => assert_eq!(height, h1),
             other => panic!("expected TruncationTargetUnavailable at {h1}, got {other:?}"),
         }
-    }
-
-    /// The ZNS leaf and nullifier are accepted; the ordinary rseed leaf,
-    /// a changed memo, and a changed `psi` are refused.
-    #[test]
-    fn name_note_binding_uses_the_zns_cmx() {
-        use incrementalmerkletree::{Marking, Position, Retention};
-        use zcash_client_backend::data_api::{BlockMetadata, TransactionStatus};
-
-        let rho = orchard::note::Rho::from_bytes(&[3u8; 32])
-            .into_option()
-            .expect("canonical rho");
-        let rseed = orchard::note::RandomSeed::from_bytes([4u8; 32], &rho)
-            .into_option()
-            .expect("rseed");
-        let sk = orchard::keys::SpendingKey::from_bytes([5u8; 32])
-            .into_option()
-            .expect("spending key");
-        let fvk = orchard::keys::FullViewingKey::from(&sk);
-        let recipient = fvk.to_ivk(orchard::keys::Scope::External).address_at(0u32);
-        let note = orchard::note::Note::from_parts(
-            recipient,
-            orchard::value::NoteValue::ZERO,
-            rho,
-            rseed,
-            orchard::note::NoteVersion::V2,
-        )
-        .into_option()
-        .expect("note");
-        let rcm = orchard::note::NoteCommitTrapdoor::from_bytes(&[6u8; 32])
-            .into_option()
-            .expect("rcm");
-        let psi = pasta_curves::pallas::Base::from_raw([7, 0, 0, 0]);
-        let cmx = note.zns_cmx(rcm, Psi::from_inner(psi)).expect("ZNS cmx");
-        let txid = zcash_primitives::transaction::TxId::from_bytes([8u8; 32]);
-        let epk = zcash_note_encryption::EphemeralKeyBytes([9u8; 32]);
-        let nullifier = note
-            .zns_nullifier(&fvk, rcm, Psi::from_inner(psi))
-            .expect("ZNS nullifier");
-        assert_ne!(nullifier, note.nullifier(&fvk));
-        let memo = [0u8; 512];
-        let height = BlockHeight::from_u32(1);
-
-        let plant = |leaf| {
-            let mut wallet =
-                Wallet::new([], &empty_origin(), &[], &[], MainNetwork).expect("wallet");
-            wallet
-                .ironwood_tree
-                .append(
-                    leaf,
-                    Retention::Checkpoint {
-                        id: height,
-                        marking: Marking::Marked,
-                    },
-                )
-                .expect("mark the ZNS leaf");
-            wallet
-                .transaction_statuses
-                .insert(txid, TransactionStatus::Mined(height));
-            wallet.blocks.insert(
-                height,
-                BlockMetadata::from_parts(height, BlockHash([1; 32]), None, None, Some(1)),
-            );
-            wallet
-        };
-
-        let zns_leaf = orchard::tree::MerkleHashOrchard::from_cmx(&cmx);
-        let mut wallet = plant(zns_leaf);
-        wallet
-            .store_name_note(
-                height,
-                Position::from(0),
-                txid,
-                0,
-                note,
-                rcm,
-                psi,
-                nullifier,
-                epk.clone(),
-                memo,
-            )
-            .expect("ZNS cmx matches the leaf");
-        let stored = wallet
-            .unspent_ironwood_note_by_nullifier(
-                REGISTRY_ACCOUNT,
-                nullifier,
-                zcash_client_backend::data_api::wallet::TargetHeight::from(height),
-            )
-            .expect("stored Name Note is found by its ZNS nullifier");
-        assert_eq!(*stored.note(), note);
-        wallet
-            .store_name_note(
-                height,
-                Position::from(0),
-                txid,
-                0,
-                note,
-                rcm,
-                psi,
-                nullifier,
-                epk.clone(),
-                memo,
-            )
-            .expect("identical retry");
-        let mut divergent = memo;
-        divergent[0] = 1;
-        assert!(matches!(
-            wallet.store_name_note(
-                height,
-                Position::from(0),
-                txid,
-                0,
-                note,
-                rcm,
-                psi,
-                nullifier,
-                epk.clone(),
-                divergent,
-            ),
-            Err(WalletError::InvalidNameNote(_))
-        ));
-
-        let other = pasta_curves::pallas::Base::from_raw([8, 0, 0, 0]);
-        let mut wallet = plant(zns_leaf);
-        assert!(matches!(
-            wallet.store_name_note(
-                height,
-                Position::from(0),
-                txid,
-                0,
-                note,
-                rcm,
-                other,
-                nullifier,
-                epk,
-                memo,
-            ),
-            Err(WalletError::InvalidNameNote(_))
-        ));
-
-        let ordinary_cmx: orchard::note::ExtractedNoteCommitment = note.commitment().into();
-        let mut wallet = plant(orchard::tree::MerkleHashOrchard::from_cmx(&ordinary_cmx));
-        assert!(matches!(
-            wallet.store_name_note(
-                height,
-                Position::from(0),
-                txid,
-                0,
-                note,
-                rcm,
-                psi,
-                nullifier,
-                zcash_note_encryption::EphemeralKeyBytes([9u8; 32]),
-                memo,
-            ),
-            Err(WalletError::InvalidNameNote(_))
-        ));
     }
 }

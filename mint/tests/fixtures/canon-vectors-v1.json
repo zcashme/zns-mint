@@ -1589,6 +1589,7 @@
           "spent_anchor": "0100000000000000000000000000000000000000000000000000000000000000",
           "successor_anchor": "c100000000000000000000000000000000000000000000000000000000000000",
           "nullifier": "a100000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00a1000000000000000000000000000000000000000000000000000000000000",
           "expect": "accepted"
         }
       ],
@@ -1612,7 +1613,7 @@
               "action": "claim",
               "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
               "expires_at_secs": null,
-              "commitment": "ad4c73bc0cdc11dbbd5ca528f4ffdaf8540672e678c21927e98392a7e1a3a21b",
+              "commitment": "00a1000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 110,
               "release_deadline_secs": 1731557600,
               "nullifier": "a100000000000000000000000000000000000000000000000000000000000000"
@@ -1685,6 +1686,7 @@
           "spent_anchor": "0100000000000000000000000000000000000000000000000000000000000000",
           "successor_anchor": "c100000000000000000000000000000000000000000000000000000000000000",
           "nullifier": "a100000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00a1000000000000000000000000000000000000000000000000000000000000",
           "expect": "accepted"
         },
         {
@@ -1697,6 +1699,7 @@
           "spent_anchor": "0200000000000000000000000000000000000000000000000000000000000000",
           "successor_anchor": "c200000000000000000000000000000000000000000000000000000000000000",
           "nullifier": "a200000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00a2000000000000000000000000000000000000000000000000000000000000",
           "expect": "rejected"
         }
       ],
@@ -1730,7 +1733,7 @@
               "action": "claim",
               "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
               "expires_at_secs": null,
-              "commitment": "ad4c73bc0cdc11dbbd5ca528f4ffdaf8540672e678c21927e98392a7e1a3a21b",
+              "commitment": "00a1000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 110,
               "release_deadline_secs": 1731557600,
               "nullifier": "a100000000000000000000000000000000000000000000000000000000000000"
@@ -1748,7 +1751,7 @@
               "action": "claim",
               "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
               "expires_at_secs": null,
-              "commitment": "ad4c73bc0cdc11dbbd5ca528f4ffdaf8540672e678c21927e98392a7e1a3a21b",
+              "commitment": "00a1000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 110,
               "release_deadline_secs": 1731557600,
               "nullifier": "a100000000000000000000000000000000000000000000000000000000000000"
@@ -1781,6 +1784,7 @@
           "spent_anchor": "0100000000000000000000000000000000000000000000000000000000000000",
           "successor_anchor": "c100000000000000000000000000000000000000000000000000000000000000",
           "nullifier": "a100000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00a1000000000000000000000000000000000000000000000000000000000000",
           "expect": "accepted"
         },
         {
@@ -1790,7 +1794,8 @@
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "prev_nullifier": "a100000000000000000000000000000000000000000000000000000000000000",
-          "nullifier": "b100000000000000000000000000000000000000000000000000000000000000"
+          "nullifier": "b100000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00b1000000000000000000000000000000000000000000000000000000000000"
         },
         {
           "kind": "claim",
@@ -1802,6 +1807,7 @@
           "spent_anchor": "0200000000000000000000000000000000000000000000000000000000000000",
           "successor_anchor": "c200000000000000000000000000000000000000000000000000000000000000",
           "nullifier": "a200000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00a2000000000000000000000000000000000000000000000000000000000000",
           "expect": "accepted"
         }
       ],
@@ -1835,7 +1841,7 @@
               "action": "claim",
               "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
               "expires_at_secs": null,
-              "commitment": "ad4c73bc0cdc11dbbd5ca528f4ffdaf8540672e678c21927e98392a7e1a3a21b",
+              "commitment": "00a1000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 110,
               "release_deadline_secs": 1731557600,
               "nullifier": "a100000000000000000000000000000000000000000000000000000000000000"
@@ -1863,7 +1869,7 @@
               "action": "claim",
               "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
               "expires_at_secs": null,
-              "commitment": "ad4c73bc0cdc11dbbd5ca528f4ffdaf8540672e678c21927e98392a7e1a3a21b",
+              "commitment": "00a2000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 300,
               "release_deadline_secs": 1751557600,
               "nullifier": "a200000000000000000000000000000000000000000000000000000000000000"
@@ -1896,6 +1902,7 @@
           "spent_anchor": "0100000000000000000000000000000000000000000000000000000000000000",
           "successor_anchor": "c100000000000000000000000000000000000000000000000000000000000000",
           "nullifier": "a100000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00a1000000000000000000000000000000000000000000000000000000000000",
           "expect": "accepted"
         },
         {
@@ -1905,7 +1912,8 @@
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "prev_nullifier": "a100000000000000000000000000000000000000000000000000000000000000",
-          "nullifier": "b100000000000000000000000000000000000000000000000000000000000000"
+          "nullifier": "b100000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00b1000000000000000000000000000000000000000000000000000000000000"
         },
         {
           "kind": "claim",
@@ -1917,6 +1925,7 @@
           "spent_anchor": "0200000000000000000000000000000000000000000000000000000000000000",
           "successor_anchor": "c200000000000000000000000000000000000000000000000000000000000000",
           "nullifier": "a200000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00a2000000000000000000000000000000000000000000000000000000000000",
           "expiry_height": 220,
           "expect": "rejected"
         }
@@ -1951,7 +1960,7 @@
               "action": "claim",
               "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
               "expires_at_secs": null,
-              "commitment": "ad4c73bc0cdc11dbbd5ca528f4ffdaf8540672e678c21927e98392a7e1a3a21b",
+              "commitment": "00a1000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 110,
               "release_deadline_secs": 1731557600,
               "nullifier": "a100000000000000000000000000000000000000000000000000000000000000"
@@ -1996,6 +2005,7 @@
           "spent_anchor": "0100000000000000000000000000000000000000000000000000000000000000",
           "successor_anchor": "c100000000000000000000000000000000000000000000000000000000000000",
           "nullifier": "a100000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00a1000000000000000000000000000000000000000000000000000000000000",
           "expect": "accepted"
         },
         {
@@ -2006,7 +2016,8 @@
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "expires_at_secs": 2100000000,
           "prev_nullifier": "a100000000000000000000000000000000000000000000000000000000000000",
-          "nullifier": "a200000000000000000000000000000000000000000000000000000000000000"
+          "nullifier": "a200000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00a2000000000000000000000000000000000000000000000000000000000000"
         },
         {
           "kind": "release",
@@ -2015,7 +2026,8 @@
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "prev_nullifier": "a200000000000000000000000000000000000000000000000000000000000000",
-          "nullifier": "a300000000000000000000000000000000000000000000000000000000000000"
+          "nullifier": "a300000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00a3000000000000000000000000000000000000000000000000000000000000"
         }
       ],
       "trace": [
@@ -2038,7 +2050,7 @@
               "action": "claim",
               "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
               "expires_at_secs": 2000000000,
-              "commitment": "abf2d42db002d9112595a49d2a80578ae966bb31f379e386c8f967855913da27",
+              "commitment": "00a1000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 110,
               "release_deadline_secs": 1731557600,
               "nullifier": "a100000000000000000000000000000000000000000000000000000000000000"
@@ -2056,7 +2068,7 @@
               "action": "update",
               "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
               "expires_at_secs": 2100000000,
-              "commitment": "faf1dd4f6b84e18df871553e8ae32b724bbc723b3a700969f899a9b87106b62e",
+              "commitment": "00a2000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 200,
               "release_deadline_secs": 1741557600,
               "nullifier": "a200000000000000000000000000000000000000000000000000000000000000"
@@ -2092,6 +2104,7 @@
           "spent_anchor": "0100000000000000000000000000000000000000000000000000000000000000",
           "successor_anchor": "c100000000000000000000000000000000000000000000000000000000000000",
           "nullifier": "a100000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00a1000000000000000000000000000000000000000000000000000000000000",
           "expect": "accepted"
         },
         {
@@ -2102,7 +2115,8 @@
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "expires_at_secs": null,
           "prev_nullifier": "a100000000000000000000000000000000000000000000000000000000000000",
-          "nullifier": "a200000000000000000000000000000000000000000000000000000000000000"
+          "nullifier": "a200000000000000000000000000000000000000000000000000000000000000",
+          "cmx": "00a2000000000000000000000000000000000000000000000000000000000000"
         },
         {
           "kind": "rewind",
@@ -2129,7 +2143,7 @@
               "action": "claim",
               "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
               "expires_at_secs": null,
-              "commitment": "ad4c73bc0cdc11dbbd5ca528f4ffdaf8540672e678c21927e98392a7e1a3a21b",
+              "commitment": "00a1000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 110,
               "release_deadline_secs": 1731557600,
               "nullifier": "a100000000000000000000000000000000000000000000000000000000000000"
@@ -2147,7 +2161,7 @@
               "action": "update",
               "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
               "expires_at_secs": null,
-              "commitment": "891e33b940f46a0021b2209f22806dcd6d5410d9f9b701a40b87af0f5e4f5d1a",
+              "commitment": "00a2000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 200,
               "release_deadline_secs": 1741557600,
               "nullifier": "a200000000000000000000000000000000000000000000000000000000000000"
