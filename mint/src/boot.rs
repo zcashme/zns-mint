@@ -25,7 +25,7 @@ use crate::mint::note::NameNoteQueue;
 use crate::mint::presale::{self, AccessCodeDerivationKey, HttpsClient, ProtectedNames};
 use crate::mint::pricing::Oracle;
 use crate::mint::registry::Registry;
-use crate::mint::sale::{transparent_payments, Market};
+use crate::mint::sale::Market;
 use crate::mint::treasury::{OtpQueue, RefundQueue, RequestQueue};
 use crate::mint::{MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
@@ -92,8 +92,7 @@ pub struct Boot<P: Parameters> {
     pub mtp: MtpTracker,
     /// must not: fail-closed at birth — the first price or no start
     pub oracle: Oracle,
-    /// produced: list and delist challenges read from the chain during
-    /// boot sync; update and release challenges are filled by `main`
+    /// initialized: pending OTP challenges
     pub challenges: OtpQueue,
     /// TEE-derived access-code key (HMAC purpose key, not the root)
     pub access_code_key: AccessCodeDerivationKey,
@@ -111,7 +110,7 @@ pub struct Boot<P: Parameters> {
     pub requests: RequestQueue,
     /// initialized: refunds due
     pub refunds: RefundQueue,
-    /// Open sales and marketplace events read from the chain during boot sync.
+    /// initialized: open buys
     pub market: Market,
     /// The exact encoded identity written to the boot identity document.
     pub treasury_address: String,
@@ -593,8 +592,6 @@ impl Boot<Network> {
             zats_per_action = fee_rule.marginal_fee().into_u64(),
             "boot: fee rate read"
         );
-        let mut market = Market::new();
-        let mut challenges = OtpQueue::new();
         while wallet.tip().block_height() < best_height {
             let from_height = wallet.tip().block_height();
             let next_height = from_height + 1;
@@ -608,8 +605,7 @@ impl Boot<Network> {
                     panic!("FATAL: {reason} at height {}", u32::from(next_height))
                 });
 
-            let payments = transparent_payments(&block);
-            let (arrivals, relays) = crate::mint::apply_block(
+            crate::mint::apply_block(
                 &network,
                 mint_birthday,
                 &registry_keys,
@@ -620,50 +616,7 @@ impl Boot<Network> {
                 &mut registry,
                 &mut mtp,
             );
-            let block_mtp = mtp
-                .current()
-                .expect("FATAL: MTP unavailable at the applied block");
-            market.expire(block_mtp, next_height);
-            challenges.expire(block_mtp);
-            market.reconcile(&registry, next_height);
-            // The codes this mint sent before the sync: an answer in the
-            // history matches the code its owner was sent.
-            for relay in &relays {
-                challenges.relay_seen(relay);
-            }
-            for (txid, inbound, paid) in arrivals {
-                if let crate::mint::MintInbound::Request(
-                    request @ (crate::mint::Request::List(_)
-                    | crate::mint::Request::Delist { .. }
-                    | crate::mint::Request::Buy { .. }),
-                ) = &inbound
-                {
-                    // A returned intent is not sent from a scan. The live
-                    // loop sends it when the intent is first admitted.
-                    market.admit(
-                        txid,
-                        request,
-                        paid,
-                        &registry,
-                        &mut challenges,
-                        &fee_rule,
-                        next_height,
-                        block_mtp,
-                        |_| false,
-                        &access_code_key,
-                    );
-                }
-            }
-            market.observe(
-                |name| registry.record(name).map(|record| record.ua().clone()),
-                &payments,
-                block_mtp,
-                next_height,
-            );
         }
-        // A buy read from history stays payable. This process does not
-        // send its code, and a later rollback leaves that code unsent.
-        market.seal_replayed_buys();
         tracing::info!(
             height = u32::from(wallet.tip().block_height()),
             "boot: synced to chain tip"
@@ -724,6 +677,8 @@ impl Boot<Network> {
         let name_notes = NameNoteQueue::default();
         let requests = RequestQueue::default();
         let refunds = RefundQueue::default();
+        let challenges = OtpQueue::default();
+        let market = Market::default();
 
         // 7. Sapling proving parameters. Loading and hash verification happen
         // before attestation: a mint that produces a report can also prove

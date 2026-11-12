@@ -1,5 +1,11 @@
 # Sale module changelog
 
+## 2026-11-12 — Boot does not replay buys (#475)
+
+- `Market::seal_replayed_buys` and `SaleQueue::seal_relayed` are gone.
+  They marked buys rebuilt from history as already relayed, and boot
+  no longer rebuilds buys.
+
 ## 2026-11-11 — The market holds buys; the chain holds listings (#465)
 
 - `Market::answer`, `Market::list`, `Market::delist`, and the

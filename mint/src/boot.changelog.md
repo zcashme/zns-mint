@@ -1,5 +1,14 @@
 # Boot module changelog
 
+## 2026-11-12 — The sync applies blocks and nothing else (#475)
+
+- History is balance, not instruction: the sync no longer re-runs list,
+  delist, or buy requests through `Market::admit`, replays payments
+  through `Market::observe`, or feeds the mint's relay memos to the OTP
+  queue. Names and listings come from the Name Notes `apply_block`
+  applies. `challenges` and `market` start empty, as `requests` and
+  `refunds` do; a challenge or buy open at a restart is gone.
+
 ## 2026-11-11 — The sync reads listings from Name Notes (#465)
 
 - The sync no longer replays list and delist answers. A listing is the

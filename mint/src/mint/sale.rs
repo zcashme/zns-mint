@@ -405,16 +405,6 @@ impl SaleQueue {
         paid
     }
 
-    /// Every unpaid buy counts as sent. Startup uses this so a code read
-    /// from the chain is not submitted by this process.
-    fn seal_relayed(&mut self) {
-        for sale in &mut self.sales {
-            if let Phase::Paying { relayed, .. } = &mut sale.phase {
-                *relayed = true;
-            }
-        }
-    }
-
     fn get(&self, name: &Name) -> Option<&Sale> {
         self.sales.iter().find(|sale| sale.name == *name)
     }
@@ -679,19 +669,6 @@ impl Market {
     /// so a rollback submits that code.
     pub fn relayed(&mut self, name: &Name) {
         self.sales.relayed(name);
-    }
-
-    /// An unpaid buy read from the chain stays payable and unsent. The
-    /// open event records that, so a later rollback leaves the code unsent.
-    pub fn seal_replayed_buys(&mut self) {
-        self.sales.seal_relayed();
-        for stamped in &mut self.events {
-            if let MarketEvent::Open { sale } = &mut stamped.event {
-                if let Phase::Paying { relayed, .. } = &mut sale.phase {
-                    *relayed = true;
-                }
-            }
-        }
     }
 
     pub fn observe(
@@ -2189,66 +2166,6 @@ mod tests {
         assert_eq!(registry.price(&name()), Some(zats(100_000_000)));
         assert_eq!(registry.record(&name()), Some(&record));
         assert_eq!(registry.record_history(&name()).last(), Some(&record));
-    }
-
-    #[test]
-    fn a_buy_read_from_the_chain_stays_payable_and_unsent() {
-        let (owner, pay_to) = alice();
-        let mut registry = sale_registry();
-        let mut market = Market::new();
-        list_on_chain(&mut registry, &list_for(100_000_000), 60);
-        let code = OtpCode::for_test(*b"123456");
-        market
-            .open_buy(
-                &registry,
-                &name(),
-                &bob(),
-                &owner,
-                Expiry::Never,
-                held(),
-                false,
-                false,
-                code.clone(),
-                mtp(),
-                height(),
-            )
-            .unwrap();
-        assert_eq!(market.unrelayed().len(), 1);
-        market.seal_replayed_buys();
-        assert!(market.unrelayed().is_empty());
-        market.truncate_to(height());
-        assert!(market.is_open(&name()));
-        assert!(market.unrelayed().is_empty());
-
-        let second = Name::parse("zed").unwrap();
-        let zed = Listing {
-            name: second.clone(),
-            ua: owner.clone(),
-            pay_to,
-            ask: Ask::Flat(zats(50_000_000)),
-        };
-        list_on_chain(&mut registry, &zed, 61);
-        market
-            .open_buy(
-                &registry,
-                &second,
-                &bob(),
-                &owner,
-                Expiry::Never,
-                held(),
-                false,
-                false,
-                OtpCode::for_test(*b"654321"),
-                mtp(),
-                height(),
-            )
-            .unwrap();
-        assert_eq!(market.unrelayed().len(), 1);
-        assert_eq!(market.unrelayed()[0].name, second);
-
-        let paid = zats(100_000_000 + otp_amount(&code).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
-        assert!(market.is_paid(&name()));
     }
 
     fn auction_listing(start: u32, end: u32) -> Listing {
