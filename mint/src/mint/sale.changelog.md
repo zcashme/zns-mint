@@ -1,5 +1,13 @@
 # Sale module changelog
 
+## 2026-11-12 — A list pays the t1 the owner names
+
+- A listing pays the t1 in the list memo, which the owner repeats in
+  her OTP response. The controller's transparent receiver, if any,
+  plays no part, so a shielded-only controller can list.
+- `is_owner_listing` is gone: `propose_list` and a buy check only that
+  the listing's UA is the owner's.
+
 ## 2026-11-12 — The market keeps no history, and is one type (#477)
 
 - `SaleQueue` is gone: `Market` holds the open buys itself. Its

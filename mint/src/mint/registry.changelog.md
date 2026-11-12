@@ -2,6 +2,11 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-11-12 — A list pays the t1 the owner names
+
+- `allows_challenge`, `authorize_list`, and `carries_forward` check
+  only that a list's UA is the owner's; its t1 is whatever she names.
+
 ## 2026-11-11 — A listing is the name's current list note (#465)
 
 - `NameRecord` holds the note that set it; `name()`, `action()`,

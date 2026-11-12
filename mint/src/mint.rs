@@ -182,8 +182,8 @@ pub enum Request {
         name: Name,
         ua: UnifiedAddress,
     },
-    /// Alice lists the name she owns, at the transparent receiver on her
-    /// controller address, once she returns the challenge.
+    /// Alice lists the name she owns, at the t1 she names, once she
+    /// returns the challenge.
     List(sale::Listing),
     /// Alice takes her listing down, once she returns the challenge.
     Delist {

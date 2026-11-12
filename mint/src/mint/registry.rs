@@ -7,7 +7,7 @@ use anchor_pool::AnchorPool;
 pub use anchor_pool::{is_ceremony_fill, ANCHOR_POOL_SIZE};
 
 use crate::mint::note::NameNoteQueue;
-use crate::mint::sale::{is_owner_listing, listable, Ask, Listing};
+use crate::mint::sale::{listable, Ask, Listing};
 use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
@@ -98,9 +98,8 @@ impl NameRecord {
     }
 
     /// The clock-and-verb check behind [`Registry::authorize_challenge`]:
-    /// release, list, and delist from this record's controller, a list
-    /// at the transparent receiver on her address, and forever names
-    /// take no term. Claims and buys are never challenged.
+    /// release, list, and delist from this record's controller, and
+    /// forever names take no term. Claims and buys are never challenged.
     fn allows_challenge(
         &self,
         request: &Request,
@@ -112,8 +111,9 @@ impl NameRecord {
         }
         match request {
             Request::Update { term, .. } => !(self.expires_at() == Expiry::Never && term.is_some()),
-            Request::Release { ua, .. } | Request::Delist { ua, .. } => ua == self.ua(),
-            Request::List(listing) => is_owner_listing(self.ua(), &listing.ua, &listing.pay_to),
+            Request::Release { ua, .. }
+            | Request::Delist { ua, .. }
+            | Request::List(Listing { ua, .. }) => ua == self.ua(),
             Request::Claim { .. } | Request::Buy { .. } => false,
         }
     }
@@ -137,18 +137,14 @@ impl std::fmt::Debug for NameRecord {
 }
 
 /// A list or a delist changes neither the owner nor the term: it repeats
-/// both from `record`, and a list pays the owner's own t1. A sale spends
-/// a list note and repeats its term.
+/// both from `record`. A sale spends a list note and repeats its term.
 fn carries_forward(note: &NameNote, record: &NameRecord) -> bool {
     match note {
         NameNote::List {
             listing,
             expires_at,
             ..
-        } => {
-            *expires_at == record.expires_at()
-                && is_owner_listing(record.ua(), &listing.ua, &listing.pay_to)
-        }
+        } => *expires_at == record.expires_at() && listing.ua == *record.ua(),
         NameNote::Delist { ua, expires_at, .. } => {
             *expires_at == record.expires_at() && ua == record.ua()
         }
@@ -201,9 +197,9 @@ impl Registry {
         }
     }
 
-    /// The list law: the owner lists at her own t1, on terms that are
-    /// still listable at `height`, before either clock fires. The note
-    /// carries her UA and term forward. `None` means unlawful.
+    /// The list law: the owner lists at the t1 she names, on terms still
+    /// listable at `height`, before either clock fires. The note carries her UA and
+    /// term forward. `None` means unlawful.
     pub fn authorize_list(
         &self,
         pending: &OtpChallenge,
@@ -215,7 +211,7 @@ impl Registry {
         };
         let record = self.record(&listing.name)?;
         if record.is_release_due(mtp)
-            || !is_owner_listing(record.ua(), &listing.ua, &listing.pay_to)
+            || listing.ua != *record.ua()
             || listable(&listing.ask, height).is_err()
         {
             return None;
@@ -1507,7 +1503,7 @@ mod tests {
         assert!(r.is_available(&test_name()));
     }
 
-    /// The owner lists at her own t1 on terms still listable, and
+    /// The owner lists at the t1 she names on terms still listable, and
     /// delists only a listing; both stop once a clock fires. Each note
     /// carries her UA and term forward.
     #[test]
