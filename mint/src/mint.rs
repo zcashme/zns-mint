@@ -657,14 +657,15 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                 let candidate = &candidates[*index];
                 let action = candidate.payload.action();
                 let accepted = if action.is_claim() {
-                    // The successor anchor: a backed claim creates
-                    // exactly one zero-value Registry output.
-                    let successor = if registry_outputs.len() == 1
-                        && registry_outputs[0].note().0.value().inner() == 0
-                    {
-                        registry_outputs[0].nf().copied()
-                    } else {
-                        None
+                    // The successor anchor: besides its Name Note, a backed
+                    // claim creates exactly one zero-value Registry output.
+                    let others: Vec<_> = registry_outputs
+                        .iter()
+                        .filter(|output| output.index() != candidate.action_index)
+                        .collect();
+                    let successor = match others.as_slice() {
+                        [only] if only.note().0.value().inner() == 0 => only.nf().copied(),
+                        _ => None,
                     };
                     let expiry = expiry_by_txid
                         .get(&txid)
