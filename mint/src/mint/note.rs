@@ -198,26 +198,68 @@ impl NameNote {
     /// 63-byte name and a three-receiver UA, is 461 bytes on mainnet and
     /// 468 on regtest.
     pub fn encode<P: Parameters>(&self, params: &P) -> [u8; 512] {
-        let ua_field = self.ua().encode(params);
-        let verb = self.action().as_str();
-        let hex_rcm = hex::encode(self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]));
-        let expires_field = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
-        let terms = self.terms(params).map(|t| t + ":").unwrap_or_default();
         let memo_string = format!(
-            "ZNS:{}:{}:{}:{}:{}{}",
-            verb,
-            self.name().as_str(),
-            ua_field,
-            // `b"none"` or canonical ASCII digits — always UTF-8.
-            String::from_utf8(expires_field).unwrap(),
-            terms,
-            hex_rcm,
+            "ZNS:{}:{}",
+            self.fields(params),
+            hex::encode(self.prev_bytes())
         );
         let mut memo = [0u8; 512];
         let bytes = memo_string.as_bytes();
         memo[..bytes.len()].copy_from_slice(bytes);
         memo
     }
+
+    /// The record as the memo writes it between `ZNS:` and the predecessor:
+    /// `verb:name:ua:expiry`, and `:terms` for a list or an auction.
+    pub fn fields<P: Parameters>(&self, params: &P) -> String {
+        let expires_field = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
+        let terms = self
+            .terms(params)
+            .map(|t| format!(":{t}"))
+            .unwrap_or_default();
+        format!(
+            "{}:{}:{}:{}{}",
+            self.action().as_str(),
+            self.name().as_str(),
+            self.ua().encode(params),
+            // `b"none"` or canonical ASCII digits — always UTF-8.
+            String::from_utf8(expires_field).unwrap(),
+            terms,
+        )
+    }
+
+    /// The note's rseed, derived from its record (zcashme/zns-mint#480):
+    /// BLAKE2b-256, personalization [`NAME_NOTE_PERSONALIZATION`], over
+    /// `kind ‖ I2LEOSP64(len(fields)) ‖ fields ‖ prev`.
+    pub fn rseed<P: Parameters>(&self, params: &P) -> [u8; 32] {
+        name_note_rseed(self.fields(params).as_bytes(), &self.prev_bytes())
+    }
+
+    /// The predecessor's 32 bytes, all zero for a claim.
+    fn prev_bytes(&self) -> [u8; 32] {
+        self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32])
+    }
+}
+
+/// The binding domain of a Name Note's rseed: its BLAKE2b personalization.
+pub const NAME_NOTE_PERSONALIZATION: &[u8; 16] = b"ZNS___Name_Notes";
+
+/// The record kind of every Name Note.
+pub const NAME_NOTE_KIND: u8 = 0x01;
+
+fn name_note_rseed(fields: &[u8], prev: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake2b_simd::Params::new()
+        .hash_length(32)
+        .personal(NAME_NOTE_PERSONALIZATION)
+        .to_state();
+    h.update(&[NAME_NOTE_KIND]);
+    h.update(&(fields.len() as u64).to_le_bytes());
+    h.update(fields);
+    h.update(prev);
+    h.finalize()
+        .as_bytes()
+        .try_into()
+        .expect("BLAKE2b-256 output is 32 bytes")
 }
 
 /// The `expires_at` field of a transition: a fixed Unix instant, or the
