@@ -182,9 +182,8 @@ pub enum Request {
         name: Name,
         ua: UnifiedAddress,
     },
-    /// Alice lists the name she owns, once she returns the challenge.
-    /// Payment goes to the transparent receiver on her controller address
-    /// when it has one, and to the t1 in the memo when it has none.
+    /// Alice lists the name she owns, at the t1 she names, once she
+    /// returns the challenge.
     List(sale::Listing),
     /// Alice takes her listing down, once she returns the challenge.
     Delist {

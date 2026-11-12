@@ -21,20 +21,6 @@ use crate::mint::{
     Action, Expiry, Name, NameCommitment, NameNote, Request, Timestamp, UnifiedAddress,
 };
 
-/// The listing is from the current owner. Payment goes to the transparent
-/// receiver on that address when it has one, and to `pay_to` when it has none.
-pub fn is_owner_listing(
-    owner: &UnifiedAddress,
-    ua: &UnifiedAddress,
-    pay_to: &TransparentAddress,
-) -> bool {
-    owner == ua
-        && match owner.transparent() {
-            Some(receiver) => receiver == pay_to,
-            None => true,
-        }
-}
-
 /// The mint's reply. The verb is `buyotp`, so a wallet cannot read it
 /// as an update or release challenge (`ZNS:otp`).
 #[derive(Clone, Debug)]
@@ -598,7 +584,7 @@ impl Market {
             let Some(listing) = registry.listing(name) else {
                 return Err(MarketRefusal::NotListed);
             };
-            if !is_owner_listing(owner, &listing.ua, &listing.pay_to) {
+            if listing.ua != *owner {
                 return Err(MarketRefusal::NotOwner);
             }
             match &listing.ask {
@@ -650,7 +636,7 @@ impl Market {
         height: BlockHeight,
     ) -> Result<(), MarketRefusal> {
         listable(&listing.ask, height)?;
-        if !is_owner_listing(owner, &listing.ua, &listing.pay_to) {
+        if listing.ua != *owner {
             return Err(MarketRefusal::NotOwner);
         }
         if self.is_open(&listing.name) {
@@ -971,18 +957,9 @@ mod tests {
     }
 
     #[test]
-    fn a_listing_requires_the_owner_and_her_transparent_receiver() {
+    fn a_list_memo_prices_in_at_most_eight_decimals() {
         let network = MainNetwork;
-        let base = decode_controller_ua(&network, TEST_UA).unwrap();
-        let pay_to = TransparentAddress::PublicKeyHash([0x11; 20]);
-        let owner = UnifiedAddress::from_receivers(
-            base.orchard().copied(),
-            base.sapling().cloned(),
-            Some(pay_to),
-            None,
-            None,
-        )
-        .unwrap();
+        let owner = decode_controller_ua(&network, TEST_UA).unwrap();
         let memo = padded(&format!(
             "ZNS:list:alice:{}:{}:1.5",
             owner.encode(&network),
@@ -991,14 +968,10 @@ mod tests {
         let Some(Request::List(list)) = Request::decode(&network, &memo) else {
             panic!("expected list")
         };
-        assert!(is_owner_listing(&owner, &list.ua, &list.pay_to));
         assert_eq!(
             list.ask,
             Ask::Flat(Zatoshis::from_u64(150_000_000).unwrap())
         );
-        let other = TransparentAddress::PublicKeyHash([0x22; 20]);
-        assert!(!is_owner_listing(&owner, &list.ua, &other));
-        assert!(!is_owner_listing(&base, &list.ua, &list.pay_to));
         assert!(Request::decode(
             &network,
             &padded(&format!(
@@ -1011,18 +984,9 @@ mod tests {
     }
 
     #[test]
-    fn a_shielded_controller_lists_at_the_t1_she_names() {
+    fn a_list_pays_the_t1_the_owner_returns() {
         let network = MainNetwork;
-        let base = decode_controller_ua(&network, TEST_UA).unwrap();
-        let owner = UnifiedAddress::from_receivers(
-            base.orchard().copied(),
-            base.sapling().cloned(),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        assert!(owner.transparent().is_none());
+        let owner = decode_controller_ua(&network, TEST_UA).unwrap();
         let pasted = TransparentAddress::PublicKeyHash([0x22; 20]);
         let pasted_text = Address::Transparent(pasted).encode(&network);
         let memo = padded(&format!(
@@ -1032,9 +996,6 @@ mod tests {
         let Some(Request::List(list)) = Request::decode(&network, &memo) else {
             panic!("expected list")
         };
-        assert_eq!(list.pay_to, pasted);
-        assert!(is_owner_listing(&owner, &list.ua, &list.pay_to));
-        assert!(!is_owner_listing(&base, &list.ua, &list.pay_to));
 
         let mut registry = Registry::new();
         let anchor = nf(10);
@@ -1501,19 +1462,9 @@ mod tests {
 
     #[test]
     fn a_stranger_cannot_list_or_delist() {
-        let (owner, pay_to) = alice();
+        let (owner, _) = alice();
         let mut registry = sale_registry();
         let mut market = Market::new();
-        let foreign = Listing {
-            name: name(),
-            ua: owner.clone(),
-            pay_to: TransparentAddress::PublicKeyHash([0x22; 20]),
-            ask: Ask::Flat(zats(150_000_000)),
-        };
-        assert_eq!(
-            propose_list(&mut market, &foreign, &owner, height()),
-            Err(MarketRefusal::NotOwner)
-        );
         let by_bob = Listing {
             ua: bob(),
             ..list_for(150_000_000)
@@ -1528,7 +1479,6 @@ mod tests {
             Err(MarketRefusal::NotOwner)
         );
         assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
-        assert_eq!(pay_to, TransparentAddress::PublicKeyHash([0x11; 20]));
     }
 
     #[test]
