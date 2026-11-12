@@ -245,22 +245,112 @@ struct Sale {
     phase: Phase,
 }
 
-/// Open sales. One per name. Rebuilt from the chain on startup.
+/// An auction's terms. The start block quotes `start_price`. The end
+/// block quotes `min_price` and is the last block that sells.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuctionTerms {
+    pub start_price: Zatoshis,
+    pub min_price: Zatoshis,
+    pub start: BlockHeight,
+    pub end: BlockHeight,
+}
+
+impl AuctionTerms {
+    /// The end is after the start, and the price falls.
+    pub fn is_valid(&self) -> bool {
+        self.end > self.start && self.start_price > self.min_price
+    }
+
+    /// Whole-zatoshis fall. A height outside the span has no price.
+    pub fn price_at(&self, height: BlockHeight) -> Option<Zatoshis> {
+        if !self.is_valid() || height < self.start || height > self.end {
+            return None;
+        }
+        let span = u128::from(u32::from(self.end) - u32::from(self.start));
+        let elapsed = u128::from(u32::from(height) - u32::from(self.start));
+        let drop = u128::from(self.start_price.into_u64() - self.min_price.into_u64());
+        let fallen = u64::try_from(drop * elapsed / span).ok()?;
+        Zatoshis::from_u64(self.start_price.into_u64() - fallen).ok()
+    }
+}
+
+/// What the buyer pays. A flat price is the listing. An auction price is
+/// the price of the block his intent is mined in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ask {
+    Flat(Zatoshis),
+    Dutch(AuctionTerms),
+}
+
+/// One listing per name: the terms of its current list note.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listing {
+    pub name: Name,
+    pub ua: UnifiedAddress,
+    pub pay_to: TransparentAddress,
+    pub ask: Ask,
+}
+
+/// Why a list, delist, or buy did not change the market.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarketRefusal {
+    /// A buy is open, so the listing stays as it was.
+    BuyOpen,
+    /// The caller does not own the name, or the t1 is not hers.
+    NotOwner,
+    /// The name has no listing.
+    NotListed,
+    /// A name note is already in flight.
+    InFlight,
+    /// The purchased term or the liveness deadline has passed.
+    ReleaseDue,
+    /// This name already has a buy.
+    AlreadyOpen,
+    /// An open buy already pays this address the same total.
+    PaymentTaken,
+    /// The auction has not reached its start block.
+    Early { start: BlockHeight },
+    /// An auction sale still reserves the name.
+    Held { until: Timestamp },
+    /// The end is not after the start, or the price does not fall.
+    BadTerms,
+    /// This block is after the auction's end block.
+    Ended,
+}
+
+/// An auction lists through its end block. A later height quotes no price.
+pub(crate) fn listable(ask: &Ask, height: BlockHeight) -> Result<(), MarketRefusal> {
+    let Ask::Dutch(terms) = ask else {
+        return Ok(());
+    };
+    if !terms.is_valid() {
+        return Err(MarketRefusal::BadTerms);
+    }
+    if height > terms.end {
+        return Err(MarketRefusal::Ended);
+    }
+    Ok(())
+}
+
+/// The open buys against listings, one per name. A listing is the name's
+/// current note in the registry. A buy holds the name: no new listing, no
+/// delist, and no update, release, or lifecycle release. A restart or a
+/// reorg starts it empty.
 #[derive(Default)]
-pub struct SaleQueue {
+pub struct Market {
     sales: Vec<Sale>,
 }
 
-impl SaleQueue {
+impl Market {
     pub fn new() -> Self {
-        Self { sales: Vec::new() }
+        Self::default()
     }
 
     /// Opens a sale and returns the OTP to send Bob. `None` when this
     /// name already has one. A flat quote stays payable for [`D_OTP`].
     /// An auction quote stays payable for [`D_DUTCH`].
     #[allow(clippy::too_many_arguments)]
-    pub fn open(
+    fn open(
         &mut self,
         name: &Name,
         bob: &UnifiedAddress,
@@ -412,12 +502,13 @@ impl SaleQueue {
     }
 
     /// A buy is open from the OTP until it expires unpaid or Bob holds the name.
-    pub fn is_open(&self, name: &Name) -> bool {
+    fn is_open(&self, name: &Name) -> bool {
         self.sales.iter().any(|sale| sale.name == *name)
     }
 
     /// The payment has matched and the sale note is still owed.
-    pub fn is_paid(&self, name: &Name) -> bool {
+    #[cfg(test)]
+    fn is_paid(&self, name: &Name) -> bool {
         self.sales
             .iter()
             .any(|sale| sale.name == *name && matches!(sale.phase, Phase::Paid))
@@ -433,9 +524,9 @@ impl SaleQueue {
 
     /// Drops a sale whose captured note is gone. A paid sale whose note is
     /// still that one stays, so the caller can sign it.
-    pub fn reconcile(&mut self, live: impl Fn(&Name) -> Option<(UnifiedAddress, NameCommitment)>) {
-        self.sales.retain(|sale| match live(&sale.name) {
-            Some((ua, commitment)) => ua == sale.alice && commitment == sale.held,
+    pub fn reconcile(&mut self, registry: &Registry) {
+        self.sales.retain(|sale| match registry.record(&sale.name) {
+            Some(record) => *record.ua() == sale.alice && record.commitment == sale.held,
             None => false,
         });
     }
@@ -469,163 +560,11 @@ impl SaleQueue {
         });
         notes
     }
-}
-
-/// An auction's terms. The start block quotes `start_price`. The end
-/// block quotes `min_price` and is the last block that sells.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AuctionTerms {
-    pub start_price: Zatoshis,
-    pub min_price: Zatoshis,
-    pub start: BlockHeight,
-    pub end: BlockHeight,
-}
-
-impl AuctionTerms {
-    /// The end is after the start, and the price falls.
-    pub fn is_valid(&self) -> bool {
-        self.end > self.start && self.start_price > self.min_price
-    }
-
-    /// Whole-zatoshis fall. A height outside the span has no price.
-    pub fn price_at(&self, height: BlockHeight) -> Option<Zatoshis> {
-        if !self.is_valid() || height < self.start || height > self.end {
-            return None;
-        }
-        let span = u128::from(u32::from(self.end) - u32::from(self.start));
-        let elapsed = u128::from(u32::from(height) - u32::from(self.start));
-        let drop = u128::from(self.start_price.into_u64() - self.min_price.into_u64());
-        let fallen = u64::try_from(drop * elapsed / span).ok()?;
-        Zatoshis::from_u64(self.start_price.into_u64() - fallen).ok()
-    }
-}
-
-/// What the buyer pays. A flat price is the listing. An auction price is
-/// the price of the block his intent is mined in.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Ask {
-    Flat(Zatoshis),
-    Dutch(AuctionTerms),
-}
-
-/// One listing per name: the terms of its current list note.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Listing {
-    pub name: Name,
-    pub ua: UnifiedAddress,
-    pub pay_to: TransparentAddress,
-    pub ask: Ask,
-}
-
-/// Why a list, delist, or buy did not change the market.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MarketRefusal {
-    /// A buy is open, so the listing stays as it was.
-    BuyOpen,
-    /// The caller does not own the name, or the t1 is not hers.
-    NotOwner,
-    /// The name has no listing.
-    NotListed,
-    /// A name note is already in flight.
-    InFlight,
-    /// The purchased term or the liveness deadline has passed.
-    ReleaseDue,
-    /// This name already has a buy.
-    AlreadyOpen,
-    /// An open buy already pays this address the same total.
-    PaymentTaken,
-    /// The auction has not reached its start block.
-    Early { start: BlockHeight },
-    /// An auction sale still reserves the name.
-    Held { until: Timestamp },
-    /// The end is not after the start, or the price does not fall.
-    BadTerms,
-    /// This block is after the auction's end block.
-    Ended,
-}
-
-/// An auction lists through its end block. A later height quotes no price.
-pub(crate) fn listable(ask: &Ask, height: BlockHeight) -> Result<(), MarketRefusal> {
-    let Ask::Dutch(terms) = ask else {
-        return Ok(());
-    };
-    if !terms.is_valid() {
-        return Err(MarketRefusal::BadTerms);
-    }
-    if height > terms.end {
-        return Err(MarketRefusal::Ended);
-    }
-    Ok(())
-}
-
-/// The buys against listings. A listing is the name's current note in the
-/// registry. A buy holds the name: no new listing, no delist, and no
-/// update, release, or lifecycle release.
-#[derive(Default)]
-pub struct Market {
-    sales: SaleQueue,
-}
-
-impl Market {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn names(&self) -> impl Iterator<Item = &Name> {
-        self.sales.names()
-    }
-
-    pub fn is_open(&self, name: &Name) -> bool {
-        self.sales.is_open(name)
-    }
-
-    pub fn is_paid(&self, name: &Name) -> bool {
-        self.sales.is_paid(name)
-    }
 
     /// An update, a release, an OTP response, or a lifecycle release
     /// may proceed. False while a buy is open.
     pub fn allows_transition(&self, name: &Name) -> bool {
-        !self.sales.is_open(name)
-    }
-
-    pub fn unrelayed(&self) -> Vec<BuyOtp> {
-        self.sales.unrelayed()
-    }
-
-    /// The node accepted the buy OTP. The open event keeps `relayed` clear,
-    /// so a rollback submits that code.
-    pub fn relayed(&mut self, name: &Name) {
-        self.sales.relayed(name);
-    }
-
-    pub fn observe(
-        &mut self,
-        holder: impl Fn(&Name) -> Option<UnifiedAddress>,
-        payments: &[(TransparentAddress, Zatoshis)],
-        mtp: Timestamp,
-    ) {
-        self.sales.observe(holder, payments, mtp);
-    }
-
-    /// Drops unpaid sales whose time has passed.
-    pub fn expire(&mut self, mtp: Timestamp) {
-        self.sales.expire(mtp);
-    }
-
-    /// Drops a sale whose captured note is no longer live. A scan calls
-    /// this before the block's memos, so a finished sale does not block them.
-    pub fn reconcile(&mut self, registry: &Registry) {
-        let live = |name: &Name| {
-            registry
-                .record(name)
-                .map(|record| (record.ua().clone(), record.commitment))
-        };
-        self.sales.reconcile(live);
-    }
-
-    pub fn poll(&mut self, registry: &Registry, pending: impl Fn(&Name) -> bool) -> Vec<NameNote> {
-        self.sales.poll(registry, pending)
+        !self.is_open(name)
     }
 
     /// Opens a buy from the current listing. The caller drops any
@@ -645,8 +584,8 @@ impl Market {
         mtp: Timestamp,
         height: BlockHeight,
     ) -> Result<BuyOtp, MarketRefusal> {
-        if self.sales.is_open(name) {
-            if let Some(until) = self.sales.dutch_hold(name) {
+        if self.is_open(name) {
+            if let Some(until) = self.dutch_hold(name) {
                 return Err(MarketRefusal::Held { until });
             }
             return Err(MarketRefusal::AlreadyOpen);
@@ -677,23 +616,22 @@ impl Market {
         if note_pending {
             return Err(MarketRefusal::InFlight);
         }
-        if self.sales.same_payment(pay_to, price, &code) {
+        if self.same_payment(pay_to, price, &code) {
             return Err(MarketRefusal::PaymentTaken);
         }
-        self.sales
-            .open(
-                name,
-                bob,
-                owner.clone(),
-                pay_to,
-                price,
-                term,
-                held,
-                code,
-                dutch,
-                mtp,
-            )
-            .ok_or(MarketRefusal::AlreadyOpen)
+        self.open(
+            name,
+            bob,
+            owner.clone(),
+            pay_to,
+            price,
+            term,
+            held,
+            code,
+            dutch,
+            mtp,
+        )
+        .ok_or(MarketRefusal::AlreadyOpen)
     }
 
     /// Opens a list challenge. The returned code authorizes a list note,
@@ -711,7 +649,7 @@ impl Market {
         if !is_owner_listing(owner, &listing.ua, &listing.pay_to) {
             return Err(MarketRefusal::NotOwner);
         }
-        if self.sales.is_open(&listing.name) {
+        if self.is_open(&listing.name) {
             return Err(MarketRefusal::BuyOpen);
         }
         challenges.admit(Request::List(listing.clone()), txid, mtp);
@@ -732,7 +670,7 @@ impl Market {
         if registry.record(name).is_none_or(|record| record.ua() != ua) {
             return Err(MarketRefusal::NotOwner);
         }
-        if self.sales.is_open(name) {
+        if self.is_open(name) {
             return Err(MarketRefusal::BuyOpen);
         }
         if registry.listing(name).is_none() {
@@ -1121,7 +1059,7 @@ mod tests {
 
     #[test]
     fn an_unpaid_sale_expires_with_the_code() {
-        let mut sales = SaleQueue::new();
+        let mut sales = Market::new();
         let mtp = Timestamp::from_seconds(1_700_000_000).unwrap();
         assert!(sales
             .open(

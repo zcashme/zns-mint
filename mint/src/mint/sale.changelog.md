@@ -1,6 +1,12 @@
 # Sale module changelog
 
-## 2026-11-12 — The market keeps no history (#477)
+## 2026-11-12 — The market keeps no history, and is one type (#477)
+
+- `SaleQueue` is gone: `Market` holds the open buys itself. Its
+  forwarding methods are gone, `is_open` is private (callers ask
+  `allows_transition`), and `is_paid` is test-only. `AuctionTerms`,
+  `Ask`, `Listing`, and `MarketRefusal` move above `Market`, so it has
+  one `impl` block.
 
 - `MarketEvent`, `Stamped`, `Market.events`, `Market::record`, and
   `Market::truncate_to` are gone. A reorg drops the open buys instead
