@@ -1520,7 +1520,7 @@ mod tests {
                 tree_size +=
                     u32::try_from(block.vtx()[0].ironwood_bundle().unwrap().actions().len())
                         .unwrap();
-                let (arrivals, _) = crate::mint::apply_block(
+                let arrivals = crate::mint::apply_block(
                     &network,
                     birthday,
                     &registry_keys,

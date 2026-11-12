@@ -1742,13 +1742,27 @@ mod tests {
         );
     }
 
+    /// Relays the one requested challenge, as the run loop does, and
+    /// returns the code it carried.
+    fn issue(challenges: &mut OtpQueue) -> OtpCode {
+        let pending = challenges.requested().remove(0);
+        challenges.challenge_issued(&pending);
+        pending.code
+    }
+
+    /// A code that is not `code`.
+    fn other_than(code: &OtpCode) -> OtpCode {
+        let mut digits = code.digits();
+        digits[0] = if digits[0] == b'0' { b'1' } else { b'0' };
+        OtpCode::for_test(digits)
+    }
+
     #[test]
     fn a_list_waits_for_the_controllers_code() {
         let (owner, pay_to) = alice();
         let mut registry = sale_registry();
         let mut market = Market::new();
         let mut challenges = OtpQueue::new();
-        let code = OtpCode::for_test(*b"042831");
         let request = list_for(150_000_000);
         market
             .propose_list(
@@ -1760,17 +1774,10 @@ mod tests {
                 height(),
             )
             .unwrap();
-        challenges.relay_seen(&OtpMemo {
-            code: code.clone(),
-            name: name(),
-            action: Action::List,
-            ua: owner.clone(),
-            listing: Some((pay_to, zats(150_000_000))),
-            auction: None,
-        });
+        let code = issue(&mut challenges);
         assert_eq!(registry.price(&name()), None);
         let wrong = OtpMemo {
-            code: OtpCode::for_test(*b"000000"),
+            code: other_than(&code),
             name: name(),
             action: Action::List,
             ua: owner.clone(),
@@ -1830,19 +1837,9 @@ mod tests {
                 height(),
             )
             .unwrap();
-        challenges.relay_seen(&OtpMemo {
-            code: OtpCode::for_test(*b"042831"),
-            name: name(),
-            action: Action::List,
-            ua: owner.clone(),
-            listing: Some((
-                TransparentAddress::PublicKeyHash([0x11; 20]),
-                zats(150_000_000),
-            )),
-            auction: None,
-        });
+        let code = issue(&mut challenges);
         let stranger = OtpMemo {
-            code: OtpCode::for_test(*b"042831"),
+            code,
             name: name(),
             action: Action::List,
             ua: bob(),
@@ -1875,14 +1872,13 @@ mod tests {
             .unwrap();
         assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
         let right = OtpMemo {
-            code: OtpCode::for_test(*b"042831"),
+            code: issue(&mut challenges),
             name: name(),
             action: Action::Delist,
             ua: owner.clone(),
             listing: None,
             auction: None,
         };
-        challenges.relay_seen(&right);
         let note = answer(&registry, &mut challenges, &right, height()).unwrap();
         assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
         confirm(&mut registry, &note, 61, height());

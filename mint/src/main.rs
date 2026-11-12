@@ -340,7 +340,7 @@ async fn main() {
                 });
 
             let payments = zns_mint::mint::sale::transparent_payments(&block);
-            let (arrivals, _) = zns_mint::mint::apply_block(
+            let arrivals = zns_mint::mint::apply_block(
                 &network,
                 birthday,
                 &registry_keys,

@@ -179,21 +179,6 @@ impl OtpQueue {
         }
     }
 
-    /// A relay the Treasury sent, read back from the chain: the
-    /// challenge it names takes its code and counts as relayed.
-    pub fn relay_seen(&mut self, relay: &OtpMemo) {
-        for (challenge, state, _) in &mut self.challenges {
-            if challenge.request.name() == &relay.name
-                && challenge.request.ua() == &relay.ua
-                && challenge.request.action() == relay.action
-                && challenge.same_terms(relay)
-            {
-                challenge.code = relay.code.clone();
-                *state = ChallengeState::Relayed;
-            }
-        }
-    }
-
     /// Issues a challenge for `request` unless one is live. Its code is
     /// unique among the challenges a response could also name. A live
     /// challenge takes `txid`, so a mined repeat backs a code first sent

@@ -1,5 +1,11 @@
 # `mint/note.rs` design record
 
+## 2026-11-12 — The Treasury's sent memos are not decoded (#475)
+
+- `decrypt_treasury_memos` returns only the memos paid to the Treasury.
+  `treasury_sent`, which read back the memos the Treasury sent with its
+  outgoing viewing key, is gone: they only fed boot's relay replay.
+
 ## 2026-11-11 — List, auction, and delist are Name Notes (#465)
 
 - `NameNote::List` carries a `Listing` and the carried-forward expiry.

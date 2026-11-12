@@ -1,5 +1,11 @@
 # `mint/otp.rs` design record
 
+## 2026-11-12 — `relay_seen` is gone (#475)
+
+- Nothing reads a relay back from the chain any more: boot no longer
+  rebuilds challenges. A challenge's code is the one `admit` generated
+  and the run loop relayed.
+
 ## 2026-11-09 — An `OtpChallenge` can challenge a list or a delist (#446)
 
 - `OtpQueue` holds list and delist challenges with update and release

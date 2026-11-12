@@ -533,8 +533,7 @@ impl Name {
 
 /// Applies one verified canonical successor to every faculty: scan, clock,
 /// Registry law, wallet commit, Treasury decode, and Name Note storage.
-/// Returns Treasury arrivals, which the caller routes, and the OTP
-/// relays the Treasury sent.
+/// Returns Treasury arrivals, which the caller routes.
 /// Before birthday, applies only wallet history and clock.
 /// Never fetches, never broadcasts.
 #[allow(clippy::too_many_arguments)]
@@ -548,7 +547,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     wallet: &mut Wallet<P>,
     registry: &mut registry::Registry,
     mtp: &mut mtp::MtpTracker,
-) -> (Vec<(TxId, MintInbound, Zatoshis)>, Vec<OtpMemo>) {
+) -> Vec<(TxId, MintInbound, Zatoshis)> {
     use std::collections::BTreeMap;
     use std::convert::Infallible;
 
@@ -574,13 +573,13 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .map(|tx| (tx.txid(), tx.expiry_height()))
         .collect();
     let block_time = block.header().time;
-    let (candidates, (treasury_memos, treasury_sent)) = if height >= birthday {
+    let (candidates, treasury_memos) = if height >= birthday {
         (
             decrypt_name_notes(network, &block, registry_keys),
             note::decrypt_treasury_memos(network, &block, height, treasury_keys),
         )
     } else {
-        (Vec::new(), (Vec::new(), Vec::new()))
+        (Vec::new(), Vec::new())
     };
 
     let (header, batches) = decrypt_block(network, block, wallet.scanning_keys());
@@ -744,10 +743,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .into_iter()
         .map(|(txid, paid, memo)| (txid, MintInbound::decode(network, &memo), paid))
         .collect();
-    let relays = treasury_sent
-        .iter()
-        .filter_map(|memo| OtpMemo::decode(network, memo))
-        .collect();
     for (index, position) in accepted_name_notes {
         let candidate = &candidates[index];
         wallet
@@ -772,7 +767,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         hash = %applied_tip.block_hash(),
         "canonical block applied"
     );
-    (arrivals, relays)
+    arrivals
 }
 
 // ===========================================================================
