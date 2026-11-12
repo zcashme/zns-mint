@@ -5258,7 +5258,6 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "orchard",
- "pasta_curves",
  "rand 0.10.3",
  "rust_decimal",
  "rustls",
