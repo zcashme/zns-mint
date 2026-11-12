@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.89"
 license = "MIT"
 publish = false
-description = "Cross-stack harness for ZNS: zebra, mint, resolver"
+description = "Cross-stack harness for ZNS: zebra, zallet, mint"
 
 [dependencies]
 anyhow = "1"

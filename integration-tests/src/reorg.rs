@@ -19,8 +19,7 @@ use anyhow::{bail, Context, Result};
 use hmac::Mac;
 use serde_json::json;
 
-use crate::fixture::Stack;
-use crate::verify::{wait_for_verified_name_note, VerifiedNameNote};
+use crate::fixture::{wait_for_verified_name_note, Stack, VerifiedNameNote};
 
 /// The name a reorg is not allowed to drop.
 const KEEP: &str = "zcash";

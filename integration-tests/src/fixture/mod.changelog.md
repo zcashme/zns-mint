@@ -1,5 +1,11 @@
 # fixture/mod.changelog.md
 
+## 2026-11-12
+
+- `treasury_ua` lives here. The harness's `ceremony` and `verify`
+  modules, which this module and `fixture::verify` were copied from, are
+  gone, so the fixture is the only copy.
+
 ## 2026-11-10
 
 - This crate root becomes the harness's `fixture` module (it was

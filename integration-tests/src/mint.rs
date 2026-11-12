@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use tempfile::TempDir;
 
-use crate::binaries::{cargo_build_bin_with, mint_bin_override, repo_root};
+use crate::binaries::{cargo_build_bin, mint_bin_override, repo_root};
 use crate::child::ChildProcess;
 
 /// Halo2 in a debug mint binary is too slow for vault sweep. Regtest
@@ -33,7 +33,7 @@ impl Mint {
         if let Some(bin) = mint_bin_override() {
             return Ok(bin);
         }
-        cargo_build_bin_with(
+        cargo_build_bin(
             &repo_root(),
             "zns-mint",
             &["-p", "zns-mint", "--features", "regtest"],

@@ -5,10 +5,9 @@
 //! — then author the 40-anchor Registry ceremony plus their own Ironwood
 //! funding. One transaction, one input, the whole ownership flow.
 //!
-//! A copy of this crate's `ceremony` and `tx` modules as of
-//! zns-integration-tests f28fabfb56e4962a7e95283134791fb41c51337c
-//! (themselves adapted from zns-keygen's anchor builder), with two
-//! deliberate divergences:
+//! Adapted from the `ceremony` and `tx` modules of zns-integration-tests
+//! f28fabfb56e4962a7e95283134791fb41c51337c (themselves adapted from
+//! zns-keygen's anchor builder), with two deliberate divergences:
 //! 1. no coinbase-maturity filter on the Treasury input — the funding
 //!    payment is a regular UTXO, not coinbase;
 //! 2. no ceremony-tx cache — the funding txid is random, so a cached
@@ -109,6 +108,23 @@ pub fn account_usk(
         AccountId::try_from(account).expect("account 0/1"),
     )
     .map_err(|e| anyhow!("ZIP-32 USK account {account}: {e}"))
+}
+
+/// The Treasury's Orchard-only UA (ZIP-32 account 0, j=0 external): where
+/// the user pays request memos.
+pub fn treasury_ua() -> Result<String> {
+    let network = regtest_network();
+    let usk = account_usk(&network, &DEV_SEED, 0)?;
+    let fvk = orchard::keys::FullViewingKey::from(usk.orchard());
+    zcash_keys::address::UnifiedAddress::from_receivers(
+        Some(fvk.address_at(0u32, orchard::keys::Scope::External)),
+        None,
+        None,
+        None,
+        None,
+    )
+    .ok_or_else(|| anyhow!("orchard-only UA"))
+    .map(|ua| ua.encode(&network))
 }
 
 /// The Treasury's transparent P2PKH (ZIP-32 account 0, j=0 external).

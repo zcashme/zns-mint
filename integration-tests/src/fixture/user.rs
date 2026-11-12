@@ -5,8 +5,10 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde_json::json;
 
-use super::{mature_coinbase_zats, wait_until_sees_coinbase, wait_until_shielded, Zallet};
-use crate::{treasury_ua, Zebrad};
+use super::{
+    mature_coinbase_zats, treasury_ua, wait_until_sees_coinbase, wait_until_shielded, Zallet,
+};
+use crate::Zebrad;
 
 /// ZEC per request payment. Deliberately overpays the oracle-priced fees:
 /// intake is fail-closed and an underpay is a dead attempt.
