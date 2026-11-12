@@ -20,6 +20,7 @@ use zns_mint::boot::Boot;
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::presale;
 use zns_mint::mint::pricing::{fetch_round, Oracle};
+use zns_mint::mint::sale::Market;
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
 use zns_mint::mint::{
@@ -268,11 +269,7 @@ async fn main() {
             .await
             .expect("FATAL: MTP reconstruction after reorg failed");
             challenges = OtpQueue::new();
-            market.truncate_to(rewound);
-            market.expire(
-                mtp.current().expect("FATAL: MTP unavailable after reorg"),
-                rewound,
-            );
+            market = Market::new();
             name_notes.rewind_to(rewound);
             name_notes.reconcile_seen(&network, &registry);
             requests.truncate_to(rewound);
@@ -381,8 +378,8 @@ async fn main() {
                 }
                 challenges.rebind(request, *txid);
             }
-            market.expire(block_mtp, next_height);
-            market.reconcile(&registry, next_height);
+            market.expire(block_mtp);
+            market.reconcile(&registry);
             for (txid, inbound, paid) in arrivals {
                 match inbound {
                     MintInbound::Request(
@@ -535,7 +532,6 @@ async fn main() {
                 |name| registry.record(name).map(|record| record.ua().clone()),
                 &payments,
                 block_mtp,
-                next_height,
             );
         }
 
@@ -760,7 +756,7 @@ async fn main() {
 
         // A paid sale binds the buyer while the holder is unchanged,
         // before the lifecycle admits its own release of the same name.
-        for note in market.poll(&registry, |name| name_notes.note_pending(name), tip) {
+        for note in market.poll(&registry, |name| name_notes.note_pending(name)) {
             let name = note.name().clone();
             if name_notes.admit(tip, note) {
                 challenges.drop_challenges(&name);

@@ -1,5 +1,23 @@
 # Sale module changelog
 
+## 2026-11-12 — The market keeps no history, and is one type (#477)
+
+- `SaleQueue` is gone: `Market` holds the open buys itself. Its
+  forwarding methods are gone, `is_open` is private (callers ask
+  `allows_transition`), and `is_paid` is test-only. `AuctionTerms`,
+  `Ask`, `Listing`, and `MarketRefusal` move above `Market`, so it has
+  one `impl` block.
+
+- `MarketEvent`, `Stamped`, `Market.events`, `Market::record`, and
+  `Market::truncate_to` are gone. A reorg drops the open buys instead
+  of replaying a log of every buy. `SaleQueue::restore`, `mark_paid`,
+  and `close` served only that replay.
+- `observe`, `expire`, `reconcile`, and `poll` take no height and
+  return no names: both only stamped log entries. `poll` still returns
+  the sale notes to submit.
+- The rollback tests are gone with the rollback. The expiry test keeps
+  its expire, re-open, and pay steps.
+
 ## 2026-11-12 — Boot does not replay buys; a buy's code is random (#475)
 
 - `Market::seal_replayed_buys` and `SaleQueue::seal_relayed` are gone.

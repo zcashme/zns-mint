@@ -245,22 +245,112 @@ struct Sale {
     phase: Phase,
 }
 
-/// Open sales. One per name. Rebuilt from the chain on startup.
+/// An auction's terms. The start block quotes `start_price`. The end
+/// block quotes `min_price` and is the last block that sells.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuctionTerms {
+    pub start_price: Zatoshis,
+    pub min_price: Zatoshis,
+    pub start: BlockHeight,
+    pub end: BlockHeight,
+}
+
+impl AuctionTerms {
+    /// The end is after the start, and the price falls.
+    pub fn is_valid(&self) -> bool {
+        self.end > self.start && self.start_price > self.min_price
+    }
+
+    /// Whole-zatoshis fall. A height outside the span has no price.
+    pub fn price_at(&self, height: BlockHeight) -> Option<Zatoshis> {
+        if !self.is_valid() || height < self.start || height > self.end {
+            return None;
+        }
+        let span = u128::from(u32::from(self.end) - u32::from(self.start));
+        let elapsed = u128::from(u32::from(height) - u32::from(self.start));
+        let drop = u128::from(self.start_price.into_u64() - self.min_price.into_u64());
+        let fallen = u64::try_from(drop * elapsed / span).ok()?;
+        Zatoshis::from_u64(self.start_price.into_u64() - fallen).ok()
+    }
+}
+
+/// What the buyer pays. A flat price is the listing. An auction price is
+/// the price of the block his intent is mined in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ask {
+    Flat(Zatoshis),
+    Dutch(AuctionTerms),
+}
+
+/// One listing per name: the terms of its current list note.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listing {
+    pub name: Name,
+    pub ua: UnifiedAddress,
+    pub pay_to: TransparentAddress,
+    pub ask: Ask,
+}
+
+/// Why a list, delist, or buy did not change the market.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarketRefusal {
+    /// A buy is open, so the listing stays as it was.
+    BuyOpen,
+    /// The caller does not own the name, or the t1 is not hers.
+    NotOwner,
+    /// The name has no listing.
+    NotListed,
+    /// A name note is already in flight.
+    InFlight,
+    /// The purchased term or the liveness deadline has passed.
+    ReleaseDue,
+    /// This name already has a buy.
+    AlreadyOpen,
+    /// An open buy already pays this address the same total.
+    PaymentTaken,
+    /// The auction has not reached its start block.
+    Early { start: BlockHeight },
+    /// An auction sale still reserves the name.
+    Held { until: Timestamp },
+    /// The end is not after the start, or the price does not fall.
+    BadTerms,
+    /// This block is after the auction's end block.
+    Ended,
+}
+
+/// An auction lists through its end block. A later height quotes no price.
+pub(crate) fn listable(ask: &Ask, height: BlockHeight) -> Result<(), MarketRefusal> {
+    let Ask::Dutch(terms) = ask else {
+        return Ok(());
+    };
+    if !terms.is_valid() {
+        return Err(MarketRefusal::BadTerms);
+    }
+    if height > terms.end {
+        return Err(MarketRefusal::Ended);
+    }
+    Ok(())
+}
+
+/// The open buys against listings, one per name. A listing is the name's
+/// current note in the registry. A buy holds the name: no new listing, no
+/// delist, and no update, release, or lifecycle release. A restart or a
+/// reorg starts it empty.
 #[derive(Default)]
-pub struct SaleQueue {
+pub struct Market {
     sales: Vec<Sale>,
 }
 
-impl SaleQueue {
+impl Market {
     pub fn new() -> Self {
-        Self { sales: Vec::new() }
+        Self::default()
     }
 
     /// Opens a sale and returns the OTP to send Bob. `None` when this
     /// name already has one. A flat quote stays payable for [`D_OTP`].
     /// An auction quote stays payable for [`D_DUTCH`].
     #[allow(clippy::too_many_arguments)]
-    pub fn open(
+    fn open(
         &mut self,
         name: &Name,
         bob: &UnifiedAddress,
@@ -364,9 +454,8 @@ impl SaleQueue {
         holder: impl Fn(&Name) -> Option<UnifiedAddress>,
         payments: &[(TransparentAddress, Zatoshis)],
         mtp: Timestamp,
-    ) -> Vec<(Name, OtpCode)> {
+    ) {
         let mut used = vec![false; payments.len()];
-        let mut paid = Vec::new();
         for sale in &mut self.sales {
             let Phase::Paying {
                 code,
@@ -397,11 +486,8 @@ impl SaleQueue {
                 continue;
             };
             used[index] = true;
-            let code = code.clone();
             sale.phase = Phase::Paid;
-            paid.push((sale.name.clone(), code));
         }
-        paid
     }
 
     fn get(&self, name: &Name) -> Option<&Sale> {
@@ -415,89 +501,40 @@ impl SaleQueue {
         sale.dutch.then_some(sale.until)
     }
 
-    fn restore(&mut self, sale: Sale) {
-        if self.sales.iter().any(|open| open.name == sale.name) {
-            return;
-        }
-        self.sales.push(sale);
-    }
-
-    fn mark_paid(&mut self, name: &Name, code: &OtpCode) {
-        for sale in &mut self.sales {
-            if sale.name == *name {
-                if let Phase::Paying { code: open, .. } = &sale.phase {
-                    if open == code {
-                        sale.phase = Phase::Paid;
-                    }
-                }
-            }
-        }
-    }
-
-    fn close(&mut self, name: &Name) {
-        self.sales.retain(|sale| sale.name != *name);
-    }
-
     /// A buy is open from the OTP until it expires unpaid or Bob holds the name.
-    pub fn is_open(&self, name: &Name) -> bool {
+    fn is_open(&self, name: &Name) -> bool {
         self.sales.iter().any(|sale| sale.name == *name)
     }
 
     /// The payment has matched and the sale note is still owed.
-    pub fn is_paid(&self, name: &Name) -> bool {
+    #[cfg(test)]
+    fn is_paid(&self, name: &Name) -> bool {
         self.sales
             .iter()
             .any(|sale| sale.name == *name && matches!(sale.phase, Phase::Paid))
     }
 
-    /// Drops an unpaid sale whose code has expired. The names leave in order.
-    pub fn expire(&mut self, mtp: Timestamp) -> Vec<Name> {
-        let mut dropped = Vec::new();
+    /// Drops an unpaid sale whose code has expired.
+    pub fn expire(&mut self, mtp: Timestamp) {
         self.sales.retain(|sale| match &sale.phase {
-            Phase::Paying { expires_at, .. } => {
-                if mtp < *expires_at {
-                    true
-                } else {
-                    dropped.push(sale.name.clone());
-                    false
-                }
-            }
+            Phase::Paying { expires_at, .. } => mtp < *expires_at,
             Phase::Paid => true,
         });
-        dropped
     }
 
     /// Drops a sale whose captured note is gone. A paid sale whose note is
     /// still that one stays, so the caller can sign it.
-    pub fn reconcile(
-        &mut self,
-        live: impl Fn(&Name) -> Option<(UnifiedAddress, NameCommitment)>,
-    ) -> Vec<Name> {
-        let mut closed = Vec::new();
-        self.sales.retain(|sale| {
-            let moved = match live(&sale.name) {
-                Some((ua, commitment)) => ua != sale.alice || commitment != sale.held,
-                None => true,
-            };
-            if moved {
-                closed.push(sale.name.clone());
-                false
-            } else {
-                true
-            }
+    pub fn reconcile(&mut self, registry: &Registry) {
+        self.sales.retain(|sale| match registry.record(&sale.name) {
+            Some(record) => *record.ua() == sale.alice && record.commitment == sale.held,
+            None => false,
         });
-        closed
     }
 
     /// After a matching payment, sign a sale while the captured note is live.
     /// The sale leaves once that note is gone.
-    pub fn poll(
-        &mut self,
-        registry: &Registry,
-        pending: impl Fn(&Name) -> bool,
-    ) -> (Vec<NameNote>, Vec<Name>) {
+    pub fn poll(&mut self, registry: &Registry, pending: impl Fn(&Name) -> bool) -> Vec<NameNote> {
         let mut notes = Vec::new();
-        let mut closed = Vec::new();
         self.sales.retain_mut(|sale| {
             if !matches!(sale.phase, Phase::Paid) {
                 return true;
@@ -506,234 +543,28 @@ impl SaleQueue {
                 return true;
             }
             let Some(record) = registry.record(&sale.name) else {
-                closed.push(sale.name.clone());
                 return false;
             };
             if *record.ua() == sale.bob
                 || *record.ua() != sale.alice
                 || record.commitment != sale.held
             {
-                closed.push(sale.name.clone());
                 return false;
             }
             let Some(note) = registry.sale_transfer(&sale.name, &sale.bob, sale.term, sale.held)
             else {
-                closed.push(sale.name.clone());
                 return false;
             };
             notes.push(note);
             true
         });
-        (notes, closed)
-    }
-}
-
-/// An auction's terms. The start block quotes `start_price`. The end
-/// block quotes `min_price` and is the last block that sells.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AuctionTerms {
-    pub start_price: Zatoshis,
-    pub min_price: Zatoshis,
-    pub start: BlockHeight,
-    pub end: BlockHeight,
-}
-
-impl AuctionTerms {
-    /// The end is after the start, and the price falls.
-    pub fn is_valid(&self) -> bool {
-        self.end > self.start && self.start_price > self.min_price
-    }
-
-    /// Whole-zatoshis fall. A height outside the span has no price.
-    pub fn price_at(&self, height: BlockHeight) -> Option<Zatoshis> {
-        if !self.is_valid() || height < self.start || height > self.end {
-            return None;
-        }
-        let span = u128::from(u32::from(self.end) - u32::from(self.start));
-        let elapsed = u128::from(u32::from(height) - u32::from(self.start));
-        let drop = u128::from(self.start_price.into_u64() - self.min_price.into_u64());
-        let fallen = u64::try_from(drop * elapsed / span).ok()?;
-        Zatoshis::from_u64(self.start_price.into_u64() - fallen).ok()
-    }
-}
-
-/// What the buyer pays. A flat price is the listing. An auction price is
-/// the price of the block his intent is mined in.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Ask {
-    Flat(Zatoshis),
-    Dutch(AuctionTerms),
-}
-
-/// One listing per name: the terms of its current list note.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Listing {
-    pub name: Name,
-    pub ua: UnifiedAddress,
-    pub pay_to: TransparentAddress,
-    pub ask: Ask,
-}
-
-/// Why a list, delist, or buy did not change the market.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MarketRefusal {
-    /// A buy is open, so the listing stays as it was.
-    BuyOpen,
-    /// The caller does not own the name, or the t1 is not hers.
-    NotOwner,
-    /// The name has no listing.
-    NotListed,
-    /// A name note is already in flight.
-    InFlight,
-    /// The purchased term or the liveness deadline has passed.
-    ReleaseDue,
-    /// This name already has a buy.
-    AlreadyOpen,
-    /// An open buy already pays this address the same total.
-    PaymentTaken,
-    /// The auction has not reached its start block.
-    Early { start: BlockHeight },
-    /// An auction sale still reserves the name.
-    Held { until: Timestamp },
-    /// The end is not after the start, or the price does not fall.
-    BadTerms,
-    /// This block is after the auction's end block.
-    Ended,
-}
-
-/// An auction lists through its end block. A later height quotes no price.
-pub(crate) fn listable(ask: &Ask, height: BlockHeight) -> Result<(), MarketRefusal> {
-    let Ask::Dutch(terms) = ask else {
-        return Ok(());
-    };
-    if !terms.is_valid() {
-        return Err(MarketRefusal::BadTerms);
-    }
-    if height > terms.end {
-        return Err(MarketRefusal::Ended);
-    }
-    Ok(())
-}
-
-enum MarketEvent {
-    Open { sale: Box<Sale> },
-    Paid { name: Name, code: OtpCode },
-    Expire { name: Name },
-    Close { name: Name },
-}
-
-struct Stamped {
-    height: BlockHeight,
-    event: MarketEvent,
-}
-
-/// The buys against listings. A listing is the name's current note in the
-/// registry. A buy holds the name: no new listing, no delist, and no
-/// update, release, or lifecycle release. The event log is what a
-/// rollback rebuilds the buys from.
-#[derive(Default)]
-pub struct Market {
-    sales: SaleQueue,
-    events: Vec<Stamped>,
-}
-
-impl Market {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn names(&self) -> impl Iterator<Item = &Name> {
-        self.sales.names()
-    }
-
-    pub fn is_open(&self, name: &Name) -> bool {
-        self.sales.is_open(name)
-    }
-
-    pub fn is_paid(&self, name: &Name) -> bool {
-        self.sales.is_paid(name)
+        notes
     }
 
     /// An update, a release, an OTP response, or a lifecycle release
     /// may proceed. False while a buy is open.
     pub fn allows_transition(&self, name: &Name) -> bool {
-        !self.sales.is_open(name)
-    }
-
-    pub fn unrelayed(&self) -> Vec<BuyOtp> {
-        self.sales.unrelayed()
-    }
-
-    /// The node accepted the buy OTP. The open event keeps `relayed` clear,
-    /// so a rollback submits that code.
-    pub fn relayed(&mut self, name: &Name) {
-        self.sales.relayed(name);
-    }
-
-    pub fn observe(
-        &mut self,
-        holder: impl Fn(&Name) -> Option<UnifiedAddress>,
-        payments: &[(TransparentAddress, Zatoshis)],
-        mtp: Timestamp,
-        height: BlockHeight,
-    ) {
-        for (name, code) in self.sales.observe(holder, payments, mtp) {
-            self.record(height, MarketEvent::Paid { name, code });
-        }
-    }
-
-    /// Drops unpaid sales whose time has passed.
-    pub fn expire(&mut self, mtp: Timestamp, height: BlockHeight) {
-        for name in self.sales.expire(mtp) {
-            self.record(height, MarketEvent::Expire { name });
-        }
-    }
-
-    /// Drops a sale whose captured note is no longer live. A scan calls
-    /// this before the block's memos, so a finished sale does not block them.
-    pub fn reconcile(&mut self, registry: &Registry, height: BlockHeight) {
-        let live = |name: &Name| {
-            registry
-                .record(name)
-                .map(|record| (record.ua().clone(), record.commitment))
-        };
-        for name in self.sales.reconcile(live) {
-            self.record(height, MarketEvent::Close { name });
-        }
-    }
-
-    /// Drops entries from blocks above `height` and rebuilds the rest.
-    pub fn truncate_to(&mut self, height: BlockHeight) {
-        self.events.retain(|event| event.height <= height);
-        let events = std::mem::take(&mut self.events);
-        self.sales = SaleQueue::new();
-        for stamped in &events {
-            match &stamped.event {
-                MarketEvent::Open { sale } => self.sales.restore(sale.as_ref().clone()),
-                MarketEvent::Paid { name, code } => self.sales.mark_paid(name, code),
-                MarketEvent::Expire { name } | MarketEvent::Close { name } => {
-                    self.sales.close(name);
-                }
-            }
-        }
-        self.events = events;
-    }
-
-    pub fn poll(
-        &mut self,
-        registry: &Registry,
-        pending: impl Fn(&Name) -> bool,
-        height: BlockHeight,
-    ) -> Vec<NameNote> {
-        let (notes, closed) = self.sales.poll(registry, pending);
-        for name in closed {
-            self.record(height, MarketEvent::Close { name });
-        }
-        notes
-    }
-
-    fn record(&mut self, height: BlockHeight, event: MarketEvent) {
-        self.events.push(Stamped { height, event });
+        !self.is_open(name)
     }
 
     /// Opens a buy from the current listing. The caller drops any
@@ -753,8 +584,8 @@ impl Market {
         mtp: Timestamp,
         height: BlockHeight,
     ) -> Result<BuyOtp, MarketRefusal> {
-        if self.sales.is_open(name) {
-            if let Some(until) = self.sales.dutch_hold(name) {
+        if self.is_open(name) {
+            if let Some(until) = self.dutch_hold(name) {
                 return Err(MarketRefusal::Held { until });
             }
             return Err(MarketRefusal::AlreadyOpen);
@@ -785,32 +616,22 @@ impl Market {
         if note_pending {
             return Err(MarketRefusal::InFlight);
         }
-        if self.sales.same_payment(pay_to, price, &code) {
+        if self.same_payment(pay_to, price, &code) {
             return Err(MarketRefusal::PaymentTaken);
         }
-        let otp = self
-            .sales
-            .open(
-                name,
-                bob,
-                owner.clone(),
-                pay_to,
-                price,
-                term,
-                held,
-                code,
-                dutch,
-                mtp,
-            )
-            .ok_or(MarketRefusal::AlreadyOpen)?;
-        let sale = self.sales.get(name).expect("just opened").clone();
-        self.record(
-            height,
-            MarketEvent::Open {
-                sale: Box::new(sale),
-            },
-        );
-        Ok(otp)
+        self.open(
+            name,
+            bob,
+            owner.clone(),
+            pay_to,
+            price,
+            term,
+            held,
+            code,
+            dutch,
+            mtp,
+        )
+        .ok_or(MarketRefusal::AlreadyOpen)
     }
 
     /// Opens a list challenge. The returned code authorizes a list note,
@@ -828,7 +649,7 @@ impl Market {
         if !is_owner_listing(owner, &listing.ua, &listing.pay_to) {
             return Err(MarketRefusal::NotOwner);
         }
-        if self.sales.is_open(&listing.name) {
+        if self.is_open(&listing.name) {
             return Err(MarketRefusal::BuyOpen);
         }
         challenges.admit(Request::List(listing.clone()), txid, mtp);
@@ -849,7 +670,7 @@ impl Market {
         if registry.record(name).is_none_or(|record| record.ua() != ua) {
             return Err(MarketRefusal::NotOwner);
         }
-        if self.sales.is_open(name) {
+        if self.is_open(name) {
             return Err(MarketRefusal::BuyOpen);
         }
         if registry.listing(name).is_none() {
@@ -1238,7 +1059,7 @@ mod tests {
 
     #[test]
     fn an_unpaid_sale_expires_with_the_code() {
-        let mut sales = SaleQueue::new();
+        let mut sales = Market::new();
         let mtp = Timestamp::from_seconds(1_700_000_000).unwrap();
         assert!(sales
             .open(
@@ -1474,10 +1295,7 @@ mod tests {
         // The same gate refuses an update, a release, an OTP response,
         // and a lifecycle release.
         assert!(!market.allows_transition(&name()));
-        market.expire(
-            Timestamp::from_seconds(1_700_000_000 + D_OTP).unwrap(),
-            height(),
-        );
+        market.expire(Timestamp::from_seconds(1_700_000_000 + D_OTP).unwrap());
         assert!(market.allows_transition(&name()));
         assert!(propose_delist(&mut market, &registry, &owner).is_ok());
         delist_on_chain(&mut registry, &name(), 61);
@@ -1488,7 +1306,7 @@ mod tests {
     fn a_paid_buy_still_holds_the_name() {
         let (mut market, registry, owner, pay_to, otp) = buying(150_000_000);
         let paid = zats(150_000_000 + otp_amount(&otp.code).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
+        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp());
         assert!(market.is_paid(&name()));
         assert!(!market.allows_transition(&name()));
         assert_eq!(
@@ -1631,22 +1449,17 @@ mod tests {
         let (mut market, _registry, owner, pay_to, otp) = buying(150_000_000);
         let exact = zats(150_000_000 + otp_amount(&otp.code).into_u64());
         let short = zats(exact.into_u64() - 1);
-        market.observe(|_| Some(owner.clone()), &[(pay_to, short)], mtp(), height());
+        market.observe(|_| Some(owner.clone()), &[(pay_to, short)], mtp());
         assert!(!market.is_paid(&name()));
         let elsewhere = TransparentAddress::PublicKeyHash([0x22; 20]);
-        market.observe(
-            |_| Some(owner.clone()),
-            &[(elsewhere, exact)],
-            mtp(),
-            height(),
-        );
+        market.observe(|_| Some(owner.clone()), &[(elsewhere, exact)], mtp());
         assert!(!market.is_paid(&name()));
         // She no longer holds the name.
-        market.observe(|_| Some(bob()), &[(pay_to, exact)], mtp(), height());
+        market.observe(|_| Some(bob()), &[(pay_to, exact)], mtp());
         assert!(!market.is_paid(&name()));
-        market.observe(|_| None, &[(pay_to, exact)], mtp(), height());
+        market.observe(|_| None, &[(pay_to, exact)], mtp());
         assert!(!market.is_paid(&name()));
-        market.observe(|_| Some(owner.clone()), &[(pay_to, exact)], mtp(), height());
+        market.observe(|_| Some(owner.clone()), &[(pay_to, exact)], mtp());
         assert!(market.is_paid(&name()));
     }
 
@@ -1658,12 +1471,7 @@ mod tests {
         let price = 100_900_000u64;
         let tail = (price / 1_000_000 + 1) * 1_000_000 + code;
         assert_ne!(tail - price, code);
-        market.observe(
-            |_| Some(owner.clone()),
-            &[(pay_to, zats(tail))],
-            mtp(),
-            height(),
-        );
+        market.observe(|_| Some(owner.clone()), &[(pay_to, zats(tail))], mtp());
         assert!(!market.is_paid(&name()));
     }
 
@@ -1672,55 +1480,10 @@ mod tests {
         let (mut market, registry, owner, pay_to, otp) = buying(150_000_000);
         let exact = zats(150_000_000 + otp_amount(&otp.code).into_u64());
         let later = Timestamp::from_seconds(1_700_000_000 + D_OTP).unwrap();
-        market.expire(later, height());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, exact)], later, height());
+        market.expire(later);
+        market.observe(|_| Some(owner.clone()), &[(pay_to, exact)], later);
         assert!(!market.is_open(&name()));
         assert!(propose_delist(&mut market, &registry, &owner).is_ok());
-    }
-
-    #[test]
-    fn a_rollback_keeps_blocks_that_are_still_valid() {
-        let (owner, pay_to) = alice();
-        let mut registry = sale_registry();
-        let mut market = Market::new();
-        let low = BlockHeight::from_u32(10);
-        let high = BlockHeight::from_u32(20);
-        list_on_chain_at(&mut registry, &list_for(100_000_000), 60, low);
-        let code = OtpCode::for_test(*b"123456");
-        let otp = market
-            .open_buy(
-                &registry,
-                &name(),
-                &bob(),
-                &owner,
-                Expiry::Never,
-                held(),
-                false,
-                false,
-                code.clone(),
-                mtp(),
-                low,
-            )
-            .unwrap();
-        assert_eq!(otp.code.digits(), code.digits());
-        let paid = zats(100_000_000 + otp_amount(&code).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), high);
-        assert!(market.is_paid(&name()));
-
-        market.truncate_to(low);
-        registry.truncate_to_height(low);
-        assert_eq!(registry.price(&name()), Some(zats(100_000_000)));
-        assert!(market.is_open(&name()));
-        assert!(!market.is_paid(&name()));
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), high);
-        assert!(market.is_paid(&name()));
-
-        // The list note's block rolls back, and alice's claim stands.
-        market.truncate_to(BlockHeight::from_u32(5));
-        registry.truncate_to_height(BlockHeight::from_u32(5));
-        assert_eq!(registry.record(&name()).unwrap().action(), Action::Claim);
-        assert_eq!(registry.price(&name()), None);
-        assert!(!market.is_open(&name()));
     }
 
     /// Relays the one requested challenge, as the run loop does, and
@@ -1912,7 +1675,7 @@ mod tests {
             )
             .unwrap();
         let paid = zats(100_000_000 + otp_amount(&code).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
+        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp());
         assert!(market.is_paid(&name()));
         assert!(!market.is_paid(&second));
     }
@@ -1923,9 +1686,7 @@ mod tests {
         let mut registry = sale_registry();
         let mut market = Market::new();
         let open_at = BlockHeight::from_u32(10);
-        let expired_at = BlockHeight::from_u32(15);
         let next_at = BlockHeight::from_u32(16);
-        let paid_at = BlockHeight::from_u32(20);
         list_on_chain_at(&mut registry, &list_for(100_000_000), 60, open_at);
         let first = OtpCode::for_test(*b"111111");
         market
@@ -1944,7 +1705,7 @@ mod tests {
             )
             .unwrap();
         let later = Timestamp::from_seconds(1_700_000_000 + D_OTP).unwrap();
-        market.expire(later, expired_at);
+        market.expire(later);
         assert!(!market.is_open(&name()));
         let second = OtpCode::for_test(*b"222222");
         market
@@ -1963,23 +1724,7 @@ mod tests {
             )
             .unwrap();
         let paid = zats(100_000_000 + otp_amount(&second).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], later, paid_at);
-        assert!(market.is_paid(&name()));
-
-        market.truncate_to(paid_at);
-        assert!(market.is_paid(&name()));
-        assert!(market.is_open(&name()));
-
-        market.truncate_to(open_at);
-        assert!(market.is_open(&name()));
-        assert!(!market.is_paid(&name()));
-        let first_paid = zats(100_000_000 + otp_amount(&OtpCode::for_test(*b"111111")).into_u64());
-        market.observe(
-            |_| Some(owner.clone()),
-            &[(pay_to, first_paid)],
-            mtp(),
-            expired_at,
-        );
+        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], later);
         assert!(market.is_paid(&name()));
     }
 
@@ -2006,31 +1751,6 @@ mod tests {
         assert!(registry
             .authorize_challenge(&notes, &unclaimed, next, mtp())
             .is_none());
-    }
-
-    #[test]
-    fn a_rollback_submits_an_open_code() {
-        let (mut market, registry, owner, _) = listed(100_000_000);
-        let buy = OtpCode::for_test(*b"123456");
-        market
-            .open_buy(
-                &registry,
-                &name(),
-                &bob(),
-                &owner,
-                Expiry::Never,
-                held(),
-                false,
-                false,
-                buy,
-                mtp(),
-                height(),
-            )
-            .unwrap();
-        market.relayed(&name());
-        assert!(market.unrelayed().is_empty());
-        market.truncate_to(height());
-        assert_eq!(market.unrelayed().len(), 1);
     }
 
     #[test]
@@ -2239,7 +1959,7 @@ mod tests {
         let back = returned_intent(&name(), &bob(), MarketRefusal::Held { until }).unwrap();
         assert_eq!(back.note, format!("ZNS:held:alice:{}", until.as_seconds()));
         let paid = zats(70_000_000 + otp_amount(&code).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), at);
+        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp());
         assert!(market.is_paid(&name()));
     }
 
@@ -2302,16 +2022,13 @@ mod tests {
             .unwrap();
         assert_eq!(registry.quote(&name(), at), Some(zats(40_000_000)));
         let later = BlockHeight::from_u32(21);
-        market.expire(mtp(), later);
+        market.expire(mtp());
         assert_eq!(registry.quote(&name(), later), None);
         assert!(market.is_open(&name()));
         let paid = zats(40_000_000 + otp_amount(&code).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), later);
+        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp());
         assert!(market.is_paid(&name()));
-        market.expire(
-            Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH).unwrap(),
-            later,
-        );
+        market.expire(Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH).unwrap());
         assert!(market.is_paid(&name()));
     }
 
@@ -2409,13 +2126,10 @@ mod tests {
                 at,
             )
             .unwrap();
-        market.expire(
-            Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH - 1).unwrap(),
-            at,
-        );
+        market.expire(Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH - 1).unwrap());
         assert!(market.is_open(&name()));
         let after = Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH).unwrap();
-        market.expire(after, at);
+        market.expire(after);
         assert!(!market.is_open(&name()));
         assert_eq!(registry.quote(&name(), at), Some(zats(70_000_000)));
     }
@@ -2454,54 +2168,6 @@ mod tests {
             registry.quote(&name(), BlockHeight::from_u32(20)),
             Some(zats(40_000_000))
         );
-    }
-
-    #[test]
-    fn a_paid_auction_buy_keeps_the_hold_through_a_replay() {
-        let (owner, pay_to) = alice();
-        let mut registry = sale_registry();
-        let mut market = Market::new();
-        let at = BlockHeight::from_u32(15);
-        let paid_at = BlockHeight::from_u32(16);
-        list_on_chain_at(&mut registry, &auction_listing(10, 20), 60, at);
-        let code = OtpCode::for_test(*b"042831");
-        market
-            .open_buy(
-                &registry,
-                &name(),
-                &bob(),
-                &owner,
-                Expiry::Never,
-                held(),
-                false,
-                false,
-                code.clone(),
-                mtp(),
-                at,
-            )
-            .unwrap();
-        let until = Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH).unwrap();
-        let paid = zats(70_000_000 + otp_amount(&code).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), paid_at);
-        assert!(market.is_paid(&name()));
-        market.truncate_to(paid_at);
-        assert!(market.is_paid(&name()));
-        assert!(matches!(
-            market.open_buy(
-                &registry,
-                &name(),
-                &bob(),
-                &owner,
-                Expiry::Never,
-                held(),
-                false,
-                false,
-                OtpCode::for_test(*b"111111"),
-                mtp(),
-                paid_at,
-            ),
-            Err(MarketRefusal::Held { until: held_until }) if held_until == until
-        ));
     }
 
     fn nf(seed: u8) -> orchard::note::Nullifier {
@@ -2627,12 +2293,7 @@ mod tests {
         assert!(first.opened.is_some());
         let code = market.unrelayed()[0].code.clone();
         let settlement = zats(70_000_000 + otp_amount(&code).into_u64());
-        market.observe(
-            |_| Some(owner.clone()),
-            &[(pay_to, settlement)],
-            mtp(),
-            later,
-        );
+        market.observe(|_| Some(owner.clone()), &[(pay_to, settlement)], mtp());
         assert!(market.is_paid(&name()));
 
         let next = admit_buy(&mut market, &registry, 2, zats(1_000_000), later);
