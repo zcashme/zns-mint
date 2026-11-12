@@ -98,9 +98,9 @@ impl NameRecord {
     }
 
     /// The clock-and-verb check behind [`Registry::authorize_challenge`]:
-    /// release, list, and delist from this record's controller, a list
-    /// at the transparent receiver on her address, and forever names
-    /// take no term. Claims and buys are never challenged.
+    /// release, list, and delist from this record's controller. A list
+    /// pays her transparent receiver, or the t1 she names when she has
+    /// none. Forever names take no term. Claims and buys are never challenged.
     fn allows_challenge(
         &self,
         request: &Request,
@@ -137,8 +137,9 @@ impl std::fmt::Debug for NameRecord {
 }
 
 /// A list or a delist changes neither the owner nor the term: it repeats
-/// both from `record`, and a list pays the owner's own t1. A sale spends
-/// a list note and repeats its term.
+/// both from `record`. A list pays her transparent receiver, or the t1
+/// she named when she has none. A sale spends a list note and repeats
+/// its term.
 fn carries_forward(note: &NameNote, record: &NameRecord) -> bool {
     match note {
         NameNote::List {
@@ -201,9 +202,10 @@ impl Registry {
         }
     }
 
-    /// The list law: the owner lists at her own t1, on terms that are
-    /// still listable at `height`, before either clock fires. The note
-    /// carries her UA and term forward. `None` means unlawful.
+    /// The list law: the owner lists at her transparent receiver, or at
+    /// the t1 she named when she has none, on terms still listable at
+    /// `height`, before either clock fires. The note carries her UA and
+    /// term forward. `None` means unlawful.
     pub fn authorize_list(
         &self,
         pending: &OtpChallenge,

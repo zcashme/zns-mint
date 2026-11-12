@@ -1,4 +1,4 @@
-//! A sale: Alice lists her name at her transparent address, Bob asks
+//! A sale: Alice lists her name at a transparent address, Bob asks
 //! to buy it, and a payment of her price plus the buy OTP makes the
 //! mint hand the name to Bob. The note is a sale, so the name stays live.
 //! A dutch listing falls from a start price to a minimum across a span
@@ -21,14 +21,18 @@ use crate::mint::{
     Action, Expiry, Name, NameCommitment, NameNote, Request, Timestamp, UnifiedAddress,
 };
 
-/// The listing is from the current owner, and the transparent address
-/// is the receiver on her controller address.
+/// The listing is from the current owner. Payment goes to the transparent
+/// receiver on that address when it has one, and to `pay_to` when it has none.
 pub fn is_owner_listing(
     owner: &UnifiedAddress,
     ua: &UnifiedAddress,
     pay_to: &TransparentAddress,
 ) -> bool {
-    owner == ua && owner.transparent() == Some(pay_to)
+    owner == ua
+        && match owner.transparent() {
+            Some(receiver) => receiver == pay_to,
+            None => true,
+        }
 }
 
 /// The mint's reply. The verb is `buyotp`, so a wallet cannot read it
@@ -1004,6 +1008,61 @@ mod tests {
             ))
         )
         .is_none());
+    }
+
+    #[test]
+    fn a_shielded_controller_lists_at_the_t1_she_names() {
+        let network = MainNetwork;
+        let base = decode_controller_ua(&network, TEST_UA).unwrap();
+        let owner = UnifiedAddress::from_receivers(
+            base.orchard().copied(),
+            base.sapling().cloned(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(owner.transparent().is_none());
+        let pasted = TransparentAddress::PublicKeyHash([0x22; 20]);
+        let pasted_text = Address::Transparent(pasted).encode(&network);
+        let memo = padded(&format!(
+            "ZNS:list:alice:{}:{pasted_text}:1.5",
+            owner.encode(&network),
+        ));
+        let Some(Request::List(list)) = Request::decode(&network, &memo) else {
+            panic!("expected list")
+        };
+        assert_eq!(list.pay_to, pasted);
+        assert!(is_owner_listing(&owner, &list.ua, &list.pay_to));
+        assert!(!is_owner_listing(&base, &list.ua, &list.pay_to));
+
+        let mut registry = Registry::new();
+        let anchor = nf(10);
+        registry.adopt_anchor(BlockHeight::from_u32(0), anchor);
+        let claim = NameNote::Claim {
+            name: name(),
+            ua: owner.clone(),
+            expires_at: Expiry::Never,
+        };
+        assert!(registry.accept_claim(
+            &network,
+            &claim,
+            nf(20),
+            Some(nf(40)),
+            &[anchor],
+            height(),
+            mtp(),
+            BlockHeight::from_u32(41),
+        ));
+        assert_eq!(
+            propose_list(&mut Market::new(), &list, &owner, height()),
+            Ok(())
+        );
+        list_on_chain(&mut registry, &list, 60);
+        assert_eq!(
+            registry.listing(&name()).map(|listing| listing.pay_to),
+            Some(pasted)
+        );
     }
 
     #[test]

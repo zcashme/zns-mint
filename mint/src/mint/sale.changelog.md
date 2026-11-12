@@ -1,5 +1,12 @@
 # Sale module changelog
 
+## 2026-11-12 — A shielded controller lists at the t1 she names
+
+- A listing pays the transparent receiver on the controller address
+  when that address has one. A different t1 is refused.
+- A controller address with no transparent receiver pays the t1 in
+  the list memo.
+
 ## 2026-11-12 — The market keeps no history, and is one type (#477)
 
 - `SaleQueue` is gone: `Market` holds the open buys itself. Its

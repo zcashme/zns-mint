@@ -2,6 +2,12 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-11-12 — A list pays a named t1 when the controller has none
+
+- `allows_challenge`, `authorize_list`, and `carries_forward` accept
+  a list whose t1 is the controller's transparent receiver, or the t1
+  she named when that address has no transparent receiver.
+
 ## 2026-11-11 — A listing is the name's current list note (#465)
 
 - `NameRecord` holds the note that set it; `name()`, `action()`,
