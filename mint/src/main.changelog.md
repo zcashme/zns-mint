@@ -1,5 +1,12 @@
 # main.changelog.md
 
+## 2026-11-12 — A reorg drops the open buys (#477)
+
+- A reorg replaces the market as it does the OTP queue:
+  `market = Market::new()`. A buy open at the reorg is gone; its buyer
+  sends a new request.
+- `market.expire`, `reconcile`, `observe`, and `poll` take no height.
+
 ## 2026-11-12 — The run loop starts with no OTP state from history (#475)
 
 - Boot hands the loop an empty `OtpQueue` and `Market`. A challenge or
