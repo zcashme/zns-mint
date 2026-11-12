@@ -1731,7 +1731,7 @@ mod tests {
     }
 
     #[test]
-    fn accept_update_prev_rcm_mismatch_marks_released() {
+    fn accept_update_prev_mismatch_marks_released() {
         let mut r = live_alice(Expiry::Never, 3_000_000_000);
         let wrong_prev = update_for_alice(Expiry::Never, 99);
         let height = BlockHeight::from_u32(101);

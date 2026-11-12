@@ -237,8 +237,8 @@ impl Expiry {
     ///
     /// Canonical means digits only — no sign, no leading zeroes (except `0`
     /// itself). Non-canonical spellings are rejected because the raw field
-    /// bytes are hashed into σ: `1` and `01` are different transitions with
-    /// different commitments.
+    /// bytes are hashed into the rseed: `1` and `01` are different
+    /// transitions with different commitments.
     pub fn parse(field: &str) -> Option<Self> {
         match field {
             "none" => Some(Expiry::Never),
@@ -394,7 +394,7 @@ impl NameNote {
         };
         let expires_at = Expiry::parse(parts[4])?;
 
-        let mut prev_rcm_bytes = [0u8; 32];
+        let mut prev_bytes = [0u8; 32];
         if parts[5].len() != 64
             || !parts[5]
                 .bytes()
@@ -402,12 +402,12 @@ impl NameNote {
         {
             return None;
         }
-        hex::decode_to_slice(parts[5], &mut prev_rcm_bytes).ok()?;
+        hex::decode_to_slice(parts[5], &mut prev_bytes).ok()?;
 
         let note = match action {
             Action::List | Action::Auction => {
                 let (pay_to, ask) = terms?;
-                if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                if prev_bytes == [0u8; 32] || ua_str.is_empty() {
                     return None;
                 }
                 NameNote::List {
@@ -418,22 +418,22 @@ impl NameNote {
                         ask,
                     },
                     expires_at,
-                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                    prev: NameCommitment::from_bytes(&prev_bytes)?,
                 }
             }
             Action::Delist => {
-                if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                if prev_bytes == [0u8; 32] || ua_str.is_empty() {
                     return None;
                 }
                 NameNote::Delist {
                     name,
                     ua,
                     expires_at,
-                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                    prev: NameCommitment::from_bytes(&prev_bytes)?,
                 }
             }
             Action::Claim => {
-                if prev_rcm_bytes != [0u8; 32] || ua_str.is_empty() {
+                if prev_bytes != [0u8; 32] || ua_str.is_empty() {
                     return None;
                 }
                 NameNote::Claim {
@@ -443,37 +443,37 @@ impl NameNote {
                 }
             }
             Action::Update => {
-                if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                if prev_bytes == [0u8; 32] || ua_str.is_empty() {
                     return None;
                 }
                 NameNote::Update {
                     name,
                     ua,
                     expires_at,
-                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                    prev: NameCommitment::from_bytes(&prev_bytes)?,
                 }
             }
             Action::Sale => {
-                if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                if prev_bytes == [0u8; 32] || ua_str.is_empty() {
                     return None;
                 }
                 NameNote::Sale {
                     name,
                     ua,
                     expires_at,
-                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                    prev: NameCommitment::from_bytes(&prev_bytes)?,
                 }
             }
             // A release MUST retain the released UA and encode the exact value
             // `none` for its expiry.
             Action::Release => {
-                if ua_str.is_empty() || expires_at != Expiry::Never || prev_rcm_bytes == [0u8; 32] {
+                if ua_str.is_empty() || expires_at != Expiry::Never || prev_bytes == [0u8; 32] {
                     return None;
                 }
                 NameNote::Release {
                     name,
                     ua,
-                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                    prev: NameCommitment::from_bytes(&prev_bytes)?,
                 }
             }
         };
@@ -975,7 +975,7 @@ mod tests {
         assert!(zcash_keys::address::Address::decode(&MAIN_NETWORK, "u1xxx").is_none());
     }
 
-    /// Canonical-decimal strictness: `e` bytes are hashed into σ, so
+    /// Canonical-decimal strictness: `e` bytes are hashed into the rseed, so
     /// non-canonical spellings must be rejected by the parser rather than
     /// silently accepted as the same value.
     #[test]
