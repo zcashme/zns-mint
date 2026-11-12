@@ -340,7 +340,7 @@ async fn main() {
                 });
 
             let payments = zns_mint::mint::sale::transparent_payments(&block);
-            let (arrivals, _) = zns_mint::mint::apply_block(
+            let arrivals = zns_mint::mint::apply_block(
                 &network,
                 birthday,
                 &registry_keys,
@@ -398,7 +398,6 @@ async fn main() {
                             next_height,
                             block_mtp,
                             |name| name_notes.note_pending(name),
-                            &access_code_key,
                         );
                         if let Some(back) = admitted.returned {
                             refunds.admit_with_note(

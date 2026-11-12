@@ -15,7 +15,6 @@ use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::TxId;
 
-use crate::mint::presale::AccessCodeDerivationKey;
 use crate::mint::registry::Registry;
 use crate::mint::treasury::{OtpCode, OtpQueue, D_OTP, FEE_ACTIONS};
 use crate::mint::{
@@ -405,16 +404,6 @@ impl SaleQueue {
         paid
     }
 
-    /// Every unpaid buy counts as sent. Startup uses this so a code read
-    /// from the chain is not submitted by this process.
-    fn seal_relayed(&mut self) {
-        for sale in &mut self.sales {
-            if let Phase::Paying { relayed, .. } = &mut sale.phase {
-                *relayed = true;
-            }
-        }
-    }
-
     fn get(&self, name: &Name) -> Option<&Sale> {
         self.sales.iter().find(|sale| sale.name == *name)
     }
@@ -681,19 +670,6 @@ impl Market {
         self.sales.relayed(name);
     }
 
-    /// An unpaid buy read from the chain stays payable and unsent. The
-    /// open event records that, so a later rollback leaves the code unsent.
-    pub fn seal_replayed_buys(&mut self) {
-        self.sales.seal_relayed();
-        for stamped in &mut self.events {
-            if let MarketEvent::Open { sale } = &mut stamped.event {
-                if let Phase::Paying { relayed, .. } = &mut sale.phase {
-                    *relayed = true;
-                }
-            }
-        }
-    }
-
     pub fn observe(
         &mut self,
         holder: impl Fn(&Name) -> Option<UnifiedAddress>,
@@ -901,7 +877,6 @@ impl Market {
         height: BlockHeight,
         mtp: Timestamp,
         pending: impl Fn(&Name) -> bool,
-        key: &AccessCodeDerivationKey,
     ) -> Admission {
         let fee_ok = (fee_rule.marginal_fee() * FEE_ACTIONS).is_some_and(|fee| paid >= fee);
         match request {
@@ -997,7 +972,7 @@ impl Market {
                 let owner = record.ua().clone();
                 let term = record.expires_at();
                 let held = record.commitment;
-                let code = key.buy_otp(&txid, name);
+                let code = OtpCode::generate();
                 if !fee_ok {
                     tracing::info!(
                         %txid,
@@ -1748,21 +1723,19 @@ mod tests {
         assert!(!market.is_open(&name()));
     }
 
-    #[test]
-    fn the_buy_code_is_the_same_on_a_second_read() {
-        let txid = [7u8; 32];
-        assert_eq!(
-            OtpCode::buy(b"mint-key", &txid, b"alice"),
-            OtpCode::buy(b"mint-key", &txid, b"alice")
-        );
-        assert_ne!(
-            OtpCode::buy(b"mint-key", &txid, b"alice"),
-            OtpCode::buy(b"other-key", &txid, b"alice")
-        );
-        assert_ne!(
-            OtpCode::buy(b"mint-key", &txid, b"alice"),
-            OtpCode::buy(b"mint-key", &txid, b"bob")
-        );
+    /// Relays the one requested challenge, as the run loop does, and
+    /// returns the code it carried.
+    fn issue(challenges: &mut OtpQueue) -> OtpCode {
+        let pending = challenges.requested().remove(0);
+        challenges.challenge_issued(&pending);
+        pending.code
+    }
+
+    /// A code that is not `code`.
+    fn other_than(code: &OtpCode) -> OtpCode {
+        let mut digits = code.digits();
+        digits[0] = if digits[0] == b'0' { b'1' } else { b'0' };
+        OtpCode::for_test(digits)
     }
 
     #[test]
@@ -1771,7 +1744,6 @@ mod tests {
         let mut registry = sale_registry();
         let mut market = Market::new();
         let mut challenges = OtpQueue::new();
-        let code = OtpCode::for_test(*b"042831");
         let request = list_for(150_000_000);
         market
             .propose_list(
@@ -1783,17 +1755,10 @@ mod tests {
                 height(),
             )
             .unwrap();
-        challenges.relay_seen(&OtpMemo {
-            code: code.clone(),
-            name: name(),
-            action: Action::List,
-            ua: owner.clone(),
-            listing: Some((pay_to, zats(150_000_000))),
-            auction: None,
-        });
+        let code = issue(&mut challenges);
         assert_eq!(registry.price(&name()), None);
         let wrong = OtpMemo {
-            code: OtpCode::for_test(*b"000000"),
+            code: other_than(&code),
             name: name(),
             action: Action::List,
             ua: owner.clone(),
@@ -1853,19 +1818,9 @@ mod tests {
                 height(),
             )
             .unwrap();
-        challenges.relay_seen(&OtpMemo {
-            code: OtpCode::for_test(*b"042831"),
-            name: name(),
-            action: Action::List,
-            ua: owner.clone(),
-            listing: Some((
-                TransparentAddress::PublicKeyHash([0x11; 20]),
-                zats(150_000_000),
-            )),
-            auction: None,
-        });
+        let code = issue(&mut challenges);
         let stranger = OtpMemo {
-            code: OtpCode::for_test(*b"042831"),
+            code,
             name: name(),
             action: Action::List,
             ua: bob(),
@@ -1898,14 +1853,13 @@ mod tests {
             .unwrap();
         assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
         let right = OtpMemo {
-            code: OtpCode::for_test(*b"042831"),
+            code: issue(&mut challenges),
             name: name(),
             action: Action::Delist,
             ua: owner.clone(),
             listing: None,
             auction: None,
         };
-        challenges.relay_seen(&right);
         let note = answer(&registry, &mut challenges, &right, height()).unwrap();
         assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
         confirm(&mut registry, &note, 61, height());
@@ -2189,66 +2143,6 @@ mod tests {
         assert_eq!(registry.price(&name()), Some(zats(100_000_000)));
         assert_eq!(registry.record(&name()), Some(&record));
         assert_eq!(registry.record_history(&name()).last(), Some(&record));
-    }
-
-    #[test]
-    fn a_buy_read_from_the_chain_stays_payable_and_unsent() {
-        let (owner, pay_to) = alice();
-        let mut registry = sale_registry();
-        let mut market = Market::new();
-        list_on_chain(&mut registry, &list_for(100_000_000), 60);
-        let code = OtpCode::for_test(*b"123456");
-        market
-            .open_buy(
-                &registry,
-                &name(),
-                &bob(),
-                &owner,
-                Expiry::Never,
-                held(),
-                false,
-                false,
-                code.clone(),
-                mtp(),
-                height(),
-            )
-            .unwrap();
-        assert_eq!(market.unrelayed().len(), 1);
-        market.seal_replayed_buys();
-        assert!(market.unrelayed().is_empty());
-        market.truncate_to(height());
-        assert!(market.is_open(&name()));
-        assert!(market.unrelayed().is_empty());
-
-        let second = Name::parse("zed").unwrap();
-        let zed = Listing {
-            name: second.clone(),
-            ua: owner.clone(),
-            pay_to,
-            ask: Ask::Flat(zats(50_000_000)),
-        };
-        list_on_chain(&mut registry, &zed, 61);
-        market
-            .open_buy(
-                &registry,
-                &second,
-                &bob(),
-                &owner,
-                Expiry::Never,
-                held(),
-                false,
-                false,
-                OtpCode::for_test(*b"654321"),
-                mtp(),
-                height(),
-            )
-            .unwrap();
-        assert_eq!(market.unrelayed().len(), 1);
-        assert_eq!(market.unrelayed()[0].name, second);
-
-        let paid = zats(100_000_000 + otp_amount(&code).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
-        assert!(market.is_paid(&name()));
     }
 
     fn auction_listing(start: u32, end: u32) -> Listing {
@@ -2618,10 +2512,6 @@ mod tests {
             .expect("test nullifier")
     }
 
-    fn derivation() -> AccessCodeDerivationKey {
-        AccessCodeDerivationKey::from_seed(&[0x22; 32])
-    }
-
     fn intent_fee() -> Zatoshis {
         (MARGINAL_FEE * FEE_ACTIONS).unwrap()
     }
@@ -2650,7 +2540,6 @@ mod tests {
             height,
             mtp(),
             |_| false,
-            &derivation(),
         )
     }
 
@@ -2734,10 +2623,9 @@ mod tests {
             at,
             mtp(),
             |_| false,
-            &derivation(),
         );
         assert!(first.opened.is_some());
-        let code = derivation().buy_otp(&txid, &name());
+        let code = market.unrelayed()[0].code.clone();
         let settlement = zats(70_000_000 + otp_amount(&code).into_u64());
         market.observe(
             |_| Some(owner.clone()),

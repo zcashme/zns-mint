@@ -1,5 +1,10 @@
 # Mint live-work design record
 
+## 2026-11-12 — `apply_block` returns arrivals only (#475)
+
+- The OTP relays the Treasury sent are no longer returned: boot was
+  their only reader, and it no longer replays them.
+
 ## 2026-11-11 — The scan accepts list and delist notes (#465)
 
 - `apply_block` hands every confirmed note after a claim to

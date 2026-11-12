@@ -1,5 +1,12 @@
 # main.changelog.md
 
+## 2026-11-12 — The run loop starts with no OTP state from history (#475)
+
+- Boot hands the loop an empty `OtpQueue` and `Market`. A challenge or
+  buy open at a restart is gone; its owner sends a new request.
+- `apply_block` returns arrivals only, and `market.admit` no longer
+  takes the access-code key.
+
 ## 2026-11-11 — A list or delist response queues a Name Note (#465)
 
 - A list or delist response takes the update and release path: the

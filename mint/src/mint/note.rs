@@ -673,43 +673,24 @@ pub fn decrypt_name_notes<P: Parameters>(
 }
 
 /// Trial-decrypts the block's Sapling outputs and Ironwood actions sent to
-/// the Treasury's external addresses, exposing each `(txid, paid, memo)`,
-/// and the memos the Treasury sent. The upstream scanner deliberately
-/// drops note plaintexts; request memos arrive through this pass instead.
+/// the Treasury's external addresses, exposing each `(txid, paid, memo)`.
+/// The upstream scanner deliberately drops note plaintexts; request memos
+/// arrive through this pass instead.
 pub fn decrypt_treasury_memos<P: Parameters>(
     network: &P,
     block: &Block,
     height: BlockHeight,
     treasury_keys: &crate::TreasuryKeys,
-) -> (Vec<(TxId, Zatoshis, MemoBytes)>, Vec<MemoBytes>) {
+) -> Vec<(TxId, Zatoshis, MemoBytes)> {
     let ufvks = treasury_ufvk(treasury_keys);
     let mut memos = Vec::new();
-    let mut sent = Vec::new();
     for tx in block.vtx() {
         let decrypted = decrypt_transaction(network, Some(height), None, tx, &ufvks);
         for (paid, memo) in treasury_payments(&decrypted) {
             memos.push((tx.txid(), paid, memo));
         }
-        sent.extend(treasury_sent(&decrypted));
     }
-    (memos, sent)
-}
-
-/// The memos the Treasury sent to other addresses, recovered with its
-/// outgoing viewing key.
-fn treasury_sent(decrypted: &DecryptedTransaction<Transaction, AccountId>) -> Vec<MemoBytes> {
-    let mut sent = Vec::new();
-    for output in decrypted.sapling_outputs() {
-        if output.transfer_type() == TransferType::Outgoing {
-            sent.push(output.memo().clone());
-        }
-    }
-    for output in decrypted.ironwood_outputs() {
-        if output.transfer_type() == TransferType::Outgoing {
-            sent.push(output.memo().clone());
-        }
-    }
-    sent
+    memos
 }
 
 /// Trial-decrypts one transaction's Sapling outputs and Ironwood actions
