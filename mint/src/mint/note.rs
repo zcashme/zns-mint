@@ -1,6 +1,5 @@
-//! Name Notes: the transition types, its memo codec, and the ZNS commitment
+//! Name Notes: the transition types, their memo codec, and the rseed
 //! derivation.
-//!
 
 use std::collections::HashMap;
 
@@ -140,44 +139,6 @@ impl NameNote {
             }
             _ => None,
         }
-    }
-
-    /// The rcm component of the ZNS note commitment, derived from the
-    /// transition tuple with derivation tag `rcm`.
-    pub fn rcm<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Scalar {
-        let verb = self.action().as_str().as_bytes();
-        let name = self.name().as_str().as_bytes();
-        let ua = self.ua().encode(params);
-        let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
-        let terms = self.terms(params);
-        let prev = self.prev_bytes();
-        zns_rcm(
-            verb,
-            name,
-            ua.as_bytes(),
-            &expiry,
-            terms.as_deref().map(str::as_bytes),
-            &prev,
-        )
-    }
-
-    /// The ψ component of the ZNS note commitment, derived from the
-    /// transition tuple with derivation tag `psi`.
-    pub fn psi<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Base {
-        let verb = self.action().as_str().as_bytes();
-        let name = self.name().as_str().as_bytes();
-        let ua = self.ua().encode(params);
-        let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
-        let terms = self.terms(params);
-        let prev = self.prev_bytes();
-        zns_psi(
-            verb,
-            name,
-            ua.as_bytes(),
-            &expiry,
-            terms.as_deref().map(str::as_bytes),
-            &prev,
-        )
     }
 
     /// Encodes into the canonical zero-padded 512-byte memo under `params`.
@@ -384,83 +345,6 @@ impl Term {
             Self::Years(_) => mtp.checked_add(self.duration()).map(Expiry::At),
         }
     }
-}
-
-/// Derives the ZNS note-commitment randomness `rcm` for a transition (§3.3):
-/// BLAKE2b-512 over the length-prefixed fields with derivation tag `rcm`,
-/// wide-reduced into the Pallas scalar field.
-fn zns_rcm(
-    verb: &[u8],
-    name: &[u8],
-    ua: &[u8],
-    expires_at: &[u8],
-    terms: Option<&[u8]>,
-    prev_rcm_bytes: &[u8; 32],
-) -> pasta_curves::pallas::Scalar {
-    use pasta_curves::group::ff::FromUniformBytes;
-    pasta_curves::pallas::Scalar::from_uniform_bytes(&tagged_zns_hash(
-        b"rcm",
-        verb,
-        name,
-        ua,
-        expires_at,
-        terms,
-        prev_rcm_bytes,
-    ))
-}
-
-/// Derives the ZNS note-commitment psi `ψ` for a transition (§3.3):
-/// BLAKE2b-512 over the length-prefixed fields with derivation tag `psi`,
-/// wide-reduced into the Pallas base field.
-fn zns_psi(
-    verb: &[u8],
-    name: &[u8],
-    ua: &[u8],
-    expires_at: &[u8],
-    terms: Option<&[u8]>,
-    prev_rcm_bytes: &[u8; 32],
-) -> pasta_curves::pallas::Base {
-    use pasta_curves::group::ff::FromUniformBytes;
-    pasta_curves::pallas::Base::from_uniform_bytes(&tagged_zns_hash(
-        b"psi",
-        verb,
-        name,
-        ua,
-        expires_at,
-        terms,
-        prev_rcm_bytes,
-    ))
-}
-
-/// The domain-tagged, length-prefixed BLAKE2b-512 of σ (§3.3).
-/// Field order: `LP(T) || LP(t) || LP(α) || LP(n) || LP(u) || LP(e) || p`.
-/// A list or an auction absorbs its terms as `LP(terms)` before `p`. The
-/// verb comes first, so no other transition hashes the same input.
-fn tagged_zns_hash(
-    field_tag: &[u8],
-    verb: &[u8],
-    name: &[u8],
-    ua: &[u8],
-    expires_at: &[u8],
-    terms: Option<&[u8]>,
-    prev_rcm: &[u8; 32],
-) -> [u8; 64] {
-    let mut h = blake2b_simd::State::new();
-    let mut absorb = |b: &[u8]| {
-        h.update(&(b.len() as u32).to_le_bytes());
-        h.update(b);
-    };
-    absorb(b"ZcashName/v1");
-    absorb(field_tag);
-    absorb(verb);
-    absorb(name);
-    absorb(ua);
-    absorb(expires_at);
-    if let Some(terms) = terms {
-        absorb(terms);
-    }
-    h.update(prev_rcm);
-    *h.finalize().as_array()
 }
 
 impl NameNote {
@@ -1075,34 +959,6 @@ mod tests {
         }
     }
 
-    /// The terms are part of the commitment, and a delist does not
-    /// commit to the same opening as an update with the same fields.
-    #[test]
-    fn openings_bind_the_listing_terms() {
-        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
-        let five = list_note(test_name(), flat(5), Expiry::Never, prev);
-        let six = list_note(test_name(), flat(6), Expiry::Never, prev);
-        let auction = list_note(test_name(), dutch(), Expiry::Never, prev);
-        assert_ne!(five.rcm(&MAIN_NETWORK), six.rcm(&MAIN_NETWORK));
-        assert_ne!(five.psi(&MAIN_NETWORK), six.psi(&MAIN_NETWORK));
-        assert_ne!(five.rcm(&MAIN_NETWORK), auction.rcm(&MAIN_NETWORK));
-
-        let delist = NameNote::Delist {
-            name: test_name(),
-            ua: test_ua(),
-            expires_at: Expiry::Never,
-            prev,
-        };
-        let update = NameNote::Update {
-            name: test_name(),
-            ua: test_ua(),
-            expires_at: Expiry::Never,
-            prev,
-        };
-        assert_ne!(delist.rcm(&MAIN_NETWORK), update.rcm(&MAIN_NETWORK));
-        assert_ne!(delist.psi(&MAIN_NETWORK), update.psi(&MAIN_NETWORK));
-    }
-
     /// §3.5: a memo whose UA is not a valid ZIP 316 address decodes to no
     /// note. `u1xxx` is the whitepaper's own example.
     #[test]
@@ -1117,43 +973,6 @@ mod tests {
         m[..forged.len()].copy_from_slice(forged.as_bytes());
         assert!(NameNote::decode(&MAIN_NETWORK, &m).is_none());
         assert!(zcash_keys::address::Address::decode(&MAIN_NETWORK, "u1xxx").is_none());
-    }
-
-    /// The chain rule: claim/update/release openings all differ, and the
-    /// expiry is cryptographically bound (changing only `e` changes both
-    /// field elements).
-    #[test]
-    fn openings_bind_expiry_and_chain() {
-        let name = test_name();
-        let ua = test_ua();
-        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
-        let t = Timestamp::from_seconds(1_000).unwrap();
-
-        let claim_never = NameNote::Claim {
-            name: name.clone(),
-            ua: ua.clone(),
-            expires_at: Expiry::Never,
-        };
-        let rcm_never = claim_never.rcm(&MAIN_NETWORK);
-        let psi_never = claim_never.psi(&MAIN_NETWORK);
-        let claim_at = NameNote::Claim {
-            name: name.clone(),
-            ua: ua.clone(),
-            expires_at: Expiry::At(t),
-        };
-        let rcm_at = claim_at.rcm(&MAIN_NETWORK);
-        let psi_at = claim_at.psi(&MAIN_NETWORK);
-        assert_ne!(rcm_never, rcm_at);
-        assert_ne!(psi_never, psi_at);
-
-        let rcm_upd = NameNote::Update {
-            name,
-            ua,
-            expires_at: Expiry::At(t),
-            prev,
-        }
-        .rcm(&MAIN_NETWORK);
-        assert_ne!(rcm_at, rcm_upd);
     }
 
     /// Canonical-decimal strictness: `e` bytes are hashed into σ, so
