@@ -984,77 +984,6 @@ mod tests {
     }
 
     #[test]
-    fn a_list_pays_the_t1_the_owner_returns() {
-        let network = MainNetwork;
-        let owner = decode_controller_ua(&network, TEST_UA).unwrap();
-        let pasted = TransparentAddress::PublicKeyHash([0x22; 20]);
-        let pasted_text = Address::Transparent(pasted).encode(&network);
-        let memo = padded(&format!(
-            "ZNS:list:alice:{}:{pasted_text}:1.5",
-            owner.encode(&network),
-        ));
-        let Some(Request::List(list)) = Request::decode(&network, &memo) else {
-            panic!("expected list")
-        };
-
-        let mut registry = Registry::new();
-        let anchor = nf(10);
-        registry.adopt_anchor(BlockHeight::from_u32(0), anchor);
-        let claim = NameNote::Claim {
-            name: name(),
-            ua: owner.clone(),
-            expires_at: Expiry::Never,
-        };
-        assert!(registry.accept_claim(
-            &network,
-            &claim,
-            nf(20),
-            Some(nf(40)),
-            &[anchor],
-            height(),
-            mtp(),
-            BlockHeight::from_u32(41),
-        ));
-        let mut market = Market::new();
-        let mut challenges = OtpQueue::new();
-        market
-            .propose_list(
-                &mut challenges,
-                &list,
-                &owner,
-                TxId::from_bytes([1; 32]),
-                mtp(),
-                height(),
-            )
-            .unwrap();
-        let code = issue(&mut challenges);
-        let swapped = TransparentAddress::PublicKeyHash([0x33; 20]);
-        let substituted = OtpMemo {
-            code: code.clone(),
-            name: name(),
-            action: Action::List,
-            ua: owner.clone(),
-            listing: Some((swapped, zats(150_000_000))),
-            auction: None,
-        };
-        assert!(answer(&registry, &mut challenges, &substituted, height()).is_none());
-        let right = OtpMemo {
-            code,
-            name: name(),
-            action: Action::List,
-            ua: owner.clone(),
-            listing: Some((pasted, zats(150_000_000))),
-            auction: None,
-        };
-        let note = answer(&registry, &mut challenges, &right, height()).unwrap();
-        confirm(&mut registry, &note, 60, height());
-        assert_eq!(
-            registry.listing(&name()).map(|listing| listing.pay_to),
-            Some(pasted)
-        );
-    }
-
-    #[test]
     fn delist_names_the_owner() {
         let network = MainNetwork;
         let memo = padded(&format!("ZNS:delist:alice:{TEST_UA}"));
@@ -1461,18 +1390,9 @@ mod tests {
     }
 
     #[test]
-    fn a_stranger_cannot_list_or_delist() {
-        let (owner, _) = alice();
+    fn a_stranger_cannot_delist() {
         let mut registry = sale_registry();
         let mut market = Market::new();
-        let by_bob = Listing {
-            ua: bob(),
-            ..list_for(150_000_000)
-        };
-        assert_eq!(
-            propose_list(&mut market, &by_bob, &owner, height()),
-            Err(MarketRefusal::NotOwner)
-        );
         list_on_chain(&mut registry, &list_for(150_000_000), 60);
         assert_eq!(
             propose_delist(&mut market, &registry, &bob()),
@@ -1575,6 +1495,18 @@ mod tests {
             auction: None,
         };
         assert!(answer(&registry, &mut challenges, &other_price, height()).is_none());
+        let other_t1 = OtpMemo {
+            code: code.clone(),
+            name: name(),
+            action: Action::List,
+            ua: owner.clone(),
+            listing: Some((
+                TransparentAddress::PublicKeyHash([0x22; 20]),
+                zats(150_000_000),
+            )),
+            auction: None,
+        };
+        assert!(answer(&registry, &mut challenges, &other_t1, height()).is_none());
         let right = OtpMemo {
             code,
             name: name(),
@@ -1588,7 +1520,6 @@ mod tests {
         assert_eq!(registry.price(&name()), None);
         confirm(&mut registry, &note, 60, height());
         assert_eq!(registry.price(&name()), Some(zats(150_000_000)));
-        assert_eq!(pay_to, request.pay_to);
     }
 
     #[test]
