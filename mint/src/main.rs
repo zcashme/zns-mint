@@ -398,7 +398,6 @@ async fn main() {
                             next_height,
                             block_mtp,
                             |name| name_notes.note_pending(name),
-                            &access_code_key,
                         );
                         if let Some(back) = admitted.returned {
                             refunds.admit_with_note(

@@ -15,7 +15,6 @@ use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::TxId;
 
-use crate::mint::presale::AccessCodeDerivationKey;
 use crate::mint::registry::Registry;
 use crate::mint::treasury::{OtpCode, OtpQueue, D_OTP, FEE_ACTIONS};
 use crate::mint::{
@@ -878,7 +877,6 @@ impl Market {
         height: BlockHeight,
         mtp: Timestamp,
         pending: impl Fn(&Name) -> bool,
-        key: &AccessCodeDerivationKey,
     ) -> Admission {
         let fee_ok = (fee_rule.marginal_fee() * FEE_ACTIONS).is_some_and(|fee| paid >= fee);
         match request {
@@ -974,7 +972,7 @@ impl Market {
                 let owner = record.ua().clone();
                 let term = record.expires_at();
                 let held = record.commitment;
-                let code = key.buy_otp(&txid, name);
+                let code = OtpCode::generate();
                 if !fee_ok {
                     tracing::info!(
                         %txid,
@@ -1723,23 +1721,6 @@ mod tests {
         assert_eq!(registry.record(&name()).unwrap().action(), Action::Claim);
         assert_eq!(registry.price(&name()), None);
         assert!(!market.is_open(&name()));
-    }
-
-    #[test]
-    fn the_buy_code_is_the_same_on_a_second_read() {
-        let txid = [7u8; 32];
-        assert_eq!(
-            OtpCode::buy(b"mint-key", &txid, b"alice"),
-            OtpCode::buy(b"mint-key", &txid, b"alice")
-        );
-        assert_ne!(
-            OtpCode::buy(b"mint-key", &txid, b"alice"),
-            OtpCode::buy(b"other-key", &txid, b"alice")
-        );
-        assert_ne!(
-            OtpCode::buy(b"mint-key", &txid, b"alice"),
-            OtpCode::buy(b"mint-key", &txid, b"bob")
-        );
     }
 
     /// Relays the one requested challenge, as the run loop does, and
@@ -2531,10 +2512,6 @@ mod tests {
             .expect("test nullifier")
     }
 
-    fn derivation() -> AccessCodeDerivationKey {
-        AccessCodeDerivationKey::from_seed(&[0x22; 32])
-    }
-
     fn intent_fee() -> Zatoshis {
         (MARGINAL_FEE * FEE_ACTIONS).unwrap()
     }
@@ -2563,7 +2540,6 @@ mod tests {
             height,
             mtp(),
             |_| false,
-            &derivation(),
         )
     }
 
@@ -2647,10 +2623,9 @@ mod tests {
             at,
             mtp(),
             |_| false,
-            &derivation(),
         );
         assert!(first.opened.is_some());
-        let code = derivation().buy_otp(&txid, &name());
+        let code = market.unrelayed()[0].code.clone();
         let settlement = zats(70_000_000 + otp_amount(&code).into_u64());
         market.observe(
             |_| Some(owner.clone()),

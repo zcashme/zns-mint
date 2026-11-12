@@ -1,10 +1,14 @@
 # Sale module changelog
 
-## 2026-11-12 — Boot does not replay buys (#475)
+## 2026-11-12 — Boot does not replay buys; a buy's code is random (#475)
 
 - `Market::seal_replayed_buys` and `SaleQueue::seal_relayed` are gone.
   They marked buys rebuilt from history as already relayed, and boot
   no longer rebuilds buys.
+- `Market::admit` draws a buy's code with `OtpCode::generate()` and no
+  longer takes the access-code key.
+- The list and delist challenge tests answer with the code the queue
+  generated and relayed.
 
 ## 2026-11-11 — The market holds buys; the chain holds listings (#465)
 

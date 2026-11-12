@@ -1,5 +1,9 @@
 # `mint/presale.rs` design record
 
+## 2026-11-12 — The access-code key derives no buy codes (#475)
+
+- `buy_otp` is gone. The key derives access codes and nothing else.
+
 ## 2026-11-09 — The access-code key derives no challenge codes (#446)
 
 - `list_otp`, `auction_otp`, and `delist_otp` are gone. Only `buy_otp`

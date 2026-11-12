@@ -1,10 +1,13 @@
 # `mint/otp.rs` design record
 
-## 2026-11-12 — `relay_seen` is gone (#475)
+## 2026-11-12 — Every code is random; `relay_seen` is gone (#475)
 
 - Nothing reads a relay back from the chain any more: boot no longer
   rebuilds challenges. A challenge's code is the one `admit` generated
   and the run loop relayed.
+- `OtpCode::buy` is gone. It derived a buy's code from the access-code
+  key, the buy txid, and the name so a boot rescan could rebuild it.
+  A buy's code is `OtpCode::generate()`, uniform and random (§5).
 
 ## 2026-11-09 — An `OtpChallenge` can challenge a list or a delist (#446)
 

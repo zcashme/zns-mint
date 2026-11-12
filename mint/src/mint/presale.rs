@@ -23,9 +23,7 @@ use time::{OffsetDateTime, Timestamp};
 use tokio::task::JoinHandle;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::mint::treasury::OtpCode;
 use crate::mint::Name;
-use zcash_protocol::TxId;
 use zns_canon::access_code::purpose_key;
 
 /// Supabase project HTTP origin. PostgREST only.
@@ -372,12 +370,6 @@ impl AccessCodeDerivationKey {
         let digest = mac.finalize().into_bytes();
         let n = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
         AccessCode(n % 1_000_000)
-    }
-
-    /// The buy OTP for `txid` and `name`. A rescan of that buy yields the
-    /// same code. Two names in one transaction get two codes.
-    pub fn buy_otp(&self, txid: &TxId, name: &Name) -> OtpCode {
-        OtpCode::buy(self.0.as_ref(), txid.as_ref(), name.as_str().as_bytes())
     }
 
     /// Does `offered` match the code for `name`? Missing never
