@@ -476,24 +476,20 @@ impl MintInbound {
     }
 }
 
-/// A ZNS name-chain commitment — the trapdoor that links consecutive Name Notes.
+/// A ZNS name-chain commitment: the cmx of a mined Name Note, which its
+/// successor names as `prev`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NameCommitment(orchard::note::NoteCommitTrapdoor);
+pub struct NameCommitment(orchard::note::ExtractedNoteCommitment);
 
 impl NameCommitment {
-    /// Wraps a `NoteCommitTrapdoor` derived via [`NameNote::rcm`].
-    pub fn from_inner(inner: orchard::note::NoteCommitTrapdoor) -> Self {
-        Self(inner)
-    }
-
-    /// Unwraps back to the upstream type for the `unsafe-zns` builder surface.
-    pub fn into_inner(self) -> orchard::note::NoteCommitTrapdoor {
-        self.0
+    /// Wraps the cmx a Name Note's action published.
+    pub fn from_cmx(cmx: orchard::note::ExtractedNoteCommitment) -> Self {
+        Self(cmx)
     }
 
     /// Deserializes from the canonical 32-byte little-endian representation.
     pub fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        orchard::note::NoteCommitTrapdoor::from_bytes(bytes)
+        orchard::note::ExtractedNoteCommitment::from_bytes(bytes)
             .into_option()
             .map(Self)
     }
@@ -532,7 +528,7 @@ impl Name {
 // ---------------------------------------------------------------------------
 
 /// Applies one verified canonical successor to every faculty: scan, clock,
-/// Registry law, wallet commit, Treasury decode, and Name Note storage.
+/// Registry law, wallet commit, and Treasury decode.
 /// Returns Treasury arrivals, which the caller routes.
 /// Before birthday, applies only wallet history and clock.
 /// Never fetches, never broadcasts.
@@ -551,7 +547,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     use std::collections::BTreeMap;
     use std::convert::Infallible;
 
-    use incrementalmerkletree::Position;
     use zcash_client_backend::scanning::full::{decrypt_block, scan_block};
     use zcash_client_backend::scanning::SpendIdentifiers;
 
@@ -619,7 +614,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         notes.sort_by_key(|index| candidates[*index].action_index);
     }
 
-    let mut accepted_name_notes = Vec::new();
     for wtx in scanned.transactions() {
         if height < birthday {
             continue;
@@ -655,16 +649,16 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         match notes {
             [index] => {
                 let candidate = &candidates[*index];
-                let action = candidate.payload.action();
-                let accepted = if action.is_claim() {
-                    // The successor anchor: a backed claim creates
-                    // exactly one zero-value Registry output.
-                    let successor = if registry_outputs.len() == 1
-                        && registry_outputs[0].note().0.value().inner() == 0
-                    {
-                        registry_outputs[0].nf().copied()
-                    } else {
-                        None
+                if candidate.payload.action().is_claim() {
+                    // The successor anchor: besides its Name Note, a backed
+                    // claim creates exactly one zero-value Registry output.
+                    let others: Vec<_> = registry_outputs
+                        .iter()
+                        .filter(|output| output.index() != candidate.action_index)
+                        .collect();
+                    let successor = match others.as_slice() {
+                        [only] if only.note().0.value().inner() == 0 => only.nf().copied(),
+                        _ => None,
                     };
                     let expiry = expiry_by_txid
                         .get(&txid)
@@ -673,60 +667,30 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                     registry.accept_claim(
                         network,
                         &candidate.payload,
+                        NameCommitment::from_cmx(candidate.cmx),
                         candidate.nullifier,
                         successor,
                         &nfs,
                         height,
                         block_mtp,
                         expiry,
-                    )
+                    );
                 } else {
                     registry.accept_transition(
-                        network,
                         &candidate.payload,
+                        NameCommitment::from_cmx(candidate.cmx),
                         candidate.nullifier,
                         &nfs,
                         height,
                         block_mtp,
-                    )
-                };
-                if accepted {
-                    accepted_name_notes.push(*index);
+                    );
                 }
             }
             _ => registry.follow_spends(&nfs, height),
         }
     }
 
-    let ironwood_start = scanned
-        .ironwood()
-        .final_tree_size()
-        .checked_sub(
-            u32::try_from(scanned.ironwood().commitments().len())
-                .expect("Ironwood block action count fits u32"),
-        )
-        .expect("FATAL: scanner returned an impossible Ironwood tree size");
-    let accepted_name_notes = accepted_name_notes
-        .into_iter()
-        .map(|index| {
-            let candidate = &candidates[index];
-            let position = Position::from(
-                u64::from(ironwood_start)
-                    + u64::try_from(candidate.ordinal).expect("Name Note ordinal fits u64"),
-            );
-            (index, position)
-        })
-        .collect::<Vec<_>>();
-
-    // Accepted Name Note commitments are marked at the commit — the
-    // scanner cannot decrypt them, so they would otherwise enter the
-    // tree Ephemeral, prune with the checkpoints, and leave the note
-    // without a witness.
-    let marks: Vec<orchard::tree::MerkleHashOrchard> = accepted_name_notes
-        .iter()
-        .map(|(index, _)| orchard::tree::MerkleHashOrchard::from_cmx(&candidates[*index].cmx))
-        .collect();
-    if let Err(error) = wallet.put_blocks_marked(&cursor, vec![scanned], &marks) {
+    if let Err(error) = wallet.put_blocks_after(&cursor, vec![scanned]) {
         match error {
             crate::wallet::WalletError::UnexpectedOrchardReceive => {
                 panic!("FATAL: ordinary-Orchard receive — consensus violation or key compromise")
@@ -743,23 +707,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .into_iter()
         .map(|(txid, paid, memo)| (txid, MintInbound::decode(network, &memo), paid))
         .collect();
-    for (index, position) in accepted_name_notes {
-        let candidate = &candidates[index];
-        wallet
-            .store_name_note(
-                height,
-                position,
-                candidate.txid,
-                candidate.action_index,
-                candidate.note,
-                orchard::note::NoteCommitTrapdoor::from_inner(candidate.payload.rcm(network)),
-                candidate.payload.psi(network),
-                candidate.nullifier,
-                candidate.ephemeral_key.clone(),
-                candidate.memo,
-            )
-            .expect("FATAL: Name Note disagreed with applied wallet state");
-    }
     *mtp = next_mtp;
     let applied_tip = wallet.tip();
     tracing::debug!(

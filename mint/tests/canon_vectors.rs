@@ -23,7 +23,7 @@ use zcash_primitives::transaction::builder::default_tx_expiry_delta;
 use zcash_protocol::consensus::{BlockHeight, BranchId, MainNetwork};
 
 use zns_mint::mint::registry::{Registry, ANCHOR_POOL_SIZE};
-use zns_mint::mint::{Action, Expiry, Name, NameNote};
+use zns_mint::mint::{Action, Expiry, Name, NameCommitment, NameNote};
 
 // ---------------------------------------------------------------------------
 // Fixture types
@@ -68,6 +68,8 @@ enum Event {
         successor_anchor: Hex32,
         /// The NameNote's own nullifier.
         nullifier: Hex32,
+        /// The NameNote's cmx, as its action published.
+        cmx: Hex32,
         /// Transaction expiry height. Absent means the mint's standard
         /// expiry: the claim height plus the default delta.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,6 +99,8 @@ enum Event {
         prev_nullifier: Hex32,
         /// The successor NameNote's own nullifier.
         nullifier: Hex32,
+        /// The successor NameNote's cmx, as its action published.
+        cmx: Hex32,
     },
     /// A Release that spends the current record's nullifier.
     Release {
@@ -106,6 +110,8 @@ enum Event {
         ua: String,
         prev_nullifier: Hex32,
         nullifier: Hex32,
+        /// The release NameNote's cmx, as its action published.
+        cmx: Hex32,
     },
     /// Reorg: rewind Registry to `to_height`.
     Rewind { to_height: u32 },
@@ -184,6 +190,7 @@ fn apply(registry: &mut Registry, event: &Event) {
             spent_anchor,
             successor_anchor,
             nullifier,
+            cmx,
             expiry_height,
             expect,
         } => {
@@ -197,6 +204,7 @@ fn apply(registry: &mut Registry, event: &Event) {
             let ok = registry.accept_claim(
                 &MainNetwork,
                 &note,
+                commitment(cmx),
                 nf(nullifier),
                 Some(nf(successor_anchor)),
                 &[nf(spent_anchor)],
@@ -228,6 +236,7 @@ fn apply(registry: &mut Registry, event: &Event) {
             let accepted = registry.accept_claim(
                 &MainNetwork,
                 &note,
+                commitment(&cmx_from_seed(0xFE)),
                 nf(&hex32_from_seed(0xFE)),
                 // No successor: an unbacked claim never authored one, and
                 // `accept_claim` must reject before the successor is read.
@@ -247,6 +256,7 @@ fn apply(registry: &mut Registry, event: &Event) {
             expires_at_secs,
             prev_nullifier,
             nullifier,
+            cmx,
         } => {
             let parsed_name = parse_name(name);
             let record = registry
@@ -264,8 +274,8 @@ fn apply(registry: &mut Registry, event: &Event) {
                 prev: record.commitment,
             };
             let ok = registry.accept_transition(
-                &MainNetwork,
                 &note,
+                commitment(cmx),
                 nf(nullifier),
                 &[nf(prev_nullifier)],
                 BlockHeight::from_u32(*height),
@@ -280,6 +290,7 @@ fn apply(registry: &mut Registry, event: &Event) {
             ua,
             prev_nullifier,
             nullifier,
+            cmx,
         } => {
             let parsed_name = parse_name(name);
             let record = registry
@@ -296,8 +307,8 @@ fn apply(registry: &mut Registry, event: &Event) {
                 prev: record.commitment,
             };
             let ok = registry.accept_transition(
-                &MainNetwork,
                 &note,
+                commitment(cmx),
                 nf(nullifier),
                 &[nf(prev_nullifier)],
                 BlockHeight::from_u32(*height),
@@ -411,6 +422,23 @@ fn hex32_from_seed(seed: u8) -> Hex32 {
     hex::encode(bytes)
 }
 
+/// Parses a lowercase 32-byte hex cmx.
+fn commitment(hex_str: &str) -> NameCommitment {
+    let mut bytes = [0u8; 32];
+    hex::decode_to_slice(hex_str, &mut bytes)
+        .unwrap_or_else(|_| panic!("cmx hex is not 32 bytes: {hex_str}"));
+    NameCommitment::from_bytes(&bytes)
+        .unwrap_or_else(|| panic!("cmx hex is not a Pallas base element: {hex_str}"))
+}
+
+/// Builds a deterministic 32-byte cmx hex from a single-byte seed. The seed
+/// sits in byte 1, so no cmx equals a nullifier from `hex32_from_seed`.
+fn cmx_from_seed(seed: u8) -> Hex32 {
+    let mut bytes = [0u8; 32];
+    bytes[1] = seed;
+    hex::encode(bytes)
+}
+
 // ---------------------------------------------------------------------------
 // Scenario builders
 // ---------------------------------------------------------------------------
@@ -486,6 +514,7 @@ fn backed_claim() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n1,
+            cmx: cmx_from_seed(0xA1),
             expiry_height: None,
             expect: Expectation::Accepted,
         },
@@ -553,6 +582,7 @@ fn duplicate_claim() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n1,
+            cmx: cmx_from_seed(0xA1),
             expiry_height: None,
             expect: Expectation::Accepted,
         },
@@ -567,6 +597,7 @@ fn duplicate_claim() -> Scenario {
             spent_anchor: a2,
             successor_anchor: s2,
             nullifier: n2,
+            cmx: cmx_from_seed(0xA2),
             expiry_height: None,
             expect: Expectation::Rejected,
         },
@@ -609,6 +640,7 @@ fn claim_after_release() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n1.clone(),
+            cmx: cmx_from_seed(0xA1),
             expiry_height: None,
             expect: Expectation::Accepted,
         },
@@ -619,6 +651,7 @@ fn claim_after_release() -> Scenario {
             ua: TEST_UA.to_owned(),
             prev_nullifier: n1,
             nullifier: n_release,
+            cmx: cmx_from_seed(0xB1),
         },
         Event::Claim {
             height: 300,
@@ -629,6 +662,7 @@ fn claim_after_release() -> Scenario {
             spent_anchor: a2,
             successor_anchor: s2,
             nullifier: n2,
+            cmx: cmx_from_seed(0xA2),
             expiry_height: None,
             expect: Expectation::Accepted,
         },
@@ -670,6 +704,7 @@ fn claim_inside_release_window() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n1.clone(),
+            cmx: cmx_from_seed(0xA1),
             expiry_height: None,
             expect: Expectation::Accepted,
         },
@@ -680,6 +715,7 @@ fn claim_inside_release_window() -> Scenario {
             ua: TEST_UA.to_owned(),
             prev_nullifier: n1,
             nullifier: n_release,
+            cmx: cmx_from_seed(0xB1),
         },
         // Mined after the release, but expiry is the release height plus
         // the standard delta: the transaction was built before the release.
@@ -692,6 +728,7 @@ fn claim_inside_release_window() -> Scenario {
             spent_anchor: a2,
             successor_anchor: s2,
             nullifier: n2,
+            cmx: cmx_from_seed(0xA2),
             expiry_height: Some(standard_expiry(release_height)),
             expect: Expectation::Rejected,
         },
@@ -728,6 +765,7 @@ fn update_then_release() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n_claim.clone(),
+            cmx: cmx_from_seed(0xA1),
             expiry_height: None,
             expect: Expectation::Accepted,
         },
@@ -739,6 +777,7 @@ fn update_then_release() -> Scenario {
             expires_at_secs: Some(2_100_000_000),
             prev_nullifier: n_claim,
             nullifier: n_update.clone(),
+            cmx: cmx_from_seed(0xA2),
         },
         Event::Release {
             height: 300,
@@ -747,6 +786,7 @@ fn update_then_release() -> Scenario {
             ua: TEST_UA.to_owned(),
             prev_nullifier: n_update,
             nullifier: n_release,
+            cmx: cmx_from_seed(0xA3),
         },
     ];
     Scenario {
@@ -779,6 +819,7 @@ fn reorg() -> Scenario {
             spent_anchor: a1,
             successor_anchor: s1,
             nullifier: n_claim.clone(),
+            cmx: cmx_from_seed(0xA1),
             expiry_height: None,
             expect: Expectation::Accepted,
         },
@@ -790,6 +831,7 @@ fn reorg() -> Scenario {
             expires_at_secs: None,
             prev_nullifier: n_claim,
             nullifier: n_update,
+            cmx: cmx_from_seed(0xA2),
         },
         // Rewind past both the update and the claim — pool and records
         // return to their post-ceremony state.

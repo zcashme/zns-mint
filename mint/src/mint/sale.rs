@@ -1122,6 +1122,7 @@ mod tests {
             assert!(registry.accept_claim(
                 &MainNetwork,
                 &note,
+                NameCommitment::from_bytes(&[20 + index as u8; 32]).unwrap(),
                 nf(20 + index as u8),
                 Some(nf(40 + index as u8)),
                 &[anchor],
@@ -1137,7 +1138,14 @@ mod tests {
     /// nullifier.
     fn confirm(registry: &mut Registry, note: &NameNote, seed: u8, at: BlockHeight) {
         let spent = registry.record(note.name()).unwrap().predecessor_nullifier;
-        assert!(registry.accept_transition(&MainNetwork, note, nf(seed), &[spent], at, mtp()));
+        assert!(registry.accept_transition(
+            note,
+            NameCommitment::from_bytes(&[seed; 32]).unwrap(),
+            nf(seed),
+            &[spent],
+            at,
+            mtp()
+        ));
     }
 
     fn list_on_chain_at(registry: &mut Registry, listing: &Listing, seed: u8, at: BlockHeight) {

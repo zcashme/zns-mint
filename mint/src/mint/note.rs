@@ -1,10 +1,8 @@
-//! Name Notes: the transition types, its memo codec, and the ZNS commitment
+//! Name Notes: the transition types, their memo codec, and the rseed
 //! derivation.
-//!
 
 use std::collections::HashMap;
 
-use orchard::note::Psi;
 use time::Timestamp;
 use zcash_address::unified::Encoding;
 use zcash_client_backend::data_api::DecryptedTransaction;
@@ -121,8 +119,8 @@ impl NameNote {
         }
     }
 
-    /// The predecessor chain commitment, absent only for a claim.
-    pub fn prev_rcm(&self) -> Option<NameCommitment> {
+    /// The predecessor's cmx, absent only for a claim.
+    pub fn prev(&self) -> Option<NameCommitment> {
         match self {
             NameNote::Claim { .. } => None,
             NameNote::Update { prev, .. }
@@ -143,52 +141,6 @@ impl NameNote {
         }
     }
 
-    /// The rcm component of the ZNS note commitment, derived from the
-    /// transition tuple with derivation tag `rcm`.
-    pub fn rcm<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Scalar {
-        let verb = self.action().as_str().as_bytes();
-        let name = self.name().as_str().as_bytes();
-        let ua = self.ua().encode(params);
-        let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
-        let terms = self.terms(params);
-        let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
-        zns_rcm(
-            verb,
-            name,
-            ua.as_bytes(),
-            &expiry,
-            terms.as_deref().map(str::as_bytes),
-            &prev,
-        )
-    }
-
-    /// The note's ZNS commitment: the rcm wrapped as the chain's
-    /// identity.
-    pub fn commitment<P: Parameters>(&self, params: &P) -> NameCommitment {
-        NameCommitment::from_inner(orchard::note::NoteCommitTrapdoor::from_inner(
-            self.rcm(params),
-        ))
-    }
-
-    /// The ψ component of the ZNS note commitment, derived from the
-    /// transition tuple with derivation tag `psi`.
-    pub fn psi<P: Parameters>(&self, params: &P) -> pasta_curves::pallas::Base {
-        let verb = self.action().as_str().as_bytes();
-        let name = self.name().as_str().as_bytes();
-        let ua = self.ua().encode(params);
-        let expiry = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
-        let terms = self.terms(params);
-        let prev = self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]);
-        zns_psi(
-            verb,
-            name,
-            ua.as_bytes(),
-            &expiry,
-            terms.as_deref().map(str::as_bytes),
-            &prev,
-        )
-    }
-
     /// Encodes into the canonical zero-padded 512-byte memo under `params`.
     ///
     /// Total over valid `NameNote`s — the memo always fits, because every
@@ -198,26 +150,68 @@ impl NameNote {
     /// 63-byte name and a three-receiver UA, is 461 bytes on mainnet and
     /// 468 on regtest.
     pub fn encode<P: Parameters>(&self, params: &P) -> [u8; 512] {
-        let ua_field = self.ua().encode(params);
-        let verb = self.action().as_str();
-        let hex_rcm = hex::encode(self.prev_rcm().map(|r| r.to_bytes()).unwrap_or([0u8; 32]));
-        let expires_field = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
-        let terms = self.terms(params).map(|t| t + ":").unwrap_or_default();
         let memo_string = format!(
-            "ZNS:{}:{}:{}:{}:{}{}",
-            verb,
-            self.name().as_str(),
-            ua_field,
-            // `b"none"` or canonical ASCII digits — always UTF-8.
-            String::from_utf8(expires_field).unwrap(),
-            terms,
-            hex_rcm,
+            "ZNS:{}:{}",
+            self.fields(params),
+            hex::encode(self.prev_bytes())
         );
         let mut memo = [0u8; 512];
         let bytes = memo_string.as_bytes();
         memo[..bytes.len()].copy_from_slice(bytes);
         memo
     }
+
+    /// The record as the memo writes it between `ZNS:` and the predecessor:
+    /// `verb:name:ua:expiry`, and `:terms` for a list or an auction.
+    pub fn fields<P: Parameters>(&self, params: &P) -> String {
+        let expires_field = self.expires_at().unwrap_or(Expiry::Never).field_bytes();
+        let terms = self
+            .terms(params)
+            .map(|t| format!(":{t}"))
+            .unwrap_or_default();
+        format!(
+            "{}:{}:{}:{}{}",
+            self.action().as_str(),
+            self.name().as_str(),
+            self.ua().encode(params),
+            // `b"none"` or canonical ASCII digits — always UTF-8.
+            String::from_utf8(expires_field).unwrap(),
+            terms,
+        )
+    }
+
+    /// The note's rseed, derived from its record (zcashme/zns-mint#480):
+    /// BLAKE2b-256, personalization [`NAME_NOTE_PERSONALIZATION`], over
+    /// `kind ‖ I2LEOSP64(len(fields)) ‖ fields ‖ prev`.
+    pub fn rseed<P: Parameters>(&self, params: &P) -> [u8; 32] {
+        name_note_rseed(self.fields(params).as_bytes(), &self.prev_bytes())
+    }
+
+    /// The predecessor's 32 bytes, all zero for a claim.
+    fn prev_bytes(&self) -> [u8; 32] {
+        self.prev().map(|r| r.to_bytes()).unwrap_or([0u8; 32])
+    }
+}
+
+/// The binding domain of a Name Note's rseed: its BLAKE2b personalization.
+pub const NAME_NOTE_PERSONALIZATION: &[u8; 16] = b"ZNS___Name_Notes";
+
+/// The record kind of every Name Note.
+pub const NAME_NOTE_KIND: u8 = 0x01;
+
+fn name_note_rseed(fields: &[u8], prev: &[u8; 32]) -> [u8; 32] {
+    let mut h = blake2b_simd::Params::new()
+        .hash_length(32)
+        .personal(NAME_NOTE_PERSONALIZATION)
+        .to_state();
+    h.update(&[NAME_NOTE_KIND]);
+    h.update(&(fields.len() as u64).to_le_bytes());
+    h.update(fields);
+    h.update(prev);
+    h.finalize()
+        .as_bytes()
+        .try_into()
+        .expect("BLAKE2b-256 output is 32 bytes")
 }
 
 /// The `expires_at` field of a transition: a fixed Unix instant, or the
@@ -243,8 +237,8 @@ impl Expiry {
     ///
     /// Canonical means digits only — no sign, no leading zeroes (except `0`
     /// itself). Non-canonical spellings are rejected because the raw field
-    /// bytes are hashed into σ: `1` and `01` are different transitions with
-    /// different commitments.
+    /// bytes are hashed into the rseed: `1` and `01` are different
+    /// transitions with different commitments.
     pub fn parse(field: &str) -> Option<Self> {
         match field {
             "none" => Some(Expiry::Never),
@@ -353,83 +347,6 @@ impl Term {
     }
 }
 
-/// Derives the ZNS note-commitment randomness `rcm` for a transition (§3.3):
-/// BLAKE2b-512 over the length-prefixed fields with derivation tag `rcm`,
-/// wide-reduced into the Pallas scalar field.
-fn zns_rcm(
-    verb: &[u8],
-    name: &[u8],
-    ua: &[u8],
-    expires_at: &[u8],
-    terms: Option<&[u8]>,
-    prev_rcm_bytes: &[u8; 32],
-) -> pasta_curves::pallas::Scalar {
-    use pasta_curves::group::ff::FromUniformBytes;
-    pasta_curves::pallas::Scalar::from_uniform_bytes(&tagged_zns_hash(
-        b"rcm",
-        verb,
-        name,
-        ua,
-        expires_at,
-        terms,
-        prev_rcm_bytes,
-    ))
-}
-
-/// Derives the ZNS note-commitment psi `ψ` for a transition (§3.3):
-/// BLAKE2b-512 over the length-prefixed fields with derivation tag `psi`,
-/// wide-reduced into the Pallas base field.
-fn zns_psi(
-    verb: &[u8],
-    name: &[u8],
-    ua: &[u8],
-    expires_at: &[u8],
-    terms: Option<&[u8]>,
-    prev_rcm_bytes: &[u8; 32],
-) -> pasta_curves::pallas::Base {
-    use pasta_curves::group::ff::FromUniformBytes;
-    pasta_curves::pallas::Base::from_uniform_bytes(&tagged_zns_hash(
-        b"psi",
-        verb,
-        name,
-        ua,
-        expires_at,
-        terms,
-        prev_rcm_bytes,
-    ))
-}
-
-/// The domain-tagged, length-prefixed BLAKE2b-512 of σ (§3.3).
-/// Field order: `LP(T) || LP(t) || LP(α) || LP(n) || LP(u) || LP(e) || p`.
-/// A list or an auction absorbs its terms as `LP(terms)` before `p`. The
-/// verb comes first, so no other transition hashes the same input.
-fn tagged_zns_hash(
-    field_tag: &[u8],
-    verb: &[u8],
-    name: &[u8],
-    ua: &[u8],
-    expires_at: &[u8],
-    terms: Option<&[u8]>,
-    prev_rcm: &[u8; 32],
-) -> [u8; 64] {
-    let mut h = blake2b_simd::State::new();
-    let mut absorb = |b: &[u8]| {
-        h.update(&(b.len() as u32).to_le_bytes());
-        h.update(b);
-    };
-    absorb(b"ZcashName/v1");
-    absorb(field_tag);
-    absorb(verb);
-    absorb(name);
-    absorb(ua);
-    absorb(expires_at);
-    if let Some(terms) = terms {
-        absorb(terms);
-    }
-    h.update(prev_rcm);
-    *h.finalize().as_array()
-}
-
 impl NameNote {
     /// Decodes a 512-byte memo into a typed [`NameNote`].
     ///
@@ -477,7 +394,7 @@ impl NameNote {
         };
         let expires_at = Expiry::parse(parts[4])?;
 
-        let mut prev_rcm_bytes = [0u8; 32];
+        let mut prev_bytes = [0u8; 32];
         if parts[5].len() != 64
             || !parts[5]
                 .bytes()
@@ -485,12 +402,12 @@ impl NameNote {
         {
             return None;
         }
-        hex::decode_to_slice(parts[5], &mut prev_rcm_bytes).ok()?;
+        hex::decode_to_slice(parts[5], &mut prev_bytes).ok()?;
 
         let note = match action {
             Action::List | Action::Auction => {
                 let (pay_to, ask) = terms?;
-                if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                if prev_bytes == [0u8; 32] || ua_str.is_empty() {
                     return None;
                 }
                 NameNote::List {
@@ -501,22 +418,22 @@ impl NameNote {
                         ask,
                     },
                     expires_at,
-                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                    prev: NameCommitment::from_bytes(&prev_bytes)?,
                 }
             }
             Action::Delist => {
-                if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                if prev_bytes == [0u8; 32] || ua_str.is_empty() {
                     return None;
                 }
                 NameNote::Delist {
                     name,
                     ua,
                     expires_at,
-                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                    prev: NameCommitment::from_bytes(&prev_bytes)?,
                 }
             }
             Action::Claim => {
-                if prev_rcm_bytes != [0u8; 32] || ua_str.is_empty() {
+                if prev_bytes != [0u8; 32] || ua_str.is_empty() {
                     return None;
                 }
                 NameNote::Claim {
@@ -526,37 +443,37 @@ impl NameNote {
                 }
             }
             Action::Update => {
-                if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                if prev_bytes == [0u8; 32] || ua_str.is_empty() {
                     return None;
                 }
                 NameNote::Update {
                     name,
                     ua,
                     expires_at,
-                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                    prev: NameCommitment::from_bytes(&prev_bytes)?,
                 }
             }
             Action::Sale => {
-                if prev_rcm_bytes == [0u8; 32] || ua_str.is_empty() {
+                if prev_bytes == [0u8; 32] || ua_str.is_empty() {
                     return None;
                 }
                 NameNote::Sale {
                     name,
                     ua,
                     expires_at,
-                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                    prev: NameCommitment::from_bytes(&prev_bytes)?,
                 }
             }
             // A release MUST retain the released UA and encode the exact value
             // `none` for its expiry.
             Action::Release => {
-                if ua_str.is_empty() || expires_at != Expiry::Never || prev_rcm_bytes == [0u8; 32] {
+                if ua_str.is_empty() || expires_at != Expiry::Never || prev_bytes == [0u8; 32] {
                     return None;
                 }
                 NameNote::Release {
                     name,
                     ua,
-                    prev: NameCommitment::from_bytes(&prev_rcm_bytes)?,
+                    prev: NameCommitment::from_bytes(&prev_bytes)?,
                 }
             }
         };
@@ -566,45 +483,29 @@ impl NameNote {
 }
 
 // ---------------------------------------------------------------------------
-// Block scan: ZNS trial-decryption pass
+// Block scan: Name Note pass
 // ---------------------------------------------------------------------------
 
-use subtle::ConstantTimeEq as _;
 use zcash_primitives::block::Block;
 
-/// One decrypted Name Note from the ZNS scan pass, with the facts the wallet
-/// store and the Registry evidence need.
+/// One Name Note from the scan pass, with the facts the Registry needs.
 pub struct DecryptedNameNote {
     pub txid: TxId,
     pub action_index: usize,
-    /// The action's index in the block's full Ironwood commitment stream —
-    /// fixes the note's tree position.
-    pub ordinal: usize,
-    /// The action's published note commitment — marked at the wallet
-    /// commit so the note stays witnessable.
+    /// The action's published note commitment: the note's identity.
     pub cmx: orchard::note::ExtractedNoteCommitment,
-    pub note: orchard::note::Note,
-    /// The nullifier this ZNS-bound note reveals when spent. It must be
-    /// derived from the same authenticated `(rcm, psi)` pair as `cmx`; the
-    /// ordinary rseed-derived nullifier is not the Name Note's nullifier.
+    /// The nullifier the note reveals when spent.
     pub nullifier: orchard::note::Nullifier,
-    /// The epk bytes directly — the `ShieldedOutput` trait method is
-    /// ambiguous across the three Ironwood-family domains.
-    pub ephemeral_key: zcash_note_encryption::EphemeralKeyBytes,
-    pub memo: [u8; 512],
     pub payload: NameNote,
 }
 
-/// Trial-decrypts the block's Ironwood actions under the ZNS domain.
+/// Trial-decrypts the block's Ironwood actions to the Registry address.
 ///
-/// Derives the Registry's published identity from the capability — the
-/// external-scope address at diversifier index 0 — and its prepared ivk,
-/// in exactly one ivk derivation per call.
-///
-/// A candidate is exposed only if its memo parses as a Name Note and the
-/// payload-derived ZNS commitment reproduces the action's actual cmx — the
-/// cryptographic authorship check. Value must be zero and the recipient must
-/// be the exact Registry address; anything else is not a Name Note.
+/// Standard decryption already checks the action's cmx against the note's
+/// rseed. A candidate is exposed only if its memo parses as a Name Note and
+/// the rseed derived from that record is the note's rseed: the authorship
+/// check. Value must be zero and the recipient must be the exact Registry
+/// address; anything else is not a Name Note.
 pub fn decrypt_name_notes<P: Parameters>(
     network: &P,
     block: &Block,
@@ -616,57 +517,37 @@ pub fn decrypt_name_notes<P: Parameters>(
     let registry_ivk = registry_ivk.prepare();
 
     let mut candidates = Vec::new();
-    let mut ordinal = 0usize;
     for tx in block.vtx() {
         let Some(bundle) = tx.ironwood_bundle() else {
             continue;
         };
-        let zns_capable = bundle.bundle_version() == orchard::bundle::BundleVersion::ironwood_v3()
-            && bundle.flags().outputs_enabled();
+        if bundle.bundle_version() != orchard::bundle::BundleVersion::ironwood_v3()
+            || !bundle.flags().outputs_enabled()
+        {
+            continue;
+        }
         for (action_index, action) in bundle.actions().iter().enumerate() {
-            if zns_capable {
-                if let Some((candidate, recipient, memo)) =
-                    orchard::note_encryption::ZnsIronwoodDomain::for_action(action)
-                        .try_decrypt(action, &registry_ivk)
-                {
-                    if let Some(payload) = NameNote::decode(network, &memo) {
-                        // The authorship check, caller-side: the memo's transition,
-                        // hashed under the ZNS binding, must reproduce the action's
-                        // published cmx.
-                        let note = *candidate.note();
-                        let rcm =
-                            orchard::note::NoteCommitTrapdoor::from_inner(payload.rcm(network));
-                        let psi = Psi::from_inner(payload.psi(network));
-                        let authored = match note.zns_cmx(rcm, psi) {
-                            Some(computed) => computed.ct_eq(candidate.cmx()),
-                            None => subtle::Choice::from(0),
-                        };
-
-                        if authored.into()
-                            && note.value() == orchard::value::NoteValue::ZERO
-                            && recipient == registry_recipient
-                        {
-                            let nullifier = note
-                                .zns_nullifier(&registry_fvk, rcm, psi)
-                                .expect("authenticated Name Note commitment is not identity");
-                            candidates.push(DecryptedNameNote {
-                                txid: tx.txid(),
-                                action_index,
-                                ordinal,
-                                cmx: *candidate.cmx(),
-                                note,
-                                nullifier,
-                                ephemeral_key: zcash_note_encryption::EphemeralKeyBytes(
-                                    action.encrypted_note().epk_bytes,
-                                ),
-                                memo,
-                                payload,
-                            });
-                        }
-                    }
-                }
+            let domain = orchard::note_encryption::IronwoodDomain::for_action(action);
+            let Some((note, recipient, memo)) =
+                zcash_note_encryption::try_note_decryption(&domain, &registry_ivk, action)
+            else {
+                continue;
+            };
+            let Some(payload) = NameNote::decode(network, &memo) else {
+                continue;
+            };
+            if note.rseed().as_bytes() == &payload.rseed(network)
+                && note.value() == orchard::value::NoteValue::ZERO
+                && recipient == registry_recipient
+            {
+                candidates.push(DecryptedNameNote {
+                    txid: tx.txid(),
+                    action_index,
+                    cmx: *action.cmx(),
+                    nullifier: note.nullifier(&registry_fvk),
+                    payload,
+                });
             }
-            ordinal += 1;
         }
     }
     candidates
@@ -777,16 +658,15 @@ impl NameNoteQueue {
         true
     }
 
-    /// Derive `Seen` from any matching confirmed record at or after the
-    /// order's origin. Earlier matches may belong to an older incarnation
-    /// of a deterministic note commitment.
-    pub fn reconcile_seen<P: Parameters>(&mut self, network: &P, registry: &Registry) {
+    /// Derive `Seen` from any confirmed record of the same note at or after
+    /// the order's origin. Earlier matches may be an older note with the
+    /// same record.
+    pub fn reconcile_seen(&mut self, registry: &Registry) {
         for (note, origin, state) in &mut self.orders {
-            let commitment = note.commitment(network);
             if registry
                 .record_history(note.name())
                 .iter()
-                .any(|record| record.confirmed_height >= *origin && record.commitment == commitment)
+                .any(|record| record.confirmed_height >= *origin && record.note == *note)
             {
                 *state = NameNoteState::Seen;
             }
@@ -800,7 +680,7 @@ impl NameNoteQueue {
             }
             registry
                 .record(note.name())
-                .is_some_and(|record| Some(record.commitment) == note.prev_rcm())
+                .is_some_and(|record| Some(record.commitment) == note.prev())
         });
     }
 
@@ -1079,34 +959,6 @@ mod tests {
         }
     }
 
-    /// The terms are part of the commitment, and a delist does not
-    /// commit to the same opening as an update with the same fields.
-    #[test]
-    fn openings_bind_the_listing_terms() {
-        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
-        let five = list_note(test_name(), flat(5), Expiry::Never, prev);
-        let six = list_note(test_name(), flat(6), Expiry::Never, prev);
-        let auction = list_note(test_name(), dutch(), Expiry::Never, prev);
-        assert_ne!(five.rcm(&MAIN_NETWORK), six.rcm(&MAIN_NETWORK));
-        assert_ne!(five.psi(&MAIN_NETWORK), six.psi(&MAIN_NETWORK));
-        assert_ne!(five.rcm(&MAIN_NETWORK), auction.rcm(&MAIN_NETWORK));
-
-        let delist = NameNote::Delist {
-            name: test_name(),
-            ua: test_ua(),
-            expires_at: Expiry::Never,
-            prev,
-        };
-        let update = NameNote::Update {
-            name: test_name(),
-            ua: test_ua(),
-            expires_at: Expiry::Never,
-            prev,
-        };
-        assert_ne!(delist.rcm(&MAIN_NETWORK), update.rcm(&MAIN_NETWORK));
-        assert_ne!(delist.psi(&MAIN_NETWORK), update.psi(&MAIN_NETWORK));
-    }
-
     /// §3.5: a memo whose UA is not a valid ZIP 316 address decodes to no
     /// note. `u1xxx` is the whitepaper's own example.
     #[test]
@@ -1123,44 +975,7 @@ mod tests {
         assert!(zcash_keys::address::Address::decode(&MAIN_NETWORK, "u1xxx").is_none());
     }
 
-    /// The chain rule: claim/update/release openings all differ, and the
-    /// expiry is cryptographically bound (changing only `e` changes both
-    /// field elements).
-    #[test]
-    fn openings_bind_expiry_and_chain() {
-        let name = test_name();
-        let ua = test_ua();
-        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
-        let t = Timestamp::from_seconds(1_000).unwrap();
-
-        let claim_never = NameNote::Claim {
-            name: name.clone(),
-            ua: ua.clone(),
-            expires_at: Expiry::Never,
-        };
-        let rcm_never = claim_never.rcm(&MAIN_NETWORK);
-        let psi_never = claim_never.psi(&MAIN_NETWORK);
-        let claim_at = NameNote::Claim {
-            name: name.clone(),
-            ua: ua.clone(),
-            expires_at: Expiry::At(t),
-        };
-        let rcm_at = claim_at.rcm(&MAIN_NETWORK);
-        let psi_at = claim_at.psi(&MAIN_NETWORK);
-        assert_ne!(rcm_never, rcm_at);
-        assert_ne!(psi_never, psi_at);
-
-        let rcm_upd = NameNote::Update {
-            name,
-            ua,
-            expires_at: Expiry::At(t),
-            prev,
-        }
-        .rcm(&MAIN_NETWORK);
-        assert_ne!(rcm_at, rcm_upd);
-    }
-
-    /// Canonical-decimal strictness: `e` bytes are hashed into σ, so
+    /// Canonical-decimal strictness: `e` bytes are hashed into the rseed, so
     /// non-canonical spellings must be rejected by the parser rather than
     /// silently accepted as the same value.
     #[test]
@@ -1373,6 +1188,7 @@ mod tests {
         assert!(registry.accept_claim(
             &MAIN_NETWORK,
             &first_claim,
+            NameCommitment::from_bytes(&[11; 32]).unwrap(),
             test_nullifier(11),
             Some(test_nullifier(21)),
             &[first_anchor],
@@ -1387,8 +1203,8 @@ mod tests {
             prev: registry.record(&name).unwrap().commitment,
         };
         assert!(registry.accept_transition(
-            &MAIN_NETWORK,
             &release,
+            NameCommitment::from_bytes(&[12; 32]).unwrap(),
             test_nullifier(12),
             &[test_nullifier(11)],
             height(120),
@@ -1405,6 +1221,7 @@ mod tests {
         assert!(registry.accept_claim(
             &MAIN_NETWORK,
             &reclaim,
+            NameCommitment::from_bytes(&[13; 32]).unwrap(),
             test_nullifier(13),
             Some(test_nullifier(23)),
             &[second_anchor],
@@ -1423,13 +1240,13 @@ mod tests {
 
         let mut queue = NameNoteQueue::default();
         queue.admit(height(105), release.clone());
-        queue.reconcile_seen(&MAIN_NETWORK, &registry);
+        queue.reconcile_seen(&registry);
         assert!(!queue.note_pending(release.name()));
         assert!(queue.authorized_notes().is_empty());
 
         // The seen release frees the name for the reclaim.
         queue.admit(height(126), reclaim.clone());
-        queue.reconcile_seen(&MAIN_NETWORK, &registry);
+        queue.reconcile_seen(&registry);
         assert!(!queue.note_pending(reclaim.name()));
 
         // Both entries remain for reorg tracking: a rewind below the
@@ -1445,12 +1262,12 @@ mod tests {
         let height = |n| BlockHeight::from_u32(n);
         let mut queue = NameNoteQueue::default();
         queue.admit(height(105), release.clone());
-        queue.reconcile_seen(&MAIN_NETWORK, &registry);
+        queue.reconcile_seen(&registry);
         assert!(!queue.note_pending(release.name()));
 
         queue.rewind_to(height(110));
         registry.truncate_to_height(height(110));
-        queue.reconcile_seen(&MAIN_NETWORK, &registry);
+        queue.reconcile_seen(&registry);
         assert!(queue.note_pending(release.name()));
         assert_eq!(queue.authorized_notes().len(), 1);
     }
@@ -1470,6 +1287,7 @@ mod tests {
         assert!(registry.accept_claim(
             &MAIN_NETWORK,
             &note,
+            NameCommitment::from_bytes(&[11; 32]).unwrap(),
             test_nullifier(11),
             Some(test_nullifier(21)),
             &[anchor],
@@ -1480,7 +1298,7 @@ mod tests {
 
         let mut queue = NameNoteQueue::default();
         queue.admit(height(101), note);
-        queue.reconcile_seen(&MAIN_NETWORK, &registry);
+        queue.reconcile_seen(&registry);
         // The match predates the order's origin: still authorized.
         assert_eq!(queue.authorized_notes().len(), 1);
     }
@@ -1500,6 +1318,7 @@ mod tests {
         assert!(registry.accept_claim(
             &MAIN_NETWORK,
             &claim,
+            NameCommitment::from_bytes(&[11; 32]).unwrap(),
             test_nullifier(11),
             Some(test_nullifier(21)),
             &[anchor],
@@ -1510,7 +1329,7 @@ mod tests {
 
         let mut queue = NameNoteQueue::default();
         assert!(queue.admit(height(100), claim.clone()));
-        queue.reconcile_seen(&MAIN_NETWORK, &registry);
+        queue.reconcile_seen(&registry);
         assert!(!queue.note_pending(claim.name()));
 
         // The seen entry no longer reserves the name: the identical

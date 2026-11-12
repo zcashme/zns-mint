@@ -2166,7 +2166,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "orchard"
 version = "0.16.0"
-source = "git+https://github.com/zcashme/orchard.git?tag=zns-orchard-v0.16.0#6ffdf4ef8825b15b4e436252b6da4e0182ae5d74"
+source = "git+https://github.com/zcashme/orchard.git?tag=zns-orchard-v0.16.0.1#2389552e8f61b9087e8fc5da44d80e84b4fd544d"
 dependencies = [
  "aes",
  "bitvec",
@@ -4647,7 +4647,7 @@ dependencies = [
 [[package]]
 name = "zcash_primitives"
 version = "0.31.0"
-source = "git+https://github.com/zcashme/zns-zcash_primitives.git?tag=zns-zcash_primitives-v0.31.0#f436d1b426a61f9c9e02e2b12df92f16cb86592b"
+source = "git+https://github.com/zcashme/zns-zcash_primitives.git?tag=zns-zcash_primitives-v0.31.0.1#da38c91460d0995c54883369e22cb8adc7433388"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -4944,7 +4944,6 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "orchard",
- "pasta_curves",
  "rand 0.10.3",
  "rust_decimal",
  "rustls",
@@ -4979,9 +4978,9 @@ dependencies = [
 
 [[package]]
 name = "zns-verify"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c228573577dc2422109714c52319d9c5c52e8fcbc50c931b9a7ee62ca4304e3b"
+checksum = "f224dfcf63c7f60342516228ac9eb8ced4748ffd9886934432b32189536fead5"
 dependencies = [
  "blake2b_simd",
  "group 0.14.0",

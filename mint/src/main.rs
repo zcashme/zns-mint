@@ -271,7 +271,7 @@ async fn main() {
             challenges = OtpQueue::new();
             market = Market::new();
             name_notes.rewind_to(rewound);
-            name_notes.reconcile_seen(&network, &registry);
+            name_notes.reconcile_seen(&registry);
             requests.truncate_to(rewound);
             refunds.truncate_to(rewound);
             tracing::warn!(
@@ -348,7 +348,7 @@ async fn main() {
                 &mut registry,
                 &mut mtp,
             );
-            name_notes.reconcile_seen(&network, &registry);
+            name_notes.reconcile_seen(&registry);
             // The block's own clock: a challenge expired by it completes
             // nothing in it, and the law reads it.
             let block_mtp = mtp

@@ -70,18 +70,19 @@ impl NameRecord {
     }
 
     /// The name's state as of `note` taking effect at `confirmed_height`:
-    /// commitment = the note's identity, liveness clock restarted from
-    /// `mtp`, `spent` = the nullifier it will reveal when next spent.
-    fn create<P: Parameters>(
-        params: &P,
+    /// `commitment` = the cmx its action published, liveness clock
+    /// restarted from `mtp`, `spent` = the nullifier it will reveal when
+    /// next spent.
+    fn create(
         note: &NameNote,
+        commitment: NameCommitment,
         spent: orchard::note::Nullifier,
         confirmed_height: BlockHeight,
         mtp: Timestamp,
     ) -> Self {
         Self {
             note: note.clone(),
-            commitment: note.commitment(params),
+            commitment,
             confirmed_height,
             release_deadline: Timestamp::from_seconds(
                 mtp.as_seconds() + crate::mint::LIVENESS_INTERVAL,
@@ -121,7 +122,7 @@ impl NameRecord {
     /// This record's nullifier, when `note` still names this exact
     /// state.
     pub fn nullifier(&self, note: &NameNote) -> Option<orchard::note::Nullifier> {
-        (Some(self.commitment) == note.prev_rcm()).then_some(self.predecessor_nullifier)
+        (Some(self.commitment) == note.prev()).then_some(self.predecessor_nullifier)
     }
 }
 
@@ -392,6 +393,7 @@ impl Registry {
         &mut self,
         params: &P,
         note: &NameNote,
+        commitment: NameCommitment,
         nullifier: orchard::note::Nullifier,
         successor: Option<orchard::note::Nullifier>,
         nfs: &[orchard::note::Nullifier],
@@ -432,7 +434,7 @@ impl Registry {
         if !built_after_release {
             return false;
         }
-        self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
+        self.set_record(NameRecord::create(note, commitment, nullifier, height, mtp));
         true
     }
 
@@ -459,10 +461,10 @@ impl Registry {
     /// the transaction spent this name's current note and the note follows
     /// it. The new liveness deadline starts at this block's median, and
     /// releases stay legal after either clock.
-    pub fn accept_transition<P: Parameters>(
+    pub fn accept_transition(
         &mut self,
-        params: &P,
         note: &NameNote,
+        commitment: NameCommitment,
         nullifier: orchard::note::Nullifier,
         nfs: &[orchard::note::Nullifier],
         height: BlockHeight,
@@ -476,22 +478,30 @@ impl Registry {
             self.follow_spends(nfs, height);
             return false;
         };
-        if note.prev_rcm() != Some(record.commitment) || !carries_forward(note, &record) {
+        if note.prev() != Some(record.commitment) || !carries_forward(note, &record) {
             // The predecessor was spent whatever the note claims.
-            self.release_predecessor(params, note.name().clone(), &record, nullifier, height, mtp);
+            self.release_predecessor(
+                note.name().clone(),
+                &record,
+                commitment,
+                nullifier,
+                height,
+                mtp,
+            );
             return false;
         }
-        self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
+        self.set_record(NameRecord::create(note, commitment, nullifier, height, mtp));
         true
     }
 
     /// The name's live note was spent but no renewal lands: the name
-    /// is released, bound to the successor nullifier it received.
-    fn release_predecessor<P: Parameters>(
+    /// is released, bound to the cmx and nullifier of the note that did
+    /// land.
+    fn release_predecessor(
         &mut self,
-        params: &P,
         name: Name,
         record: &NameRecord,
+        commitment: NameCommitment,
         nullifier: orchard::note::Nullifier,
         height: BlockHeight,
         mtp: Timestamp,
@@ -501,7 +511,9 @@ impl Registry {
             ua: record.ua().clone(),
             prev: record.commitment,
         };
-        self.set_record(NameRecord::create(params, &release, nullifier, height, mtp));
+        self.set_record(NameRecord::create(
+            &release, commitment, nullifier, height, mtp,
+        ));
     }
 
     /// The live predecessor this transaction spent, when it is this
@@ -746,6 +758,7 @@ mod tests {
         assert!(registry.accept_claim(
             &MAIN_NETWORK,
             &note,
+            commitment(note_seed),
             nullifier(note_seed),
             Some(nullifier(successor_seed)),
             &[anchor],
@@ -764,8 +777,8 @@ mod tests {
             prev: record.commitment,
         };
         assert!(registry.accept_transition(
-            &MAIN_NETWORK,
             &note,
+            commitment(note_seed),
             nullifier(note_seed),
             &[record.predecessor_nullifier],
             BlockHeight::from_u32(height),
@@ -781,8 +794,8 @@ mod tests {
             prev: record.commitment,
         };
         assert!(registry.accept_transition(
-            &MAIN_NETWORK,
             &note,
+            commitment(note_seed),
             nullifier(note_seed),
             &[record.predecessor_nullifier],
             BlockHeight::from_u32(height),
@@ -1037,8 +1050,8 @@ mod tests {
         );
         // Each yielded note is the release bound to its own record.
         assert!(matches!(due[0].1, NameNote::Release { .. }));
-        assert_eq!(due[0].1.prev_rcm(), Some(commitment(1)));
-        assert_eq!(due[1].1.prev_rcm(), Some(commitment(2)));
+        assert_eq!(due[0].1.prev(), Some(commitment(1)));
+        assert_eq!(due[1].1.prev(), Some(commitment(2)));
     }
 
     /// A claim sets `release_deadline = τ + L`. An update at a later block
@@ -1057,8 +1070,8 @@ mod tests {
             expires_at: Expiry::Never,
         };
         let rec = NameRecord::create(
-            &MAIN_NETWORK,
             &claim,
+            commitment(1),
             nullifier(1),
             BlockHeight::from_u32(100),
             ts(tau_claim),
@@ -1074,8 +1087,8 @@ mod tests {
             prev: commitment(3),
         };
         let rec2 = NameRecord::create(
-            &MAIN_NETWORK,
             &update,
+            commitment(2),
             nullifier(2),
             BlockHeight::from_u32(200),
             ts(tau_update),
@@ -1109,6 +1122,7 @@ mod tests {
         assert!(r.accept_claim(
             &MAIN_NETWORK,
             &claim,
+            commitment(20),
             nullifier(20),
             Some(succ1),
             &[a1],
@@ -1121,6 +1135,7 @@ mod tests {
         assert!(!r.accept_claim(
             &MAIN_NETWORK,
             &claim,
+            commitment(21),
             nullifier(21),
             Some(succ2),
             &[a2],
@@ -1163,6 +1178,7 @@ mod tests {
         assert!(!r.accept_claim(
             &MAIN_NETWORK,
             &claim,
+            commitment(31),
             nullifier(31),
             Some(stale_successor),
             &[stale_anchor],
@@ -1180,6 +1196,7 @@ mod tests {
         assert!(r.accept_claim(
             &MAIN_NETWORK,
             &claim,
+            commitment(41),
             nullifier(41),
             Some(fresh_successor),
             &[fresh_anchor],
@@ -1268,6 +1285,7 @@ mod tests {
         assert!(!r.accept_claim(
             &MAIN_NETWORK,
             &claim,
+            commitment(20),
             nullifier(20),
             None,
             &[a1],
@@ -1284,6 +1302,7 @@ mod tests {
         assert!(!r.accept_claim(
             &MAIN_NETWORK,
             &claim,
+            commitment(21),
             nullifier(21),
             Some(succ),
             &[a2, a1],
@@ -1316,6 +1335,7 @@ mod tests {
         assert!(!r.accept_claim(
             &MAIN_NETWORK,
             &claim,
+            commitment(21),
             nullifier(21),
             Some(nullifier(200)),
             &[nullifier(9)],
@@ -1346,6 +1366,7 @@ mod tests {
         assert!(!r.accept_claim(
             &MAIN_NETWORK,
             &claim,
+            commitment(21),
             nullifier(21),
             Some(succ),
             &[anchor, nullifier(1)],
@@ -1405,8 +1426,8 @@ mod tests {
         let note = update_for_alice(Expiry::At(ts(2_100_000_000)), 1);
         let succ = nullifier(20);
         assert!(r.accept_transition(
-            &MAIN_NETWORK,
             &note,
+            commitment(20),
             succ,
             &[nullifier(1)],
             BlockHeight::from_u32(101),
@@ -1454,8 +1475,8 @@ mod tests {
             prev: commitment(1),
         };
         assert!(r.accept_transition(
-            &MAIN_NETWORK,
             &list,
+            commitment(20),
             nullifier(20),
             &[nullifier(1)],
             at,
@@ -1472,7 +1493,7 @@ mod tests {
         assert!(!note.action().is_update());
         assert_eq!(note.ua(), &bob);
         let succ = nullifier(21);
-        assert!(r.accept_transition(&MAIN_NETWORK, &note, succ, &[nullifier(20)], at, mtp));
+        assert!(r.accept_transition(&note, commitment(21), succ, &[nullifier(20)], at, mtp));
         let rec = r.record(&test_name()).expect("the name stays live");
         assert_eq!(rec.action(), Action::Sale);
         assert_eq!(*rec.ua(), bob);
@@ -1493,8 +1514,8 @@ mod tests {
             prev: commitment(1),
         };
         assert!(!r.accept_transition(
-            &MAIN_NETWORK,
             &sale,
+            commitment(20),
             nullifier(20),
             &[nullifier(1)],
             BlockHeight::from_u32(101),
@@ -1533,7 +1554,7 @@ mod tests {
         let list = challenge(Request::List(listing(alice.clone(), flat.clone())));
         let note = r.authorize_list(&list, mtp, at).unwrap();
         assert_eq!(note.expires_at(), Some(term));
-        assert_eq!(note.prev_rcm(), Some(commitment(1)));
+        assert_eq!(note.prev(), Some(commitment(1)));
         let by_bob = challenge(Request::List(listing(bob_ua(), flat.clone())));
         assert!(r.authorize_list(&by_bob, mtp, at).is_none());
         let ended = challenge(Request::List(listing(
@@ -1555,8 +1576,8 @@ mod tests {
         assert!(r.authorize_delist(&delist, mtp).is_none(), "not listed");
         let mut r = r;
         assert!(r.accept_transition(
-            &MAIN_NETWORK,
             &note,
+            commitment(20),
             nullifier(20),
             &[nullifier(1)],
             at,
@@ -1597,8 +1618,8 @@ mod tests {
         };
         let accept = |r: &mut Registry, note: &NameNote| {
             r.accept_transition(
-                &MAIN_NETWORK,
                 note,
+                commitment(20),
                 nullifier(20),
                 &[nullifier(1)],
                 BlockHeight::from_u32(101),
@@ -1630,8 +1651,8 @@ mod tests {
         let succ = nullifier(20);
         let mtp = ts(1_000_000_000);
         assert!(r.accept_transition(
-            &MAIN_NETWORK,
             &note,
+            commitment(20),
             succ,
             &[nullifier(1)],
             BlockHeight::from_u32(101),
@@ -1654,8 +1675,8 @@ mod tests {
         let note = update_for_alice(Expiry::Never, 1);
         let succ = nullifier(20);
         assert!(r.accept_transition(
-            &MAIN_NETWORK,
             &note,
+            commitment(20),
             succ,
             &[nullifier(1)],
             BlockHeight::from_u32(101),
@@ -1686,8 +1707,8 @@ mod tests {
         // and the chain facts still land — alice's note was consumed,
         // so she is marked released, and the anchor retires.
         assert!(!r.accept_transition(
-            &MAIN_NETWORK,
             &note,
+            commitment(20),
             nullifier(20),
             &[nullifier(1), nullifier(9)],
             height,
@@ -1710,7 +1731,7 @@ mod tests {
     }
 
     #[test]
-    fn accept_update_prev_rcm_mismatch_marks_released() {
+    fn accept_update_prev_mismatch_marks_released() {
         let mut r = live_alice(Expiry::Never, 3_000_000_000);
         let wrong_prev = update_for_alice(Expiry::Never, 99);
         let height = BlockHeight::from_u32(101);
@@ -1719,8 +1740,8 @@ mod tests {
         // Alice's note was spent whatever the payload claims: the name
         // is released, bound to the successor nullifier it received.
         assert!(!r.accept_transition(
-            &MAIN_NETWORK,
             &wrong_prev,
+            commitment(20),
             nullifier(20),
             &[nullifier(1)],
             height,
@@ -1745,8 +1766,8 @@ mod tests {
         };
         let succ = nullifier(20);
         assert!(r.accept_transition(
-            &MAIN_NETWORK,
             &note,
+            commitment(20),
             succ,
             &[nullifier(1)],
             BlockHeight::from_u32(101),

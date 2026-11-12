@@ -74,10 +74,6 @@ pub enum WalletError {
     /// block would make that value invisible.
     #[error("scanned ordinary-Orchard receive is not stored by this wallet")]
     UnexpectedOrchardReceive,
-    /// `store_name_note` disagreed with applied wallet state (height, tx
-    /// status, ZNS cmx, or a stored field).
-    #[error("invalid Name Note ingestion: {0}")]
-    InvalidNameNote(&'static str),
     /// A rescan was requested, but the in-memory projection retains no
     /// blocks to re-scan. The process must be restarted, replaying from the
     /// birthday.

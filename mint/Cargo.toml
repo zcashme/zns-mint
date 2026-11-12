@@ -59,11 +59,9 @@ hex = "0.4"
 zns-canon = { path = "../canon" }
 incrementalmerkletree = "0.9"
 
-# ZNS payload (rcm, ψ) derivation: BLAKE2b-512 wide-reduced into Pallas field
-# elements. Both are already transitive deps (via zcash_spec / orchard); pulling
-# them direct adds no new compiled code to the graph.
+# A Name Note's rseed: BLAKE2b-256 with personalization `ZNS___Name_Notes`.
+# Already a transitive dep (via zcash_spec / orchard).
 blake2b_simd = "1"
-pasta_curves = "0.6"
 
 zcash_note_encryption = "0.5"
 
@@ -104,12 +102,10 @@ zip321 = "0.10"
 # detection (Treasury accepts transparent payments from users).
 zcash_client_backend = { version = "0.25", default-features = false, features = ["orchard", "transparent-inputs"] }
 
-# Orchard with the `unsafe-zns` feature: Name Notes override the standard
-# note commitment so a note commits to a ZNS payload. The fork lives at
+# Orchard with the `unsafe-zns` feature, for `RandomSeedBytes`: a Name Note
+# is built from an rseed derived from its record. The fork lives at
 # https://github.com/zcashme/orchard and is unified with the librustzcash
-# graph via the [patch.crates-io] git tag. zns-mint calls
-# `Builder::add_zns_output` / `add_zns_spend` directly, so this is a
-# first-class dep, not just a transitive one.
+# graph via the [patch.crates-io] git tag.
 orchard = { version = "0.16.0", default-features = false, features = ["unsafe-zns", "circuit", "multicore"] }
 shardtree = "0.8"
 metrics = "0.24.6"

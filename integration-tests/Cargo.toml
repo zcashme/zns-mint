@@ -31,15 +31,15 @@ zcash_script = "0.6"
 zip32 = "0.3"
 # `decrypt` is zns-verify's ZnsIronwoodDomain scan (unified with the orchard
 # patch below). Ceremony/claim still need orchard for proving.
-zns-verify = { version = "0.2", features = ["decrypt"] }
+zns-verify = { version = "0.2.1", features = ["decrypt"] }
 # Public key for sealing the all-zero test capsule. A release build cannot use this.
 zns-canon = { path = "../canon", features = ["non-tee"] }
 # The mint under test, linked in-process by `fixture`: regtest selects non-tee.
 zns-mint = { path = "../mint", features = ["regtest"] }
 
 [patch.crates-io]
-orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0" }
-zcash_primitives = { git = "https://github.com/zcashme/zns-zcash_primitives.git", tag = "zns-zcash_primitives-v0.31.0" }
+orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0.1" }
+zcash_primitives = { git = "https://github.com/zcashme/zns-zcash_primitives.git", tag = "zns-zcash_primitives-v0.31.0.1" }
 
 # Debug Halo2 is too slow for a 42-action Ironwood bundle.
 [dev-dependencies]
