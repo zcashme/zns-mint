@@ -1054,11 +1054,39 @@ mod tests {
             mtp(),
             BlockHeight::from_u32(41),
         ));
-        assert_eq!(
-            propose_list(&mut Market::new(), &list, &owner, height()),
-            Ok(())
-        );
-        list_on_chain(&mut registry, &list, 60);
+        let mut market = Market::new();
+        let mut challenges = OtpQueue::new();
+        market
+            .propose_list(
+                &mut challenges,
+                &list,
+                &owner,
+                TxId::from_bytes([1; 32]),
+                mtp(),
+                height(),
+            )
+            .unwrap();
+        let code = issue(&mut challenges);
+        let swapped = TransparentAddress::PublicKeyHash([0x33; 20]);
+        let substituted = OtpMemo {
+            code: code.clone(),
+            name: name(),
+            action: Action::List,
+            ua: owner.clone(),
+            listing: Some((swapped, zats(150_000_000))),
+            auction: None,
+        };
+        assert!(answer(&registry, &mut challenges, &substituted, height()).is_none());
+        let right = OtpMemo {
+            code,
+            name: name(),
+            action: Action::List,
+            ua: owner.clone(),
+            listing: Some((pasted, zats(150_000_000))),
+            auction: None,
+        };
+        let note = answer(&registry, &mut challenges, &right, height()).unwrap();
+        confirm(&mut registry, &note, 60, height());
         assert_eq!(
             registry.listing(&name()).map(|listing| listing.pay_to),
             Some(pasted)
