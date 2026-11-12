@@ -118,7 +118,7 @@ async fn transition(
             assert_eq!(txid.action, action);
             assert_eq!(txid.ua, stack.user.ua);
             assert_eq!(txid.expires_at.as_deref(), expires);
-            assert_eq!(txid.prev, prev.own_rcm);
+            assert_eq!(txid.prev, prev.own_cmx);
             assert_eq!(txid.value, 0);
             let (g_d, pk_d) = registry_commitment_keys()?;
             assert_eq!(txid.g_d, g_d);

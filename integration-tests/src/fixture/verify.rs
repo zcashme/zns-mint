@@ -1,14 +1,14 @@
 //! Independent Name Note scan: `zns-verify` trial-decrypt and
-//! `verify_name_note` — never mint's decoder. Every field asserted by the
-//! happy path is checked here, in this repo, including the `rcm` chain:
-//! each successor's `prev` must be its predecessor's own derived `rcm`.
+//! `verify_bound_name_note` — never mint's decoder. Every field asserted by
+//! the happy path is checked here, in this repo, including the chain: each
+//! successor's `prev` must be its predecessor's on-chain `cmx`.
 
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use zcash_primitives::block::Block;
-use zns_verify::{zns_psi_rcm, NameNote};
+use zns_verify::NameNote;
 
 use super::{account_usk, regtest_network, DEV_SEED};
 use crate::{Mint, Zebrad};
@@ -29,9 +29,9 @@ pub struct VerifiedNameNote {
     pub expires_at: Option<String>,
     /// The memo's `prev` slot, verbatim hex — 64 zeros for a claim.
     pub prev: String,
-    /// This note's own `rcm`, derived from its memo fields — the value a
+    /// This note's own `cmx`, as its action published it — the value a
     /// successor's `prev` must carry.
-    pub own_rcm: String,
+    pub own_cmx: String,
     pub value: u64,
     pub g_d: [u8; 32],
     pub pk_d: [u8; 32],
@@ -157,14 +157,16 @@ async fn scan_block(zebra: &Zebrad, height: u32) -> Result<Vec<VerifiedNameNote>
             let value = note.value().inner();
             let rho = zns_verify::Rho::from_bytes(&action.rho().to_bytes())
                 .ok_or_else(|| anyhow!("non-canonical rho at height {height}"))?;
-            if !zns_verify::verify_name_note(&payload, g_d, pk_d, value, rho, cmx) {
+            if !zns_verify::verify_bound_name_note(&payload, g_d, pk_d, value, rho, cmx) {
                 bail!(
                     "Registry-decryptable memo at height {height} tx {} failed zns-verify",
                     tx.txid()
                 );
             }
-            let (prev, own_rcm) = memo_chain_fields(&memo)
-                .with_context(|| format!("chain fields at height {height}"))?;
+            let prev = payload.prev_rcm().map_or_else(
+                || "0".repeat(64),
+                |prev| String::from_utf8_lossy(&prev.to_hex()).into_owned(),
+            );
             found.push(VerifiedNameNote {
                 height,
                 txid: tx.txid().to_string(),
@@ -173,7 +175,7 @@ async fn scan_block(zebra: &Zebrad, height: u32) -> Result<Vec<VerifiedNameNote>
                 ua: payload.ua().as_str().to_string(),
                 expires_at: payload.expires_at().map(|e| e.field_bytes().to_string()),
                 prev,
-                own_rcm,
+                own_cmx: hex::encode(cmx.to_bytes()),
                 value,
                 g_d,
                 pk_d,
@@ -181,36 +183,6 @@ async fn scan_block(zebra: &Zebrad, height: u32) -> Result<Vec<VerifiedNameNote>
         }
     }
     Ok(found)
-}
-
-/// The memo's `prev` slot and this note's own derived `rcm`, both as hex.
-///
-/// The `rcm` is recomputed from the raw memo fields — the same preimage
-/// `zns_psi_rcm` digests when the mint derives the note's commitment — so
-/// a successor's `prev` can be checked against its predecessor without
-/// trusting anyone's bookkeeping.
-fn memo_chain_fields(memo: &zns_verify::Memo) -> Result<(String, String)> {
-    let text = memo.text().ok_or_else(|| anyhow!("ZNS memo is not text"))?;
-    let fields: Vec<&str> = text.split(':').collect();
-    if fields.len() != 6 || fields[0] != "ZNS" {
-        bail!("ZNS memo field count");
-    }
-    let prev_hex = fields[5];
-    let prev_bytes = hex::decode(prev_hex).context("prev hex")?;
-    let prev_bytes: [u8; 32] = prev_bytes
-        .try_into()
-        .map_err(|_| anyhow!("prev hex length"))?;
-    let (_, rcm) = zns_psi_rcm(
-        fields[1].as_bytes(),
-        fields[2].as_bytes(),
-        fields[3].as_bytes(),
-        fields[4].as_bytes(),
-        &prev_bytes,
-    );
-    // Serialize exactly as the mint does — the trapdoor's canonical
-    // bytes — so a successor's `prev` hex compares byte-identically.
-    let own = orchard::note::NoteCommitTrapdoor::from_inner(rcm).to_bytes();
-    Ok((prev_hex.to_string(), hex::encode(own)))
 }
 
 /// `txid=` on the mint line that reports the Name Note was submitted.
@@ -337,27 +309,5 @@ mod tests {
             registration_txid(log, "alice").as_deref(),
             Some("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
         );
-    }
-
-    #[test]
-    fn memo_chain_fields_derive_distinct_rcm_per_verb() {
-        let claim = "ZNS:claim:forever:u1alice:none:".to_string() + &"0".repeat(64);
-        let update_prev = "1".repeat(64);
-        let update = format!("ZNS:update:forever:u1alice:none:{update_prev}");
-        let claim_memo = zns_verify::Memo::from_array(memo_bytes(&claim));
-        let update_memo = zns_verify::Memo::from_array(memo_bytes(&update));
-        let (claim_prev, claim_rcm) = memo_chain_fields(&claim_memo).expect("claim fields");
-        let (update_prev_out, update_rcm) = memo_chain_fields(&update_memo).expect("update");
-        assert_eq!(claim_prev, "0".repeat(64));
-        assert_eq!(update_prev_out, update_prev);
-        assert_ne!(claim_rcm, update_rcm);
-        assert_eq!(claim_rcm.len(), 64);
-        assert!(claim_rcm.bytes().all(|b| b.is_ascii_hexdigit()));
-    }
-
-    fn memo_bytes(text: &str) -> [u8; 512] {
-        let mut bytes = [0u8; 512];
-        bytes[..text.len()].copy_from_slice(text.as_bytes());
-        bytes
     }
 }
