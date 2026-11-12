@@ -163,10 +163,9 @@ async fn scan_block(zebra: &Zebrad, height: u32) -> Result<Vec<VerifiedNameNote>
                     tx.txid()
                 );
             }
-            let prev = payload.prev_rcm().map_or_else(
-                || "0".repeat(64),
-                |prev| String::from_utf8_lossy(&prev.to_hex()).into_owned(),
-            );
+            let prev = payload
+                .prev_rcm()
+                .map_or_else(|| "0".repeat(64), |prev| hex::encode(prev.as_bytes()));
             found.push(VerifiedNameNote {
                 height,
                 txid: tx.txid().to_string(),
