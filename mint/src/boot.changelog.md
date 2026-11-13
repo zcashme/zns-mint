@@ -1,5 +1,13 @@
 # Boot module changelog
 
+## 2026-11-13 — The wallet scans from the birthday (#487)
+
+- `origin_checkpoint` seeds the wallet at `birthday - 1` on every network,
+  so the first scanned block is the birthday. Mainnet and testnet no
+  longer scan the 100 blocks before it. The lookback (#239) found
+  Treasury funding sent before the keygen ceremony, and no ceremony will
+  run again.
+
 ## 2026-11-12 — The sync applies blocks and nothing else (#475)
 
 - History is balance, not instruction: the sync no longer re-runs list,
