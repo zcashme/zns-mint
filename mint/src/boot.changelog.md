@@ -1,5 +1,12 @@
 # Boot module changelog
 
+## 2026-11-13 — The key methods are public for zns-rebind (#486)
+
+- `AccountKeys::derive`, `fvk`, `orchard_fvk`, `orchard_ask` and
+  `spending_keys` are `pub`, so zns-rebind builds the mint's own
+  `TreasuryKeys` and `RegistryKeys` from the unsealed seed. Visibility
+  only; the mint compiles to the same code.
+
 ## 2026-11-13 — Boot reads the manifest through canon (#491)
 
 - `load_manifest` reads `custody::PATH` once and returns canon's
