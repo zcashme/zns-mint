@@ -8,7 +8,7 @@
   parser and `CUSTODY_MANIFEST_FILE` are removed, and the mint no longer
   depends on `toml`.
 - Refusals keep their text (`FATAL: keys/zns_custody_manifest.toml has
-  no anchor txid`, …); their tests moved to canon. `anchor_txid` converts
+  no anchor txid`, …); their tests are dropped. `anchor_txid` converts
   the file's display order for the chain check, and its test stays here.
 
 ## 2026-11-13 — `Boot` carries no birthday (#489)
