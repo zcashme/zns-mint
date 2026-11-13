@@ -9,6 +9,7 @@ mod anchor;
 mod boot;
 mod note;
 mod registry;
+mod sweep;
 
 use std::time::Duration;
 
@@ -277,4 +278,21 @@ async fn main() {
     }
     let (h, anchor_txid) = scan.h.expect("H is known");
     tracing::info!(h = u32::from(h), %anchor_txid, "rebind: anchors at the new birthday");
+
+    // 4. The sweep: the old Treasury notes into one note the new mint sees.
+    if sweep::due(&scan.wallet, h, scan.wallet.tip().block_height()) {
+        let transaction = sweep::build(
+            &network,
+            &mut scan.wallet,
+            &treasury_keys,
+            &spend_prover,
+            &output_prover,
+            &fee_rule,
+        );
+        assert!(
+            source.submit(&transaction, "rebind sweep").await,
+            "FATAL: the node refused the sweep"
+        );
+        tracing::info!(txid = %transaction.txid(), "rebind: sweep sent");
+    }
 }
