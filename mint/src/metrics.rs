@@ -216,6 +216,14 @@ pub fn serving(serving: bool) {
     metrics::gauge!("zns_mint_serving").set(if serving { 1.0 } else { 0.0 });
 }
 
+/// Counts relayed challenges that expired with their request never
+/// mined: relays the Treasury paid for and no request fee paid back.
+/// `increase(zns_mint_otp_dead_relays_total[24h])` is the day's count;
+/// it stays at zero unless someone kills requests after their relay.
+pub fn dead_relays(count: usize) {
+    metrics::counter!("zns_mint_otp_dead_relays_total").increment(count as u64);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,5 +1,11 @@
 # `mint/otp.rs` design record
 
+## 2026-11-13 — `holds_name`; `expire` returns the relayed requests (#435)
+
+- `OtpQueue::holds_name` is true while any challenge on the name is live.
+- `OtpQueue::expire` returns the request txid of each relayed challenge
+  it drops, so the run loop can count the ones whose request never mined.
+
 ## 2026-11-12 — Every code is random; `relay_seen` is gone (#475)
 
 - Nothing reads a relay back from the chain any more: boot no longer

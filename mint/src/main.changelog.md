@@ -1,5 +1,16 @@
 # main.changelog.md
 
+## 2026-11-13 — A mempool relay waits while its name has a live challenge; dead relays are counted (#435)
+
+- The mempool gate checks `holds_name`, not `holds(&request)`: an update
+  with another UA or term no longer gets its own relay while a challenge
+  on the name is live. A killed request costs at most one relay per name
+  per `D_OTP`.
+- The tip pass counts each relayed challenge that expires with its
+  request never mined into `zns_mint_otp_dead_relays_total`.
+- An OTP response mined before its request is still refunded, by design:
+  no transition lands before the request that paid its fee.
+
 ## 2026-11-13 — `market.admit` returns the intent to send back (#497)
 
 - The run loop reads `market.admit`'s `Option<ReturnedIntent>` directly.
