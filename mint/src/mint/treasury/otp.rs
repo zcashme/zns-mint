@@ -254,10 +254,19 @@ impl OtpQueue {
             .collect()
     }
 
-    /// Drops every challenge whose window closed by `mtp`.
-    pub fn expire(&mut self, mtp: Timestamp) {
-        self.challenges
-            .retain(|(challenge, _, _)| mtp < challenge.expires_at);
+    /// Drops every challenge whose window closed by `mtp`, and returns
+    /// the request txid of each dropped challenge that was relayed. A
+    /// relayed challenge whose request never mined is a dead relay.
+    pub fn expire(&mut self, mtp: Timestamp) -> Vec<TxId> {
+        let mut relayed = Vec::new();
+        self.challenges.retain(|(challenge, state, txid)| {
+            let live = mtp < challenge.expires_at;
+            if !live && *state == ChallengeState::Relayed {
+                relayed.push(*txid);
+            }
+            live
+        });
+        relayed
     }
 
     /// Drops every challenge for `name`, once a transition is admitted.
@@ -427,6 +436,34 @@ mod tests {
         assert_eq!(q.unrelayed().collect::<Vec<_>>(), [unsent.request.name()]);
         q.expire(sent.expires_at);
         assert_eq!(q.relayed().count(), 0);
+        assert_eq!(q.unrelayed().count(), 0);
+    }
+
+    /// A live challenge on a name holds the name for every request on
+    /// it, whatever its UA or action; other names stand, and expiry
+    /// frees the name.
+    #[test]
+    fn a_live_challenge_holds_its_name() {
+        let mut q = OtpQueue::new();
+        let sent = admit(&mut q, update("alice"), *b"111111");
+        assert!(q.holds_name(&test_name("alice")));
+        assert!(!q.holds(&release("alice")));
+        assert!(!q.holds_name(&test_name("bob")));
+        q.expire(sent.expires_at);
+        assert!(!q.holds_name(&test_name("alice")));
+    }
+
+    /// Expiry returns the request txid of each relayed challenge it
+    /// drops, and nothing for a challenge never relayed or still live.
+    #[test]
+    fn expire_returns_the_relayed_requests() {
+        let mut q = OtpQueue::new();
+        let sent = admit(&mut q, update("alice"), *b"111111");
+        q.challenge_issued(&sent);
+        q.rebind(&sent.request, txid(7));
+        admit(&mut q, update("bob"), *b"222222");
+        assert!(q.expire(t0()).is_empty());
+        assert_eq!(q.expire(sent.expires_at), [txid(7)]);
         assert_eq!(q.unrelayed().count(), 0);
     }
 

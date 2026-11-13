@@ -354,7 +354,18 @@ async fn main() {
             let block_mtp = mtp
                 .current()
                 .expect("FATAL: MTP unavailable at the applied block");
-            challenges.expire(block_mtp);
+            // A relayed challenge whose request never mined paid for a
+            // relay that nothing paid back: a dead relay.
+            let dead_relays = challenges
+                .expire(block_mtp)
+                .into_iter()
+                .filter(|txid| {
+                    !wallet
+                        .get_tx_height(*txid)
+                        .is_ok_and(|height| height.is_some())
+                })
+                .count();
+            zns_mint::metrics::dead_relays(dead_relays);
             // A mined repeat takes the code before this block's replies
             // are read. The fee and the authorization are the same ones
             // the request pass requires.
