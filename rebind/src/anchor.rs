@@ -1,6 +1,6 @@
-//! The anchor transaction: the new mint's 40 claim anchors, and one
-//! Treasury fee note per lane so [`LANES`] claims go out in each block.
-//! Its height is the new birthday, H.
+//! The anchor transaction: the new mint's 40 claim anchors, and [`LANES`]
+//! Treasury fee notes, so each block has that many mined notes to pay
+//! claims with. Its height is the new birthday, H.
 
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
@@ -14,8 +14,10 @@ use zns_mint::mint::TREASURY_ACCOUNT;
 use zns_mint::wallet::Wallet;
 use zns_mint::{RegistryKeys, TreasuryKeys};
 
-/// Claims per block, one fee note each: 28, for Zcash's launch on
-/// 28 October 2016. At most the 40 anchors.
+/// Claims per block: 28, for Zcash's launch on 28 October 2016. At most
+/// the 40 anchors. `assemble::prepare` pays each claim from the largest
+/// mined Treasury note, and each claim's change is mined by the next
+/// round, so the fee notes keep at least this many notes to pay from.
 pub const LANES: usize = 28;
 
 /// Outputs: the anchors, the fee notes, and the Treasury's change.

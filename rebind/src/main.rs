@@ -244,8 +244,8 @@ async fn main() {
              {MIN_REBIND_BALANCE}. Send {} more to the Treasury and run again.",
             MIN_REBIND_BALANCE - have
         );
-        // Each fee note pays one claim (3 actions) per round, and keeps its
-        // change for the next round.
+        // A fee note can pay one claim (3 actions) in every round, its
+        // change paying the next.
         let rounds = claims.len().div_ceil(anchor::LANES) as u64;
         let fee_note = Zatoshis::from_u64(rounds * 3 * marginal + marginal)
             .expect("fee note fits the monetary range");
@@ -275,8 +275,8 @@ async fn main() {
     let (h, anchor_txid) = scan.h.expect("H is known");
     tracing::info!(h = u32::from(h), %anchor_txid, "rebind: anchors at the new birthday");
 
-    // 4. The claims, up to `anchor::LANES` per block, paid from the fee
-    // notes before anything else touches them.
+    // 4. The claims, up to `anchor::LANES` per block, before the sweep
+    // merges the Treasury's notes.
     let mut in_flight = BTreeMap::new();
     while !claims.iter().all(|c| claim::held(&scan.fresh, c)) {
         claim::round(
@@ -298,33 +298,41 @@ async fn main() {
     }
 
     // 5. The sweep, last: whatever the Treasury still holds from before H,
-    // into one note the new mint sees. The manifest waits until it is mined;
-    // one that expires unmined frees its notes and is built again.
+    // into one note the new mint sees. One sweep: once it is mined the step
+    // is done, and a note too small to pay its own spend stays behind. The
+    // manifest waits for it; one that expires unmined is built again.
     let mut sweep = None;
     loop {
         let tip = scan.wallet.tip().block_height();
-        if sweep::due(&scan.wallet, h, tip) {
-            let transaction = sweep::build(
-                &network,
-                &mut scan.wallet,
-                &treasury_keys,
-                &spend_prover,
-                &output_prover,
-                &fee_rule,
-            );
-            assert!(
-                source.submit(&transaction, "rebind sweep").await,
-                "FATAL: the node refused the sweep"
-            );
-            tracing::info!(txid = %transaction.txid(), "rebind: sweep sent");
-            sweep = Some(transaction.txid());
-        } else if sweep.is_none_or(|txid| {
-            scan.wallet
-                .get_tx_height(txid)
-                .expect("FATAL: wallet transaction lookup")
-                .is_some()
-        }) {
-            break;
+        match sweep {
+            Some(txid)
+                if scan
+                    .wallet
+                    .get_tx_height(txid)
+                    .expect("FATAL: wallet transaction lookup")
+                    .is_some() =>
+            {
+                break
+            }
+            Some(txid) if scan.wallet.expired_unmined_at(txid, tip) => sweep = None,
+            Some(_) => {}
+            None if sweep::due(&scan.wallet, h, tip) => {
+                let transaction = sweep::build(
+                    &network,
+                    &mut scan.wallet,
+                    &treasury_keys,
+                    &spend_prover,
+                    &output_prover,
+                    &fee_rule,
+                );
+                assert!(
+                    source.submit(&transaction, "rebind sweep").await,
+                    "FATAL: the node refused the sweep"
+                );
+                tracing::info!(txid = %transaction.txid(), "rebind: sweep sent");
+                sweep = Some(transaction.txid());
+            }
+            None => break,
         }
         scan.next_block(&network, &source, &treasury_keys, &registry_keys)
             .await;
