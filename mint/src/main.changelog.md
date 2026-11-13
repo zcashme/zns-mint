@@ -1,5 +1,10 @@
 # main.changelog.md
 
+## 2026-11-13 — The run loop passes no birthday (#489)
+
+- `main` no longer destructures `birthday` from `Boot`; `apply_block`
+  takes none.
+
 ## 2026-11-12 — A reorg drops the open buys (#477)
 
 - A reorg replaces the market as it does the OTP queue:

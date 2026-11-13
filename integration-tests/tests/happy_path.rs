@@ -71,7 +71,6 @@ async fn boot_then_claim_update_release() -> Result<()> {
         .context("boot exceeded the harness deadline")?;
 
     let tip_height = BlockHeight::from_u32(birthday);
-    assert_eq!(boot.birthday, tip_height);
     assert_eq!(boot.wallet.tip().block_height(), tip_height);
     assert_eq!(boot.registry.anchor_pool().len(), fixture::ANCHOR_POOL_SIZE);
     assert!(boot.registry.anchor_adoption_closed());

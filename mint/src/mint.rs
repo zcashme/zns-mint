@@ -530,12 +530,10 @@ impl Name {
 /// Applies one verified canonical successor to every faculty: scan, clock,
 /// Registry law, wallet commit, and Treasury decode.
 /// Returns Treasury arrivals, which the caller routes.
-/// Before birthday, applies only wallet history and clock.
 /// Never fetches, never broadcasts.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_block<P: Parameters + Send + 'static>(
     network: &P,
-    birthday: BlockHeight,
     registry_keys: &crate::RegistryKeys,
     treasury_keys: &TreasuryKeys,
     block: zcash_primitives::block::Block,
@@ -568,14 +566,8 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .map(|tx| (tx.txid(), tx.expiry_height()))
         .collect();
     let block_time = block.header().time;
-    let (candidates, treasury_memos) = if height >= birthday {
-        (
-            decrypt_name_notes(network, &block, registry_keys),
-            note::decrypt_treasury_memos(network, &block, height, treasury_keys),
-        )
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    let candidates = decrypt_name_notes(network, &block, registry_keys);
+    let treasury_memos = note::decrypt_treasury_memos(network, &block, height, treasury_keys);
 
     let (header, batches) = decrypt_block(network, block, wallet.scanning_keys());
     let spend_identifiers = SpendIdentifiers::unspent(wallet)
@@ -615,9 +607,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     }
 
     for wtx in scanned.transactions() {
-        if height < birthday {
-            continue;
-        }
         let txid = wtx.txid();
         let nfs: Vec<orchard::note::Nullifier> = wtx
             .ironwood_spends()

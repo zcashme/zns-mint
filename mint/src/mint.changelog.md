@@ -1,5 +1,12 @@
 # Mint live-work design record
 
+## 2026-11-13 — `apply_block` takes no birthday (#489)
+
+- `apply_block` drops its `birthday` parameter and the two branches it
+  gated. Every block it applies runs the Name Notes, the Treasury memos
+  and the law. Since #488 the wallet starts at the birthday, so no
+  caller could pass an earlier block.
+
 ## 2026-11-12 — `apply_block` returns arrivals only (#475)
 
 - The OTP relays the Treasury sent are no longer returned: boot was

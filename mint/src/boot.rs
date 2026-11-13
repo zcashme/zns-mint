@@ -72,8 +72,6 @@ pub struct GuestInfo {
 pub struct Boot<P: Parameters> {
     /// verified: boot-to-loop consensus — the loop never discovers parameters
     pub network: P,
-    /// verified: Registry birth and the run loop's reorg boundary
-    pub birthday: BlockHeight,
     /// acquired: boot proved that both Zebra transports are live
     pub chain: ChainClient,
     /// acquired: the node source used during boot sync
@@ -607,7 +605,6 @@ impl Boot<Network> {
 
             crate::mint::apply_block(
                 &network,
-                mint_birthday,
                 &registry_keys,
                 &treasury_keys,
                 block,
@@ -738,7 +735,6 @@ impl Boot<Network> {
 
         Boot {
             network,
-            birthday: mint_birthday,
             chain: chain_client,
             source,
             wallet,
