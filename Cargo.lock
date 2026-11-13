@@ -5232,3 +5232,19 @@ dependencies = [
  "zip321",
  "zns-canon",
 ]
+
+[[package]]
+name = "zns-rebind"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rustls",
+ "secrecy",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zcash_protocol",
+ "zip32",
+ "zns-canon",
+ "zns-mint",
+]

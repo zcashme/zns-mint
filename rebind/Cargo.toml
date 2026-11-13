@@ -1,0 +1,24 @@
+[package]
+name = "zns-rebind"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[features]
+regtest = ["zns-mint/regtest", "zcash_protocol/local-consensus", "non-tee"]
+testnet = ["zns-mint/testnet"]
+# Dev escape hatch: public sealing keys, no attestation. Release-blocked in zns-mint.
+non-tee = ["zns-mint/non-tee", "zns-canon/non-tee"]
+
+[dependencies]
+zns-mint = { path = "../mint" }
+zns-canon = { path = "../canon" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+secrecy = "0.8"
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["std", "aws-lc-rs"] }
+zip32 = "0.3"
+zcash_protocol = { version = "0.11", default-features = false }
