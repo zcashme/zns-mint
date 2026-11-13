@@ -5232,3 +5232,31 @@ dependencies = [
  "zip321",
  "zns-canon",
 ]
+
+[[package]]
+name = "zns-rebind"
+version = "0.1.0"
+dependencies = [
+ "blake2b_simd",
+ "hex",
+ "libc",
+ "orchard",
+ "pasta_curves",
+ "rand 0.10.3",
+ "rustls",
+ "sapling-crypto",
+ "secrecy",
+ "subtle",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zcash_address",
+ "zcash_client_backend",
+ "zcash_keys",
+ "zcash_note_encryption",
+ "zcash_primitives",
+ "zcash_protocol",
+ "zip32",
+ "zns-canon",
+ "zns-mint",
+]

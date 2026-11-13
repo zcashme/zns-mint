@@ -1,5 +1,11 @@
 # Zcash I/O changelog
 
+## 2026-11-13 — `ChainClient::connect` is public for zns-rebind (#486)
+
+- zns-rebind connects to Zebra with `ChainClient::connect`. The
+  tip-change stream stays crate-private: zns-rebind reads the tip with
+  `exact_tip`.
+
 ## 2026-11-09 — zebra-indexer-proto 3.0 encodes the gRPC field rules
 
 - `block_and_hash` builds its request with `BlockRequest::new`; a height

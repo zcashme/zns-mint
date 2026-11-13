@@ -1,0 +1,37 @@
+[package]
+name = "zns-rebind"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[features]
+regtest = ["zns-mint/regtest", "zcash_protocol/local-consensus", "non-tee"]
+testnet = ["zns-mint/testnet"]
+# Dev escape hatch: public sealing keys, no attestation. Release-blocked in zns-mint.
+non-tee = ["zns-mint/non-tee", "zns-canon/non-tee"]
+
+[dependencies]
+zns-mint = { path = "../mint" }
+zns-canon = { path = "../canon" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+secrecy = "0.8"
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["std", "aws-lc-rs"] }
+zip32 = "0.3"
+zcash_protocol = { version = "0.11", default-features = false }
+# The live mint's copied Name Notes and law (`note.rs`, `registry.rs`).
+orchard = { version = "0.16.0", default-features = false, features = ["unsafe-zns", "circuit", "multicore"] }
+pasta_curves = "0.6"
+blake2b_simd = "1"
+subtle = "2.5"
+hex = "0.4"
+zcash_address = "0.14"
+zcash_keys = { version = "0.17", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
+rand = "0.10"
+zcash_note_encryption = "0.5"
+zcash_primitives = { version = "0.31", default-features = false, features = ["unsafe-zns", "non-standard-fees"] }
+zcash_client_backend = { version = "0.25", default-features = false, features = ["orchard", "transparent-inputs"] }
+sapling = { package = "sapling-crypto", version = "0.9", default-features = false, features = ["multicore"] }
