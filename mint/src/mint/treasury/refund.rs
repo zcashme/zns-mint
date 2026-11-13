@@ -14,6 +14,7 @@ use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 
+use crate::claim_log::ClaimReason;
 use crate::mint::{Name, UnifiedAddress};
 
 /// Actions' worth of the node's rate withheld from every refund, and
@@ -43,6 +44,8 @@ pub struct RefundRequest {
     height: BlockHeight,
     /// A sentence sent with the payment. Absent on a plain refund.
     note: Option<String>,
+    /// Set when this refund answers a claim. The sent line repeats it.
+    claim_reason: Option<ClaimReason>,
 }
 
 impl RefundRequest {
@@ -67,6 +70,11 @@ impl RefundRequest {
     pub fn note(&self) -> Option<&str> {
         self.note.as_deref()
     }
+
+    /// The claim reason, when this refund answers a claim.
+    pub fn claim_reason(&self) -> Option<ClaimReason> {
+        self.claim_reason
+    }
 }
 
 /// Refunds due, in admission order. A refund leaves when it is built and
@@ -88,8 +96,35 @@ impl RefundQueue {
         name: &Name,
         height: BlockHeight,
         refundable: Zatoshis,
-    ) {
-        self.admit_with_note(fee_rule, txid, recipient, name, height, refundable, None);
+    ) -> bool {
+        self.enqueue(
+            fee_rule, txid, recipient, name, height, refundable, None, None,
+        )
+    }
+
+    /// [`admit`](Self::admit) for a claim. The reason is repeated when the
+    /// refund is sent. The access code is not stored.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_claim(
+        &mut self,
+        fee_rule: &FeeRule,
+        txid: TxId,
+        recipient: &UnifiedAddress,
+        name: &Name,
+        height: BlockHeight,
+        refundable: Zatoshis,
+        reason: ClaimReason,
+    ) -> bool {
+        self.enqueue(
+            fee_rule,
+            txid,
+            recipient,
+            name,
+            height,
+            refundable,
+            None,
+            Some(reason),
+        )
     }
 
     /// [`admit`](Self::admit), and `note` is paid back with the zatoshis.
@@ -103,7 +138,24 @@ impl RefundQueue {
         height: BlockHeight,
         refundable: Zatoshis,
         note: Option<String>,
-    ) {
+    ) -> bool {
+        self.enqueue(
+            fee_rule, txid, recipient, name, height, refundable, note, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue(
+        &mut self,
+        fee_rule: &FeeRule,
+        txid: TxId,
+        recipient: &UnifiedAddress,
+        name: &Name,
+        height: BlockHeight,
+        refundable: Zatoshis,
+        note: Option<String>,
+        claim_reason: Option<ClaimReason>,
+    ) -> bool {
         let Some(amount) = refund_output(refundable, fee_rule) else {
             // Nothing is queued. The sentence stays on this record.
             if let Some(sentence) = note.as_deref() {
@@ -122,7 +174,7 @@ impl RefundQueue {
                     "payment kept"
                 );
             }
-            return;
+            return false;
         };
         tracing::info!(
             %txid,
@@ -138,7 +190,9 @@ impl RefundQueue {
             name: name.clone(),
             height,
             note,
+            claim_reason,
         });
+        true
     }
 
     /// The refunds whose payment is below `tip`, in admission order.
@@ -203,7 +257,7 @@ mod tests {
             &alice(),
             BlockHeight::from_u32(height),
             Zatoshis::const_from_u64(1_000_000),
-        )
+        );
     }
 
     #[test]

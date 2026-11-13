@@ -17,6 +17,7 @@ use zcash_protocol::consensus::{BlockHeight, BranchId};
 use zcash_protocol::value::Zatoshis;
 
 use zns_mint::boot::Boot;
+use zns_mint::claim_log::{ClaimOutcome, ClaimReason};
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::presale;
 use zns_mint::mint::pricing::{fetch_round, Oracle};
@@ -609,15 +610,38 @@ async fn main() {
                     term,
                     code,
                 } => {
+                    let record = |outcome, reason| {
+                        zns_mint::claim_log::record(name, txid, outcome, reason, None);
+                    };
+                    let mut refund = |reason, amount| {
+                        let queued = refunds.admit_claim(
+                            &fee_rule,
+                            txid,
+                            ua,
+                            name,
+                            note_height,
+                            amount,
+                            reason,
+                        );
+                        record(
+                            if queued {
+                                ClaimOutcome::RefundQueued
+                            } else {
+                                ClaimOutcome::Kept
+                            },
+                            Some(reason),
+                        );
+                    };
                     // A protected name claims only with its code.
                     let protected = protected_names.is_protected(name, mtp_now);
                     if protected && code.is_none() {
-                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                        refund(ClaimReason::MissingCode, paid);
                         continue;
                     }
                     // The quote at first sight is binding. A quote above
                     // the money supply is dead; the payment is kept.
                     let Some(price) = Oracle::quote_at(rate, name, *term) else {
+                        record(ClaimOutcome::Kept, Some(ClaimReason::NotAuthorized));
                         tracing::info!(
                             %txid,
                             name = %name.as_str(),
@@ -627,17 +651,13 @@ async fn main() {
                         continue;
                     };
                     if paid < price {
-                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                        refund(ClaimReason::Underpaid, paid);
                         continue;
                     }
                     if protected && !access_code_key.accepts(name, code.as_ref()) {
                         tracing::info!(%txid, name = %name.as_str(), "wrong access code");
-                        refunds.admit(
-                            &fee_rule,
-                            txid,
-                            ua,
-                            name,
-                            note_height,
+                        refund(
+                            ClaimReason::WrongCode,
                             (paid - access_code_penalty(price)).unwrap_or(Zatoshis::ZERO),
                         );
                         continue;
@@ -647,8 +667,9 @@ async fn main() {
                         registry.authorize_claim(name.clone(), ua.clone(), *term, mtp_now)
                     else {
                         if !registry.is_available(name) {
-                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                            refund(ClaimReason::NameTaken, paid);
                         } else {
+                            record(ClaimOutcome::Kept, Some(ClaimReason::NotAuthorized));
                             tracing::info!(
                                 %txid,
                                 name = %name.as_str(),
@@ -660,9 +681,10 @@ async fn main() {
                     };
                     // The earliest payment owns the name until its claim is observed.
                     if name_notes.admit(note_height, claim_note) {
+                        record(ClaimOutcome::Registered, None);
                         challenges.drop_challenges(name);
                     } else {
-                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                        refund(ClaimReason::NameTaken, paid);
                     }
                 }
                 Request::Update { .. } | Request::Release { .. } => {
@@ -927,6 +949,22 @@ async fn main() {
             ) {
                 Ok(Some(tx)) => {
                     if source.submit(&tx, "refund").await {
+                        if let Some(reason) = refund.claim_reason() {
+                            zns_mint::claim_log::record(
+                                refund.name(),
+                                refund.payment(),
+                                ClaimOutcome::RefundSent,
+                                Some(reason),
+                                Some(tx.txid()),
+                            );
+                        } else {
+                            tracing::info!(
+                                payment = %refund.payment(),
+                                refund = %tx.txid(),
+                                name = %refund.name().as_str(),
+                                "refund sent"
+                            );
+                        }
                         refunds.paid(&refund);
                     }
                 }
