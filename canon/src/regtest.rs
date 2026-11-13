@@ -34,7 +34,8 @@ pub fn write_dev_keys(
     std::fs::write(dir.join("zns_seed.capsule"), blob)?;
 
     // The manifest fields boot reads, formatted by hand; boot parses them
-    // with `toml`. Display form, not hex: boot's `FromStr` is bech32.
+    // through `custody` and `genesis`. Display form, not hex: boot's
+    // `FromStr` is bech32.
     let manifest = format!(
         "network = \"regtest\"\n\
          seed_fingerprint = \"{}\"\n\

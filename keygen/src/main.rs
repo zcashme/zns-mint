@@ -685,7 +685,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zns-keygen-finalize-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let manifest_path = dir.join("zns_custody_manifest.toml");
+        let manifest_path = dir.join(custody::FILE);
 
         let treasury_address = Receiver::Transparent(*sealed.funding.address())
             .to_zcash_address(NETWORK.network_type())
