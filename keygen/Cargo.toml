@@ -21,7 +21,6 @@ x25519-dalek = { version = "3", features = ["static_secrets", "zeroize"] }
 zeroize = "1.9.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
 secrecy = "0.8"
 zns-canon = { path = "../canon" }
 tracing = "0.1"
@@ -43,4 +42,5 @@ secp256k1 = "0.33"
 zcash_script = "0.6"
 
 [dev-dependencies]
+toml = "1"
 zcash_keys = { version = "0.17", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }

@@ -18,7 +18,7 @@ secrecy = "0.8"
 zip32 = "0.3"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
-toml = "0.8"
+toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 zns-canon = { path = "../canon" }
