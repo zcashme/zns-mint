@@ -359,24 +359,7 @@ fn finalize(
     txid: &str,
     birthday: u32,
 ) {
-    let report_data_hash = blake2b256(&attestation.report_data);
-    let attestation_hash = blake2b256(&attestation.report_bytes);
-    let measurement = hex::encode(attestation.measurement);
-    let treasury_address = Receiver::Transparent(*sealed.funding.address())
-        .to_zcash_address(NETWORK.network_type())
-        .encode();
-    let manifest = custody_manifest(CustodyManifestInputs {
-        fingerprint: sealed.fingerprint,
-        capsule_hash: &sealed.capsule_hash,
-        treasury_address: &treasury_address,
-        anchor_txid: txid,
-        birthday,
-        report_data_hash: &report_data_hash,
-        attestation_hash: &attestation_hash,
-        measurement: &measurement,
-        guest_policy: attestation.guest_policy,
-        tcb_version: &attestation.tcb_version,
-    });
+    let manifest = custody_record(sealed, attestation, txid, birthday).to_toml();
     write_atomic(Path::new(custody::PATH), manifest.as_bytes(), 0o644);
     tracing::info!(birthday, "manifest written");
 }
@@ -463,48 +446,41 @@ fn utxo_to_input(
 
 // ── Manifest ──────────────────────────────────────────────────────
 
-struct CustodyManifestInputs<'a> {
-    fingerprint: SeedFingerprint,
-    capsule_hash: &'a [u8; 32],
-    treasury_address: &'a str,
-    anchor_txid: &'a str,
+fn custody_record(
+    sealed: &SealedCeremony,
+    attestation: &zns_canon::attestation::Attestation,
+    txid: &str,
     birthday: u32,
-    report_data_hash: &'a [u8; 32],
-    attestation_hash: &'a [u8; 32],
-    measurement: &'a str,
-    guest_policy: u64,
-    tcb_version: &'a str,
-}
-
-fn custody_manifest(inputs: CustodyManifestInputs<'_>) -> String {
+) -> custody::Record {
     custody::Record {
         manifest_version: 1,
         network: NETWORK_LABEL.into(),
-        seed_fingerprint: inputs.fingerprint.to_string(),
+        seed_fingerprint: sealed.fingerprint.to_string(),
         capsule_file: CAPSULE_FILE.into(),
-        capsule_hash_blake2b256: hex::encode(inputs.capsule_hash),
+        capsule_hash_blake2b256: hex::encode(sealed.capsule_hash),
         capsule_format: String::from_utf8(CAPSULE_MAGIC.to_vec()).expect("FATAL: capsule magic"),
         seed_length: SEED_LEN,
         treasury_account: TREASURY_ACCOUNT,
         registry_account: REGISTRY_ACCOUNT,
-        treasury_address: inputs.treasury_address.to_string(),
-        anchor_txid: inputs.anchor_txid.to_string(),
-        birthday: inputs.birthday,
+        treasury_address: Receiver::Transparent(*sealed.funding.address())
+            .to_zcash_address(NETWORK.network_type())
+            .encode(),
+        anchor_txid: txid.to_string(),
+        birthday,
         sealing: "amd-sev-snp-derived-key".into(),
         sealing_root_key: "vcek".into(),
         sealing_guest_fields: "guest_policy,measurement".into(),
-        guest_policy: format!("0x{:016x}", inputs.guest_policy),
-        tcb_version: inputs.tcb_version.to_string(),
+        guest_policy: format!("0x{:016x}", attestation.guest_policy),
+        tcb_version: attestation.tcb_version.clone(),
         rng: "rdseed".into(),
         attestation_file: ATTESTATION_FILE.into(),
-        attestation_hash_blake2b256: hex::encode(inputs.attestation_hash),
-        report_data_hash_blake2b256: hex::encode(inputs.report_data_hash),
-        measurement: inputs.measurement.to_string(),
+        attestation_hash_blake2b256: hex::encode(blake2b256(&attestation.report_bytes)),
+        report_data_hash_blake2b256: hex::encode(blake2b256(&attestation.report_data)),
+        measurement: hex::encode(attestation.measurement),
         attestation_sig_algo: "ecdsa-p384-sha384".into(),
         migration: "none".into(),
         signer_socket: "none".into(),
     }
-    .to_toml()
 }
 
 // ── Hashing ───────────────────────────────────────────────────────
@@ -711,24 +687,10 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let manifest_path = dir.join("zns_custody_manifest.toml");
 
-        let report_data_hash = blake2b256(&attestation.report_data);
-        let attestation_hash = blake2b256(&attestation.report_bytes);
-        let measurement = hex::encode(attestation.measurement);
         let treasury_address = Receiver::Transparent(*sealed.funding.address())
             .to_zcash_address(NETWORK.network_type())
             .encode();
-        let manifest = custody_manifest(CustodyManifestInputs {
-            fingerprint: sealed.fingerprint,
-            capsule_hash: &sealed.capsule_hash,
-            treasury_address: &treasury_address,
-            anchor_txid: &txid,
-            birthday,
-            report_data_hash: &report_data_hash,
-            attestation_hash: &attestation_hash,
-            measurement: &measurement,
-            guest_policy: attestation.guest_policy,
-            tcb_version: &attestation.tcb_version,
-        });
+        let manifest = custody_record(&sealed, &attestation, &txid, birthday).to_toml();
         write_atomic(&manifest_path, manifest.as_bytes(), 0o644);
 
         let manifest: toml::Value =
