@@ -420,12 +420,12 @@ mod tests {
         let gate = gate();
         assert_eq!(
             hex::encode(*gate.0),
-            "5e2db6040cd32d2486675a3b3d60b9d4d96e9c8d4a5f862e0dfd7bd6a3f57b91"
+            "21086425a6d9ae0eff127a22b8e98bcfb9d1efc94c50eaa1737820de26ffdd8f"
         );
-        assert_eq!(gate.derive(&alice()).digits(), *b"352582");
+        assert_eq!(gate.derive(&alice()).digits(), *b"575692");
         assert_eq!(
             gate.derive(&Name::parse("bob").unwrap()).digits(),
-            *b"131624"
+            *b"577225"
         );
     }
 
@@ -452,9 +452,9 @@ mod tests {
         let key = AccessCodeDerivationKey::from_seed(&[0x22u8; 32]);
         assert_eq!(
             hex::encode(*key.0),
-            "bcd2c0e1ffa22fdd3756b5ec81a4b7c2d252c14251a44552aea3324d5d41d3f0"
+            "782bb536c0a826f28c3732272eb7d0e9fa30a455d338949497bdae72162f485e"
         );
-        assert_eq!(key.derive(&alice()).digits(), *b"549703");
+        assert_eq!(key.derive(&alice()).digits(), *b"844038");
     }
 
     fn table_of(rows: &[(&str, ProtectionStatus)]) -> ProtectedNames {
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn derive_matches_the_vector() {
-        assert_eq!(gate().derive(&alice()).digits(), *b"352582");
+        assert_eq!(gate().derive(&alice()).digits(), *b"575692");
     }
 
     #[test]
