@@ -1,5 +1,32 @@
 # Sale module changelog
 
+## 2026-11-13 — The market drops checks that cannot fail (#497)
+
+- `observe` keeps no `used` list: `open_buy` already refuses a second
+  buy with the same address and total (`PaymentTaken`).
+  `one_output_settles_one_sale` is gone; its buys had different totals.
+- The buy law moves to `Registry::authorize_buy`, which returns the
+  `BuyTerms` a sale takes from the chain. `open_buy(name, bob, ruling,
+  code, mtp)` keeps only the market's part: a sale already on the name
+  refuses first, then the ruling, then `PaymentTaken`. It takes no
+  `registry`, `owner`, `term`, `held`, `release_due`, `note_pending`,
+  or `height`; `admit` turns a pending note into `InFlight`. The
+  refusal order is unchanged.
+- `owner` and its `NotOwner` check are gone: a listed name's record UA
+  is the listing's UA, so the check compared a value with itself. The
+  stranger half of the unlisted-name test is gone with it.
+- `open` and `dutch_hold` fold into `open_buy`.
+- The test that `open_buy` echoes its `release_due` and `note_pending`
+  flags is gone with the flags. Tests open buys on the registry's
+  ruling, so a sale holds the real commitment; the fake `held()` is gone.
+- The `zats` test helper is gone; the tests call upstream's
+  `Zatoshis::const_from_u64` directly.
+- `Phase::Paying.expires_at` is gone; `Sale.until` held the same time.
+- `admit` returns `Option<ReturnedIntent>`; `Admission` and its unread
+  `opened` are gone.
+- `admit` no longer checks the delister's ownership before
+  `propose_delist` checks it.
+
 ## 2026-11-13 — A sale is signed on the tip after its payment (#434)
 
 - `Phase::Paid` holds the payment's height. `observe` takes the

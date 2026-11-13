@@ -384,7 +384,7 @@ async fn main() {
                     MintInbound::Request(
                         request @ (Request::List(_) | Request::Delist { .. } | Request::Buy { .. }),
                     ) => {
-                        let admitted = market.admit(
+                        let returned = market.admit(
                             txid,
                             &request,
                             paid,
@@ -395,7 +395,7 @@ async fn main() {
                             block_mtp,
                             |name| name_notes.note_pending(name),
                         );
-                        if let Some(back) = admitted.returned {
+                        if let Some(back) = returned {
                             refunds.admit_with_note(
                                 &fee_rule,
                                 txid,
