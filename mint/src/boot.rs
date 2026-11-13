@@ -833,9 +833,6 @@ async fn origin_checkpoint(
     birthday: BlockHeight,
     treestate: impl AsyncFnOnce(BlockHeight) -> Result<ChainState, zcash::TransportError>,
 ) -> ChainState {
-    #[cfg(not(feature = "regtest"))]
-    let checkpoint_height = birthday - 101;
-    #[cfg(feature = "regtest")]
     let checkpoint_height = birthday - 1;
 
     let chain_state = treestate(checkpoint_height)
@@ -1210,13 +1207,7 @@ mod tests {
     async fn origin_checkpoint_selects_the_scan_boundary() {
         use zcash_primitives::block::BlockHash;
 
-        #[cfg(not(feature = "regtest"))]
         let birthday = BlockHeight::from_u32(10_000);
-        #[cfg(feature = "regtest")]
-        let birthday = BlockHeight::from_u32(100);
-        #[cfg(not(feature = "regtest"))]
-        let (checkpoint, first) = (birthday - 101, birthday - 100);
-        #[cfg(feature = "regtest")]
         let (checkpoint, first) = (birthday - 1, birthday);
 
         let origin = origin_checkpoint(birthday, async |height| {
