@@ -195,8 +195,11 @@ fn render(recent: &VecDeque<Entry>) -> String {
 }
 
 fn labels(entry: &Entry) -> String {
+    // The index is a label. The value is not part of the series, and a
+    // repeated label set rejects the whole scrape.
     let mut labels = format!(
-        "name=\"{}\",payment=\"{}\",outcome=\"{}\"",
+        "decision=\"{}\",name=\"{}\",payment=\"{}\",outcome=\"{}\"",
+        entry.index,
         entry.name,
         entry.payment,
         entry.outcome.as_str()
@@ -394,8 +397,28 @@ mod tests {
         let page = render(&VecDeque::from([entry]));
         assert!(page.contains("outcome=\"refund sent\""));
         assert!(page.contains(&format!("refund=\"{refund}\"")));
+        assert!(page.contains("decision=\"4\""));
         assert!(page.contains("zns_mint_claim_decision{"));
         assert!(page.ends_with(" 4\n"));
+    }
+
+    #[test]
+    fn two_decisions_for_one_payment_are_two_series() {
+        let payment = payment(1).to_string();
+        let line = format_line(
+            "alice",
+            &payment,
+            ClaimOutcome::RefundQueued,
+            Some(ClaimReason::WrongCode),
+            None,
+        );
+        let page = render(&VecDeque::from([
+            parse_line(1, &line).unwrap(),
+            parse_line(2, &line).unwrap(),
+        ]));
+        assert!(page.contains("decision=\"1\""));
+        assert!(page.contains("decision=\"2\""));
+        assert_eq!(page.matches("zns_mint_claim_decision{").count(), 2);
     }
 
     #[test]

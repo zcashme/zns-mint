@@ -6,8 +6,9 @@
   the serial console: the name, the payment, and `registered`,
   `refund queued`, `refund sent`, or `kept`, with the reason. The
   access code is not on the line. A sent refund names its transaction.
-- `/metrics` reprints the recent lines and loads them from that file
-  at boot. Loading the file does not queue a refund.
+- `/metrics` reprints the recent lines. Each line's index is a label,
+  so a payment decided again is a second series. Boot loads the file
+  and does not queue a refund.
 - A payment confirmed while the mint was down stays unanswered. A
   restart does not replay it.
 ## 2026-11-13 — A sale waits a block after its payment (#434)
