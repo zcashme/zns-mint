@@ -7,14 +7,13 @@ use anchor_pool::AnchorPool;
 pub use anchor_pool::{is_ceremony_fill, ANCHOR_POOL_SIZE};
 
 use crate::mint::note::NameNoteQueue;
-use crate::mint::sale::{listable, Ask, Listing};
+use crate::mint::sale::{listable, Ask, BuyTerms, Listing, MarketRefusal};
 use crate::mint::treasury::OtpChallenge;
 use crate::mint::{Action, Expiry, Name, NameCommitment, NameNote, Request, Term, UnifiedAddress};
 use std::collections::{BTreeMap, BTreeSet};
 use time::Timestamp;
 use zcash_primitives::transaction::builder::default_tx_expiry_delta;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
-use zcash_protocol::value::Zatoshis;
 
 // ---------------------------------------------------------------------------
 // NameRecord — a confirmed state in one name's chain
@@ -183,19 +182,38 @@ impl Registry {
         self.record(name)?.listing()
     }
 
-    pub fn price(&self, name: &Name) -> Option<Zatoshis> {
-        match &self.listing(name)?.ask {
-            Ask::Flat(price) => Some(*price),
-            Ask::Dutch(_) => None,
+    /// The buy law: the name is listed, an auction has started and quotes
+    /// a price for an intent in `height`, and neither clock has fired at
+    /// `mtp`. The terms are the listing's and the live note's.
+    pub fn authorize_buy(
+        &self,
+        name: &Name,
+        height: BlockHeight,
+        mtp: Timestamp,
+    ) -> Result<BuyTerms, MarketRefusal> {
+        let record = self.record(name).ok_or(MarketRefusal::NotListed)?;
+        let listing = record.listing().ok_or(MarketRefusal::NotListed)?;
+        let (price, dutch) = match &listing.ask {
+            Ask::Flat(price) => (*price, false),
+            Ask::Dutch(terms) => {
+                if height < terms.start {
+                    return Err(MarketRefusal::Early { start: terms.start });
+                }
+                let price = terms.price_at(height).ok_or(MarketRefusal::NotListed)?;
+                (price, true)
+            }
+        };
+        if record.is_release_due(mtp) {
+            return Err(MarketRefusal::ReleaseDue);
         }
-    }
-
-    /// The price a buyer would be quoted for an intent in `height`.
-    pub fn quote(&self, name: &Name, height: BlockHeight) -> Option<Zatoshis> {
-        match &self.listing(name)?.ask {
-            Ask::Flat(price) => Some(*price),
-            Ask::Dutch(terms) => terms.price_at(height),
-        }
+        Ok(BuyTerms {
+            alice: listing.ua.clone(),
+            pay_to: listing.pay_to,
+            price,
+            dutch,
+            term: record.expires_at(),
+            held: record.commitment,
+        })
     }
 
     /// The list law: the owner lists at the t1 she names, on terms still
@@ -643,6 +661,7 @@ impl Registry {
 mod tests {
     use super::*;
     use zcash_protocol::consensus::MAIN_NETWORK;
+    use zcash_protocol::value::Zatoshis;
 
     /// The expiry the builder sets for a transaction targeting `height`.
     fn standard_expiry(height: BlockHeight) -> BlockHeight {
