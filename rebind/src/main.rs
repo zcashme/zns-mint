@@ -2,8 +2,8 @@
 //! migrated guest before the new mint first boots.
 //!
 //! Unseal, scan, check the Treasury, anchor transaction (H), claims, sweep,
-//! check, rewrite the manifest's anchor. Each step is done when the chain
-//! says so, so a rerun picks up where the last one stopped.
+//! check, rewrite the manifest's anchor. H is the block holding the anchor
+//! transaction this run sent; a rerun sends its own.
 
 mod anchor;
 mod boot;
@@ -43,14 +43,15 @@ struct Scan {
     mtp: MtpTracker,
     /// The live mint's verdicts: the names to move.
     old: registry::Registry,
-    /// The new law up to the old birthday, whose block holds the old
-    /// ceremony's anchors. Dropped verdicts.
+    /// The new law before H. Dropped verdicts.
     throwaway: zns_mint::mint::registry::Registry,
-    /// The new law after the old birthday: empty until the new anchor
-    /// transaction, then what the new mint will build from H.
+    /// The new law from H on: what the new mint builds booting from H.
     fresh: zns_mint::mint::registry::Registry,
     old_birthday: BlockHeight,
-    /// The new birthday and the anchor transaction mined there.
+    /// The anchor transaction this run sent.
+    sent_anchor: Option<TxId>,
+    /// The new birthday, H: the block holding the anchor transaction this
+    /// run sent, as keygen's birthday is the block holding its own.
     h: Option<(BlockHeight, TxId)>,
 }
 
@@ -77,6 +78,16 @@ impl Scan {
                 .header_time_ok(time)
                 .unwrap_or_else(|reason| panic!("FATAL: {reason} at height {}", u32::from(height)));
 
+            if self.h.is_none() {
+                if let Some(txid) = self
+                    .sent_anchor
+                    .filter(|txid| block.vtx().iter().any(|tx| tx.txid() == *txid))
+                {
+                    tracing::info!(h = u32::from(height), %txid, "rebind: anchor transaction mined");
+                    self.h = Some((height, txid));
+                }
+            }
+
             if height >= self.old_birthday && self.h.is_none() {
                 let mut next = self.mtp.clone();
                 next.update(height, time);
@@ -91,7 +102,8 @@ impl Scan {
                 );
             }
 
-            let new_law = if height > self.old_birthday {
+            let at_h = self.h.is_some_and(|(h, _)| h == height);
+            let new_law = if self.h.is_some() {
                 &mut self.fresh
             } else {
                 &mut self.throwaway
@@ -106,19 +118,11 @@ impl Scan {
                 new_law,
                 &mut self.mtp,
             );
-            if self.h.is_none() && self.fresh.anchor_adoption_closed() {
-                let any = *self.fresh.anchor_pool().first().expect("adopted anchors");
-                let txid = *self
-                    .wallet
-                    .unspent_ironwood_note_by_nullifier(
-                        REGISTRY_ACCOUNT,
-                        any,
-                        TargetHeight::from(height),
-                    )
-                    .expect("FATAL: adopted anchor missing from the wallet")
-                    .txid();
-                tracing::info!(h = u32::from(height), %txid, "rebind: new anchors adopted");
-                self.h = Some((height, txid));
+            if at_h {
+                assert!(
+                    self.fresh.anchor_adoption_closed(),
+                    "FATAL: the anchor transaction's block did not fill the anchor pool"
+                );
             }
         }
     }
@@ -213,6 +217,7 @@ async fn main() {
         throwaway: zns_mint::mint::registry::Registry::new(),
         fresh: zns_mint::mint::registry::Registry::new(),
         old_birthday,
+        sent_anchor: None,
         h: None,
     };
     scan.sync(&network, &source, &treasury_keys, &registry_keys)
@@ -235,42 +240,47 @@ async fn main() {
     let marginal = fee_rule.marginal_fee().into_u64();
 
     // 3. The anchor transaction. The operator funds the Treasury first; a
-    // short balance refuses here, before anything is sent.
-    if scan.h.is_none() {
-        let have = scan.treasury_ironwood();
-        assert!(
-            have >= MIN_REBIND_BALANCE,
-            "FATAL: the Treasury holds {have} zats in Ironwood; the move needs \
-             {MIN_REBIND_BALANCE}. Send {} more to the Treasury and run again.",
-            MIN_REBIND_BALANCE - have
-        );
-        // A fee note can pay one claim (3 actions) in every round, its
-        // change paying the next.
-        let rounds = claims.len().div_ceil(anchor::LANES) as u64;
-        let fee_note = Zatoshis::from_u64(rounds * 3 * marginal + marginal)
-            .expect("fee note fits the monetary range");
+    // short balance refuses here, before anything is sent. H is the block
+    // that mines it; one that expires unmined is built again.
+    let have = scan.treasury_ironwood();
+    assert!(
+        have >= MIN_REBIND_BALANCE,
+        "FATAL: the Treasury holds {have} zats in Ironwood; the move needs \
+         {MIN_REBIND_BALANCE}. Send {} more to the Treasury and run again.",
+        MIN_REBIND_BALANCE - have
+    );
+    // A fee note can pay one claim (3 actions) in every round, its
+    // change paying the next.
+    let rounds = claims.len().div_ceil(anchor::LANES) as u64;
+    let fee_note = Zatoshis::from_u64(rounds * 3 * marginal + marginal)
+        .expect("fee note fits the monetary range");
+    while scan.h.is_none() {
         let tip = scan.wallet.tip().block_height();
-        let (transaction, fee) = anchor::build(
-            &network,
-            &mut scan.wallet,
-            &treasury_keys,
-            &registry_keys,
-            &spend_prover,
-            &output_prover,
-            &fee_rule,
-            fee_note,
-            tip,
-        );
-        assert!(
-            source.submit(&transaction, "rebind anchors").await,
-            "FATAL: the node refused the anchor transaction"
-        );
-        scan.wallet.record_sent(&transaction, tip + 1, fee);
-        tracing::info!(txid = %transaction.txid(), "rebind: anchor transaction sent");
-        while scan.h.is_none() {
-            scan.next_block(&network, &source, &treasury_keys, &registry_keys)
-                .await;
+        if scan
+            .sent_anchor
+            .is_none_or(|txid| scan.wallet.expired_unmined_at(txid, tip))
+        {
+            let (transaction, fee) = anchor::build(
+                &network,
+                &mut scan.wallet,
+                &treasury_keys,
+                &registry_keys,
+                &spend_prover,
+                &output_prover,
+                &fee_rule,
+                fee_note,
+                tip,
+            );
+            assert!(
+                source.submit(&transaction, "rebind anchors").await,
+                "FATAL: the node refused the anchor transaction"
+            );
+            scan.wallet.record_sent(&transaction, tip + 1, fee);
+            tracing::info!(txid = %transaction.txid(), "rebind: anchor transaction sent");
+            scan.sent_anchor = Some(transaction.txid());
         }
+        scan.next_block(&network, &source, &treasury_keys, &registry_keys)
+            .await;
     }
     let (h, anchor_txid) = scan.h.expect("H is known");
     tracing::info!(h = u32::from(h), %anchor_txid, "rebind: anchors at the new birthday");
