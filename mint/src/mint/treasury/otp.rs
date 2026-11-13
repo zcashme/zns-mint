@@ -202,6 +202,13 @@ impl OtpQueue {
             .any(|(challenge, _, _)| challenge.request == *request)
     }
 
+    /// A challenge for any request on `name` is live.
+    pub fn holds_name(&self, name: &Name) -> bool {
+        self.challenges
+            .iter()
+            .any(|(challenge, _, _)| challenge.request.name() == name)
+    }
+
     /// Points a live challenge for `request` at `txid`. A request with
     /// no challenge is left alone.
     pub fn rebind(&mut self, request: &Request, txid: TxId) -> bool {

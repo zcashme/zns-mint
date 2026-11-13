@@ -115,6 +115,8 @@ async fn main() {
                 // relays it now. A transparent spend can chain on unmined
                 // transactions, so it waits for its block. One request
                 // per transaction, so one conflicting spend voids one code.
+                // A name with a live challenge waits for its block too: a
+                // killed request costs one relay per name per `D_OTP`.
                 if kind != MempoolChangeKind::Added {
                     continue;
                 }
@@ -151,7 +153,7 @@ async fn main() {
                     _ => None,
                 })
                 .find_map(|(request, paid)| {
-                    if challenges.holds(&request)
+                    if challenges.holds_name(request.name())
                         || !market.allows_transition(request.name())
                         || (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
                             .is_none_or(|fee| paid < fee)
