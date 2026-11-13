@@ -42,12 +42,12 @@ const GRPC_MAX_RESPONSE_BYTES: usize = 2 * MAX_BLOCK_BYTES;
 
 /// A client for the node's gRPC announcements about the chain.
 #[derive(Clone)]
-pub struct ChainClient(pub(crate) ZebraClient);
+pub(crate) struct ChainClient(pub(crate) ZebraClient);
 
 impl ChainClient {
     /// Connects to the indexer's gRPC endpoint, keep-alive on: the tip
     /// stream hangs silently on a dead peer otherwise.
-    pub async fn connect() -> Result<Self, tonic::transport::Error> {
+    pub(crate) async fn connect() -> Result<Self, tonic::transport::Error> {
         let endpoint = tonic::transport::Endpoint::from_static(ZEBRA_INDEXER_URL)
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)

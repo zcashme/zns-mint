@@ -19,7 +19,7 @@ impl ChainClient {
     /// errored — mean reconnect; what a gap missed, the block path decides —
     /// the re-baseline the doc once promised is deliberately not built
     /// (best-effort is the doctrine).
-    pub async fn mempool_events(
+    pub(crate) async fn mempool_events(
         &mut self,
     ) -> Result<impl Stream<Item = Result<(MempoolChangeKind, TxId), TransportError>>, TransportError>
     {

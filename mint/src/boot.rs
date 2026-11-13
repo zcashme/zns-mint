@@ -29,7 +29,7 @@ use crate::mint::sale::Market;
 use crate::mint::treasury::{OtpQueue, RefundQueue, RequestQueue};
 use crate::mint::{MIN_TREASURY_BALANCE, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
-use crate::zcash::{self, CanonicalBlockSource, ChainClient};
+use crate::zcash::{self, CanonicalBlockSource};
 use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::chain::ChainState;
 use zcash_client_backend::data_api::WalletRead as _;
@@ -377,12 +377,9 @@ impl Boot<Network> {
              never point at production"
         );
 
-        // 1. Liveness + connect: confirm both Zebra transports, get chain client.
-        let chain_client = connect_zebra().await;
-
-        // The one node handle: both dialects behind one door, bound to the
-        // client this boot proved live.
-        let source = CanonicalBlockSource::new(chain_client.clone());
+        // 1. Liveness + connect: the one node handle, both Zebra
+        // transports confirmed through it.
+        let source = connect_zebra().await;
 
         // Ceremony facts — the custody manifest, every network: keygen
         // writes it in deployment, the fixture on regtest.
@@ -715,11 +712,15 @@ impl Boot<Network> {
 // Step 1: Liveness + connect
 // ---------------------------------------------------------------------------
 
-/// Zebra liveness.
-async fn connect_zebra() -> ChainClient {
+/// The node handle, with both Zebra transports proved live through it.
+async fn connect_zebra() -> CanonicalBlockSource {
+    let source = CanonicalBlockSource::connect()
+        .await
+        .expect("FATAL: Zebra gRPC unreachable or timed out");
+
     // JSON-RPC liveness
-    let rpc = zcash::JsonRpc::new();
-    let info = rpc
+    let info = source
+        .rpc
         .get_blockchain_info()
         .await
         .expect("FATAL: JSON-RPC getblockchaininfo failed, Zebra is unreachable");
@@ -730,16 +731,15 @@ async fn connect_zebra() -> ChainClient {
     );
 
     // gRPC liveness
-    let mut chain = ChainClient::connect()
-        .await
-        .expect("FATAL: Zebra gRPC unreachable or timed out");
-    chain
+    source
+        .chain
+        .clone()
         .chain_tip_change_stream()
         .await
         .expect("FATAL: chain_tip_change gRPC call failed");
     tracing::info!("boot: gRPC chain client connected");
 
-    chain
+    source
 }
 
 // ---------------------------------------------------------------------------

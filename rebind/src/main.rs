@@ -26,7 +26,7 @@ use zns_mint::mint::mtp::MtpTracker;
 use zns_mint::mint::registry::Registry;
 use zns_mint::mint::{NameNote, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::wallet::Wallet;
-use zns_mint::zcash::{CanonicalBlockSource, ChainClient};
+use zns_mint::zcash::CanonicalBlockSource;
 use zns_mint::{RegistryKeys, TreasuryKeys};
 
 /// How often a waiting step checks the chain again.
@@ -294,11 +294,9 @@ async fn main() {
     let (treasury_keys, registry_keys) = boot::unseal(&network, &custody);
     let old_birthday = BlockHeight::from_u32(anchor.birthday);
     let (spend_prover, output_prover) = boot::sapling_provers();
-    let source = CanonicalBlockSource::new(
-        ChainClient::connect()
-            .await
-            .expect("FATAL: Zebra gRPC unreachable or timed out"),
-    );
+    let source = CanonicalBlockSource::connect()
+        .await
+        .expect("FATAL: Zebra gRPC unreachable or timed out");
     boot::require_anchor_on_chain(&network, &source, &anchor).await;
     let fee_rule = source
         .standard_fee()

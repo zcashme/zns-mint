@@ -5,7 +5,8 @@ pub mod fees;
 pub mod mempool;
 pub mod submit;
 
-pub use chain::{BlockchainInfo, ChainClient, TipSession};
+pub(crate) use chain::ChainClient;
+pub use chain::{BlockchainInfo, TipSession};
 pub use mempool::MempoolSession;
 pub use submit::SubmitOutcome;
 pub use zebra_indexer_proto::MempoolChangeKind;
@@ -136,14 +137,13 @@ pub struct CanonicalBlockSource {
 }
 
 impl CanonicalBlockSource {
-    /// Binds the connected gRPC client (boot's connect product) to a
-    /// fresh JSON-RPC transport. Same hardcoded node — a view, not a
-    /// connection.
-    pub fn new(chain: ChainClient) -> Self {
-        Self {
+    /// Connects the gRPC client and binds a fresh JSON-RPC transport to
+    /// it. Same hardcoded node for both.
+    pub async fn connect() -> Result<Self, tonic::transport::Error> {
+        Ok(Self {
             rpc: JsonRpc::new(),
-            chain,
-        }
+            chain: ChainClient::connect().await?,
+        })
     }
 }
 
