@@ -5,6 +5,8 @@
 use std::str::FromStr;
 
 use secrecy::{ExposeSecret, Secret};
+use zcash_client_backend::data_api::chain::ChainState;
+use zcash_protocol::consensus::BlockHeight as Height;
 #[cfg(not(feature = "regtest"))]
 #[cfg(not(feature = "testnet"))]
 use zcash_protocol::consensus::MainNetwork;
@@ -21,6 +23,8 @@ use zns_canon::sealing::derive_sealing_key;
 #[cfg(feature = "non-tee")]
 use zns_canon::sealing::dev_sealing_key;
 use zns_canon::sealing::{SealingKey, TeeError};
+use zns_mint::mint::mtp::MtpTracker;
+use zns_mint::zcash::{self, CanonicalBlockSource};
 use zns_mint::{RegistryKeys, TreasuryKeys};
 
 /// Network label for logging.
@@ -205,4 +209,42 @@ pub fn unseal(network: &Network, custody: &custody::Custody) -> (TreasuryKeys, R
         TreasuryKeys::derive(network, &seed),
         RegistryKeys::derive(network, &seed),
     )
+}
+
+/// The live mint's wallet origin (`46f61f9`): the treestate 101 blocks
+/// before its birthday on mainnet and testnet, one block on regtest. The
+/// wallet then holds every Treasury note the live mint holds.
+pub async fn origin_checkpoint(
+    birthday: Height,
+    treestate: impl AsyncFnOnce(Height) -> Result<ChainState, zcash::TransportError>,
+) -> ChainState {
+    #[cfg(not(feature = "regtest"))]
+    let checkpoint_height = birthday - 101;
+    #[cfg(feature = "regtest")]
+    let checkpoint_height = birthday - 1;
+
+    let chain_state = treestate(checkpoint_height)
+        .await
+        .expect("FATAL: wallet origin treestate unavailable from Zebra");
+
+    tracing::info!(
+        "rebind: origin checkpoint at height {}, hash {}",
+        u32::from(checkpoint_height),
+        chain_state.block_hash()
+    );
+
+    chain_state
+}
+
+/// The 11 header timestamps through the origin checkpoint, so the MTP
+/// window is complete before the first block applies.
+pub async fn mtp_through(checkpoint: Height, source: &CanonicalBlockSource) -> MtpTracker {
+    let mut mtp = MtpTracker::default();
+    mtp.backfill(checkpoint, |height| {
+        let source = source.clone();
+        async move { source.header_time(height).await }
+    })
+    .await
+    .expect("FATAL: MTP backfill from Zebra failed");
+    mtp
 }
