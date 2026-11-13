@@ -1,7 +1,7 @@
 //! zns-rebind: moves every live Name Note to a bound claim, once, inside the
 //! migrated guest before the new mint first boots.
 //!
-//! Unseal, scan, check the Treasury, anchor transaction (H), sweep, claims,
+//! Unseal, scan, check the Treasury, anchor transaction (H), claims, sweep,
 //! check, rewrite the manifest's anchor. Each step is done when the chain
 //! says so, so a rerun picks up where the last one stopped.
 
@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use zcash_client_backend::data_api::wallet::TargetHeight;
+use zcash_client_backend::data_api::WalletRead as _;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
@@ -281,24 +282,8 @@ async fn main() {
     let (h, anchor_txid) = scan.h.expect("H is known");
     tracing::info!(h = u32::from(h), %anchor_txid, "rebind: anchors at the new birthday");
 
-    // 4. The sweep: the old Treasury notes into one note the new mint sees.
-    if sweep::due(&scan.wallet, h, scan.wallet.tip().block_height()) {
-        let transaction = sweep::build(
-            &network,
-            &mut scan.wallet,
-            &treasury_keys,
-            &spend_prover,
-            &output_prover,
-            &fee_rule,
-        );
-        assert!(
-            source.submit(&transaction, "rebind sweep").await,
-            "FATAL: the node refused the sweep"
-        );
-        tracing::info!(txid = %transaction.txid(), "rebind: sweep sent");
-    }
-
-    // 5. The claims, up to one per anchor per block.
+    // 4. The claims, up to `anchor::LANES` per block, paid from the fee
+    // notes before anything else touches them.
     let mut in_flight = BTreeMap::new();
     while !claims.iter().all(|c| claim::held(&scan.fresh, c)) {
         claim::round(
@@ -315,6 +300,39 @@ async fn main() {
             &mut in_flight,
         )
         .await;
+        scan.next_block(&network, &source, &treasury_keys, &registry_keys)
+            .await;
+    }
+
+    // 5. The sweep, last: whatever the Treasury still holds from before H,
+    // into one note the new mint sees. The manifest waits until it is mined;
+    // one that expires unmined frees its notes and is built again.
+    let mut sweep = None;
+    loop {
+        let tip = scan.wallet.tip().block_height();
+        if sweep::due(&scan.wallet, h, tip) {
+            let transaction = sweep::build(
+                &network,
+                &mut scan.wallet,
+                &treasury_keys,
+                &spend_prover,
+                &output_prover,
+                &fee_rule,
+            );
+            assert!(
+                source.submit(&transaction, "rebind sweep").await,
+                "FATAL: the node refused the sweep"
+            );
+            tracing::info!(txid = %transaction.txid(), "rebind: sweep sent");
+            sweep = Some(transaction.txid());
+        } else if sweep.is_none_or(|txid| {
+            scan.wallet
+                .get_tx_height(txid)
+                .expect("FATAL: wallet transaction lookup")
+                .is_some()
+        }) {
+            break;
+        }
         scan.next_block(&network, &source, &treasury_keys, &registry_keys)
             .await;
     }
