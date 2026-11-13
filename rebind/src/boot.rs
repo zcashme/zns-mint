@@ -325,6 +325,30 @@ pub fn write_manifest(text: &str) {
         .expect("FATAL: sync keys/");
 }
 
+/// The live mint's anchor, checked as its boot checks it: `anchor_txid`
+/// mined at `birthday`. The old law's replay starts there, so a wrong
+/// birthday would miss names; it refuses the run instead.
+pub async fn require_anchor_on_chain(
+    network: &Network,
+    source: &CanonicalBlockSource,
+    anchor: &Anchor,
+) {
+    let birthday = Height::from_u32(anchor.birthday);
+    // The file holds display order: `from_hex` inverts it.
+    let txid = zcash_primitives::transaction::TxId::from_hex(&hex::encode(anchor.txid))
+        .expect("32 bytes are a txid");
+    let block = source
+        .get_block(network, birthday)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("FATAL: cannot fetch block at the manifest birthday {birthday}: {error}")
+        });
+    assert!(
+        block.vtx().iter().any(|tx| tx.txid() == txid),
+        "FATAL: ceremony anchor {txid} is not mined at the manifest birthday {birthday}"
+    );
+}
+
 /// The 11 header timestamps through the origin checkpoint, so the MTP
 /// window is complete before the first block applies.
 pub async fn mtp_through(checkpoint: Height, source: &CanonicalBlockSource) -> MtpTracker {

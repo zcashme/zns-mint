@@ -87,6 +87,12 @@ pub async fn round<P: Parameters + Send + 'static>(
         if source.submit(&transaction, "rebind claim").await {
             wallet.record_sent(&transaction, target_height, fee);
             in_flight.insert(claim.name().clone(), transaction.expiry_height());
+        } else {
+            tracing::error!(
+                name = claim.name().as_str(),
+                txid = %transaction.txid(),
+                "rebind: the node refused a claim"
+            );
         }
     }
 }

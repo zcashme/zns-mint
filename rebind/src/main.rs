@@ -188,7 +188,6 @@ fn check_funds(chain: &Chain) {
 }
 
 /// Sends the anchor transaction and waits for the block that mines it: H.
-/// One that expires unmined is built again.
 async fn place_anchors(chain: &mut Chain, rebind: &Rebind, names: usize) -> (BlockHeight, TxId) {
     // A fee note can pay one claim (3 actions) in every round, its change
     // paying the next.
@@ -196,33 +195,29 @@ async fn place_anchors(chain: &mut Chain, rebind: &Rebind, names: usize) -> (Blo
     let rounds = names.div_ceil(anchor::LANES) as u64;
     let fee_note = Zatoshis::from_u64(rounds * 3 * marginal + marginal)
         .expect("fee note fits the monetary range");
-    let mut anchor_txid: Option<TxId> = None;
+    let tip = chain.wallet.tip().block_height();
+    let (transaction, fee) = anchor::build(
+        &rebind.network,
+        &mut chain.wallet,
+        &rebind.treasury_keys,
+        &rebind.registry_keys,
+        &rebind.spend_prover,
+        &rebind.output_prover,
+        &rebind.fee_rule,
+        fee_note,
+        tip,
+    );
+    assert!(
+        rebind.source.submit(&transaction, "rebind anchors").await,
+        "FATAL: the node refused the anchor transaction"
+    );
+    chain.wallet.record_sent(&transaction, tip + 1, fee);
+    let anchor_txid = transaction.txid();
+    tracing::info!(txid = %anchor_txid, "rebind: anchor transaction sent");
     loop {
-        let tip = chain.wallet.tip().block_height();
-        if anchor_txid.is_none_or(|txid| chain.wallet.expired_unmined_at(txid, tip)) {
-            let (transaction, fee) = anchor::build(
-                &rebind.network,
-                &mut chain.wallet,
-                &rebind.treasury_keys,
-                &rebind.registry_keys,
-                &rebind.spend_prover,
-                &rebind.output_prover,
-                &rebind.fee_rule,
-                fee_note,
-                tip,
-            );
-            assert!(
-                rebind.source.submit(&transaction, "rebind anchors").await,
-                "FATAL: the node refused the anchor transaction"
-            );
-            chain.wallet.record_sent(&transaction, tip + 1, fee);
-            tracing::info!(txid = %transaction.txid(), "rebind: anchor transaction sent");
-            anchor_txid = Some(transaction.txid());
-        }
-        if let Some(h) = chain.next_block(rebind, anchor_txid).await {
-            let txid = anchor_txid.expect("sent above");
-            tracing::info!(h = u32::from(h), %txid, "rebind: anchors at the new birthday");
-            return (h, txid);
+        if let Some(h) = chain.next_block(rebind, Some(anchor_txid)).await {
+            tracing::info!(h = u32::from(h), txid = %anchor_txid, "rebind: anchors at the new birthday");
+            return (h, anchor_txid);
         }
     }
 }
@@ -251,43 +246,32 @@ async fn claim_all(chain: &mut Chain, rebind: &Rebind, claims: &[NameNote]) {
 }
 
 /// The sweep, last: whatever the Treasury still holds from before H, into
-/// one note the new mint sees. One sweep: once it is mined the step is
-/// done, and a note too small to pay its own spend stays behind. The
-/// manifest waits for it; one that expires unmined is built again.
+/// one note the new mint sees. One sweep; a note too small to pay its own
+/// spend stays behind. The manifest waits until it is mined.
 async fn sweep_treasury(chain: &mut Chain, rebind: &Rebind, h: BlockHeight) {
-    let mut sweep = None;
-    loop {
-        let tip = chain.wallet.tip().block_height();
-        match sweep {
-            Some(txid)
-                if chain
-                    .wallet
-                    .get_tx_height(txid)
-                    .expect("FATAL: wallet transaction lookup")
-                    .is_some() =>
-            {
-                return
-            }
-            Some(txid) if chain.wallet.expired_unmined_at(txid, tip) => sweep = None,
-            Some(_) => {}
-            None if sweep::due(&chain.wallet, h, tip) => {
-                let transaction = sweep::build(
-                    &rebind.network,
-                    &mut chain.wallet,
-                    &rebind.treasury_keys,
-                    &rebind.spend_prover,
-                    &rebind.output_prover,
-                    &rebind.fee_rule,
-                );
-                assert!(
-                    rebind.source.submit(&transaction, "rebind sweep").await,
-                    "FATAL: the node refused the sweep"
-                );
-                tracing::info!(txid = %transaction.txid(), "rebind: sweep sent");
-                sweep = Some(transaction.txid());
-            }
-            None => return,
-        }
+    if !sweep::due(&chain.wallet, h, chain.wallet.tip().block_height()) {
+        return;
+    }
+    let transaction = sweep::build(
+        &rebind.network,
+        &mut chain.wallet,
+        &rebind.treasury_keys,
+        &rebind.spend_prover,
+        &rebind.output_prover,
+        &rebind.fee_rule,
+    );
+    assert!(
+        rebind.source.submit(&transaction, "rebind sweep").await,
+        "FATAL: the node refused the sweep"
+    );
+    let txid = transaction.txid();
+    tracing::info!(%txid, "rebind: sweep sent");
+    while chain
+        .wallet
+        .get_tx_height(txid)
+        .expect("FATAL: wallet transaction lookup")
+        .is_none()
+    {
         chain.next_block(rebind, None).await;
     }
 }
@@ -315,6 +299,7 @@ async fn main() {
             .await
             .expect("FATAL: Zebra gRPC unreachable or timed out"),
     );
+    boot::require_anchor_on_chain(&network, &source, &anchor).await;
     let fee_rule = source
         .standard_fee()
         .await
