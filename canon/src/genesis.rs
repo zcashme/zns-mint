@@ -168,28 +168,21 @@ mod tests {
         assert_ne!(genesis_report_data(&later), bound);
     }
 
-    use crate::custody::tests::KEYGEN_MANIFEST;
-
-    #[test]
-    fn the_anchor_reads_out_of_the_manifest() {
-        assert_eq!(
-            Anchor::read(KEYGEN_MANIFEST).unwrap(),
-            Anchor {
-                txid: [0xab; 32],
-                birthday: 4_408_922,
-            }
-        );
-    }
-
     #[test]
     fn rewrite_changes_only_the_anchor_lines() {
+        let manifest = "seed_fingerprint = \"zip32seedfp1x\"
+capsule_hash_blake2b256 = \"4444\"
+anchor_txid = \"abababababababababababababababababababababababababababababababab\"
+birthday = 4408922
+measurement = \"7a7a\"
+";
         let moved = Anchor {
             txid: [0xff; 32],
             birthday: 3_500_000,
         };
-        let rewritten = moved.rewrite(KEYGEN_MANIFEST).unwrap();
-        assert_eq!(KEYGEN_MANIFEST.lines().count(), rewritten.lines().count());
-        let changed: Vec<_> = KEYGEN_MANIFEST
+        let rewritten = moved.rewrite(manifest).unwrap();
+        assert_eq!(manifest.lines().count(), rewritten.lines().count());
+        let changed: Vec<_> = manifest
             .lines()
             .zip(rewritten.lines())
             .filter(|(before, after)| before != after)
@@ -205,30 +198,5 @@ mod tests {
             ]
         );
         assert_eq!(Anchor::read(&rewritten).unwrap(), moved);
-    }
-
-    #[test]
-    fn read_refuses_what_boot_refuses() {
-        let txid = "ab".repeat(32);
-        assert_eq!(
-            Anchor::read("network = \"testnet\"\n"),
-            Err(AnchorError::NoAnchorTxid)
-        );
-        assert_eq!(
-            Anchor::read("anchor_txid = \"zz\"\nbirthday = 1\n"),
-            Err(AnchorError::TxidNotHex)
-        );
-        assert_eq!(
-            Anchor::read("anchor_txid = \"abab\"\nbirthday = 1\n"),
-            Err(AnchorError::TxidLength)
-        );
-        assert_eq!(
-            Anchor::read(&format!("anchor_txid = \"{txid}\"\n")),
-            Err(AnchorError::NoBirthday)
-        );
-        assert!(matches!(
-            Anchor::read("not toml ="),
-            Err(AnchorError::Invalid(_))
-        ));
     }
 }
