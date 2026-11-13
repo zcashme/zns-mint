@@ -30,7 +30,7 @@ use zns_mint::{RegistryKeys, TreasuryKeys};
 /// How often a waiting step checks the chain again.
 const POLL: Duration = Duration::from_secs(10);
 
-/// What the Treasury must hold before the move starts (0.05 ZEC): about
+/// What the Treasury must hold in Ironwood before the move starts (0.05 ZEC): about
 /// four times the fees of moving ~300 names at 1,000 zats per action,
 /// plus the new mint's boot floor. What the move does not spend stays.
 const MIN_REBIND_BALANCE: u64 = 5_000_000;
@@ -146,22 +146,15 @@ impl Scan {
             .await;
     }
 
-    /// Every Treasury note the wallet can spend at the tip, both pools.
-    fn treasury_balance(&self) -> u64 {
+    /// The Treasury's Ironwood the wallet can spend at the tip: what the
+    /// anchor transaction draws on.
+    fn treasury_ironwood(&self) -> u64 {
         let target = TargetHeight::from(self.wallet.tip().block_height());
-        let ironwood: u64 = self
-            .wallet
+        self.wallet
             .unspent_ironwood_notes(TREASURY_ACCOUNT, target)
             .iter()
             .map(|note| note.note().value().inner())
-            .sum();
-        let sapling: u64 = self
-            .wallet
-            .unspent_sapling_notes(TREASURY_ACCOUNT, target)
-            .iter()
-            .map(|note| note.note().value().inner())
-            .sum();
-        ironwood + sapling
+            .sum()
     }
 }
 
@@ -244,11 +237,11 @@ async fn main() {
     // 3. The anchor transaction. The operator funds the Treasury first; a
     // short balance refuses here, before anything is sent.
     if scan.h.is_none() {
-        let have = scan.treasury_balance();
+        let have = scan.treasury_ironwood();
         assert!(
             have >= MIN_REBIND_BALANCE,
-            "FATAL: the Treasury holds {have} zats; the move needs {MIN_REBIND_BALANCE}. \
-             Send {} more to the Treasury and run again.",
+            "FATAL: the Treasury holds {have} zats in Ironwood; the move needs \
+             {MIN_REBIND_BALANCE}. Send {} more to the Treasury and run again.",
             MIN_REBIND_BALANCE - have
         );
         // Each fee note pays one claim (3 actions) per round, and keeps its
