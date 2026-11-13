@@ -1,16 +1,35 @@
 //! zns-rebind: moves every live Name Note to a bound claim, once, inside the
 //! migrated guest before the new mint first boots.
+//!
+//! Unseal, scan, check the Treasury, anchor transaction (H), sweep, claims,
+//! check, rewrite the manifest's anchor. Each step is done when the chain
+//! says so, so a rerun picks up where the last one stopped.
 
+mod anchor;
 mod boot;
 mod note;
 mod registry;
 
+use std::time::Duration;
+
+use zcash_client_backend::data_api::wallet::TargetHeight;
+use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
+use zcash_protocol::value::Zatoshis;
 use zns_mint::mint::mtp::MtpTracker;
+use zns_mint::mint::registry::ANCHOR_POOL_SIZE;
 use zns_mint::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::wallet::Wallet;
 use zns_mint::zcash::{CanonicalBlockSource, ChainClient};
 use zns_mint::{RegistryKeys, TreasuryKeys};
+
+/// How often a waiting step checks the chain again.
+const POLL: Duration = Duration::from_secs(10);
+
+/// What the Treasury must hold before the move starts (0.05 ZEC): about
+/// four times the fees of moving ~300 names at 1,000 zats per action,
+/// plus the new mint's boot floor. What the move does not spend stays.
+const MIN_REBIND_BALANCE: u64 = 5_000_000;
 
 /// One pass over the chain, kept at the tip. Every block applies once to
 /// the wallet and the new law; blocks before H also go through the live
@@ -27,8 +46,8 @@ struct Scan {
     /// transaction, then what the new mint will build from H.
     fresh: zns_mint::mint::registry::Registry,
     old_birthday: BlockHeight,
-    /// The height where `fresh` adopted its anchors: the new birthday.
-    h: Option<BlockHeight>,
+    /// The new birthday and the anchor transaction mined there.
+    h: Option<(BlockHeight, TxId)>,
 }
 
 impl Scan {
@@ -84,10 +103,61 @@ impl Scan {
                 &mut self.mtp,
             );
             if self.h.is_none() && self.fresh.anchor_adoption_closed() {
-                tracing::info!(h = u32::from(height), "rebind: new anchors adopted");
-                self.h = Some(height);
+                let any = *self.fresh.anchor_pool().first().expect("adopted anchors");
+                let txid = *self
+                    .wallet
+                    .unspent_ironwood_note_by_nullifier(
+                        REGISTRY_ACCOUNT,
+                        any,
+                        TargetHeight::from(height),
+                    )
+                    .expect("FATAL: adopted anchor missing from the wallet")
+                    .txid();
+                tracing::info!(h = u32::from(height), %txid, "rebind: new anchors adopted");
+                self.h = Some((height, txid));
             }
         }
+    }
+
+    /// Syncs again once the chain has moved past the applied tip.
+    async fn next_block(
+        &mut self,
+        network: &boot::Network,
+        source: &CanonicalBlockSource,
+        treasury_keys: &TreasuryKeys,
+        registry_keys: &RegistryKeys,
+    ) {
+        let applied = self.wallet.tip().block_height();
+        loop {
+            tokio::time::sleep(POLL).await;
+            let (tip, _) = source
+                .exact_tip()
+                .await
+                .expect("FATAL: Zebra tip unavailable");
+            if tip > applied {
+                break;
+            }
+        }
+        self.sync(network, source, treasury_keys, registry_keys)
+            .await;
+    }
+
+    /// Every Treasury note the wallet can spend at the tip, both pools.
+    fn treasury_balance(&self) -> u64 {
+        let target = TargetHeight::from(self.wallet.tip().block_height());
+        let ironwood: u64 = self
+            .wallet
+            .unspent_ironwood_notes(TREASURY_ACCOUNT, target)
+            .iter()
+            .map(|note| note.note().value().inner())
+            .sum();
+        let sapling: u64 = self
+            .wallet
+            .unspent_sapling_notes(TREASURY_ACCOUNT, target)
+            .iter()
+            .map(|note| note.note().value().inner())
+            .sum();
+        ironwood + sapling
     }
 }
 
@@ -103,11 +173,14 @@ async fn main() {
     // default, and the first HTTPS client panics without one.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+    // 1. Unseal.
     let network = boot::boot_network();
     let (_manifest, custody, anchor) = boot::load_manifest();
     let (treasury_keys, registry_keys) = boot::unseal(&network, &custody);
     let old_birthday = BlockHeight::from_u32(anchor.birthday);
+    let (spend_prover, output_prover) = boot::sapling_provers();
 
+    // 2. Scan from the live mint's own wallet origin to the tip.
     let chain = ChainClient::connect()
         .await
         .expect("FATAL: Zebra gRPC unreachable or timed out");
@@ -136,7 +209,6 @@ async fn main() {
     )
     .expect("FATAL: failed to seed commitment trees from the verified Zebra checkpoint");
     let mtp = boot::mtp_through(origin.block_height(), &source).await;
-
     let mut scan = Scan {
         wallet,
         mtp,
@@ -149,10 +221,60 @@ async fn main() {
     scan.sync(&network, &source, &treasury_keys, &registry_keys)
         .await;
 
-    let live: Vec<_> = scan.old.name_chain().collect();
-    tracing::info!(
-        names = live.len(),
-        tip = u32::from(scan.wallet.tip().block_height()),
-        "rebind: live names read"
+    // The names to move. None means this manifest's anchor is not the live
+    // mint's: there is nothing to move, and nothing may be rewritten.
+    let claims: Vec<_> = scan.old.name_chain().collect();
+    assert!(
+        !claims.is_empty(),
+        "FATAL: no live old-format names from {}; refusing to move an empty registry",
+        u32::from(old_birthday)
     );
+    tracing::info!(names = claims.len(), "rebind: live names read");
+
+    let fee_rule = source
+        .standard_fee()
+        .await
+        .expect("FATAL: fee rate unavailable from Zebra");
+    let marginal = fee_rule.marginal_fee().into_u64();
+
+    // 3. The anchor transaction. The operator funds the Treasury first; a
+    // short balance refuses here, before anything is sent.
+    if scan.h.is_none() {
+        let have = scan.treasury_balance();
+        assert!(
+            have >= MIN_REBIND_BALANCE,
+            "FATAL: the Treasury holds {have} zats; the move needs {MIN_REBIND_BALANCE}. \
+             Send {} more to the Treasury and run again.",
+            MIN_REBIND_BALANCE - have
+        );
+        // Each fee note pays one claim (3 actions) per round, and keeps its
+        // change for the next round.
+        let rounds = claims.len().div_ceil(ANCHOR_POOL_SIZE) as u64;
+        let fee_note = Zatoshis::from_u64(rounds * 3 * marginal + marginal)
+            .expect("fee note fits the monetary range");
+        let tip = scan.wallet.tip().block_height();
+        let (transaction, fee) = anchor::build(
+            &network,
+            &mut scan.wallet,
+            &treasury_keys,
+            &registry_keys,
+            &spend_prover,
+            &output_prover,
+            &fee_rule,
+            fee_note,
+            tip,
+        );
+        assert!(
+            source.submit(&transaction, "rebind anchors").await,
+            "FATAL: the node refused the anchor transaction"
+        );
+        scan.wallet.record_sent(&transaction, tip + 1, fee);
+        tracing::info!(txid = %transaction.txid(), "rebind: anchor transaction sent");
+        while scan.h.is_none() {
+            scan.next_block(&network, &source, &treasury_keys, &registry_keys)
+                .await;
+        }
+    }
+    let (h, anchor_txid) = scan.h.expect("H is known");
+    tracing::info!(h = u32::from(h), %anchor_txid, "rebind: anchors at the new birthday");
 }

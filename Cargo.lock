@@ -5242,6 +5242,7 @@ dependencies = [
  "libc",
  "orchard",
  "pasta_curves",
+ "rand 0.10.3",
  "rustls",
  "sapling-crypto",
  "secrecy",

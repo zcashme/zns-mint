@@ -236,6 +236,76 @@ pub async fn origin_checkpoint(
     chain_state
 }
 
+/// The BLAKE2b-512 hash of the canonical `sapling-spend.params` file.
+const SAPLING_SPEND_HASH: &str = "8270785a1a0d0bc77196f000ee6d221c9c9894f55307bd9357c3f0105d31ca63991ab91324160d8f53e2bbd3c2633a6eb8bdf5205d822e7f3f73edac51b2b70c";
+
+/// The BLAKE2b-512 hash of the canonical `sapling-output.params` file.
+const SAPLING_OUTPUT_HASH: &str = "657e3d38dbb5cb5e7dd2970e8b03d69b4787dd907285b5a7f0790dcc8072f60bf593b32cc2d1c030e00ff5ae64bf84c5c3beb84ddc841d48264b4a171744d028";
+
+/// Expected file sizes for the Sapling parameter files.
+const SAPLING_SPEND_BYTES: u64 = 47_958_396;
+const SAPLING_OUTPUT_BYTES: u64 = 3_592_860;
+
+fn sapling_params_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("ZCASH_PARAMS_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    std::path::PathBuf::from(home).join(".zcash-params")
+}
+
+fn read_verified_sapling_params(
+    path: &std::path::Path,
+    expected_hash: &str,
+    expected_bytes: u64,
+) -> Vec<u8> {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| {
+        panic!(
+            "FATAL: cannot read Sapling params at {}: {e}",
+            path.display()
+        )
+    });
+    assert_eq!(
+        bytes.len() as u64,
+        expected_bytes,
+        "Sapling params size mismatch at {}",
+        path.display(),
+    );
+    let hash_hex = blake2b_simd::blake2b(&bytes).to_hex();
+    assert_eq!(
+        hash_hex.as_str(),
+        expected_hash,
+        "Sapling params hash mismatch at {}",
+        path.display(),
+    );
+    bytes
+}
+
+/// The Sapling provers both builders need: size and BLAKE2b-512 checked,
+/// then upstream's own deserializer.
+pub fn sapling_provers() -> (
+    sapling::circuit::SpendParameters,
+    sapling::circuit::OutputParameters,
+) {
+    let dir = sapling_params_dir();
+    let spend = read_verified_sapling_params(
+        &dir.join("sapling-spend.params"),
+        SAPLING_SPEND_HASH,
+        SAPLING_SPEND_BYTES,
+    );
+    let output = read_verified_sapling_params(
+        &dir.join("sapling-output.params"),
+        SAPLING_OUTPUT_HASH,
+        SAPLING_OUTPUT_BYTES,
+    );
+    (
+        sapling::circuit::SpendParameters::read(&spend[..], false)
+            .expect("FATAL: failed to deserialize sapling-spend.params"),
+        sapling::circuit::OutputParameters::read(&output[..], false)
+            .expect("FATAL: failed to deserialize sapling-output.params"),
+    )
+}
+
 /// The 11 header timestamps through the origin checkpoint, so the MTP
 /// window is complete before the first block applies.
 pub async fn mtp_through(checkpoint: Height, source: &CanonicalBlockSource) -> MtpTracker {
