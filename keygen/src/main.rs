@@ -22,12 +22,12 @@ use zcash_protocol::value::Zatoshis;
 use zeroize::Zeroize;
 use zip32::fingerprint::SeedFingerprint;
 use zns_canon::capsule::{self, MAGIC as CAPSULE_MAGIC, SEED_LEN};
+use zns_canon::custody;
 
 use keys::{AnchorMaterial, TreasuryFundingInfo};
 
 const KEYS_DIR: &str = "keys";
 const CAPSULE_FILE: &str = "keys/zns_seed.capsule";
-const MANIFEST_FILE: &str = "keys/zns_custody_manifest.toml";
 const ATTESTATION_FILE: &str = "keys/zns_attestation.bin";
 
 const TREASURY_ACCOUNT: u32 = 0;
@@ -59,7 +59,7 @@ fn main() {
     tracing::info!("=== ZNS KEY GENESIS ===");
     tracing::info!(network = NETWORK_LABEL, "starting ceremony");
 
-    if Path::new(MANIFEST_FILE).exists() {
+    if Path::new(custody::PATH).exists() {
         tracing::info!("custody manifest exists; ceremony already complete");
         return;
     }
@@ -377,7 +377,7 @@ fn finalize(
         guest_policy: attestation.guest_policy,
         tcb_version: &attestation.tcb_version,
     });
-    write_atomic(Path::new(MANIFEST_FILE), manifest.as_bytes(), 0o644);
+    write_atomic(Path::new(custody::PATH), manifest.as_bytes(), 0o644);
     tracing::info!(birthday, "manifest written");
 }
 
@@ -463,35 +463,6 @@ fn utxo_to_input(
 
 // ── Manifest ──────────────────────────────────────────────────────
 
-#[derive(serde::Serialize)]
-struct CustodyManifest {
-    manifest_version: u8,
-    network: &'static str,
-    seed_fingerprint: String,
-    capsule_file: &'static str,
-    capsule_hash_blake2b256: String,
-    capsule_format: String,
-    seed_length: usize,
-    treasury_account: u32,
-    registry_account: u32,
-    treasury_address: String,
-    anchor_txid: String,
-    birthday: u32,
-    sealing: &'static str,
-    sealing_root_key: &'static str,
-    sealing_guest_fields: &'static str,
-    guest_policy: String,
-    tcb_version: String,
-    rng: &'static str,
-    attestation_file: &'static str,
-    attestation_hash_blake2b256: String,
-    report_data_hash_blake2b256: String,
-    measurement: String,
-    attestation_sig_algo: &'static str,
-    migration: &'static str,
-    signer_socket: &'static str,
-}
-
 struct CustodyManifestInputs<'a> {
     fingerprint: SeedFingerprint,
     capsule_hash: &'a [u8; 32],
@@ -506,11 +477,11 @@ struct CustodyManifestInputs<'a> {
 }
 
 fn custody_manifest(inputs: CustodyManifestInputs<'_>) -> String {
-    let m = CustodyManifest {
+    custody::Record {
         manifest_version: 1,
-        network: NETWORK_LABEL,
+        network: NETWORK_LABEL.into(),
         seed_fingerprint: inputs.fingerprint.to_string(),
-        capsule_file: CAPSULE_FILE,
+        capsule_file: CAPSULE_FILE.into(),
         capsule_hash_blake2b256: hex::encode(inputs.capsule_hash),
         capsule_format: String::from_utf8(CAPSULE_MAGIC.to_vec()).expect("FATAL: capsule magic"),
         seed_length: SEED_LEN,
@@ -519,21 +490,21 @@ fn custody_manifest(inputs: CustodyManifestInputs<'_>) -> String {
         treasury_address: inputs.treasury_address.to_string(),
         anchor_txid: inputs.anchor_txid.to_string(),
         birthday: inputs.birthday,
-        sealing: "amd-sev-snp-derived-key",
-        sealing_root_key: "vcek",
-        sealing_guest_fields: "guest_policy,measurement",
+        sealing: "amd-sev-snp-derived-key".into(),
+        sealing_root_key: "vcek".into(),
+        sealing_guest_fields: "guest_policy,measurement".into(),
         guest_policy: format!("0x{:016x}", inputs.guest_policy),
         tcb_version: inputs.tcb_version.to_string(),
-        rng: "rdseed",
-        attestation_file: ATTESTATION_FILE,
+        rng: "rdseed".into(),
+        attestation_file: ATTESTATION_FILE.into(),
         attestation_hash_blake2b256: hex::encode(inputs.attestation_hash),
         report_data_hash_blake2b256: hex::encode(inputs.report_data_hash),
         measurement: inputs.measurement.to_string(),
-        attestation_sig_algo: "ecdsa-p384-sha384",
-        migration: "none",
-        signer_socket: "none",
-    };
-    toml::to_string(&m).expect("FATAL: serialize custody manifest")
+        attestation_sig_algo: "ecdsa-p384-sha384".into(),
+        migration: "none".into(),
+        signer_socket: "none".into(),
+    }
+    .to_toml()
 }
 
 // ── Hashing ───────────────────────────────────────────────────────
