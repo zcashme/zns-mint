@@ -1,5 +1,13 @@
 # Sale module changelog
 
+## 2026-11-13 — A sale is signed on the tip after its payment (#434)
+
+- `Phase::Paid` holds the payment's height. `observe` takes the
+  block's height, and `poll` takes the tip and signs a paid sale only
+  once the tip is past that height, as `RefundQueue::due` does for
+  refunds. A reorg that drops the payment's block replaces the market
+  before the sale note is built.
+
 ## 2026-11-12 — A list pays the t1 the owner names
 
 - A listing pays the t1 in the list memo, which the owner repeats in

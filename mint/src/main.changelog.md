@@ -10,6 +10,10 @@
   at boot. Loading the file does not queue a refund.
 - A payment confirmed while the mint was down stays unanswered. A
   restart does not replay it.
+## 2026-11-13 — A sale waits a block after its payment (#434)
+
+- `market.observe` gets the applied block's height and `market.poll`
+  gets the tip, so the sale note is built on the tip after the payment.
 
 ## 2026-11-13 — The run loop passes no birthday (#489)
 
