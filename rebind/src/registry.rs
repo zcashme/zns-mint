@@ -14,8 +14,7 @@ pub use anchor_pool::is_ceremony_fill;
 
 use crate::note::{Action, Expiry, Name, NameNote, NameRcm};
 use std::collections::{BTreeMap, BTreeSet};
-use zcash_primitives::transaction::builder::default_tx_expiry_delta;
-use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zns_mint::mint::Timestamp;
 use zns_mint::mint::UnifiedAddress;
 
@@ -156,8 +155,6 @@ impl Registry {
 
     /// Offers a confirmed claim candidate; true when it spent one
     /// standing anchor, spent no Name Note, and the name was free.
-    /// After a release, `expiry` must sit past the standard expiry
-    /// window, so a transaction built earlier does not register.
     /// A rejected claim retires the anchor it spent and does not seat
     /// its successor.
     #[allow(clippy::too_many_arguments)]
@@ -170,7 +167,6 @@ impl Registry {
         nfs: &[orchard::note::Nullifier],
         height: BlockHeight,
         mtp: Timestamp,
-        expiry: BlockHeight,
     ) -> bool {
         assert!(matches!(note, NameNote::Claim { .. }));
         let spent: Vec<_> = nfs
@@ -179,21 +175,15 @@ impl Registry {
             .copied()
             .collect();
         let name_free = self.record(note.name()).is_none();
-        let built_after_release = !self.built_before_release(params, note.name(), expiry);
         // Spent anchors retire on any verdict. The successor joins only
-        // when this claim is admitted: one anchor, no Name Note, name free,
-        // and not an older transaction mining after a release.
-        let seated = successor.filter(|_| {
-            spent.len() == 1
-                && self.names_spent_by(nfs).is_empty()
-                && name_free
-                && built_after_release
-        });
+        // when this claim is admitted: one anchor, no Name Note, name free.
+        let seated = successor
+            .filter(|_| spent.len() == 1 && self.names_spent_by(nfs).is_empty() && name_free);
         self.anchors.retire_spent(nfs, seated, height);
 
         // The law: a well-formed claim spends exactly one anchor,
         // spends no Name Note, creates a zero-value successor, and
-        // finds the name free (or released after this transaction was built).
+        // finds the name free.
         if successor.is_none() || spent.len() != 1 || !self.names_spent_by(nfs).is_empty() {
             self.mark_released(nfs, height);
             return false;
@@ -202,30 +192,8 @@ impl Registry {
             // A late or duplicate claim: first confirmed wins.
             return false;
         }
-        if !built_after_release {
-            return false;
-        }
         self.set_record(NameRecord::create(params, note, nullifier, height, mtp));
         true
-    }
-
-    /// The mint builds a claim only after a release is applied, and sets
-    /// expiry to the target height plus the standard delta at that
-    /// height: 40 blocks, 120 from NU7. The delta never shrinks, so a
-    /// transaction inside the release height's window was built before
-    /// the release.
-    fn built_before_release<P: Parameters>(
-        &self,
-        params: &P,
-        name: &Name,
-        expiry: BlockHeight,
-    ) -> bool {
-        let Some(latest) = self.record_history(name).last() else {
-            return false;
-        };
-        let released = latest.confirmed_height;
-        let delta = default_tx_expiry_delta(BranchId::for_height(params, released));
-        latest.action.is_release() && expiry <= released + delta
     }
 
     /// Offers a confirmed update candidate; true when the transaction
@@ -443,11 +411,6 @@ pub fn apply<P: Parameters>(
     use zcash_primitives::transaction::TxId;
 
     let candidates = crate::note::decrypt_name_notes(network, block, registry_keys);
-    let expiry_by_txid: BTreeMap<TxId, BlockHeight> = block
-        .vtx()
-        .iter()
-        .map(|tx| (tx.txid(), tx.expiry_height()))
-        .collect();
 
     // The confirmation pass: the scanner's transactions in block order.
     // Two claims for one name in the same block: the lower vtx is
@@ -515,10 +478,6 @@ pub fn apply<P: Parameters>(
                         [(true, nf)] => Some(*nf),
                         _ => None,
                     };
-                    let expiry = expiry_by_txid
-                        .get(&txid)
-                        .copied()
-                        .expect("FATAL: scanned transaction is missing from the block");
                     registry.accept_claim(
                         network,
                         &candidate.payload,
@@ -527,7 +486,6 @@ pub fn apply<P: Parameters>(
                         &nfs,
                         height,
                         block_mtp,
-                        expiry,
                     );
                 } else {
                     match action {
