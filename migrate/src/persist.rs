@@ -295,7 +295,7 @@ mod tests {
     fn commit_files_links_every_staged_file() {
         let root = scratch("commit");
         let capsule = root.join("zns_seed.capsule");
-        let manifest = root.join("zns_custody_manifest.toml");
+        let manifest = root.join(zns_canon::custody::FILE);
         let staged_capsule = stage(&capsule, b"capsule").unwrap();
         let staged_manifest = stage_file(&manifest, b"manifest", 0o644).unwrap();
         commit_files(
@@ -319,7 +319,7 @@ mod tests {
         fs::create_dir(&keys).unwrap();
         fs::create_dir(&blocked).unwrap();
         let capsule = keys.join("zns_seed.capsule");
-        let manifest = blocked.join("zns_custody_manifest.toml");
+        let manifest = blocked.join(zns_canon::custody::FILE);
         let staged_capsule = stage(&capsule, b"new-capsule").unwrap();
         let staged_manifest = stage_file(&manifest, b"birthday = 1", 0o644).unwrap();
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o555)).unwrap();
@@ -346,7 +346,7 @@ mod tests {
         fs::create_dir(&blocked).unwrap();
         let capsule = keys.join("zns_seed.capsule");
         fs::write(&capsule, b"old-capsule").unwrap();
-        let manifest = blocked.join("zns_custody_manifest.toml");
+        let manifest = blocked.join(zns_canon::custody::FILE);
         let staged_capsule = stage(&capsule, b"new-capsule").unwrap();
         let staged_manifest = stage_file(&manifest, b"birthday = 1", 0o644).unwrap();
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o555)).unwrap();

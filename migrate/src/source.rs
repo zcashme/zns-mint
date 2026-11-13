@@ -21,6 +21,7 @@
 use rand::rngs::SysRng;
 use tracing::info;
 use zns_canon::capsule;
+use zns_canon::custody;
 use zns_canon::migration::{self, MigrationOffer};
 use zns_canon::sealing::{get_attestation, SealingKey};
 use zns_canon::upgrade::{self, UpgradeManifest};
@@ -105,7 +106,7 @@ pub fn run(
     )?;
     transport.publish_encrypted_seed(&handoff::encode_transfer(&transfer))?;
     transport.publish_source_attestation(source_report.as_bytes())?;
-    transport.publish_ceremony(transport::CUSTODY_MANIFEST_FILE, &custody_manifest)?;
+    transport.publish_ceremony(custody::FILE, &custody_manifest)?;
     info!("seed wrapped; plaintext dropped");
 
     let receipt = wait_peer(transport.wait_receipt())?;
@@ -170,7 +171,7 @@ pub(crate) fn require_source_capsule(
 
 /// The custody manifest beside the capsule: the mint's only ceremony input.
 fn read_custody_manifest(capsule: &std::path::Path) -> Result<Vec<u8>, MigrateError> {
-    let path = crate::persist::containing_dir(capsule).join(transport::CUSTODY_MANIFEST_FILE);
+    let path = crate::persist::containing_dir(capsule).join(custody::FILE);
     transport::read_regular(&path, transport::CEREMONY_MAX)
 }
 
@@ -273,15 +274,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zns-migrate-ceremony-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(transport::CUSTODY_MANIFEST_FILE), b"birthday = 1").unwrap();
+        std::fs::write(dir.join(custody::FILE), b"birthday = 1").unwrap();
         let manifest = read_custody_manifest(&dir.join("zns_seed.capsule")).unwrap();
         assert_eq!(manifest, b"birthday = 1");
 
-        std::os::unix::fs::symlink(
-            dir.join(transport::CUSTODY_MANIFEST_FILE),
-            dir.join("link.toml"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(dir.join(custody::FILE), dir.join("link.toml")).unwrap();
         let err =
             transport::read_regular(&dir.join("link.toml"), transport::CEREMONY_MAX).unwrap_err();
         assert!(err.to_string().contains("symlink"));

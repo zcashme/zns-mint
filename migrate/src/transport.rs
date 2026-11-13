@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use zns_canon::custody;
+
 use crate::error::MigrateError;
 use crate::handoff::{OFFER_LEN, RECEIPT_LEN, TRANSFER_LEN};
 
@@ -25,7 +27,6 @@ pub const SOURCE_ATTESTATION_FILE: &str = "source_attestation.bin";
 pub const RECEIPT_FILE: &str = "receipt.bin";
 pub const RECEIPT_ATTESTATION_FILE: &str = "receipt_attestation.bin";
 pub const SOURCE_READY_FILE: &str = "source.ready";
-pub const CUSTODY_MANIFEST_FILE: &str = "zns_custody_manifest.toml";
 const READY_MAGIC: &[u8] = b"ZNS_MIGRATE_READY_V1";
 const ATTESTATION_MAX: usize = 4096;
 pub const CEREMONY_MAX: usize = 1024 * 1024;
@@ -36,7 +37,7 @@ const PROTOCOL_FILES: &[&str] = &[
     ATTESTATION_FILE,
     ENCRYPTED_SEED_FILE,
     SOURCE_ATTESTATION_FILE,
-    CUSTODY_MANIFEST_FILE,
+    custody::FILE,
     RECEIPT_FILE,
     RECEIPT_ATTESTATION_FILE,
 ];
@@ -139,7 +140,7 @@ impl DirTransport {
     }
 
     /// Copy the custody manifest in the open. The name must be
-    /// [`CUSTODY_MANIFEST_FILE`]; it is the only ceremony file on the channel.
+    /// [`custody::FILE`]; it is the only ceremony file on the channel.
     pub fn publish_ceremony(&self, name: &str, bytes: &[u8]) -> Result<(), MigrateError> {
         ceremony_name(name)?;
         if bytes.is_empty() || bytes.len() > CEREMONY_MAX {
@@ -263,7 +264,7 @@ impl DirTransport {
 }
 
 fn ceremony_name(name: &str) -> Result<(), MigrateError> {
-    if name == CUSTODY_MANIFEST_FILE {
+    if name == custody::FILE {
         Ok(())
     } else {
         Err(MigrateError::transport(format!(
@@ -511,10 +512,10 @@ mod tests {
         assert!(err.to_string().contains("not a ceremony file"));
 
         transport
-            .publish_ceremony(CUSTODY_MANIFEST_FILE, b"birthday = 1")
+            .publish_ceremony(custody::FILE, b"birthday = 1")
             .unwrap();
         assert_eq!(
-            transport.wait_ceremony(CUSTODY_MANIFEST_FILE).unwrap(),
+            transport.wait_ceremony(custody::FILE).unwrap(),
             b"birthday = 1"
         );
         let _ = fs::remove_dir_all(&dir);

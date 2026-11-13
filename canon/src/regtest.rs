@@ -34,7 +34,8 @@ pub fn write_dev_keys(
     std::fs::write(dir.join("zns_seed.capsule"), blob)?;
 
     // The manifest fields boot reads, formatted by hand; boot parses them
-    // with `toml`. Display form, not hex: boot's `FromStr` is bech32.
+    // through `custody` and `genesis`. Display form, not hex: boot's
+    // `FromStr` is bech32.
     let manifest = format!(
         "network = \"regtest\"\n\
          seed_fingerprint = \"{}\"\n\
@@ -42,7 +43,7 @@ pub fn write_dev_keys(
          birthday = {birthday}\n",
         dev_seed_fingerprint(),
     );
-    std::fs::write(dir.join("zns_custody_manifest.toml"), manifest)
+    std::fs::write(dir.join(crate::custody::FILE), manifest)
 }
 
 #[cfg(test)]
@@ -65,7 +66,7 @@ mod tests {
 
         // Display form on both sides, so a hex-encoded fingerprint fails here.
         let manifest =
-            std::fs::read_to_string(dir.join("zns_custody_manifest.toml")).expect("manifest file");
+            std::fs::read_to_string(dir.join(crate::custody::FILE)).expect("manifest file");
         let expected = format!(
             "network = \"regtest\"\nseed_fingerprint = \"{}\"\nanchor_txid = \"{txid}\"\nbirthday = 100\n",
             dev_seed_fingerprint()

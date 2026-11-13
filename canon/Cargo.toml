@@ -24,6 +24,8 @@ sha2 = "0.10"
 sigstore-trust-root = { version = "0.14", default-features = false }
 sigstore-verify = "0.14"
 thiserror = "1"
+toml = "1"
+toml_edit = "0.25"
 tracing = "0.1"
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 x25519-dalek = { version = "3", features = ["static_secrets", "zeroize"] }

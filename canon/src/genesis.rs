@@ -5,6 +5,9 @@
 //! transaction has a confirmed birthday.
 //! Ceremony orchestration stays in `zns-keygen`; this is the canonical record.
 
+use serde::Deserialize;
+use thiserror::Error;
+
 use crate::attestation::REPORT_DATA_LEN;
 
 /// Domain separation for [`genesis_report_data`].
@@ -66,6 +69,66 @@ fn write_bytes(out: &mut [u8], offset: &mut usize, bytes: &[u8]) {
     *offset = end;
 }
 
+/// Why a manifest's anchor fields were refused.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum AnchorError {
+    #[error("is invalid: {0}")]
+    Invalid(String),
+    #[error("has no anchor txid")]
+    NoAnchorTxid,
+    #[error("txid is not hex")]
+    TxidNotHex,
+    #[error("txid is not 32 bytes")]
+    TxidLength,
+    #[error("has no birthday")]
+    NoBirthday,
+}
+
+/// Where the Registry starts, as the custody manifest records it: the
+/// anchor transaction and the height it was mined at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Anchor {
+    /// Display order, as the file writes it: `Transaction::txid`'s
+    /// `Display`.
+    pub txid: [u8; 32],
+    pub birthday: u32,
+}
+
+impl Anchor {
+    /// Reads `anchor_txid` and `birthday` out of a manifest's text. Other
+    /// fields are ignored.
+    pub fn read(text: &str) -> Result<Self, AnchorError> {
+        #[derive(Deserialize)]
+        struct Raw {
+            anchor_txid: Option<String>,
+            birthday: Option<u32>,
+        }
+        let raw: Raw =
+            toml::from_str(text).map_err(|error| AnchorError::Invalid(error.to_string()))?;
+        let txid = raw
+            .anchor_txid
+            .filter(|txid| !txid.trim().is_empty())
+            .ok_or(AnchorError::NoAnchorTxid)?;
+        let birthday = raw.birthday.ok_or(AnchorError::NoBirthday)?;
+        let txid = hex::decode(txid.trim())
+            .map_err(|_| AnchorError::TxidNotHex)?
+            .try_into()
+            .map_err(|_| AnchorError::TxidLength)?;
+        Ok(Self { txid, birthday })
+    }
+
+    /// `text` with `anchor_txid` and `birthday` set to this anchor. Every
+    /// other byte is kept as written.
+    pub fn rewrite(&self, text: &str) -> Result<String, AnchorError> {
+        let mut document: toml_edit::DocumentMut = text
+            .parse()
+            .map_err(|error: toml_edit::TomlError| AnchorError::Invalid(error.to_string()))?;
+        document["anchor_txid"] = toml_edit::value(hex::encode(self.txid));
+        document["birthday"] = toml_edit::value(i64::from(self.birthday));
+        Ok(document.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +166,37 @@ mod tests {
         let mut later = record;
         later.birthday += 1;
         assert_ne!(genesis_report_data(&later), bound);
+    }
+
+    #[test]
+    fn rewrite_changes_only_the_anchor_lines() {
+        let manifest = "seed_fingerprint = \"zip32seedfp1x\"
+capsule_hash_blake2b256 = \"4444\"
+anchor_txid = \"abababababababababababababababababababababababababababababababab\"
+birthday = 4408922
+measurement = \"7a7a\"
+";
+        let moved = Anchor {
+            txid: [0xff; 32],
+            birthday: 3_500_000,
+        };
+        let rewritten = moved.rewrite(manifest).unwrap();
+        assert_eq!(manifest.lines().count(), rewritten.lines().count());
+        let changed: Vec<_> = manifest
+            .lines()
+            .zip(rewritten.lines())
+            .filter(|(before, after)| before != after)
+            .collect();
+        assert_eq!(
+            changed,
+            vec![
+                (
+                    "anchor_txid = \"abababababababababababababababababababababababababababababababab\"",
+                    "anchor_txid = \"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"",
+                ),
+                ("birthday = 4408922", "birthday = 3500000"),
+            ]
+        );
+        assert_eq!(Anchor::read(&rewritten).unwrap(), moved);
     }
 }

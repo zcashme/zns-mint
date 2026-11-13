@@ -1,5 +1,16 @@
 # Boot module changelog
 
+## 2026-11-13 — Boot reads the manifest through canon (#491)
+
+- `load_manifest` reads `custody::PATH` once and returns canon's
+  `custody::Custody` (network, seed fingerprint) and `genesis::Anchor`
+  (anchor txid, birthday). `CeremonyAnchor`, the inline `RawAnchor`
+  parser and `CUSTODY_MANIFEST_FILE` are removed, and the mint no longer
+  depends on `toml`.
+- Refusals keep their text (`FATAL: keys/zns_custody_manifest.toml has
+  no anchor txid`, …); their tests are dropped. `anchor_txid` converts
+  the file's display order for the chain check, and its test stays here.
+
 ## 2026-11-13 — `Boot` carries no birthday (#489)
 
 - `Boot::birthday` is removed: the run loop read it only to pass it to

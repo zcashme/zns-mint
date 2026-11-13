@@ -2,7 +2,8 @@
 //!
 //! [`capsule`] seals the ZIP-32 seed. [`sealing`] is the TEE seam that
 //! derives the sealing key and requests a report. [`attestation`] verifies
-//! a SEV-SNP report against a pinned AMD ARK.
+//! a SEV-SNP report against a pinned AMD ARK. [`custody`] is the manifest
+//! naming the seed the capsule holds.
 //!
 //! [`genesis`], [`upgrade`], and [`migration`] are the canonical statements
 //! for a finished ceremony and for moving that seed to a new measurement.
@@ -17,6 +18,7 @@ compile_error!(
 pub mod access_code;
 pub mod attestation;
 pub mod capsule;
+pub mod custody;
 pub mod genesis;
 pub mod migration;
 #[cfg(feature = "non-tee")]
