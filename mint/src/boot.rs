@@ -35,6 +35,8 @@ use zcash_client_backend::data_api::chain::ChainState;
 use zcash_client_backend::data_api::WalletRead as _;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zns_canon::capsule::{hash as capsule_hash, parse_capsule, read_capsule_file, unseal_seed};
+use zns_canon::custody;
+use zns_canon::genesis::Anchor;
 #[cfg(not(feature = "non-tee"))]
 use zns_canon::sealing::derive_sealing_key;
 #[cfg(feature = "non-tee")]
@@ -178,10 +180,12 @@ fn require_established_ceremony(registry: &Registry) {
     );
 }
 
-fn require_ceremony_network(ceremony: &CeremonyAnchor) {
+fn require_ceremony_network(custody: &custody::Custody) {
     assert_eq!(
-        ceremony.network, NETWORK_LABEL,
-        "FATAL: {CUSTODY_MANIFEST_FILE} network does not match {NETWORK_LABEL} build"
+        custody.network,
+        NETWORK_LABEL,
+        "FATAL: {} network does not match {NETWORK_LABEL} build",
+        custody::PATH
     );
 }
 
@@ -191,13 +195,6 @@ const ATTESTATION_REPORT_LEN: usize = 1184;
 
 /// The boot identity document: written once, at attestation time.
 const IDENTITY_DOC_FILE: &str = "zns_mint_identity.json";
-
-/// Keygen's custody manifest: network, seed fingerprint, anchor txid,
-/// and the height it mined at. Boot accepts the seed this fingerprint
-/// names when the capsule matches it; an attested build also requires
-/// the keygen report. The anchor txid is checked against the chain.
-/// A missing file refuses boot.
-const CUSTODY_MANIFEST_FILE: &str = "keys/zns_custody_manifest.toml";
 
 /// Genesis facts and the hex-encoded SNP report, one file. `keys/` is
 /// read-only in production, so this stays in the working directory.
@@ -255,7 +252,7 @@ fn read_attestation_report(path: &std::path::Path) -> Vec<u8> {
 /// Attests the ceremony anchor after the seed is gone. `non-tee` builds
 /// skip this: no device.
 #[cfg(not(feature = "non-tee"))]
-fn write_genesis_statement(capsule_hash: [u8; 32], fingerprint: [u8; 32], anchor: &CeremonyAnchor) {
+fn write_genesis_statement(capsule_hash: [u8; 32], fingerprint: [u8; 32], anchor: &Anchor) {
     let record = genesis_record(genesis_network(), fingerprint, capsule_hash, anchor);
     let report_data = zns_canon::genesis::genesis_report_data(&record);
     let attestation = get_attestation(&report_data)
@@ -265,7 +262,7 @@ fn write_genesis_statement(capsule_hash: [u8; 32], fingerprint: [u8; 32], anchor
     std::fs::write(GENESIS_RECORD_FILE, &document)
         .unwrap_or_else(|error| panic!("FATAL: failed to write {GENESIS_RECORD_FILE}: {error}"));
     tracing::info!(
-        txid = %anchor.txid,
+        txid = %anchor_txid(anchor),
         birthday = record.birthday,
         "boot: genesis attestation written"
     );
@@ -290,7 +287,7 @@ fn genesis_record(
     network: zns_canon::genesis::NetworkId,
     fingerprint: [u8; 32],
     capsule_hash: [u8; 32],
-    anchor: &CeremonyAnchor,
+    anchor: &Anchor,
 ) -> zns_canon::genesis::GenesisRecord {
     zns_canon::genesis::GenesisRecord {
         version: 1,
@@ -298,36 +295,29 @@ fn genesis_record(
         seed_fingerprint: fingerprint,
         capsule_hash,
         // Display-order bytes, same as the published JSON field.
-        anchor_txid: anchor.file_txid,
+        anchor_txid: anchor.txid,
         birthday: anchor.birthday,
     }
-}
-
-/// Keygen's ceremony record: the build's network, the seed's fingerprint,
-/// the anchor transaction, and the height it mined at. Read on every
-/// network.
-struct CeremonyAnchor {
-    network: String,
-    seed_fingerprint: String,
-    /// Internal order, for `tx.txid()` equality in the chain check.
-    txid: TxId,
-    /// The file's own display-order bytes — what the genesis document
-    /// publishes and the genesis attestation quotes. `non-tee` builds
-    /// write no genesis statement.
-    #[cfg(not(feature = "non-tee"))]
-    file_txid: [u8; 32],
-    birthday: u32,
 }
 
 /// Reads `keys/zns_custody_manifest.toml`. Missing, malformed, or a non-hex
 /// txid refuses boot: the manifest is the only record of which transaction
 /// anchored the mint, and a missing file must not silently skip the
 /// anchor check.
-fn load_ceremony_anchor() -> CeremonyAnchor {
-    ceremony_anchor(
-        &std::fs::read_to_string(CUSTODY_MANIFEST_FILE)
-            .unwrap_or_else(|error| panic!("FATAL: cannot read {CUSTODY_MANIFEST_FILE}: {error}")),
-    )
+fn load_manifest() -> (custody::Custody, Anchor) {
+    let text = std::fs::read_to_string(custody::PATH)
+        .unwrap_or_else(|error| panic!("FATAL: cannot read {}: {error}", custody::PATH));
+    let anchor =
+        Anchor::read(&text).unwrap_or_else(|error| panic!("FATAL: {} {error}", custody::PATH));
+    let custody = custody::Custody::read(&text)
+        .unwrap_or_else(|error| panic!("FATAL: {} {error}", custody::PATH));
+    (custody, anchor)
+}
+
+/// Internal order, for `tx.txid()` equality in the chain check. The file
+/// holds display order: `from_hex` inverts it, `from_bytes` would not.
+fn anchor_txid(anchor: &Anchor) -> TxId {
+    TxId::from_hex(&hex::encode(anchor.txid)).expect("32 bytes are a txid")
 }
 
 /// The anchor, verified against the chain: the stored txid must be
@@ -354,52 +344,10 @@ async fn require_anchor_on_chain(
     );
 }
 
-/// Parses the custody manifest's text. That string is `Transaction::txid`'s
-/// display form.
-fn ceremony_anchor(text: &str) -> CeremonyAnchor {
-    #[derive(serde::Deserialize)]
-    struct RawAnchor {
-        anchor_txid: Option<String>,
-        birthday: Option<u32>,
-        network: Option<String>,
-        seed_fingerprint: Option<String>,
-    }
-    let raw: RawAnchor = toml::from_str(text)
-        .unwrap_or_else(|error| panic!("FATAL: {CUSTODY_MANIFEST_FILE} is invalid: {error}"));
-    let txid_hex = raw
-        .anchor_txid
-        .filter(|txid| !txid.trim().is_empty())
-        .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} has no anchor txid"));
-    let birthday = raw
-        .birthday
-        .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} has no birthday"));
-    let network = raw
-        .network
-        .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} has no network"));
-    let seed_fingerprint = raw
-        .seed_fingerprint
-        .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} has no seed fingerprint"));
-    #[cfg(not(feature = "non-tee"))]
-    let file_txid: [u8; 32] = hex::decode(txid_hex.trim())
-        .unwrap_or_else(|_| panic!("FATAL: {CUSTODY_MANIFEST_FILE} txid is not hex"))
-        .try_into()
-        .unwrap_or_else(|_| panic!("FATAL: {CUSTODY_MANIFEST_FILE} txid is not 32 bytes"));
-    CeremonyAnchor {
-        network,
-        seed_fingerprint,
-        // Display form: `from_hex` inverts it, `from_bytes` would not.
-        txid: TxId::from_hex(txid_hex.trim())
-            .unwrap_or_else(|| panic!("FATAL: {CUSTODY_MANIFEST_FILE} txid is not hex")),
-        #[cfg(not(feature = "non-tee"))]
-        file_txid,
-        birthday,
-    }
-}
-
 #[cfg(not(feature = "non-tee"))]
 fn genesis_document(
     record: &zns_canon::genesis::GenesisRecord,
-    anchor: &CeremonyAnchor,
+    anchor: &Anchor,
     report: &[u8],
 ) -> Vec<u8> {
     serde_json::to_vec_pretty(&serde_json::json!({
@@ -407,7 +355,7 @@ fn genesis_document(
         "network": NETWORK_LABEL,
         "seed_fingerprint": hex::encode(record.seed_fingerprint),
         "capsule_hash": hex::encode(record.capsule_hash),
-        "anchor_txid": anchor.txid.to_string(),
+        "anchor_txid": anchor_txid(anchor).to_string(),
         "birthday": record.birthday,
         "report": hex::encode(report),
     }))
@@ -439,8 +387,8 @@ impl Boot<Network> {
 
         // Ceremony facts — the custody manifest, every network: keygen
         // writes it in deployment, the fixture on regtest.
-        let ceremony = load_ceremony_anchor();
-        require_ceremony_network(&ceremony);
+        let (custody, ceremony) = load_manifest();
+        require_ceremony_network(&custody);
         let mint_birthday = BlockHeight::from_u32(ceremony.birthday);
 
         // 1b. Select the build's sealing mode: public dev key for
@@ -465,12 +413,13 @@ impl Boot<Network> {
             let capsule = parse_capsule(&blob).expect("FATAL: failed to parse zns_seed.capsule");
             // Manifest, capsule field, and the attested fingerprint are one
             // value. Unseal then requires that value of the decrypted seed.
-            let expected = SeedFingerprint::from_str(ceremony.seed_fingerprint.trim())
-                .unwrap_or_else(|_| {
-                    panic!("FATAL: invalid seed_fingerprint in {CUSTODY_MANIFEST_FILE}")
-                });
+            let expected = SeedFingerprint::from_str(custody.seed_fingerprint.trim())
+                .unwrap_or_else(|_| panic!("FATAL: invalid seed_fingerprint in {}", custody::PATH));
             if expected.to_bytes() != capsule.fingerprint {
-                panic!("FATAL: capsule fingerprint does not match {CUSTODY_MANIFEST_FILE}");
+                panic!(
+                    "FATAL: capsule fingerprint does not match {}",
+                    custody::PATH
+                );
             }
             #[cfg(not(feature = "non-tee"))]
             require_keygen_attestation(&blob, &expected);
@@ -479,7 +428,7 @@ impl Boot<Network> {
             let seed = unseal_seed(&capsule_key, &capsule)
                 .expect("FATAL: failed to unseal seed. Capsule tampering, wrong TEE, or wrong capsule for this instance.");
             let access_code_key = AccessCodeDerivationKey::from_seed(seed.expose_secret());
-            verify_fingerprint(&seed, ceremony.seed_fingerprint.trim());
+            verify_fingerprint(&seed, custody.seed_fingerprint.trim());
             let sealed_hash = capsule_hash(&blob);
             (
                 TreasuryKeys::derive(&network, &seed),
@@ -496,7 +445,7 @@ impl Boot<Network> {
         require_anchor_on_chain(
             |height| source.get_block(&network, height),
             mint_birthday,
-            ceremony.txid,
+            anchor_txid(&ceremony),
         )
         .await;
 
@@ -804,12 +753,13 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
         .expect("seed is 32 bytes, within ZIP-32's 32..=252 range");
 
     let expected_fp = SeedFingerprint::from_str(expected)
-        .unwrap_or_else(|_| panic!("FATAL: invalid seed_fingerprint in {CUSTODY_MANIFEST_FILE}"));
+        .unwrap_or_else(|_| panic!("FATAL: invalid seed_fingerprint in {}", custody::PATH));
 
     if actual != expected_fp {
         // Redacted panic: do not print either fingerprint.
         panic!(
-            "FATAL: SEED FINGERPRINT MISMATCH — decrypted seed does not match {CUSTODY_MANIFEST_FILE}"
+            "FATAL: SEED FINGERPRINT MISMATCH — decrypted seed does not match {}",
+            custody::PATH
         );
     }
     tracing::info!("boot: seed fingerprint verified");
@@ -1069,11 +1019,8 @@ mod tests {
         // Non-palindrome vector: pins display vs internal byte order.
         let txid_bytes: [u8; 32] = core::array::from_fn(|i| i as u8);
         let txid = hex::encode(txid_bytes);
-        let anchor = CeremonyAnchor {
-            network: NETWORK_LABEL.to_string(),
-            seed_fingerprint: String::new(),
-            txid: TxId::from_hex(&txid).unwrap(),
-            file_txid: txid_bytes,
+        let anchor = Anchor {
+            txid: txid_bytes,
             birthday: 4408922,
         };
         let record = genesis_record(genesis_network(), [0x11; 32], [0x22; 32], &anchor);
@@ -1084,18 +1031,14 @@ mod tests {
     }
 
     #[test]
-    fn ceremony_anchor_reads_the_manifest_fields() {
+    fn anchor_txid_inverts_the_display_order() {
+        // Non-palindrome vector: pins display vs internal byte order.
         let txid_bytes: [u8; 32] = core::array::from_fn(|i| i as u8);
-        let txid = hex::encode(txid_bytes);
-        let anchor = ceremony_anchor(&format!(
-            "network = \"testnet\"\nseed_fingerprint = \"zip32seedfp1x\"\nanchor_txid = \"{txid}\"\nbirthday = 4408922\n"
-        ));
-        assert_eq!(anchor.network, "testnet");
-        assert_eq!(anchor.seed_fingerprint, "zip32seedfp1x");
-        assert_eq!(anchor.birthday, 4408922);
-        assert_eq!(anchor.txid.to_string(), txid);
-        #[cfg(not(feature = "non-tee"))]
-        assert_eq!(anchor.file_txid, txid_bytes);
+        let anchor = Anchor {
+            txid: txid_bytes,
+            birthday: 4408922,
+        };
+        assert_eq!(anchor_txid(&anchor).to_string(), hex::encode(txid_bytes));
     }
 
     /// A one-transaction block, for anchor-check fixtures.
@@ -1159,44 +1102,6 @@ mod tests {
         let block = test_block_with(tx, BlockHeight::from_u32(109));
         let other = TxId::from_bytes(core::array::from_fn(|i| i as u8 + 1));
         require_anchor_on_chain(async |_| Ok(block), BlockHeight::from_u32(109), other).await;
-    }
-
-    #[test]
-    #[should_panic(expected = "has no anchor txid")]
-    fn ceremony_anchor_refuses_a_missing_txid() {
-        ceremony_anchor("network = \"testnet\"\n");
-    }
-
-    #[test]
-    #[should_panic(expected = "txid is not hex")]
-    fn ceremony_anchor_refuses_a_non_hex_txid() {
-        ceremony_anchor(
-            "network = \"testnet\"\nseed_fingerprint = \"x\"\nanchor_txid = \"zz\"\nbirthday = 1\n",
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "has no birthday")]
-    fn ceremony_anchor_refuses_a_missing_birthday() {
-        ceremony_anchor(&format!("anchor_txid = \"{}\"\n", "ab".repeat(32)));
-    }
-
-    #[test]
-    #[should_panic(expected = "has no network")]
-    fn ceremony_anchor_refuses_a_missing_network() {
-        ceremony_anchor(&format!(
-            "anchor_txid = \"{}\"\nbirthday = 1\nseed_fingerprint = \"x\"\n",
-            "ab".repeat(32)
-        ));
-    }
-
-    #[test]
-    #[should_panic(expected = "has no seed fingerprint")]
-    fn ceremony_anchor_refuses_a_missing_seed_fingerprint() {
-        ceremony_anchor(&format!(
-            "anchor_txid = \"{}\"\nbirthday = 1\nnetwork = \"testnet\"\n",
-            "ab".repeat(32)
-        ));
     }
 
     #[tokio::test]
