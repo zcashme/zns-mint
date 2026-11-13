@@ -1,9 +1,11 @@
 //! The live mint's name-chain law, copied from zns-mint `46f61f9`
 //! (`src/mint/registry.rs`). Do not change this law; it is mainnet's.
 //!
-//! The copy is verbatim apart from imports, the `NameRcm` rename, and the
+//! The copy is verbatim apart from imports, the `NameRcm` rename, the
 //! authorization laws that need the old mint's requests (`allows_challenge`,
-//! `authorize_*`). zns-rebind does not call every item it keeps.
+//! `authorize_*`), and `built_before_release`, which refused a claim whose
+//! expiry fell inside a release's window; no mainnet claim landed there.
+//! zns-rebind does not call every item it keeps.
 #![allow(dead_code)]
 
 mod anchor_pool;

@@ -1131,8 +1131,6 @@ mod tests {
         assert!(!r.anchor_pool().contains(&succ2));
     }
 
-    /// A claim transaction built before a release does not register if it
-    /// mines afterward. One built after the release does.
     #[test]
     fn per_name_history_is_ordered_and_release_is_absent_from_tip_records() {
         let r = registry_with_alice_and_bob_history();
