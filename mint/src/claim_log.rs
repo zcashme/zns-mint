@@ -101,13 +101,14 @@ struct Entry {
 }
 
 struct State {
-    path: PathBuf,
+    /// Unset until the first read or write.
+    path: Option<PathBuf>,
     next: u64,
     recent: VecDeque<Entry>,
 }
 
 static STATE: Mutex<State> = Mutex::new(State {
-    path: PathBuf::new(),
+    path: None,
     next: 1,
     recent: VecDeque::new(),
 });
@@ -119,10 +120,7 @@ static PAGE: std::sync::LazyLock<watch::Sender<String>> =
 /// refund and does not register a name.
 pub fn load() {
     let mut state = STATE.lock().expect("claim log");
-    if state.path.as_os_str().is_empty() {
-        state.path = PathBuf::from(FILE);
-    }
-    let loaded = read_entries(&state.path);
+    let loaded = read_entries(log_path(&mut state));
     state.next = loaded.back().map(|entry| entry.index + 1).unwrap_or(1);
     state.recent = loaded;
     publish(&state);
@@ -138,9 +136,7 @@ pub fn record(
     refund: Option<TxId>,
 ) {
     let mut state = STATE.lock().expect("claim log");
-    if state.path.as_os_str().is_empty() {
-        state.path = PathBuf::from(FILE);
-    }
+    let path = log_path(&mut state).to_path_buf();
     let index = state.next;
     state.next += 1;
     let line = format_line(
@@ -150,7 +146,7 @@ pub fn record(
         reason,
         refund.as_ref(),
     );
-    if let Err(error) = append(&state.path, &line) {
+    if let Err(error) = append(&path, &line) {
         tracing::warn!(%error, "claim line not written");
     }
     state.recent.push_back(Entry {
@@ -173,6 +169,10 @@ pub fn record(
 /// The recent lines, as a gauge. Empty when no claim has been decided.
 pub fn exposition() -> String {
     PAGE.borrow().clone()
+}
+
+fn log_path(state: &mut State) -> &Path {
+    state.path.get_or_insert_with(|| PathBuf::from(FILE))
 }
 
 fn publish(state: &State) {
