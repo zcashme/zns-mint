@@ -21,7 +21,6 @@ use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 use zns_canon::genesis::Anchor;
 use zns_mint::mint::mtp::MtpTracker;
-use zns_mint::mint::registry::ANCHOR_POOL_SIZE;
 use zns_mint::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::wallet::Wallet;
 use zns_mint::zcash::{CanonicalBlockSource, ChainClient};
@@ -253,7 +252,7 @@ async fn main() {
         );
         // Each fee note pays one claim (3 actions) per round, and keeps its
         // change for the next round.
-        let rounds = claims.len().div_ceil(ANCHOR_POOL_SIZE) as u64;
+        let rounds = claims.len().div_ceil(anchor::LANES) as u64;
         let fee_note = Zatoshis::from_u64(rounds * 3 * marginal + marginal)
             .expect("fee note fits the monetary range");
         let tip = scan.wallet.tip().block_height();

@@ -1,5 +1,5 @@
 //! The anchor transaction: the new mint's 40 claim anchors, and one
-//! Treasury fee note per anchor so up to 40 claims go out in each block.
+//! Treasury fee note per lane so [`LANES`] claims go out in each block.
 //! Its height is the new birthday, H.
 
 use zcash_client_backend::data_api::wallet::TargetHeight;
@@ -14,8 +14,12 @@ use zns_mint::mint::TREASURY_ACCOUNT;
 use zns_mint::wallet::Wallet;
 use zns_mint::{RegistryKeys, TreasuryKeys};
 
+/// Claims per block, one fee note each: 28, for Zcash's launch on
+/// 28 October 2016. At most the 40 anchors.
+pub const LANES: usize = 28;
+
 /// Outputs: the anchors, the fee notes, and the Treasury's change.
-const OUTPUTS: usize = 2 * ANCHOR_POOL_SIZE + 1;
+const OUTPUTS: usize = ANCHOR_POOL_SIZE + LANES + 1;
 
 /// ZIP-317 for an Ironwood-only transaction of `actions` logical actions.
 pub fn fee<P: Parameters>(
@@ -53,7 +57,7 @@ pub fn build<P: Parameters>(
     tip: BlockHeight,
 ) -> (Transaction, Zatoshis) {
     let target_height = tip + 1;
-    let fee_notes_total = (0..ANCHOR_POOL_SIZE)
+    let fee_notes_total = (0..LANES)
         .try_fold(Zatoshis::ZERO, |sum, _| sum + fee_note)
         .expect("fee notes fit the monetary range");
 
@@ -116,6 +120,8 @@ pub fn build<P: Parameters>(
                 zcash_protocol::memo::MemoBytes::empty(),
             )
             .expect("FATAL: anchor output");
+    }
+    for _ in 0..LANES {
         builder
             .add_ironwood_output::<FeeError>(
                 treasury_ovk.clone(),

@@ -31,8 +31,9 @@ pub fn held(fresh: &Registry, claim: &NameNote) -> bool {
     })
 }
 
-/// Sends up to one claim per spendable anchor. A name with a claim in
-/// flight waits until that claim confirms or expires.
+/// One round, one block: up to [`crate::anchor::LANES`] claims, each on a
+/// spendable anchor. A name with a claim in flight waits until that claim
+/// confirms or expires.
 #[allow(clippy::too_many_arguments)]
 pub async fn round<P: Parameters + Send + 'static>(
     network: &P,
@@ -50,10 +51,12 @@ pub async fn round<P: Parameters + Send + 'static>(
     let tip = wallet.tip().block_height();
     let target_height = tip + 1;
     in_flight.retain(|_, expiry| *expiry > tip);
-    for claim in claims {
-        if held(fresh, claim) || in_flight.contains_key(claim.name()) {
-            continue;
-        }
+    let waiting: Vec<_> = claims
+        .iter()
+        .filter(|claim| !held(fresh, claim) && !in_flight.contains_key(claim.name()))
+        .take(crate::anchor::LANES)
+        .collect();
+    for claim in waiting {
         let Some(anchor) = fresh.spendable_claim_anchor(|nf| {
             wallet
                 .unspent_ironwood_note_by_nullifier(REGISTRY_ACCOUNT, nf, TargetHeight::from(tip))
