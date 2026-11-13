@@ -1,5 +1,11 @@
 # happy_path.changelog.md
 
+## 2026-11-13 — No `boot.birthday` assertion (#489)
+
+- `Boot` carries no birthday, so `assert_eq!(boot.birthday, tip_height)`
+  is gone. Boot still refuses an anchor not mined at the manifest
+  birthday, and the test still asserts the full ceremony pool.
+
 ## 2026-11-10
 
 - The fixture is `zns_integration_tests::fixture`: the mint's e2e crate
