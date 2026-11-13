@@ -1,5 +1,16 @@
 # main.changelog.md
 
+## 2026-11-13 — A decided claim leaves a line support can read
+
+- Each decided claim appends one line to `/state/log/claims.log` and
+  the serial console: the name, the payment, and `registered`,
+  `refund queued`, `refund sent`, or `kept`, with the reason. The
+  access code is not on the line. A sent refund names its transaction.
+- `/metrics` reprints the recent lines and loads them from that file
+  at boot. Loading the file does not queue a refund.
+- A payment confirmed while the mint was down stays unanswered. A
+  restart does not replay it.
+
 ## 2026-11-13 — The run loop passes no birthday (#489)
 
 - `main` no longer destructures `birthday` from `Boot`; `apply_block`

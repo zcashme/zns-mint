@@ -68,6 +68,7 @@ pub fn install() {
             tokio::net::TcpListener::from_std(listener)
         })
         .expect("FATAL: metrics endpoint bind failed");
+    crate::claim_log::load();
     tokio::spawn(serve(listener, handle.clone()));
     tokio::spawn(async move {
         loop {
@@ -163,10 +164,12 @@ async fn serve(listener: tokio::net::TcpListener, handle: PrometheusHandle) {
     }
 }
 
-/// The recorder's text, then the requests in flight.
+/// The recorder's text, the requests in flight, then the recent claim
+/// decisions. A restart loads those decisions back from the state disk.
 fn page(handle: &PrometheusHandle) -> String {
     let mut page = handle.render();
     page.push_str(&IN_FLIGHT.borrow());
+    page.push_str(&crate::claim_log::exposition());
     page
 }
 
