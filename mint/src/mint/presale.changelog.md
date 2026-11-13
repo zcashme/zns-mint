@@ -1,5 +1,14 @@
 # `mint/presale.rs` design record
 
+## 2026-11-13 — Every access code is rotated: purpose `zns-access-code-v1` (#484)
+
+- `zns_canon::access_code::PURPOSE` is `zns-access-code-v1`, was
+  `access-code-v1`. Every code issued under the old purpose stops
+  working; the issuer derives new ones with the same keys.
+- The reference vectors move with it: alice `575692`, bob `577225`, and
+  the issuer known-answer vector `844038`, each checked against an
+  independent Python derivation.
+
 ## 2026-11-12 — The access-code key derives no buy codes (#475)
 
 - `buy_otp` is gone. The key derives access codes and nothing else.

@@ -7,7 +7,7 @@
 //!
 //! `zns-keygen access-code code <name>` derives the same private key and
 //! agrees it with the issuer's public key. The mint judges a name with that
-//! shared secret: `purpose = HMAC-SHA256(shared, "access-code-v1")`, then
+//! shared secret: `purpose = HMAC-SHA256(shared, "zns-access-code-v1")`, then
 //! `u32_be(HMAC-SHA256(purpose, name)[0..4]) mod 1_000_000`.
 
 use hmac::{Hmac, Mac};
@@ -134,10 +134,10 @@ mod tests {
         let gate = purpose(&key);
         assert_eq!(
             hex::encode(*gate),
-            "5e2db6040cd32d2486675a3b3d60b9d4d96e9c8d4a5f862e0dfd7bd6a3f57b91"
+            "21086425a6d9ae0eff127a22b8e98bcfb9d1efc94c50eaa1737820de26ffdd8f"
         );
-        assert_eq!(access_code(&key, "alice"), 352_582);
-        assert_eq!(access_code(&key, "bob"), 131_624);
+        assert_eq!(access_code(&key, "alice"), 575_692);
+        assert_eq!(access_code(&key, "bob"), 577_225);
     }
 
     #[test]
