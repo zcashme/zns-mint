@@ -1,5 +1,9 @@
 # main.changelog.md
 
+## 2026-11-13 — `market.admit` returns the intent to send back (#497)
+
+- The run loop reads `market.admit`'s `Option<ReturnedIntent>` directly.
+
 ## 2026-11-13 — A sale waits a block after its payment (#434)
 
 - `market.observe` gets the applied block's height and `market.poll`

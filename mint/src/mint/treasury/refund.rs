@@ -178,10 +178,6 @@ mod tests {
         (MARGINAL_FEE * FEE_ACTIONS).unwrap()
     }
 
-    fn zats(n: u64) -> Zatoshis {
-        Zatoshis::const_from_u64(n)
-    }
-
     fn alice() -> Name {
         Name::parse("alice").unwrap()
     }
@@ -206,7 +202,7 @@ mod tests {
             &ua(),
             &alice(),
             BlockHeight::from_u32(height),
-            zats(1_000_000),
+            Zatoshis::const_from_u64(1_000_000),
         )
     }
 
@@ -215,10 +211,13 @@ mod tests {
         let txid = TxId::from_bytes([1; 32]);
         let mut queue = RefundQueue::default();
         admit(&mut queue, txid, 10);
-        assert_eq!(queue.due(deep())[0].amount(), zats(500_000));
+        assert_eq!(
+            queue.due(deep())[0].amount(),
+            Zatoshis::const_from_u64(500_000)
+        );
 
         let mut queue = RefundQueue::default();
-        let price = zats(1_000_000);
+        let price = Zatoshis::const_from_u64(1_000_000);
         queue.admit(
             &FeeRule::standard(),
             txid,
@@ -227,7 +226,10 @@ mod tests {
             BlockHeight::from_u32(10),
             (price - access_code_penalty(price)).unwrap(),
         );
-        assert_eq!(queue.due(deep())[0].amount(), zats(490_000));
+        assert_eq!(
+            queue.due(deep())[0].amount(),
+            Zatoshis::const_from_u64(490_000)
+        );
     }
 
     #[test]
@@ -239,7 +241,7 @@ mod tests {
             &ua(),
             &alice(),
             BlockHeight::from_u32(10),
-            zats(1_000_000),
+            Zatoshis::const_from_u64(1_000_000),
             Some("ZNS:held:alice:1700000600".to_string()),
         );
         assert_eq!(
@@ -251,7 +253,10 @@ mod tests {
     #[test]
     fn a_payment_that_does_not_exceed_the_fee_is_kept() {
         let mut queue = RefundQueue::default();
-        for refundable in [withheld(), (withheld() - zats(1)).unwrap()] {
+        for refundable in [
+            withheld(),
+            (withheld() - Zatoshis::const_from_u64(1)).unwrap(),
+        ] {
             queue.admit(
                 &FeeRule::standard(),
                 TxId::from_bytes([1; 32]),
@@ -278,9 +283,12 @@ mod tests {
 
     #[test]
     fn a_lower_node_rate_refunds_a_payment_the_standard_rate_keeps() {
-        let paid = zats(200_000);
-        let node = crate::zcash::fees::fee_rule(zats(1_000));
-        assert_eq!(refund_output(paid, &node), Some(zats(100_000)));
+        let paid = Zatoshis::const_from_u64(200_000);
+        let node = crate::zcash::fees::fee_rule(Zatoshis::const_from_u64(1_000));
+        assert_eq!(
+            refund_output(paid, &node),
+            Some(Zatoshis::const_from_u64(100_000))
+        );
         assert_eq!(refund_output(paid, &FeeRule::standard()), None);
     }
 
@@ -316,14 +324,14 @@ mod tests {
             &ua(),
             &alice(),
             BlockHeight::from_u32(10),
-            zats(2_000_000),
+            Zatoshis::const_from_u64(2_000_000),
         );
 
         let second = queue.due(deep()).remove(1);
         queue.paid(&second);
         let left = queue.due(deep());
         assert_eq!(left.len(), 1);
-        assert_eq!(left[0].amount(), zats(500_000));
+        assert_eq!(left[0].amount(), Zatoshis::const_from_u64(500_000));
     }
 
     #[test]

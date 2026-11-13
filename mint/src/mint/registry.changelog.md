@@ -2,6 +2,15 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-11-13 — The registry rules on a buy (#497)
+
+- `authorize_buy(name, height, mtp)` holds the buy law beside the other
+  `authorize_*`: the name is listed, an auction has started and quotes
+  a price at `height`, and neither clock has fired. It returns the
+  `BuyTerms` the sale takes: Alice's UA and t1, the price, whether it is
+  an auction, the term, and the live commitment.
+- `price` and `quote` are gone; nothing outside tests called them.
+
 ## 2026-11-12 — A list pays the t1 the owner names
 
 - `allows_challenge`, `authorize_list`, and `carries_forward` check
