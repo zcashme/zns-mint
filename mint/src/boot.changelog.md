@@ -1,5 +1,12 @@
 # Boot module changelog
 
+## 2026-11-13 — `Boot` carries no birthday (#489)
+
+- `Boot::birthday` is removed: the run loop read it only to pass it to
+  `apply_block`, which takes none. The sync's `apply_block` call drops
+  `mint_birthday`, which still sets the origin, the MTP day zero and the
+  anchor check.
+
 ## 2026-11-13 — The wallet scans from the birthday (#487)
 
 - `origin_checkpoint` seeds the wallet at `birthday - 1` on every network,

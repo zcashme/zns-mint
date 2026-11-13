@@ -39,7 +39,6 @@ async fn main() {
 
     let Boot {
         network,
-        birthday,
         chain,
         source,
         mut wallet,
@@ -339,7 +338,6 @@ async fn main() {
             let payments = zns_mint::mint::sale::transparent_payments(&block);
             let arrivals = zns_mint::mint::apply_block(
                 &network,
-                birthday,
                 &registry_keys,
                 &treasury_keys,
                 block,
