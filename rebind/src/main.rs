@@ -7,16 +7,19 @@
 
 mod anchor;
 mod boot;
+mod claim;
 mod note;
 mod registry;
 mod sweep;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
+use zns_canon::genesis::Anchor;
 use zns_mint::mint::mtp::MtpTracker;
 use zns_mint::mint::registry::ANCHOR_POOL_SIZE;
 use zns_mint::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
@@ -176,7 +179,7 @@ async fn main() {
 
     // 1. Unseal.
     let network = boot::boot_network();
-    let (_manifest, custody, anchor) = boot::load_manifest();
+    let (manifest, custody, anchor) = boot::load_manifest();
     let (treasury_keys, registry_keys) = boot::unseal(&network, &custody);
     let old_birthday = BlockHeight::from_u32(anchor.birthday);
     let (spend_prover, output_prover) = boot::sapling_provers();
@@ -224,7 +227,7 @@ async fn main() {
 
     // The names to move. None means this manifest's anchor is not the live
     // mint's: there is nothing to move, and nothing may be rewritten.
-    let claims: Vec<_> = scan.old.name_chain().collect();
+    let claims: Vec<_> = scan.old.name_chain().map(claim::of).collect();
     assert!(
         !claims.is_empty(),
         "FATAL: no live old-format names from {}; refusing to move an empty registry",
@@ -295,4 +298,51 @@ async fn main() {
         );
         tracing::info!(txid = %transaction.txid(), "rebind: sweep sent");
     }
+
+    // 5. The claims, up to one per anchor per block.
+    let mut in_flight = BTreeMap::new();
+    while !claims.iter().all(|c| claim::held(&scan.fresh, c)) {
+        claim::round(
+            &network,
+            &mut scan.wallet,
+            &treasury_keys,
+            &registry_keys,
+            &spend_prover,
+            &output_prover,
+            &fee_rule,
+            &source,
+            &scan.fresh,
+            &claims,
+            &mut in_flight,
+        )
+        .await;
+        scan.next_block(&network, &source, &treasury_keys, &registry_keys)
+            .await;
+    }
+
+    // 6. The check: the new law holds exactly the live names, no more.
+    assert_eq!(
+        scan.fresh.name_chain().count(),
+        claims.len(),
+        "FATAL: the new law holds names the live mint did not"
+    );
+    tracing::info!(
+        names = claims.len(),
+        h = u32::from(h),
+        "rebind: every live name held"
+    );
+
+    // 7. The manifest: only the anchor and the birthday change.
+    let moved = Anchor {
+        txid: hex::decode(anchor_txid.to_string())
+            .expect("txid display is hex")
+            .try_into()
+            .expect("a txid is 32 bytes"),
+        birthday: u32::from(h),
+    };
+    let rewritten = moved
+        .rewrite(&manifest)
+        .unwrap_or_else(|error| panic!("FATAL: manifest rewrite: {error}"));
+    boot::write_manifest(&rewritten);
+    tracing::info!(%anchor_txid, birthday = u32::from(h), "rebind: manifest moved; done");
 }

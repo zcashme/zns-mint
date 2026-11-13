@@ -306,6 +306,25 @@ pub fn sapling_provers() -> (
     )
 }
 
+/// Replaces the manifest in one rename: a crash leaves the old file or the
+/// new one, never a short one.
+pub fn write_manifest(text: &str) {
+    use std::io::Write;
+    let path = std::path::Path::new(custody::PATH);
+    let tmp = path.with_extension("toml.tmp");
+    let mut file = std::fs::File::create(&tmp)
+        .unwrap_or_else(|error| panic!("FATAL: create {}: {error}", tmp.display()));
+    file.write_all(text.as_bytes())
+        .unwrap_or_else(|error| panic!("FATAL: write {}: {error}", tmp.display()));
+    file.sync_all()
+        .unwrap_or_else(|error| panic!("FATAL: sync {}: {error}", tmp.display()));
+    std::fs::rename(&tmp, path)
+        .unwrap_or_else(|error| panic!("FATAL: rename to {}: {error}", path.display()));
+    std::fs::File::open(path.parent().expect("keys/"))
+        .and_then(|dir| dir.sync_all())
+        .expect("FATAL: sync keys/");
+}
+
 /// The 11 header timestamps through the origin checkpoint, so the MTP
 /// window is complete before the first block applies.
 pub async fn mtp_through(checkpoint: Height, source: &CanonicalBlockSource) -> MtpTracker {
