@@ -47,7 +47,7 @@ pub struct ChainClient(pub(crate) ZebraClient);
 impl ChainClient {
     /// Connects to the indexer's gRPC endpoint, keep-alive on: the tip
     /// stream hangs silently on a dead peer otherwise.
-    pub(crate) async fn connect() -> Result<Self, tonic::transport::Error> {
+    pub async fn connect() -> Result<Self, tonic::transport::Error> {
         let endpoint = tonic::transport::Endpoint::from_static(ZEBRA_INDEXER_URL)
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
@@ -80,7 +80,7 @@ impl ChainClient {
             .into_inner())
     }
 
-    pub(crate) async fn chain_tip_change_stream(&mut self) -> Result<TipStream, TransportError> {
+    pub async fn chain_tip_change_stream(&mut self) -> Result<TipStream, TransportError> {
         self.0
             .chain_tip_change(Empty {})
             .await

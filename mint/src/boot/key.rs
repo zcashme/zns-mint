@@ -49,7 +49,7 @@ pub type RegistryKeys = AccountKeys<Registry>;
 
 impl<A: MintAccount> AccountKeys<A> {
     /// Derives the account's keys from the sealed seed; panics only on a cryptographically broken seed.
-    pub(super) fn derive<P: Parameters>(network: &P, seed: &Secret<[u8; 32]>) -> Self {
+    pub fn derive<P: Parameters>(network: &P, seed: &Secret<[u8; 32]>) -> Self {
         let usk = UnifiedSpendingKey::from_seed(network, seed.expose_secret(), A::ACCOUNT_ID)
             .expect("FATAL: key derivation");
         Self {
@@ -59,17 +59,17 @@ impl<A: MintAccount> AccountKeys<A> {
     }
 
     /// The unified full viewing key — for scanning and address derivation.
-    pub(crate) fn fvk(&self) -> UnifiedFullViewingKey {
+    pub fn fvk(&self) -> UnifiedFullViewingKey {
         self.spending.to_unified_full_viewing_key()
     }
 
     /// The Orchard spend-authorizing capability used to sign Ironwood spends.
-    pub(crate) fn orchard_ask(&self) -> orchard::keys::SpendAuthorizingKey {
+    pub fn orchard_ask(&self) -> orchard::keys::SpendAuthorizingKey {
         self.spending.orchard().into()
     }
 
     /// The Orchard-family full viewing key, for internal viewing operations.
-    pub(crate) fn orchard_fvk(&self) -> orchard::keys::FullViewingKey {
+    pub fn orchard_fvk(&self) -> orchard::keys::FullViewingKey {
         self.spending.orchard().into()
     }
 }
@@ -77,7 +77,7 @@ impl<A: MintAccount> AccountKeys<A> {
 impl AccountKeys<Treasury> {
     /// Copies the Treasury spending capability into the upstream wallet
     /// wrapper for one payment construction call.
-    pub(crate) fn spending_keys(&self) -> SpendingKeys {
+    pub fn spending_keys(&self) -> SpendingKeys {
         SpendingKeys::new(self.spending.clone())
     }
 }
