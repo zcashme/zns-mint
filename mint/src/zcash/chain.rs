@@ -80,7 +80,7 @@ impl ChainClient {
             .into_inner())
     }
 
-    pub async fn chain_tip_change_stream(&mut self) -> Result<TipStream, TransportError> {
+    pub(crate) async fn chain_tip_change_stream(&mut self) -> Result<TipStream, TransportError> {
         self.0
             .chain_tip_change(Empty {})
             .await
