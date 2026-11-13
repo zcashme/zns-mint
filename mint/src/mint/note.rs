@@ -763,7 +763,6 @@ mod tests {
     use super::*;
     use crate::mint::sale::{Ask, AuctionTerms};
     use crate::mint::MAX_NAME_LEN;
-    use zcash_primitives::transaction::builder::BLOSSOM_DEFAULT_TX_EXPIRY_DELTA;
     use zcash_protocol::consensus::MAIN_NETWORK;
 
     /// A real mainnet UA with every known receiver kind — Orchard,
@@ -1186,7 +1185,6 @@ mod tests {
         let first_anchor = test_nullifier(1);
         registry.adopt_anchor(height(100), first_anchor);
         assert!(registry.accept_claim(
-            &MAIN_NETWORK,
             &first_claim,
             NameCommitment::from_bytes(&[11; 32]).unwrap(),
             test_nullifier(11),
@@ -1194,7 +1192,6 @@ mod tests {
             &[first_anchor],
             height(100),
             mtp,
-            height(100) + BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         let release = NameNote::Release {
@@ -1219,7 +1216,6 @@ mod tests {
         let second_anchor = test_nullifier(2);
         registry.adopt_anchor(height(130), second_anchor);
         assert!(registry.accept_claim(
-            &MAIN_NETWORK,
             &reclaim,
             NameCommitment::from_bytes(&[13; 32]).unwrap(),
             test_nullifier(13),
@@ -1227,7 +1223,6 @@ mod tests {
             &[second_anchor],
             height(130),
             mtp,
-            height(130) + BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         (registry, release, reclaim)
@@ -1285,7 +1280,6 @@ mod tests {
         let mut registry = Registry::new();
         registry.adopt_anchor(height(100), anchor);
         assert!(registry.accept_claim(
-            &MAIN_NETWORK,
             &note,
             NameCommitment::from_bytes(&[11; 32]).unwrap(),
             test_nullifier(11),
@@ -1293,7 +1287,6 @@ mod tests {
             &[anchor],
             height(100),
             mtp,
-            height(100) + BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         let mut queue = NameNoteQueue::default();
@@ -1316,7 +1309,6 @@ mod tests {
         let mut registry = Registry::new();
         registry.adopt_anchor(height(100), anchor);
         assert!(registry.accept_claim(
-            &MAIN_NETWORK,
             &claim,
             NameCommitment::from_bytes(&[11; 32]).unwrap(),
             test_nullifier(11),
@@ -1324,7 +1316,6 @@ mod tests {
             &[anchor],
             height(100),
             mtp,
-            height(100) + BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
         ));
 
         let mut queue = NameNoteQueue::default();

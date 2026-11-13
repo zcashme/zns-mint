@@ -983,7 +983,6 @@ mod tests {
                 expires_at: Expiry::Never,
             };
             assert!(registry.accept_claim(
-                &MainNetwork,
                 &note,
                 NameCommitment::from_bytes(&[20 + index as u8; 32]).unwrap(),
                 nf(20 + index as u8),
@@ -991,7 +990,6 @@ mod tests {
                 &[anchor],
                 height(),
                 mtp(),
-                BlockHeight::from_u32(41),
             ));
         }
         registry

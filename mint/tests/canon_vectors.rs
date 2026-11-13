@@ -19,8 +19,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use time::Timestamp;
 use zcash_keys::address::{Address, UnifiedAddress};
-use zcash_primitives::transaction::builder::default_tx_expiry_delta;
-use zcash_protocol::consensus::{BlockHeight, BranchId, MainNetwork};
+use zcash_protocol::consensus::{BlockHeight, MainNetwork};
 
 use zns_mint::mint::registry::{Registry, ANCHOR_POOL_SIZE};
 use zns_mint::mint::{Action, Expiry, Name, NameCommitment, NameNote};
@@ -70,10 +69,6 @@ enum Event {
         nullifier: Hex32,
         /// The NameNote's cmx, as its action published.
         cmx: Hex32,
-        /// Transaction expiry height. Absent means the mint's standard
-        /// expiry: the claim height plus the default delta.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expiry_height: Option<u32>,
         expect: Expectation,
     },
     /// Attacker-shaped Claim: no live anchor spent. Mint drops the
@@ -191,7 +186,6 @@ fn apply(registry: &mut Registry, event: &Event) {
             successor_anchor,
             nullifier,
             cmx,
-            expiry_height,
             expect,
         } => {
             let note = NameNote::Claim {
@@ -199,10 +193,7 @@ fn apply(registry: &mut Registry, event: &Event) {
                 ua: parse_ua(ua),
                 expires_at: expiry(*expires_at_secs),
             };
-            let tx_expiry =
-                BlockHeight::from_u32(expiry_height.unwrap_or(standard_expiry(*height)));
             let ok = registry.accept_claim(
-                &MainNetwork,
                 &note,
                 commitment(cmx),
                 nf(nullifier),
@@ -210,7 +201,6 @@ fn apply(registry: &mut Registry, event: &Event) {
                 &[nf(spent_anchor)],
                 BlockHeight::from_u32(*height),
                 ts(*mtp_secs),
-                tx_expiry,
             );
             match *expect {
                 Expectation::Accepted => assert!(ok, "backed claim was rejected: {name}"),
@@ -234,7 +224,6 @@ fn apply(registry: &mut Registry, event: &Event) {
             };
             let nfs: Vec<_> = spent.iter().map(|s| nf(s)).collect();
             let accepted = registry.accept_claim(
-                &MainNetwork,
                 &note,
                 commitment(&cmx_from_seed(0xFE)),
                 nf(&hex32_from_seed(0xFE)),
@@ -244,7 +233,6 @@ fn apply(registry: &mut Registry, event: &Event) {
                 &nfs,
                 BlockHeight::from_u32(*height),
                 ts(*mtp_secs),
-                BlockHeight::from_u32(standard_expiry(*height)),
             );
             assert!(!accepted, "unbacked claim was accepted: {name}");
         }
@@ -396,12 +384,6 @@ fn ts(secs: i64) -> Timestamp {
     Timestamp::from_seconds(secs).expect("MTP fits Timestamp")
 }
 
-/// The expiry the builder sets for a transaction targeting `height`.
-fn standard_expiry(height: u32) -> u32 {
-    let height = BlockHeight::from_u32(height);
-    u32::from(height + default_tx_expiry_delta(BranchId::for_height(&MainNetwork, height)))
-}
-
 /// Parses a lowercase 32-byte hex nullifier.
 fn nf(hex_str: &str) -> orchard::note::Nullifier {
     let mut bytes = [0u8; 32];
@@ -515,7 +497,6 @@ fn backed_claim() -> Scenario {
             successor_anchor: s1,
             nullifier: n1,
             cmx: cmx_from_seed(0xA1),
-            expiry_height: None,
             expect: Expectation::Accepted,
         },
     ];
@@ -583,7 +564,6 @@ fn duplicate_claim() -> Scenario {
             successor_anchor: s1,
             nullifier: n1,
             cmx: cmx_from_seed(0xA1),
-            expiry_height: None,
             expect: Expectation::Accepted,
         },
         // Second backed claim for the same live name: the anchor retires,
@@ -598,7 +578,6 @@ fn duplicate_claim() -> Scenario {
             successor_anchor: s2,
             nullifier: n2,
             cmx: cmx_from_seed(0xA2),
-            expiry_height: None,
             expect: Expectation::Rejected,
         },
     ];
@@ -641,7 +620,6 @@ fn claim_after_release() -> Scenario {
             successor_anchor: s1,
             nullifier: n1.clone(),
             cmx: cmx_from_seed(0xA1),
-            expiry_height: None,
             expect: Expectation::Accepted,
         },
         Event::Release {
@@ -663,81 +641,12 @@ fn claim_after_release() -> Scenario {
             successor_anchor: s2,
             nullifier: n2,
             cmx: cmx_from_seed(0xA2),
-            expiry_height: None,
             expect: Expectation::Accepted,
         },
     ];
     Scenario {
         name: "claim_after_release".to_owned(),
         description: "A new Claim after Release binds the name to the second claimant.".to_owned(),
-        trace: run(&events),
-        events,
-    }
-}
-
-/// A claim mined after a release, whose expiry still falls inside the
-/// standard window of that release. It was built before the release.
-fn claim_inside_release_window() -> Scenario {
-    let a1 = hex32_from_seed(0x01);
-    let a2 = hex32_from_seed(0x02);
-    let s1 = hex32_from_seed(0xC1);
-    let s2 = hex32_from_seed(0xC2);
-    let n1 = hex32_from_seed(0xA1);
-    let n_release = hex32_from_seed(0xB1);
-    let n2 = hex32_from_seed(0xA2);
-    let release_height: u32 = 200;
-    let events = vec![
-        Event::AdoptAnchor {
-            height: 100,
-            nullifier: a1.clone(),
-        },
-        Event::AdoptAnchor {
-            height: 100,
-            nullifier: a2.clone(),
-        },
-        Event::Claim {
-            height: 110,
-            mtp_secs: 1_700_000_000,
-            name: "alice".to_owned(),
-            ua: TEST_UA.to_owned(),
-            expires_at_secs: None,
-            spent_anchor: a1,
-            successor_anchor: s1,
-            nullifier: n1.clone(),
-            cmx: cmx_from_seed(0xA1),
-            expiry_height: None,
-            expect: Expectation::Accepted,
-        },
-        Event::Release {
-            height: release_height,
-            mtp_secs: 1_710_000_000,
-            name: "alice".to_owned(),
-            ua: TEST_UA.to_owned(),
-            prev_nullifier: n1,
-            nullifier: n_release,
-            cmx: cmx_from_seed(0xB1),
-        },
-        // Mined after the release, but expiry is the release height plus
-        // the standard delta: the transaction was built before the release.
-        Event::Claim {
-            height: 220,
-            mtp_secs: 1_720_000_000,
-            name: "alice".to_owned(),
-            ua: TEST_UA.to_owned(),
-            expires_at_secs: None,
-            spent_anchor: a2,
-            successor_anchor: s2,
-            nullifier: n2,
-            cmx: cmx_from_seed(0xA2),
-            expiry_height: Some(standard_expiry(release_height)),
-            expect: Expectation::Rejected,
-        },
-    ];
-    Scenario {
-        name: "claim_inside_release_window".to_owned(),
-        description: "A claim whose expiry falls inside the latest release's window retires \
-             its anchor and leaves its successor out. The name stays free."
-            .to_owned(),
         trace: run(&events),
         events,
     }
@@ -766,7 +675,6 @@ fn update_then_release() -> Scenario {
             successor_anchor: s1,
             nullifier: n_claim.clone(),
             cmx: cmx_from_seed(0xA1),
-            expiry_height: None,
             expect: Expectation::Accepted,
         },
         Event::Update {
@@ -820,7 +728,6 @@ fn reorg() -> Scenario {
             successor_anchor: s1,
             nullifier: n_claim.clone(),
             cmx: cmx_from_seed(0xA1),
-            expiry_height: None,
             expect: Expectation::Accepted,
         },
         Event::Update {
@@ -861,7 +768,6 @@ fn build_vectors() -> Vectors {
             unbacked_claim(),
             duplicate_claim(),
             claim_after_release(),
-            claim_inside_release_window(),
             update_then_release(),
             reorg(),
         ],

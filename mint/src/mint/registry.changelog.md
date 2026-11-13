@@ -2,6 +2,21 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-11-13 — A claim on a free name registers whatever its expiry (#376)
+
+- `built_before_release` is gone. A claim whose transaction expiry fell
+  inside the latest release's standard window was refused as built
+  before the release. The mint builds a claim only after it applies the
+  release, so the rule fired only after a reorg: where the claim landed
+  before the release, or the release was dropped, `name_free` already
+  refused it; where the release re-mined later, it refused a paid claim
+  on a free name. The resolver dropped the same rule
+  (zcashme/zns-resolver#73).
+- `accept_claim` takes no `params` and no `expiry`. The claim law is one
+  anchor spent, no Name Note spent, one successor, the name free.
+- The canon vectors lose `claim_inside_release_window` and the claim
+  event's `expiry_height`.
+
 ## 2026-11-13 — The registry rules on a buy (#497)
 
 - `authorize_buy(name, height, mtp)` holds the buy law beside the other
