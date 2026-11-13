@@ -1,5 +1,20 @@
 # Sale module changelog
 
+## 2026-11-13 — The market drops checks that cannot fail (#497)
+
+- `observe` keeps no `used` list: `open_buy` already refuses a second
+  buy with the same address and total (`PaymentTaken`).
+  `one_output_settles_one_sale` is gone; its buys had different totals.
+- `open_buy` takes no `owner`. A listed name's record UA is the
+  listing's UA, so the `NotOwner` check compared a value with itself.
+  The stranger half of the unlisted-name test is gone with it.
+- `open` folds into `open_buy`, which already refused a second buy.
+- `Phase::Paying.expires_at` is gone; `Sale.until` held the same time.
+- `admit` returns `Option<ReturnedIntent>`; `Admission` and its unread
+  `opened` are gone.
+- `admit` no longer checks the delister's ownership before
+  `propose_delist` checks it.
+
 ## 2026-11-13 — A sale is signed on the tip after its payment (#434)
 
 - `Phase::Paid` holds the payment's height. `observe` takes the
