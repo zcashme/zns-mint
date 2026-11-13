@@ -215,8 +215,8 @@ enum Phase {
         expires_at: Timestamp,
         relayed: bool,
     },
-    /// The payment was seen while `alice` still held the name.
-    Paid,
+    /// The payment was seen at `height` while `alice` still held the name.
+    Paid { height: BlockHeight },
 }
 
 #[derive(Clone)]
@@ -421,7 +421,7 @@ impl Market {
                 price,
                 ..
             } => *addr == pay_to && payment_total(*price, code) == Some(total),
-            Phase::Paid => false,
+            Phase::Paid { .. } => false,
         })
     }
 
@@ -444,6 +444,7 @@ impl Market {
         holder: impl Fn(&Name) -> Option<UnifiedAddress>,
         payments: &[(TransparentAddress, Zatoshis)],
         mtp: Timestamp,
+        height: BlockHeight,
     ) {
         let mut used = vec![false; payments.len()];
         for sale in &mut self.sales {
@@ -476,7 +477,7 @@ impl Market {
                 continue;
             };
             used[index] = true;
-            sale.phase = Phase::Paid;
+            sale.phase = Phase::Paid { height };
         }
     }
 
@@ -501,14 +502,14 @@ impl Market {
     fn is_paid(&self, name: &Name) -> bool {
         self.sales
             .iter()
-            .any(|sale| sale.name == *name && matches!(sale.phase, Phase::Paid))
+            .any(|sale| sale.name == *name && matches!(sale.phase, Phase::Paid { .. }))
     }
 
     /// Drops an unpaid sale whose code has expired.
     pub fn expire(&mut self, mtp: Timestamp) {
         self.sales.retain(|sale| match &sale.phase {
             Phase::Paying { expires_at, .. } => mtp < *expires_at,
-            Phase::Paid => true,
+            Phase::Paid { .. } => true,
         });
     }
 
@@ -521,12 +522,17 @@ impl Market {
         });
     }
 
-    /// After a matching payment, sign a sale while the captured note is live.
-    /// The sale leaves once that note is gone.
-    pub fn poll(&mut self, registry: &Registry, pending: impl Fn(&Name) -> bool) -> Vec<NameNote> {
+    /// On a tip after the payment's block, sign a sale while the captured
+    /// note is live. The sale leaves once that note is gone.
+    pub fn poll(
+        &mut self,
+        registry: &Registry,
+        tip: BlockHeight,
+        pending: impl Fn(&Name) -> bool,
+    ) -> Vec<NameNote> {
         let mut notes = Vec::new();
         self.sales.retain_mut(|sale| {
-            if !matches!(sale.phase, Phase::Paid) {
+            if !matches!(sale.phase, Phase::Paid { height } if height < tip) {
                 return true;
             }
             if pending(&sale.name) {
@@ -1291,13 +1297,28 @@ mod tests {
     fn a_paid_buy_still_holds_the_name() {
         let (mut market, registry, owner, pay_to, otp) = buying(150_000_000);
         let paid = zats(150_000_000 + otp_amount(&otp.code).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp());
+        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
         assert!(market.is_paid(&name()));
         assert!(!market.allows_transition(&name()));
         assert_eq!(
             propose_delist(&mut market, &registry, &owner),
             Err(MarketRefusal::BuyOpen)
         );
+    }
+
+    #[test]
+    fn a_sale_is_signed_on_the_tip_after_its_payment() {
+        let (mut market, registry, owner, pay_to) = listed(150_000_000);
+        assert!(
+            admit_buy(&mut market, &registry, 1, zats(1_000_000), height())
+                .opened
+                .is_some()
+        );
+        let code = market.unrelayed()[0].code.clone();
+        let paid = zats(150_000_000 + otp_amount(&code).into_u64());
+        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
+        assert!(market.poll(&registry, height(), |_| false).is_empty());
+        assert_eq!(market.poll(&registry, height() + 1, |_| false).len(), 1);
     }
 
     #[test]
@@ -1414,17 +1435,22 @@ mod tests {
         let (mut market, _registry, owner, pay_to, otp) = buying(150_000_000);
         let exact = zats(150_000_000 + otp_amount(&otp.code).into_u64());
         let short = zats(exact.into_u64() - 1);
-        market.observe(|_| Some(owner.clone()), &[(pay_to, short)], mtp());
+        market.observe(|_| Some(owner.clone()), &[(pay_to, short)], mtp(), height());
         assert!(!market.is_paid(&name()));
         let elsewhere = TransparentAddress::PublicKeyHash([0x22; 20]);
-        market.observe(|_| Some(owner.clone()), &[(elsewhere, exact)], mtp());
+        market.observe(
+            |_| Some(owner.clone()),
+            &[(elsewhere, exact)],
+            mtp(),
+            height(),
+        );
         assert!(!market.is_paid(&name()));
         // She no longer holds the name.
-        market.observe(|_| Some(bob()), &[(pay_to, exact)], mtp());
+        market.observe(|_| Some(bob()), &[(pay_to, exact)], mtp(), height());
         assert!(!market.is_paid(&name()));
-        market.observe(|_| None, &[(pay_to, exact)], mtp());
+        market.observe(|_| None, &[(pay_to, exact)], mtp(), height());
         assert!(!market.is_paid(&name()));
-        market.observe(|_| Some(owner.clone()), &[(pay_to, exact)], mtp());
+        market.observe(|_| Some(owner.clone()), &[(pay_to, exact)], mtp(), height());
         assert!(market.is_paid(&name()));
     }
 
@@ -1436,7 +1462,12 @@ mod tests {
         let price = 100_900_000u64;
         let tail = (price / 1_000_000 + 1) * 1_000_000 + code;
         assert_ne!(tail - price, code);
-        market.observe(|_| Some(owner.clone()), &[(pay_to, zats(tail))], mtp());
+        market.observe(
+            |_| Some(owner.clone()),
+            &[(pay_to, zats(tail))],
+            mtp(),
+            height(),
+        );
         assert!(!market.is_paid(&name()));
     }
 
@@ -1446,7 +1477,7 @@ mod tests {
         let exact = zats(150_000_000 + otp_amount(&otp.code).into_u64());
         let later = Timestamp::from_seconds(1_700_000_000 + D_OTP).unwrap();
         market.expire(later);
-        market.observe(|_| Some(owner.clone()), &[(pay_to, exact)], later);
+        market.observe(|_| Some(owner.clone()), &[(pay_to, exact)], later, height());
         assert!(!market.is_open(&name()));
         assert!(propose_delist(&mut market, &registry, &owner).is_ok());
     }
@@ -1651,7 +1682,7 @@ mod tests {
             )
             .unwrap();
         let paid = zats(100_000_000 + otp_amount(&code).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp());
+        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
         assert!(market.is_paid(&name()));
         assert!(!market.is_paid(&second));
     }
@@ -1700,7 +1731,7 @@ mod tests {
             )
             .unwrap();
         let paid = zats(100_000_000 + otp_amount(&second).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], later);
+        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], later, height());
         assert!(market.is_paid(&name()));
     }
 
@@ -1935,7 +1966,7 @@ mod tests {
         let back = returned_intent(&name(), &bob(), MarketRefusal::Held { until }).unwrap();
         assert_eq!(back.note, format!("ZNS:held:alice:{}", until.as_seconds()));
         let paid = zats(70_000_000 + otp_amount(&code).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp());
+        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
         assert!(market.is_paid(&name()));
     }
 
@@ -2002,7 +2033,7 @@ mod tests {
         assert_eq!(registry.quote(&name(), later), None);
         assert!(market.is_open(&name()));
         let paid = zats(40_000_000 + otp_amount(&code).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp());
+        market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
         assert!(market.is_paid(&name()));
         market.expire(Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH).unwrap());
         assert!(market.is_paid(&name()));
@@ -2269,7 +2300,12 @@ mod tests {
         assert!(first.opened.is_some());
         let code = market.unrelayed()[0].code.clone();
         let settlement = zats(70_000_000 + otp_amount(&code).into_u64());
-        market.observe(|_| Some(owner.clone()), &[(pay_to, settlement)], mtp());
+        market.observe(
+            |_| Some(owner.clone()),
+            &[(pay_to, settlement)],
+            mtp(),
+            height(),
+        );
         assert!(market.is_paid(&name()));
 
         let next = admit_buy(&mut market, &registry, 2, zats(1_000_000), later);
