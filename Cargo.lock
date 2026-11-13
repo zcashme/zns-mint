@@ -4029,6 +4029,7 @@ dependencies = [
  "indexmap",
  "toml_datetime 1.1.2+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 1.0.4",
 ]
 
@@ -5185,6 +5186,8 @@ dependencies = [
  "sigstore-trust-root",
  "sigstore-verify",
  "thiserror 1.0.69",
+ "toml 1.1.8+spec-1.1.0",
+ "toml_edit 0.25.17+spec-1.1.0",
  "tracing",
  "ureq",
  "x25519-dalek",
