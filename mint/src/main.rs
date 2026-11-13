@@ -39,7 +39,6 @@ async fn main() {
 
     let Boot {
         network,
-        chain,
         source,
         mut wallet,
         treasury_keys,
@@ -79,9 +78,9 @@ async fn main() {
         "mint awaiting Zebra tips"
     );
 
-    let mut connection = TipSession::open(chain.clone()).await;
+    let mut connection = TipSession::open(&source).await;
     let (mempool_tx, mut mempool_rx) = mpsc::channel(64);
-    tokio::spawn(zns_mint::mint::watch_mempool(chain, mempool_tx));
+    tokio::spawn(zns_mint::mint::watch_mempool(source.clone(), mempool_tx));
     zns_mint::metrics::serving(true);
     'run: loop {
         // Every pass ends here, however it ended: the names the queues

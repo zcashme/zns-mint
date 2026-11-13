@@ -114,7 +114,8 @@ pub struct TipSession {
 }
 
 impl TipSession {
-    pub async fn open(client: ChainClient) -> Self {
+    pub async fn open(source: &CanonicalBlockSource) -> Self {
+        let client = source.chain.clone();
         let stream = Self::subscribe(client.clone()).await;
         Self { client, stream }
     }

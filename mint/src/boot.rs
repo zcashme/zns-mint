@@ -74,9 +74,8 @@ pub struct GuestInfo {
 pub struct Boot<P: Parameters> {
     /// verified: boot-to-loop consensus — the loop never discovers parameters
     pub network: P,
-    /// acquired: boot proved that both Zebra transports are live
-    pub chain: ChainClient,
-    /// acquired: the node source used during boot sync
+    /// acquired: the one node handle; boot proved both Zebra transports
+    /// live and synced through it
     pub source: CanonicalBlockSource,
     /// produced: trees seeded from the verified origin
     pub wallet: Wallet<P>,
@@ -684,7 +683,6 @@ impl Boot<Network> {
 
         Boot {
             network,
-            chain: chain_client,
             source,
             wallet,
             treasury_keys,

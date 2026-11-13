@@ -112,7 +112,8 @@ pub struct MempoolSession {
 
 impl MempoolSession {
     /// Subscribes to the mempool-change stream.
-    pub async fn open(client: ChainClient) -> Self {
+    pub async fn open(source: &super::CanonicalBlockSource) -> Self {
+        let client = source.chain.clone();
         let stream = Self::subscribe(client.clone()).await;
         Self { client, stream }
     }
