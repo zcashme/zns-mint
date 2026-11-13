@@ -530,6 +530,7 @@ async fn main() {
                 |name| registry.record(name).map(|record| record.ua().clone()),
                 &payments,
                 block_mtp,
+                next_height,
             );
         }
 
@@ -752,9 +753,10 @@ async fn main() {
             }
         }
 
-        // A paid sale binds the buyer while the holder is unchanged,
-        // before the lifecycle admits its own release of the same name.
-        for note in market.poll(&registry, |name| name_notes.note_pending(name)) {
+        // A paid sale binds the buyer while the holder is unchanged, on a
+        // tip after the payment's block, before the lifecycle admits its
+        // own release of the same name.
+        for note in market.poll(&registry, tip, |name| name_notes.note_pending(name)) {
             let name = note.name().clone();
             if name_notes.admit(tip, note) {
                 challenges.drop_challenges(&name);
