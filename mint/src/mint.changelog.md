@@ -1,5 +1,10 @@
 # Mint live-work design record
 
+## 2026-11-13 — `watch_mempool` takes the node handle (#494)
+
+- `watch_mempool` takes a `CanonicalBlockSource` instead of a
+  `ChainClient`.
+
 ## 2026-11-13 — `apply_block` takes no birthday (#489)
 
 - `apply_block` drops its `birthday` parameter and the two branches it

@@ -1,5 +1,14 @@
 # Zcash I/O changelog
 
+## 2026-11-13 — One node handle (#494)
+
+- `CanonicalBlockSource::connect` connects the gRPC client and binds a
+  JSON-RPC transport to it, replacing `new(ChainClient)`.
+- `TipSession::open` and `MempoolSession::open` take
+  `&CanonicalBlockSource` and clone its gRPC client.
+- `ChainClient`, `ChainClient::connect` and `mempool_events` are
+  crate-private. zns-rebind connects with `CanonicalBlockSource::connect`.
+
 ## 2026-11-13 — `ChainClient::connect` is public for zns-rebind (#486)
 
 - zns-rebind connects to Zebra with `ChainClient::connect`. The

@@ -1,5 +1,12 @@
 # Boot module changelog
 
+## 2026-11-13 — `Boot` carries one node handle (#494)
+
+- `Boot.chain` is gone; `source` is the one node handle.
+- `connect_zebra` returns the `CanonicalBlockSource` and checks both
+  transports through it: the gRPC connect, then JSON-RPC
+  `getblockchaininfo`, then the tip stream.
+
 ## 2026-11-13 — The key methods are public for zns-rebind (#486)
 
 - `AccountKeys::derive`, `fvk`, `orchard_fvk`, `orchard_ask` and

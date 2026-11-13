@@ -1,5 +1,10 @@
 # main.changelog.md
 
+## 2026-11-13 — The streams open from the node handle (#494)
+
+- `main` no longer destructures `chain` from `Boot`:
+  `TipSession::open(&source)` and `watch_mempool(source.clone(), …)`.
+
 ## 2026-11-13 — The run loop passes no birthday (#489)
 
 - `main` no longer destructures `birthday` from `Boot`; `apply_block`
