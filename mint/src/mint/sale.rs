@@ -954,10 +954,6 @@ mod tests {
         Name::parse("alice").unwrap()
     }
 
-    fn zats(n: u64) -> Zatoshis {
-        Zatoshis::from_u64(n).unwrap()
-    }
-
     fn mtp() -> Timestamp {
         Timestamp::from_seconds(1_700_000_000).unwrap()
     }
@@ -972,7 +968,7 @@ mod tests {
             name: name(),
             ua,
             pay_to,
-            ask: Ask::Flat(zats(price)),
+            ask: Ask::Flat(Zatoshis::const_from_u64(price)),
         }
     }
 
@@ -1146,7 +1142,10 @@ mod tests {
             propose_delist(&mut market, &registry, &owner),
             Err(MarketRefusal::BuyOpen)
         );
-        assert_eq!(price(&registry), Some(zats(150_000_000)));
+        assert_eq!(
+            price(&registry),
+            Some(Zatoshis::const_from_u64(150_000_000))
+        );
         assert!(!market.allows_transition(&name()));
     }
 
@@ -1157,13 +1156,16 @@ mod tests {
             name: name(),
             ua: owner.clone(),
             pay_to,
-            ask: Ask::Flat(zats(200_000_000)),
+            ask: Ask::Flat(Zatoshis::const_from_u64(200_000_000)),
         };
         assert_eq!(
             propose_list(&mut market, &higher, &owner, height()),
             Err(MarketRefusal::BuyOpen)
         );
-        assert_eq!(price(&registry), Some(zats(150_000_000)));
+        assert_eq!(
+            price(&registry),
+            Some(Zatoshis::const_from_u64(150_000_000))
+        );
     }
 
     #[test]
@@ -1182,7 +1184,7 @@ mod tests {
     #[test]
     fn a_paid_buy_still_holds_the_name() {
         let (mut market, registry, owner, pay_to, otp) = buying(150_000_000);
-        let paid = zats(150_000_000 + otp_amount(&otp.code).into_u64());
+        let paid = Zatoshis::const_from_u64(150_000_000 + otp_amount(&otp.code).into_u64());
         market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
         assert!(market.is_paid(&name()));
         assert!(!market.allows_transition(&name()));
@@ -1195,9 +1197,15 @@ mod tests {
     #[test]
     fn a_sale_is_signed_on_the_tip_after_its_payment() {
         let (mut market, registry, owner, pay_to) = listed(150_000_000);
-        admit_buy(&mut market, &registry, 1, zats(1_000_000), height());
+        admit_buy(
+            &mut market,
+            &registry,
+            1,
+            Zatoshis::const_from_u64(1_000_000),
+            height(),
+        );
         let code = market.unrelayed()[0].code.clone();
-        let paid = zats(150_000_000 + otp_amount(&code).into_u64());
+        let paid = Zatoshis::const_from_u64(150_000_000 + otp_amount(&code).into_u64());
         market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
         assert!(market.poll(&registry, height(), |_| false).is_empty());
         assert_eq!(market.poll(&registry, height() + 1, |_| false).len(), 1);
@@ -1244,14 +1252,17 @@ mod tests {
             propose_delist(&mut market, &registry, &bob()),
             Err(MarketRefusal::NotOwner)
         );
-        assert_eq!(price(&registry), Some(zats(150_000_000)));
+        assert_eq!(
+            price(&registry),
+            Some(Zatoshis::const_from_u64(150_000_000))
+        );
     }
 
     #[test]
     fn a_payment_must_be_the_price_plus_the_code() {
         let (mut market, _registry, owner, pay_to, otp) = buying(150_000_000);
-        let exact = zats(150_000_000 + otp_amount(&otp.code).into_u64());
-        let short = zats(exact.into_u64() - 1);
+        let exact = Zatoshis::const_from_u64(150_000_000 + otp_amount(&otp.code).into_u64());
+        let short = Zatoshis::const_from_u64(exact.into_u64() - 1);
         market.observe(|_| Some(owner.clone()), &[(pay_to, short)], mtp(), height());
         assert!(!market.is_paid(&name()));
         let elsewhere = TransparentAddress::PublicKeyHash([0x22; 20]);
@@ -1281,7 +1292,7 @@ mod tests {
         assert_ne!(tail - price, code);
         market.observe(
             |_| Some(owner.clone()),
-            &[(pay_to, zats(tail))],
+            &[(pay_to, Zatoshis::const_from_u64(tail))],
             mtp(),
             height(),
         );
@@ -1291,7 +1302,7 @@ mod tests {
     #[test]
     fn a_payment_after_the_code_expires_does_not_count() {
         let (mut market, registry, owner, pay_to, otp) = buying(150_000_000);
-        let exact = zats(150_000_000 + otp_amount(&otp.code).into_u64());
+        let exact = Zatoshis::const_from_u64(150_000_000 + otp_amount(&otp.code).into_u64());
         let later = Timestamp::from_seconds(1_700_000_000 + D_OTP).unwrap();
         market.expire(later);
         market.observe(|_| Some(owner.clone()), &[(pay_to, exact)], later, height());
@@ -1338,7 +1349,7 @@ mod tests {
             name: name(),
             action: Action::List,
             ua: owner.clone(),
-            listing: Some((pay_to, zats(150_000_000))),
+            listing: Some((pay_to, Zatoshis::const_from_u64(150_000_000))),
             auction: None,
         };
         assert!(answer(&registry, &mut challenges, &wrong, height()).is_none());
@@ -1347,7 +1358,7 @@ mod tests {
             name: name(),
             action: Action::List,
             ua: owner.clone(),
-            listing: Some((pay_to, zats(1))),
+            listing: Some((pay_to, Zatoshis::const_from_u64(1))),
             auction: None,
         };
         assert!(answer(&registry, &mut challenges, &other_price, height()).is_none());
@@ -1358,7 +1369,7 @@ mod tests {
             ua: owner.clone(),
             listing: Some((
                 TransparentAddress::PublicKeyHash([0x22; 20]),
-                zats(150_000_000),
+                Zatoshis::const_from_u64(150_000_000),
             )),
             auction: None,
         };
@@ -1368,14 +1379,17 @@ mod tests {
             name: name(),
             action: Action::List,
             ua: owner.clone(),
-            listing: Some((pay_to, zats(150_000_000))),
+            listing: Some((pay_to, Zatoshis::const_from_u64(150_000_000))),
             auction: None,
         };
         let note = answer(&registry, &mut challenges, &right, height()).unwrap();
         // The listing starts when its note confirms, not at the answer.
         assert_eq!(price(&registry), None);
         confirm(&mut registry, &note, 60, height());
-        assert_eq!(price(&registry), Some(zats(150_000_000)));
+        assert_eq!(
+            price(&registry),
+            Some(Zatoshis::const_from_u64(150_000_000))
+        );
     }
 
     #[test]
@@ -1413,7 +1427,7 @@ mod tests {
             ua: bob(),
             listing: Some((
                 TransparentAddress::PublicKeyHash([0x11; 20]),
-                zats(150_000_000),
+                Zatoshis::const_from_u64(150_000_000),
             )),
             auction: None,
         };
@@ -1438,7 +1452,10 @@ mod tests {
                 mtp(),
             )
             .unwrap();
-        assert_eq!(price(&registry), Some(zats(150_000_000)));
+        assert_eq!(
+            price(&registry),
+            Some(Zatoshis::const_from_u64(150_000_000))
+        );
         let right = OtpMemo {
             code: issue(&mut challenges),
             name: name(),
@@ -1448,7 +1465,10 @@ mod tests {
             auction: None,
         };
         let note = answer(&registry, &mut challenges, &right, height()).unwrap();
-        assert_eq!(price(&registry), Some(zats(150_000_000)));
+        assert_eq!(
+            price(&registry),
+            Some(Zatoshis::const_from_u64(150_000_000))
+        );
         confirm(&mut registry, &note, 61, height());
         assert_eq!(price(&registry), None);
     }
@@ -1476,7 +1496,7 @@ mod tests {
             later,
         )
         .unwrap();
-        let paid = zats(100_000_000 + otp_amount(&second).into_u64());
+        let paid = Zatoshis::const_from_u64(100_000_000 + otp_amount(&second).into_u64());
         market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], later, height());
         assert!(market.is_paid(&name()));
     }
@@ -1517,7 +1537,7 @@ mod tests {
             name: second.clone(),
             ua: owner.clone(),
             pay_to,
-            ask: Ask::Flat(zats(100_000_001)),
+            ask: Ask::Flat(Zatoshis::const_from_u64(100_000_001)),
         };
         list_on_chain(&mut registry, &zed, 61);
         let code = |digits: &[u8; 6]| OtpCode::for_test(*digits);
@@ -1573,7 +1593,10 @@ mod tests {
 
         registry.truncate_to_height(listed_at);
         assert_eq!(*registry.record(&name()).unwrap().ua(), owner);
-        assert_eq!(price(&registry), Some(zats(100_000_000)));
+        assert_eq!(
+            price(&registry),
+            Some(Zatoshis::const_from_u64(100_000_000))
+        );
 
         let record = registry.record(&name()).unwrap().clone();
         let release = NameNote::Release {
@@ -1595,9 +1618,15 @@ mod tests {
             61,
             BlockHeight::from_u32(2),
         );
-        assert_eq!(price(&registry), Some(zats(200_000_000)));
+        assert_eq!(
+            price(&registry),
+            Some(Zatoshis::const_from_u64(200_000_000))
+        );
         registry.truncate_to_height(height());
-        assert_eq!(price(&registry), Some(zats(100_000_000)));
+        assert_eq!(
+            price(&registry),
+            Some(Zatoshis::const_from_u64(100_000_000))
+        );
         assert_eq!(registry.record(&name()), Some(&record));
         assert_eq!(registry.record_history(&name()).last(), Some(&record));
     }
@@ -1609,8 +1638,8 @@ mod tests {
             ua,
             pay_to,
             ask: Ask::Dutch(AuctionTerms {
-                start_price: zats(100_000_000),
-                min_price: zats(40_000_000),
+                start_price: Zatoshis::const_from_u64(100_000_000),
+                min_price: Zatoshis::const_from_u64(40_000_000),
                 start: BlockHeight::from_u32(start),
                 end: BlockHeight::from_u32(end),
             }),
@@ -1620,22 +1649,22 @@ mod tests {
     #[test]
     fn the_auction_price_falls_in_whole_zatoshis() {
         let terms = AuctionTerms {
-            start_price: zats(100_000_000),
-            min_price: zats(40_000_000),
+            start_price: Zatoshis::const_from_u64(100_000_000),
+            min_price: Zatoshis::const_from_u64(40_000_000),
             start: BlockHeight::from_u32(10),
             end: BlockHeight::from_u32(20),
         };
         assert_eq!(
             terms.price_at(BlockHeight::from_u32(10)),
-            Some(zats(100_000_000))
+            Some(Zatoshis::const_from_u64(100_000_000))
         );
         assert_eq!(
             terms.price_at(BlockHeight::from_u32(15)),
-            Some(zats(70_000_000))
+            Some(Zatoshis::const_from_u64(70_000_000))
         );
         assert_eq!(
             terms.price_at(BlockHeight::from_u32(20)),
-            Some(zats(40_000_000))
+            Some(Zatoshis::const_from_u64(40_000_000))
         );
         assert_eq!(terms.price_at(BlockHeight::from_u32(9)), None);
         assert_eq!(terms.price_at(BlockHeight::from_u32(21)), None);
@@ -1651,7 +1680,10 @@ mod tests {
         let code = OtpCode::for_test(*b"042831");
         let otp = open(&mut market, &registry, &name(), code.clone(), at, mtp()).unwrap();
         let until = Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH).unwrap();
-        assert_eq!(otp.dutch, Some((zats(70_000_000), until)));
+        assert_eq!(
+            otp.dutch,
+            Some((Zatoshis::const_from_u64(70_000_000), until))
+        );
         let memo = otp.encode(&MainNetwork).unwrap();
         let Memo::Text(text) = Memo::try_from(&memo).unwrap() else {
             panic!("text memo");
@@ -1669,7 +1701,7 @@ mod tests {
         ));
         let back = returned_intent(&name(), &bob(), MarketRefusal::Held { until }).unwrap();
         assert_eq!(back.note, format!("ZNS:held:alice:{}", until.as_seconds()));
-        let paid = zats(70_000_000 + otp_amount(&code).into_u64());
+        let paid = Zatoshis::const_from_u64(70_000_000 + otp_amount(&code).into_u64());
         market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
         assert!(market.is_paid(&name()));
     }
@@ -1704,12 +1736,15 @@ mod tests {
         list_on_chain_at(&mut registry, &auction_listing(10, 20), 60, at);
         let code = OtpCode::for_test(*b"042831");
         open(&mut market, &registry, &name(), code.clone(), at, mtp()).unwrap();
-        assert_eq!(quote(&registry, at), Some(zats(40_000_000)));
+        assert_eq!(
+            quote(&registry, at),
+            Some(Zatoshis::const_from_u64(40_000_000))
+        );
         let later = BlockHeight::from_u32(21);
         market.expire(mtp());
         assert_eq!(quote(&registry, later), None);
         assert!(market.is_open(&name()));
-        let paid = zats(40_000_000 + otp_amount(&code).into_u64());
+        let paid = Zatoshis::const_from_u64(40_000_000 + otp_amount(&code).into_u64());
         market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
         assert!(market.is_paid(&name()));
         market.expire(Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH).unwrap());
@@ -1731,8 +1766,8 @@ mod tests {
         assert_eq!(
             list.ask,
             Ask::Dutch(AuctionTerms {
-                start_price: zats(100_000_000),
-                min_price: zats(40_000_000),
+                start_price: Zatoshis::const_from_u64(100_000_000),
+                min_price: Zatoshis::const_from_u64(40_000_000),
                 start: BlockHeight::from_u32(10),
                 end: BlockHeight::from_u32(20),
             })
@@ -1776,15 +1811,15 @@ mod tests {
         confirm(&mut registry, &note, 60, height());
         assert_eq!(
             quote(&registry, BlockHeight::from_u32(10)),
-            Some(zats(100_000_000))
+            Some(Zatoshis::const_from_u64(100_000_000))
         );
         assert_eq!(
             quote(&registry, BlockHeight::from_u32(15)),
-            Some(zats(70_000_000))
+            Some(Zatoshis::const_from_u64(70_000_000))
         );
         assert_eq!(
             quote(&registry, BlockHeight::from_u32(20)),
-            Some(zats(40_000_000))
+            Some(Zatoshis::const_from_u64(40_000_000))
         );
     }
 
@@ -1808,7 +1843,10 @@ mod tests {
         let after = Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH).unwrap();
         market.expire(after);
         assert!(!market.is_open(&name()));
-        assert_eq!(quote(&registry, at), Some(zats(70_000_000)));
+        assert_eq!(
+            quote(&registry, at),
+            Some(Zatoshis::const_from_u64(70_000_000))
+        );
     }
 
     #[test]
@@ -1834,7 +1872,10 @@ mod tests {
         // A reply after the end authorizes no note.
         let after = BlockHeight::from_u32(21);
         assert!(answer(&registry, &mut challenges, &memo, after).is_none());
-        assert_eq!(price(&registry), Some(zats(150_000_000)));
+        assert_eq!(
+            price(&registry),
+            Some(Zatoshis::const_from_u64(150_000_000))
+        );
         list_on_chain_at(
             &mut registry,
             &auction_listing(10, 20),
@@ -1843,7 +1884,7 @@ mod tests {
         );
         assert_eq!(
             quote(&registry, BlockHeight::from_u32(20)),
-            Some(zats(40_000_000))
+            Some(Zatoshis::const_from_u64(40_000_000))
         );
     }
 
@@ -1913,16 +1954,29 @@ mod tests {
         let mut market = Market::new();
         let at = BlockHeight::from_u32(15);
         list_on_chain_at(&mut registry, &auction_listing(10, 20), 60, at);
-        assert!(admit_buy(&mut market, &registry, 1, zats(1_000_000), at).is_none());
+        assert!(admit_buy(
+            &mut market,
+            &registry,
+            1,
+            Zatoshis::const_from_u64(1_000_000),
+            at
+        )
+        .is_none());
         assert!(market.is_open(&name()));
 
-        let back = admit_buy(&mut market, &registry, 2, zats(1_000_000), at)
-            .expect("the second intent is returned");
+        let back = admit_buy(
+            &mut market,
+            &registry,
+            2,
+            Zatoshis::const_from_u64(1_000_000),
+            at,
+        )
+        .expect("the second intent is returned");
         let until = Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH).unwrap();
         assert_eq!(back.recipient, bob());
         assert_eq!(back.note, format!("ZNS:held:alice:{}", until.as_seconds()));
-        let (amount, note) = due_note(&queued(&back, zats(1_000_000), at));
-        assert_eq!(amount, zats(500_000));
+        let (amount, note) = due_note(&queued(&back, Zatoshis::const_from_u64(1_000_000), at));
+        assert_eq!(amount, Zatoshis::const_from_u64(500_000));
         assert_eq!(note, back.note);
 
         let kept = admit_buy(&mut market, &registry, 3, intent_fee(), at)
@@ -1937,12 +1991,18 @@ mod tests {
         let mut market = Market::new();
         let early = BlockHeight::from_u32(9);
         list_on_chain_at(&mut registry, &auction_listing(10, 20), 60, early);
-        let back = admit_buy(&mut market, &registry, 1, zats(1_000_000), early)
-            .expect("the auction has not started");
+        let back = admit_buy(
+            &mut market,
+            &registry,
+            1,
+            Zatoshis::const_from_u64(1_000_000),
+            early,
+        )
+        .expect("the auction has not started");
         assert_eq!(back.recipient, bob());
         assert_eq!(back.note, "ZNS:wait:alice:10");
-        let (amount, note) = due_note(&queued(&back, zats(1_000_000), early));
-        assert_eq!(amount, zats(500_000));
+        let (amount, note) = due_note(&queued(&back, Zatoshis::const_from_u64(1_000_000), early));
+        assert_eq!(amount, Zatoshis::const_from_u64(500_000));
         assert_eq!(note, back.note);
     }
 
@@ -1954,9 +2014,16 @@ mod tests {
         let at = BlockHeight::from_u32(15);
         let later = BlockHeight::from_u32(16);
         list_on_chain_at(&mut registry, &auction_listing(10, 20), 60, at);
-        assert!(admit_buy(&mut market, &registry, 1, zats(1_000_000), at).is_none());
+        assert!(admit_buy(
+            &mut market,
+            &registry,
+            1,
+            Zatoshis::const_from_u64(1_000_000),
+            at
+        )
+        .is_none());
         let code = market.unrelayed()[0].code.clone();
-        let settlement = zats(70_000_000 + otp_amount(&code).into_u64());
+        let settlement = Zatoshis::const_from_u64(70_000_000 + otp_amount(&code).into_u64());
         market.observe(
             |_| Some(owner.clone()),
             &[(pay_to, settlement)],
@@ -1965,13 +2032,19 @@ mod tests {
         );
         assert!(market.is_paid(&name()));
 
-        let back = admit_buy(&mut market, &registry, 2, zats(1_000_000), later)
-            .expect("the paid sale still holds the name");
+        let back = admit_buy(
+            &mut market,
+            &registry,
+            2,
+            Zatoshis::const_from_u64(1_000_000),
+            later,
+        )
+        .expect("the paid sale still holds the name");
         let until = Timestamp::from_seconds(mtp().as_seconds() + D_DUTCH).unwrap();
         assert_eq!(back.recipient, bob());
         assert_eq!(back.note, format!("ZNS:held:alice:{}", until.as_seconds()));
-        let (amount, note) = due_note(&queued(&back, zats(1_000_000), later));
-        assert_eq!(amount, zats(500_000));
+        let (amount, note) = due_note(&queued(&back, Zatoshis::const_from_u64(1_000_000), later));
+        assert_eq!(amount, Zatoshis::const_from_u64(500_000));
         assert_eq!(note, back.note);
     }
 }

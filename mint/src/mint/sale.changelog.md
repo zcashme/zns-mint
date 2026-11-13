@@ -19,6 +19,8 @@
 - The test that `open_buy` echoes its `release_due` and `note_pending`
   flags is gone with the flags. Tests open buys on the registry's
   ruling, so a sale holds the real commitment; the fake `held()` is gone.
+- The `zats` test helper is gone; the tests call upstream's
+  `Zatoshis::const_from_u64` directly.
 - `Phase::Paying.expires_at` is gone; `Sale.until` held the same time.
 - `admit` returns `Option<ReturnedIntent>`; `Admission` and its unread
   `opened` are gone.

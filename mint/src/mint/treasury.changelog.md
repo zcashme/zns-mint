@@ -1,5 +1,10 @@
 # Treasury design record
 
+## 2026-11-13 — Refund tests use upstream's `Zatoshis::const_from_u64` (#497)
+
+- The `zats` test helper is gone; the tests call
+  `Zatoshis::const_from_u64` directly.
+
 ## 2026-11-06 — A kept exact-fee return logs its sentence
 
 - An intent that pays only the fee is not queued. The kept-payment
