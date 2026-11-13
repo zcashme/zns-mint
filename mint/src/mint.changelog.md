@@ -1,5 +1,9 @@
 # Mint live-work design record
 
+## 2026-11-13 — `apply_block` reads no transaction expiry (#376)
+
+- `expiry_by_txid` is gone: it fed only `accept_claim`'s `expiry`.
+
 ## 2026-11-13 — `apply_block` takes no birthday (#489)
 
 - `apply_block` drops its `birthday` parameter and the two branches it

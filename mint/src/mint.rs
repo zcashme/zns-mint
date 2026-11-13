@@ -560,11 +560,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         "FATAL: fetched block does not continue the applied cursor"
     );
 
-    let expiry_by_txid: BTreeMap<TxId, BlockHeight> = block
-        .vtx()
-        .iter()
-        .map(|tx| (tx.txid(), tx.expiry_height()))
-        .collect();
     let block_time = block.header().time;
     let candidates = decrypt_name_notes(network, &block, registry_keys);
     let treasury_memos = note::decrypt_treasury_memos(network, &block, height, treasury_keys);
@@ -649,12 +644,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                         [only] if only.note().0.value().inner() == 0 => only.nf().copied(),
                         _ => None,
                     };
-                    let expiry = expiry_by_txid
-                        .get(&txid)
-                        .copied()
-                        .expect("FATAL: scanned transaction is missing from the block");
                     registry.accept_claim(
-                        network,
                         &candidate.payload,
                         NameCommitment::from_cmx(candidate.cmx),
                         candidate.nullifier,
@@ -662,7 +652,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
                         &nfs,
                         height,
                         block_mtp,
-                        expiry,
                     );
                 } else {
                     registry.accept_transition(
