@@ -773,27 +773,10 @@ async fn main() {
             }
         }
 
-        // A broadcast order whose expiry height has passed can be signed
-        // again, or dropped below once the tip median would release it.
+        // A broadcast order whose expiry height has passed is signed again.
+        // An order approved in time is kept past the name's deadline until
+        // it lands; the release below waits for it.
         name_notes.expire_sent(tip);
-        // Drop an update, list, or delist the tip median would already
-        // release, so a release note can be admitted below. A broadcast
-        // still inside its expiry window stays.
-        for note in name_notes.authorized_notes() {
-            let action = note.action();
-            if (action.is_update() || action.is_list() || action.is_auction() || action.is_delist())
-                && registry
-                    .record(note.name())
-                    .is_some_and(|record| record.is_release_due(mtp_now))
-            {
-                tracing::info!(
-                    name = %note.name().as_str(),
-                    action = action.as_str(),
-                    "transition dropped: the tip median would release the name"
-                );
-                name_notes.drop_note(note.name());
-            }
-        }
 
         // Lifecycle releases, §4.5: the registry owns the clocks and
         // their plural; each tip admits the release notes.

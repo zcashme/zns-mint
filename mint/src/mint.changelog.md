@@ -5,8 +5,9 @@
 - `apply_block` admits the block's header through `MtpTracker::admit`,
   which checks it, and judges the block at the median of the 11 blocks
   before it. Before, it took the median including the block itself:
-  the next block's MTP, one block late. Liveness, OTP expiry and the
-  update, list and delist laws all move one block earlier.
+  the next block's MTP, one block late. Liveness, OTP expiry, the
+  update, list and delist laws, buy approval and expiry, and sale
+  payment checks all move one block earlier.
 - `apply_block` returns the block's MTP with its arrivals.
 
 ## 2026-11-13 — `apply_block` reads no transaction expiry (#376)

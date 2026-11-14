@@ -97,9 +97,10 @@ impl Chain {
                     )
                 });
                 if let Some(old) = old.as_deref_mut().filter(|_| height >= self.old_birthday) {
-                    // The live mint judged a block at the median including
-                    // the block's own time, the next block's MTP. Its law
-                    // is replayed as it ran.
+                    // The live mint, an old-format mint from before #504,
+                    // judged a block at the median including the block's
+                    // own time, the next block's MTP. Its law is replayed
+                    // as it ran.
                     let mut seen = self.mtp.clone();
                     seen.admit(height, block.header().time)
                         .unwrap_or_else(|reason| {

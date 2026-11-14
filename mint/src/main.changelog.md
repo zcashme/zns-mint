@@ -9,6 +9,13 @@
 - The mined-repeat check judges an update or release at its trigger
   block, `next_height + 1`, so it takes that block's MTP, `mtp.next()`,
   as the mempool path does.
+- An update, list, auction, or delist approved in time is no longer
+  dropped when the next block's median passes the name's deadline. The
+  response is judged at its own block's MTP; an order that block
+  approved is kept until it lands, and the release waits for it, as a
+  buy already holds a name. Before, a response approved at its block's
+  MTP could be dropped in the same pass at the next block's, keeping
+  the payment and the code. The "transition dropped" loop is gone.
 - The separate `header_time_ok` call is gone: `apply_block` checks the
   header as it admits it.
 
