@@ -6,35 +6,15 @@
 //! payer covers the fee. A refund is built on the tip pass after its
 //! payment's block.
 
-use zcash_primitives::transaction::fees::zip317::{
-    FeeRule, GRACE_ACTIONS, P2PKH_STANDARD_INPUT_SIZE, P2PKH_STANDARD_OUTPUT_SIZE,
-};
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 
 use crate::mint::{Name, UnifiedAddress};
 
-/// The marginal fee per logical action on every transaction the mint
-/// builds. Zebra 7.0.0's mempool accepts it; its `getstandardfee` reports
-/// it only from Mainnet height 3,590,000. Upstream's `MARGINAL_FEE` is
-/// still 5,000.
-const ACTION_FEE: Zatoshis = Zatoshis::const_from_u64(1_000);
-
 /// Paid by every update, release, buy, list or delist request, and
 /// withheld from every refund. Equivalent to `ACTION_FEE * 100`.
 pub const CHALLENGE_FEE: Zatoshis = Zatoshis::const_from_u64(100_000);
-
-/// ZIP 317 at `ACTION_FEE` per logical action.
-pub fn fee_rule() -> FeeRule {
-    FeeRule::non_standard(
-        ACTION_FEE,
-        GRACE_ACTIONS,
-        P2PKH_STANDARD_INPUT_SIZE,
-        P2PKH_STANDARD_OUTPUT_SIZE,
-    )
-    .expect("upstream ZIP-317 sizes are nonzero")
-}
 
 /// `paid` minus `CHALLENGE_FEE`, when that remainder is positive.
 fn refund_output(paid: Zatoshis) -> Option<Zatoshis> {
