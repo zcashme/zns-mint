@@ -85,16 +85,22 @@ impl MtpTracker {
         self.blocktimes.push_back((height, timestamp));
     }
 
-    /// Admits block `height`: checks its header time against the MTP the
-    /// block must exceed, records it, and returns that MTP, the block's
-    /// own.
+    /// Admits block `height`: its header time must be after the block's
+    /// MTP and at most 90 minutes past it, as consensus requires. Records
+    /// the time and returns the block's MTP.
     pub fn admit(
         &mut self,
         height: BlockHeight,
         timestamp: u32,
     ) -> Result<Timestamp, &'static str> {
-        self.header_time_ok(timestamp)?;
         let mtp = self.next().ok_or("preceding median unavailable")?;
+        let time = i64::from(timestamp);
+        if time <= mtp.as_seconds() {
+            return Err("block time is not after the previous median");
+        }
+        if time > mtp.as_seconds() + MAX_TIME_SINCE_MEDIAN {
+            return Err("block time is more than 90 minutes past the previous median");
+        }
         self.update(height, timestamp);
         Ok(mtp)
     }
@@ -112,23 +118,6 @@ impl MtpTracker {
             Timestamp::from_seconds(stamps[stamps.len() / 2] as i64)
                 .expect("block timestamp is a valid u32, always fits in Timestamp"),
         )
-    }
-
-    /// Checks the next header against the preceding 11-block median.
-    /// The mint processes blocks after activation of both timestamp bounds.
-    fn header_time_ok(&self, timestamp: u32) -> Result<(), &'static str> {
-        let median = self
-            .next()
-            .ok_or("preceding median unavailable")?
-            .as_seconds();
-        let timestamp = i64::from(timestamp);
-        if timestamp <= median {
-            return Err("block time is not after the previous median");
-        }
-        if timestamp > median + MAX_TIME_SINCE_MEDIAN {
-            return Err("block time is more than 90 minutes past the previous median");
-        }
-        Ok(())
     }
 
     /// Reorg Handler to drops entries above `height`
@@ -246,11 +235,12 @@ mod tests {
             tracker.update(h(height as u32), time);
         }
         assert_eq!(tracker.next(), Some(t(140)));
-        assert!(tracker.header_time_ok(141).is_ok());
-        assert!(tracker.header_time_ok(140).is_err());
-        assert!(tracker.header_time_ok(139).is_err());
-        assert!(tracker.header_time_ok(140 + 90 * 60).is_ok());
-        assert!(tracker.header_time_ok(140 + 90 * 60 + 1).is_err());
+        let admits = |time| tracker.clone().admit(h(11), time).is_ok();
+        assert!(admits(141));
+        assert!(!admits(140));
+        assert!(!admits(139));
+        assert!(admits(140 + 90 * 60));
+        assert!(!admits(140 + 90 * 60 + 1));
     }
 
     #[test]
@@ -275,7 +265,7 @@ mod tests {
         for i in 0..11 {
             tracker.update(h(i), u32::MAX - 1);
         }
-        assert!(tracker.header_time_ok(u32::MAX).is_ok());
+        assert!(tracker.admit(h(11), u32::MAX).is_ok());
     }
 
     #[tokio::test]
