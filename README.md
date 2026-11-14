@@ -76,7 +76,7 @@ A claim is a purchase.
 
 There is no confirmation code. The payment is the request. The first sufficient payment owns the name. A second payment for the same word does not start a second record.
 
-A name on the pre-sale list also needs its six-digit code in the memo. The mint checks the code before it looks at the price.
+A name on the pre-sale list also needs its six-digit code in the memo. The mint reads the code only when the payment covers the price and the name is free. A wrong code, or no code, then keeps the whole payment: nothing is refunded.
 
 ## Update
 
