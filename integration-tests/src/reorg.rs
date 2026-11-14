@@ -28,7 +28,7 @@ const DROP: &str = "zebra";
 /// A forever claim paid below its price: admitted, then refunded.
 const REFUND_NAME: &str = "alice";
 
-/// 0.1 ZEC: above the withheld refund fee (10 marginal actions), and below
+/// 0.1 ZEC: above the withheld refund fee (`CHALLENGE_FEE`, 100,000 zats), and below
 /// [`REFUND_NAME`]'s forever price of $300 while ZEC is under $3,000.
 const REFUND_ZATS: u64 = 10_000_000;
 /// 2 ZEC, the fixture's request payment.
