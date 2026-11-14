@@ -7,7 +7,7 @@ mod otp;
 mod refund;
 
 pub use otp::{ChallengeState, OtpChallenge, OtpCode, OtpQueue, D_OTP, MAX_ATTEMPTS};
-pub use refund::{access_code_penalty, RefundQueue, RefundRequest, FEE_ACTIONS};
+pub use refund::{RefundQueue, RefundRequest, FEE_ACTIONS};
 
 use std::convert::Infallible;
 

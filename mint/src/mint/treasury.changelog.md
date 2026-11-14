@@ -1,5 +1,11 @@
 # Treasury design record
 
+## 2026-11-14 — No access-code penalty (#505)
+
+- `access_code_penalty` is gone: no refund keeps 1% of the price.
+- The kept-payment log is one call. Its `note` field is absent when the
+  payment has no sentence, as before.
+
 ## 2026-11-13 — Refund tests use upstream's `Zatoshis::const_from_u64` (#497)
 
 - The `zats` test helper is gone; the tests call

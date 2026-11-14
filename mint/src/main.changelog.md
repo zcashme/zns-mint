@@ -1,5 +1,22 @@
 # main.changelog.md
 
+## 2026-11-14 — A wrong access code on a protected name keeps the payment (#505)
+
+- A claim on a protected name that covers the price with a wrong code
+  keeps its whole payment. It was refunded less 1% of the price and the
+  refund fee.
+- The kept-payment line carries the claim's address, so the payer can
+  be found from the log.
+- The code is read after the price, the registry and the Name Note
+  queue. A claim below the price, on a registered name, or on a name
+  queued for an earlier payment is refunded less the refund fee
+  whatever its code, so the refund says nothing about the code. A wrong
+  code at the price on a registered protected name lost 1% of the
+  price before; it no longer does.
+- The OTP response arm queues its refunds through one local `refund`.
+  Each goes to the response's address under the response's name, which
+  is the name of the challenge it completed.
+
 ## 2026-11-13 — A mempool relay waits while its name has a live challenge; dead relays are counted (#435)
 
 - The mempool gate checks `holds_name`, not `holds(&request)`: an update
