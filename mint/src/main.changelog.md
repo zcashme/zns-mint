@@ -9,7 +9,12 @@
 - The code is read after the price, the registry and the Name Note
   queue. A claim below the price, on a registered name, or on a name
   queued for an earlier payment is refunded less the refund fee
-  whatever its code, so the refund says nothing about the code.
+  whatever its code, so the refund says nothing about the code. A wrong
+  code at the price on a registered protected name lost 1% of the
+  price before; it no longer does.
+- A code-free claim on a protected name whose quote is above the money
+  supply is kept, as every other claim with that quote is. It was
+  refunded less the refund fee, before the quote was read.
 - The queued-name refund moved in front of the code check;
   `name_notes.admit` can no longer refuse a claim, so its refund branch
   is gone.
