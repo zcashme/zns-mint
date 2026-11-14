@@ -6,12 +6,13 @@
   or with none, keeps its whole payment. A wrong code was refunded less
   1% of the price and the refund fee; a missing code was refunded less
   the refund fee.
-- The code is read after the price and the registry. A claim below the
-  price, or on a registered name, is refunded less the refund fee
-  whatever its code, as before, so the refund says nothing about the
-  code.
-- The right code at the price is still refunded, less the refund fee,
-  when the name is already queued.
+- The code is read after the price, the registry and the Name Note
+  queue. A claim below the price, on a registered name, or on a name
+  queued for an earlier payment is refunded less the refund fee
+  whatever its code, so the refund says nothing about the code.
+- The queued-name refund moved in front of the code check;
+  `name_notes.admit` can no longer refuse a claim, so its refund branch
+  is gone.
 - The kept-payment line carries `code_present`: false for a claim with
   no code, true for a wrong one. The code itself is not logged.
 - The OTP response arm queues its refunds through one local `refund`.

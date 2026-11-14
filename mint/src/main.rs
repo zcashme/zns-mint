@@ -622,9 +622,11 @@ async fn main() {
                         );
                         continue;
                     };
-                    // Below the price, or for a registered name, the code
-                    // is not read, so the refund says nothing about it.
-                    if paid < price || !registry.is_available(name) {
+                    // Below the price, or for a name registered or queued
+                    // for an earlier payment, the code is not read, so the
+                    // refund says nothing about it.
+                    if paid < price || !registry.is_available(name) || name_notes.note_pending(name)
+                    {
                         refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         continue;
                     }
@@ -657,8 +659,6 @@ async fn main() {
                     // The earliest payment owns the name until its claim is observed.
                     if name_notes.admit(note_height, claim_note) {
                         challenges.drop_challenges(name);
-                    } else {
-                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                     }
                 }
                 Request::Update { .. } | Request::Release { .. } => {
