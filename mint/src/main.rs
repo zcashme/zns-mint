@@ -431,19 +431,22 @@ async fn main() {
                     // A refused response goes back to the memo address,
                     // less the refund fee.
                     MintInbound::Response(response) => {
-                        // A buy holds the name. A code already issued cannot
-                        // apply an update, release, list, or delist, and its
-                        // payment returns.
-                        if !market.allows_transition(&response.name) {
-                            challenges.drop_challenges(&response.name);
+                        let mut refund = |amount| {
                             refunds.admit(
                                 &fee_rule,
                                 txid,
                                 &response.ua,
                                 &response.name,
                                 next_height,
-                                paid,
-                            );
+                                amount,
+                            )
+                        };
+                        // A buy holds the name. A code already issued cannot
+                        // apply an update, release, list, or delist, and its
+                        // payment returns.
+                        if !market.allows_transition(&response.name) {
+                            challenges.drop_challenges(&response.name);
+                            refund(paid);
                             continue;
                         }
                         // The code stays until the wallet holds its request.
@@ -453,26 +456,12 @@ async fn main() {
                                 .get_tx_height(request_txid)
                                 .is_ok_and(|height| height.is_some())
                         }) {
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                &response.ua,
-                                &response.name,
-                                next_height,
-                                paid,
-                            );
+                            refund(paid);
                             continue;
                         }
                         let Some((sent, _)) = challenges.complete(&response) else {
                             // A wrong code, or no live challenge.
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                &response.ua,
-                                &response.name,
-                                next_height,
-                                paid,
-                            );
+                            refund(paid);
                             continue;
                         };
                         let name = sent.request.name();
@@ -488,7 +477,7 @@ async fn main() {
                             _ => Some(paid),
                         };
                         let Some(rest) = rest else {
-                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
+                            refund(paid);
                             continue;
                         };
                         if name_notes.note_pending(name) {
@@ -497,7 +486,7 @@ async fn main() {
                                 name = %name.as_str(),
                                 "transition already queued; OTP spent"
                             );
-                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
+                            refund(paid);
                             continue;
                         }
                         let authorized = match &sent.request {
@@ -510,7 +499,7 @@ async fn main() {
                             Request::Claim { .. } | Request::Buy { .. } => continue,
                         };
                         let Some(note) = authorized else {
-                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
+                            refund(paid);
                             continue;
                         };
                         // The only durable record that a release was voluntary.
@@ -526,7 +515,7 @@ async fn main() {
                             answered.push(sent.request.clone());
                         }
                         if rest > Zatoshis::ZERO {
-                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, rest);
+                            refund(rest);
                         }
                     }
                     MintInbound::Unrecognized => {

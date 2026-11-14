@@ -9,6 +9,9 @@
 - The code is read after the price check. A claim below the price is
   refunded less the refund fee whatever its code, so it tells the payer
   nothing about the code.
+- The OTP response arm queues its refunds through one local `refund`.
+  Each goes to the response's address under the response's name, which
+  is the name of the challenge it completed.
 
 ## 2026-11-13 — A mempool relay waits while its name has a live challenge; dead relays are counted (#435)
 
