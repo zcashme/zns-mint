@@ -22,7 +22,7 @@ use zns_mint::mint::presale;
 use zns_mint::mint::pricing::{fetch_round, Oracle};
 use zns_mint::mint::sale::Market;
 use zns_mint::mint::treasury;
-use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
+use zns_mint::mint::treasury::OtpQueue;
 use zns_mint::mint::{
     relay, relay_buy, spends_transparent, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
@@ -622,12 +622,6 @@ async fn main() {
                     term,
                     code,
                 } => {
-                    // A protected name claims only with its code.
-                    let protected = protected_names.is_protected(name, mtp_now);
-                    if protected && code.is_none() {
-                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
-                        continue;
-                    }
                     // The quote at first sight is binding. A quote above
                     // the money supply is dead; the payment is kept.
                     let Some(price) = Oracle::quote_at(rate, name, *term) else {
@@ -643,15 +637,17 @@ async fn main() {
                         refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         continue;
                     }
-                    if protected && !access_code_key.accepts(name, code.as_ref()) {
-                        tracing::info!(%txid, name = %name.as_str(), "wrong access code");
-                        refunds.admit(
-                            &fee_rule,
-                            txid,
-                            ua,
-                            name,
-                            note_height,
-                            (paid - access_code_penalty(price)).unwrap_or(Zatoshis::ZERO),
+                    // A protected name claims only with its code. A payment
+                    // that covers the price with any other code, or none,
+                    // is kept: a guess costs the price.
+                    if protected_names.is_protected(name, mtp_now)
+                        && !access_code_key.accepts(name, code.as_ref())
+                    {
+                        tracing::info!(
+                            %txid,
+                            name = %name.as_str(),
+                            paid = paid.into_u64(),
+                            "access code refused; payment kept"
                         );
                         continue;
                     }

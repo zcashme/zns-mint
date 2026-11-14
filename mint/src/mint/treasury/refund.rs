@@ -2,12 +2,9 @@
 //!
 //! A refund is a Treasury payment, funded from Sapling or Ironwood, with
 //! change in Ironwood, and the wallet's from there, like a sweep. Its amount
-//! is fixed when it is admitted: the payment less any penalty and the
-//! withheld fee, `FEE_ACTIONS` at the node's rate, so the payer covers the fee.
-//! A wrong access code also keeps 1% of the quote. A refund is built on
-//! the tip pass after its payment's block.
-
-use std::num::NonZeroU64;
+//! is fixed when it is admitted: the payment less the withheld fee,
+//! `FEE_ACTIONS` at the node's rate, so the payer covers the fee. A refund
+//! is built on the tip pass after its payment's block.
 
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
@@ -26,18 +23,12 @@ fn refund_output(paid: Zatoshis, fee_rule: &FeeRule) -> Option<Zatoshis> {
     (paid - fee).filter(|output| *output > Zatoshis::ZERO)
 }
 
-/// One percent of `price`, rounded down to a zat.
-pub fn access_code_penalty(price: Zatoshis) -> Zatoshis {
-    price / NonZeroU64::new(100).expect("100 is non-zero")
-}
-
 /// One refund due: the payment it answers, where it goes, how much.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefundRequest {
     payment: TxId,
     recipient: UnifiedAddress,
-    /// What the Treasury pays back: the payment less any penalty and the
-    /// withheld fee.
+    /// What the Treasury pays back: the payment less the withheld fee.
     amount: Zatoshis,
     name: Name,
     height: BlockHeight,
@@ -207,28 +198,12 @@ mod tests {
     }
 
     #[test]
-    fn an_admitted_refund_is_the_payment_less_the_penalty_and_the_fee() {
-        let txid = TxId::from_bytes([1; 32]);
+    fn an_admitted_refund_is_the_payment_less_the_fee() {
         let mut queue = RefundQueue::default();
-        admit(&mut queue, txid, 10);
+        admit(&mut queue, TxId::from_bytes([1; 32]), 10);
         assert_eq!(
             queue.due(deep())[0].amount(),
             Zatoshis::const_from_u64(500_000)
-        );
-
-        let mut queue = RefundQueue::default();
-        let price = Zatoshis::const_from_u64(1_000_000);
-        queue.admit(
-            &FeeRule::standard(),
-            txid,
-            &ua(),
-            &alice(),
-            BlockHeight::from_u32(10),
-            (price - access_code_penalty(price)).unwrap(),
-        );
-        assert_eq!(
-            queue.due(deep())[0].amount(),
-            Zatoshis::const_from_u64(490_000)
         );
     }
 

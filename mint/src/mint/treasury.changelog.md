@@ -1,5 +1,10 @@
 # Treasury design record
 
+## 2026-11-14 — No access-code penalty (#505)
+
+- `access_code_penalty` is gone: a claim that fails a protected name's
+  access code is not refunded, so no refund keeps 1% of the price.
+
 ## 2026-11-13 — Refund tests use upstream's `Zatoshis::const_from_u64` (#497)
 
 - The `zats` test helper is gone; the tests call

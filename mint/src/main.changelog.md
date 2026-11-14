@@ -1,5 +1,15 @@
 # main.changelog.md
 
+## 2026-11-14 — A claim that fails a protected name's access code is kept (#505)
+
+- A claim on a protected name that covers the price with a wrong code,
+  or with none, keeps its whole payment. A wrong code was refunded less
+  1% of the price and the refund fee; a missing code was refunded less
+  the refund fee.
+- The code is read after the price check. A claim below the price is
+  refunded less the refund fee whatever its code, so it tells the payer
+  nothing about the code.
+
 ## 2026-11-13 — A mempool relay waits while its name has a live challenge; dead relays are counted (#435)
 
 - The mempool gate checks `holds_name`, not `holds(&request)`: an update
