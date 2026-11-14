@@ -1,8 +1,10 @@
-//! Where the move stands. `main` syncs to the tip once per block and calls
-//! [`Phase::advance`]; each phase acts at that tip or waits for the next.
+//! Where the move stands. `main` syncs to the tip and calls
+//! [`Phase::advance`]. A phase that moves on acts again at the same tip; one
+//! that stays waits for the next block.
 //!
-//! A sent anchor or sweep that passes its expiry unmined is built again a
-//! block later, once the wallet releases its notes.
+//! A built anchor or sweep counts as sent, whatever the node answered, until
+//! it is mined or passes its expiry. Then it is built again a block later,
+//! once the wallet releases its notes.
 
 use std::collections::BTreeMap;
 
@@ -94,7 +96,7 @@ impl Phase {
                     claims,
                 },
                 (None, _) => {
-                    let sent = send_anchor(chain, rebind, claims.len(), tip).await;
+                    let sent = Some(send_anchor(chain, rebind, claims.len(), tip).await);
                     Phase::Anchor { claims, sent }
                 }
             },
@@ -183,14 +185,10 @@ fn unexpired(chain: &Chain, txid: TxId, tip: BlockHeight, what: &str) -> Option<
     Some(txid)
 }
 
-/// Sends the anchor transaction at `tip`. A refusal leaves nothing sent,
-/// and the next block builds again.
-async fn send_anchor(
-    chain: &mut Chain,
-    rebind: &Rebind,
-    names: usize,
-    tip: BlockHeight,
-) -> Option<TxId> {
+/// Sends the anchor transaction at `tip`. `submit` can answer false for a
+/// transaction the node holds, such as one mined during a retry, so the
+/// wallet holds its notes either way and `sync` watches for it.
+async fn send_anchor(chain: &mut Chain, rebind: &Rebind, names: usize, tip: BlockHeight) -> TxId {
     // A fee note can pay one claim (3 actions) in every round, its change
     // paying the next.
     let marginal = rebind.fee_rule.marginal_fee().into_u64();
@@ -209,18 +207,17 @@ async fn send_anchor(
         tip,
     );
     let txid = transaction.txid();
-    if !rebind.source.submit(&transaction, "rebind anchors").await {
-        tracing::error!(%txid, "rebind: the node refused the anchor transaction");
-        return None;
-    }
     chain.wallet.record_sent(&transaction, tip + 1, fee);
-    tracing::info!(%txid, "rebind: anchor transaction sent");
-    Some(txid)
+    if rebind.source.submit(&transaction, "rebind anchors").await {
+        tracing::info!(%txid, "rebind: anchor transaction sent");
+    } else {
+        tracing::error!(%txid, "rebind: the node refused the anchor transaction");
+    }
+    txid
 }
 
 /// Sends the sweep. Building it already stored it in the wallet, holding
-/// its notes until its expiry, so a refusal waits that out like an
-/// expired sweep.
+/// its notes until its expiry.
 async fn send_sweep(chain: &mut Chain, rebind: &Rebind) -> TxId {
     let transaction = sweep::build(
         &rebind.network,
