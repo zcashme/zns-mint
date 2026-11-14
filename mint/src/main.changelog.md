@@ -5,6 +5,8 @@
 - A claim on a protected name that covers the price with a wrong code
   keeps its whole payment. It was refunded less 1% of the price and the
   refund fee.
+- The kept-payment line carries the claim's address, so the payer can
+  be found from the log.
 - A claim on a protected name with no code is refunded less the refund
   fee, as before: no code is no guess.
 - The code is read after the price, the registry and the Name Note

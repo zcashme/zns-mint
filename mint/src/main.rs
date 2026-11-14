@@ -643,6 +643,7 @@ async fn main() {
                             %txid,
                             name = %name.as_str(),
                             paid = paid.into_u64(),
+                            ua = %ua.encode(&network),
                             "access code refused; payment kept"
                         );
                         continue;
