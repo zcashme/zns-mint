@@ -586,7 +586,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     let mut next_mtp = mtp.clone();
     next_mtp.update(height, block_time);
     let block_mtp = next_mtp
-        .current()
+        .next()
         .expect("FATAL: MTP unavailable after applying a block");
 
     // The confirmation pass: the scanner's transactions in block order.

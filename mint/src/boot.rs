@@ -499,7 +499,7 @@ impl Boot<Network> {
             .await
             .expect("FATAL: birthday MTP backfill from Zebra failed");
         let birthday_mtp = birthday
-            .current()
+            .next()
             .expect("FATAL: birthday MTP unavailable from Zebra");
         let mut mtp = MtpTracker::born(birthday_mtp);
 

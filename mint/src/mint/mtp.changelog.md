@@ -1,5 +1,13 @@
 # Mtp design record
 
+## 2026-11-14 — A block's MTP leaves the block out (#504)
+
+- `admit(height, time)` checks a header against the median of the 11
+  blocks before it, records it, and returns that median: the block's
+  MTP, as the protocol spec (§7.6), Zebra and Zakura define it.
+- `current()` is `next()`: the median of the recorded times, which is
+  the MTP of the block after the last one recorded.
+
 ## 2026-11-07 — Header checks use chain time
 
 - Move median validation into `MtpTracker`; remove `zcash::adopt`, its

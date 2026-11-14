@@ -136,7 +136,7 @@ async fn main() {
                     continue;
                 }
                 let mtp_now = mtp
-                    .current()
+                    .next()
                     .expect("FATAL: MTP unavailable before a mempool relay");
                 let target_height = tip + 1;
                 let candidate = zns_mint::mint::note::decrypt_treasury_transaction(
@@ -352,7 +352,7 @@ async fn main() {
             // The block's own clock: a challenge expired by it completes
             // nothing in it, and the law reads it.
             let block_mtp = mtp
-                .current()
+                .next()
                 .expect("FATAL: MTP unavailable at the applied block");
             // A relayed challenge whose request never mined paid for a
             // relay that nothing paid back: a dead relay.
@@ -555,7 +555,7 @@ async fn main() {
         let tip_hash = wallet.tip().block_hash();
         let target_height = tip + 1;
         let mtp_now = mtp
-            .current()
+            .next()
             .expect("FATAL: MTP unavailable at the applied tip");
 
         let today = mtp

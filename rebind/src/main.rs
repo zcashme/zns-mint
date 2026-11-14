@@ -104,7 +104,7 @@ impl Chain {
                 if let Some(old) = old.as_deref_mut().filter(|_| height >= self.old_birthday) {
                     let mut next = self.mtp.clone();
                     next.update(height, time);
-                    let block_mtp = next.current().expect("FATAL: MTP unavailable");
+                    let block_mtp = next.next().expect("FATAL: MTP unavailable");
                     registry::apply(
                         &rebind.network,
                         &rebind.registry_keys,
