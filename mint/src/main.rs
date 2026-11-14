@@ -52,7 +52,6 @@ async fn main() {
         access_code_key,
         mut protected_names,
         presale_client,
-        mut fee_rule,
         mut registry,
         mut name_notes,
         mut requests,
@@ -65,6 +64,7 @@ async fn main() {
         #[cfg(not(feature = "non-tee"))]
         guest,
     } = Boot::start().await;
+    let fee_rule = treasury::fee_rule();
 
     zns_mint::metrics::install();
     zns_mint::metrics::identity(&treasury_address, &registry_ufvk);
@@ -155,8 +155,7 @@ async fn main() {
                 .find_map(|(request, paid)| {
                     if challenges.holds_name(request.name())
                         || !market.allows_transition(request.name())
-                        || (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
-                            .is_none_or(|fee| paid < fee)
+                        || paid < treasury::CHALLENGE_FEE
                     {
                         return None;
                     }
@@ -382,8 +381,7 @@ async fn main() {
                     || registry
                         .authorize_challenge(&name_notes, request, trigger, block_mtp)
                         .is_none()
-                    || (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
-                        .is_none_or(|fee| *paid < fee)
+                    || *paid < treasury::CHALLENGE_FEE
                 {
                     continue;
                 }
@@ -402,14 +400,12 @@ async fn main() {
                             paid,
                             &registry,
                             &mut challenges,
-                            &fee_rule,
                             next_height,
                             block_mtp,
                             |name| name_notes.note_pending(name),
                         );
                         if let Some(back) = returned {
                             refunds.admit_with_note(
-                                &fee_rule,
                                 txid,
                                 &back.recipient,
                                 &back.name,
@@ -432,14 +428,7 @@ async fn main() {
                     // less the refund fee.
                     MintInbound::Response(response) => {
                         let mut refund = |amount| {
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                &response.ua,
-                                &response.name,
-                                next_height,
-                                amount,
-                            )
+                            refunds.admit(txid, &response.ua, &response.name, next_height, amount)
                         };
                         // A buy holds the name. A code already issued cannot
                         // apply an update, release, list, or delist, and its
@@ -574,21 +563,6 @@ async fn main() {
             );
             continue;
         }
-        // The node's fee rate for every transaction this pass builds. A
-        // failed read keeps the last rate the node gave.
-        match source.standard_fee().await {
-            Ok(rule) => {
-                if rule.marginal_fee() != fee_rule.marginal_fee() {
-                    tracing::info!(
-                        zats_per_action = rule.marginal_fee().into_u64(),
-                        "fee rate changed"
-                    );
-                }
-                fee_rule = rule;
-            }
-            Err(error) => tracing::warn!(%error, "fee rate unavailable; keeping the last rate"),
-        }
-
         // The three gauges: chain level, money level, price level.
         let treasury_zats = wallet
             .get_wallet_summary(zns_mint::wallet::CONFIRMATIONS)
@@ -615,7 +589,7 @@ async fn main() {
                     // is no guess, and the payment is refunded.
                     let protected = protected_names.is_protected(name, mtp_now);
                     if protected && code.is_none() {
-                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                        refunds.admit(txid, ua, name, note_height, paid);
                         continue;
                     }
                     // The quote at first sight is binding. A quote above
@@ -634,7 +608,7 @@ async fn main() {
                     // refund says nothing about it.
                     if paid < price || !registry.is_available(name) || name_notes.note_pending(name)
                     {
-                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                        refunds.admit(txid, ua, name, note_height, paid);
                         continue;
                     }
                     // A wrong code keeps the payment: a guess costs the price.
@@ -663,7 +637,7 @@ async fn main() {
                     if name_notes.admit(note_height, claim_note) {
                         challenges.drop_challenges(name);
                     } else {
-                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                        refunds.admit(txid, ua, name, note_height, paid);
                     }
                 }
                 Request::Update { .. } | Request::Release { .. } => {
@@ -690,9 +664,7 @@ async fn main() {
                         );
                         continue;
                     }
-                    if (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
-                        .is_none_or(|fee| paid < fee)
-                    {
+                    if paid < treasury::CHALLENGE_FEE {
                         tracing::info!(
                             %txid,
                             name = %request.name().as_str(),

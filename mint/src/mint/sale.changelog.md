@@ -1,5 +1,10 @@
 # Sale module changelog
 
+## 2026-11-14 — The list, delist and buy fee is `CHALLENGE_FEE` (#512)
+
+- `Market::admit` takes no `fee_rule`; `fee_ok` is `paid >= CHALLENGE_FEE`,
+  100,000 zatoshis. It was 100 times the node's rate, 500,000 on Mainnet.
+
 ## 2026-11-13 — The market drops checks that cannot fail (#497)
 
 - `observe` keeps no `used` list: `open_buy` already refuses a second

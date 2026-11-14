@@ -199,10 +199,7 @@ async fn main() {
             .expect("FATAL: Zebra gRPC unreachable or timed out"),
     );
     boot::require_anchor_on_chain(&network, &source, &anchor).await;
-    let fee_rule = source
-        .standard_fee()
-        .await
-        .expect("FATAL: fee rate unavailable from Zebra");
+    let fee_rule = zns_mint::mint::treasury::fee_rule();
 
     // The wallet starts at the live mint's own origin, so it holds every
     // Treasury note the live mint holds.

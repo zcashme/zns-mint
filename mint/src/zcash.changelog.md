@@ -1,5 +1,11 @@
 # Zcash I/O changelog
 
+## 2026-11-14 — The node's fee rate is no longer read (#512)
+
+- The `fees` module is gone: `CanonicalBlockSource::standard_fee`, the
+  `getstandardfee` response type and their tests. The rate is
+  `treasury::fee_rule()`.
+
 ## 2026-11-13 — `ChainClient::connect` is public for zns-rebind (#486)
 
 - zns-rebind connects to Zebra with `ChainClient::connect`. The

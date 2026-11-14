@@ -47,7 +47,7 @@ pub enum PrepareError {
 
 /// Builds a Name Note transaction and its fee without recording a send.
 /// `authority_nf` is the claim anchor or the predecessor; Treasury fee
-/// notes cover the fee at the node's rate, `fee_rule`.
+/// notes cover the fee at `fee_rule`.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare<P: Parameters>(
     network: &P,
