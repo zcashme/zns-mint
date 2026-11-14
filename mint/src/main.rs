@@ -332,13 +332,10 @@ async fn main() {
                 );
                 continue 'run;
             }
-            mtp.header_time_ok(block.header().time)
-                .unwrap_or_else(|reason| {
-                    panic!("FATAL: {reason} at height {}", u32::from(next_height))
-                });
-
             let payments = zns_mint::mint::sale::transparent_payments(&block);
-            let arrivals = zns_mint::mint::apply_block(
+            // `block_mtp` is the block's own clock: a challenge expired
+            // by it completes nothing in it, and the law reads it.
+            let (arrivals, block_mtp) = zns_mint::mint::apply_block(
                 &network,
                 &registry_keys,
                 &treasury_keys,
@@ -349,11 +346,6 @@ async fn main() {
                 &mut mtp,
             );
             name_notes.reconcile_seen(&registry);
-            // The block's own clock: a challenge expired by it completes
-            // nothing in it, and the law reads it.
-            let block_mtp = mtp
-                .next()
-                .expect("FATAL: MTP unavailable at the applied block");
             // A relayed challenge whose request never mined paid for a
             // relay that nothing paid back: a dead relay.
             let dead_relays = challenges

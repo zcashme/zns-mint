@@ -1,5 +1,14 @@
 # main.changelog.md
 
+## 2026-11-14 — The run loop uses the block's MTP from `apply_block` (#504)
+
+- Challenge and buy expiry and the update, list and delist laws use the
+  MTP `apply_block` returns, the median of the 11 blocks before the
+  block. The loop no longer reads the tracker after applying, which
+  gave the next block's MTP.
+- The separate `header_time_ok` call is gone: `apply_block` checks the
+  header as it admits it.
+
 ## 2026-11-13 — A mempool relay waits while its name has a live challenge; dead relays are counted (#435)
 
 - The mempool gate checks `holds_name`, not `holds(&request)`: an update

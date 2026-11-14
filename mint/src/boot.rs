@@ -547,10 +547,6 @@ impl Boot<Network> {
                 .get_block(&network, next_height)
                 .await
                 .expect("FATAL: block unavailable during boot sync");
-            mtp.header_time_ok(block.header().time)
-                .unwrap_or_else(|reason| {
-                    panic!("FATAL: {reason} at height {}", u32::from(next_height))
-                });
 
             crate::mint::apply_block(
                 &network,

@@ -1,5 +1,10 @@
 # Boot module changelog
 
+## 2026-11-14 — Boot sync leaves the header check to `apply_block` (#504)
+
+- The separate `header_time_ok` call is gone: `apply_block` checks each
+  header as it admits it.
+
 ## 2026-11-13 — The key methods are public for zns-rebind (#486)
 
 - `AccountKeys::derive`, `fvk`, `orchard_fvk`, `orchard_ask` and
