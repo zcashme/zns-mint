@@ -8,6 +8,10 @@
   blocks before it. The window used to end at the birthday block, which
   gave the next block's MTP, so day zero, and each day after it, starts
   one block earlier.
+- Those 11 blocks end at the origin checkpoint, so boot backfills one
+  window and takes day zero from it; the throwaway birthday window and
+  its 11 header reads are gone. `MtpTracker::born` only registers day
+  zero.
 
 ## 2026-11-13 — The key methods are public for zns-rebind (#486)
 

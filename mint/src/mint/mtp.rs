@@ -26,9 +26,8 @@ pub struct MtpTracker {
 }
 
 impl MtpTracker {
-    /// Born at the mint's birthday: registers the day-zero anchor and
-    /// returns an empty tracker.
-    pub fn born(birthday: Timestamp) -> Self {
+    /// Registers the day-zero anchor: the MTP of the mint's birthday block.
+    pub fn born(birthday: Timestamp) {
         // `set` bounces the rejected value back, not the incumbent, so
         // read the incumbent for the comparison.
         if BIRTHDAY.set(birthday).is_err() {
@@ -38,7 +37,6 @@ impl MtpTracker {
                 "FATAL: the mint cannot be born twice with different birthdays"
             );
         }
-        Self::default()
     }
 
     /// Days since the mint's birthday. `None` when [`Self::next`] is.
@@ -148,7 +146,8 @@ mod tests {
     }
 
     fn born() -> MtpTracker {
-        MtpTracker::born(t(BIRTHDAY_SECS))
+        MtpTracker::born(t(BIRTHDAY_SECS));
+        MtpTracker::default()
     }
 
     /// A plausible header time for each height.
