@@ -6,11 +6,12 @@
   or with none, keeps its whole payment. A wrong code was refunded less
   1% of the price and the refund fee; a missing code was refunded less
   the refund fee.
-- The code is read after the price check. A claim below the price is
-  refunded less the refund fee whatever its code, as before, so the
-  refund says nothing about the code.
+- The code is read after the price and the registry. A claim below the
+  price, or on a registered name, is refunded less the refund fee
+  whatever its code, as before, so the refund says nothing about the
+  code.
 - The right code at the price is still refunded, less the refund fee,
-  when the name is registered or already queued.
+  when the name is already queued.
 - The OTP response arm queues its refunds through one local `refund`.
   Each goes to the response's address under the response's name, which
   is the name of the challenge it completed.

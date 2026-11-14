@@ -622,9 +622,9 @@ async fn main() {
                         );
                         continue;
                     };
-                    // Below the price the code is not read, so the refund
-                    // says nothing about it.
-                    if paid < price {
+                    // Below the price, or for a registered name, the code
+                    // is not read, so the refund says nothing about it.
+                    if paid < price || !registry.is_available(name) {
                         refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         continue;
                     }
@@ -642,20 +642,15 @@ async fn main() {
                         );
                         continue;
                     }
-                    // A refusal keeps the payment unless the name is taken.
                     let Some(claim_note) =
                         registry.authorize_claim(name.clone(), ua.clone(), *term, mtp_now)
                     else {
-                        if !registry.is_available(name) {
-                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
-                        } else {
-                            tracing::info!(
-                                %txid,
-                                name = %name.as_str(),
-                                paid = paid.into_u64(),
-                                "claim not authorized; payment kept"
-                            );
-                        }
+                        tracing::info!(
+                            %txid,
+                            name = %name.as_str(),
+                            paid = paid.into_u64(),
+                            "claim not authorized; payment kept"
+                        );
                         continue;
                     };
                     // The earliest payment owns the name until its claim is observed.
