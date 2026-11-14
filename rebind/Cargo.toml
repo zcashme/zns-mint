@@ -17,6 +17,7 @@ zns-canon = { path = "../canon" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+futures-util = "0.3"
 secrecy = "0.8"
 libc = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["std", "aws-lc-rs"] }
