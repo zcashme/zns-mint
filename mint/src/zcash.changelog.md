@@ -1,5 +1,13 @@
 # Zcash I/O changelog
 
+## 2026-11-14 — A fixed fee rate (#512)
+
+- `fees::fee_rule()` is ZIP 317 at 1,000 zatoshis per logical action.
+  Zebra 7.0.0's mempool accepts that rate now; its `getstandardfee`
+  reports 5,000 on Mainnet until height 3,590,000.
+- `CanonicalBlockSource::standard_fee` and the `getstandardfee` response
+  type are gone, with their tests.
+
 ## 2026-11-13 — `ChainClient::connect` is public for zns-rebind (#486)
 
 - zns-rebind connects to Zebra with `ChainClient::connect`. The

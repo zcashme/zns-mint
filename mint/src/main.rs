@@ -52,7 +52,6 @@ async fn main() {
         access_code_key,
         mut protected_names,
         presale_client,
-        mut fee_rule,
         mut registry,
         mut name_notes,
         mut requests,
@@ -65,6 +64,7 @@ async fn main() {
         #[cfg(not(feature = "non-tee"))]
         guest,
     } = Boot::start().await;
+    let fee_rule = zns_mint::zcash::fees::fee_rule();
 
     zns_mint::metrics::install();
     zns_mint::metrics::identity(&treasury_address, &registry_ufvk);
@@ -574,21 +574,6 @@ async fn main() {
             );
             continue;
         }
-        // The node's fee rate for every transaction this pass builds. A
-        // failed read keeps the last rate the node gave.
-        match source.standard_fee().await {
-            Ok(rule) => {
-                if rule.marginal_fee() != fee_rule.marginal_fee() {
-                    tracing::info!(
-                        zats_per_action = rule.marginal_fee().into_u64(),
-                        "fee rate changed"
-                    );
-                }
-                fee_rule = rule;
-            }
-            Err(error) => tracing::warn!(%error, "fee rate unavailable; keeping the last rate"),
-        }
-
         // The three gauges: chain level, money level, price level.
         let treasury_zats = wallet
             .get_wallet_summary(zns_mint::wallet::CONFIRMATIONS)

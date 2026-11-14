@@ -1,5 +1,13 @@
 # main.changelog.md
 
+## 2026-11-14 — The fee rate is 1,000 zatoshis per action (#512)
+
+- The run loop no longer reads `getstandardfee` each pass. It takes
+  `fees::fee_rule()` once: the challenge fee and the refund fee are
+  100,000 zatoshis, and every transaction the mint builds pays 1,000
+  zatoshis per action. The `fee rate changed` and `fee rate unavailable`
+  lines are gone.
+
 ## 2026-11-14 — A wrong access code on a protected name keeps the payment (#505)
 
 - A claim on a protected name that covers the price with a wrong code

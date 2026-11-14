@@ -33,7 +33,6 @@ use crate::zcash::{self, CanonicalBlockSource, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::chain::ChainState;
 use zcash_client_backend::data_api::WalletRead as _;
-use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zns_canon::capsule::{hash as capsule_hash, parse_capsule, read_capsule_file, unseal_seed};
 use zns_canon::custody;
 use zns_canon::genesis::Anchor;
@@ -100,8 +99,6 @@ pub struct Boot<P: Parameters> {
     pub protected_names: ProtectedNames,
     /// initialized: the one client every pre-sale read goes through
     pub presale_client: HttpsClient,
-    /// must not: fail-closed at birth — the node's fee rate or no start
-    pub fee_rule: FeeRule,
     /// produced: scanned and verified during boot sync
     pub registry: Registry,
     /// initialized: pending Name Note authorizations
@@ -531,14 +528,6 @@ impl Boot<Network> {
             to = u32::from(best_height),
             "boot: syncing to chain tip"
         );
-        let fee_rule = source
-            .standard_fee()
-            .await
-            .expect("FATAL: fee rate unavailable from Zebra");
-        tracing::info!(
-            zats_per_action = fee_rule.marginal_fee().into_u64(),
-            "boot: fee rate read"
-        );
         while wallet.tip().block_height() < best_height {
             let from_height = wallet.tip().block_height();
             let next_height = from_height + 1;
@@ -697,7 +686,6 @@ impl Boot<Network> {
             access_code_key,
             protected_names,
             presale_client,
-            fee_rule,
             registry,
             name_notes,
             requests,

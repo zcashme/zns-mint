@@ -248,11 +248,10 @@ mod tests {
     }
 
     #[test]
-    fn a_lower_node_rate_refunds_a_payment_the_standard_rate_keeps() {
+    fn the_mint_rate_refunds_a_payment_the_standard_rate_keeps() {
         let paid = Zatoshis::const_from_u64(200_000);
-        let node = crate::zcash::fees::fee_rule(Zatoshis::const_from_u64(1_000));
         assert_eq!(
-            refund_output(paid, &node),
+            refund_output(paid, &crate::zcash::fees::fee_rule()),
             Some(Zatoshis::const_from_u64(100_000))
         );
         assert_eq!(refund_output(paid, &FeeRule::standard()), None);
