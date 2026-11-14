@@ -638,6 +638,7 @@ async fn main() {
                             %txid,
                             name = %name.as_str(),
                             paid = paid.into_u64(),
+                            code_present = code.is_some(),
                             "access code refused; payment kept"
                         );
                         continue;

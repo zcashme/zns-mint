@@ -12,6 +12,8 @@
   code.
 - The right code at the price is still refunded, less the refund fee,
   when the name is already queued.
+- The kept-payment line carries `code_present`: false for a claim with
+  no code, true for a wrong one. The code itself is not logged.
 - The OTP response arm queues its refunds through one local `refund`.
   Each goes to the response's address under the response's name, which
   is the name of the challenge it completed.
