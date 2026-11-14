@@ -1,4 +1,4 @@
-//! Where the move stands. `main` syncs to the tip and calls
+//! Where the move stands. `main` syncs to the settled tip and calls
 //! [`Phase::advance`]. A phase that moves on acts again at the same tip; one
 //! that stays waits for the next block.
 //!

@@ -31,6 +31,11 @@ use zns_mint::{RegistryKeys, TreasuryKeys};
 /// How often a waiting phase checks the chain again.
 const POLL: Duration = Duration::from_secs(10);
 
+/// Rebind reads only blocks this deep, so a reorg of the newest blocks
+/// never touches what it applied, and what it builds anchors at H − 3, as
+/// ZIP 315 recommends.
+const DEPTH: u32 = 3;
+
 /// What the run works with from start to end.
 struct Rebind {
     network: boot::Network,
@@ -53,10 +58,10 @@ struct Chain {
 }
 
 impl Chain {
-    /// Applies blocks until Zebra has none past the wallet's tip. `old`
-    /// also takes the live mint's law over them. When the block holding
-    /// `anchor_txid` arrives, `law` starts afresh there, and its height is
-    /// returned: H.
+    /// Applies blocks until Zebra has none [`DEPTH`] deep past the wallet's
+    /// tip. `old` also takes the live mint's law over them. When the block
+    /// holding `anchor_txid` arrives, `law` starts afresh there, and its
+    /// height is returned: H.
     async fn sync(
         &mut self,
         rebind: &Rebind,
@@ -65,11 +70,7 @@ impl Chain {
     ) -> Option<BlockHeight> {
         let mut h = None;
         loop {
-            let (tip, _) = rebind
-                .source
-                .exact_tip()
-                .await
-                .expect("FATAL: Zebra tip unavailable");
+            let tip = settled_tip(rebind).await;
             if self.wallet.tip().block_height() >= tip {
                 return h;
             }
@@ -126,17 +127,12 @@ impl Chain {
         }
     }
 
-    /// Returns once Zebra has a block past the wallet's tip.
+    /// Returns once Zebra has a block [`DEPTH`] deep past the wallet's tip.
     async fn wait_for_block(&self, rebind: &Rebind) {
         let applied = self.wallet.tip().block_height();
         loop {
             tokio::time::sleep(POLL).await;
-            let (tip, _) = rebind
-                .source
-                .exact_tip()
-                .await
-                .expect("FATAL: Zebra tip unavailable");
-            if tip > applied {
+            if settled_tip(rebind).await > applied {
                 return;
             }
         }
@@ -152,6 +148,16 @@ impl Chain {
             .map(|note| note.note().value().inner())
             .sum()
     }
+}
+
+/// Zebra's tip less [`DEPTH`]: the newest block rebind reads.
+async fn settled_tip(rebind: &Rebind) -> BlockHeight {
+    let (tip, _) = rebind
+        .source
+        .exact_tip()
+        .await
+        .expect("FATAL: Zebra tip unavailable");
+    tip.saturating_sub(DEPTH)
 }
 
 #[tokio::main]
