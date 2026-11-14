@@ -611,15 +611,16 @@ async fn main() {
                     term,
                     code,
                 } => {
+                    // A protected name claims only with its code. No code
+                    // is no guess, and the payment is refunded.
                     let protected = protected_names.is_protected(name, mtp_now);
+                    if protected && code.is_none() {
+                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                        continue;
+                    }
                     // The quote at first sight is binding. A quote above
-                    // the money supply is dead; the payment is kept, but
-                    // a protected name's claim with no code is refunded.
+                    // the money supply is dead; the payment is kept.
                     let Some(price) = Oracle::quote_at(rate, name, *term) else {
-                        if protected && code.is_none() {
-                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
-                            continue;
-                        }
                         tracing::info!(
                             %txid,
                             name = %name.as_str(),
@@ -636,15 +637,12 @@ async fn main() {
                         refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         continue;
                     }
-                    // A protected name claims only with its code. Any other
-                    // code, or none, keeps the payment: a guess costs the
-                    // price.
+                    // A wrong code keeps the payment: a guess costs the price.
                     if protected && !access_code_key.accepts(name, code.as_ref()) {
                         tracing::info!(
                             %txid,
                             name = %name.as_str(),
                             paid = paid.into_u64(),
-                            code_present = code.is_some(),
                             "access code refused; payment kept"
                         );
                         continue;

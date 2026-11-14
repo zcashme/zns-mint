@@ -1,25 +1,21 @@
 # main.changelog.md
 
-## 2026-11-14 — A claim that fails a protected name's access code is kept (#505)
+## 2026-11-14 — A wrong access code on a protected name keeps the payment (#505)
 
-- A claim on a protected name that covers the price with a wrong code,
-  or with none, keeps its whole payment. A wrong code was refunded less
-  1% of the price and the refund fee; a missing code was refunded less
-  the refund fee.
+- A claim on a protected name that covers the price with a wrong code
+  keeps its whole payment. It was refunded less 1% of the price and the
+  refund fee.
+- A claim on a protected name with no code is refunded less the refund
+  fee, as before: no code is no guess.
 - The code is read after the price, the registry and the Name Note
   queue. A claim below the price, on a registered name, or on a name
   queued for an earlier payment is refunded less the refund fee
   whatever its code, so the refund says nothing about the code. A wrong
   code at the price on a registered protected name lost 1% of the
   price before; it no longer does.
-- A code-free claim on a protected name whose quote is above the money
-  supply is still refunded less the refund fee. Every other claim with
-  that quote is kept, as before.
 - The queued-name refund moved in front of the code check;
   `name_notes.admit` can no longer refuse a claim, so its refund branch
   is gone.
-- The kept-payment line carries `code_present`: false for a claim with
-  no code, true for a wrong one. The code itself is not logged.
 - The OTP response arm queues its refunds through one local `refund`.
   Each goes to the response's address under the response's name, which
   is the name of the challenge it completed.
