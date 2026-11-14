@@ -280,9 +280,9 @@ impl Registry {
 
     /// The update law: action, term, liveness. `None` means unlawful.
     ///
-    /// The purchased term and the liveness deadline are read at the applied
-    /// tip. A confirmed update renews even when the confirming block's
-    /// median is later.
+    /// The purchased term and the liveness deadline are read at `mtp`, the
+    /// MTP of the block holding the response. A confirmed update renews
+    /// even when the confirming block's median is later.
     pub fn authorize_update(&self, pending: &OtpChallenge, mtp: Timestamp) -> Option<NameNote> {
         let Request::Update { name, ua, term } = &pending.request else {
             return None;
@@ -340,9 +340,9 @@ impl Registry {
 
     /// The request gate. The note is unspoken-for, the request is newer
     /// than the record, and a forever name takes no term. The purchased
-    /// term and the liveness deadline are read at the applied tip, the
-    /// same instant as [`Self::authorize_update`]. Returns the record
-    /// when a challenge may proceed.
+    /// term and the liveness deadline are read at `mtp_now`, the MTP of
+    /// `trigger_height`, the block the challenge is relayed in. Returns
+    /// the record when a challenge may proceed.
     pub fn authorize_challenge(
         &self,
         name_notes: &NameNoteQueue,
@@ -905,9 +905,9 @@ mod tests {
         assert!(!term_live.allows_challenge(&release(), above, ts(1_500_000_000)));
     }
 
-    /// The gate and the update law share the tip median. One second
-    /// before the deadline both allow the update. At the deadline both
-    /// refuse, and a queued note would be dropped.
+    /// The gate and the update law read the deadline the same way. One
+    /// second before the deadline both allow the update. At the deadline
+    /// both refuse.
     #[test]
     fn the_gate_and_the_update_law_agree_on_the_liveness_clock() {
         use crate::mint::note::NameNoteQueue;

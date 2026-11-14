@@ -9,7 +9,11 @@
   the MTP of the block after the last one recorded.
 - `header_time_ok` is gone: `admit` checks the header against the
   median it returns, computed once. `update` is private: a block enters
-  only through `admit`, checked.
+  only through `admit`, checked, and only as the height after the last
+  recorded one; a gap or repeat is an error in release builds too.
+- `truncate_to` is gone: the reorg path rebuilds the window with
+  `backfill`. Its test, `the_day_rewinds_when_a_truncate_recrosses_midnight`,
+  goes with it.
 
 ## 2026-11-07 — Header checks use chain time
 

@@ -4,18 +4,18 @@
 
 - Challenge and buy expiry and the update, list and delist laws use the
   MTP `apply_block` returns, the median of the 11 blocks before the
-  block. The loop no longer reads the tracker after applying, which
-  gave the next block's MTP.
-- The mined-repeat check judges an update or release at its trigger
-  block, `next_height + 1`, so it takes that block's MTP, `mtp.next()`,
-  as the mempool path does.
+  block, instead of the tracker's median after applying, which was the
+  next block's MTP.
+- The mined-repeat check is unchanged: it judges an update or release
+  at its trigger block, `next_height + 1`, and still takes that block's
+  MTP, now read as `mtp.next()`.
 - An update, list, auction, or delist approved in time is no longer
-  dropped when the next block's median passes the name's deadline. The
-  response is judged at its own block's MTP; an order that block
-  approved is kept until it lands, and the release waits for it, as a
-  buy already holds a name. Before, a response approved at its block's
-  MTP could be dropped in the same pass at the next block's, keeping
-  the payment and the code. The "transition dropped" loop is gone.
+  dropped when the next block's median passes the name's deadline. An
+  approved order is kept until it lands, and the release waits for it,
+  as a buy already holds a name. Before, a response approved in a block
+  the loop caught up through could be dropped at the tip median,
+  keeping the payment and the code. The "transition dropped" loop is
+  gone.
 - The separate `header_time_ok` call is gone: `apply_block` checks the
   header as it admits it.
 

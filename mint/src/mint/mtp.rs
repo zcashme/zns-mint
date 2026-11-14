@@ -83,14 +83,17 @@ impl MtpTracker {
         self.blocktimes.push_back((height, timestamp));
     }
 
-    /// Admits block `height`: its header time must be after the block's
-    /// MTP and at most 90 minutes past it, as consensus requires. Records
-    /// the time and returns the block's MTP.
+    /// Admits block `height`, the one after the last recorded: its header
+    /// time must be after the block's MTP and at most 90 minutes past it,
+    /// as consensus requires. Records the time and returns the block's MTP.
     pub fn admit(
         &mut self,
         height: BlockHeight,
         timestamp: u32,
     ) -> Result<Timestamp, &'static str> {
+        if self.blocktimes.back().map(|(last, _)| *last + 1) != Some(height) {
+            return Err("block height does not follow the last recorded");
+        }
         let mtp = self.next().ok_or("preceding median unavailable")?;
         let time = i64::from(timestamp);
         if time <= mtp.as_seconds() {
@@ -116,11 +119,6 @@ impl MtpTracker {
             Timestamp::from_seconds(stamps[stamps.len() / 2] as i64)
                 .expect("block timestamp is a valid u32, always fits in Timestamp"),
         )
-    }
-
-    /// Reorg Handler to drops entries above `height`
-    pub fn truncate_to(&mut self, height: BlockHeight) {
-        self.blocktimes.retain(|(h, _)| *h <= height);
     }
 }
 
@@ -208,21 +206,6 @@ mod tests {
     }
 
     #[test]
-    fn the_day_rewinds_when_a_truncate_recrosses_midnight() {
-        let mut tracker = born();
-        for i in 0..5 {
-            tracker.update(h(i), u32::try_from(BIRTHDAY_SECS - 100).unwrap());
-        }
-        for i in 5..11 {
-            tracker.update(h(i), u32::try_from(BIRTHDAY_SECS + DAY).unwrap());
-        }
-        assert_eq!(tracker.current_day(), Some(1));
-
-        tracker.truncate_to(h(4));
-        assert_eq!(tracker.current_day(), Some(0));
-    }
-
-    #[test]
     fn header_time_is_checked_against_the_preceding_median() {
         let mut tracker = born();
         // Deliberately unordered times: the previous header can be later
@@ -255,6 +238,10 @@ mod tests {
         assert_eq!(tracker.next(), Some(t(160)));
         // A time not after the block's MTP is refused, and not recorded.
         assert!(tracker.admit(h(12), 160).is_err());
+        assert_eq!(tracker.next(), Some(t(160)));
+        // A height that skips or repeats one is refused, and not recorded.
+        assert!(tracker.admit(h(13), 500).is_err());
+        assert!(tracker.admit(h(11), 500).is_err());
         assert_eq!(tracker.next(), Some(t(160)));
     }
 
