@@ -7,6 +7,8 @@
   MTP, as the protocol spec (§7.6), Zebra and Zakura define it.
 - `current()` is `next()`: the median of the recorded times, which is
   the MTP of the block after the last one recorded.
+- `update` and `header_time_ok` are private: a block enters only
+  through `admit`, checked.
 
 ## 2026-11-07 — Header checks use chain time
 

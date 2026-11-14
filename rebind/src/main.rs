@@ -96,15 +96,16 @@ impl Chain {
                         u32::from(height)
                     )
                 });
-                let time = block.header().time;
-                self.mtp.header_time_ok(time).unwrap_or_else(|reason| {
-                    panic!("FATAL: {reason} at height {}", u32::from(height))
-                });
-
                 if let Some(old) = old.as_deref_mut().filter(|_| height >= self.old_birthday) {
-                    let mut next = self.mtp.clone();
-                    next.update(height, time);
-                    let block_mtp = next.next().expect("FATAL: MTP unavailable");
+                    // The live mint judged a block at the median including
+                    // the block's own time, the next block's MTP. Its law
+                    // is replayed as it ran.
+                    let mut seen = self.mtp.clone();
+                    seen.admit(height, block.header().time)
+                        .unwrap_or_else(|reason| {
+                            panic!("FATAL: {reason} at height {}", u32::from(height))
+                        });
+                    let block_mtp = seen.next().expect("FATAL: MTP unavailable");
                     registry::apply(
                         &rebind.network,
                         &rebind.registry_keys,

@@ -69,7 +69,7 @@ impl MtpTracker {
     }
 
     /// Records a block's header timestamp.
-    pub fn update(&mut self, height: BlockHeight, timestamp: u32) {
+    fn update(&mut self, height: BlockHeight, timestamp: u32) {
         debug_assert!(
             self.blocktimes
                 .back()
@@ -116,7 +116,7 @@ impl MtpTracker {
 
     /// Checks the next header against the preceding 11-block median.
     /// The mint processes blocks after activation of both timestamp bounds.
-    pub fn header_time_ok(&self, timestamp: u32) -> Result<(), &'static str> {
+    fn header_time_ok(&self, timestamp: u32) -> Result<(), &'static str> {
         let median = self
             .next()
             .ok_or("preceding median unavailable")?
