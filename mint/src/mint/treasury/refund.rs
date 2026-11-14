@@ -3,19 +3,37 @@
 //! A refund is a Treasury payment, funded from Sapling or Ironwood, with
 //! change in Ironwood, and the wallet's from there, like a sweep. Its amount
 //! is fixed when it is admitted: the payment less the withheld fee,
-//! `FEE_ACTIONS` at the node's rate, so the payer covers the fee. A refund
+//! `FEE_ACTIONS` at `ACTION_FEE`, so the payer covers the fee. A refund
 //! is built on the tip pass after its payment's block.
 
-use zcash_primitives::transaction::fees::zip317::FeeRule;
+use zcash_primitives::transaction::fees::zip317::{
+    FeeRule, GRACE_ACTIONS, P2PKH_STANDARD_INPUT_SIZE, P2PKH_STANDARD_OUTPUT_SIZE,
+};
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 
 use crate::mint::{Name, UnifiedAddress};
 
-/// Actions' worth of the node's rate withheld from every refund, and
-/// paid by every update or release request.
+/// Zatoshis per logical action on every transaction the mint builds.
+/// Zebra 7.0.0's mempool accepts it; its `getstandardfee` reports it only
+/// from Mainnet height 3,590,000.
+pub const ACTION_FEE: Zatoshis = Zatoshis::const_from_u64(1_000);
+
+/// Actions' worth of `ACTION_FEE` withheld from every refund, and paid by
+/// every update or release request.
 pub const FEE_ACTIONS: usize = 100;
+
+/// ZIP 317 at `ACTION_FEE` per logical action.
+pub fn fee_rule() -> FeeRule {
+    FeeRule::non_standard(
+        ACTION_FEE,
+        GRACE_ACTIONS,
+        P2PKH_STANDARD_INPUT_SIZE,
+        P2PKH_STANDARD_OUTPUT_SIZE,
+    )
+    .expect("upstream ZIP-317 sizes are nonzero")
+}
 
 /// `paid` minus the withheld refund fee, when that remainder is positive.
 fn refund_output(paid: Zatoshis, fee_rule: &FeeRule) -> Option<Zatoshis> {
@@ -251,7 +269,7 @@ mod tests {
     fn the_mint_rate_refunds_a_payment_the_standard_rate_keeps() {
         let paid = Zatoshis::const_from_u64(200_000);
         assert_eq!(
-            refund_output(paid, &crate::zcash::fees::fee_rule()),
+            refund_output(paid, &fee_rule()),
             Some(Zatoshis::const_from_u64(100_000))
         );
         assert_eq!(refund_output(paid, &FeeRule::standard()), None);

@@ -1,12 +1,10 @@
 # Zcash I/O changelog
 
-## 2026-11-14 — A fixed fee rate (#512)
+## 2026-11-14 — The node's fee rate is no longer read (#512)
 
-- `fees::fee_rule()` is ZIP 317 at 1,000 zatoshis per logical action.
-  Zebra 7.0.0's mempool accepts that rate now; its `getstandardfee`
-  reports 5,000 on Mainnet until height 3,590,000.
-- `CanonicalBlockSource::standard_fee` and the `getstandardfee` response
-  type are gone, with their tests.
+- The `fees` module is gone: `CanonicalBlockSource::standard_fee`, the
+  `getstandardfee` response type and their tests. The rate is
+  `treasury::fee_rule()`.
 
 ## 2026-11-13 — `ChainClient::connect` is public for zns-rebind (#486)
 

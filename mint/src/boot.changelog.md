@@ -2,7 +2,7 @@
 
 ## 2026-11-14 — Boot no longer reads the fee rate (#512)
 
-- `Boot` has no `fee_rule`; the run loop takes `fees::fee_rule()`. Boot
+- `Boot` has no `fee_rule`; the run loop takes `treasury::fee_rule()`. Boot
   no longer fails when Zebra's `getstandardfee` does, and zns-rebind no
   longer reads it either.
 

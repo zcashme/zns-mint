@@ -64,7 +64,7 @@ async fn main() {
         #[cfg(not(feature = "non-tee"))]
         guest,
     } = Boot::start().await;
-    let fee_rule = zns_mint::zcash::fees::fee_rule();
+    let fee_rule = treasury::fee_rule();
 
     zns_mint::metrics::install();
     zns_mint::metrics::identity(&treasury_address, &registry_ufvk);
