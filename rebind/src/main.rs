@@ -59,71 +59,77 @@ struct Chain {
 }
 
 impl Chain {
-    /// Applies every block up to the tip. `old` also takes the live mint's
-    /// law over them. When the block holding `anchor_txid` arrives, `law`
-    /// starts afresh there, and its height is returned: H.
+    /// Applies blocks until Zebra has none past the wallet's tip. `old`
+    /// also takes the live mint's law over them. When the block holding
+    /// `anchor_txid` arrives, `law` starts afresh there, and its height is
+    /// returned: H.
     async fn sync(
         &mut self,
         rebind: &Rebind,
         mut old: Option<&mut registry::Registry>,
         anchor_txid: Option<TxId>,
     ) -> Option<BlockHeight> {
-        let (tip, _) = rebind
-            .source
-            .exact_tip()
-            .await
-            .expect("FATAL: Zebra tip unavailable");
         let mut h = None;
-        while self.wallet.tip().block_height() < tip {
-            let height = self.wallet.tip().block_height() + 1;
-            let block = rebind
+        loop {
+            let (tip, _) = rebind
                 .source
-                .get_block(&rebind.network, height)
+                .exact_tip()
                 .await
-                .expect("FATAL: block unavailable during the scan");
-            let time = block.header().time;
-            self.mtp
-                .header_time_ok(time)
-                .unwrap_or_else(|reason| panic!("FATAL: {reason} at height {}", u32::from(height)));
+                .expect("FATAL: Zebra tip unavailable");
+            if self.wallet.tip().block_height() >= tip {
+                return h;
+            }
+            while self.wallet.tip().block_height() < tip {
+                let height = self.wallet.tip().block_height() + 1;
+                let block = rebind
+                    .source
+                    .get_block(&rebind.network, height)
+                    .await
+                    .expect("FATAL: block unavailable during the scan");
+                let time = block.header().time;
+                self.mtp.header_time_ok(time).unwrap_or_else(|reason| {
+                    panic!("FATAL: {reason} at height {}", u32::from(height))
+                });
 
-            if let Some(old) = old.as_deref_mut().filter(|_| height >= self.old_birthday) {
-                let mut next = self.mtp.clone();
-                next.update(height, time);
-                let block_mtp = next.current().expect("FATAL: MTP unavailable");
-                registry::apply(
+                if let Some(old) = old.as_deref_mut().filter(|_| height >= self.old_birthday) {
+                    let mut next = self.mtp.clone();
+                    next.update(height, time);
+                    let block_mtp = next.current().expect("FATAL: MTP unavailable");
+                    registry::apply(
+                        &rebind.network,
+                        &rebind.registry_keys,
+                        &block,
+                        height,
+                        block_mtp,
+                        old,
+                    );
+                }
+
+                let at_h = anchor_txid.is_some_and(|txid| {
+                    h.is_none() && block.vtx().iter().any(|tx| tx.txid() == txid)
+                });
+                if at_h {
+                    self.law = Registry::new();
+                    h = Some(height);
+                }
+                zns_mint::mint::apply_block(
                     &rebind.network,
                     &rebind.registry_keys,
-                    &block,
+                    &rebind.treasury_keys,
+                    block,
                     height,
-                    block_mtp,
-                    old,
+                    &mut self.wallet,
+                    &mut self.law,
+                    &mut self.mtp,
                 );
-            }
-
-            let at_h = anchor_txid
-                .is_some_and(|txid| h.is_none() && block.vtx().iter().any(|tx| tx.txid() == txid));
-            if at_h {
-                self.law = Registry::new();
-                h = Some(height);
-            }
-            zns_mint::mint::apply_block(
-                &rebind.network,
-                &rebind.registry_keys,
-                &rebind.treasury_keys,
-                block,
-                height,
-                &mut self.wallet,
-                &mut self.law,
-                &mut self.mtp,
-            );
-            if at_h {
-                assert!(
-                    self.law.anchor_adoption_closed(),
-                    "FATAL: the anchor transaction's block did not fill the anchor pool"
-                );
+                if at_h {
+                    assert!(
+                        self.law.anchor_adoption_closed(),
+                        "FATAL: the anchor transaction's block did not fill the anchor pool"
+                    );
+                }
             }
         }
-        h
     }
 
     /// Syncs again once the chain has moved past the applied tip.
