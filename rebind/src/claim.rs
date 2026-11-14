@@ -32,8 +32,8 @@ pub fn held(fresh: &Registry, claim: &NameNote) -> bool {
 }
 
 /// One round, one block: up to [`crate::anchor::LANES`] claims, each on a
-/// spendable anchor. A name with a claim in flight waits until that claim
-/// confirms or expires.
+/// spendable anchor. A name with a claim built waits until that claim
+/// confirms or expires, even if the node refused it.
 #[allow(clippy::too_many_arguments)]
 pub async fn round<P: Parameters + Send + 'static>(
     network: &P,
@@ -84,10 +84,11 @@ pub async fn round<P: Parameters + Send + 'static>(
                 continue;
             }
         };
-        if source.submit(&transaction, "rebind claim").await {
-            wallet.record_sent(&transaction, target_height, fee);
-            in_flight.insert(claim.name().clone(), transaction.expiry_height());
-        } else {
+        // In flight whatever submit answers: a claim mined during a retry
+        // is answered "already in chain".
+        wallet.record_sent(&transaction, target_height, fee);
+        in_flight.insert(claim.name().clone(), transaction.expiry_height());
+        if !source.submit(&transaction, "rebind claim").await {
             tracing::error!(
                 name = claim.name().as_str(),
                 txid = %transaction.txid(),

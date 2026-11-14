@@ -9,33 +9,32 @@ mod anchor;
 mod boot;
 mod claim;
 mod note;
+mod phase;
 mod registry;
 mod sweep;
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
+use phase::{Moved, Phase};
 use zcash_client_backend::data_api::wallet::TargetHeight;
-use zcash_client_backend::data_api::WalletRead as _;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
-use zcash_protocol::value::Zatoshis;
 use zns_canon::genesis::Anchor;
 use zns_mint::mint::mtp::MtpTracker;
 use zns_mint::mint::registry::Registry;
-use zns_mint::mint::{NameNote, REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
+use zns_mint::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::wallet::Wallet;
 use zns_mint::zcash::{CanonicalBlockSource, ChainClient};
 use zns_mint::{RegistryKeys, TreasuryKeys};
 
-/// How often a waiting step checks the chain again.
+/// How often a waiting phase checks the chain again.
 const POLL: Duration = Duration::from_secs(10);
 
-/// What the Treasury must hold in Ironwood before the move starts (0.05 ZEC): about
-/// four times the fees of moving ~300 names at 1,000 zats per action,
-/// plus the new mint's boot floor. What the move does not spend stays.
-const MIN_REBIND_BALANCE: u64 = 5_000_000;
+/// Rebind reads only blocks this deep, so a reorg of the newest blocks
+/// never touches what it applied, and what it builds anchors at H − 3, as
+/// ZIP 315 recommends.
+const DEPTH: u32 = 3;
 
 /// What the run works with from start to end.
 struct Rebind {
@@ -59,92 +58,84 @@ struct Chain {
 }
 
 impl Chain {
-    /// Applies every block up to the tip. `old` also takes the live mint's
-    /// law over them. When the block holding `anchor_txid` arrives, `law`
-    /// starts afresh there, and its height is returned: H.
+    /// Applies blocks until Zebra has none [`DEPTH`] deep past the wallet's
+    /// tip. `old` also takes the live mint's law over them. When the block
+    /// holding `anchor_txid` arrives, `law` starts afresh there, and its
+    /// height is returned: H.
     async fn sync(
         &mut self,
         rebind: &Rebind,
         mut old: Option<&mut registry::Registry>,
         anchor_txid: Option<TxId>,
     ) -> Option<BlockHeight> {
-        let (tip, _) = rebind
-            .source
-            .exact_tip()
-            .await
-            .expect("FATAL: Zebra tip unavailable");
         let mut h = None;
-        while self.wallet.tip().block_height() < tip {
-            let height = self.wallet.tip().block_height() + 1;
-            let block = rebind
-                .source
-                .get_block(&rebind.network, height)
-                .await
-                .expect("FATAL: block unavailable during the scan");
-            let time = block.header().time;
-            self.mtp
-                .header_time_ok(time)
-                .unwrap_or_else(|reason| panic!("FATAL: {reason} at height {}", u32::from(height)));
+        loop {
+            let tip = settled_tip(rebind).await;
+            if self.wallet.tip().block_height() >= tip {
+                return h;
+            }
+            while self.wallet.tip().block_height() < tip {
+                let height = self.wallet.tip().block_height() + 1;
+                let block = rebind
+                    .source
+                    .get_block(&rebind.network, height)
+                    .await
+                    .expect("FATAL: block unavailable during the scan");
+                let time = block.header().time;
+                self.mtp.header_time_ok(time).unwrap_or_else(|reason| {
+                    panic!("FATAL: {reason} at height {}", u32::from(height))
+                });
 
-            if let Some(old) = old.as_deref_mut().filter(|_| height >= self.old_birthday) {
-                let mut next = self.mtp.clone();
-                next.update(height, time);
-                let block_mtp = next.current().expect("FATAL: MTP unavailable");
-                registry::apply(
+                if let Some(old) = old.as_deref_mut().filter(|_| height >= self.old_birthday) {
+                    let mut next = self.mtp.clone();
+                    next.update(height, time);
+                    let block_mtp = next.current().expect("FATAL: MTP unavailable");
+                    registry::apply(
+                        &rebind.network,
+                        &rebind.registry_keys,
+                        &block,
+                        height,
+                        block_mtp,
+                        old,
+                    );
+                }
+
+                let at_h = anchor_txid.is_some_and(|txid| {
+                    h.is_none() && block.vtx().iter().any(|tx| tx.txid() == txid)
+                });
+                if at_h {
+                    self.law = Registry::new();
+                    h = Some(height);
+                }
+                zns_mint::mint::apply_block(
                     &rebind.network,
                     &rebind.registry_keys,
-                    &block,
+                    &rebind.treasury_keys,
+                    block,
                     height,
-                    block_mtp,
-                    old,
+                    &mut self.wallet,
+                    &mut self.law,
+                    &mut self.mtp,
                 );
-            }
-
-            let at_h = anchor_txid
-                .is_some_and(|txid| h.is_none() && block.vtx().iter().any(|tx| tx.txid() == txid));
-            if at_h {
-                self.law = Registry::new();
-                h = Some(height);
-            }
-            zns_mint::mint::apply_block(
-                &rebind.network,
-                &rebind.registry_keys,
-                &rebind.treasury_keys,
-                block,
-                height,
-                &mut self.wallet,
-                &mut self.law,
-                &mut self.mtp,
-            );
-            if at_h {
-                assert!(
-                    self.law.anchor_adoption_closed(),
-                    "FATAL: the anchor transaction's block did not fill the anchor pool"
-                );
+                if at_h {
+                    assert!(
+                        self.law.anchor_adoption_closed(),
+                        "FATAL: the anchor transaction's block did not fill the anchor pool"
+                    );
+                }
             }
         }
-        h
     }
 
-    /// Syncs again once the chain has moved past the applied tip.
-    async fn next_block(
-        &mut self,
-        rebind: &Rebind,
-        anchor_txid: Option<TxId>,
-    ) -> Option<BlockHeight> {
+    /// Returns once Zebra has a block [`DEPTH`] deep past the wallet's tip.
+    async fn wait_for_block(&self, rebind: &Rebind) {
         let applied = self.wallet.tip().block_height();
         loop {
             tokio::time::sleep(POLL).await;
-            let (tip, _) = rebind
-                .source
-                .exact_tip()
-                .await
-                .expect("FATAL: Zebra tip unavailable");
-            if tip > applied {
-                break;
+            if settled_tip(rebind).await > applied {
+                return;
             }
         }
-        self.sync(rebind, None, anchor_txid).await
     }
 
     /// The Treasury's Ironwood the wallet can spend at the tip: what the
@@ -159,121 +150,14 @@ impl Chain {
     }
 }
 
-/// The scan to the tip with the live mint's law: one claim per live name.
-/// No names means this manifest's anchor is not the live mint's: there is
-/// nothing to move, and nothing may be rewritten.
-async fn read_live_names(chain: &mut Chain, rebind: &Rebind) -> Vec<NameNote> {
-    let mut old = registry::Registry::new();
-    chain.sync(rebind, Some(&mut old), None).await;
-    let claims: Vec<_> = old.name_chain().map(claim::of).collect();
-    assert!(
-        !claims.is_empty(),
-        "FATAL: no live old-format names from {}; refusing to move an empty registry",
-        u32::from(chain.old_birthday)
-    );
-    tracing::info!(names = claims.len(), "rebind: live names read");
-    claims
-}
-
-/// The operator funds the Treasury first; a short balance refuses here,
-/// before anything is sent.
-fn check_funds(chain: &Chain) {
-    let have = chain.treasury_ironwood();
-    assert!(
-        have >= MIN_REBIND_BALANCE,
-        "FATAL: the Treasury holds {have} zats in Ironwood; the move needs \
-         {MIN_REBIND_BALANCE}. Send {} more to the Treasury and run again.",
-        MIN_REBIND_BALANCE - have
-    );
-}
-
-/// Sends the anchor transaction and waits for the block that mines it: H.
-async fn place_anchors(chain: &mut Chain, rebind: &Rebind, names: usize) -> (BlockHeight, TxId) {
-    // A fee note can pay one claim (3 actions) in every round, its change
-    // paying the next.
-    let marginal = rebind.fee_rule.marginal_fee().into_u64();
-    let rounds = names.div_ceil(anchor::LANES) as u64;
-    let fee_note = Zatoshis::from_u64(rounds * 3 * marginal + marginal)
-        .expect("fee note fits the monetary range");
-    let tip = chain.wallet.tip().block_height();
-    let (transaction, fee) = anchor::build(
-        &rebind.network,
-        &mut chain.wallet,
-        &rebind.treasury_keys,
-        &rebind.registry_keys,
-        &rebind.spend_prover,
-        &rebind.output_prover,
-        &rebind.fee_rule,
-        fee_note,
-        tip,
-    );
-    assert!(
-        rebind.source.submit(&transaction, "rebind anchors").await,
-        "FATAL: the node refused the anchor transaction"
-    );
-    chain.wallet.record_sent(&transaction, tip + 1, fee);
-    let anchor_txid = transaction.txid();
-    tracing::info!(txid = %anchor_txid, "rebind: anchor transaction sent");
-    loop {
-        if let Some(h) = chain.next_block(rebind, Some(anchor_txid)).await {
-            tracing::info!(h = u32::from(h), txid = %anchor_txid, "rebind: anchors at the new birthday");
-            return (h, anchor_txid);
-        }
-    }
-}
-
-/// The claims, up to `anchor::LANES` per block, before the sweep merges
-/// the Treasury's notes.
-async fn claim_all(chain: &mut Chain, rebind: &Rebind, claims: &[NameNote]) {
-    let mut in_flight = BTreeMap::new();
-    while !claims.iter().all(|c| claim::held(&chain.law, c)) {
-        claim::round(
-            &rebind.network,
-            &mut chain.wallet,
-            &rebind.treasury_keys,
-            &rebind.registry_keys,
-            &rebind.spend_prover,
-            &rebind.output_prover,
-            &rebind.fee_rule,
-            &rebind.source,
-            &chain.law,
-            claims,
-            &mut in_flight,
-        )
-        .await;
-        chain.next_block(rebind, None).await;
-    }
-}
-
-/// The sweep, last: whatever the Treasury still holds from before H, into
-/// one note the new mint sees. One sweep; a note too small to pay its own
-/// spend stays behind. The manifest waits until it is mined.
-async fn sweep_treasury(chain: &mut Chain, rebind: &Rebind, h: BlockHeight) {
-    if !sweep::due(&chain.wallet, h, chain.wallet.tip().block_height()) {
-        return;
-    }
-    let transaction = sweep::build(
-        &rebind.network,
-        &mut chain.wallet,
-        &rebind.treasury_keys,
-        &rebind.spend_prover,
-        &rebind.output_prover,
-        &rebind.fee_rule,
-    );
-    assert!(
-        rebind.source.submit(&transaction, "rebind sweep").await,
-        "FATAL: the node refused the sweep"
-    );
-    let txid = transaction.txid();
-    tracing::info!(%txid, "rebind: sweep sent");
-    while chain
-        .wallet
-        .get_tx_height(txid)
-        .expect("FATAL: wallet transaction lookup")
-        .is_none()
-    {
-        chain.next_block(rebind, None).await;
-    }
+/// Zebra's tip less [`DEPTH`]: the newest block rebind reads.
+async fn settled_tip(rebind: &Rebind) -> BlockHeight {
+    let (tip, _) = rebind
+        .source
+        .exact_tip()
+        .await
+        .expect("FATAL: Zebra tip unavailable");
+    tip.saturating_sub(DEPTH)
 }
 
 #[tokio::main]
@@ -347,18 +231,30 @@ async fn main() {
         old_birthday,
     };
 
-    // 2. The names to move.
-    let claims = read_live_names(&mut chain, &rebind).await;
-    // 3. The Treasury covers the move.
-    check_funds(&chain);
-    // 4. The anchor transaction: H.
-    let (h, anchor_txid) = place_anchors(&mut chain, &rebind, claims.len()).await;
-    // 5. The claims.
-    claim_all(&mut chain, &rebind, &claims).await;
-    // 6. The sweep.
-    sweep_treasury(&mut chain, &rebind, h).await;
+    // 2. One loop over new blocks: the names, the anchor transaction (H),
+    // the claims, the sweep. A phase that moved on acts at once; one that
+    // stayed waits for the next block.
+    let mut phase = Phase::Names {
+        old: registry::Registry::new(),
+    };
+    let Moved {
+        claims,
+        h,
+        anchor: anchor_txid,
+    } = loop {
+        let anchor_txid = phase.anchor_txid();
+        let anchored = chain.sync(&rebind, phase.old_law(), anchor_txid).await;
+        let stayed = std::mem::discriminant(&phase);
+        phase = phase.advance(&mut chain, &rebind, anchored).await;
+        if let Phase::Done(moved) = phase {
+            break moved;
+        }
+        if std::mem::discriminant(&phase) == stayed {
+            chain.wait_for_block(&rebind).await;
+        }
+    };
 
-    // 7. The check: the new law holds exactly the live names, no more.
+    // 3. The check: the new law holds exactly the live names, no more.
     assert_eq!(
         chain.law.name_chain().count(),
         claims.len(),
@@ -370,7 +266,7 @@ async fn main() {
         "rebind: every live name held"
     );
 
-    // 8. The manifest: only the anchor and the birthday change.
+    // 4. The manifest: only the anchor and the birthday change.
     let moved = Anchor {
         txid: hex::decode(anchor_txid.to_string())
             .expect("txid display is hex")
