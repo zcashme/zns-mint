@@ -7,16 +7,12 @@
   refund fee.
 - The kept-payment line carries the claim's address, so the payer can
   be found from the log.
-- A claim on a protected name with no code is refunded less the refund
-  fee, as before: no code is no guess.
 - The code is read after the price, the registry and the Name Note
   queue. A claim below the price, on a registered name, or on a name
   queued for an earlier payment is refunded less the refund fee
   whatever its code, so the refund says nothing about the code. A wrong
   code at the price on a registered protected name lost 1% of the
   price before; it no longer does.
-- A queued name is refunded in front of the code check. The refund on
-  a refused `name_notes.admit` stays behind it.
 - The OTP response arm queues its refunds through one local `refund`.
   Each goes to the response's address under the response's name, which
   is the name of the challenge it completed.
