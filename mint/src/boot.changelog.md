@@ -1,9 +1,13 @@
 # Boot module changelog
 
-## 2026-11-14 — Boot sync leaves the header check to `apply_block` (#504)
+## 2026-11-14 — Boot takes MTPs as Zebra does (#504)
 
 - The separate `header_time_ok` call is gone: `apply_block` checks each
   header as it admits it.
+- The birthday anchor is the birthday block's MTP: the median of the 11
+  blocks before it. The window used to end at the birthday block, which
+  gave the next block's MTP, so day zero, and each day after it, starts
+  one block earlier.
 
 ## 2026-11-13 — The key methods are public for zns-rebind (#486)
 

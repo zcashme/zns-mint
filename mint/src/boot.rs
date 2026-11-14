@@ -487,12 +487,12 @@ impl Boot<Network> {
             "boot: wallet born complete from the origin checkpoint"
         );
 
-        // 3d. The mint's birthday: a throwaway window ending at the
-        // birthday block, whose median is the birthday block's MTP —
-        // the day-zero anchor for `current_day`.
+        // 3d. The mint's birthday: a throwaway window of the 11 blocks
+        // before the birthday block, whose median is the birthday
+        // block's MTP — the day-zero anchor for `current_day`.
         let mut birthday = MtpTracker::default();
         birthday
-            .backfill(mint_birthday, |height| {
+            .backfill(mint_birthday - 1, |height| {
                 let source = source.clone();
                 async move { source.header_time(height).await }
             })
