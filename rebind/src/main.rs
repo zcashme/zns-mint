@@ -79,17 +79,23 @@ impl Chain {
             if self.wallet.tip().block_height() >= tip {
                 return h;
             }
-            let next = u32::from(self.wallet.tip().block_height()) + 1;
-            let mut blocks = stream::iter(next..=u32::from(tip))
-                .map(|height| {
-                    rebind
-                        .source
-                        .get_block(&rebind.network, BlockHeight::from_u32(height))
+            let from = self.wallet.tip().block_height() + 1;
+            let mut blocks = stream::iter(u32::from(from)..=u32::from(tip))
+                .map(|height| async move {
+                    let height = BlockHeight::from_u32(height);
+                    (
+                        height,
+                        rebind.source.get_block(&rebind.network, height).await,
+                    )
                 })
                 .buffered(AHEAD);
-            while let Some(block) = blocks.next().await {
-                let block = block.expect("FATAL: block unavailable during the scan");
-                let height = self.wallet.tip().block_height() + 1;
+            while let Some((height, block)) = blocks.next().await {
+                let block = block.unwrap_or_else(|error| {
+                    panic!(
+                        "FATAL: block {} unavailable during the scan: {error}",
+                        u32::from(height)
+                    )
+                });
                 let time = block.header().time;
                 self.mtp.header_time_ok(time).unwrap_or_else(|reason| {
                     panic!("FATAL: {reason} at height {}", u32::from(height))
