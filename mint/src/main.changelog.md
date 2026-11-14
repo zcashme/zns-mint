@@ -2,13 +2,14 @@
 
 ## 2026-11-14 — A claim that fails a protected name's access code is kept (#505)
 
-- A claim on a protected name that covers the price with a wrong code,
-  or with none, keeps its whole payment. A wrong code was refunded less
-  1% of the price and the refund fee; a missing code was refunded less
-  the refund fee.
-- The code is read after the price check. A claim below the price is
-  refunded less the refund fee whatever its code, so it tells the payer
-  nothing about the code.
+- A claim on a protected name with a wrong code, with none, or below
+  the price keeps its whole payment. A wrong code was refunded less 1%
+  of the price and the refund fee; a missing code or an underpayment
+  was refunded less the refund fee.
+- The right code below the price is kept too. Refunding it while a
+  wrong code is kept would test a code for the refund fee.
+- The right code at the price is still refunded, less the refund fee,
+  when the name is registered or already queued.
 - The OTP response arm queues its refunds through one local `refund`.
   Each goes to the response's address under the response's name, which
   is the name of the challenge it completed.

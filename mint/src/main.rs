@@ -622,22 +622,23 @@ async fn main() {
                         );
                         continue;
                     };
-                    if paid < price {
-                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
-                        continue;
-                    }
-                    // A protected name claims only with its code. A payment
-                    // that covers the price with any other code, or none,
-                    // is kept: a guess costs the price.
+                    // A protected name claims only with its code and its
+                    // price; otherwise the payment is kept. The right code
+                    // below the price is kept too: refunding it would test
+                    // a code for the refund fee.
                     if protected_names.is_protected(name, mtp_now)
-                        && !access_code_key.accepts(name, code.as_ref())
+                        && (paid < price || !access_code_key.accepts(name, code.as_ref()))
                     {
                         tracing::info!(
                             %txid,
                             name = %name.as_str(),
                             paid = paid.into_u64(),
-                            "access code refused; payment kept"
+                            "protected claim refused; payment kept"
                         );
+                        continue;
+                    }
+                    if paid < price {
+                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
                         continue;
                     }
                     // A refusal keeps the payment unless the name is taken.
