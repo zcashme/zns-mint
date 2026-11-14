@@ -97,22 +97,13 @@ impl RefundQueue {
     ) {
         let Some(amount) = refund_output(refundable, fee_rule) else {
             // Nothing is queued. The sentence stays on this record.
-            if let Some(sentence) = note.as_deref() {
-                tracing::info!(
-                    %txid,
-                    name = %name.as_str(),
-                    refundable = refundable.into_u64(),
-                    note = sentence,
-                    "payment kept"
-                );
-            } else {
-                tracing::info!(
-                    %txid,
-                    name = %name.as_str(),
-                    refundable = refundable.into_u64(),
-                    "payment kept"
-                );
-            }
+            tracing::info!(
+                %txid,
+                name = %name.as_str(),
+                refundable = refundable.into_u64(),
+                note = note.as_deref(),
+                "payment kept"
+            );
             return;
         };
         tracing::info!(
