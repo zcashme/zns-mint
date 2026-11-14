@@ -2,8 +2,9 @@
 
 ## 2026-11-14 — No access-code penalty (#505)
 
-- `access_code_penalty` is gone: a claim that fails a protected name's
-  access code is not refunded, so no refund keeps 1% of the price.
+- `access_code_penalty` is gone: no refund keeps 1% of the price. A
+  wrong code at the price on a free protected name is not refunded, and
+  every other refused claim is refunded less the fee alone.
 - The kept-payment log is one call. Its `note` field is absent when the
   payment has no sentence, as before.
 
