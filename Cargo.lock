@@ -5238,6 +5238,7 @@ name = "zns-rebind"
 version = "0.1.0"
 dependencies = [
  "blake2b_simd",
+ "futures-util",
  "hex",
  "libc",
  "orchard",

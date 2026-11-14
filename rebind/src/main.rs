@@ -15,6 +15,7 @@ mod sweep;
 
 use std::time::Duration;
 
+use futures_util::{stream, StreamExt as _};
 use phase::{Moved, Phase};
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
@@ -35,6 +36,10 @@ const POLL: Duration = Duration::from_secs(10);
 /// never touches what it applied, and what it builds anchors at H − 3, as
 /// ZIP 315 recommends.
 const DEPTH: u32 = 3;
+
+/// Blocks fetched while the one before them is applied. Applying still
+/// goes one block at a time, in height order.
+const AHEAD: usize = 4;
 
 /// What the run works with from start to end.
 struct Rebind {
@@ -74,13 +79,23 @@ impl Chain {
             if self.wallet.tip().block_height() >= tip {
                 return h;
             }
-            while self.wallet.tip().block_height() < tip {
-                let height = self.wallet.tip().block_height() + 1;
-                let block = rebind
-                    .source
-                    .get_block(&rebind.network, height)
-                    .await
-                    .expect("FATAL: block unavailable during the scan");
+            let from = self.wallet.tip().block_height() + 1;
+            let mut blocks = stream::iter(u32::from(from)..=u32::from(tip))
+                .map(|height| async move {
+                    let height = BlockHeight::from_u32(height);
+                    (
+                        height,
+                        rebind.source.get_block(&rebind.network, height).await,
+                    )
+                })
+                .buffered(AHEAD);
+            while let Some((height, block)) = blocks.next().await {
+                let block = block.unwrap_or_else(|error| {
+                    panic!(
+                        "FATAL: block {} unavailable during the scan: {error}",
+                        u32::from(height)
+                    )
+                });
                 let time = block.header().time;
                 self.mtp.header_time_ok(time).unwrap_or_else(|reason| {
                     panic!("FATAL: {reason} at height {}", u32::from(height))
