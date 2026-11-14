@@ -2,10 +2,13 @@
 
 ## 2026-11-14 — The mint's fee rate (#512)
 
-- `ACTION_FEE` is 1,000 zatoshis per logical action, beside
-  `FEE_ACTIONS`. `fee_rule()` is ZIP 317 at that rate, with upstream's
-  `GRACE_ACTIONS` and P2PKH sizes. Zebra 7.0.0's mempool accepts it; its
-  `getstandardfee` reports it only from Mainnet height 3,590,000.
+- `ACTION_FEE` is 1,000 zatoshis per logical action. `fee_rule()` is
+  ZIP 317 at that rate, with upstream's `GRACE_ACTIONS` and P2PKH sizes.
+  Zebra 7.0.0's mempool accepts it; its `getstandardfee` reports it only
+  from Mainnet height 3,590,000. Upstream's `MARGINAL_FEE` stays 5,000.
+- `CHALLENGE_FEE` (100,000 zatoshis, `ACTION_FEE * 100`) replaces
+  `FEE_ACTIONS`. `refund_output` subtracts it with no `FeeRule`, so
+  `RefundQueue::admit` and `admit_with_note` take no `fee_rule`.
 
 ## 2026-11-14 — No access-code penalty (#505)
 

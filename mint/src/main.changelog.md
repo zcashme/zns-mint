@@ -7,6 +7,9 @@
   100,000 zatoshis, and every transaction the mint builds pays 1,000
   zatoshis per action. The `fee rate changed` and `fee rate unavailable`
   lines are gone.
+- The three challenge-fee checks compare `paid` with
+  `treasury::CHALLENGE_FEE`, and `refunds.admit` and `market.admit` take
+  no `fee_rule`.
 
 ## 2026-11-14 — A wrong access code on a protected name keeps the payment (#505)
 

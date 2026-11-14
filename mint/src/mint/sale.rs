@@ -11,14 +11,13 @@ use zcash_protocol::consensus::Parameters;
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis;
 
-use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::TxId;
 
 use time::Duration;
 
 use crate::mint::registry::Registry;
-use crate::mint::treasury::{OtpCode, OtpQueue, D_OTP, FEE_ACTIONS};
+use crate::mint::treasury::{OtpCode, OtpQueue, CHALLENGE_FEE, D_OTP};
 use crate::mint::{
     Action, Expiry, Name, NameCommitment, NameNote, Request, Timestamp, UnifiedAddress,
 };
@@ -623,12 +622,11 @@ impl Market {
         paid: Zatoshis,
         registry: &Registry,
         challenges: &mut OtpQueue,
-        fee_rule: &FeeRule,
         height: BlockHeight,
         mtp: Timestamp,
         pending: impl Fn(&Name) -> bool,
     ) -> Option<ReturnedIntent> {
-        let fee_ok = (fee_rule.marginal_fee() * FEE_ACTIONS).is_some_and(|fee| paid >= fee);
+        let fee_ok = paid >= CHALLENGE_FEE;
         match request {
             Request::Claim { .. } | Request::Update { .. } | Request::Release { .. } => None,
             Request::List(listing) => {
@@ -818,7 +816,6 @@ mod tests {
     use crate::mint::note::NameNoteQueue;
     use crate::mint::treasury::RefundQueue;
     use crate::mint::{decode_controller_ua, Action, OtpMemo};
-    use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
     use zcash_protocol::consensus::MainNetwork;
     use zcash_protocol::memo::Memo;
 
@@ -1894,10 +1891,6 @@ mod tests {
             .expect("test nullifier")
     }
 
-    fn intent_fee() -> Zatoshis {
-        (MARGINAL_FEE * FEE_ACTIONS).unwrap()
-    }
-
     fn buy_of_alice() -> Request {
         Request::Buy {
             name: name(),
@@ -1918,7 +1911,6 @@ mod tests {
             paid,
             registry,
             &mut OtpQueue::new(),
-            &FeeRule::standard(),
             height,
             mtp(),
             |_| false,
@@ -1929,7 +1921,6 @@ mod tests {
     fn queued(back: &ReturnedIntent, paid: Zatoshis, height: BlockHeight) -> RefundQueue {
         let mut queue = RefundQueue::default();
         queue.admit_with_note(
-            &FeeRule::standard(),
             TxId::from_bytes([9; 32]),
             &back.recipient,
             &back.name,
@@ -1974,13 +1965,13 @@ mod tests {
         assert_eq!(back.recipient, bob());
         assert_eq!(back.note, format!("ZNS:held:alice:{}", until.as_seconds()));
         let (amount, note) = due_note(&queued(&back, Zatoshis::const_from_u64(1_000_000), at));
-        assert_eq!(amount, Zatoshis::const_from_u64(500_000));
+        assert_eq!(amount, Zatoshis::const_from_u64(900_000));
         assert_eq!(note, back.note);
 
-        let kept = admit_buy(&mut market, &registry, 3, intent_fee(), at)
+        let kept = admit_buy(&mut market, &registry, 3, CHALLENGE_FEE, at)
             .expect("an exact fee is still a return");
         assert_eq!(kept.note, back.note);
-        assert!(queued(&kept, intent_fee(), at).is_empty());
+        assert!(queued(&kept, CHALLENGE_FEE, at).is_empty());
     }
 
     #[test]
@@ -2000,7 +1991,7 @@ mod tests {
         assert_eq!(back.recipient, bob());
         assert_eq!(back.note, "ZNS:wait:alice:10");
         let (amount, note) = due_note(&queued(&back, Zatoshis::const_from_u64(1_000_000), early));
-        assert_eq!(amount, Zatoshis::const_from_u64(500_000));
+        assert_eq!(amount, Zatoshis::const_from_u64(900_000));
         assert_eq!(note, back.note);
     }
 
@@ -2042,7 +2033,7 @@ mod tests {
         assert_eq!(back.recipient, bob());
         assert_eq!(back.note, format!("ZNS:held:alice:{}", until.as_seconds()));
         let (amount, note) = due_note(&queued(&back, Zatoshis::const_from_u64(1_000_000), later));
-        assert_eq!(amount, Zatoshis::const_from_u64(500_000));
+        assert_eq!(amount, Zatoshis::const_from_u64(900_000));
         assert_eq!(note, back.note);
     }
 }
