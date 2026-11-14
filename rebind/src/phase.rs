@@ -19,40 +19,34 @@ use crate::{anchor, claim, registry, sweep, Chain, Rebind};
 /// plus the new mint's boot floor. What the move does not spend stays.
 const MIN_REBIND_BALANCE: u64 = 5_000_000;
 
-/// A transaction this run submitted and the node accepted.
-#[derive(Clone, Copy)]
-pub struct Sent {
-    pub txid: TxId,
-    pub expiry: BlockHeight,
-}
-
 pub enum Phase {
     /// The scan to the tip with the live mint's law.
-    Names { old: registry::Registry },
+    Names {
+        old: registry::Registry,
+    },
     /// One claim per live name; the anchor transaction is not yet mined.
     Anchor {
         claims: Vec<NameNote>,
-        sent: Option<Sent>,
+        sent: Option<TxId>,
     },
-    /// H is the block holding `anchor`.
     Claims {
-        claims: Vec<NameNote>,
-        h: BlockHeight,
-        anchor: TxId,
+        moved: Moved,
         in_flight: BTreeMap<Name, BlockHeight>,
     },
     /// Whatever the Treasury still holds from before H, into one note.
     Sweep {
-        claims: Vec<NameNote>,
-        h: BlockHeight,
-        anchor: TxId,
-        sent: Option<Sent>,
+        moved: Moved,
+        sent: Option<TxId>,
     },
-    Done {
-        claims: Vec<NameNote>,
-        h: BlockHeight,
-        anchor: TxId,
-    },
+    Done(Moved),
+}
+
+/// The move from the anchor transaction's block on.
+pub struct Moved {
+    pub claims: Vec<NameNote>,
+    /// The block holding `anchor`: the new birthday.
+    pub h: BlockHeight,
+    pub anchor: TxId,
 }
 
 impl Phase {
@@ -67,9 +61,7 @@ impl Phase {
     /// The anchor transaction `sync` watches for.
     pub fn anchor_txid(&self) -> Option<TxId> {
         match self {
-            Phase::Anchor {
-                sent: Some(sent), ..
-            } => Some(sent.txid),
+            Phase::Anchor { sent, .. } => *sent,
             _ => None,
         }
     }
@@ -90,17 +82,15 @@ impl Phase {
                 Phase::Anchor { claims, sent: None }
             }
             Phase::Anchor { claims, sent } => match (sent, anchored) {
-                (Some(sent), Some(h)) => {
-                    tracing::info!(h = u32::from(h), txid = %sent.txid, "rebind: anchors at the new birthday");
+                (Some(anchor), Some(h)) => {
+                    tracing::info!(h = u32::from(h), txid = %anchor, "rebind: anchors at the new birthday");
                     Phase::Claims {
-                        claims,
-                        h,
-                        anchor: sent.txid,
+                        moved: Moved { claims, h, anchor },
                         in_flight: BTreeMap::new(),
                     }
                 }
-                (Some(sent), None) => Phase::Anchor {
-                    sent: unexpired(chain, sent, tip, "anchor transaction"),
+                (Some(txid), None) => Phase::Anchor {
+                    sent: unexpired(chain, txid, tip, "anchor transaction"),
                     claims,
                 },
                 (None, _) => {
@@ -109,18 +99,11 @@ impl Phase {
                 }
             },
             Phase::Claims {
-                claims,
-                h,
-                anchor,
+                moved,
                 mut in_flight,
             } => {
-                if claims.iter().all(|c| claim::held(&chain.law, c)) {
-                    return Phase::Sweep {
-                        claims,
-                        h,
-                        anchor,
-                        sent: None,
-                    };
+                if moved.claims.iter().all(|c| claim::held(&chain.law, c)) {
+                    return Phase::Sweep { moved, sent: None };
                 }
                 claim::round(
                     &rebind.network,
@@ -132,56 +115,35 @@ impl Phase {
                     &rebind.fee_rule,
                     &rebind.source,
                     &chain.law,
-                    &claims,
+                    &moved.claims,
                     &mut in_flight,
                 )
                 .await;
-                Phase::Claims {
-                    claims,
-                    h,
-                    anchor,
-                    in_flight,
-                }
+                Phase::Claims { moved, in_flight }
             }
             Phase::Sweep {
-                claims,
-                h,
-                anchor,
-                sent: Some(sent),
+                moved,
+                sent: Some(txid),
             } => {
                 let mined = chain
                     .wallet
-                    .get_tx_height(sent.txid)
+                    .get_tx_height(txid)
                     .expect("FATAL: wallet transaction lookup")
                     .is_some();
                 if mined {
-                    return Phase::Done { claims, h, anchor };
+                    return Phase::Done(moved);
                 }
-                Phase::Sweep {
-                    sent: unexpired(chain, sent, tip, "sweep"),
-                    claims,
-                    h,
-                    anchor,
-                }
+                let sent = unexpired(chain, txid, tip, "sweep");
+                Phase::Sweep { moved, sent }
             }
-            Phase::Sweep {
-                claims,
-                h,
-                anchor,
-                sent: None,
-            } => {
-                if !sweep::due(&chain.wallet, h, tip) {
-                    return Phase::Done { claims, h, anchor };
+            Phase::Sweep { moved, sent: None } => {
+                if !sweep::due(&chain.wallet, moved.h, tip) {
+                    return Phase::Done(moved);
                 }
-                let sent = send_sweep(chain, rebind).await;
-                Phase::Sweep {
-                    claims,
-                    h,
-                    anchor,
-                    sent: Some(sent),
-                }
+                let sent = Some(send_sweep(chain, rebind).await);
+                Phase::Sweep { moved, sent }
             }
-            done @ Phase::Done { .. } => done,
+            done @ Phase::Done(_) => done,
         }
     }
 }
@@ -211,14 +173,14 @@ fn check_funds(chain: &Chain) {
     );
 }
 
-/// `sent`, until the chain passes its expiry with it unmined. Its notes
+/// `txid`, until the chain passes its expiry with it unmined. Its notes
 /// come back to the wallet the block after, and the phase builds again.
-fn unexpired(chain: &Chain, sent: Sent, tip: BlockHeight, what: &str) -> Option<Sent> {
-    if chain.wallet.expired_unmined_at(sent.txid, tip) {
-        tracing::warn!(txid = %sent.txid, expiry = u32::from(sent.expiry), "rebind: the {what} expired unmined");
+fn unexpired(chain: &Chain, txid: TxId, tip: BlockHeight, what: &str) -> Option<TxId> {
+    if chain.wallet.expired_unmined_at(txid, tip) {
+        tracing::warn!(%txid, "rebind: the {what} expired unmined");
         return None;
     }
-    Some(sent)
+    Some(txid)
 }
 
 /// Sends the anchor transaction at `tip`. A refusal leaves nothing sent,
@@ -228,7 +190,7 @@ async fn send_anchor(
     rebind: &Rebind,
     names: usize,
     tip: BlockHeight,
-) -> Option<Sent> {
+) -> Option<TxId> {
     // A fee note can pay one claim (3 actions) in every round, its change
     // paying the next.
     let marginal = rebind.fee_rule.marginal_fee().into_u64();
@@ -253,16 +215,13 @@ async fn send_anchor(
     }
     chain.wallet.record_sent(&transaction, tip + 1, fee);
     tracing::info!(%txid, "rebind: anchor transaction sent");
-    Some(Sent {
-        txid,
-        expiry: transaction.expiry_height(),
-    })
+    Some(txid)
 }
 
 /// Sends the sweep. Building it already stored it in the wallet, holding
 /// its notes until its expiry, so a refusal waits that out like an
 /// expired sweep.
-async fn send_sweep(chain: &mut Chain, rebind: &Rebind) -> Sent {
+async fn send_sweep(chain: &mut Chain, rebind: &Rebind) -> TxId {
     let transaction = sweep::build(
         &rebind.network,
         &mut chain.wallet,
@@ -277,8 +236,5 @@ async fn send_sweep(chain: &mut Chain, rebind: &Rebind) -> Sent {
     } else {
         tracing::error!(%txid, "rebind: the node refused the sweep");
     }
-    Sent {
-        txid,
-        expiry: transaction.expiry_height(),
-    }
+    txid
 }

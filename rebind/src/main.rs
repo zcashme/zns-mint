@@ -15,7 +15,7 @@ mod sweep;
 
 use std::time::Duration;
 
-use phase::Phase;
+use phase::{Moved, Phase};
 use zcash_client_backend::data_api::wallet::TargetHeight;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
@@ -231,13 +231,17 @@ async fn main() {
     let mut phase = Phase::Names {
         old: registry::Registry::new(),
     };
-    let (claims, h, anchor_txid) = loop {
+    let Moved {
+        claims,
+        h,
+        anchor: anchor_txid,
+    } = loop {
         let anchor_txid = phase.anchor_txid();
         let anchored = chain.sync(&rebind, phase.old_law(), anchor_txid).await;
         let stayed = std::mem::discriminant(&phase);
         phase = phase.advance(&mut chain, &rebind, anchored).await;
-        if let Phase::Done { claims, h, anchor } = phase {
-            break (claims, h, anchor);
+        if let Phase::Done(moved) = phase {
+            break moved;
         }
         if std::mem::discriminant(&phase) == stayed {
             chain.wait_for_block(&rebind).await;
