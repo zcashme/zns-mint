@@ -611,9 +611,15 @@ async fn main() {
                     term,
                     code,
                 } => {
+                    let protected = protected_names.is_protected(name, mtp_now);
                     // The quote at first sight is binding. A quote above
-                    // the money supply is dead; the payment is kept.
+                    // the money supply is dead; the payment is kept, but
+                    // a protected name's claim with no code is refunded.
                     let Some(price) = Oracle::quote_at(rate, name, *term) else {
+                        if protected && code.is_none() {
+                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                            continue;
+                        }
                         tracing::info!(
                             %txid,
                             name = %name.as_str(),
@@ -633,9 +639,7 @@ async fn main() {
                     // A protected name claims only with its code. Any other
                     // code, or none, keeps the payment: a guess costs the
                     // price.
-                    if protected_names.is_protected(name, mtp_now)
-                        && !access_code_key.accepts(name, code.as_ref())
-                    {
+                    if protected && !access_code_key.accepts(name, code.as_ref()) {
                         tracing::info!(
                             %txid,
                             name = %name.as_str(),

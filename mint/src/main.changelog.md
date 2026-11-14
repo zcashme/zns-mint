@@ -13,8 +13,8 @@
   code at the price on a registered protected name lost 1% of the
   price before; it no longer does.
 - A code-free claim on a protected name whose quote is above the money
-  supply is kept, as every other claim with that quote is. It was
-  refunded less the refund fee, before the quote was read.
+  supply is still refunded less the refund fee. Every other claim with
+  that quote is kept, as before.
 - The queued-name refund moved in front of the code check;
   `name_notes.admit` can no longer refuse a claim, so its refund branch
   is gone.
