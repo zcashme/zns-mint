@@ -362,6 +362,11 @@ async fn main() {
             // are read. The fee and the authorization are the same ones
             // the request pass requires.
             let trigger = next_height + 1;
+            // A challenge opened here is relayed in the trigger block, so
+            // it is judged at that block's MTP, as the mempool path does.
+            let trigger_mtp = mtp
+                .next()
+                .expect("FATAL: MTP unavailable at the applied block");
             for (txid, inbound, paid) in &arrivals {
                 let MintInbound::Request(
                     request @ (Request::Update { .. } | Request::Release { .. }),
@@ -372,7 +377,7 @@ async fn main() {
                 if !challenges.holds(request)
                     || !market.allows_transition(request.name())
                     || registry
-                        .authorize_challenge(&name_notes, request, trigger, block_mtp)
+                        .authorize_challenge(&name_notes, request, trigger, trigger_mtp)
                         .is_none()
                     || (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
                         .is_none_or(|fee| *paid < fee)

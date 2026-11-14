@@ -6,6 +6,9 @@
   MTP `apply_block` returns, the median of the 11 blocks before the
   block. The loop no longer reads the tracker after applying, which
   gave the next block's MTP.
+- The mined-repeat check judges an update or release at its trigger
+  block, `next_height + 1`, so it takes that block's MTP, `mtp.next()`,
+  as the mempool path does.
 - The separate `header_time_ok` call is gone: `apply_block` checks the
   header as it admits it.
 
