@@ -1,5 +1,12 @@
 # Treasury design record
 
+## 2026-11-15 — The mainnet vault is the new address (#518)
+
+- `MAINNET_VAULT_ADDRESS` is
+  `u1u0zxet96mm6chufy5y3mg5n93x69ht98js44rs4448xwcfk5l6xrx6zl34439vpup6fz040v4ensc3npx6jsk679e7kksdf7qv5mq53n`,
+  an Orchard-only mainnet unified address. The testnet vault is
+  unchanged.
+
 ## 2026-11-14 — The mint's fee rate (#512)
 
 - `ACTION_FEE` is 1,000 zatoshis per logical action. `fee_rule()` is
