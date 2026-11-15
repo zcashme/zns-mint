@@ -253,13 +253,13 @@ pub async fn fetch_round() -> Option<Decimal> {
 // Name schedule — the product's pricing law, independent of the rate
 // ===========================================================================
 
-/// Annual USD price by name length: the five tiers cover 1–5 character
-/// names and longer names pay the established minimum.
-const ANNUAL_USD: [u64; 5] = [10_000, 2_500, 800, 400, 100];
-const MINIMUM_USD: u64 = 20;
+/// Annual USD price by name length: the nine tiers cover 1–9 character
+/// names and longer names pay the minimum.
+const ANNUAL_USD: [u64; 9] = [12_480, 2_720, 920, 472, 188, 112, 48, 32, 24];
+const MINIMUM_USD: u64 = 18;
 
-/// Forever registration of names costs three annual prices.
-const FOREVER_MULTIPLE: u64 = 3;
+/// Forever registration of names costs four annual prices.
+const FOREVER_MULTIPLE: u64 = 4;
 
 fn annual_usd(name: &Name) -> u64 {
     let len = name.as_str().len();
@@ -370,14 +370,13 @@ mod tests {
         assert_eq!(oracle.current().into_u64(), 100_000);
 
         let short = Name::parse("a").unwrap();
-        // A year is the annual tier price; forever is three of them.
-        assert_eq!(quoted(&oracle, &short, Term::Years(1)), 1_000_000_000);
-        assert_eq!(quoted(&oracle, &short, Term::Forever), 3_000_000_000);
+        // A year is the annual tier price; forever is four of them.
+        assert_eq!(quoted(&oracle, &short, Term::Years(1)), 1_248_000_000);
+        assert_eq!(quoted(&oracle, &short, Term::Forever), 4_992_000_000);
 
-        // Six-character names pay the flat minimum tier.
         let long = Name::parse("purple").unwrap();
-        assert_eq!(quoted(&oracle, &long, Term::Years(1)), 2_000_000);
-        assert_eq!(quoted(&oracle, &long, Term::Forever), 6_000_000);
+        assert_eq!(quoted(&oracle, &long, Term::Years(1)), 11_200_000);
+        assert_eq!(quoted(&oracle, &long, Term::Forever), 44_800_000);
     }
 
     /// `quote_at` prices at the rate given; `quote` passes the published one.
@@ -387,14 +386,14 @@ mod tests {
         let name = Name::parse("purple").unwrap();
         let rate = Zatoshis::const_from_u64(200_000);
         let quote = Oracle::quote_at(rate, &name, Term::Years(1)).unwrap();
-        assert_eq!(quote.into_u64(), 4_000_000);
+        assert_eq!(quote.into_u64(), 22_400_000);
         assert_eq!(
             oracle.quote(&name, Term::Years(1)),
             Oracle::quote_at(oracle.current(), &name, Term::Years(1))
         );
     }
 
-    /// The registration quote follows the term: N annuals for `Ny`, three
+    /// The registration quote follows the term: N annuals for `Ny`, four
     /// for `forever` — the pricing law the run-loop join flattened to a
     /// flat forever quote (issue #30). Every tariff tier, priced by term.
     #[test]
@@ -402,15 +401,19 @@ mod tests {
         // $1,000/ZEC ⇒ rate 100,000 zats per dollar, from the first round.
         let oracle = Oracle::new(Decimal::from(1_000));
 
-        // Every tariff tier: lengths 1–5 pay the annual schedule, longer
-        // names the flat minimum. The one-year quote is the tier's base.
+        // Every tariff tier: lengths 1–9 pay the annual schedule, longer
+        // names the minimum. The one-year quote is the tier's base.
         for (name, annual) in [
-            ("a", 1_000_000_000u64),
-            ("ab", 250_000_000),
-            ("abc", 80_000_000),
-            ("abcd", 40_000_000),
-            ("abcde", 10_000_000),
-            ("purple", 2_000_000),
+            ("a", 1_248_000_000u64),
+            ("ab", 272_000_000),
+            ("abc", 92_000_000),
+            ("abcd", 47_200_000),
+            ("abcde", 18_800_000),
+            ("abcdef", 11_200_000),
+            ("abcdefg", 4_800_000),
+            ("abcdefgh", 3_200_000),
+            ("abcdefghi", 2_400_000),
+            ("abcdefghij", 1_800_000),
         ] {
             let name = Name::parse(name).unwrap();
             assert_eq!(
@@ -425,10 +428,10 @@ mod tests {
                     "{name:?} {years}y"
                 );
             }
-            // Forever keeps its three-annual multiple, not years-capped.
+            // Forever keeps its four-annual multiple, not years-capped.
             assert_eq!(
                 quoted(&oracle, &name, Term::Forever),
-                annual * 3,
+                annual * 4,
                 "{name:?} forever"
             );
         }

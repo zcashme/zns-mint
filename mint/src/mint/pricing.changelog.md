@@ -1,5 +1,14 @@
 # Pricing changelog
 
+## 2026-11-15 — Nine length tiers, and forever is four annual prices (#514)
+
+- `ANNUAL_USD` has a tier for each length from 1 to 9 characters:
+  12,480, 2,720, 920, 472, 188, 112, 48, 32 and 24. `MINIMUM_USD` is
+  18, for 10 characters and longer. It was five tiers (10,000, 2,500,
+  800, 400, 100) and 20 from 6 characters.
+- `FOREVER_MULTIPLE` is 4: forever costs four annual prices. It was 3.
+- The quote tests price every tier.
+
 ## 2026-11-11 — The rate is the lowest of the last 120 rounds (#466)
 
 - `Oracle` holds the zats-per-USD rate of the last `WINDOW` (120)
