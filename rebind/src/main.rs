@@ -18,6 +18,7 @@ use std::time::Duration;
 use futures_util::{stream, StreamExt as _};
 use phase::{Moved, Phase};
 use zcash_client_backend::data_api::wallet::TargetHeight;
+use zcash_primitives::block::Block;
 use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
@@ -26,7 +27,7 @@ use zns_mint::mint::mtp::MtpTracker;
 use zns_mint::mint::registry::Registry;
 use zns_mint::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use zns_mint::wallet::Wallet;
-use zns_mint::zcash::{CanonicalBlockSource, ChainClient};
+use zns_mint::zcash::{CanonicalBlockSource, ChainClient, TransportError, RETRY_PAUSE};
 use zns_mint::{RegistryKeys, TreasuryKeys};
 
 /// How often a waiting phase checks the chain again.
@@ -83,10 +84,7 @@ impl Chain {
             let mut blocks = stream::iter(u32::from(from)..=u32::from(tip))
                 .map(|height| async move {
                     let height = BlockHeight::from_u32(height);
-                    (
-                        height,
-                        rebind.source.get_block(&rebind.network, height).await,
-                    )
+                    (height, fetch_block(rebind, height).await)
                 })
                 .buffered(AHEAD);
             while let Some((height, block)) = blocks.next().await {
@@ -171,10 +169,28 @@ impl Chain {
 async fn settled_tip(rebind: &Rebind) -> BlockHeight {
     let (tip, _) = rebind
         .source
-        .exact_tip()
+        .canonical_tip()
         .await
         .expect("FATAL: Zebra tip unavailable");
     tip.saturating_sub(DEPTH)
+}
+
+/// Block `height`, retrying while Zebra cannot be reached, as the mint's
+/// run loop does. Any other error is returned.
+async fn fetch_block(rebind: &Rebind, height: BlockHeight) -> Result<Block, TransportError> {
+    loop {
+        match rebind.source.get_block(&rebind.network, height).await {
+            Err(error) if error.is_retryable() => {
+                tracing::warn!(
+                    %error,
+                    height = u32::from(height),
+                    "rebind: block unavailable; retrying"
+                );
+                tokio::time::sleep(RETRY_PAUSE).await;
+            }
+            fetched => return fetched,
+        }
+    }
 }
 
 #[tokio::main]
