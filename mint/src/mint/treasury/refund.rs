@@ -2,33 +2,23 @@
 //!
 //! A refund is a Treasury payment, funded from Sapling or Ironwood, with
 //! change in Ironwood, and the wallet's from there, like a sweep. Its amount
-//! is fixed when it is admitted: the payment less any penalty and the
-//! withheld fee, `FEE_ACTIONS` at the node's rate, so the payer covers the fee.
-//! A wrong access code also keeps 1% of the quote. A refund is built on
-//! the tip pass after its payment's block.
+//! is fixed when it is admitted: the payment less `CHALLENGE_FEE`, so the
+//! payer covers the fee. A refund is built on the tip pass after its
+//! payment's block.
 
-use std::num::NonZeroU64;
-
-use zcash_primitives::transaction::fees::zip317::FeeRule;
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 
 use crate::mint::{Name, UnifiedAddress};
 
-/// Actions' worth of the node's rate withheld from every refund, and
-/// paid by every update or release request.
-pub const FEE_ACTIONS: usize = 100;
+/// Paid by every update, release, buy, list or delist request, and
+/// withheld from every refund. Equivalent to `ACTION_FEE * 100`.
+pub const CHALLENGE_FEE: Zatoshis = Zatoshis::const_from_u64(100_000);
 
-/// `paid` minus the withheld refund fee, when that remainder is positive.
-fn refund_output(paid: Zatoshis, fee_rule: &FeeRule) -> Option<Zatoshis> {
-    let fee = (fee_rule.marginal_fee() * FEE_ACTIONS)?;
-    (paid - fee).filter(|output| *output > Zatoshis::ZERO)
-}
-
-/// One percent of `price`, rounded down to a zat.
-pub fn access_code_penalty(price: Zatoshis) -> Zatoshis {
-    price / NonZeroU64::new(100).expect("100 is non-zero")
+/// `paid` minus `CHALLENGE_FEE`, when that remainder is positive.
+fn refund_output(paid: Zatoshis) -> Option<Zatoshis> {
+    (paid - CHALLENGE_FEE).filter(|output| *output > Zatoshis::ZERO)
 }
 
 /// One refund due: the payment it answers, where it goes, how much.
@@ -36,8 +26,7 @@ pub fn access_code_penalty(price: Zatoshis) -> Zatoshis {
 pub struct RefundRequest {
     payment: TxId,
     recipient: UnifiedAddress,
-    /// What the Treasury pays back: the payment less any penalty and the
-    /// withheld fee.
+    /// What the Treasury pays back: the payment less the withheld fee.
     amount: Zatoshis,
     name: Name,
     height: BlockHeight,
@@ -82,21 +71,18 @@ impl RefundQueue {
     /// payment that leaves nothing is kept.
     pub fn admit(
         &mut self,
-        fee_rule: &FeeRule,
         txid: TxId,
         recipient: &UnifiedAddress,
         name: &Name,
         height: BlockHeight,
         refundable: Zatoshis,
     ) {
-        self.admit_with_note(fee_rule, txid, recipient, name, height, refundable, None);
+        self.admit_with_note(txid, recipient, name, height, refundable, None);
     }
 
     /// [`admit`](Self::admit), and `note` is paid back with the zatoshis.
-    #[allow(clippy::too_many_arguments)]
     pub fn admit_with_note(
         &mut self,
-        fee_rule: &FeeRule,
         txid: TxId,
         recipient: &UnifiedAddress,
         name: &Name,
@@ -104,24 +90,15 @@ impl RefundQueue {
         refundable: Zatoshis,
         note: Option<String>,
     ) {
-        let Some(amount) = refund_output(refundable, fee_rule) else {
+        let Some(amount) = refund_output(refundable) else {
             // Nothing is queued. The sentence stays on this record.
-            if let Some(sentence) = note.as_deref() {
-                tracing::info!(
-                    %txid,
-                    name = %name.as_str(),
-                    refundable = refundable.into_u64(),
-                    note = sentence,
-                    "payment kept"
-                );
-            } else {
-                tracing::info!(
-                    %txid,
-                    name = %name.as_str(),
-                    refundable = refundable.into_u64(),
-                    "payment kept"
-                );
-            }
+            tracing::info!(
+                %txid,
+                name = %name.as_str(),
+                refundable = refundable.into_u64(),
+                note = note.as_deref(),
+                "payment kept"
+            );
             return;
         };
         tracing::info!(
@@ -172,11 +149,6 @@ impl RefundQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
-
-    fn withheld() -> Zatoshis {
-        (MARGINAL_FEE * FEE_ACTIONS).unwrap()
-    }
 
     fn alice() -> Name {
         Name::parse("alice").unwrap()
@@ -197,7 +169,6 @@ mod tests {
 
     fn admit(queue: &mut RefundQueue, payment: TxId, height: u32) {
         queue.admit(
-            &FeeRule::standard(),
             payment,
             &ua(),
             &alice(),
@@ -207,28 +178,12 @@ mod tests {
     }
 
     #[test]
-    fn an_admitted_refund_is_the_payment_less_the_penalty_and_the_fee() {
-        let txid = TxId::from_bytes([1; 32]);
+    fn an_admitted_refund_is_the_payment_less_the_fee() {
         let mut queue = RefundQueue::default();
-        admit(&mut queue, txid, 10);
+        admit(&mut queue, TxId::from_bytes([1; 32]), 10);
         assert_eq!(
             queue.due(deep())[0].amount(),
-            Zatoshis::const_from_u64(500_000)
-        );
-
-        let mut queue = RefundQueue::default();
-        let price = Zatoshis::const_from_u64(1_000_000);
-        queue.admit(
-            &FeeRule::standard(),
-            txid,
-            &ua(),
-            &alice(),
-            BlockHeight::from_u32(10),
-            (price - access_code_penalty(price)).unwrap(),
-        );
-        assert_eq!(
-            queue.due(deep())[0].amount(),
-            Zatoshis::const_from_u64(490_000)
+            Zatoshis::const_from_u64(900_000)
         );
     }
 
@@ -236,7 +191,6 @@ mod tests {
     fn a_return_keeps_its_sentence() {
         let mut queue = RefundQueue::default();
         queue.admit_with_note(
-            &FeeRule::standard(),
             TxId::from_bytes([1; 32]),
             &ua(),
             &alice(),
@@ -254,11 +208,10 @@ mod tests {
     fn a_payment_that_does_not_exceed_the_fee_is_kept() {
         let mut queue = RefundQueue::default();
         for refundable in [
-            withheld(),
-            (withheld() - Zatoshis::const_from_u64(1)).unwrap(),
+            CHALLENGE_FEE,
+            (CHALLENGE_FEE - Zatoshis::const_from_u64(1)).unwrap(),
         ] {
             queue.admit(
-                &FeeRule::standard(),
                 TxId::from_bytes([1; 32]),
                 &ua(),
                 &alice(),
@@ -270,26 +223,14 @@ mod tests {
 
         let mut noted = RefundQueue::default();
         noted.admit_with_note(
-            &FeeRule::standard(),
             TxId::from_bytes([1; 32]),
             &ua(),
             &alice(),
             BlockHeight::from_u32(10),
-            withheld(),
+            CHALLENGE_FEE,
             Some("ZNS:held:alice:1700000600".to_string()),
         );
         assert!(noted.is_empty());
-    }
-
-    #[test]
-    fn a_lower_node_rate_refunds_a_payment_the_standard_rate_keeps() {
-        let paid = Zatoshis::const_from_u64(200_000);
-        let node = crate::zcash::fees::fee_rule(Zatoshis::const_from_u64(1_000));
-        assert_eq!(
-            refund_output(paid, &node),
-            Some(Zatoshis::const_from_u64(100_000))
-        );
-        assert_eq!(refund_output(paid, &FeeRule::standard()), None);
     }
 
     #[test]
@@ -319,7 +260,6 @@ mod tests {
         let mut queue = RefundQueue::default();
         admit(&mut queue, txid, 10);
         queue.admit(
-            &FeeRule::standard(),
             txid,
             &ua(),
             &alice(),
@@ -331,7 +271,7 @@ mod tests {
         queue.paid(&second);
         let left = queue.due(deep());
         assert_eq!(left.len(), 1);
-        assert_eq!(left[0].amount(), Zatoshis::const_from_u64(500_000));
+        assert_eq!(left[0].amount(), Zatoshis::const_from_u64(900_000));
     }
 
     #[test]

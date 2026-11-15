@@ -28,7 +28,7 @@ const DROP: &str = "zebra";
 /// A forever claim paid below its price: admitted, then refunded.
 const REFUND_NAME: &str = "alice";
 
-/// 0.1 ZEC: above the withheld refund fee (10 marginal actions), and below
+/// 0.1 ZEC: above the withheld refund fee (`CHALLENGE_FEE`, 100,000 zats), and below
 /// [`REFUND_NAME`]'s forever price of $300 while ZEC is under $3,000.
 const REFUND_ZATS: u64 = 10_000_000;
 /// 2 ZEC, the fixture's request payment.
@@ -363,6 +363,9 @@ async fn wait_name_note(
         if tail.contains("payment refund") && tail.contains(pay) {
             return true;
         }
+        if tail.contains("access code refused") && tail.contains(pay) {
+            return true;
+        }
         if tail.contains("non-request payment") && tail.contains(pay) {
             return true;
         }
@@ -373,8 +376,14 @@ async fn wait_name_note(
     let tail = tail(&log, mark);
     if tail.contains("payment refund") && tail.contains(pay) {
         bail!(
-            "{name} was refunded; it has to be a protected pre-sale name and the dev access code \
-             has to match:\n{}",
+            "{name} was refunded; the payment has to cover the price and the name has to be \
+             free:\n{}",
+            stack.mint.exit_detail()
+        );
+    }
+    if tail.contains("access code refused") && tail.contains(pay) {
+        bail!(
+            "{name}'s access code was refused; the dev access code has to match:\n{}",
             stack.mint.exit_detail()
         );
     }

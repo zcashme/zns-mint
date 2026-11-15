@@ -1,7 +1,6 @@
 //! The seam between the mint and its Zebra full node.
 
 pub mod chain;
-pub mod fees;
 pub mod mempool;
 pub mod submit;
 

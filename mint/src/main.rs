@@ -22,7 +22,7 @@ use zns_mint::mint::presale;
 use zns_mint::mint::pricing::{fetch_round, Oracle};
 use zns_mint::mint::sale::Market;
 use zns_mint::mint::treasury;
-use zns_mint::mint::treasury::{access_code_penalty, OtpQueue};
+use zns_mint::mint::treasury::OtpQueue;
 use zns_mint::mint::{
     relay, relay_buy, spends_transparent, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
 };
@@ -52,7 +52,6 @@ async fn main() {
         access_code_key,
         mut protected_names,
         presale_client,
-        mut fee_rule,
         mut registry,
         mut name_notes,
         mut requests,
@@ -65,6 +64,7 @@ async fn main() {
         #[cfg(not(feature = "non-tee"))]
         guest,
     } = Boot::start().await;
+    let fee_rule = treasury::fee_rule();
 
     zns_mint::metrics::install();
     zns_mint::metrics::identity(&treasury_address, &registry_ufvk);
@@ -155,8 +155,7 @@ async fn main() {
                 .find_map(|(request, paid)| {
                     if challenges.holds_name(request.name())
                         || !market.allows_transition(request.name())
-                        || (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
-                            .is_none_or(|fee| paid < fee)
+                        || paid < treasury::CHALLENGE_FEE
                     {
                         return None;
                     }
@@ -379,8 +378,7 @@ async fn main() {
                     || registry
                         .authorize_challenge(&name_notes, request, trigger, trigger_mtp)
                         .is_none()
-                    || (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
-                        .is_none_or(|fee| *paid < fee)
+                    || *paid < treasury::CHALLENGE_FEE
                 {
                     continue;
                 }
@@ -399,14 +397,12 @@ async fn main() {
                             paid,
                             &registry,
                             &mut challenges,
-                            &fee_rule,
                             next_height,
                             block_mtp,
                             |name| name_notes.note_pending(name),
                         );
                         if let Some(back) = returned {
                             refunds.admit_with_note(
-                                &fee_rule,
                                 txid,
                                 &back.recipient,
                                 &back.name,
@@ -428,19 +424,15 @@ async fn main() {
                     // A refused response goes back to the memo address,
                     // less the refund fee.
                     MintInbound::Response(response) => {
+                        let mut refund = |amount| {
+                            refunds.admit(txid, &response.ua, &response.name, next_height, amount)
+                        };
                         // A buy holds the name. A code already issued cannot
                         // apply an update, release, list, or delist, and its
                         // payment returns.
                         if !market.allows_transition(&response.name) {
                             challenges.drop_challenges(&response.name);
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                &response.ua,
-                                &response.name,
-                                next_height,
-                                paid,
-                            );
+                            refund(paid);
                             continue;
                         }
                         // The code stays until the wallet holds its request.
@@ -450,26 +442,12 @@ async fn main() {
                                 .get_tx_height(request_txid)
                                 .is_ok_and(|height| height.is_some())
                         }) {
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                &response.ua,
-                                &response.name,
-                                next_height,
-                                paid,
-                            );
+                            refund(paid);
                             continue;
                         }
                         let Some((sent, _)) = challenges.complete(&response) else {
                             // A wrong code, or no live challenge.
-                            refunds.admit(
-                                &fee_rule,
-                                txid,
-                                &response.ua,
-                                &response.name,
-                                next_height,
-                                paid,
-                            );
+                            refund(paid);
                             continue;
                         };
                         let name = sent.request.name();
@@ -485,7 +463,7 @@ async fn main() {
                             _ => Some(paid),
                         };
                         let Some(rest) = rest else {
-                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
+                            refund(paid);
                             continue;
                         };
                         if name_notes.note_pending(name) {
@@ -494,7 +472,7 @@ async fn main() {
                                 name = %name.as_str(),
                                 "transition already queued; OTP spent"
                             );
-                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
+                            refund(paid);
                             continue;
                         }
                         let authorized = match &sent.request {
@@ -507,7 +485,7 @@ async fn main() {
                             Request::Claim { .. } | Request::Buy { .. } => continue,
                         };
                         let Some(note) = authorized else {
-                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, paid);
+                            refund(paid);
                             continue;
                         };
                         // The only durable record that a release was voluntary.
@@ -523,7 +501,7 @@ async fn main() {
                             answered.push(sent.request.clone());
                         }
                         if rest > Zatoshis::ZERO {
-                            refunds.admit(&fee_rule, txid, &response.ua, name, next_height, rest);
+                            refund(rest);
                         }
                     }
                     MintInbound::Unrecognized => {
@@ -582,21 +560,6 @@ async fn main() {
             );
             continue;
         }
-        // The node's fee rate for every transaction this pass builds. A
-        // failed read keeps the last rate the node gave.
-        match source.standard_fee().await {
-            Ok(rule) => {
-                if rule.marginal_fee() != fee_rule.marginal_fee() {
-                    tracing::info!(
-                        zats_per_action = rule.marginal_fee().into_u64(),
-                        "fee rate changed"
-                    );
-                }
-                fee_rule = rule;
-            }
-            Err(error) => tracing::warn!(%error, "fee rate unavailable; keeping the last rate"),
-        }
-
         // The three gauges: chain level, money level, price level.
         let treasury_zats = wallet
             .get_wallet_summary(zns_mint::wallet::CONFIRMATIONS)
@@ -619,10 +582,11 @@ async fn main() {
                     term,
                     code,
                 } => {
-                    // A protected name claims only with its code.
+                    // A protected name claims only with its code. No code
+                    // is no guess, and the payment is refunded.
                     let protected = protected_names.is_protected(name, mtp_now);
                     if protected && code.is_none() {
-                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                        refunds.admit(txid, ua, name, note_height, paid);
                         continue;
                     }
                     // The quote at first sight is binding. A quote above
@@ -636,43 +600,41 @@ async fn main() {
                         );
                         continue;
                     };
-                    if paid < price {
-                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                    // Below the price, or for a name registered or queued
+                    // for an earlier payment, the code is not read, so the
+                    // refund says nothing about it.
+                    if paid < price || !registry.is_available(name) || name_notes.note_pending(name)
+                    {
+                        refunds.admit(txid, ua, name, note_height, paid);
                         continue;
                     }
+                    // A wrong code keeps the payment: a guess costs the price.
                     if protected && !access_code_key.accepts(name, code.as_ref()) {
-                        tracing::info!(%txid, name = %name.as_str(), "wrong access code");
-                        refunds.admit(
-                            &fee_rule,
-                            txid,
-                            ua,
-                            name,
-                            note_height,
-                            (paid - access_code_penalty(price)).unwrap_or(Zatoshis::ZERO),
+                        tracing::info!(
+                            %txid,
+                            name = %name.as_str(),
+                            paid = paid.into_u64(),
+                            ua = %ua.encode(&network),
+                            "access code refused; payment kept"
                         );
                         continue;
                     }
-                    // A refusal keeps the payment unless the name is taken.
                     let Some(claim_note) =
                         registry.authorize_claim(name.clone(), ua.clone(), *term, mtp_now)
                     else {
-                        if !registry.is_available(name) {
-                            refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
-                        } else {
-                            tracing::info!(
-                                %txid,
-                                name = %name.as_str(),
-                                paid = paid.into_u64(),
-                                "claim not authorized; payment kept"
-                            );
-                        }
+                        tracing::info!(
+                            %txid,
+                            name = %name.as_str(),
+                            paid = paid.into_u64(),
+                            "claim not authorized; payment kept"
+                        );
                         continue;
                     };
                     // The earliest payment owns the name until its claim is observed.
                     if name_notes.admit(note_height, claim_note) {
                         challenges.drop_challenges(name);
                     } else {
-                        refunds.admit(&fee_rule, txid, ua, name, note_height, paid);
+                        refunds.admit(txid, ua, name, note_height, paid);
                     }
                 }
                 Request::Update { .. } | Request::Release { .. } => {
@@ -699,9 +661,7 @@ async fn main() {
                         );
                         continue;
                     }
-                    if (fee_rule.marginal_fee() * treasury::FEE_ACTIONS)
-                        .is_none_or(|fee| paid < fee)
-                    {
+                    if paid < treasury::CHALLENGE_FEE {
                         tracing::info!(
                             %txid,
                             name = %request.name().as_str(),

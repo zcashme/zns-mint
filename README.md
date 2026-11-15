@@ -76,7 +76,7 @@ A claim is a purchase.
 
 There is no confirmation code. The payment is the request. The first sufficient payment owns the name. A second payment for the same word does not start a second record.
 
-A name on the pre-sale list also needs its six-digit code in the memo. The mint checks the code before it looks at the price.
+A name on the pre-sale list also needs its six-digit code in the memo. A claim with no code is refunded, less the refund fee. The mint reads a code only when the payment covers the price and the name is free. A wrong code then keeps the whole payment: nothing is refunded.
 
 ## Update
 
@@ -120,7 +120,7 @@ Forever is three years' price, paid once. A term of several years is the yearly 
 
 The mint publishes a daily ZEC price from public exchanges and quotes every name in zatoshis from that rate. The quote you meet is the one in force when the mint first sees the payment.
 
-An update or a release starts with a challenge fee of a hundred times the node's fee per logical action: 500,000 zatoshis at 5,000 per action, and 100,000 zatoshis at 1,000 per action from height 3,590,000. That fee opens the confirmation. It is not the price of the name. Extra years are paid when you send the confirmation code back.
+An update or a release starts with a challenge fee of 100,000 zatoshis: a hundred times the mint's fee of 1,000 zatoshis per logical action. That fee opens the confirmation. It is not the price of the name. Extra years are paid when you send the confirmation code back. A list, a delist and a buy pay the same 100,000 zatoshis, and a refund withholds it: that is the refund fee.
 
 A payment changes a name only when the memo is one of the sentences above and the amount covers the price that sentence requires. Any other payment to the treasury stays there.
 

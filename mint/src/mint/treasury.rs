@@ -7,7 +7,7 @@ mod otp;
 mod refund;
 
 pub use otp::{ChallengeState, OtpChallenge, OtpCode, OtpQueue, D_OTP, MAX_ATTEMPTS};
-pub use refund::{access_code_penalty, RefundQueue, RefundRequest, FEE_ACTIONS};
+pub use refund::{RefundQueue, RefundRequest, CHALLENGE_FEE};
 
 use std::convert::Infallible;
 
@@ -28,7 +28,10 @@ use zcash_client_backend::proposal::Proposal;
 use zcash_client_backend::util::SystemClock;
 use zcash_client_backend::wallet::{NoteId, OvkPolicy};
 use zcash_keys::address::Address;
-use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule, MARGINAL_FEE};
+use zcash_primitives::transaction::fees::zip317::{
+    FeeError, FeeRule, GRACE_ACTIONS, MARGINAL_FEE, P2PKH_STANDARD_INPUT_SIZE,
+    P2PKH_STANDARD_OUTPUT_SIZE,
+};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, MainNetwork, NetworkType, Parameters, TestNetwork};
 use zcash_protocol::memo::MemoBytes;
@@ -48,6 +51,23 @@ type TreasuryProposalError<P> = ProposeTransferErrT<
 type TreasuryBuildError<P> =
     CreateErrT<Wallet<P>, GreedyInputSelectorError, FeeRule, FeeError, NoteId>;
 type TreasuryProposal = Proposal<FeeRule, NoteId>;
+
+/// The marginal fee per logical action on every transaction the mint
+/// builds. Zebra 7.0.0's mempool accepts it; its `getstandardfee` reports
+/// it only from Mainnet height 3,590,000. Upstream's `MARGINAL_FEE` is
+/// still 5,000, and stays the dust floor below.
+const ACTION_FEE: Zatoshis = Zatoshis::const_from_u64(1_000);
+
+/// ZIP 317 at `ACTION_FEE` per logical action.
+pub fn fee_rule() -> FeeRule {
+    FeeRule::non_standard(
+        ACTION_FEE,
+        GRACE_ACTIONS,
+        P2PKH_STANDARD_INPUT_SIZE,
+        P2PKH_STANDARD_OUTPUT_SIZE,
+    )
+    .expect("upstream ZIP-317 sizes are nonzero")
+}
 
 /// Minimum vault payment for a sweep to fire (1 ZEC): a floor on what
 /// actually moves, not on the balance behind it.
