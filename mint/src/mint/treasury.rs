@@ -82,7 +82,7 @@ pub const SWEEP_RESERVE: Zatoshis = Zatoshis::const_from_u64(1_000_000);
 pub const CHALLENGE_RELAY_VALUE: Zatoshis = Zatoshis::ZERO;
 
 /// The project vault's mainnet Unified Address.
-const MAINNET_VAULT_ADDRESS: &str = "u1eqcql0r460xjqk49maglfxa02mfuetaed4h0nkf0lum4m6ay6t9gjpuxhuuygfeuz3d9sfgcjpz7uev2gsk5nnpf6g0uh0rn2uq0gz44";
+const MAINNET_VAULT_ADDRESS: &str = "u1u0zxet96mm6chufy5y3mg5n93x69ht98js44rs4448xwcfk5l6xrx6zl34439vpup6fz040v4ensc3npx6jsk679e7kksdf7qv5mq53n";
 
 /// The project vault's testnet Unified Address (also used on regtest).
 const TESTNET_VAULT_ADDRESS: &str = "utest1v5p9lqxsshgrhdcj3gsg60vglxlkhwmhpvhtv3884pgwxktas9s95ws5qvypv4qyxadd5gjhzp4vczpd95flh307x42ssrynp9az3j4fyhz8knacwkzf8xk2f9726480ym2ntmv3ftk9z7gy5a8tarndrm0p992dx7gsczewsglqnpxg";
