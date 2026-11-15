@@ -1,5 +1,25 @@
 # main.changelog.md
 
+## 2026-11-14 — The run loop uses the block's MTP from `apply_block` (#504)
+
+- Challenge and buy expiry and the update, list and delist laws use the
+  MTP `apply_block` returns, the median of the 11 blocks before the
+  block, instead of the tracker's median after applying, which was the
+  next block's MTP.
+- Opening a challenge is unchanged: the mined-repeat check and
+  `market.admit` (list, delist, buy) judge it at the block its code is
+  relayed in, `next_height + 1`, the same MTP the relay checks, now read
+  as `mtp.next()`.
+- An update, list, auction, or delist approved in time is no longer
+  dropped when the next block's median passes the name's deadline. An
+  approved order is kept until it lands, and the release waits for it,
+  as a buy already holds a name. Before, a response approved in a block
+  the loop caught up through could be dropped at the tip median,
+  keeping the payment and the code. The "transition dropped" loop is
+  gone.
+- The separate `header_time_ok` call is gone: `apply_block` checks the
+  header as it admits it.
+
 ## 2026-11-14 — The fee rate is 1,000 zatoshis per action (#512)
 
 - The run loop no longer reads `getstandardfee` each pass. It takes

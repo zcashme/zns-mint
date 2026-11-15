@@ -1,5 +1,18 @@
 # Boot module changelog
 
+## 2026-11-14 — Boot takes MTPs as Zebra does (#504)
+
+- The separate `header_time_ok` call is gone: `apply_block` checks each
+  header as it admits it.
+- The birthday anchor is the birthday block's MTP: the median of the 11
+  blocks before it. The window used to end at the birthday block, which
+  gave the next block's MTP, so day zero, and each day after it, starts
+  one block earlier.
+- Those 11 blocks end at the origin checkpoint, so boot backfills one
+  window and takes day zero from it; the throwaway birthday window and
+  its 11 header reads are gone. `MtpTracker::born` only registers day
+  zero.
+
 ## 2026-11-14 — Boot no longer reads the fee rate (#512)
 
 - `Boot` has no `fee_rule`; the run loop takes `treasury::fee_rule()`. Boot

@@ -136,7 +136,7 @@ async fn main() {
                     continue;
                 }
                 let mtp_now = mtp
-                    .current()
+                    .next()
                     .expect("FATAL: MTP unavailable before a mempool relay");
                 let target_height = tip + 1;
                 let candidate = zns_mint::mint::note::decrypt_treasury_transaction(
@@ -331,13 +331,10 @@ async fn main() {
                 );
                 continue 'run;
             }
-            mtp.header_time_ok(block.header().time)
-                .unwrap_or_else(|reason| {
-                    panic!("FATAL: {reason} at height {}", u32::from(next_height))
-                });
-
             let payments = zns_mint::mint::sale::transparent_payments(&block);
-            let arrivals = zns_mint::mint::apply_block(
+            // `block_mtp` is the block's own clock: a challenge expired
+            // by it completes nothing in it, and the law reads it.
+            let (arrivals, block_mtp) = zns_mint::mint::apply_block(
                 &network,
                 &registry_keys,
                 &treasury_keys,
@@ -348,11 +345,6 @@ async fn main() {
                 &mut mtp,
             );
             name_notes.reconcile_seen(&registry);
-            // The block's own clock: a challenge expired by it completes
-            // nothing in it, and the law reads it.
-            let block_mtp = mtp
-                .current()
-                .expect("FATAL: MTP unavailable at the applied block");
             // A relayed challenge whose request never mined paid for a
             // relay that nothing paid back: a dead relay.
             let dead_relays = challenges
@@ -369,6 +361,12 @@ async fn main() {
             // are read. The fee and the authorization are the same ones
             // the request pass requires.
             let trigger = next_height + 1;
+            // A challenge is relayed in the trigger block, so it is judged
+            // at that block's MTP, as the mempool path and the relay judge
+            // it.
+            let trigger_mtp = mtp
+                .next()
+                .expect("FATAL: MTP unavailable at the applied block");
             for (txid, inbound, paid) in &arrivals {
                 let MintInbound::Request(
                     request @ (Request::Update { .. } | Request::Release { .. }),
@@ -379,7 +377,7 @@ async fn main() {
                 if !challenges.holds(request)
                     || !market.allows_transition(request.name())
                     || registry
-                        .authorize_challenge(&name_notes, request, trigger, block_mtp)
+                        .authorize_challenge(&name_notes, request, trigger, trigger_mtp)
                         .is_none()
                     || *paid < treasury::CHALLENGE_FEE
                 {
@@ -401,7 +399,7 @@ async fn main() {
                             &registry,
                             &mut challenges,
                             next_height,
-                            block_mtp,
+                            trigger_mtp,
                             |name| name_notes.note_pending(name),
                         );
                         if let Some(back) = returned {
@@ -533,7 +531,7 @@ async fn main() {
         let tip_hash = wallet.tip().block_hash();
         let target_height = tip + 1;
         let mtp_now = mtp
-            .current()
+            .next()
             .expect("FATAL: MTP unavailable at the applied tip");
 
         let today = mtp
@@ -736,27 +734,10 @@ async fn main() {
             }
         }
 
-        // A broadcast order whose expiry height has passed can be signed
-        // again, or dropped below once the tip median would release it.
+        // A broadcast order whose expiry height has passed is signed again.
+        // An order approved in time is kept past the name's deadline until
+        // it lands; the release below waits for it.
         name_notes.expire_sent(tip);
-        // Drop an update, list, or delist the tip median would already
-        // release, so a release note can be admitted below. A broadcast
-        // still inside its expiry window stays.
-        for note in name_notes.authorized_notes() {
-            let action = note.action();
-            if (action.is_update() || action.is_list() || action.is_auction() || action.is_delist())
-                && registry
-                    .record(note.name())
-                    .is_some_and(|record| record.is_release_due(mtp_now))
-            {
-                tracing::info!(
-                    name = %note.name().as_str(),
-                    action = action.as_str(),
-                    "transition dropped: the tip median would release the name"
-                );
-                name_notes.drop_note(note.name());
-            }
-        }
 
         // Lifecycle releases, §4.5: the registry owns the clocks and
         // their plural; each tip admits the release notes.

@@ -1,5 +1,15 @@
 # Mint live-work design record
 
+## 2026-11-14 — A block is judged at its own MTP (#504)
+
+- `apply_block` admits the block's header through `MtpTracker::admit`,
+  which checks it, and judges the block at the median of the 11 blocks
+  before it. Before, it took the median including the block itself:
+  the next block's MTP, one block late. Liveness, OTP expiry, the
+  update, list and delist laws, buy expiry, and sale payment checks
+  all move one block earlier.
+- `apply_block` returns the block's MTP with its arrivals.
+
 ## 2026-11-13 — `apply_block` reads no transaction expiry (#376)
 
 - `expiry_by_txid` is gone: it fed only `accept_claim`'s `expiry`.

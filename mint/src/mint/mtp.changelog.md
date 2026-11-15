@@ -1,5 +1,22 @@
 # Mtp design record
 
+## 2026-11-14 — A block's MTP leaves the block out (#504)
+
+- `admit(height, time)` checks a header against the median of the 11
+  blocks before it, records it, and returns that median: the block's
+  MTP, as the protocol spec (§7.6), Zebra and Zakura define it.
+- `current()` is `next()`: the median of the recorded times, which is
+  the MTP of the block after the last one recorded.
+- `header_time_ok` is gone: `admit` checks the header against the
+  median it returns, computed once. `update` is private: a block enters
+  only through `admit`, checked, and only as the height after the last
+  recorded one; a gap or repeat is an error in release builds too.
+  `update`'s debug-only ordering assert and its test,
+  `an_out_of_order_height_is_a_checked_bug`, are gone with it.
+- `truncate_to` is gone: the reorg path rebuilds the window with
+  `backfill`. Its test, `the_day_rewinds_when_a_truncate_recrosses_midnight`,
+  goes with it.
+
 ## 2026-11-07 — Header checks use chain time
 
 - Move median validation into `MtpTracker`; remove `zcash::adopt`, its

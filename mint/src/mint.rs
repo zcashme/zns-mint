@@ -529,7 +529,8 @@ impl Name {
 
 /// Applies one verified canonical successor to every faculty: scan, clock,
 /// Registry law, wallet commit, and Treasury decode.
-/// Returns Treasury arrivals, which the caller routes.
+/// Returns Treasury arrivals, which the caller routes, and the block's
+/// MTP, the time the law judged it at.
 /// Never fetches, never broadcasts.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_block<P: Parameters + Send + 'static>(
@@ -541,7 +542,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     wallet: &mut Wallet<P>,
     registry: &mut registry::Registry,
     mtp: &mut mtp::MtpTracker,
-) -> Vec<(TxId, MintInbound, Zatoshis)> {
+) -> (Vec<(TxId, MintInbound, Zatoshis)>, Timestamp) {
     use std::collections::BTreeMap;
     use std::convert::Infallible;
 
@@ -560,7 +561,9 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         "FATAL: fetched block does not continue the applied cursor"
     );
 
-    let block_time = block.header().time;
+    let block_mtp = mtp
+        .admit(height, block.header().time)
+        .unwrap_or_else(|reason| panic!("FATAL: {reason} at height {}", u32::from(height)));
     let candidates = decrypt_name_notes(network, &block, registry_keys);
     let treasury_memos = note::decrypt_treasury_memos(network, &block, height, treasury_keys);
 
@@ -582,12 +585,6 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         },
     )
     .expect("FATAL: a canonical block failed deterministic wallet scanning");
-
-    let mut next_mtp = mtp.clone();
-    next_mtp.update(height, block_time);
-    let block_mtp = next_mtp
-        .current()
-        .expect("FATAL: MTP unavailable after applying a block");
 
     // The confirmation pass: the scanner's transactions in block order.
     // Two claims for one name in the same block: the lower vtx is
@@ -685,14 +682,13 @@ pub fn apply_block<P: Parameters + Send + 'static>(
         .into_iter()
         .map(|(txid, paid, memo)| (txid, MintInbound::decode(network, &memo), paid))
         .collect();
-    *mtp = next_mtp;
     let applied_tip = wallet.tip();
     tracing::debug!(
         height = u32::from(applied_tip.block_height()),
         hash = %applied_tip.block_hash(),
         "canonical block applied"
     );
-    arrivals
+    (arrivals, block_mtp)
 }
 
 // ===========================================================================

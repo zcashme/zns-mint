@@ -484,30 +484,21 @@ impl Boot<Network> {
             "boot: wallet born complete from the origin checkpoint"
         );
 
-        // 3d. The mint's birthday: a throwaway window ending at the
-        // birthday block, whose median is the birthday block's MTP —
-        // the day-zero anchor for `current_day`.
-        let mut birthday = MtpTracker::default();
-        birthday
-            .backfill(mint_birthday, |height| {
-                let source = source.clone();
-                async move { source.header_time(height).await }
-            })
-            .await
-            .expect("FATAL: birthday MTP backfill from Zebra failed");
-        let birthday_mtp = birthday
-            .current()
-            .expect("FATAL: birthday MTP unavailable from Zebra");
-        let mut mtp = MtpTracker::born(birthday_mtp);
-
-        // 3e. MTP backfill: the 11 header timestamps through the origin
-        // checkpoint, so the MTP window is complete before the first scan.
+        // 3d. MTP backfill: the 11 header timestamps through the origin
+        // checkpoint, the block before the birthday, so the MTP window is
+        // complete before the first scan. Their median is the birthday
+        // block's MTP: the day-zero anchor for `current_day`.
+        let mut mtp = MtpTracker::default();
         mtp.backfill(checkpoint_height, |height| {
             let source = source.clone();
             async move { source.header_time(height).await }
         })
         .await
         .expect("FATAL: MTP backfill from Zebra failed");
+        MtpTracker::born(
+            mtp.next()
+                .expect("FATAL: birthday MTP unavailable from Zebra"),
+        );
         tracing::info!(
             "boot: MTP backfilled from headers through checkpoint {}",
             u32::from(checkpoint_height)
@@ -536,10 +527,6 @@ impl Boot<Network> {
                 .get_block(&network, next_height)
                 .await
                 .expect("FATAL: block unavailable during boot sync");
-            mtp.header_time_ok(block.header().time)
-                .unwrap_or_else(|reason| {
-                    panic!("FATAL: {reason} at height {}", u32::from(next_height))
-                });
 
             crate::mint::apply_block(
                 &network,

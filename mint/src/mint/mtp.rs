@@ -14,18 +14,20 @@ const MAX_TIME_SINCE_MEDIAN: i64 = 90 * 60;
 /// boot by [`MtpTracker::born`] and never changed after.
 static BIRTHDAY: OnceLock<Timestamp> = OnceLock::new();
 
-/// Median Time Past Tracker.
-/// Tracks up to the last 11 block timestamps and computes their median
-/// Follows the Zcash consensus definition of MTP.
+/// Median Time Past Tracker: the last 11 block timestamps.
+///
+/// A block's MTP is the median of the 11 blocks before it, not counting
+/// the block itself (protocol spec §7.6), as Zebra and Zakura take it.
+/// [`Self::admit`] gives a block its MTP; [`Self::next`] is the MTP of
+/// the block after the last one recorded.
 #[derive(Clone, Debug, Default)]
 pub struct MtpTracker {
     blocktimes: VecDeque<(BlockHeight, u32)>,
 }
 
 impl MtpTracker {
-    /// Born at the mint's birthday: registers the day-zero anchor and
-    /// returns an empty tracker.
-    pub fn born(birthday: Timestamp) -> Self {
+    /// Registers the day-zero anchor: the MTP of the mint's birthday block.
+    pub fn born(birthday: Timestamp) {
         // `set` bounces the rejected value back, not the incumbent, so
         // read the incumbent for the comparison.
         if BIRTHDAY.set(birthday).is_err() {
@@ -35,19 +37,18 @@ impl MtpTracker {
                 "FATAL: the mint cannot be born twice with different birthdays"
             );
         }
-        Self::default()
     }
 
-    /// Days since the mint's birthday. `None` when [`Self::current`] is.
+    /// Days since the mint's birthday. `None` when [`Self::next`] is.
     pub fn current_day(&self) -> Option<i64> {
         let birthday = BIRTHDAY.get().expect("FATAL: the mint was never born");
-        self.current().map(|mtp| (mtp - *birthday).whole_days())
+        self.next().map(|mtp| (mtp - *birthday).whole_days())
     }
 
     /// Fills the tracker with the block timestamps ending at `till`, so
     /// MTP is available immediately at boot and after reorgs.
     /// These seed headers do not include their preceding windows; Zebra
-    /// validates them. Subsequent blocks are checked by [`Self::header_time_ok`].
+    /// validates them. Subsequent blocks are checked by [`Self::admit`].
     pub async fn backfill<F, Fut, E>(&mut self, till: BlockHeight, mut fetch: F) -> Result<(), E>
     where
         F: FnMut(BlockHeight) -> Fut,
@@ -66,25 +67,39 @@ impl MtpTracker {
     }
 
     /// Records a block's header timestamp.
-    pub fn update(&mut self, height: BlockHeight, timestamp: u32) {
-        debug_assert!(
-            self.blocktimes
-                .back()
-                .is_none_or(|(prev_h, _)| height > *prev_h),
-            "push out of order: {} after {:?}",
-            height,
-            self.blocktimes.back().map(|(h, _)| h),
-        );
-
+    fn update(&mut self, height: BlockHeight, timestamp: u32) {
         if self.blocktimes.len() >= MTP_WINDOW {
             self.blocktimes.pop_front();
         }
         self.blocktimes.push_back((height, timestamp));
     }
 
-    /// Returns the current MTP as a [`Timestamp`], or `None` when no
-    /// timestamps have been recorded.
-    pub fn current(&self) -> Option<Timestamp> {
+    /// Admits block `height`, the one after the last recorded: its header
+    /// time must be after the block's MTP and at most 90 minutes past it,
+    /// as consensus requires. Records the time and returns the block's MTP.
+    pub fn admit(
+        &mut self,
+        height: BlockHeight,
+        timestamp: u32,
+    ) -> Result<Timestamp, &'static str> {
+        let mtp = self.next().ok_or("preceding median unavailable")?;
+        if self.blocktimes.back().map(|(last, _)| *last + 1) != Some(height) {
+            return Err("block height does not follow the last recorded");
+        }
+        let time = i64::from(timestamp);
+        if time <= mtp.as_seconds() {
+            return Err("block time is not after the previous median");
+        }
+        if time > mtp.as_seconds() + MAX_TIME_SINCE_MEDIAN {
+            return Err("block time is more than 90 minutes past the previous median");
+        }
+        self.update(height, timestamp);
+        Ok(mtp)
+    }
+
+    /// The MTP of the block after the last one recorded: the median of
+    /// the recorded times. `None` when none are recorded.
+    pub fn next(&self) -> Option<Timestamp> {
         if self.blocktimes.is_empty() {
             return None;
         }
@@ -95,28 +110,6 @@ impl MtpTracker {
             Timestamp::from_seconds(stamps[stamps.len() / 2] as i64)
                 .expect("block timestamp is a valid u32, always fits in Timestamp"),
         )
-    }
-
-    /// Checks the next header against the preceding 11-block median.
-    /// The mint processes blocks after activation of both timestamp bounds.
-    pub fn header_time_ok(&self, timestamp: u32) -> Result<(), &'static str> {
-        let median = self
-            .current()
-            .ok_or("preceding median unavailable")?
-            .as_seconds();
-        let timestamp = i64::from(timestamp);
-        if timestamp <= median {
-            return Err("block time is not after the previous median");
-        }
-        if timestamp > median + MAX_TIME_SINCE_MEDIAN {
-            return Err("block time is more than 90 minutes past the previous median");
-        }
-        Ok(())
-    }
-
-    /// Reorg Handler to drops entries above `height`
-    pub fn truncate_to(&mut self, height: BlockHeight) {
-        self.blocktimes.retain(|(h, _)| *h <= height);
     }
 }
 
@@ -142,7 +135,8 @@ mod tests {
     }
 
     fn born() -> MtpTracker {
-        MtpTracker::born(t(BIRTHDAY_SECS))
+        MtpTracker::born(t(BIRTHDAY_SECS));
+        MtpTracker::default()
     }
 
     /// A plausible header time for each height.
@@ -203,21 +197,6 @@ mod tests {
     }
 
     #[test]
-    fn the_day_rewinds_when_a_truncate_recrosses_midnight() {
-        let mut tracker = born();
-        for i in 0..5 {
-            tracker.update(h(i), u32::try_from(BIRTHDAY_SECS - 100).unwrap());
-        }
-        for i in 5..11 {
-            tracker.update(h(i), u32::try_from(BIRTHDAY_SECS + DAY).unwrap());
-        }
-        assert_eq!(tracker.current_day(), Some(1));
-
-        tracker.truncate_to(h(4));
-        assert_eq!(tracker.current_day(), Some(0));
-    }
-
-    #[test]
     fn header_time_is_checked_against_the_preceding_median() {
         let mut tracker = born();
         // Deliberately unordered times: the previous header can be later
@@ -228,12 +207,33 @@ mod tests {
         {
             tracker.update(h(height as u32), time);
         }
-        assert_eq!(tracker.current(), Some(t(140)));
-        assert!(tracker.header_time_ok(141).is_ok());
-        assert!(tracker.header_time_ok(140).is_err());
-        assert!(tracker.header_time_ok(139).is_err());
-        assert!(tracker.header_time_ok(140 + 90 * 60).is_ok());
-        assert!(tracker.header_time_ok(140 + 90 * 60 + 1).is_err());
+        assert_eq!(tracker.next(), Some(t(140)));
+        let admits = |time| tracker.clone().admit(h(11), time).is_ok();
+        assert!(admits(141));
+        assert!(!admits(140));
+        assert!(!admits(139));
+        assert!(admits(140 + 90 * 60));
+        assert!(!admits(140 + 90 * 60 + 1));
+    }
+
+    #[test]
+    fn a_block_s_mtp_is_the_median_of_the_11_before_it() {
+        let mut tracker = born();
+        for i in 0..11 {
+            tracker.update(h(i), 100 + 10 * i);
+        }
+        // The 11 before block 11 are 100..=200: their median is 150.
+        // Counting block 11's own time (500) would make it 160, the
+        // next block's MTP.
+        assert_eq!(tracker.admit(h(11), 500), Ok(t(150)));
+        assert_eq!(tracker.next(), Some(t(160)));
+        // A time not after the block's MTP is refused, and not recorded.
+        assert!(tracker.admit(h(12), 160).is_err());
+        assert_eq!(tracker.next(), Some(t(160)));
+        // A height that skips or repeats one is refused, and not recorded.
+        assert!(tracker.admit(h(13), 500).is_err());
+        assert!(tracker.admit(h(11), 500).is_err());
+        assert_eq!(tracker.next(), Some(t(160)));
     }
 
     #[test]
@@ -242,7 +242,7 @@ mod tests {
         for i in 0..11 {
             tracker.update(h(i), u32::MAX - 1);
         }
-        assert!(tracker.header_time_ok(u32::MAX).is_ok());
+        assert!(tracker.admit(h(11), u32::MAX).is_ok());
     }
 
     #[tokio::test]
@@ -252,7 +252,7 @@ mod tests {
             .backfill(h(20), |_| async { Ok::<_, Infallible>(u32::MAX) })
             .await
             .unwrap();
-        assert_eq!(tracker.current(), Some(t(i64::from(u32::MAX))));
+        assert_eq!(tracker.next(), Some(t(i64::from(u32::MAX))));
     }
 
     #[tokio::test]
@@ -260,7 +260,7 @@ mod tests {
         let mut tracker = born();
         let requested = backfill_mock(&mut tracker, h(20)).await;
         assert_eq!(requested, (10..=20).collect::<Vec<u32>>());
-        assert_eq!(tracker.current(), Some(t(150))); // median of 100..=200
+        assert_eq!(tracker.next(), Some(t(150))); // median of 100..=200
     }
 
     #[tokio::test]
@@ -268,17 +268,17 @@ mod tests {
         let mut tracker = born();
         let requested = backfill_mock(&mut tracker, h(4)).await;
         assert_eq!(requested, (0..=4).collect::<Vec<u32>>());
-        assert_eq!(tracker.current(), Some(t(20))); // median of 0..=40
+        assert_eq!(tracker.next(), Some(t(20))); // median of 0..=40
     }
 
     #[tokio::test]
     async fn after_backfill_the_next_block_pushes_the_window_forward() {
-        // The boot flow: window ends at the origin, the first scanned
-        // block enters without touching the ascending order.
+        // The boot flow: the window ends at the origin, and the first
+        // scanned block is admitted after it.
         let mut tracker = born();
         backfill_mock(&mut tracker, h(10)).await;
-        tracker.update(h(11), stamp(11));
-        assert_eq!(tracker.current(), Some(t(60))); // median of 10..=110
+        assert_eq!(tracker.admit(h(11), stamp(11)), Ok(t(50))); // median of 0..=100
+        assert_eq!(tracker.next(), Some(t(60))); // median of 10..=110
     }
 
     #[test]
@@ -294,13 +294,5 @@ mod tests {
     fn born_twice_with_a_different_birthday_is_fatal() {
         born();
         MtpTracker::born(t(BIRTHDAY_SECS + 1));
-    }
-
-    #[test]
-    #[should_panic(expected = "push out of order")]
-    fn an_out_of_order_height_is_a_checked_bug() {
-        let mut tracker = born();
-        tracker.update(h(10), 1);
-        tracker.update(h(5), 2);
     }
 }
