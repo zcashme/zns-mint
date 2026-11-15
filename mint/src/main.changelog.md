@@ -6,9 +6,10 @@
   MTP `apply_block` returns, the median of the 11 blocks before the
   block, instead of the tracker's median after applying, which was the
   next block's MTP.
-- The mined-repeat check is unchanged: it judges an update or release
-  at its trigger block, `next_height + 1`, and still takes that block's
-  MTP, now read as `mtp.next()`.
+- Opening a challenge is unchanged: the mined-repeat check and
+  `market.admit` (list, delist, buy) judge it at the block its code is
+  relayed in, `next_height + 1`, the same MTP the relay checks, now read
+  as `mtp.next()`.
 - An update, list, auction, or delist approved in time is no longer
   dropped when the next block's median passes the name's deadline. An
   approved order is kept until it lands, and the release waits for it,

@@ -361,8 +361,9 @@ async fn main() {
             // are read. The fee and the authorization are the same ones
             // the request pass requires.
             let trigger = next_height + 1;
-            // A challenge opened here is relayed in the trigger block, so
-            // it is judged at that block's MTP, as the mempool path does.
+            // A challenge is relayed in the trigger block, so it is judged
+            // at that block's MTP, as the mempool path and the relay judge
+            // it.
             let trigger_mtp = mtp
                 .next()
                 .expect("FATAL: MTP unavailable at the applied block");
@@ -398,7 +399,7 @@ async fn main() {
                             &registry,
                             &mut challenges,
                             next_height,
-                            block_mtp,
+                            trigger_mtp,
                             |name| name_notes.note_pending(name),
                         );
                         if let Some(back) = returned {

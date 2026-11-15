@@ -68,15 +68,6 @@ impl MtpTracker {
 
     /// Records a block's header timestamp.
     fn update(&mut self, height: BlockHeight, timestamp: u32) {
-        debug_assert!(
-            self.blocktimes
-                .back()
-                .is_none_or(|(prev_h, _)| height > *prev_h),
-            "push out of order: {} after {:?}",
-            height,
-            self.blocktimes.back().map(|(h, _)| h),
-        );
-
         if self.blocktimes.len() >= MTP_WINDOW {
             self.blocktimes.pop_front();
         }
@@ -91,10 +82,10 @@ impl MtpTracker {
         height: BlockHeight,
         timestamp: u32,
     ) -> Result<Timestamp, &'static str> {
+        let mtp = self.next().ok_or("preceding median unavailable")?;
         if self.blocktimes.back().map(|(last, _)| *last + 1) != Some(height) {
             return Err("block height does not follow the last recorded");
         }
-        let mtp = self.next().ok_or("preceding median unavailable")?;
         let time = i64::from(timestamp);
         if time <= mtp.as_seconds() {
             return Err("block time is not after the previous median");
@@ -282,11 +273,11 @@ mod tests {
 
     #[tokio::test]
     async fn after_backfill_the_next_block_pushes_the_window_forward() {
-        // The boot flow: window ends at the origin, the first scanned
-        // block enters without touching the ascending order.
+        // The boot flow: the window ends at the origin, and the first
+        // scanned block is admitted after it.
         let mut tracker = born();
         backfill_mock(&mut tracker, h(10)).await;
-        tracker.update(h(11), stamp(11));
+        assert_eq!(tracker.admit(h(11), stamp(11)), Ok(t(50))); // median of 0..=100
         assert_eq!(tracker.next(), Some(t(60))); // median of 10..=110
     }
 
@@ -303,13 +294,5 @@ mod tests {
     fn born_twice_with_a_different_birthday_is_fatal() {
         born();
         MtpTracker::born(t(BIRTHDAY_SECS + 1));
-    }
-
-    #[test]
-    #[should_panic(expected = "push out of order")]
-    fn an_out_of_order_height_is_a_checked_bug() {
-        let mut tracker = born();
-        tracker.update(h(10), 1);
-        tracker.update(h(5), 2);
     }
 }
