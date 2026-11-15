@@ -107,16 +107,20 @@ The mint also releases a name on its own when the paid term ends, or when about 
 
 Shorter names cost more per year. The price is in dollars, then converted to ZEC at the highest ZEC price of the mint's last 120 price checks, about one per block.
 
-| Length        | One year   | Forever |
-| ------------- | ---------- | ------- |
-| 1 character   | $10,000    | $30,000 |
-| 2 characters  | $2,500     | $7,500  |
-| 3 characters  | $800       | $2,400  |
-| 4 characters  | $400       | $1,200  |
-| 5 characters  | $100       | $300    |
-| 6 or more     | $20        | $60     |
+| Length         | One year   | Forever |
+| -------------- | ---------- | ------- |
+| 1 character    | $12,480    | $49,920 |
+| 2 characters   | $2,720     | $10,880 |
+| 3 characters   | $920       | $3,680  |
+| 4 characters   | $472       | $1,888  |
+| 5 characters   | $188       | $752    |
+| 6 characters   | $112       | $448    |
+| 7 characters   | $48        | $192    |
+| 8 characters   | $32        | $128    |
+| 9 characters   | $24        | $96     |
+| 10 or more     | $18        | $72     |
 
-Forever is three years' price, paid once. A term of several years is the yearly price times the number of years.
+Forever is four years' price, paid once. A term of several years is the yearly price times the number of years.
 
 The mint publishes a daily ZEC price from public exchanges and quotes every name in zatoshis from that rate. The quote you meet is the one in force when the mint first sees the payment.
 

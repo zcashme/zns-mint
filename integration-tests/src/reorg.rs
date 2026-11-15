@@ -29,7 +29,7 @@ const DROP: &str = "zebra";
 const REFUND_NAME: &str = "alice";
 
 /// 0.1 ZEC: above the withheld refund fee (`CHALLENGE_FEE`, 100,000 zats), and below
-/// [`REFUND_NAME`]'s forever price of $300 while ZEC is under $3,000.
+/// [`REFUND_NAME`]'s forever price of $752 while ZEC is under $7,520.
 const REFUND_ZATS: u64 = 10_000_000;
 /// 2 ZEC, the fixture's request payment.
 const CLAIM_ZATS: u64 = 200_000_000;
