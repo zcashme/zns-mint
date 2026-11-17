@@ -1,5 +1,11 @@
 # Boot module changelog
 
+## 2026-11-17 — The key methods are crate-private again (#533)
+
+- `AccountKeys::derive` is `pub(super)` again, and `fvk`, `orchard_fvk`,
+  `orchard_ask` and `spending_keys` are `pub(crate)`. zns-rebind, the only
+  caller outside the crate, is gone. Visibility only.
+
 ## 2026-11-14 — Boot takes MTPs as Zebra does (#504)
 
 - The separate `header_time_ok` call is gone: `apply_block` checks each
