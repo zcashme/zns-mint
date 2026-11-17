@@ -172,7 +172,7 @@ where
 
     let ciphertext = cipher
         .encrypt(
-            XNonce::from_slice(&nonce_bytes),
+            &XNonce::from(nonce_bytes),
             Payload {
                 msg: seed.expose_secret(),
                 aad: &aad,
@@ -212,7 +212,7 @@ pub fn unseal_seed(
     aad.extend_from_slice(&capsule.fingerprint);
 
     let plaintext = cipher.decrypt(
-        XNonce::from_slice(&capsule.nonce),
+        &XNonce::try_from(capsule.nonce.as_slice()).expect("parse_capsule checks the nonce length"),
         Payload {
             msg: &capsule.ciphertext,
             aad: &aad,
@@ -407,7 +407,7 @@ mod tests {
         aad.extend_from_slice(&other);
         let ciphertext = cipher
             .encrypt(
-                XNonce::from_slice(&nonce),
+                &XNonce::from(nonce),
                 Payload {
                     msg: seed.expose_secret(),
                     aad: &aad,

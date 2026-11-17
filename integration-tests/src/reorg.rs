@@ -16,7 +16,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use hmac::Mac;
+use hmac::{KeyInit, Mac};
 use serde_json::json;
 
 use crate::fixture::{wait_for_verified_name_note, Stack, VerifiedNameNote};

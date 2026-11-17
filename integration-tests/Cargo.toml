@@ -11,9 +11,9 @@ description = "Cross-stack harness for ZNS: zebra, zallet, mint"
 anyhow = "1"
 blake2b_simd = "1"
 hex = "0.4"
-hmac = "0.12.1"
+hmac = "0.13.0"
 rand = "0.10"
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 secp256k1 = "0.33"
 serde = { version = "1", features = ["derive"] }
@@ -29,17 +29,20 @@ zcash_primitives = { version = "0.31", default-features = false, features = ["st
 zcash_protocol = { version = "0.11", default-features = false, features = ["local-consensus"] }
 zcash_script = "0.6"
 zip32 = "0.3"
-# `decrypt` is zns-verify's ZnsIronwoodDomain scan (unified with the orchard
-# patch below). Ceremony/claim still need orchard for proving.
-zns-verify = { version = "0.2.1", features = ["decrypt"] }
+# `decrypt` is zns-verify's standard Ironwood trial decryption. Ceremony/claim
+# still need orchard for proving.
+zns-verify = { version = "0.3", features = ["decrypt"] }
+# Orchard's diversify hash, for the Registry address's g_d.
+group = "0.14"
+pasta_curves = "0.6"
 # Public key for sealing the all-zero test capsule. A release build cannot use this.
 zns-canon = { path = "../canon", features = ["non-tee"] }
 # The mint under test, linked in-process by `fixture`: regtest selects non-tee.
 zns-mint = { path = "../mint", features = ["regtest"] }
 
 [patch.crates-io]
-orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0.1" }
-zcash_primitives = { git = "https://github.com/zcashme/zns-zcash_primitives.git", tag = "zns-zcash_primitives-v0.31.0.1" }
+orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0.2" }
+zcash_primitives = { git = "https://github.com/zcashme/zns-zcash_primitives.git", tag = "zns-zcash_primitives-v0.31.0.2" }
 
 # Debug Halo2 is too slow for a 42-action Ironwood bundle.
 [dev-dependencies]

@@ -7,6 +7,8 @@ use std::io::Cursor;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use group::{Group, GroupEncoding};
+use pasta_curves::{arithmetic::CurveExt, pallas};
 use zcash_primitives::block::Block;
 use zns_verify::NameNote;
 
@@ -42,9 +44,21 @@ fn registry_fvk() -> Result<orchard::keys::FullViewingKey> {
     Ok(orchard::keys::FullViewingKey::from(usk.orchard()))
 }
 
+/// An address's `(g_d, pk_d)`: `pk_d` from its raw bytes, `g_d` from orchard's
+/// diversify hash of `d`, which falls back to the empty input on the identity.
+fn commitment_keys(address: &orchard::Address) -> ([u8; 32], [u8; 32]) {
+    let raw = address.to_raw_address_bytes();
+    let (d, pk_d) = raw.split_at(11);
+    let hasher = pallas::Point::hash_to_curve("z.cash:Orchard-gd");
+    let mut g_d = hasher(d);
+    if bool::from(g_d.is_identity()) {
+        g_d = hasher(&[]);
+    }
+    (g_d.to_bytes(), pk_d.try_into().expect("pk_d is 32 bytes"))
+}
+
 fn commitment_keys_for_fvk(fvk: &orchard::keys::FullViewingKey) -> ([u8; 32], [u8; 32]) {
-    fvk.address_at(0u32, orchard::keys::Scope::External)
-        .zns_commitment_keys()
+    commitment_keys(&fvk.address_at(0u32, orchard::keys::Scope::External))
 }
 
 /// ZIP-32 `g_d` / `pk_d` of the non-tee Registry address (account 1, j=0).
@@ -153,7 +167,7 @@ async fn scan_block(zebra: &Zebrad, height: u32) -> Result<Vec<VerifiedNameNote>
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            let (g_d, pk_d) = recipient.zns_commitment_keys();
+            let (g_d, pk_d) = commitment_keys(&recipient);
             let value = note.value().inner();
             let rho = zns_verify::Rho::from_bytes(&action.rho().to_bytes())
                 .ok_or_else(|| anyhow!("non-canonical rho at height {height}"))?;
@@ -164,7 +178,7 @@ async fn scan_block(zebra: &Zebrad, height: u32) -> Result<Vec<VerifiedNameNote>
                 );
             }
             let prev = payload
-                .prev_rcm()
+                .prev()
                 .map_or_else(|| "0".repeat(64), |prev| hex::encode(prev.as_bytes()));
             found.push(VerifiedNameNote {
                 height,

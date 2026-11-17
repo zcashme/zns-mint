@@ -168,7 +168,7 @@ where
         shared_bytes.zeroize();
         let cipher = XChaCha20Poly1305::new_from_slice(&key).expect("wrap key is 32 bytes");
         let result = cipher.encrypt(
-            XNonce::from_slice(&aead_nonce),
+            &XNonce::from(aead_nonce),
             Payload {
                 msg: seed.expose_secret(),
                 aad: &aad,
@@ -233,7 +233,7 @@ pub fn decrypt_seed(
         shared_bytes.zeroize();
         let cipher = XChaCha20Poly1305::new_from_slice(&key).expect("wrap key is 32 bytes");
         let result = cipher.decrypt(
-            XNonce::from_slice(&transfer.nonce),
+            &XNonce::from(transfer.nonce),
             Payload {
                 msg: &transfer.ciphertext,
                 aad: &aad,
