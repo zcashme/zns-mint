@@ -29,28 +29,20 @@ pub enum TeeError {
 /// A signed attestation report from the AMD Secure Processor.
 ///
 /// The wire form (`bytes`) is what an external verifier parses; the mint
-/// treats it as opaque past this seam. `report_data` is the exact 64-byte
-/// binding the caller passed in, retained for logs and tests without
-/// re-parsing the report.
+/// treats it as opaque past this seam.
 #[derive(Clone, Debug)]
 pub struct Attestation {
     bytes: Vec<u8>,
-    report_data: [u8; 64],
 }
 
 impl Attestation {
-    pub fn new(bytes: Vec<u8>, report_data: [u8; 64]) -> Self {
-        Self { bytes, report_data }
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
     }
 
     /// The signed report as bytes; verifier-facing.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
-    }
-
-    /// The 64-byte identity binding this report attests to.
-    pub fn report_data(&self) -> &[u8; 64] {
-        &self.report_data
     }
 }
 
@@ -158,7 +150,7 @@ pub fn get_attestation(report_data: &[u8; 64]) -> Result<Attestation, TeeError> 
     let bytes = firmware
         .get_report(None, Some(*report_data), None)
         .map_err(|e| TeeError::Attestation(format!("SEV-SNP get_report: {e}")))?;
-    Ok(Attestation::new(bytes, *report_data))
+    Ok(Attestation::new(bytes))
 }
 
 /// Non-SNP platforms compile the same functions; they fail with
