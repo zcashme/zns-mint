@@ -116,17 +116,6 @@ impl Anchor {
             .map_err(|_| AnchorError::TxidLength)?;
         Ok(Self { txid, birthday })
     }
-
-    /// `text` with `anchor_txid` and `birthday` set to this anchor. Every
-    /// other byte is kept as written.
-    pub fn rewrite(&self, text: &str) -> Result<String, AnchorError> {
-        let mut document: toml_edit::DocumentMut = text
-            .parse()
-            .map_err(|error: toml_edit::TomlError| AnchorError::Invalid(error.to_string()))?;
-        document["anchor_txid"] = toml_edit::value(hex::encode(self.txid));
-        document["birthday"] = toml_edit::value(i64::from(self.birthday));
-        Ok(document.to_string())
-    }
 }
 
 #[cfg(test)]
@@ -166,37 +155,5 @@ mod tests {
         let mut later = record;
         later.birthday += 1;
         assert_ne!(genesis_report_data(&later), bound);
-    }
-
-    #[test]
-    fn rewrite_changes_only_the_anchor_lines() {
-        let manifest = "seed_fingerprint = \"zip32seedfp1x\"
-capsule_hash_blake2b256 = \"4444\"
-anchor_txid = \"abababababababababababababababababababababababababababababababab\"
-birthday = 4408922
-measurement = \"7a7a\"
-";
-        let moved = Anchor {
-            txid: [0xff; 32],
-            birthday: 3_500_000,
-        };
-        let rewritten = moved.rewrite(manifest).unwrap();
-        assert_eq!(manifest.lines().count(), rewritten.lines().count());
-        let changed: Vec<_> = manifest
-            .lines()
-            .zip(rewritten.lines())
-            .filter(|(before, after)| before != after)
-            .collect();
-        assert_eq!(
-            changed,
-            vec![
-                (
-                    "anchor_txid = \"abababababababababababababababababababababababababababababababab\"",
-                    "anchor_txid = \"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"",
-                ),
-                ("birthday = 4408922", "birthday = 3500000"),
-            ]
-        );
-        assert_eq!(Anchor::read(&rewritten).unwrap(), moved);
     }
 }
