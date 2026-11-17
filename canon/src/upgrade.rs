@@ -90,9 +90,6 @@ pub enum UpgradeError {
     #[error("manifest bytes are not the canonical encoding")]
     ManifestBytes,
 
-    #[error("artifact sha256 does not match the manifest artifact_hash")]
-    ArtifactHash,
-
     #[error("GitHub attestation: {0}")]
     Attestation(String),
 }
@@ -199,25 +196,6 @@ pub fn authorize_manifest(
     }
     verify_zcashme_asset(document, release, &manifest.release)?;
     Ok(())
-}
-
-/// Accept `artifact` when its SHA-256 equals `manifest.artifact_hash` and a
-/// zcashme workflow attested that digest.
-///
-/// # Errors
-///
-/// Returns [`UpgradeError::ArtifactHash`] before any signature check when the
-/// digest differs. Other errors match [`verify_zcashme_asset`].
-pub fn authorize_artifact(
-    manifest: &UpgradeManifest,
-    artifact: &[u8],
-    release: &ZcashmeRelease<'_>,
-) -> Result<(), UpgradeError> {
-    let digest = sha256(artifact);
-    if digest != manifest.artifact_hash {
-        return Err(UpgradeError::ArtifactHash);
-    }
-    verify_zcashme_digest(&digest, release, &manifest.release)
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -542,12 +520,6 @@ mod tests {
         let err = authorize_manifest(&sample(), b"not-the-manifest", &release("guest", "w", b""))
             .unwrap_err();
         assert_eq!(err, UpgradeError::ManifestBytes);
-    }
-
-    #[test]
-    fn artifact_hash_must_be_the_sha256_of_the_image() {
-        let err = authorize_artifact(&sample(), b"image", &release("guest", "w", b"")).unwrap_err();
-        assert_eq!(err, UpgradeError::ArtifactHash);
     }
 
     #[test]
