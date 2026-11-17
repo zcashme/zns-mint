@@ -11,7 +11,7 @@ description = "Cross-stack harness for ZNS: zebra, zallet, mint"
 anyhow = "1"
 blake2b_simd = "1"
 hex = "0.4"
-hmac = "0.12.1"
+hmac = "0.13.0"
 rand = "0.10"
 sha2 = "0.10.9"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }

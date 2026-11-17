@@ -4909,7 +4909,7 @@ dependencies = [
  "anyhow",
  "blake2b_simd",
  "hex",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "orchard",
  "rand 0.10.3",
  "reqwest",
