@@ -31,7 +31,7 @@ zcash_script = "0.6"
 zip32 = "0.3"
 # `decrypt` is zns-verify's ZnsIronwoodDomain scan (unified with the orchard
 # patch below). Ceremony/claim still need orchard for proving.
-zns-verify = { version = "0.2.1", features = ["decrypt"] }
+zns-verify = { version = "0.3.0", features = ["decrypt"] }
 # Public key for sealing the all-zero test capsule. A release build cannot use this.
 zns-canon = { path = "../canon", features = ["non-tee"] }
 # The mint under test, linked in-process by `fixture`: regtest selects non-tee.
