@@ -1,5 +1,9 @@
 # Zcash I/O changelog
 
+## 2026-11-17 — `ChainClient::connect` is crate-private again (#533)
+
+- zns-rebind, the only caller outside the crate, is gone.
+
 ## 2026-11-14 — The node's fee rate is no longer read (#512)
 
 - The `fees` module is gone: `CanonicalBlockSource::standard_fee`, the
