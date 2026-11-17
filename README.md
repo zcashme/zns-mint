@@ -122,11 +122,11 @@ Shorter names cost more per year. The price is in dollars, then converted to ZEC
 
 Forever is four years' price, paid once. A term of several years is the yearly price times the number of years.
 
-The mint publishes a daily ZEC price from public exchanges and quotes every name in zatoshis from that rate. The quote you meet is the one in force when the mint first sees the payment.
+A claim is quoted at the rate in force when the mint first sees the payment.
 
 An update or a release starts with a challenge fee of 100,000 zatoshis: a hundred times the mint's fee of 1,000 zatoshis per logical action. That fee opens the confirmation. It is not the price of the name. Extra years are paid when you send the confirmation code back. A list, a delist and a buy pay the same 100,000 zatoshis, and a refund withholds it: that is the refund fee.
 
-A payment changes a name only when the memo is one of the sentences above and the amount covers the price that sentence requires. Any other payment to the treasury stays there.
+A payment changes a name only when the memo is one of the sentences above and the amount covers the price that sentence requires. A claim that pays too little, a claim for a name already held, a protected claim with no access code, and a failed confirmation are refunded to the memo's address, less the refund fee. A wrong access code, a request below the challenge fee, and a payment whose memo is not a request stay in the treasury.
 
 ## The resolver
 
