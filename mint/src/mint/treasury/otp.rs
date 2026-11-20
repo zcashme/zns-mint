@@ -336,7 +336,7 @@ mod tests {
         Request::Update {
             name: test_name(name),
             ua: mainnet_ua(),
-            term: None,
+            term: Term::Existing,
         }
     }
 
@@ -510,7 +510,7 @@ mod tests {
         let renewal = Request::Update {
             name: test_name("alice"),
             ua: mainnet_ua(),
-            term: Some(Term::Years(5)),
+            term: Term::Years(5),
         };
         let planted = admit(&mut q, update("alice"), *b"111111");
         let renewal = admit(&mut q, renewal, *b"222222");

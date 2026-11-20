@@ -269,23 +269,14 @@ impl Expiry {
 
     /// Successor expiry for an update (§4.5.3).
     ///
-    /// `None` leaves the period unchanged. `Some(years)` banks from the
-    /// current expiry. `Some(Forever)` is the upgrade: a fixed-term
-    /// registration converts to no fixed expiration — the arm precedes
-    /// the banking arm because `Term::Forever::duration` is zero, so the
-    /// banking arm would silently no-op it. A forever name has no
-    /// runway: `Never` plus a term — banking or a second upgrade — is
-    /// refused. The banking result must sit no more than `MAX_TERM_YEARS`
-    /// ahead of `mtp`.
-    pub fn extend(self, term: Option<Term>, mtp: Timestamp) -> Option<Self> {
+    /// Years bank from the current expiry, never past `MAX_TERM_YEARS`
+    /// ahead of `mtp`. A forever name takes no new term.
+    pub fn extend(self, term: Term, mtp: Timestamp) -> Option<Self> {
         let extended = match (self, term) {
-            (expiry, None) => expiry,
-            (Expiry::Never, Some(_)) => return None,
-            // The upgrade: At + forever converts the registration kind. This arm MUST precede the banking arm below —
-            // `Term::Forever::duration` is zero, so the banking arm would
-            // silently no-op the upgrade (At + 0 = At).
-            (Expiry::At(_), Some(Term::Forever)) => Expiry::Never,
-            (Expiry::At(t), Some(term)) => t.checked_add(term.duration()).map(Expiry::At)?,
+            (expiry, Term::Existing) => expiry,
+            (Expiry::Never, _) => return None,
+            (Expiry::At(_), Term::Forever) => Expiry::Never,
+            (Expiry::At(t), Term::Years(_)) => t.checked_add(term.duration()).map(Expiry::At)?,
         };
         let horizon = mtp
             .checked_add(time::Duration::seconds(
@@ -1094,13 +1085,19 @@ mod tests {
         let term = Term::parse("5y").unwrap();
         // Banking: 5 years from the current expiry, not from now.
         assert_eq!(
-            Expiry::At(mtp).extend(Some(term), mtp),
+            Expiry::At(mtp).extend(term, mtp),
             Some(Expiry::At(mtp.checked_add(term.duration()).unwrap()))
         );
         // Forever has no end date, so years cannot be added to it.
-        assert_eq!(Expiry::Never.extend(Some(term), mtp), None);
-        assert_eq!(Expiry::Never.extend(None, mtp), Some(Expiry::Never));
-        assert_eq!(Expiry::At(mtp).extend(None, mtp), Some(Expiry::At(mtp)));
+        assert_eq!(Expiry::Never.extend(term, mtp), None);
+        assert_eq!(
+            Expiry::Never.extend(Term::Existing, mtp),
+            Some(Expiry::Never)
+        );
+        assert_eq!(
+            Expiry::At(mtp).extend(Term::Existing, mtp),
+            Some(Expiry::At(mtp))
+        );
     }
 
     #[test]
@@ -1108,12 +1105,12 @@ mod tests {
         let mtp = Timestamp::from_seconds(1_000).unwrap();
         // The upgrade: At + forever converts the registration kind.
         assert_eq!(
-            Expiry::At(mtp).extend(Some(Term::Forever), mtp),
+            Expiry::At(mtp).extend(Term::Forever, mtp),
             Some(Expiry::Never)
         );
         // Second upgrade / banking on forever: still refused — the tier
         // is terminal in both directions.
-        assert_eq!(Expiry::Never.extend(Some(Term::Forever), mtp), None);
+        assert_eq!(Expiry::Never.extend(Term::Forever, mtp), None);
     }
 
     #[test]
@@ -1128,15 +1125,9 @@ mod tests {
             )
         };
 
-        assert_eq!(at(98).extend(Some(Term::parse("5y").unwrap()), mtp), None);
-        assert_eq!(
-            at(96).extend(Some(Term::parse("3y").unwrap()), mtp),
-            Some(at(99))
-        );
-        assert_eq!(
-            at(50).extend(Some(Term::parse("3y").unwrap()), mtp),
-            Some(at(53))
-        );
+        assert_eq!(at(98).extend(Term::parse("5y").unwrap(), mtp), None);
+        assert_eq!(at(96).extend(Term::parse("3y").unwrap(), mtp), Some(at(99)));
+        assert_eq!(at(50).extend(Term::parse("3y").unwrap(), mtp), Some(at(53)));
     }
 
     #[test]

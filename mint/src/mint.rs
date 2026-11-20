@@ -157,8 +157,8 @@ impl Action {
 ///
 /// Built by the Treasury memo grammar (`Request::decode`); memo bytes
 /// stay on that parser. Claims carry a term (`forever` or `<N>y`) and
-/// an optional leading pre-sale access code; updates carry `none`
-/// (carried forward), `<N>y`, or `forever` — the upgrade.
+/// an optional leading pre-sale access code; updates carry `none`,
+/// `<N>y`, or `forever`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// Create a new registration; the term slot is never empty.
@@ -171,12 +171,10 @@ pub enum Request {
         term: Term,
         code: Option<AccessCode>,
     },
-    /// Rebind; `None` carries the expiry forward, `Some(Years)` extends
-    /// it, `Some(Forever)` upgrades it to no fixed expiration.
     Update {
         name: Name,
         ua: UnifiedAddress,
-        term: Option<Term>,
+        term: Term,
     },
     Release {
         name: Name,
@@ -272,11 +270,7 @@ impl Request {
                 })
             }
             "update" => {
-                let term = match fields.next()? {
-                    "none" => None,
-                    "forever" => Some(Term::Forever),
-                    field => Some(Term::parse(field)?),
-                };
+                let term = Term::parse(fields.next()?)?;
                 let (name, ua) = decode_name_and_ua(network, fields)?;
                 Some(Request::Update { name, ua, term })
             }
@@ -885,7 +879,10 @@ mod tests {
                 &network,
                 &padded(&format!("ZNS:update:none:alice:{TEST_UA}"))
             ),
-            Some(Request::Update { term: None, .. })
+            Some(Request::Update {
+                term: Term::Existing,
+                ..
+            })
         ));
         assert!(matches!(
             Request::decode(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))),
@@ -898,7 +895,7 @@ mod tests {
                 &padded(&format!("ZNS:update:forever:alice:{TEST_UA}"))
             ),
             Some(Request::Update {
-                term: Some(Term::Forever),
+                term: Term::Forever,
                 ..
             })
         ));

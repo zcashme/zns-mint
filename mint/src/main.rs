@@ -24,7 +24,8 @@ use zns_mint::mint::sale::Market;
 use zns_mint::mint::treasury;
 use zns_mint::mint::treasury::OtpQueue;
 use zns_mint::mint::{
-    relay, relay_buy, spends_transparent, MintInbound, Request, REGISTRY_ACCOUNT, TREASURY_ACCOUNT,
+    relay, relay_buy, spends_transparent, MintInbound, Request, Term, REGISTRY_ACCOUNT,
+    TREASURY_ACCOUNT,
 };
 use zns_mint::zcash::{MempoolChangeKind, TipSession, TransportError, RETRY_PAUSE};
 
@@ -444,11 +445,9 @@ async fn main() {
                         };
                         let name = sent.request.name();
                         // A term keeps the whole payment once it covers
-                        // the price; without a term, all of it goes back.
+                        // the price; with the existing term, all of it goes back.
                         let rest = match &sent.request {
-                            Request::Update {
-                                term: Some(term), ..
-                            } => oracle
+                            Request::Update { term, .. } if *term != Term::Existing => oracle
                                 .quote(name, *term)
                                 .filter(|price| paid >= *price)
                                 .map(|_| Zatoshis::ZERO),
