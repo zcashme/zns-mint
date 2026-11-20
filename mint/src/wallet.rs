@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 
 use incrementalmerkletree::{Address, Marking, Retention};
+use orchard::NOTE_COMMITMENT_TREE_DEPTH as ORCHARD_NOTE_COMMITMENT_TREE_DEPTH;
+use sapling::NOTE_COMMITMENT_TREE_DEPTH as SAPLING_NOTE_COMMITMENT_TREE_DEPTH;
 use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTree};
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::scanning::ScanningKeys;
@@ -19,6 +21,7 @@ use zcash_client_backend::{
     data_api::locking::LockOwner,
     data_api::{
         BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus, WalletWrite,
+        ORCHARD_SHARD_HEIGHT, SAPLING_SHARD_HEIGHT,
     },
     wallet::{NoteId, OutputRef, WalletIronwoodOutput, WalletSaplingOutput},
 };
@@ -47,18 +50,6 @@ fn from_infallible<T>(result: Result<T, Infallible>) -> T {
         Err(error) => match error {},
     }
 }
-
-/// Depth of the Sapling note commitment tree,
-const SAPLING_NOTE_COMMITMENT_TREE_DEPTH: u8 = 32;
-
-/// Depth of the Orchard and Ironwood note commitment tree;
-const ORCHARD_NOTE_COMMITMENT_TREE_DEPTH: u8 = 32;
-
-/// Shard height of the Sapling note commitment tree;
-const SAPLING_SHARD_HEIGHT: u8 = 16;
-
-/// Shard height of the Orchard and Ironwood note commitment trees;
-const ORCHARD_SHARD_HEIGHT: u8 = 16;
 
 /// Maximum checkpoints retained per note commitment tree.
 const MAX_CHECKPOINTS: usize = 100;
@@ -131,13 +122,13 @@ pub struct Wallet<P: Parameters> {
     sapling_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
     orchard_tree: ShardTree<
         MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>,
-        ORCHARD_NOTE_COMMITMENT_TREE_DEPTH,
+        { ORCHARD_NOTE_COMMITMENT_TREE_DEPTH as u8 },
         ORCHARD_SHARD_HEIGHT,
     >,
     orchard_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
     ironwood_tree: ShardTree<
         MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>,
-        ORCHARD_NOTE_COMMITMENT_TREE_DEPTH,
+        { ORCHARD_NOTE_COMMITMENT_TREE_DEPTH as u8 },
         ORCHARD_SHARD_HEIGHT,
     >,
     ironwood_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,

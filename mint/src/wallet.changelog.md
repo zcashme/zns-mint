@@ -1,5 +1,15 @@
 # Wallet changelog
 
+## 2026-11-20 — The commitment trees use upstream's depths and shard heights (#563)
+
+- The three `ShardTree`s take their depth from `sapling::NOTE_COMMITMENT_TREE_DEPTH`
+  and `orchard::NOTE_COMMITMENT_TREE_DEPTH`, and their shard height from
+  `zcash_client_backend::data_api::{SAPLING_SHARD_HEIGHT, ORCHARD_SHARD_HEIGHT}`,
+  as `zcash_client_sqlite` does. The wallet's own copies of those four
+  numbers are gone. Ironwood keeps Orchard's shard height, as
+  `WalletCommitmentTrees` types it.
+- `ironwood_witness` returns a path of that same depth instead of a bare `32`.
+
 ## 2026-10-31 — Marked block commits take predecessor metadata (#309)
 
 - The mint's contiguous commit path takes `BlockMetadata` from its
