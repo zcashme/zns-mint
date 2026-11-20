@@ -125,6 +125,7 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yml'
+              - '.github/actions/e2e-setup/**'
 
   # Boot → claim → update → release in one run. Needs Test, so unit
   # failures skip it. The ceremony is re-proved every run: a random
@@ -135,11 +136,6 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    # zallet-zebra reads zebrad's state directly; Zebra 7 writes format
-    # v29, which no zallet release reads yet. Move to the first release
-    # that does.
-    env:
-      ZALLET_REF: aec7f3fa8397ef17b2852dc6835572d6e623b1a2
     steps:
       - uses: actions/checkout@v4
 
@@ -148,74 +144,7 @@ jobs:
         with:
           components: clippy
 
-      # zebra-indexer-proto (tonic/prost) needs protoc at build time.
-      - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
-
-      # The built binary is cached under its pinned commit, so zallet is
-      # checked out and compiled only when ZALLET_REF changes. A cold
-      # release build takes more than ten minutes, so the binary is saved
-      # as soon as it exists, not at the end of a job that may fail.
-      - name: Restore zallet binary
-        id: zallet
-        uses: actions/cache/restore@v4
-        with:
-          path: zallet-bin
-          key: zallet-zebra-${{ runner.os }}-${{ env.ZALLET_REF }}
-
-      - name: Checkout zallet
-        if: steps.zallet.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: zcash/zallet
-          ref: ${{ env.ZALLET_REF }}
-          path: zallet
-
-      - name: Cache cargo registry and targets
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            integration-tests -> target
-
-      - name: Download zebrad and Sapling params
-        run: |
-          mkdir -p "$RUNNER_TEMP/zebrad" "$RUNNER_TEMP/params"
-          cd "$RUNNER_TEMP/zebrad"
-          base="https://github.com/ZcashFoundation/zebra/releases/download/v7.0.0"
-          asset="zebrad-7.0.0-x86_64-unknown-linux-gnu.tar.gz"
-          curl -fsSL -O "$base/$asset" -O "$base/$asset.sha256"
-          sha256sum -c "$asset.sha256"
-          tar -xzf "$asset"
-          find . -maxdepth 3 -type f -name zebrad -exec mv {} ./zebrad \;
-          chmod +x ./zebrad
-          for p in sapling-spend.params sapling-output.params; do
-            curl -L --fail -o "$RUNNER_TEMP/params/$p" "https://download.z.cash/downloads/$p"
-          done
-          echo "ZEBRAD_BIN=$RUNNER_TEMP/zebrad/zebrad" >> "$GITHUB_ENV"
-          echo "ZCASH_PARAMS_DIR=$RUNNER_TEMP/params" >> "$GITHUB_ENV"
-
-      - name: Build zallet (zebra backend)
-        if: steps.zallet.outputs.cache-hit != 'true'
-        working-directory: zallet/backends/zebra
-        run: |
-          cargo build --locked --release
-          mkdir -p "$GITHUB_WORKSPACE/zallet-bin"
-          cp target/release/zallet-zebra "$GITHUB_WORKSPACE/zallet-bin/"
-
-      - name: Save zallet binary
-        if: steps.zallet.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: zallet-bin
-          key: ${{ steps.zallet.outputs.cache-primary-key }}
-
-      - name: Use the zallet binary
-        run: |
-          test -x zallet-bin/zallet-zebra
-          echo "ZALLET_BIN=$PWD/zallet-bin/zallet-zebra" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/e2e-setup
 
       - name: clippy
         working-directory: integration-tests
@@ -224,16 +153,6 @@ jobs:
       - name: test (lib)
         working-directory: integration-tests
         run: cargo test --locked --lib
-
-      - name: Build mint for e2e
-        run: |
-          cargo \
-            --config profile.dev.package.orchard.opt-level=3 \
-            --config profile.dev.package.halo2_proofs.opt-level=3 \
-            --config profile.dev.package.halo2_gadgets.opt-level=3 \
-            build --locked -p zns-mint --bin zns-mint --features regtest
-          test -x target/debug/zns-mint
-          echo "ZNS_MINT_BIN=$PWD/target/debug/zns-mint" >> "$GITHUB_ENV"
 
       - name: boot to happy path
         working-directory: integration-tests
