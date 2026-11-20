@@ -17,7 +17,7 @@ The wallets are Zallet (`$ZALLET_BIN`, or `zallet-zebra` on `$PATH`):
 build the zebra backend of a zallet checkout with
 `cargo build --locked --release` in `backends/zebra` and point `ZALLET_BIN`
 at `target/release/zallet-zebra`. Use the zebrad release and zallet commit
-that `.github/workflows/ci.yml` pins. The user pays requests through
+that `.github/actions/e2e-setup/action.yml` pins. The user pays requests through
 `z_sendfromaccount`.
 
 Both tests are built on the `fixture` module:
