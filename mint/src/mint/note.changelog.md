@@ -1,5 +1,14 @@
 # `mint/note.rs` design record
 
+## 2026-11-20 — The write path and the trial decryptions use `NETWORK` (#579)
+
+- `prepare`, `record_sent`, `witness_at` and `fee` take
+  `Wallet<Network>` where they take a wallet, and no `network` argument
+  or `P` generic; they build and encode with `boot::NETWORK`.
+- `decrypt_name_notes`, `decrypt_treasury_memos` and
+  `decrypt_treasury_transaction` take no `network`: only the binary
+  calls them. `NameNote::encode`, `decode` and `rseed` keep theirs.
+
 ## 2026-11-20 — `assemble::record_sent` records a sent Name Note (#577)
 
 - `record_sent` moves here from the wallet, next to `prepare`. Through

@@ -17,6 +17,7 @@ use zip32::AccountId;
 
 pub mod assemble;
 
+use crate::boot::NETWORK;
 use crate::mint::registry::Registry;
 use crate::mint::sale::{decode_terms, encode_terms, Listing};
 use crate::mint::{Action, Name, NameCommitment, LIVENESS_INTERVAL, TREASURY_ACCOUNT};
@@ -499,11 +500,7 @@ pub struct DecryptedNameNote {
 /// the rseed derived from that record is the note's rseed: the authorship
 /// check. Value must be zero and the recipient must be the exact Registry
 /// address; anything else is not a Name Note.
-pub fn decrypt_name_notes<P: Parameters>(
-    network: &P,
-    block: &Block,
-    registry_keys: &RegistryKeys,
-) -> Vec<DecryptedNameNote> {
+pub fn decrypt_name_notes(block: &Block, registry_keys: &RegistryKeys) -> Vec<DecryptedNameNote> {
     let registry_fvk = registry_keys.orchard_fvk();
     let registry_ivk = registry_fvk.to_ivk(orchard::keys::Scope::External);
     let registry_recipient = registry_ivk.address_at(0u32);
@@ -526,10 +523,10 @@ pub fn decrypt_name_notes<P: Parameters>(
             else {
                 continue;
             };
-            let Some(payload) = NameNote::decode(network, &memo) else {
+            let Some(payload) = NameNote::decode(&NETWORK, &memo) else {
                 continue;
             };
-            if note.rseed().as_bytes() == &payload.rseed(network)
+            if note.rseed().as_bytes() == &payload.rseed(&NETWORK)
                 && note.value() == orchard::value::NoteValue::ZERO
                 && recipient == registry_recipient
             {
@@ -550,8 +547,7 @@ pub fn decrypt_name_notes<P: Parameters>(
 /// the Treasury's external addresses, exposing each `(txid, paid, memo)`.
 /// The upstream scanner deliberately drops note plaintexts; request memos
 /// arrive through this pass instead.
-pub fn decrypt_treasury_memos<P: Parameters>(
-    network: &P,
+pub fn decrypt_treasury_memos(
     block: &Block,
     height: BlockHeight,
     treasury_keys: &crate::TreasuryKeys,
@@ -559,7 +555,7 @@ pub fn decrypt_treasury_memos<P: Parameters>(
     let ufvks = treasury_ufvk(treasury_keys);
     let mut memos = Vec::new();
     for tx in block.vtx() {
-        let decrypted = decrypt_transaction(network, Some(height), None, tx, &ufvks);
+        let decrypted = decrypt_transaction(&NETWORK, Some(height), None, tx, &ufvks);
         for (paid, memo) in treasury_payments(&decrypted) {
             memos.push((tx.txid(), paid, memo));
         }
@@ -571,15 +567,14 @@ pub fn decrypt_treasury_memos<P: Parameters>(
 /// using the Treasury's viewing capability. Intended for mempool
 /// transactions, whose memos are not yet available through block scanning;
 /// `tip_height` is the chain tip the transaction would follow.
-pub fn decrypt_treasury_transaction<P: Parameters>(
-    network: &P,
+pub fn decrypt_treasury_transaction(
     tx: &Transaction,
     tip_height: BlockHeight,
     treasury_keys: &crate::TreasuryKeys,
 ) -> Vec<(Zatoshis, MemoBytes)> {
     let ufvks = treasury_ufvk(treasury_keys);
     treasury_payments(&decrypt_transaction(
-        network,
+        &NETWORK,
         None,
         Some(tip_height),
         tx,

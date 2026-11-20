@@ -1,5 +1,11 @@
 # Wallet changelog
 
+## 2026-11-20 — `Wallet::network()` is gone (#579)
+
+- It had no callers. The `network` field stays for the upstream test
+  harness (`create_fixture_account`, `get_sent_outputs`), with
+  `expect(dead_code)` outside tests.
+
 ## 2026-11-20 — `record_sent` moves to `note::assemble` (#577)
 
 - `wallet.rs` no longer builds a `SentTransaction` and no longer imports

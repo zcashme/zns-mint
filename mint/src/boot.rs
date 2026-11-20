@@ -12,10 +12,7 @@ use zcash_protocol::consensus::MainNetwork;
 use zcash_protocol::consensus::TestNetwork;
 #[cfg(feature = "regtest")]
 use zcash_protocol::local_consensus::LocalNetwork;
-use zcash_protocol::{
-    consensus::{BlockHeight, Parameters},
-    TxId,
-};
+use zcash_protocol::{consensus::BlockHeight, TxId};
 use zip32::fingerprint::SeedFingerprint;
 
 use std::str::FromStr;
@@ -70,15 +67,13 @@ pub struct GuestInfo {
 /// The boot product: constructed only after every boot check succeeds.
 /// Consumed exactly once by `main`'s exhaustive destructure — the seam
 /// contract, one criterion line per field.
-pub struct Boot<P: Parameters> {
-    /// verified: boot-to-loop consensus — the loop never discovers parameters
-    pub network: P,
+pub struct Boot {
     /// acquired: boot proved that both Zebra transports are live
     pub chain: ChainClient,
     /// acquired: the node source used during boot sync
     pub source: CanonicalBlockSource,
     /// produced: trees seeded from the verified origin
-    pub wallet: Wallet<P>,
+    pub wallet: Wallet<Network>,
     /// produced: derived from the seed — the seed dies before this exists
     pub treasury_keys: TreasuryKeys,
     /// produced: derived from the seed
@@ -133,40 +128,36 @@ const NETWORK_LABEL: &str = "regtest";
 /// The build-selected network type; exactly one per binary.
 #[cfg(not(feature = "regtest"))]
 #[cfg(not(feature = "testnet"))]
-type Network = MainNetwork;
+pub type Network = MainNetwork;
+/// The build-selected network type; exactly one per binary.
 #[cfg(all(feature = "testnet", not(feature = "regtest")))]
-type Network = TestNetwork;
+pub type Network = TestNetwork;
+/// The build-selected network type; exactly one per binary.
 #[cfg(feature = "regtest")]
-type Network = LocalNetwork;
+pub type Network = LocalNetwork;
 
 /// The one network value this build serves.
-fn boot_network() -> Network {
-    #[cfg(not(feature = "regtest"))]
-    #[cfg(not(feature = "testnet"))]
-    {
-        zcash_protocol::consensus::MAIN_NETWORK
-    }
-    #[cfg(all(feature = "testnet", not(feature = "regtest")))]
-    {
-        zcash_protocol::consensus::TEST_NETWORK
-    }
-    #[cfg(feature = "regtest")]
-    {
-        LocalNetwork {
-            overwinter: Some(BlockHeight::from_u32(1)),
-            sapling: Some(BlockHeight::from_u32(1)),
-            blossom: Some(BlockHeight::from_u32(1)),
-            heartwood: Some(BlockHeight::from_u32(1)),
-            canopy: Some(BlockHeight::from_u32(1)),
-            nu5: Some(BlockHeight::from_u32(1)),
-            nu6: Some(BlockHeight::from_u32(1)),
-            nu6_1: Some(BlockHeight::from_u32(4)),
-            nu6_2: Some(BlockHeight::from_u32(4)),
-            nu6_3: Some(BlockHeight::from_u32(4)),
-            nu7: None,
-        }
-    }
-}
+#[cfg(not(feature = "regtest"))]
+#[cfg(not(feature = "testnet"))]
+pub const NETWORK: Network = zcash_protocol::consensus::MAIN_NETWORK;
+/// The one network value this build serves.
+#[cfg(all(feature = "testnet", not(feature = "regtest")))]
+pub const NETWORK: Network = zcash_protocol::consensus::TEST_NETWORK;
+/// The one network value this build serves.
+#[cfg(feature = "regtest")]
+pub const NETWORK: Network = LocalNetwork {
+    overwinter: Some(BlockHeight::from_u32(1)),
+    sapling: Some(BlockHeight::from_u32(1)),
+    blossom: Some(BlockHeight::from_u32(1)),
+    heartwood: Some(BlockHeight::from_u32(1)),
+    canopy: Some(BlockHeight::from_u32(1)),
+    nu5: Some(BlockHeight::from_u32(1)),
+    nu6: Some(BlockHeight::from_u32(1)),
+    nu6_1: Some(BlockHeight::from_u32(4)),
+    nu6_2: Some(BlockHeight::from_u32(4)),
+    nu6_3: Some(BlockHeight::from_u32(4)),
+    nu7: None,
+};
 
 /// Ceremony adoption has closed. The live set may sit below standing
 /// size after a Registry spend that seated no successor.
@@ -359,14 +350,13 @@ fn genesis_document(
     .expect("FATAL: genesis record serialization")
 }
 
-impl Boot<Network> {
+impl Boot {
     /// Boot sequence for this build's network.
     pub async fn start() -> Self {
         // ring and aws-lc-rs are both linked. Rustls will not choose a
         // process default, and the first HTTPS client panics without one.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-        let network = boot_network();
         tracing::info!("boot: starting");
 
         #[cfg(feature = "non-tee")]
@@ -428,8 +418,8 @@ impl Boot<Network> {
             verify_fingerprint(&seed, custody.seed_fingerprint.trim());
             let sealed_hash = capsule_hash(&blob);
             (
-                TreasuryKeys::derive(&network, &seed),
-                RegistryKeys::derive(&network, &seed),
+                TreasuryKeys::derive(&seed),
+                RegistryKeys::derive(&seed),
                 capsule.fingerprint,
                 sealed_hash,
                 access_code_key,
@@ -440,7 +430,7 @@ impl Boot<Network> {
         // 2b. The anchor, verified against the chain before anything
         //     downstream trusts the ceremony file.
         require_anchor_on_chain(
-            |height| source.get_block(&network, height),
+            |height| source.get_block(height),
             mint_birthday,
             anchor_txid(&ceremony),
         )
@@ -464,7 +454,7 @@ impl Boot<Network> {
                 (REGISTRY_ACCOUNT, registry_keys.fvk()),
             ],
             &origin,
-            network,
+            NETWORK,
         )
         .expect("FATAL: failed to seed commitment trees from the verified Zebra checkpoint");
         tracing::info!(
@@ -512,12 +502,11 @@ impl Boot<Network> {
             let next_height = from_height + 1;
 
             let block = source
-                .get_block(&network, next_height)
+                .get_block(next_height)
                 .await
                 .expect("FATAL: block unavailable during boot sync");
 
             crate::mint::apply_block(
-                &network,
                 &registry_keys,
                 &treasury_keys,
                 block,
@@ -600,8 +589,7 @@ impl Boot<Network> {
         //
         // Regtest selects non-tee, so its identity document declares
         // development mode and contains no attestation report.
-        let (treasury_address, registry_ufvk) =
-            mint_identity(&network, &treasury_keys, &registry_keys);
+        let (treasury_address, registry_ufvk) = mint_identity(&treasury_keys, &registry_keys);
         #[cfg(not(feature = "non-tee"))]
         let guest = {
             let report_data = identity_report_data(&treasury_address, &registry_ufvk);
@@ -647,7 +635,6 @@ impl Boot<Network> {
         );
 
         Boot {
-            network,
             chain: chain_client,
             source,
             wallet,
@@ -857,20 +844,16 @@ pub const TREASURY_ADDRESS_REQUEST: zcash_keys::keys::UnifiedAddressRequest = {
 
 /// The mint's public identity: the Treasury's shielded default address and
 /// the Registry's UFVK, in exactly the encoded form the attestation binds.
-fn mint_identity(
-    network: &Network,
-    treasury_keys: &TreasuryKeys,
-    registry_keys: &RegistryKeys,
-) -> (String, String) {
+fn mint_identity(treasury_keys: &TreasuryKeys, registry_keys: &RegistryKeys) -> (String, String) {
     let (treasury_addr, _) = treasury_keys
         .fvk()
         .default_address(TREASURY_ADDRESS_REQUEST)
         .expect("FATAL: Treasury FVK missing default address");
     (
-        treasury_addr.encode(network),
+        treasury_addr.encode(&NETWORK),
         registry_keys
             .fvk()
-            .encode(network)
+            .encode(&NETWORK)
             .expect("FATAL: Registry UFVK encoding failed"),
     )
 }
@@ -933,15 +916,10 @@ mod tests {
     #[test]
     fn mint_identity_is_shielded_only() {
         let seed = Secret::new([0x42u8; 32]);
-        let network = boot_network();
-        let treasury_keys = TreasuryKeys::derive(&network, &seed);
-        let (treasury_ua, _) = mint_identity(
-            &network,
-            &treasury_keys,
-            &RegistryKeys::derive(&network, &seed),
-        );
+        let treasury_keys = TreasuryKeys::derive(&seed);
+        let (treasury_ua, _) = mint_identity(&treasury_keys, &RegistryKeys::derive(&seed));
 
-        let decoded = zcash_keys::address::Address::decode(&network, &treasury_ua)
+        let decoded = zcash_keys::address::Address::decode(&NETWORK, &treasury_ua)
             .expect("FATAL: identity UA does not decode");
         let ua = match decoded {
             zcash_keys::address::Address::Unified(ua) => ua,
@@ -1025,8 +1003,8 @@ mod tests {
     }
 
     /// One funding output to the Treasury, frozen into a transaction.
-    fn fixture_transaction(network: &Network) -> zcash_primitives::transaction::Transaction {
-        let treasury = TreasuryKeys::derive(network, &Secret::new([0; 32]));
+    fn fixture_transaction() -> zcash_primitives::transaction::Transaction {
+        let treasury = TreasuryKeys::derive(&Secret::new([0; 32]));
         let version = orchard::bundle::BundleVersion::ironwood_v3();
         let mut builder = orchard::builder::Builder::new(
             orchard::builder::BundleType::DEFAULT,
@@ -1050,8 +1028,7 @@ mod tests {
 
     #[tokio::test]
     async fn anchor_check_accepts_the_anchor_mined_at_the_birthday() {
-        let network = boot_network();
-        let tx = fixture_transaction(&network);
+        let tx = fixture_transaction();
         let txid = tx.txid();
         let block = test_block_with(tx, BlockHeight::from_u32(109));
         require_anchor_on_chain(async |_| Ok(block), BlockHeight::from_u32(109), txid).await;
@@ -1060,8 +1037,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "is not mined at the manifest birthday")]
     async fn anchor_check_refuses_an_anchor_not_mined_at_the_birthday() {
-        let network = boot_network();
-        let tx = fixture_transaction(&network);
+        let tx = fixture_transaction();
         let block = test_block_with(tx, BlockHeight::from_u32(109));
         let other = TxId::from_bytes(core::array::from_fn(|i| i as u8 + 1));
         require_anchor_on_chain(async |_| Ok(block), BlockHeight::from_u32(109), other).await;

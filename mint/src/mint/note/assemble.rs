@@ -10,10 +10,11 @@ use zcash_primitives::transaction::builder::{self, BuildConfig, Builder, BundleP
 use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule};
 use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 
 use super::NameNote;
+use crate::boot::{Network, NETWORK};
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::{TreeError, Wallet};
 use crate::{RegistryKeys, TreasuryKeys};
@@ -50,9 +51,8 @@ pub enum PrepareError {
 /// `authority_nf` is the claim anchor or the predecessor; Treasury fee
 /// notes cover the fee at `fee_rule`.
 #[allow(clippy::too_many_arguments)]
-pub fn prepare<P: Parameters>(
-    network: &P,
-    wallet: &mut Wallet<P>,
+pub fn prepare(
+    wallet: &mut Wallet<Network>,
     treasury_keys: &TreasuryKeys,
     registry_keys: &RegistryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
@@ -89,7 +89,7 @@ pub fn prepare<P: Parameters>(
     let mut fee_funding = Zatoshis::ZERO;
     let transaction_fee = loop {
         let action_count = (fixed_spends + fee_notes.len()).max(fixed_outputs).max(2);
-        let f = fee(network, fee_rule, target_height, action_count)?;
+        let f = fee(fee_rule, target_height, action_count)?;
         if fee_funding >= f {
             break f;
         }
@@ -116,7 +116,7 @@ pub fn prepare<P: Parameters>(
     let treasury_fvk = treasury_keys.orchard_fvk();
 
     let mut builder = Builder::new(
-        network.clone(),
+        NETWORK,
         target_height,
         BuildConfig::Standard {
             sapling_anchor: None,
@@ -142,7 +142,7 @@ pub fn prepare<P: Parameters>(
 
     // The successor Name Note: a zero-value output whose rseed is derived
     // from its record.
-    let memo = zcash_protocol::memo::MemoBytes::from_bytes(&note.encode(network))
+    let memo = zcash_protocol::memo::MemoBytes::from_bytes(&note.encode(&NETWORK))
         .expect("a Name Note memo is 512 bytes");
     builder
         .add_ironwood_output_with_rseed::<FeeError>(
@@ -150,7 +150,7 @@ pub fn prepare<P: Parameters>(
             registry_fvk.address_at(0u32, orchard::keys::Scope::External),
             Zatoshis::ZERO,
             memo,
-            RandomSeedBytes::from_bytes(note.rseed(network)),
+            RandomSeedBytes::from_bytes(note.rseed(&NETWORK)),
         )
         .map_err(PrepareError::Builder)?;
 
@@ -197,8 +197,8 @@ pub fn prepare<P: Parameters>(
 /// marks its input spends (which also releases any locks) so the same
 /// notes cannot be selected again until the transaction either mines
 /// or expires.
-pub fn record_sent<P: Parameters>(
-    wallet: &mut Wallet<P>,
+pub fn record_sent(
+    wallet: &mut Wallet<Network>,
     transaction: &Transaction,
     target_height: BlockHeight,
     transaction_fee: Zatoshis,
@@ -217,8 +217,8 @@ pub fn record_sent<P: Parameters>(
         .expect("FATAL: wallet rejected a locally built transaction");
 }
 
-fn witness_at<P: Parameters>(
-    wallet: &mut Wallet<P>,
+fn witness_at(
+    wallet: &mut Wallet<Network>,
     note: &ReceivedNote<NoteId, orchard::note::Note>,
     tip: BlockHeight,
 ) -> Result<orchard::tree::MerklePath, PrepareError> {
@@ -234,15 +234,14 @@ fn zatoshis(note: &ReceivedNote<NoteId, orchard::note::Note>) -> Zatoshis {
         .expect("note values fit in the Zcash monetary range")
 }
 
-fn fee<P: Parameters>(
-    network: &P,
+fn fee(
     fee_rule: &FeeRule,
     target_height: BlockHeight,
     ironwood_actions: usize,
 ) -> Result<Zatoshis, PrepareError> {
     fee_rule
         .fee_required(
-            network,
+            &NETWORK,
             target_height,
             std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
             std::iter::empty::<usize>(),

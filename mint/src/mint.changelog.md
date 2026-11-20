@@ -1,5 +1,11 @@
 # Mint live-work design record
 
+## 2026-11-20 — `apply_block`, `relay` and `relay_buy` use `NETWORK` (#579)
+
+- They take `Wallet<Network>` and no `network` argument or `P` generic,
+  and use `boot::NETWORK`. The memo codecs keep their `network`
+  argument: their tests decode fixed vectors under every build.
+
 ## 2026-11-20 — An update carries a `Term` (#556)
 
 - `Request::Update`'s term is a `Term`, not `Option<Term>`.

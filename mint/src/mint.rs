@@ -27,6 +27,7 @@ use sapling::circuit::{OutputParameters, SpendParameters};
 use std::str::Split;
 use tokio::sync::mpsc;
 
+use crate::boot::{Network, NETWORK};
 use crate::wallet::Wallet;
 use crate::zcash::{CanonicalBlockSource, ChainClient, MempoolChangeKind, MempoolSession};
 use crate::TreasuryKeys;
@@ -530,13 +531,12 @@ impl Name {
 /// MTP, the time the law judged it at.
 /// Never fetches, never broadcasts.
 #[allow(clippy::too_many_arguments)]
-pub fn apply_block<P: Parameters + Send + 'static>(
-    network: &P,
+pub fn apply_block(
     registry_keys: &crate::RegistryKeys,
     treasury_keys: &TreasuryKeys,
     block: zcash_primitives::block::Block,
     height: BlockHeight,
-    wallet: &mut Wallet<P>,
+    wallet: &mut Wallet<Network>,
     registry: &mut registry::Registry,
     mtp: &mut mtp::MtpTracker,
 ) -> (Vec<(TxId, MintInbound, Zatoshis)>, Timestamp) {
@@ -561,14 +561,14 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     let block_mtp = mtp
         .admit(height, block.header().time)
         .unwrap_or_else(|reason| panic!("FATAL: {reason} at height {}", u32::from(height)));
-    let candidates = decrypt_name_notes(network, &block, registry_keys);
-    let treasury_memos = note::decrypt_treasury_memos(network, &block, height, treasury_keys);
+    let candidates = decrypt_name_notes(&block, registry_keys);
+    let treasury_memos = note::decrypt_treasury_memos(&block, height, treasury_keys);
 
-    let (header, batches) = decrypt_block(network, block, wallet.scanning_keys());
+    let (header, batches) = decrypt_block(&NETWORK, block, wallet.scanning_keys());
     let spend_identifiers = SpendIdentifiers::unspent(wallet)
         .expect("FATAL: wallet could not expose its unspent nullifiers");
     let scanned = scan_block(
-        network,
+        &NETWORK,
         height,
         &header,
         batches,
@@ -677,7 +677,7 @@ pub fn apply_block<P: Parameters + Send + 'static>(
     // records nothing — this pass stays the only intake.
     let arrivals = treasury_memos
         .into_iter()
-        .map(|(txid, paid, memo)| (txid, MintInbound::decode(network, &memo), paid))
+        .map(|(txid, paid, memo)| (txid, MintInbound::decode(&NETWORK, &memo), paid))
         .collect();
     let applied_tip = wallet.tip();
     tracing::debug!(
@@ -695,9 +695,8 @@ pub fn apply_block<P: Parameters + Send + 'static>(
 /// Builds and submits a controller challenge. Returns false when Treasury
 /// funds or node acceptance defer it.
 #[allow(clippy::too_many_arguments)]
-pub async fn relay<P: Parameters + Send + 'static>(
-    network: &P,
-    wallet: &mut Wallet<P>,
+pub async fn relay(
+    wallet: &mut Wallet<Network>,
     treasury_keys: &TreasuryKeys,
     spend_prover: &SpendParameters,
     output_prover: &OutputParameters,
@@ -707,7 +706,7 @@ pub async fn relay<P: Parameters + Send + 'static>(
     challenge: &OtpMemo,
     lane: &'static str,
 ) -> bool {
-    let memo = match challenge.encode(network) {
+    let memo = match challenge.encode(&NETWORK) {
         Some(memo) => memo,
         None if challenge.action.is_claim() => {
             unreachable!("claims never enter the controller challenge relay")
@@ -723,7 +722,6 @@ pub async fn relay<P: Parameters + Send + 'static>(
         }
     };
     let transaction = match treasury::challenge(
-        network,
         wallet,
         treasury_keys,
         spend_prover,
@@ -768,9 +766,8 @@ pub async fn relay<P: Parameters + Send + 'static>(
 /// read as an update or release challenge. Returns false when Treasury
 /// funds or node acceptance defer it.
 #[allow(clippy::too_many_arguments)]
-pub async fn relay_buy<P: Parameters + Send + 'static>(
-    network: &P,
-    wallet: &mut Wallet<P>,
+pub async fn relay_buy(
+    wallet: &mut Wallet<Network>,
     treasury_keys: &TreasuryKeys,
     spend_prover: &SpendParameters,
     output_prover: &OutputParameters,
@@ -778,7 +775,7 @@ pub async fn relay_buy<P: Parameters + Send + 'static>(
     source: &CanonicalBlockSource,
     otp: &sale::BuyOtp,
 ) -> bool {
-    let memo = match otp.encode(network) {
+    let memo = match otp.encode(&NETWORK) {
         Some(memo) => memo,
         None => {
             tracing::error!(
@@ -789,7 +786,6 @@ pub async fn relay_buy<P: Parameters + Send + 'static>(
         }
     };
     let transaction = match treasury::challenge(
-        network,
         wallet,
         treasury_keys,
         spend_prover,

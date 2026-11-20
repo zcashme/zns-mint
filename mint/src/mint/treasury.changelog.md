@@ -1,5 +1,13 @@
 # Treasury design record
 
+## 2026-11-20 — Treasury payments use `NETWORK` (#579)
+
+- `issue_refund`, `sweep_to_vault`, `challenge` and `propose_vault_sweep`
+  take `Wallet<Network>` and no `network` argument or `P` generic, and
+  pass `&NETWORK` to upstream. `TreasuryProposalError` and
+  `TreasuryBuildError` are no longer generic. `vault_address` keeps its
+  argument.
+
 ## 2026-11-15 — The mainnet vault is the new address (#518)
 
 - `MAINNET_VAULT_ADDRESS` is
