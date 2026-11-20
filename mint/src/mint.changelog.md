@@ -1,5 +1,13 @@
 # Mint live-work design record
 
+## 2026-11-20 — An update carries a `Term` (#556)
+
+- `Request::Update`'s term is a `Term`, not `Option<Term>`.
+  `ZNS:update:none:…` decodes to `Term::Existing`; the update decoder
+  calls `Term::parse`.
+- The claim decoder refuses `Existing`: `ZNS:claim:none:…` stays an
+  unrecognized memo.
+
 ## 2026-11-14 — A block is judged at its own MTP (#504)
 
 - `apply_block` admits the block's header through `MtpTracker::admit`,

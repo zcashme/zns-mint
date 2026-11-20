@@ -1,5 +1,10 @@
 # main.changelog.md
 
+## 2026-11-20 — The OTP-response payment names `Term::Existing` (#556)
+
+- An update whose term is not `Existing` keeps the payment once it
+  covers the quote. An update with `Existing` refunds it, as `None` did.
+
 ## 2026-11-20 — The block path calls `rebind` without `holds` (#554)
 
 - A mined repeat goes straight to `OtpQueue::rebind`, which leaves the

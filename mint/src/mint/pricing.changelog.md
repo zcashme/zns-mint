@@ -1,5 +1,9 @@
 # Pricing changelog
 
+## 2026-11-20 — `Term::Existing` has no quote (#556)
+
+- `quote_at(Existing)` is `None`: it buys no time.
+
 ## 2026-11-15 — Nine length tiers, and forever is four annual prices (#514)
 
 - `ANNUAL_USD` has a tier for each length from 1 to 9 characters:
