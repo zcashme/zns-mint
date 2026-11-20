@@ -6,8 +6,10 @@
   shard completed by the origin checkpoint, through
   `put_*_subtree_roots`. The cut-off at the origin moved here from
   `Wallet::new`; Zebra answers `z_getsubtreesbyindex` as of the tip.
-- A root that conflicts with the origin frontier still stops boot with
-  `FATAL`, now naming the pool.
+- The cut-off takes the roots up to the first one that ends past the
+  origin, so an out-of-order answer cannot put a later shard's root.
+- A root that fails to go in still stops boot with `FATAL`, now naming
+  the pool.
 - The boot log counts the roots put, not the roots Zebra returned.
 
 ## 2026-11-17 — The key methods are crate-private again (#533)

@@ -452,8 +452,7 @@ impl Boot<Network> {
         write_genesis_statement(ceremony_capsule_hash, ceremony_fingerprint, &ceremony);
 
         // 3. Born complete: fetch the origin checkpoint and both
-        // subtree-root batches, then `Wallet::new` and the roots behind
-        // the origin.
+        // subtree-root batches, build the wallet, then put the roots.
         let origin = origin_checkpoint(mint_birthday, async |height| {
             source.chain_state_at(height).await
         })
@@ -476,22 +475,25 @@ impl Boot<Network> {
             network,
         )
         .expect("FATAL: failed to seed commitment trees from the verified Zebra checkpoint");
-        // Zebra answers `z_getsubtreesbyindex` as of the tip, not as of the
-        // origin. A root whose shard completed after the origin marks the
-        // origin frontier's own shard full, so every later append would
-        // land a whole shard above the chain's position and no witness
-        // would bind. Shards complete in index order, so the roots behind
-        // the origin are a leading run.
-        let sapling_behind =
-            sapling_roots.partition_point(|root| root.subtree_end_height() <= checkpoint_height);
-        let ironwood_behind =
-            ironwood_roots.partition_point(|root| root.subtree_end_height() <= checkpoint_height);
+        // Zebra returns subtree roots up to its tip, but the origin frontiers
+        // end at the origin: a later shard's root would misplace every append
+        // after it, and no witness would bind. Shards complete in index order,
+        // so the roots that fit are the first ones, up to the origin.
+        let behind_origin = |end: BlockHeight| end <= checkpoint_height;
+        let sapling_behind = sapling_roots
+            .iter()
+            .take_while(|root| behind_origin(root.subtree_end_height()))
+            .count();
+        let ironwood_behind = ironwood_roots
+            .iter()
+            .take_while(|root| behind_origin(root.subtree_end_height()))
+            .count();
         wallet
             .put_sapling_subtree_roots(0, &sapling_roots[..sapling_behind])
-            .expect("FATAL: Zebra's Sapling subtree roots conflict with its checkpoint");
+            .expect("FATAL: failed to put Zebra's Sapling subtree roots");
         wallet
             .put_ironwood_subtree_roots(0, &ironwood_roots[..ironwood_behind])
-            .expect("FATAL: Zebra's Ironwood subtree roots conflict with its checkpoint");
+            .expect("FATAL: failed to put Zebra's Ironwood subtree roots");
         tracing::info!(
             height = u32::from(checkpoint_height),
             sapling_roots = sapling_behind,
