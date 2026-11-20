@@ -1,5 +1,10 @@
 # `mint/otp.rs` design record
 
+## 2026-11-20 — `holds` is gone (#554)
+
+- `OtpQueue::holds` is gone; its one caller relied on `rebind`'s own
+  search. `rebind` returns nothing.
+
 ## 2026-11-20 — `admit` returns the challenge it opens (#552)
 
 - `OtpQueue::admit` returns the challenge it opens, or `None` when a

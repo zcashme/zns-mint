@@ -366,8 +366,7 @@ async fn main() {
                 else {
                     continue;
                 };
-                if !challenges.holds(request)
-                    || !market.allows_transition(request.name())
+                if !market.allows_transition(request.name())
                     || registry
                         .authorize_challenge(&name_notes, request, trigger, trigger_mtp)
                         .is_none()

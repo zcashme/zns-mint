@@ -193,13 +193,6 @@ impl OtpQueue {
         Some(challenge)
     }
 
-    /// A challenge for `request` is live.
-    pub fn holds(&self, request: &Request) -> bool {
-        self.challenges
-            .iter()
-            .any(|(challenge, _, _)| challenge.request == *request)
-    }
-
     /// A challenge for any request on `name` is live.
     pub fn holds_name(&self, name: &Name) -> bool {
         self.challenges
@@ -209,16 +202,14 @@ impl OtpQueue {
 
     /// Points a live challenge for `request` at `txid`. A request with
     /// no challenge is left alone.
-    pub fn rebind(&mut self, request: &Request, txid: TxId) -> bool {
-        let Some((_, _, backing)) = self
+    pub fn rebind(&mut self, request: &Request, txid: TxId) {
+        if let Some((_, _, backing)) = self
             .challenges
             .iter_mut()
             .find(|(challenge, _, _)| challenge.request == *request)
-        else {
-            return false;
-        };
-        *backing = txid;
-        true
+        {
+            *backing = txid;
+        }
     }
 
     /// The txid a relayed challenge with this code would spend. The
@@ -445,7 +436,6 @@ mod tests {
         let mut q = OtpQueue::new();
         let sent = admit(&mut q, update("alice"), *b"111111");
         assert!(q.holds_name(&test_name("alice")));
-        assert!(!q.holds(&release("alice")));
         assert!(!q.holds_name(&test_name("bob")));
         q.expire(sent.expires_at);
         assert!(!q.holds_name(&test_name("alice")));
@@ -582,10 +572,10 @@ mod tests {
         assert!(q.backing(&response).is_none());
         q.challenge_issued(&pending);
         assert_eq!(q.backing(&response), Some(txid(1)));
-        assert!(q.rebind(&pending.request, txid(2)));
+        q.rebind(&pending.request, txid(2));
         assert_eq!(q.backing(&response), Some(txid(2)));
         assert_eq!(q.relayed().count(), 1);
-        assert!(!q.rebind(&release("alice"), txid(3)));
+        q.rebind(&release("alice"), txid(3));
         assert_eq!(q.challenges.len(), 1);
         assert!(q.complete(&response).is_some());
         assert!(q.backing(&response).is_none());

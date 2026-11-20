@@ -1,5 +1,10 @@
 # main.changelog.md
 
+## 2026-11-20 — The block path calls `rebind` without `holds` (#554)
+
+- A mined repeat goes straight to `OtpQueue::rebind`, which leaves the
+  queue alone when no challenge for the request is live.
+
 ## 2026-11-20 — The mempool path relays the challenge `admit` returns (#552)
 
 - The mempool path takes the challenge from `OtpQueue::admit` and no
