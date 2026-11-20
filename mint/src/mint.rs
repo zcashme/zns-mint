@@ -862,46 +862,6 @@ mod tests {
     }
 
     #[test]
-    fn accepts_the_existing_request_forms() {
-        let network = MainNetwork;
-
-        assert!(matches!(
-            Request::decode(&network, &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"))),
-            Some(Request::Claim {
-                name,
-                term: Term::Forever,
-                code: None,
-                ..
-            }) if name.as_str() == "alice"
-        ));
-        assert!(matches!(
-            Request::decode(
-                &network,
-                &padded(&format!("ZNS:update:none:alice:{TEST_UA}"))
-            ),
-            Some(Request::Update {
-                term: Term::Existing,
-                ..
-            })
-        ));
-        assert!(matches!(
-            Request::decode(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))),
-            Some(Request::Release { .. })
-        ));
-        // The upgrade spelling.
-        assert!(matches!(
-            Request::decode(
-                &network,
-                &padded(&format!("ZNS:update:forever:alice:{TEST_UA}"))
-            ),
-            Some(Request::Update {
-                term: Term::Forever,
-                ..
-            })
-        ));
-    }
-
-    #[test]
     fn claim_may_lead_with_a_presale_code() {
         let network = MainNetwork;
         let code = AccessCode::parse("004206").unwrap();

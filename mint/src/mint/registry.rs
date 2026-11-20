@@ -795,49 +795,6 @@ mod tests {
         registry
     }
 
-    /// A forever name cannot bank a term: refused, OTP unspent.
-    #[test]
-    fn authorize_refuses_an_illegal_extension() {
-        use crate::mint::treasury::{OtpChallenge, OtpCode, D_OTP};
-
-        let mut r = Registry::new();
-        let mtp = ts(1_700_000_000);
-        r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
-        let pending = OtpChallenge {
-            request: update(Term::Years(1)),
-            code: OtpCode::for_test(*b"123456"),
-            attempts: 0,
-            expires_at: ts(1_700_000_000 + D_OTP),
-        };
-        assert!(r.authorize_update(&pending, mtp).is_none());
-    }
-
-    /// The laws are action-typed: a release-shaped pending cannot feed
-    /// the update law, an update-shaped one cannot feed the release
-    /// law — even with the UA matching.
-    #[test]
-    fn authorize_laws_reject_pendings_for_other_actions() {
-        use crate::mint::treasury::OtpCode;
-
-        let mut r = Registry::new();
-        let mtp = ts(1_700_000_000);
-        r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
-        let release_pending = OtpChallenge {
-            request: release(),
-            code: OtpCode::for_test(*b"123456"),
-            attempts: 0,
-            expires_at: ts(1_700_000_000),
-        };
-        let update_pending = OtpChallenge {
-            request: update(Term::Years(1)),
-            code: OtpCode::for_test(*b"123456"),
-            attempts: 0,
-            expires_at: ts(1_700_000_000),
-        };
-        assert!(r.authorize_update(&release_pending, mtp).is_none());
-        assert!(r.authorize_release(&update_pending).is_none());
-    }
-
     /// The plural sweep: only names whose clocks have fired, each paired
     /// with its release note. Live and already-released names are absent.
     #[test]

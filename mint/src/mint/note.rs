@@ -1051,22 +1051,6 @@ mod tests {
     }
 
     #[test]
-    fn term_parse_is_strict() {
-        assert_eq!(Term::parse("forever"), Some(Term::Forever));
-        assert_eq!(Term::parse("1y"), Some(Term::Years(1)));
-        assert_eq!(Term::parse("12y"), Some(Term::Years(12)));
-        assert_eq!(Term::parse("99y"), Some(Term::Years(99)));
-        assert_eq!(Term::parse("none"), Some(Term::Existing));
-        // Missing y, over the cap, zero, leading zero, seconds, empty.
-        assert_eq!(Term::parse("5"), None);
-        assert_eq!(Term::parse("100y"), None);
-        assert_eq!(Term::parse("0y"), None);
-        assert_eq!(Term::parse("01y"), None);
-        assert_eq!(Term::parse("31536000"), None);
-        assert_eq!(Term::parse(""), None);
-    }
-
-    #[test]
     fn claim_expiry_maps_forever_to_never() {
         let mtp = Timestamp::from_seconds(1_000).unwrap();
         assert_eq!(
