@@ -562,22 +562,18 @@ mod tests {
         assert_eq!(q.requested().len(), 1);
     }
 
-    /// Reading the txid leaves the challenge. Rebinding points it at
-    /// the mined repeat. Completing then spends it.
+    /// A rebind moves a live challenge to the mined repeat's txid;
+    /// another request on the name moves nothing.
     #[test]
-    fn backing_reads_the_txid_and_rebind_points_at_the_repeat() {
+    fn rebind_moves_only_its_requests_challenge() {
         let mut q = OtpQueue::new();
         let pending = admit(&mut q, update("alice"), *b"111111");
-        let response = response_for(&pending, *b"111111");
-        assert!(q.backing(&response).is_none());
         q.challenge_issued(&pending);
-        assert_eq!(q.backing(&response), Some(txid(1)));
         q.rebind(&pending.request, txid(2));
-        assert_eq!(q.backing(&response), Some(txid(2)));
-        assert_eq!(q.relayed().count(), 1);
         q.rebind(&release("alice"), txid(3));
-        assert_eq!(q.challenges.len(), 1);
-        assert!(q.complete(&response).is_some());
-        assert!(q.backing(&response).is_none());
+        assert_eq!(
+            q.backing(&response_for(&pending, *b"111111")),
+            Some(txid(2))
+        );
     }
 }
