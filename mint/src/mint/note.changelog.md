@@ -1,5 +1,14 @@
 # `mint/note.rs` design record
 
+## 2026-11-20 — A sent order waits through its expiry block (#573)
+
+- `expire_sent` returns a `Sent` order to `Authorized` once the tip
+  reaches `expiry`, not one block before it. A transaction can still be
+  mined in its expiry block (ZIP 203). Before, a claim was signed again
+  at tip `expiry - 1` with the next pool anchor while the first could
+  still confirm, and a refused duplicate retires an anchor with no
+  successor.
+
 ## 2026-11-20 — `none` is `Term::Existing` (#556)
 
 - `Term` is `Forever | Years(1..=99) | Existing`. `Term::parse` reads
