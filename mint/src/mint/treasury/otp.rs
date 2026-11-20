@@ -428,8 +428,7 @@ mod tests {
         assert_eq!(q.unrelayed().count(), 0);
     }
 
-    /// A live challenge on a name holds the name for every request on
-    /// it, whatever its UA or action; other names stand, and expiry
+    /// A live challenge holds its name; other names stand, and expiry
     /// frees the name.
     #[test]
     fn a_live_challenge_holds_its_name() {
