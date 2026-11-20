@@ -1396,7 +1396,7 @@ mod tests {
     }
 
     /// A broadcast order is not built or dropped while its transaction can
-    /// still confirm. Past the expiry height it is authorized again.
+    /// still confirm. Once the tip reaches the expiry height it is authorized again.
     #[test]
     fn a_sent_order_stays_until_its_expiry_height() {
         let claim = NameNote::Claim {

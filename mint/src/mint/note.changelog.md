@@ -8,6 +8,11 @@
   at tip `expiry - 1` with the next pool anchor while the first could
   still confirm, and a refused duplicate retires an anchor with no
   successor.
+- The claim-anchor pick (`main.rs`) and `prepare`'s authority and
+  Treasury fee lookups ask the wallet about `target_height` (tip + 1),
+  the block the transaction is built for, as Treasury proposals already
+  do. At tip `expiry` the expired original's notes are free again, so the
+  order is rebuilt on them in the same pass.
 
 ## 2026-11-20 — `none` is `Term::Existing` (#556)
 
