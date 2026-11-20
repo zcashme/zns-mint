@@ -1,5 +1,19 @@
 # `mint/note.rs` design record
 
+## 2026-11-20 — A sent order waits through its expiry block (#573)
+
+- `expire_sent` returns a `Sent` order to `Authorized` once the tip
+  reaches `expiry`, not one block before it. A transaction can still be
+  mined in its expiry block (ZIP 203). Before, a claim was signed again
+  at tip `expiry - 1` with the next pool anchor while the first could
+  still confirm, and a refused duplicate retires an anchor with no
+  successor.
+- The claim-anchor pick (`main.rs`) and `prepare`'s authority and
+  Treasury fee lookups ask the wallet about `target_height` (tip + 1),
+  the block the transaction is built for, as Treasury proposals already
+  do. At tip `expiry` the expired original's notes are free again, so the
+  order is rebuilt on them in the same pass.
+
 ## 2026-11-20 — `none` is `Term::Existing` (#556)
 
 - `Term` is `Forever | Years(1..=99) | Existing`. `Term::parse` reads

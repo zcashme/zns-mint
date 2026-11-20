@@ -724,7 +724,7 @@ async fn main() {
             }
         }
 
-        // A broadcast order whose expiry height has passed is signed again.
+        // A broadcast order is signed again once the tip reaches its expiry height.
         // An order approved in time is kept past the name's deadline until
         // it lands; the release below waits for it.
         name_notes.expire_sent(tip);
@@ -764,7 +764,7 @@ async fn main() {
                         .unspent_ironwood_note_by_nullifier(
                             REGISTRY_ACCOUNT,
                             nf,
-                            TargetHeight::from(tip),
+                            TargetHeight::from(target_height),
                         )
                         .is_some()
                 }) {

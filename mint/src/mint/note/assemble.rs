@@ -63,7 +63,11 @@ pub fn prepare<P: Parameters>(
     target_height: BlockHeight,
 ) -> Result<(Transaction, Zatoshis), PrepareError> {
     let authority = wallet
-        .unspent_ironwood_note_by_nullifier(REGISTRY_ACCOUNT, authority_nf, TargetHeight::from(tip))
+        .unspent_ironwood_note_by_nullifier(
+            REGISTRY_ACCOUNT,
+            authority_nf,
+            TargetHeight::from(target_height),
+        )
         .ok_or(PrepareError::AuthorityUnavailable)?;
 
     let excluded = [*authority.internal_note_id()];
@@ -75,7 +79,8 @@ pub fn prepare<P: Parameters>(
     };
 
     // Treasury funding: largest first, so fewest notes fund the fee.
-    let mut candidates = wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(tip));
+    let mut candidates =
+        wallet.unspent_ironwood_notes(TREASURY_ACCOUNT, TargetHeight::from(target_height));
     candidates.retain(|n| !excluded.contains(n.internal_note_id()));
     candidates.sort_by_key(|n| std::cmp::Reverse(n.note().value().inner()));
 

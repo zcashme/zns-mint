@@ -623,8 +623,8 @@ fn treasury_payments(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NameNoteState {
     Authorized,
-    /// Submitted. The transaction can confirm while the applied tip is
-    /// below `expiry`.
+    /// Submitted. The transaction can confirm up to and including block
+    /// `expiry` (ZIP 203).
     Sent {
         expiry: BlockHeight,
     },
@@ -688,8 +688,8 @@ impl NameNoteQueue {
         }
     }
 
-    /// Records that `name`'s authorized order was broadcast, valid below
-    /// `expiry`.
+    /// Records that `name`'s authorized order was broadcast, valid up to
+    /// and including block `expiry`.
     pub fn mark_sent(&mut self, name: &Name, expiry: BlockHeight) {
         let state = self
             .orders
@@ -702,12 +702,12 @@ impl NameNoteQueue {
     }
 
     /// Returns a broadcast order to [`NameNoteState::Authorized`] once the
-    /// applied tip can no longer mine it. The last valid block is the one
-    /// before `expiry`.
+    /// applied tip can no longer mine it. The last valid block is `expiry`
+    /// itself (ZIP 203), so the order returns when the tip reaches it.
     pub fn expire_sent(&mut self, tip: BlockHeight) {
         for (_, _, state) in &mut self.orders {
             if let NameNoteState::Sent { expiry } = *state {
-                if tip + 1 >= expiry {
+                if tip >= expiry {
                     *state = NameNoteState::Authorized;
                 }
             }
@@ -1396,7 +1396,7 @@ mod tests {
     }
 
     /// A broadcast order is not built or dropped while its transaction can
-    /// still confirm. Past the expiry height it is authorized again.
+    /// still confirm. Once the tip reaches the expiry height it is authorized again.
     #[test]
     fn a_sent_order_stays_until_its_expiry_height() {
         let claim = NameNote::Claim {
@@ -1413,10 +1413,10 @@ mod tests {
         assert!(queue.note_pending(claim.name()));
         assert_eq!(queue.authorized_names().count(), 1);
 
-        queue.expire_sent(BlockHeight::from_u32(49));
+        queue.expire_sent(BlockHeight::from_u32(50));
         assert!(queue.authorized_notes().is_empty());
 
-        queue.expire_sent(BlockHeight::from_u32(50));
+        queue.expire_sent(BlockHeight::from_u32(51));
         assert_eq!(queue.authorized_notes(), vec![claim]);
     }
 
