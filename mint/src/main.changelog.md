@@ -4,8 +4,8 @@
 
 - `Boot` no longer hands over a `network`. The loop passes `&NETWORK`
   where a translation needs one, and no longer passes it to
-  `apply_block`, `relay`, `relay_buy`, `prepare`, `issue_refund` or
-  `sweep_to_vault`.
+  `apply_block`, `relay`, `relay_buy`, `prepare`, `issue_refund`,
+  `sweep_to_vault`, `decrypt_treasury_transaction` or `get_block`.
 
 ## 2026-11-20 — The OTP-response payment names `Term::Existing` (#556)
 

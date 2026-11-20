@@ -561,8 +561,8 @@ pub fn apply_block(
     let block_mtp = mtp
         .admit(height, block.header().time)
         .unwrap_or_else(|reason| panic!("FATAL: {reason} at height {}", u32::from(height)));
-    let candidates = decrypt_name_notes(&NETWORK, &block, registry_keys);
-    let treasury_memos = note::decrypt_treasury_memos(&NETWORK, &block, height, treasury_keys);
+    let candidates = decrypt_name_notes(&block, registry_keys);
+    let treasury_memos = note::decrypt_treasury_memos(&block, height, treasury_keys);
 
     let (header, batches) = decrypt_block(&NETWORK, block, wallet.scanning_keys());
     let spend_identifiers = SpendIdentifiers::unspent(wallet)

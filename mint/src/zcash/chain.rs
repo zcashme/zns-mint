@@ -12,6 +12,8 @@ use zcash_primitives::block::{Block, BlockHash, BlockHeader};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::constants::MAX_BLOCK_BYTES;
+
+use crate::boot::NETWORK;
 use zebra_indexer_proto::{
     BlockAndHash, BlockHashAndHeight, BlockRequest, Empty, HashOrHeight, ZebraClient,
 };
@@ -296,13 +298,9 @@ impl CanonicalBlockSource {
     /// compiled consensus parameters. Best-chain membership remains
     /// Zebra's word: the bytes are the state-committed block's own
     /// serialization.
-    pub async fn get_block<P: Parameters>(
-        &self,
-        network: &P,
-        height: BlockHeight,
-    ) -> Result<Block, TransportError> {
+    pub async fn get_block(&self, height: BlockHeight) -> Result<Block, TransportError> {
         let fetched = self.chain.clone().block_and_hash(height).await?;
-        block_from_wire(&fetched.data, network, height)
+        block_from_wire(&fetched.data, &NETWORK, height)
     }
 
     /// A best-chain block hash by height, for reorg walks. The hash rides

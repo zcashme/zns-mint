@@ -10,7 +10,7 @@ use zcash_primitives::transaction::builder::{self, BuildConfig, Builder, BundleP
 use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule};
 use zcash_primitives::transaction::fees::FeeRule as _;
 use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::{BlockHeight, Parameters};
+use zcash_protocol::consensus::BlockHeight;
 use zcash_protocol::value::Zatoshis;
 
 use super::NameNote;
@@ -89,7 +89,7 @@ pub fn prepare(
     let mut fee_funding = Zatoshis::ZERO;
     let transaction_fee = loop {
         let action_count = (fixed_spends + fee_notes.len()).max(fixed_outputs).max(2);
-        let f = fee(&NETWORK, fee_rule, target_height, action_count)?;
+        let f = fee(fee_rule, target_height, action_count)?;
         if fee_funding >= f {
             break f;
         }
@@ -197,8 +197,8 @@ pub fn prepare(
 /// marks its input spends (which also releases any locks) so the same
 /// notes cannot be selected again until the transaction either mines
 /// or expires.
-pub fn record_sent<P: Parameters>(
-    wallet: &mut Wallet<P>,
+pub fn record_sent(
+    wallet: &mut Wallet<Network>,
     transaction: &Transaction,
     target_height: BlockHeight,
     transaction_fee: Zatoshis,
@@ -217,8 +217,8 @@ pub fn record_sent<P: Parameters>(
         .expect("FATAL: wallet rejected a locally built transaction");
 }
 
-fn witness_at<P: Parameters>(
-    wallet: &mut Wallet<P>,
+fn witness_at(
+    wallet: &mut Wallet<Network>,
     note: &ReceivedNote<NoteId, orchard::note::Note>,
     tip: BlockHeight,
 ) -> Result<orchard::tree::MerklePath, PrepareError> {
@@ -234,15 +234,14 @@ fn zatoshis(note: &ReceivedNote<NoteId, orchard::note::Note>) -> Zatoshis {
         .expect("note values fit in the Zcash monetary range")
 }
 
-fn fee<P: Parameters>(
-    network: &P,
+fn fee(
     fee_rule: &FeeRule,
     target_height: BlockHeight,
     ironwood_actions: usize,
 ) -> Result<Zatoshis, PrepareError> {
     fee_rule
         .fee_required(
-            network,
+            &NETWORK,
             target_height,
             std::iter::empty::<zcash_primitives::transaction::fees::transparent::InputSize>(),
             std::iter::empty::<usize>(),

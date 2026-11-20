@@ -5,9 +5,9 @@ use std::marker::PhantomData;
 use secrecy::{ExposeSecret, Secret};
 use zcash_client_backend::data_api::wallet::SpendingKeys;
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
-use zcash_protocol::consensus::Parameters;
 use zip32::AccountId;
 
+use super::NETWORK;
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 
 mod sealed {
@@ -49,8 +49,8 @@ pub type RegistryKeys = AccountKeys<Registry>;
 
 impl<A: MintAccount> AccountKeys<A> {
     /// Derives the account's keys from the sealed seed; panics only on a cryptographically broken seed.
-    pub(super) fn derive<P: Parameters>(network: &P, seed: &Secret<[u8; 32]>) -> Self {
-        let usk = UnifiedSpendingKey::from_seed(network, seed.expose_secret(), A::ACCOUNT_ID)
+    pub(super) fn derive(seed: &Secret<[u8; 32]>) -> Self {
+        let usk = UnifiedSpendingKey::from_seed(&NETWORK, seed.expose_secret(), A::ACCOUNT_ID)
             .expect("FATAL: key derivation");
         Self {
             spending: usk,

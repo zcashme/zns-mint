@@ -7,6 +7,8 @@
   mint imports.
 - `Boot` is no longer generic: its `network` field is gone and `wallet`
   is `Wallet<Network>`.
+- `TreasuryKeys::derive`, `RegistryKeys::derive` and `mint_identity`
+  take no `network`.
 
 ## 2026-11-20 — Boot fetches no subtree roots (#569)
 

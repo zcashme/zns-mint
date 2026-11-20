@@ -1,5 +1,11 @@
 # Zcash I/O changelog
 
+## 2026-11-20 — `get_block` parses under `NETWORK` (#579)
+
+- `CanonicalBlockSource::get_block(height)` takes no `network`; it
+  parses with `boot::NETWORK`. `block_from_wire` keeps its argument for
+  its mainnet fixture tests.
+
 ## 2026-11-20 — `get_subtree_roots` is gone (#569)
 
 - `get_subtree_roots`, its `ChainClient` wrapper, the

@@ -137,7 +137,6 @@ async fn main() {
                     .expect("FATAL: MTP unavailable before a mempool relay");
                 let target_height = tip + 1;
                 let candidate = zns_mint::mint::note::decrypt_treasury_transaction(
-                    &NETWORK,
                     &tx,
                     tip,
                     &treasury_keys,
@@ -290,7 +289,7 @@ async fn main() {
             let next_height = from_height + 1;
 
             let block = loop {
-                match source.get_block(&NETWORK, next_height).await {
+                match source.get_block(next_height).await {
                     Ok(block) => break block,
                     Err(error) if error.is_retryable() => {
                         tracing::warn!(
