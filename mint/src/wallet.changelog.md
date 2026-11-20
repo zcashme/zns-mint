@@ -1,5 +1,11 @@
 # Wallet changelog
 
+## 2026-11-20 — `sync_status` and `expired_unmined_at` are gone (#571)
+
+- Neither had a caller. Metrics reports the chain tip without comparing
+  it to Zebra's; a sent Name Note order and note selection judge expiry
+  themselves (`NameNotes::expire_sent`, `unmined_spend_still_blocks`).
+
 ## 2026-11-20 — The shard end-height maps are gone (#569)
 
 - `*_tree_shard_end_heights` are gone. Only `put_*_subtree_roots` filled
