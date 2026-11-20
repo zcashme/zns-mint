@@ -260,6 +260,9 @@ impl Request {
                         Term::parse(fields.next()?)?,
                     ),
                 };
+                if term == Term::Existing {
+                    return None;
+                }
                 let (name, ua) = decode_name_and_ua(network, fields)?;
                 Some(Request::Claim {
                     name,

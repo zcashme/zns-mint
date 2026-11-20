@@ -299,27 +299,28 @@ impl Expiry {
     }
 }
 
-/// A request term: `forever` or whole Julian years, 1–99. Requests speak
-/// durations — seconds never appear on the request wire; the mint
-/// converts years to seconds at authorization.
+/// A request term: `forever`, whole Julian years 1–99, or `none`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Term {
     /// No fixed expiration — held while liveness passes.
     Forever,
     /// A term of N whole Julian years (the liveness interval).
     Years(u64),
+    /// `none`: an update keeps the name's term. A claim can't.
+    Existing,
 }
 
 /// The longest single term.
 pub const MAX_TERM_YEARS: u64 = 99;
 
 impl Term {
-    /// Parses a term field: `forever` or `<N>y` — N is 1–99, digits only,
-    /// no leading zero. `5` (missing y), `100y` (over the cap), `0y`,
-    /// `01y` are invalid on sight.
+    /// Parses a term field: `forever`, `none`, or `<N>y` — N is 1–99,
+    /// digits only, no leading zero.
     pub fn parse(field: &str) -> Option<Self> {
-        if field == "forever" {
-            return Some(Self::Forever);
+        match field {
+            "forever" => return Some(Self::Forever),
+            "none" => return Some(Self::Existing),
+            _ => {}
         }
         let years = field.strip_suffix('y')?;
         if years.is_empty() || years.starts_with('0') || !years.bytes().all(|b| b.is_ascii_digit())
@@ -333,7 +334,7 @@ impl Term {
     /// The term as a `time` duration; one year is `LIVENESS_INTERVAL`.
     pub fn duration(self) -> time::Duration {
         match self {
-            Self::Forever => time::Duration::ZERO, // claim_expiry never reads it
+            Self::Forever | Self::Existing => time::Duration::ZERO,
             Self::Years(n) => time::Duration::seconds(n as i64 * LIVENESS_INTERVAL),
         }
     }
@@ -343,6 +344,7 @@ impl Term {
         match self {
             Self::Forever => Some(Expiry::Never),
             Self::Years(_) => mtp.checked_add(self.duration()).map(Expiry::At),
+            Self::Existing => None,
         }
     }
 }
@@ -1063,6 +1065,7 @@ mod tests {
         assert_eq!(Term::parse("1y"), Some(Term::Years(1)));
         assert_eq!(Term::parse("12y"), Some(Term::Years(12)));
         assert_eq!(Term::parse("99y"), Some(Term::Years(99)));
+        assert_eq!(Term::parse("none"), Some(Term::Existing));
         // Missing y, over the cap, zero, leading zero, seconds, empty.
         assert_eq!(Term::parse("5"), None);
         assert_eq!(Term::parse("100y"), None);
@@ -1070,7 +1073,6 @@ mod tests {
         assert_eq!(Term::parse("01y"), None);
         assert_eq!(Term::parse("31536000"), None);
         assert_eq!(Term::parse(""), None);
-        assert_eq!(Term::parse("none"), None);
     }
 
     #[test]
