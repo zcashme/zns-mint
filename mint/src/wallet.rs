@@ -21,7 +21,7 @@ use zcash_client_backend::{
     data_api::locking::LockOwner,
     data_api::{
         BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus, WalletWrite,
-        ORCHARD_SHARD_HEIGHT, SAPLING_SHARD_HEIGHT,
+        IRONWOOD_SHARD_HEIGHT, ORCHARD_SHARD_HEIGHT, SAPLING_SHARD_HEIGHT,
     },
     wallet::{NoteId, OutputRef, WalletIronwoodOutput, WalletSaplingOutput},
 };
@@ -129,7 +129,7 @@ pub struct Wallet<P: Parameters> {
     ironwood_tree: ShardTree<
         MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>,
         { ORCHARD_NOTE_COMMITMENT_TREE_DEPTH as u8 },
-        ORCHARD_SHARD_HEIGHT,
+        IRONWOOD_SHARD_HEIGHT,
     >,
     ironwood_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
 }
@@ -215,7 +215,7 @@ impl<P: Parameters> Wallet<P> {
             if root.subtree_end_height() > origin_height {
                 continue;
             }
-            let addr = Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index);
+            let addr = Address::from_parts(IRONWOOD_SHARD_HEIGHT.into(), index);
             wallet.ironwood_tree.insert(addr, *root.root_hash())?;
             wallet
                 .ironwood_tree_shard_end_heights

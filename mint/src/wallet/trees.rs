@@ -12,7 +12,8 @@ use shardtree::{
     ShardTree,
 };
 use zcash_client_backend::data_api::{
-    chain::CommitmentTreeRoot, WalletCommitmentTrees, ORCHARD_SHARD_HEIGHT, SAPLING_SHARD_HEIGHT,
+    chain::CommitmentTreeRoot, WalletCommitmentTrees, IRONWOOD_SHARD_HEIGHT, ORCHARD_SHARD_HEIGHT,
+    SAPLING_SHARD_HEIGHT,
 };
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 
@@ -160,7 +161,7 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
             &'a mut ShardTree<
                 Self::OrchardShardStore<'a>,
                 { ORCHARD_NOTE_COMMITMENT_TREE_DEPTH as u8 },
-                ORCHARD_SHARD_HEIGHT,
+                IRONWOOD_SHARD_HEIGHT,
             >,
         ) -> Result<A, E>,
         E: From<ShardTreeError<Self::Error>>,
@@ -179,7 +180,7 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
         if let Err(error) = self.with_ironwood_tree_mut(|tree| {
             for (root, index) in roots.iter().zip(start_index..) {
                 tree.insert(
-                    Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index),
+                    Address::from_parts(IRONWOOD_SHARD_HEIGHT.into(), index),
                     *root.root_hash(),
                 )?;
             }
@@ -191,7 +192,7 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
 
         for (root, index) in roots.iter().zip(start_index..) {
             self.ironwood_tree_shard_end_heights.insert(
-                Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index),
+                Address::from_parts(IRONWOOD_SHARD_HEIGHT.into(), index),
                 root.subtree_end_height(),
             );
         }
@@ -203,7 +204,7 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
         index: u64,
     ) -> Result<Option<orchard::tree::MerkleHashOrchard>, ShardTreeError<Self::Error>> {
         self.with_ironwood_tree_mut(|tree| {
-            let address = Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index);
+            let address = Address::from_parts(IRONWOOD_SHARD_HEIGHT.into(), index);
             Ok(tree
                 .store()
                 .get_shard(address)
