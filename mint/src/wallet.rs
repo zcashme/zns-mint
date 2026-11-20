@@ -10,7 +10,7 @@ pub use read::WalletError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 
-use incrementalmerkletree::{Address, Marking, Retention};
+use incrementalmerkletree::{Marking, Retention};
 use orchard::NOTE_COMMITMENT_TREE_DEPTH as ORCHARD_NOTE_COMMITMENT_TREE_DEPTH;
 use sapling::NOTE_COMMITMENT_TREE_DEPTH as SAPLING_NOTE_COMMITMENT_TREE_DEPTH;
 use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTree};
@@ -119,19 +119,16 @@ pub struct Wallet<P: Parameters> {
         SAPLING_NOTE_COMMITMENT_TREE_DEPTH,
         SAPLING_SHARD_HEIGHT,
     >,
-    sapling_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
     orchard_tree: ShardTree<
         MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>,
         { ORCHARD_NOTE_COMMITMENT_TREE_DEPTH as u8 },
         ORCHARD_SHARD_HEIGHT,
     >,
-    orchard_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
     ironwood_tree: ShardTree<
         MemoryShardStore<orchard::tree::MerkleHashOrchard, BlockHeight>,
         { ORCHARD_NOTE_COMMITMENT_TREE_DEPTH as u8 },
         IRONWOOD_SHARD_HEIGHT,
     >,
-    ironwood_tree_shard_end_heights: BTreeMap<Address, BlockHeight>,
 }
 
 impl<P: Parameters> Wallet<P> {
@@ -167,11 +164,8 @@ impl<P: Parameters> Wallet<P> {
             sent_outputs: BTreeMap::new(),
             locks: BTreeMap::new(),
             sapling_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),
-            sapling_tree_shard_end_heights: BTreeMap::new(),
             orchard_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),
-            orchard_tree_shard_end_heights: BTreeMap::new(),
             ironwood_tree: ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS),
-            ironwood_tree_shard_end_heights: BTreeMap::new(),
         };
         let retention = Retention::Checkpoint {
             id: chain_state.block_height(),

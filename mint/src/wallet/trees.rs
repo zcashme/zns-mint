@@ -46,8 +46,7 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
         start_index: u64,
         roots: &[CommitmentTreeRoot<sapling::Node>],
     ) -> Result<(), ShardTreeError<Self::Error>> {
-        // All or nothing: a failed batch restores the saved tree; the
-        // end-height map fills only on full success.
+        // All or nothing: a failed batch restores the saved tree.
         let saved_tree = clone_shard_tree(&self.sapling_tree)?;
         if let Err(error) = self.with_sapling_tree_mut(|tree| {
             for (root, index) in roots.iter().zip(start_index..) {
@@ -60,13 +59,6 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
         }) {
             self.sapling_tree = saved_tree;
             return Err(error);
-        }
-
-        for (root, index) in roots.iter().zip(start_index..) {
-            self.sapling_tree_shard_end_heights.insert(
-                Address::from_parts(SAPLING_SHARD_HEIGHT.into(), index),
-                root.subtree_end_height(),
-            );
         }
         Ok(())
     }
@@ -111,8 +103,7 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
         start_index: u64,
         roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
     ) -> Result<(), ShardTreeError<Self::Error>> {
-        // All or nothing: a failed batch restores the saved tree; the
-        // end-height map fills only on full success.
+        // All or nothing: a failed batch restores the saved tree.
         let saved_tree = clone_shard_tree(&self.orchard_tree)?;
         if let Err(error) = self.with_orchard_tree_mut(|tree| {
             for (root, index) in roots.iter().zip(start_index..) {
@@ -125,13 +116,6 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
         }) {
             self.orchard_tree = saved_tree;
             return Err(error);
-        }
-
-        for (root, index) in roots.iter().zip(start_index..) {
-            self.orchard_tree_shard_end_heights.insert(
-                Address::from_parts(ORCHARD_SHARD_HEIGHT.into(), index),
-                root.subtree_end_height(),
-            );
         }
         Ok(())
     }
@@ -174,8 +158,7 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
         start_index: u64,
         roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
     ) -> Result<(), ShardTreeError<Self::Error>> {
-        // All or nothing: a failed batch restores the saved tree; the
-        // end-height map fills only on full success.
+        // All or nothing: a failed batch restores the saved tree.
         let saved_tree = clone_shard_tree(&self.ironwood_tree)?;
         if let Err(error) = self.with_ironwood_tree_mut(|tree| {
             for (root, index) in roots.iter().zip(start_index..) {
@@ -188,13 +171,6 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
         }) {
             self.ironwood_tree = saved_tree;
             return Err(error);
-        }
-
-        for (root, index) in roots.iter().zip(start_index..) {
-            self.ironwood_tree_shard_end_heights.insert(
-                Address::from_parts(IRONWOOD_SHARD_HEIGHT.into(), index),
-                root.subtree_end_height(),
-            );
         }
         Ok(())
     }
@@ -303,9 +279,9 @@ mod tests {
         ));
     }
 
-    /// Putting roots seeds trees and end-height bookkeeping together.
+    /// Put roots are read back from their trees.
     #[test]
-    fn put_roots_seeds_roots_and_end_heights_together() {
+    fn put_roots_are_read_back() {
         let mut wallet =
             Wallet::new([], &empty_origin(), MainNetwork).expect("empty birth is valid");
         wallet
@@ -324,19 +300,17 @@ mod tests {
             )
             .expect("an empty shard accepts a root");
 
-        assert_eq!(wallet.sapling_tree_shard_end_heights.len(), 1);
         assert_eq!(
             wallet.get_sapling_subtree_root(0).unwrap(),
             Some(sapling::Node::empty_root(Level::from(5)))
         );
-        assert_eq!(wallet.ironwood_tree_shard_end_heights.len(), 1);
         assert_eq!(
             wallet.get_ironwood_subtree_root(0).unwrap(),
             Some(orchard::tree::MerkleHashOrchard::empty_root(Level::from(5)))
         );
     }
 
-    /// A failed batch restores the tree; the map keeps only what landed.
+    /// A failed batch restores the tree.
     #[test]
     fn put_roots_conflict_restores_the_tree() {
         let mut wallet =
@@ -364,6 +338,5 @@ mod tests {
         assert_eq!(wallet.get_sapling_subtree_root(0).unwrap(), Some(a));
         assert_eq!(wallet.get_sapling_subtree_root(1).unwrap(), None);
         assert_eq!(wallet.get_sapling_subtree_root(2).unwrap(), Some(d));
-        assert_eq!(wallet.sapling_tree_shard_end_heights.len(), 2);
     }
 }

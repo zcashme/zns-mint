@@ -450,9 +450,10 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
             chain_tip_height,
             fully_scanned_height,
             progress,
-            self.sapling_tree_shard_end_heights.len() as u64,
-            self.orchard_tree_shard_end_heights.len() as u64,
-            self.ironwood_tree_shard_end_heights.len() as u64,
+            // The mint puts no subtree roots: every next range starts at 0.
+            0,
+            0,
+            0,
         );
         Ok(Some(summary))
     }

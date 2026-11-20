@@ -204,13 +204,6 @@ impl<P: Parameters> Wallet<P> {
             }
         }
 
-        self.sapling_tree_shard_end_heights
-            .retain(|_, end| *end <= height);
-        self.orchard_tree_shard_end_heights
-            .retain(|_, end| *end <= height);
-        self.ironwood_tree_shard_end_heights
-            .retain(|_, end| *end <= height);
-
         self.blocks.retain(|h, _| *h <= height);
 
         // A lock whose note was deleted can no longer be acquired or listed.

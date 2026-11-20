@@ -1,5 +1,11 @@
 # Zcash I/O changelog
 
+## 2026-11-20 — `get_subtree_roots` is gone (#569)
+
+- `get_subtree_roots`, its `ChainClient` wrapper, the
+  `z_getsubtreesbyindex` response types, `subtrees_response_to_roots`
+  and their tests are gone. Nothing calls `z_getsubtreesbyindex`.
+
 ## 2026-11-20 — `get_subtree_roots` asks for an exact count (#567)
 
 - `get_subtree_roots(pool, start_index, count)` sends `count` as

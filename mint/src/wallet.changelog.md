@@ -1,5 +1,13 @@
 # Wallet changelog
 
+## 2026-11-20 — The shard end-height maps are gone (#569)
+
+- `*_tree_shard_end_heights` are gone. Only `put_*_subtree_roots` filled
+  them, and only `get_wallet_summary` read them, as `next_*_subtree_index`.
+  The summary reports 0: the mint puts no roots.
+- `put_*_subtree_roots` still inserts roots all or nothing, for
+  `WalletCommitmentTrees`.
+
 ## 2026-11-20 — `Wallet::new` takes no subtree roots (#567)
 
 - `Wallet::new(ufvks, chain_state, network)` inserts the origin frontiers
