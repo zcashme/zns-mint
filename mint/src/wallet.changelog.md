@@ -1,5 +1,13 @@
 # Wallet changelog
 
+## 2026-11-20 — `record_sent` moves to `note::assemble` (#577)
+
+- `wallet.rs` no longer builds a `SentTransaction` and no longer imports
+  `crate::mint` outside its test harness; `wallet/read.rs` keeps the two
+  account constants for `FixedAccount`. Name Notes reach the wallet
+  through `WalletWrite::store_transactions_to_be_sent`, as Treasury
+  payments do.
+
 ## 2026-11-20 — `sync_status` and `expired_unmined_at` are gone (#571)
 
 - Neither had a caller. Metrics reports the chain tip without comparing

@@ -4,6 +4,7 @@
 use orchard::note::RandomSeedBytes;
 use thiserror::Error;
 use zcash_client_backend::data_api::wallet::TargetHeight;
+use zcash_client_backend::data_api::{SentTransaction, WalletWrite as _};
 use zcash_client_backend::wallet::{NoteId, ReceivedNote};
 use zcash_primitives::transaction::builder::{self, BuildConfig, Builder, BundlePadding};
 use zcash_primitives::transaction::fees::zip317::{FeeError, FeeRule};
@@ -190,6 +191,30 @@ pub fn prepare<P: Parameters>(
         )
         .map_err(PrepareError::Builder)?;
     Ok((built.transaction().clone(), transaction_fee))
+}
+
+/// Records a mint-built transaction as sent-but-unconfirmed intent:
+/// marks its input spends (which also releases any locks) so the same
+/// notes cannot be selected again until the transaction either mines
+/// or expires.
+pub fn record_sent<P: Parameters>(
+    wallet: &mut Wallet<P>,
+    transaction: &Transaction,
+    target_height: BlockHeight,
+    transaction_fee: Zatoshis,
+) {
+    let sent = SentTransaction::new(
+        transaction,
+        time::OffsetDateTime::now_utc(),
+        TargetHeight::from(target_height),
+        TREASURY_ACCOUNT,
+        &[],
+        transaction_fee,
+        &[],
+    );
+    wallet
+        .store_transactions_to_be_sent(&[sent])
+        .expect("FATAL: wallet rejected a locally built transaction");
 }
 
 fn witness_at<P: Parameters>(

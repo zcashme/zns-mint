@@ -1,5 +1,12 @@
 # `mint/note.rs` design record
 
+## 2026-11-20 — `assemble::record_sent` records a sent Name Note (#577)
+
+- `record_sent` moves here from the wallet, next to `prepare`. Through
+  `WalletWrite::store_transactions_to_be_sent`, the wallet keeps the raw
+  transaction and records its spends; the main loop calls it after a
+  submission is accepted, as before.
+
 ## 2026-11-20 — A sent order waits through its expiry block (#573)
 
 - `expire_sent` returns a `Sent` order to `Authorized` once the tip
