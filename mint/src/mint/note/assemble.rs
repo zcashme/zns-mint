@@ -201,7 +201,7 @@ pub fn record_sent<P: Parameters>(
     wallet: &mut Wallet<P>,
     transaction: &Transaction,
     target_height: BlockHeight,
-    fee: Zatoshis,
+    transaction_fee: Zatoshis,
 ) {
     let sent = SentTransaction::new(
         transaction,
@@ -209,7 +209,7 @@ pub fn record_sent<P: Parameters>(
         TargetHeight::from(target_height),
         TREASURY_ACCOUNT,
         &[],
-        fee,
+        transaction_fee,
         &[],
     );
     wallet
