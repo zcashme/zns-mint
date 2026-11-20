@@ -341,7 +341,7 @@ impl Registry {
     }
 
     /// The request gate. The note is unspoken-for, the request is newer
-    /// than the record, and a forever name takes no term. The purchased
+    /// than the record, and a forever name takes no new term. The purchased
     /// term and the liveness deadline are read at `mtp_now`, the MTP of
     /// `trigger_height`, the block the challenge is relayed in. Returns
     /// the record when a challenge may proceed.

@@ -444,8 +444,8 @@ async fn main() {
                             continue;
                         };
                         let name = sent.request.name();
-                        // A term keeps the whole payment once it covers
-                        // the price; with the existing term, all of it goes back.
+                        // A new term keeps the whole payment once it covers
+                        // the price; otherwise, all of it goes back.
                         let rest = match &sent.request {
                             Request::Update { term, .. } if *term != Term::Existing => oracle
                                 .quote(name, *term)
