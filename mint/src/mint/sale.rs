@@ -561,8 +561,8 @@ impl Market {
         })
     }
 
-    /// Opens a list challenge. The returned code authorizes a list note,
-    /// and the listing starts when that note confirms.
+    /// Opens a list challenge. Its code authorizes the list note that
+    /// starts the listing.
     pub fn propose_list(
         &mut self,
         challenges: &mut OtpQueue,
@@ -583,8 +583,8 @@ impl Market {
         Ok(())
     }
 
-    /// Opens a delist challenge. The returned code authorizes a delist
-    /// note, and the listing ends when that note confirms.
+    /// Opens a delist challenge. Its code authorizes the delist note that
+    /// ends the listing.
     pub fn propose_delist(
         &mut self,
         challenges: &mut OtpQueue,

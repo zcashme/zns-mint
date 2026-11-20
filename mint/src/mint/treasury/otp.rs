@@ -159,10 +159,9 @@ impl OtpQueue {
         }
     }
 
-    /// Issues a challenge for `request` unless one is live, and returns
-    /// it. Its code is unique among the challenges a response could also
-    /// name. A live challenge takes `txid`, so a mined repeat backs a
-    /// code first sent for a request that never landed.
+    /// Opens and returns a challenge for `request`, its code unique among
+    /// those a response could also name. A live one instead takes `txid`,
+    /// so a mined repeat backs a code whose request never landed.
     pub fn admit(&mut self, request: Request, txid: TxId, mtp: Timestamp) -> Option<OtpChallenge> {
         if let Some((_, _, backing)) = self
             .challenges
