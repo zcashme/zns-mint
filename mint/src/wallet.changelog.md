@@ -1,5 +1,13 @@
 # Wallet changelog
 
+## 2026-11-20 — `Wallet::new` takes no subtree roots (#567)
+
+- `Wallet::new(ufvks, chain_state, network)` inserts the origin frontiers
+  only. Subtree roots go in through `put_sapling_subtree_roots` /
+  `put_ironwood_subtree_roots`, as `zcash_client_sqlite`, zallet and
+  upstream's sync add them to an existing wallet. Its two root loops are
+  gone.
+
 ## 2026-11-20 — The commitment trees use upstream's depths and shard heights (#563)
 
 - The three `ShardTree`s take their depth from `sapling::NOTE_COMMITMENT_TREE_DEPTH`

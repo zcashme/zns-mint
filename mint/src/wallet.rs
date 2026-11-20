@@ -17,7 +17,7 @@ use shardtree::{error::ShardTreeError, store::memory::MemoryShardStore, ShardTre
 use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
 use zcash_client_backend::scanning::ScanningKeys;
 use zcash_client_backend::{
-    data_api::chain::{ChainState, CommitmentTreeRoot},
+    data_api::chain::ChainState,
     data_api::locking::LockOwner,
     data_api::{
         BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus, WalletWrite,
@@ -135,13 +135,9 @@ pub struct Wallet<P: Parameters> {
 }
 
 impl<P: Parameters> Wallet<P> {
-    /// Born complete: the origin frontiers plus every completed
-    /// subtree root behind them, or nothing.
     pub fn new(
         ufvks: impl IntoIterator<Item = (AccountId, UnifiedFullViewingKey)>,
         chain_state: &ChainState,
-        sapling_roots: &[CommitmentTreeRoot<sapling::Node>],
-        ironwood_roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
         network: P,
     ) -> Result<Self, TreeError> {
         let ufvks: BTreeMap<AccountId, UnifiedFullViewingKey> = ufvks.into_iter().collect();
@@ -193,34 +189,6 @@ impl<P: Parameters> Wallet<P> {
         wallet
             .ironwood_tree
             .insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
-
-        // Completed shard roots behind the origin frontiers only. A root
-        // whose shard completed after the origin checkpoint marks the
-        // frontier's own shard full, so every later append would land a
-        // whole shard above the chain's position and no witness would
-        // bind. Zebra answers `z_getsubtreesbyindex` as of the tip, not
-        // as of the origin, so the wallet clamps the response itself.
-        let origin_height = chain_state.block_height();
-        for (root, index) in sapling_roots.iter().zip(0u64..) {
-            if root.subtree_end_height() > origin_height {
-                continue;
-            }
-            let addr = Address::from_parts(SAPLING_SHARD_HEIGHT.into(), index);
-            wallet.sapling_tree.insert(addr, *root.root_hash())?;
-            wallet
-                .sapling_tree_shard_end_heights
-                .insert(addr, root.subtree_end_height());
-        }
-        for (root, index) in ironwood_roots.iter().zip(0u64..) {
-            if root.subtree_end_height() > origin_height {
-                continue;
-            }
-            let addr = Address::from_parts(IRONWOOD_SHARD_HEIGHT.into(), index);
-            wallet.ironwood_tree.insert(addr, *root.root_hash())?;
-            wallet
-                .ironwood_tree_shard_end_heights
-                .insert(addr, root.subtree_end_height());
-        }
         Ok(wallet)
     }
 
@@ -396,8 +364,6 @@ pub(crate) mod testing {
             let wallet = Wallet::new(
                 [],
                 &ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32])),
-                &[],
-                &[],
                 network,
             )?;
             Ok(wallet)
@@ -447,8 +413,6 @@ pub(crate) mod testing {
             *wallet = Wallet::new(
                 [(id, usk.to_unified_full_viewing_key())],
                 prior,
-                &[],
-                &[],
                 wallet.network.clone(),
             )?;
         }

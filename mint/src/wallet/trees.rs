@@ -278,18 +278,15 @@ mod tests {
         CommitmentTreeRoot::from_parts(h(end), node)
     }
 
-    /// A conflicting root fails the whole birth; no wallet exists.
+    /// A root that disagrees with the origin frontier is refused.
     #[test]
-    fn new_with_conflicting_root_is_err() {
+    fn root_conflicting_with_the_origin_frontier_is_err() {
         // A frontier at the last leaf of shard 0 makes that shard complete
         // — its root is computable, so a differing claimed root conflicts.
         let leaf = sapling::Node::empty_root(Level::from(31));
         let ommers: Vec<sapling::Node> = (0..16u8)
             .map(|k| sapling::Node::empty_root(Level::from(k)))
             .collect();
-        // The root ends at height 1, so an origin at height 1 admits it
-        // (end heights above the origin are dropped as not yet behind
-        // the frontier).
         let origin = ChainState::new(
             h(1),
             BlockHash([0; 32]),
@@ -297,33 +294,35 @@ mod tests {
             Frontier::empty(),
             Frontier::empty(),
         );
+        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("the frontier is valid");
         let roots = [sapling_root(1, sapling::Node::empty_root(Level::from(7)))];
 
         assert!(matches!(
-            Wallet::new([], &origin, &roots, &[], MainNetwork),
+            wallet.put_sapling_subtree_roots(0, &roots),
             Err(ShardTreeError::Insert(InsertionError::Conflict(_)))
         ));
     }
 
-    /// A coherent birth seeds trees and end-height bookkeeping together.
+    /// Putting roots seeds trees and end-height bookkeeping together.
     #[test]
-    fn new_seeds_roots_and_end_heights_together() {
-        let sapling_roots = [sapling_root(10, sapling::Node::empty_root(Level::from(5)))];
-        let ironwood_roots = [CommitmentTreeRoot::from_parts(
-            h(11),
-            orchard::tree::MerkleHashOrchard::empty_root(Level::from(5)),
-        )];
-        // Roots end at heights 10 and 11: the origin must contain them,
-        // or birth correctly drops them as above-origin.
-        let origin = ChainState::new(
-            h(12),
-            BlockHash([0; 32]),
-            Frontier::empty(),
-            Frontier::empty(),
-            Frontier::empty(),
-        );
-        let mut wallet = Wallet::new([], &origin, &sapling_roots, &ironwood_roots, MainNetwork)
-            .expect("roots behind the origin cannot conflict");
+    fn put_roots_seeds_roots_and_end_heights_together() {
+        let mut wallet =
+            Wallet::new([], &empty_origin(), MainNetwork).expect("empty birth is valid");
+        wallet
+            .put_sapling_subtree_roots(
+                0,
+                &[sapling_root(10, sapling::Node::empty_root(Level::from(5)))],
+            )
+            .expect("an empty shard accepts a root");
+        wallet
+            .put_ironwood_subtree_roots(
+                0,
+                &[CommitmentTreeRoot::from_parts(
+                    h(11),
+                    orchard::tree::MerkleHashOrchard::empty_root(Level::from(5)),
+                )],
+            )
+            .expect("an empty shard accepts a root");
 
         assert_eq!(wallet.sapling_tree_shard_end_heights.len(), 1);
         assert_eq!(
@@ -341,7 +340,7 @@ mod tests {
     #[test]
     fn put_roots_conflict_restores_the_tree() {
         let mut wallet =
-            Wallet::new([], &empty_origin(), &[], &[], MainNetwork).expect("empty birth is valid");
+            Wallet::new([], &empty_origin(), MainNetwork).expect("empty birth is valid");
         let a = sapling::Node::empty_root(Level::from(5));
         let d = sapling::Node::empty_root(Level::from(8));
         wallet

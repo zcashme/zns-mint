@@ -234,22 +234,31 @@ impl JsonRpc {
         chain_state_from_rpc_response(response)
     }
 
-    /// Every completed subtree root for `pool` from `start_index`, via `z_getsubtreesbyindex`.
+    /// Exactly `count` completed subtree roots for `pool` from `start_index`, via
+    /// `z_getsubtreesbyindex`. Any other number, such as the empty list Zebra
+    /// returns while it rebuilds its subtree index, is `BadNodeData`.
     pub async fn get_subtree_roots<Node>(
         &self,
         pool: &'static str,
         start_index: u64,
+        count: u64,
     ) -> Result<Vec<CommitmentTreeRoot<Node>>, TransportError>
     where
         Node: HashSer,
     {
         let response: SubtreesResponse = self
-            .send_request("z_getsubtreesbyindex", (pool, start_index))
+            .send_request("z_getsubtreesbyindex", (pool, start_index, count))
             .await?
             .ok_or(TransportError::BadNodeData(
                 "z_getsubtreesbyindex returned null",
             ))?;
-        subtrees_response_to_roots(response, pool, start_index)
+        let roots = subtrees_response_to_roots(response, pool, start_index)?;
+        if roots.len() as u64 != count {
+            return Err(TransportError::BadNodeData(
+                "z_getsubtreesbyindex returned a different number of roots than requested",
+            ));
+        }
+        Ok(roots)
     }
 
     /// Fetches a block header's time, for MTP backfill.
@@ -341,17 +350,18 @@ impl CanonicalBlockSource {
         self.rpc.chain_state_at(height).await
     }
 
-    /// Every completed subtree root for one shielded pool, from
+    /// Exactly `count` completed subtree roots for one shielded pool, from
     /// `start_index` upward (see the `get_subtree_roots` JSON-RPC reader).
     pub async fn get_subtree_roots<Node>(
         &self,
         pool: &'static str,
         start_index: u64,
+        count: u64,
     ) -> Result<Vec<CommitmentTreeRoot<Node>>, TransportError>
     where
         Node: HashSer,
     {
-        self.rpc.get_subtree_roots(pool, start_index).await
+        self.rpc.get_subtree_roots(pool, start_index, count).await
     }
 
     pub async fn header_time(&self, height: BlockHeight) -> Result<u32, TransportError> {

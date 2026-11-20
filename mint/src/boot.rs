@@ -32,7 +32,9 @@ use crate::wallet::Wallet;
 use crate::zcash::{self, CanonicalBlockSource, ChainClient};
 use sapling::circuit::{OutputParameters, SpendParameters};
 use zcash_client_backend::data_api::chain::ChainState;
-use zcash_client_backend::data_api::WalletRead as _;
+use zcash_client_backend::data_api::{
+    WalletCommitmentTrees as _, WalletRead as _, IRONWOOD_SHARD_HEIGHT, SAPLING_SHARD_HEIGHT,
+};
 use zns_canon::capsule::{hash as capsule_hash, parse_capsule, read_capsule_file, unseal_seed};
 use zns_canon::custody;
 use zns_canon::genesis::Anchor;
@@ -452,18 +454,25 @@ impl Boot<Network> {
         write_genesis_statement(ceremony_capsule_hash, ceremony_fingerprint, &ceremony);
 
         // 3. Born complete: fetch the origin checkpoint and both
-        // subtree-root batches, then one `Wallet::new`.
+        // subtree-root batches for its full shards, build the wallet, then
+        // put the roots.
         let origin = origin_checkpoint(mint_birthday, async |height| {
             source.chain_state_at(height).await
         })
         .await;
         let checkpoint_height = origin.block_height();
+        // Zebra returns subtree roots up to its tip, but the origin frontiers
+        // end at the origin: a later shard's root would misplace every append
+        // after it, and no witness would bind. Ask for the origin's full
+        // shards only.
+        let sapling_shards = origin.final_sapling_tree().tree_size() >> SAPLING_SHARD_HEIGHT;
+        let ironwood_shards = origin.final_ironwood_tree().tree_size() >> IRONWOOD_SHARD_HEIGHT;
         let sapling_roots = source
-            .get_subtree_roots::<sapling::Node>("sapling", 0)
+            .get_subtree_roots::<sapling::Node>("sapling", 0, sapling_shards)
             .await
             .expect("FATAL: Sapling subtree roots unavailable from Zebra");
         let ironwood_roots = source
-            .get_subtree_roots::<orchard::tree::MerkleHashOrchard>("ironwood", 0)
+            .get_subtree_roots::<orchard::tree::MerkleHashOrchard>("ironwood", 0, ironwood_shards)
             .await
             .expect("FATAL: Ironwood subtree roots unavailable from Zebra");
         let mut wallet = Wallet::new(
@@ -472,11 +481,15 @@ impl Boot<Network> {
                 (REGISTRY_ACCOUNT, registry_keys.fvk()),
             ],
             &origin,
-            &sapling_roots,
-            &ironwood_roots,
             network,
         )
         .expect("FATAL: failed to seed commitment trees from the verified Zebra checkpoint");
+        wallet
+            .put_sapling_subtree_roots(0, &sapling_roots)
+            .expect("FATAL: failed to put Zebra's Sapling subtree roots");
+        wallet
+            .put_ironwood_subtree_roots(0, &ironwood_roots)
+            .expect("FATAL: failed to put Zebra's Ironwood subtree roots");
         tracing::info!(
             height = u32::from(checkpoint_height),
             sapling_roots = sapling_roots.len(),

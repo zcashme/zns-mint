@@ -1,5 +1,12 @@
 # Zcash I/O changelog
 
+## 2026-11-20 — `get_subtree_roots` asks for an exact count (#567)
+
+- `get_subtree_roots(pool, start_index, count)` sends `count` as
+  `z_getsubtreesbyindex`'s `limit` and returns exactly that many roots.
+  Any other number is `BadNodeData`, including the empty list Zebra
+  returns while it rebuilds its subtree index.
+
 ## 2026-11-17 — `ChainClient::connect` is crate-private again (#533)
 
 - zns-rebind, the only caller outside the crate, is gone.

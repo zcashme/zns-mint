@@ -1,5 +1,20 @@
 # Boot module changelog
 
+## 2026-11-20 — Boot asks Zebra for the origin's full shards (#567)
+
+- Boot counts the full shards in the origin frontiers
+  (`tree_size >> SHARD_HEIGHT`) and asks `z_getsubtreesbyindex` for
+  exactly those roots, then puts them after `Wallet::new` through
+  `put_*_subtree_roots`. Zebra answers as of its tip; the end-height
+  cut-off that dropped later roots in `Wallet::new` is gone.
+- Fewer roots than full shards, such as the empty list Zebra returns
+  while it rebuilds its subtree index, stops boot with `FATAL`. Before,
+  boot went on without them.
+- A root that fails to go in still stops boot with `FATAL`, now naming
+  the pool.
+- The boot log counts the origin's full shards, not every root Zebra
+  returned.
+
 ## 2026-11-17 — The key methods are crate-private again (#533)
 
 - `AccountKeys::derive` is `pub(super)` again, and `fvk`, `orchard_fvk`,
