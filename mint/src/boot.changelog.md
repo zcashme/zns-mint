@@ -1,5 +1,13 @@
 # Boot module changelog
 
+## 2026-11-20 — Boot fetches no subtree roots (#569)
+
+- Boot builds the wallet from the origin checkpoint's frontiers and
+  fetches no `z_getsubtreesbyindex` roots. The mint scans every block
+  in order from the origin, so the frontiers' ommers give every witness
+  it builds; roots serve out-of-order scanning.
+- Boot no longer stops while Zebra rebuilds its subtree index.
+
 ## 2026-11-20 — Boot asks Zebra for the origin's full shards (#567)
 
 - Boot counts the full shards in the origin frontiers

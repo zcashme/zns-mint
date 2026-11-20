@@ -123,8 +123,8 @@ impl JsonRpc {
 // ============================================================================
 
 /// The one node handle: both dialects behind one door. Canonical blocks
-/// and reorg-walk hashes ride the Indexer gRPC; tree state, subtree
-/// roots, MTP headers, raw transactions, and broadcast ride JSON-RPC.
+/// and reorg-walk hashes ride the Indexer gRPC; tree state, MTP headers,
+/// raw transactions, and broadcast ride JSON-RPC.
 /// Unary gRPC calls go out on a fresh handle to the shared HTTP/2
 /// connection — `Channel` is an `Arc` — so every public method stays
 /// `&self`.
