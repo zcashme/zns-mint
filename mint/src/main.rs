@@ -71,8 +71,6 @@ async fn main() {
     zns_mint::metrics::ceremony(&seed_fingerprint, &capsule_hash);
     #[cfg(not(feature = "non-tee"))]
     zns_mint::metrics::guest(&guest.measurement, &guest.guest_policy);
-    // The wallet scan is finished. The run loop has not started.
-    zns_mint::metrics::serving(false);
     tracing::info!(
         height = u32::from(wallet.tip().block_height()),
         hash = %wallet.tip().block_hash(),
@@ -82,7 +80,6 @@ async fn main() {
     let mut connection = TipSession::open(chain.clone()).await;
     let (mempool_tx, mut mempool_rx) = mpsc::channel(64);
     tokio::spawn(zns_mint::mint::watch_mempool(chain, mempool_tx));
-    zns_mint::metrics::serving(true);
     'run: loop {
         // Every pass ends here, however it ended: the names the queues
         // still hold are in flight until the next tip.
