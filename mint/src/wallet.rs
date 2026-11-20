@@ -20,7 +20,7 @@ use zcash_client_backend::{
     data_api::chain::ChainState,
     data_api::locking::LockOwner,
     data_api::{
-        BlockMetadata, SentTransaction, SentTransactionOutput, TransactionStatus, WalletWrite,
+        BlockMetadata, SentTransactionOutput, TransactionStatus, WalletWrite,
         IRONWOOD_SHARD_HEIGHT, ORCHARD_SHARD_HEIGHT, SAPLING_SHARD_HEIGHT,
     },
     wallet::{NoteId, OutputRef, WalletIronwoodOutput, WalletSaplingOutput},
@@ -31,11 +31,8 @@ use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::{
     consensus::{BlockHeight, Parameters, TxIndex},
     memo::Memo,
-    value::Zatoshis,
 };
 use zip32::AccountId;
-
-use crate::mint::TREASURY_ACCOUNT;
 
 /// One confirmation for every note, trusted or not. The mint never varies
 /// it: every library call that takes a policy passes this one, so balance
@@ -209,31 +206,6 @@ impl<P: Parameters> Wallet<P> {
         self.account_birthdays.values().copied().min()
     }
 
-    /// Records a mint-built transaction as sent-but-unconfirmed intent:
-    /// marks its input spends (which also releases any locks) so the same
-    /// notes cannot be selected again until the transaction either mines
-    /// or expires.
-    pub fn record_sent(
-        &mut self,
-        transaction: &Transaction,
-        target_height: BlockHeight,
-        fee: Zatoshis,
-    ) {
-        use zcash_client_backend::data_api::wallet::TargetHeight;
-        use zcash_client_backend::data_api::WalletWrite as _;
-        let sent = SentTransaction::new(
-            transaction,
-            time::OffsetDateTime::now_utc(),
-            TargetHeight::from(target_height),
-            TREASURY_ACCOUNT,
-            &[],
-            fee,
-            &[],
-        );
-        self.store_transactions_to_be_sent(&[sent])
-            .expect("FATAL: wallet rejected a locally built transaction");
-    }
-
     /// The block hash at `height`: an applied block, or the boot origin.
     pub fn block_hash_at(&self, height: BlockHeight) -> Option<BlockHash> {
         self.blocks
@@ -293,6 +265,7 @@ pub fn block_metadata(state: &ChainState) -> BlockMetadata {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
+    use crate::mint::TREASURY_ACCOUNT;
     use incrementalmerkletree::{Hashable, Position};
     use secrecy::{ExposeSecret, SecretVec};
     use shardtree::store::ShardStore;
@@ -308,7 +281,7 @@ pub(crate) mod testing {
     };
     use zcash_keys::address::Address;
     use zcash_keys::keys::{transparent::gap_limits::GapLimits, UnifiedSpendingKey};
-    use zcash_protocol::value::{BalanceError, ZatBalance};
+    use zcash_protocol::value::{BalanceError, ZatBalance, Zatoshis};
     use zcash_protocol::{local_consensus::LocalNetwork, PoolType, ShieldedPool};
 
     pub(crate) struct Factory;

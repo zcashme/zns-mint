@@ -837,7 +837,7 @@ async fn main() {
             };
 
             if source.submit(&transaction, "NameNote").await {
-                wallet.record_sent(&transaction, target_height, fee);
+                assemble::record_sent(&mut wallet, &transaction, target_height, fee);
                 name_notes.mark_sent(note.name(), transaction.expiry_height());
                 tracing::info!(
                     txid = %transaction.txid(),
