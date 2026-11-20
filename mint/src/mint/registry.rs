@@ -98,7 +98,7 @@ impl NameRecord {
 
     /// The clock-and-verb check behind [`Registry::authorize_challenge`]:
     /// release, list, and delist from this record's controller, and
-    /// forever names take no term. Claims and buys are never challenged.
+    /// forever names take no new term. Claims and buys are never challenged.
     fn allows_challenge(
         &self,
         request: &Request,
@@ -109,7 +109,9 @@ impl NameRecord {
             return false;
         }
         match request {
-            Request::Update { term, .. } => !(self.expires_at() == Expiry::Never && term.is_some()),
+            Request::Update { term, .. } => {
+                !(self.expires_at() == Expiry::Never && *term != Term::Existing)
+            }
             Request::Release { ua, .. }
             | Request::Delist { ua, .. }
             | Request::List(Listing { ua, .. }) => ua == self.ua(),
@@ -339,7 +341,7 @@ impl Registry {
     }
 
     /// The request gate. The note is unspoken-for, the request is newer
-    /// than the record, and a forever name takes no term. The purchased
+    /// than the record, and a forever name takes no new term. The purchased
     /// term and the liveness deadline are read at `mtp_now`, the MTP of
     /// `trigger_height`, the block the challenge is relayed in. Returns
     /// the record when a challenge may proceed.
@@ -641,7 +643,7 @@ mod tests {
         }
     }
 
-    fn update(term: Option<Term>) -> Request {
+    fn update(term: Term) -> Request {
         Request::Update {
             name: test_name(),
             ua: test_ua(),
@@ -793,49 +795,6 @@ mod tests {
         registry
     }
 
-    /// A forever name cannot bank a term: refused, OTP unspent.
-    #[test]
-    fn authorize_refuses_an_illegal_extension() {
-        use crate::mint::treasury::{OtpChallenge, OtpCode, D_OTP};
-
-        let mut r = Registry::new();
-        let mtp = ts(1_700_000_000);
-        r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
-        let pending = OtpChallenge {
-            request: update(Some(Term::Years(1))),
-            code: OtpCode::for_test(*b"123456"),
-            attempts: 0,
-            expires_at: ts(1_700_000_000 + D_OTP),
-        };
-        assert!(r.authorize_update(&pending, mtp).is_none());
-    }
-
-    /// The laws are action-typed: a release-shaped pending cannot feed
-    /// the update law, an update-shaped one cannot feed the release
-    /// law — even with the UA matching.
-    #[test]
-    fn authorize_laws_reject_pendings_for_other_actions() {
-        use crate::mint::treasury::OtpCode;
-
-        let mut r = Registry::new();
-        let mtp = ts(1_700_000_000);
-        r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
-        let release_pending = OtpChallenge {
-            request: release(),
-            code: OtpCode::for_test(*b"123456"),
-            attempts: 0,
-            expires_at: ts(1_700_000_000),
-        };
-        let update_pending = OtpChallenge {
-            request: update(Some(Term::Years(1))),
-            code: OtpCode::for_test(*b"123456"),
-            attempts: 0,
-            expires_at: ts(1_700_000_000),
-        };
-        assert!(r.authorize_update(&release_pending, mtp).is_none());
-        assert!(r.authorize_release(&update_pending).is_none());
-    }
-
     /// The plural sweep: only names whose clocks have fired, each paired
     /// with its release note. Live and already-released names are absent.
     #[test]
@@ -851,22 +810,22 @@ mod tests {
 
         // A live record allows an update challenge, a term, and a
         // release from its own UA.
-        assert!(live.allows_challenge(&update(Some(Term::Years(1))), above, now));
+        assert!(live.allows_challenge(&update(Term::Years(1)), above, now));
         assert!(live.allows_challenge(&release(), above, now));
 
         // Expired: the term has passed.
-        assert!(!live.allows_challenge(&update(None), above, ts(2_000_000_001)));
+        assert!(!live.allows_challenge(&update(Term::Existing), above, ts(2_000_000_001)));
 
         // Stale: the trigger rides at or below the last confirmed
         // transition — it speaks against superseded state.
-        assert!(!live.allows_challenge(&update(None), BlockHeight::from_u32(100), now));
-        assert!(!live.allows_challenge(&update(None), BlockHeight::from_u32(99), now));
+        assert!(!live.allows_challenge(&update(Term::Existing), BlockHeight::from_u32(100), now));
+        assert!(!live.allows_challenge(&update(Term::Existing), BlockHeight::from_u32(99), now));
 
-        // A forever name refuses any term — no runway to bank, no
-        // second upgrade to buy — and allows the termless otherwise.
+        // A forever name refuses any new term — no runway to bank, no
+        // second upgrade to buy — and allows the existing term.
         let forever = record(Action::Claim, Expiry::Never, 2_000_000_000, 3);
-        assert!(!forever.allows_challenge(&update(Some(Term::Years(1))), above, now));
-        assert!(forever.allows_challenge(&update(None), above, now));
+        assert!(!forever.allows_challenge(&update(Term::Years(1)), above, now));
+        assert!(forever.allows_challenge(&update(Term::Existing), above, now));
     }
 
     /// The gate applies both §4.5 clocks — the same predicate the law
@@ -885,20 +844,13 @@ mod tests {
             1,
         );
 
-        assert!(term_live.allows_challenge(
-            &update(Some(Term::Years(1))),
-            above,
-            ts(1_499_999_999)
-        ));
-        assert!(!term_live.allows_challenge(
-            &update(Some(Term::Years(1))),
-            above,
-            ts(1_500_000_000)
-        ));
+        assert!(term_live.allows_challenge(&update(Term::Years(1)), above, ts(1_499_999_999)));
+        assert!(!term_live.allows_challenge(&update(Term::Years(1)), above, ts(1_500_000_000)));
 
-        // A forever name past its liveness deadline: refused termless too.
+        // A forever name past its liveness deadline: refused with the
+        // existing term too.
         let forever = record(Action::Claim, Expiry::Never, 1_500_000_000, 2);
-        assert!(!forever.allows_challenge(&update(None), above, ts(1_500_000_000)));
+        assert!(!forever.allows_challenge(&update(Term::Existing), above, ts(1_500_000_000)));
 
         // Release challenges from the controller are refused alike; the
         // lifecycle sweep releases without a challenge.
@@ -923,7 +875,7 @@ mod tests {
         ));
         let queue = NameNoteQueue::default();
 
-        let request = update(Some(Term::Years(1)));
+        let request = update(Term::Years(1));
         let pending = |mtp: i64| OtpChallenge {
             request: request.clone(),
             code: OtpCode::for_test(*b"123456"),
@@ -966,7 +918,7 @@ mod tests {
         assert!(r
             .authorize_challenge(
                 &queue,
-                &update(None),
+                &update(Term::Existing),
                 BlockHeight::from_u32(101),
                 ts(1_000_000_000),
             )

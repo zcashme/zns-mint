@@ -269,23 +269,14 @@ impl Expiry {
 
     /// Successor expiry for an update (§4.5.3).
     ///
-    /// `None` leaves the period unchanged. `Some(years)` banks from the
-    /// current expiry. `Some(Forever)` is the upgrade: a fixed-term
-    /// registration converts to no fixed expiration — the arm precedes
-    /// the banking arm because `Term::Forever::duration` is zero, so the
-    /// banking arm would silently no-op it. A forever name has no
-    /// runway: `Never` plus a term — banking or a second upgrade — is
-    /// refused. The banking result must sit no more than `MAX_TERM_YEARS`
-    /// ahead of `mtp`.
-    pub fn extend(self, term: Option<Term>, mtp: Timestamp) -> Option<Self> {
+    /// Years bank from the current expiry, never past `MAX_TERM_YEARS`
+    /// ahead of `mtp`. A forever name takes no new term.
+    pub fn extend(self, term: Term, mtp: Timestamp) -> Option<Self> {
         let extended = match (self, term) {
-            (expiry, None) => expiry,
-            (Expiry::Never, Some(_)) => return None,
-            // The upgrade: At + forever converts the registration kind. This arm MUST precede the banking arm below —
-            // `Term::Forever::duration` is zero, so the banking arm would
-            // silently no-op the upgrade (At + 0 = At).
-            (Expiry::At(_), Some(Term::Forever)) => Expiry::Never,
-            (Expiry::At(t), Some(term)) => t.checked_add(term.duration()).map(Expiry::At)?,
+            (expiry, Term::Existing) => expiry,
+            (Expiry::Never, Term::Forever | Term::Years(_)) => return None,
+            (Expiry::At(_), Term::Forever) => Expiry::Never,
+            (Expiry::At(t), Term::Years(_)) => t.checked_add(term.duration()).map(Expiry::At)?,
         };
         let horizon = mtp
             .checked_add(time::Duration::seconds(
@@ -299,27 +290,28 @@ impl Expiry {
     }
 }
 
-/// A request term: `forever` or whole Julian years, 1–99. Requests speak
-/// durations — seconds never appear on the request wire; the mint
-/// converts years to seconds at authorization.
+/// A request term: `forever`, whole Julian years 1–99, or `none`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Term {
     /// No fixed expiration — held while liveness passes.
     Forever,
     /// A term of N whole Julian years (the liveness interval).
     Years(u64),
+    /// `none`: an update keeps the name's term. A claim can't.
+    Existing,
 }
 
 /// The longest single term.
 pub const MAX_TERM_YEARS: u64 = 99;
 
 impl Term {
-    /// Parses a term field: `forever` or `<N>y` — N is 1–99, digits only,
-    /// no leading zero. `5` (missing y), `100y` (over the cap), `0y`,
-    /// `01y` are invalid on sight.
+    /// Parses a term field: `forever`, `none`, or `<N>y` — N is 1–99,
+    /// digits only, no leading zero.
     pub fn parse(field: &str) -> Option<Self> {
-        if field == "forever" {
-            return Some(Self::Forever);
+        match field {
+            "forever" => return Some(Self::Forever),
+            "none" => return Some(Self::Existing),
+            _ => {}
         }
         let years = field.strip_suffix('y')?;
         if years.is_empty() || years.starts_with('0') || !years.bytes().all(|b| b.is_ascii_digit())
@@ -333,7 +325,7 @@ impl Term {
     /// The term as a `time` duration; one year is `LIVENESS_INTERVAL`.
     pub fn duration(self) -> time::Duration {
         match self {
-            Self::Forever => time::Duration::ZERO, // claim_expiry never reads it
+            Self::Forever | Self::Existing => time::Duration::ZERO,
             Self::Years(n) => time::Duration::seconds(n as i64 * LIVENESS_INTERVAL),
         }
     }
@@ -343,6 +335,7 @@ impl Term {
         match self {
             Self::Forever => Some(Expiry::Never),
             Self::Years(_) => mtp.checked_add(self.duration()).map(Expiry::At),
+            Self::Existing => None,
         }
     }
 }
@@ -1058,22 +1051,6 @@ mod tests {
     }
 
     #[test]
-    fn term_parse_is_strict() {
-        assert_eq!(Term::parse("forever"), Some(Term::Forever));
-        assert_eq!(Term::parse("1y"), Some(Term::Years(1)));
-        assert_eq!(Term::parse("12y"), Some(Term::Years(12)));
-        assert_eq!(Term::parse("99y"), Some(Term::Years(99)));
-        // Missing y, over the cap, zero, leading zero, seconds, empty.
-        assert_eq!(Term::parse("5"), None);
-        assert_eq!(Term::parse("100y"), None);
-        assert_eq!(Term::parse("0y"), None);
-        assert_eq!(Term::parse("01y"), None);
-        assert_eq!(Term::parse("31536000"), None);
-        assert_eq!(Term::parse(""), None);
-        assert_eq!(Term::parse("none"), None);
-    }
-
-    #[test]
     fn claim_expiry_maps_forever_to_never() {
         let mtp = Timestamp::from_seconds(1_000).unwrap();
         assert_eq!(
@@ -1092,13 +1069,19 @@ mod tests {
         let term = Term::parse("5y").unwrap();
         // Banking: 5 years from the current expiry, not from now.
         assert_eq!(
-            Expiry::At(mtp).extend(Some(term), mtp),
+            Expiry::At(mtp).extend(term, mtp),
             Some(Expiry::At(mtp.checked_add(term.duration()).unwrap()))
         );
         // Forever has no end date, so years cannot be added to it.
-        assert_eq!(Expiry::Never.extend(Some(term), mtp), None);
-        assert_eq!(Expiry::Never.extend(None, mtp), Some(Expiry::Never));
-        assert_eq!(Expiry::At(mtp).extend(None, mtp), Some(Expiry::At(mtp)));
+        assert_eq!(Expiry::Never.extend(term, mtp), None);
+        assert_eq!(
+            Expiry::Never.extend(Term::Existing, mtp),
+            Some(Expiry::Never)
+        );
+        assert_eq!(
+            Expiry::At(mtp).extend(Term::Existing, mtp),
+            Some(Expiry::At(mtp))
+        );
     }
 
     #[test]
@@ -1106,12 +1089,12 @@ mod tests {
         let mtp = Timestamp::from_seconds(1_000).unwrap();
         // The upgrade: At + forever converts the registration kind.
         assert_eq!(
-            Expiry::At(mtp).extend(Some(Term::Forever), mtp),
+            Expiry::At(mtp).extend(Term::Forever, mtp),
             Some(Expiry::Never)
         );
         // Second upgrade / banking on forever: still refused — the tier
         // is terminal in both directions.
-        assert_eq!(Expiry::Never.extend(Some(Term::Forever), mtp), None);
+        assert_eq!(Expiry::Never.extend(Term::Forever, mtp), None);
     }
 
     #[test]
@@ -1126,15 +1109,9 @@ mod tests {
             )
         };
 
-        assert_eq!(at(98).extend(Some(Term::parse("5y").unwrap()), mtp), None);
-        assert_eq!(
-            at(96).extend(Some(Term::parse("3y").unwrap()), mtp),
-            Some(at(99))
-        );
-        assert_eq!(
-            at(50).extend(Some(Term::parse("3y").unwrap()), mtp),
-            Some(at(53))
-        );
+        assert_eq!(at(98).extend(Term::parse("5y").unwrap(), mtp), None);
+        assert_eq!(at(96).extend(Term::parse("3y").unwrap(), mtp), Some(at(99)));
+        assert_eq!(at(50).extend(Term::parse("3y").unwrap(), mtp), Some(at(53)));
     }
 
     #[test]

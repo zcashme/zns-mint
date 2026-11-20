@@ -1,5 +1,14 @@
 # `mint/note.rs` design record
 
+## 2026-11-20 — `none` is `Term::Existing` (#556)
+
+- `Term` is `Forever | Years(1..=99) | Existing`. `Term::parse` reads
+  `none` as `Existing`: an update keeps the name's term.
+- `claim_expiry(Existing)` is `None`: a new name has no existing term.
+- `Expiry::extend` takes a `Term`. `Existing` keeps the expiry; each
+  other arm names its variant, so the upgrade no longer depends on arm
+  order.
+
 ## 2026-11-12 — The Treasury's sent memos are not decoded (#475)
 
 - `decrypt_treasury_memos` returns only the memos paid to the Treasury.

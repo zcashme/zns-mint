@@ -2,6 +2,11 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-11-20 — A forever name refuses any term but `Existing` (#556)
+
+- `allows_challenge` refuses an update on a forever name whose term is
+  not `Term::Existing`. It asked `term.is_some()`.
+
 ## 2026-11-13 — A claim on a free name registers whatever its expiry (#376)
 
 - `built_before_release` is gone. A claim whose transaction expiry fell

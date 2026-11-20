@@ -455,7 +455,7 @@ mod tests {
             Action::Update => Request::Update {
                 name,
                 ua,
-                term: None,
+                term: Term::Existing,
             },
             Action::Release => Request::Release { name, ua },
             Action::Sale => panic!("a sale is not a request"),

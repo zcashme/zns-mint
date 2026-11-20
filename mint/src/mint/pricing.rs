@@ -334,11 +334,12 @@ impl Oracle {
     }
 
     /// Registration quote in zats at `rate` zats per USD. `None` when
-    /// the product does not fit a zat amount.
+    /// the product does not fit a zat amount, or the term buys no time.
     pub fn quote_at(rate: Zatoshis, name: &Name, term: Term) -> Option<Zatoshis> {
         let usd = match term {
             Term::Forever => forever_usd(name),
             Term::Years(years) => annual_usd(name) * years,
+            Term::Existing => return None,
         };
         let zats = usd.checked_mul(rate.into_u64())?;
         Zatoshis::from_u64(zats).ok()

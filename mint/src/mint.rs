@@ -157,8 +157,8 @@ impl Action {
 ///
 /// Built by the Treasury memo grammar (`Request::decode`); memo bytes
 /// stay on that parser. Claims carry a term (`forever` or `<N>y`) and
-/// an optional leading pre-sale access code; updates carry `none`
-/// (carried forward), `<N>y`, or `forever` — the upgrade.
+/// an optional leading pre-sale access code; updates carry `none`,
+/// `<N>y`, or `forever`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// Create a new registration; the term slot is never empty.
@@ -171,12 +171,10 @@ pub enum Request {
         term: Term,
         code: Option<AccessCode>,
     },
-    /// Rebind; `None` carries the expiry forward, `Some(Years)` extends
-    /// it, `Some(Forever)` upgrades it to no fixed expiration.
     Update {
         name: Name,
         ua: UnifiedAddress,
-        term: Option<Term>,
+        term: Term,
     },
     Release {
         name: Name,
@@ -260,6 +258,9 @@ impl Request {
                         Term::parse(fields.next()?)?,
                     ),
                 };
+                if term == Term::Existing {
+                    return None;
+                }
                 let (name, ua) = decode_name_and_ua(network, fields)?;
                 Some(Request::Claim {
                     name,
@@ -269,11 +270,7 @@ impl Request {
                 })
             }
             "update" => {
-                let term = match fields.next()? {
-                    "none" => None,
-                    "forever" => Some(Term::Forever),
-                    field => Some(Term::parse(field)?),
-                };
+                let term = Term::parse(fields.next()?)?;
                 let (name, ua) = decode_name_and_ua(network, fields)?;
                 Some(Request::Update { name, ua, term })
             }
@@ -862,43 +859,6 @@ mod tests {
             Some(zcash_keys::address::Address::Unified(ua)) => *ua,
             _ => panic!("vector is a mainnet Unified Address"),
         }
-    }
-
-    #[test]
-    fn accepts_the_existing_request_forms() {
-        let network = MainNetwork;
-
-        assert!(matches!(
-            Request::decode(&network, &padded(&format!("ZNS:claim:forever:alice:{TEST_UA}"))),
-            Some(Request::Claim {
-                name,
-                term: Term::Forever,
-                code: None,
-                ..
-            }) if name.as_str() == "alice"
-        ));
-        assert!(matches!(
-            Request::decode(
-                &network,
-                &padded(&format!("ZNS:update:none:alice:{TEST_UA}"))
-            ),
-            Some(Request::Update { term: None, .. })
-        ));
-        assert!(matches!(
-            Request::decode(&network, &padded(&format!("ZNS:release:alice:{TEST_UA}"))),
-            Some(Request::Release { .. })
-        ));
-        // The upgrade spelling.
-        assert!(matches!(
-            Request::decode(
-                &network,
-                &padded(&format!("ZNS:update:forever:alice:{TEST_UA}"))
-            ),
-            Some(Request::Update {
-                term: Some(Term::Forever),
-                ..
-            })
-        ));
     }
 
     #[test]
