@@ -163,12 +163,7 @@ async fn main() {
                 let Some((request, ua)) = candidate else {
                     continue;
                 };
-                challenges.admit(request.clone(), txid, mtp_now);
-                let Some(pending) = challenges
-                    .requested()
-                    .into_iter()
-                    .find(|pending| pending.request == request)
-                else {
+                let Some(pending) = challenges.admit(request, txid, mtp_now) else {
                     continue;
                 };
                 if relay(
