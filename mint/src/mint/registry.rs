@@ -98,7 +98,7 @@ impl NameRecord {
 
     /// The clock-and-verb check behind [`Registry::authorize_challenge`]:
     /// release, list, and delist from this record's controller, and
-    /// forever names take no term. Claims and buys are never challenged.
+    /// forever names take no new term. Claims and buys are never challenged.
     fn allows_challenge(
         &self,
         request: &Request,
@@ -864,7 +864,7 @@ mod tests {
         assert!(!live.allows_challenge(&update(Term::Existing), BlockHeight::from_u32(100), now));
         assert!(!live.allows_challenge(&update(Term::Existing), BlockHeight::from_u32(99), now));
 
-        // A forever name refuses any term — no runway to bank, no
+        // A forever name refuses any new term — no runway to bank, no
         // second upgrade to buy — and allows the existing term.
         let forever = record(Action::Claim, Expiry::Never, 2_000_000_000, 3);
         assert!(!forever.allows_challenge(&update(Term::Years(1)), above, now));

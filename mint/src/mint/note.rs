@@ -274,7 +274,7 @@ impl Expiry {
     pub fn extend(self, term: Term, mtp: Timestamp) -> Option<Self> {
         let extended = match (self, term) {
             (expiry, Term::Existing) => expiry,
-            (Expiry::Never, _) => return None,
+            (Expiry::Never, Term::Forever | Term::Years(_)) => return None,
             (Expiry::At(_), Term::Forever) => Expiry::Never,
             (Expiry::At(t), Term::Years(_)) => t.checked_add(term.duration()).map(Expiry::At)?,
         };
