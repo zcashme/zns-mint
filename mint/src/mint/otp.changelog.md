@@ -1,5 +1,10 @@
 # `mint/otp.rs` design record
 
+## 2026-11-20 — `admit` returns the challenge it opens (#552)
+
+- `OtpQueue::admit` returns the challenge it opens, or `None` when a
+  live challenge for the request only takes the new txid.
+
 ## 2026-11-13 — `holds_name`; `expire` returns the relayed requests (#435)
 
 - `OtpQueue::holds_name` is true while any challenge on the name is live.

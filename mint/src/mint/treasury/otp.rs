@@ -159,18 +159,17 @@ impl OtpQueue {
         }
     }
 
-    /// Issues a challenge for `request` unless one is live. Its code is
-    /// unique among the challenges a response could also name. A live
-    /// challenge takes `txid`, so a mined repeat backs a code first sent
-    /// for a request that never landed.
-    pub fn admit(&mut self, request: Request, txid: TxId, mtp: Timestamp) {
+    /// Opens and returns a challenge for `request`, its code unique among
+    /// those a response could also name. A live one instead takes `txid`,
+    /// so a mined repeat backs a code whose request never landed.
+    pub fn admit(&mut self, request: Request, txid: TxId, mtp: Timestamp) -> Option<OtpChallenge> {
         if let Some((_, _, backing)) = self
             .challenges
             .iter_mut()
             .find(|(challenge, _, _)| challenge.request == request)
         {
             *backing = txid;
-            return;
+            return None;
         }
         let code = loop {
             let code = OtpCode::generate();
@@ -183,16 +182,15 @@ impl OtpQueue {
                 break code;
             }
         };
-        self.challenges.push((
-            OtpChallenge {
-                request,
-                code,
-                expires_at: mtp + Duration::seconds(D_OTP),
-                attempts: 0,
-            },
-            ChallengeState::Requested,
-            txid,
-        ));
+        let challenge = OtpChallenge {
+            request,
+            code,
+            expires_at: mtp + Duration::seconds(D_OTP),
+            attempts: 0,
+        };
+        self.challenges
+            .push((challenge.clone(), ChallengeState::Requested, txid));
+        Some(challenge)
     }
 
     /// A challenge for `request` is live.

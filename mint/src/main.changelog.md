@@ -1,5 +1,10 @@
 # main.changelog.md
 
+## 2026-11-20 — The mempool path relays the challenge `admit` returns (#552)
+
+- The mempool path takes the challenge from `OtpQueue::admit` and no
+  longer searches `requested()` for it.
+
 ## 2026-11-20 — `zns_mint_serving` is gone (#549)
 
 - The mint no longer publishes `zns_mint_serving`. It was `0` after the
