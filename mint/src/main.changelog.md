@@ -1,5 +1,11 @@
 # main.changelog.md
 
+## 2026-11-20 — `zns_mint_serving` is gone (#549)
+
+- The mint no longer publishes `zns_mint_serving`. It was `0` after the
+  wallet scan and `1` once the tip session opened, and never changed
+  again. `/metrics` answering says the wallet scan is finished.
+
 ## 2026-11-14 — The run loop uses the block's MTP from `apply_block` (#504)
 
 - Challenge and buy expiry and the update, list and delist laws use the
