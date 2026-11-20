@@ -1032,6 +1032,7 @@ impl<P: Parameters> Wallet<P> {
 mod tests {
     use super::{Wallet, WalletError, MAX_CHECKPOINTS};
     use incrementalmerkletree::frontier::Frontier;
+    use orchard::NOTE_COMMITMENT_TREE_DEPTH as ORCHARD_NOTE_COMMITMENT_TREE_DEPTH;
     use zcash_client_backend::data_api::chain::ChainState;
     use zcash_client_backend::data_api::locking::{LockOwner, OutputLockStore};
     use zcash_client_backend::data_api::testing::pool::dsl::TestDsl;
@@ -1468,7 +1469,7 @@ mod tests {
             };
             let mut targets = Vec::new();
             let mut frontier = if base == 0 {
-                Frontier::<MerkleHashOrchard, 32>::empty()
+                Frontier::<MerkleHashOrchard, { ORCHARD_NOTE_COMMITMENT_TREE_DEPTH as u8 }>::empty()
             } else {
                 let position = u64::from(base) - 1;
                 Frontier::from_parts(
@@ -1857,14 +1858,16 @@ mod tests {
     /// every block must stay bounded at MAX_CHECKPOINTS.
     #[test]
     fn empty_tree_checkpoints_stay_bounded() {
+        use sapling::NOTE_COMMITMENT_TREE_DEPTH as SAPLING_NOTE_COMMITMENT_TREE_DEPTH;
         use shardtree::store::memory::MemoryShardStore;
         use shardtree::store::ShardStore;
         use shardtree::ShardTree;
+        use zcash_client_backend::data_api::SAPLING_SHARD_HEIGHT;
 
         type QuietTree = ShardTree<
             MemoryShardStore<sapling::Node, BlockHeight>,
-            { super::super::SAPLING_NOTE_COMMITMENT_TREE_DEPTH },
-            { super::super::SAPLING_SHARD_HEIGHT },
+            SAPLING_NOTE_COMMITMENT_TREE_DEPTH,
+            SAPLING_SHARD_HEIGHT,
         >;
         let mut tree: QuietTree = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
 
