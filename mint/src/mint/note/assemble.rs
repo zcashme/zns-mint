@@ -14,6 +14,7 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 
 use super::NameNote;
+use crate::boot::{Network, NETWORK};
 use crate::mint::{REGISTRY_ACCOUNT, TREASURY_ACCOUNT};
 use crate::wallet::{TreeError, Wallet};
 use crate::{RegistryKeys, TreasuryKeys};
@@ -50,9 +51,8 @@ pub enum PrepareError {
 /// `authority_nf` is the claim anchor or the predecessor; Treasury fee
 /// notes cover the fee at `fee_rule`.
 #[allow(clippy::too_many_arguments)]
-pub fn prepare<P: Parameters>(
-    network: &P,
-    wallet: &mut Wallet<P>,
+pub fn prepare(
+    wallet: &mut Wallet<Network>,
     treasury_keys: &TreasuryKeys,
     registry_keys: &RegistryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
@@ -89,7 +89,7 @@ pub fn prepare<P: Parameters>(
     let mut fee_funding = Zatoshis::ZERO;
     let transaction_fee = loop {
         let action_count = (fixed_spends + fee_notes.len()).max(fixed_outputs).max(2);
-        let f = fee(network, fee_rule, target_height, action_count)?;
+        let f = fee(&NETWORK, fee_rule, target_height, action_count)?;
         if fee_funding >= f {
             break f;
         }
@@ -116,7 +116,7 @@ pub fn prepare<P: Parameters>(
     let treasury_fvk = treasury_keys.orchard_fvk();
 
     let mut builder = Builder::new(
-        network.clone(),
+        NETWORK,
         target_height,
         BuildConfig::Standard {
             sapling_anchor: None,
@@ -142,7 +142,7 @@ pub fn prepare<P: Parameters>(
 
     // The successor Name Note: a zero-value output whose rseed is derived
     // from its record.
-    let memo = zcash_protocol::memo::MemoBytes::from_bytes(&note.encode(network))
+    let memo = zcash_protocol::memo::MemoBytes::from_bytes(&note.encode(&NETWORK))
         .expect("a Name Note memo is 512 bytes");
     builder
         .add_ironwood_output_with_rseed::<FeeError>(
@@ -150,7 +150,7 @@ pub fn prepare<P: Parameters>(
             registry_fvk.address_at(0u32, orchard::keys::Scope::External),
             Zatoshis::ZERO,
             memo,
-            RandomSeedBytes::from_bytes(note.rseed(network)),
+            RandomSeedBytes::from_bytes(note.rseed(&NETWORK)),
         )
         .map_err(PrepareError::Builder)?;
 

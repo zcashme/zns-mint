@@ -65,10 +65,10 @@ pub(crate) type TreeError = ShardTreeError<Infallible>;
 /// arise; if a scanned block still surfaces one, `put_blocks` refuses it rather
 /// than dropping value.
 pub struct Wallet<P: Parameters> {
-    /// The consensus parameters of the network this wallet's accounts were
-    /// derived for. The single authority for network context inside the
-    /// wallet; callers of the free data-api functions keep passing their
-    /// own `params` and must pass the same network.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read only by the upstream test harness")
+    )]
     network: P,
     /// Per-account scan floors. Wallet-wide progress uses the earliest.
     account_birthdays: BTreeMap<AccountId, BlockHeight>,
@@ -181,14 +181,6 @@ impl<P: Parameters> Wallet<P> {
             .ironwood_tree
             .insert_frontier(chain_state.final_ironwood_tree().clone(), retention)?;
         Ok(wallet)
-    }
-
-    /// The consensus parameters this wallet was constructed for: the field's
-    /// read surface, without which it is write-only outside tests and dies
-    /// under `dead_code`. Mirrors `zcash_client_sqlite::WalletDb`'s stored
-    /// `params`.
-    pub fn network(&self) -> &P {
-        &self.network
     }
 
     /// The wallet's own scanning faculty, born from the same UFVKs.

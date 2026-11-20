@@ -16,7 +16,7 @@ use zcash_client_backend::data_api::WalletRead as _;
 use zcash_protocol::consensus::{BlockHeight, BranchId};
 use zcash_protocol::value::Zatoshis;
 
-use zns_mint::boot::Boot;
+use zns_mint::boot::{Boot, NETWORK};
 use zns_mint::mint::note::assemble;
 use zns_mint::mint::presale;
 use zns_mint::mint::pricing::{fetch_round, Oracle};
@@ -39,7 +39,6 @@ async fn main() {
         .init();
 
     let Boot {
-        network,
         chain,
         source,
         mut wallet,
@@ -120,7 +119,7 @@ async fn main() {
                 }
                 let tip = wallet.tip().block_height();
                 let tx = match source
-                    .get_raw_transaction(BranchId::for_height(&network, tip), txid)
+                    .get_raw_transaction(BranchId::for_height(&NETWORK, tip), txid)
                     .await
                 {
                     Ok(Some(tx)) => tx,
@@ -138,13 +137,13 @@ async fn main() {
                     .expect("FATAL: MTP unavailable before a mempool relay");
                 let target_height = tip + 1;
                 let candidate = zns_mint::mint::note::decrypt_treasury_transaction(
-                    &network,
+                    &NETWORK,
                     &tx,
                     tip,
                     &treasury_keys,
                 )
                 .into_iter()
-                .filter_map(|(paid, memo)| match MintInbound::decode(&network, &memo) {
+                .filter_map(|(paid, memo)| match MintInbound::decode(&NETWORK, &memo) {
                     MintInbound::Request(
                         request @ (Request::Update { .. } | Request::Release { .. }),
                     ) => Some((request, paid)),
@@ -168,7 +167,6 @@ async fn main() {
                     continue;
                 };
                 if relay(
-                    &network,
                     &mut wallet,
                     &treasury_keys,
                     &sapling_spend,
@@ -292,7 +290,7 @@ async fn main() {
             let next_height = from_height + 1;
 
             let block = loop {
-                match source.get_block(&network, next_height).await {
+                match source.get_block(&NETWORK, next_height).await {
                     Ok(block) => break block,
                     Err(error) if error.is_retryable() => {
                         tracing::warn!(
@@ -328,7 +326,6 @@ async fn main() {
             // `block_mtp` is the block's own clock: a challenge expired
             // by it completes nothing in it, and the law reads it.
             let (arrivals, block_mtp) = zns_mint::mint::apply_block(
-                &network,
                 &registry_keys,
                 &treasury_keys,
                 block,
@@ -605,7 +602,7 @@ async fn main() {
                             %txid,
                             name = %name.as_str(),
                             paid = paid.into_u64(),
-                            ua = %ua.encode(&network),
+                            ua = %ua.encode(&NETWORK),
                             "access code refused; payment kept"
                         );
                         continue;
@@ -680,7 +677,6 @@ async fn main() {
                 continue;
             };
             if relay(
-                &network,
                 &mut wallet,
                 &treasury_keys,
                 &sapling_spend,
@@ -699,7 +695,6 @@ async fn main() {
 
         for otp in market.unrelayed() {
             if relay_buy(
-                &network,
                 &mut wallet,
                 &treasury_keys,
                 &sapling_spend,
@@ -796,7 +791,6 @@ async fn main() {
                 }
             };
             let (transaction, fee) = match assemble::prepare(
-                &network,
                 &mut wallet,
                 &treasury_keys,
                 &registry_keys,
@@ -861,7 +855,6 @@ async fn main() {
         // refused, stays due.
         for refund in refunds.due(tip) {
             match treasury::issue_refund(
-                &network,
                 &mut wallet,
                 &treasury_keys,
                 &sapling_spend,
@@ -890,7 +883,6 @@ async fn main() {
         // refund is queued, its money stays and the sweep waits a day.
         if today > previous_day && refunds.is_empty() {
             match treasury::sweep_to_vault(
-                &network,
                 &mut wallet,
                 &treasury_keys,
                 &sapling_spend,

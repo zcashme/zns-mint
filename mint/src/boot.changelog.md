@@ -1,5 +1,13 @@
 # Boot module changelog
 
+## 2026-11-20 — The build's network is `boot::NETWORK` (#579)
+
+- `pub type Network` and `pub const NETWORK` replace `boot_network()`:
+  the same feature-selected network, now a compile-time constant the
+  mint imports.
+- `Boot` is no longer generic: its `network` field is gone and `wallet`
+  is `Wallet<Network>`.
+
 ## 2026-11-20 — Boot fetches no subtree roots (#569)
 
 - Boot builds the wallet from the origin checkpoint's frontiers and

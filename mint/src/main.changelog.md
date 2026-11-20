@@ -1,5 +1,12 @@
 # main.changelog.md
 
+## 2026-11-20 — The loop uses `boot::NETWORK` (#579)
+
+- `Boot` no longer hands over a `network`. The loop passes `&NETWORK`
+  where a translation needs one, and no longer passes it to
+  `apply_block`, `relay`, `relay_buy`, `prepare`, `issue_refund` or
+  `sweep_to_vault`.
+
 ## 2026-11-20 — The OTP-response payment names `Term::Existing` (#556)
 
 - An update whose term is not `Existing` keeps the payment once it

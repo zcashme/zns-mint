@@ -39,17 +39,18 @@ use zcash_protocol::value::{BalanceError, Zatoshis};
 use zcash_protocol::ShieldedPool;
 use zip321::{Payment, TransactionRequest};
 
+use crate::boot::{Network, NETWORK};
 use crate::mint::{Name, Request, TREASURY_ACCOUNT};
 use crate::wallet::Wallet;
 
-type TreasuryProposalError<P> = ProposeTransferErrT<
-    Wallet<P>,
+type TreasuryProposalError = ProposeTransferErrT<
+    Wallet<Network>,
     Infallible,
-    GreedyInputSelector<Wallet<P>>,
-    SingleOutputChangeStrategy<FeeRule, Wallet<P>>,
+    GreedyInputSelector<Wallet<Network>>,
+    SingleOutputChangeStrategy<FeeRule, Wallet<Network>>,
 >;
-type TreasuryBuildError<P> =
-    CreateErrT<Wallet<P>, GreedyInputSelectorError, FeeRule, FeeError, NoteId>;
+type TreasuryBuildError =
+    CreateErrT<Wallet<Network>, GreedyInputSelectorError, FeeRule, FeeError, NoteId>;
 type TreasuryProposal = Proposal<FeeRule, NoteId>;
 
 /// The marginal fee per logical action on every transaction the mint
@@ -118,22 +119,21 @@ pub enum BuildFailure<ProposalError, TransactionError> {
 /// funded from Sapling or Ironwood, with change in Ironwood. The wallet owns
 /// it from there, as it owns a sweep: one that expires unmined is kept, and
 /// the next sweep moves the money. `Ok(None)` means the Treasury cannot fund it yet.
-pub fn issue_refund<P: Parameters>(
-    network: &P,
-    wallet: &mut Wallet<P>,
+pub fn issue_refund(
+    wallet: &mut Wallet<Network>,
     treasury_keys: &crate::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
     fee_rule: &FeeRule,
     refund: &RefundRequest,
-) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
+) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError, TreasuryBuildError>> {
     let to = Address::Unified(Box::new(refund.recipient().clone()));
     let payment = match refund.note() {
         Some(text) => {
             let memo =
                 MemoBytes::from_bytes(text.as_bytes()).expect("a return sentence fits a memo");
             Payment::new(
-                to.to_zcash_address(network),
+                to.to_zcash_address(&NETWORK),
                 Some(refund.amount()),
                 Some(memo),
                 None,
@@ -142,13 +142,13 @@ pub fn issue_refund<P: Parameters>(
             )
             .expect("a shielded recipient can carry the return sentence")
         }
-        None => Payment::without_memo(to.to_zcash_address(network), refund.amount()),
+        None => Payment::without_memo(to.to_zcash_address(&NETWORK), refund.amount()),
     };
     let request =
         TransactionRequest::new(vec![payment]).expect("one payment is a valid ZIP 321 request");
     let proposal = match propose_transfer::<_, _, _, _, Infallible>(
         wallet,
-        network,
+        &NETWORK,
         TREASURY_ACCOUNT,
         &GreedyInputSelector::new(),
         &SingleOutputChangeStrategy::new(
@@ -173,7 +173,7 @@ pub fn issue_refund<P: Parameters>(
     let spending_keys = treasury_keys.spending_keys();
     let txids = create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
         wallet,
-        network,
+        &NETWORK,
         &SystemClock,
         &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
         spend_prover,
@@ -204,20 +204,18 @@ pub fn issue_refund<P: Parameters>(
 }
 
 /// Pays the vault what send-max could deliver, less the float.
-fn propose_vault_sweep<P: Parameters>(
-    network: &P,
-    wallet: &mut Wallet<P>,
+fn propose_vault_sweep(
+    wallet: &mut Wallet<Network>,
     fee_rule: &FeeRule,
-) -> Result<Option<TreasuryProposal>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>>
-{
-    let vault = vault_address(network);
+) -> Result<Option<TreasuryProposal>, BuildFailure<TreasuryProposalError, TreasuryBuildError>> {
+    let vault = vault_address(&NETWORK);
     let sendable = match propose_send_max_transfer::<_, _, _, Infallible>(
         wallet,
-        network,
+        &NETWORK,
         TREASURY_ACCOUNT,
         &[ShieldedPool::Ironwood],
         fee_rule,
-        vault.to_zcash_address(network),
+        vault.to_zcash_address(&NETWORK),
         None,
         MaxSpendMode::MaxSpendable,
         crate::wallet::CONFIRMATIONS,
@@ -241,13 +239,13 @@ fn propose_vault_sweep<P: Parameters>(
     };
 
     let request = TransactionRequest::new(vec![Payment::without_memo(
-        vault.to_zcash_address(network),
+        vault.to_zcash_address(&NETWORK),
         payment,
     )])
     .expect("one payment is a valid ZIP 321 request");
     propose_transfer::<_, _, _, _, Infallible>(
         wallet,
-        network,
+        &NETWORK,
         TREASURY_ACCOUNT,
         &GreedyInputSelector::new(),
         &SingleOutputChangeStrategy::new(
@@ -267,22 +265,21 @@ fn propose_vault_sweep<P: Parameters>(
 }
 
 /// Builds the vault sweep. `Ok(None)` means nothing to move.
-pub fn sweep_to_vault<P: Parameters>(
-    network: &P,
-    wallet: &mut Wallet<P>,
+pub fn sweep_to_vault(
+    wallet: &mut Wallet<Network>,
     treasury_keys: &crate::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
     fee_rule: &FeeRule,
-) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
-    let Some(proposal) = propose_vault_sweep(network, wallet, fee_rule)? else {
+) -> Result<Option<Transaction>, BuildFailure<TreasuryProposalError, TreasuryBuildError>> {
+    let Some(proposal) = propose_vault_sweep(wallet, fee_rule)? else {
         return Ok(None);
     };
 
     let spending_keys = treasury_keys.spending_keys();
     let txids = create_proposed_transactions::<_, _, GreedyInputSelectorError, _, FeeError, _>(
         wallet,
-        network,
+        &NETWORK,
         &SystemClock,
         &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
         spend_prover,
@@ -312,18 +309,17 @@ pub fn sweep_to_vault<P: Parameters>(
 /// Build failures are returned to the relay lane, which logs them and tries
 /// again on a later tip.
 #[allow(clippy::too_many_arguments)]
-pub fn challenge<P: Parameters>(
-    network: &P,
-    wallet: &mut Wallet<P>,
+pub fn challenge(
+    wallet: &mut Wallet<Network>,
     treasury_keys: &crate::TreasuryKeys,
     spend_prover: &sapling::circuit::SpendParameters,
     output_prover: &sapling::circuit::OutputParameters,
     fee_rule: &FeeRule,
     controller: &zcash_keys::address::UnifiedAddress,
     memo: MemoBytes,
-) -> Result<Transaction, BuildFailure<TreasuryProposalError<P>, TreasuryBuildError<P>>> {
+) -> Result<Transaction, BuildFailure<TreasuryProposalError, TreasuryBuildError>> {
     let payment = Payment::new(
-        Address::Unified(Box::new(controller.clone())).to_zcash_address(network),
+        Address::Unified(Box::new(controller.clone())).to_zcash_address(&NETWORK),
         Some(CHALLENGE_RELAY_VALUE),
         Some(memo),
         None,
@@ -335,7 +331,7 @@ pub fn challenge<P: Parameters>(
         TransactionRequest::new(vec![payment]).expect("one payment is a valid ZIP 321 request");
     let proposal = propose_transfer::<_, _, _, _, Infallible>(
         wallet,
-        network,
+        &NETWORK,
         TREASURY_ACCOUNT,
         &GreedyInputSelector::new(),
         &SingleOutputChangeStrategy::new(
@@ -362,15 +358,15 @@ pub fn challenge<P: Parameters>(
 
     let spending_keys = treasury_keys.spending_keys();
     let txids = create_proposed_transactions::<
-        Wallet<P>,
-        P,
+        Wallet<Network>,
+        Network,
         GreedyInputSelectorError,
         FeeRule,
         FeeError,
         NoteId,
     >(
         wallet,
-        network,
+        &NETWORK,
         &SystemClock,
         &mut rand::rand_core::UnwrapErr(rand::rngs::SysRng),
         spend_prover,

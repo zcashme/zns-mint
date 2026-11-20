@@ -1,5 +1,10 @@
 # `mint/note.rs` design record
 
+## 2026-11-20 — `assemble::prepare` uses `NETWORK` (#579)
+
+- `prepare` takes `Wallet<Network>` and no `network` argument or `P`
+  generic; it builds and encodes with `boot::NETWORK`.
+
 ## 2026-11-20 — `assemble::record_sent` records a sent Name Note (#577)
 
 - `record_sent` moves here from the wallet, next to `prepare`. Through
