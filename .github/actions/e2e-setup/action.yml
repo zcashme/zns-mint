@@ -6,12 +6,9 @@ name: e2e setup
 description: zallet, zebrad, Sapling params and a regtest zns-mint
 
 inputs:
-  # zallet-zebra reads zebrad's state directly; Zebra 7 writes format
-  # v29, which no zallet release reads yet. Move to the first release
-  # that does.
   zallet-ref:
     description: zallet commit to build
-    default: aec7f3fa8397ef17b2852dc6835572d6e623b1a2
+    default: 7b0622451382be32754699420e0e71b1b1c2bd98 # v0.1.0-beta.4
 
 runs:
   using: composite
