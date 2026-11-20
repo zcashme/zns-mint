@@ -729,7 +729,7 @@ fn verify_fingerprint(seed: &Secret<[u8; 32]>, expected: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Step 3: Initialize (origin checkpoint, subtree roots, wallet, MTP)
+// Step 3: Initialize (origin checkpoint, wallet, MTP)
 // ---------------------------------------------------------------------------
 
 /// Fetches the treestate immediately before the wallet scan window.
