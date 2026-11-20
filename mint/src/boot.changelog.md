@@ -1,16 +1,19 @@
 # Boot module changelog
 
-## 2026-11-20 — Boot puts the subtree roots behind the origin (#567)
+## 2026-11-20 — Boot asks Zebra for the origin's full shards (#567)
 
-- After `Wallet::new`, boot puts the Sapling and Ironwood roots whose
-  shard completed by the origin checkpoint, through
-  `put_*_subtree_roots`. The cut-off at the origin moved here from
-  `Wallet::new`; Zebra answers `z_getsubtreesbyindex` as of the tip.
-- The cut-off takes the roots up to the first one that ends past the
-  origin, so an out-of-order answer cannot put a later shard's root.
+- Boot counts the full shards in the origin frontiers
+  (`tree_size >> SHARD_HEIGHT`) and asks `z_getsubtreesbyindex` for
+  exactly those roots, then puts them after `Wallet::new` through
+  `put_*_subtree_roots`. Zebra answers as of its tip; the end-height
+  cut-off that dropped later roots in `Wallet::new` is gone.
+- Fewer roots than full shards, such as the empty list Zebra returns
+  while it rebuilds its subtree index, stops boot with `FATAL`. Before,
+  boot went on without them.
 - A root that fails to go in still stops boot with `FATAL`, now naming
   the pool.
-- The boot log counts the roots put, not the roots Zebra returned.
+- The boot log counts the origin's full shards, not every root Zebra
+  returned.
 
 ## 2026-11-17 — The key methods are crate-private again (#533)
 
