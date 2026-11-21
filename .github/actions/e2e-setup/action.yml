@@ -1,7 +1,7 @@
 # What an end-to-end suite needs before its test runs: zallet, zebrad,
-# the Sapling params and a regtest mint. ci.yml's e2e job and daily.yml's
-# reorg job both use it, so they test against the same builds and share
-# the cached zallet binary.
+# the Sapling params and a regtest mint. daily.yml's happy-path and reorg
+# jobs both use it, so they test against the same builds and share the
+# cached zallet binary.
 name: e2e setup
 description: zallet, zebrad, Sapling params and a regtest zns-mint
 

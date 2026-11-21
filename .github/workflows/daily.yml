@@ -1,6 +1,5 @@
-# End-to-end suites too slow for the pull-request gate. Pull requests run
-# only the happy path (ci.yml); these run once a day on master and on a
-# manual run.
+# The end-to-end suites, too slow for the pull-request gate. They run once
+# a day on master and on a manual run.
 name: Daily
 
 on:
@@ -16,6 +15,34 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  # The ceremony is re-proved every run: a random funding txid cannot be
+  # cached.
+  happy-path:
+    name: Happy path
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: ./.github/actions/e2e-setup
+
+      - name: clippy
+        working-directory: integration-tests
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: test (lib)
+        working-directory: integration-tests
+        run: cargo test --locked --lib
+
+      - name: boot to happy path
+        working-directory: integration-tests
+        run: cargo test --locked --test happy_path -- --nocapture
+
   reorg:
     name: Reorg
     runs-on: ubuntu-latest
