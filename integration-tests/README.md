@@ -20,11 +20,11 @@ at `target/release/zallet-zebra`. Use the zebrad release and zallet commit
 that `.github/actions/e2e-setup/action.yml` pins. The user pays requests through
 `z_sendfromaccount`.
 
-Both tests are built on the `fixture` module:
+Both tests are built on the `fixture` module, and the Daily workflow runs
+both:
 
-- `tests/happy_path.rs`: claim → update → release. Pull requests run it.
-- `tests/reorg.rs`: the mint's queues across live reorgs. The Daily
-  workflow runs it.
+- `tests/happy_path.rs`: claim → update → release.
+- `tests/reorg.rs`: the mint's queues across live reorgs.
 
 ## License
 
