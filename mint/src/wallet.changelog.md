@@ -1,5 +1,12 @@
 # Wallet changelog
 
+## 2026-11-21 — The Ironwood subtree-root overrides are gone (#584)
+
+- `put_ironwood_subtree_roots` and `get_ironwood_subtree_root` fall back
+  to upstream's defaults. Nothing in the mint fed subtree roots since
+  #569; the Sapling and Orchard pairs stay because the trait requires
+  them and the upstream conformance tests call the Sapling pair.
+
 ## 2026-11-20 — `Wallet::network()` is gone (#579)
 
 - It had no callers. The `network` field stays for the upstream test

@@ -371,11 +371,7 @@ where
 }
 
 /// Appends one scanned block's bundle commitments with the scanner-provided
-/// retention markers, then checkpoints the accepted height. `marks` upgrades
-/// those commitments to `Marked` — the retention the scanner assigns to notes
-/// it decrypts mid-block. The height's single checkpoint-retention append
-/// belongs to the block's last commitment; a marked Name Note that is not
-/// last must not claim it.
+/// retention markers, then checkpoints the accepted height.
 fn append_block_commitments<H, Nf, const DEPTH: u8, const SHARD_HEIGHT: u8>(
     tree: &mut ShardTree<MemoryShardStore<H, BlockHeight>, DEPTH, SHARD_HEIGHT>,
     bundles: &ScannedBundles<H, Nf>,

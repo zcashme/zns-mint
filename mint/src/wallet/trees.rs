@@ -152,48 +152,6 @@ impl<P: Parameters> WalletCommitmentTrees for Wallet<P> {
     {
         callback(&mut self.ironwood_tree).map(Some)
     }
-
-    fn put_ironwood_subtree_roots(
-        &mut self,
-        start_index: u64,
-        roots: &[CommitmentTreeRoot<orchard::tree::MerkleHashOrchard>],
-    ) -> Result<(), ShardTreeError<Self::Error>> {
-        // All or nothing: a failed batch restores the saved tree.
-        let saved_tree = clone_shard_tree(&self.ironwood_tree)?;
-        if let Err(error) = self.with_ironwood_tree_mut(|tree| {
-            for (root, index) in roots.iter().zip(start_index..) {
-                tree.insert(
-                    Address::from_parts(IRONWOOD_SHARD_HEIGHT.into(), index),
-                    *root.root_hash(),
-                )?;
-            }
-            Ok::<_, ShardTreeError<Self::Error>>(())
-        }) {
-            self.ironwood_tree = saved_tree;
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    fn get_ironwood_subtree_root(
-        &mut self,
-        index: u64,
-    ) -> Result<Option<orchard::tree::MerkleHashOrchard>, ShardTreeError<Self::Error>> {
-        self.with_ironwood_tree_mut(|tree| {
-            let address = Address::from_parts(IRONWOOD_SHARD_HEIGHT.into(), index);
-            Ok(tree
-                .store()
-                .get_shard(address)
-                .map_err(ShardTreeError::Storage)?
-                .and_then(|shard| match shard.root() {
-                    root if root.is_leaf() => root.leaf_value().copied(),
-                    root => root
-                        .annotation()
-                        .and_then(|annotation| annotation.as_deref().copied()),
-                }))
-        })
-        .map(|result| result.flatten())
-    }
 }
 
 impl<P: Parameters> Wallet<P> {
@@ -290,23 +248,10 @@ mod tests {
                 &[sapling_root(10, sapling::Node::empty_root(Level::from(5)))],
             )
             .expect("an empty shard accepts a root");
-        wallet
-            .put_ironwood_subtree_roots(
-                0,
-                &[CommitmentTreeRoot::from_parts(
-                    h(11),
-                    orchard::tree::MerkleHashOrchard::empty_root(Level::from(5)),
-                )],
-            )
-            .expect("an empty shard accepts a root");
 
         assert_eq!(
             wallet.get_sapling_subtree_root(0).unwrap(),
             Some(sapling::Node::empty_root(Level::from(5)))
-        );
-        assert_eq!(
-            wallet.get_ironwood_subtree_root(0).unwrap(),
-            Some(orchard::tree::MerkleHashOrchard::empty_root(Level::from(5)))
         );
     }
 
