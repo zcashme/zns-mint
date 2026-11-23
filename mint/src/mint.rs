@@ -146,12 +146,6 @@ impl Action {
     pub const fn is_auction(self) -> bool {
         matches!(self, Action::Auction)
     }
-
-    /// True when this action spends the registration's current note as
-    /// its authority; a claim spends an anchor instead.
-    pub const fn needs_predecessor(self) -> bool {
-        matches!(self, Action::Update | Action::Release | Action::Sale)
-    }
 }
 
 /// A name request, decoded before authorization.
