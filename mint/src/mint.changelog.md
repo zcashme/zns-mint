@@ -1,5 +1,10 @@
 # Mint live-work design record
 
+## 2026-11-23 — `Action::needs_predecessor` is gone (#586)
+
+- It never had a caller. An action that is not `is_claim()` spends the
+  predecessor.
+
 ## 2026-11-20 — `apply_block`, `relay` and `relay_buy` use `NETWORK` (#579)
 
 - They take `Wallet<Network>` and no `network` argument or `P` generic,

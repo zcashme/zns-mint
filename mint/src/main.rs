@@ -741,7 +741,7 @@ async fn main() {
         for note in name_notes.authorized_notes() {
             // Authority: a claim spends the first pool anchor the wallet
             // can still spend. A pending spend stays out until it is
-            // mined or expires. An update or release spends the
+            // mined or expires. Every other Name Note spends the
             // predecessor — the record's nullifier matched by commitment.
             let authority_nf = if note.action().is_claim() {
                 // The name must still be absent from the applied-tip registry.
