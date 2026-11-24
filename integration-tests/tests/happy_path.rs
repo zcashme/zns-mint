@@ -16,10 +16,6 @@ use zns_mint::boot::Boot;
 const SYNC_TIMEOUT: Duration = Duration::from_secs(300);
 const BOOT_TIMEOUT: Duration = Duration::from_secs(1800);
 
-/// The second wallet pays one release request and one OTP response, 2 ZEC
-/// each, plus fees.
-const NEW_OWNER_ZATS: u64 = 500_000_000;
-
 #[tokio::test(flavor = "multi_thread")]
 async fn boot_then_claim_update_release() -> Result<()> {
     if zebrad_bin().is_none() || zallet_bin().is_none() {
@@ -44,7 +40,7 @@ async fn boot_then_claim_update_release() -> Result<()> {
     let funder = fixture::User::fund(&mut zebra, 7).await?;
     fixture::wait_until_shielded(
         &funder.zallet,
-        fixture::User::BUDGET_ZATS + NEW_OWNER_ZATS + fixture::TREASURY_PAYMENT_ZATS * 2,
+        fixture::User::BUDGET_ZATS * 2 + fixture::TREASURY_PAYMENT_ZATS * 2,
         SYNC_TIMEOUT,
     )
     .await?;
@@ -59,11 +55,12 @@ async fn boot_then_claim_update_release() -> Result<()> {
     funder.zallet.wait_until_synced(tip, SYNC_TIMEOUT).await?;
     fixture::wait_until_shielded(
         &funder.zallet,
-        NEW_OWNER_ZATS + fixture::TREASURY_PAYMENT_ZATS,
+        fixture::User::BUDGET_ZATS + fixture::TREASURY_PAYMENT_ZATS,
         SYNC_TIMEOUT,
     )
     .await?;
-    let new_owner = fixture::User::fund_attached(&mut zebra, &funder, NEW_OWNER_ZATS).await?;
+    let new_owner =
+        fixture::User::fund_attached(&mut zebra, &funder, fixture::User::BUDGET_ZATS).await?;
     eprintln!("new owner UA: {}", new_owner.ua);
 
     let tip = zebra.tip_height().await?;

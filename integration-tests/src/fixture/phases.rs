@@ -85,8 +85,9 @@ pub async fn release(stack: &mut Stack, prev: &VerifiedNameNote) -> Result<Verif
 }
 
 /// One non-claim transition by the current controller, `stack.user`:
-/// request memo, OTP challenge, echo, successor. `ua` is the address the
-/// request names; the challenge is read at the controller's own.
+/// request memo, OTP challenge, OTP response, successor. `ua` is the
+/// address the request names; the challenge is read at the controller's
+/// own.
 async fn transition(
     stack: &mut Stack,
     action: &str,
