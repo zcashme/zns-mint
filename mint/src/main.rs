@@ -288,27 +288,17 @@ async fn main() {
             let from_height = wallet.tip().block_height();
             let next_height = from_height + 1;
 
-            let block = loop {
-                match source.get_block(next_height).await {
-                    Ok(block) => break block,
-                    Err(error) if error.is_retryable() => {
-                        tracing::warn!(
-                            %error,
-                            height = u32::from(next_height),
-                            "canonical block unavailable; retrying"
-                        );
-                        tokio::time::sleep(RETRY_PAUSE).await;
-                    }
-                    Err(TransportError::NotOnBestChain) => {
-                        tracing::warn!(
-                            height = u32::from(next_height),
-                            "the chain moved under the block fetch; re-converging"
-                        );
-                        continue 'run;
-                    }
-                    Err(error) => {
-                        panic!("FATAL: Zebra returned an invalid canonical block: {error}")
-                    }
+            let block = match source.canonical_block(next_height).await {
+                Ok(block) => block,
+                Err(TransportError::NotOnBestChain) => {
+                    tracing::warn!(
+                        height = u32::from(next_height),
+                        "the chain moved under the block fetch; re-converging"
+                    );
+                    continue 'run;
+                }
+                Err(error) => {
+                    panic!("FATAL: Zebra returned an invalid canonical block: {error}")
                 }
             };
             // The chain may move under the fetches; a non-extending block

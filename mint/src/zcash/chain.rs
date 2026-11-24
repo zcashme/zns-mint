@@ -303,6 +303,25 @@ impl CanonicalBlockSource {
         block_from_wire(&fetched.data, &NETWORK, height)
     }
 
+    /// The best-chain block at a height, retrying while the node is merely
+    /// unavailable.
+    pub async fn canonical_block(&self, height: BlockHeight) -> Result<Block, TransportError> {
+        loop {
+            match self.get_block(height).await {
+                Ok(block) => return Ok(block),
+                Err(error) if error.is_retryable() => {
+                    tracing::warn!(
+                        %error,
+                        height = u32::from(height),
+                        "canonical block unavailable; retrying"
+                    );
+                    tokio::time::sleep(RETRY_PAUSE).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// A best-chain block hash by height, for reorg walks. The hash rides
     /// the wire, so genesis answers where [`Block::read`] refuses to
     /// parse. The Indexer serves no hash-only call: the walk pays one
