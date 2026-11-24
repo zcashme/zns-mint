@@ -1,6 +1,6 @@
 # Zcash I/O changelog
 
-## 2026-11-24 — `canonical_block` retries; `get_block_hash` is gone (#600)
+## 2026-11-24 — `canonical_block` retries; `get_block_hash` is gone (#601)
 
 - `CanonicalBlockSource::canonical_block(height)` fetches the best-chain
   block at a height and retries while the node is merely unavailable, as

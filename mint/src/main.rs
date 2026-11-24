@@ -94,13 +94,15 @@ async fn main() {
         // The tip read stays pinned across mempool events. A reconnect
         // pause runs to the end.
         let mut tip_wait = std::pin::pin!(connection.next_tip(&source));
-        let (best_height, best_hash) = loop {
+        let best_height = loop {
             tokio::select! {
                 biased;
                 tip = &mut tip_wait => {
-                    break tip.unwrap_or_else(|error| {
-                        panic!("FATAL: Zebra could not answer its tip: {error}")
-                    });
+                    break tip
+                        .unwrap_or_else(|error| {
+                            panic!("FATAL: Zebra could not answer its tip: {error}")
+                        })
+                        .0;
                 }
                 event = mempool_rx.recv() => {
                 let Some((kind, txid)) = event else {
@@ -186,42 +188,43 @@ async fn main() {
         let presale_read = presale::PendingRead::start(&presale_client);
 
         // The fork point is the highest block the wallet shares with Zebra's
-        // best chain. A wallet that holds the announced tip has it there.
-        // Otherwise the best-chain block above the wallet's tip names it as
-        // its parent, and after a reorg each lower block names the one
-        // below. The block found above the fork point is the first to
-        // connect; no state above the fork point survives.
-        let (ancestor, mut connecting) = if wallet.block_hash_at(best_height) == Some(best_hash) {
-            (best_height, None)
-        } else {
-            let mut height = (wallet.tip().block_height() + 1).min(best_height);
-            loop {
-                let block = match source.canonical_block(height).await {
-                    Ok(block) => block,
-                    Err(TransportError::NotOnBestChain) => {
-                        tracing::warn!(
-                            height = u32::from(height),
-                            "the chain moved under the fork-point walk; re-converging"
-                        );
-                        continue 'run;
-                    }
-                    Err(error) => {
-                        panic!("FATAL: Zebra returned an invalid canonical block: {error}")
-                    }
-                };
-                let below = height - 1;
-                let Some(wallet_hash) = wallet.block_hash_at(below) else {
-                    panic!(
-                        "FATAL: no common ancestor within the wallet's applied chain \
-                         (data exhausted at height {})",
-                        u32::from(below)
-                    );
-                };
-                if wallet_hash == block.header().prev_block {
-                    break (below, Some(block));
-                }
-                height = below;
+        // best chain, read from fetched blocks alone. A fetched block the
+        // wallet already holds is the fork point. A fetched block whose
+        // parent the wallet holds sits one above it and is the first to
+        // connect. After a reorg neither holds, and the walk steps down. No
+        // state above the fork point survives.
+        let mut height = (wallet.tip().block_height() + 1).min(best_height);
+        let (ancestor, mut connecting) = loop {
+            let below = height - 1;
+            let held = wallet.block_hash_at(height);
+            let held_below = wallet.block_hash_at(below);
+            if held.is_none() && held_below.is_none() {
+                panic!(
+                    "FATAL: no common ancestor within the wallet's applied chain \
+                     (data exhausted at height {})",
+                    u32::from(height)
+                );
             }
+            let block = match source.canonical_block(height).await {
+                Ok(block) => block,
+                Err(TransportError::NotOnBestChain) => {
+                    tracing::warn!(
+                        height = u32::from(height),
+                        "the chain moved under the fork-point walk; re-converging"
+                    );
+                    continue 'run;
+                }
+                Err(error) => {
+                    panic!("FATAL: Zebra returned an invalid canonical block: {error}")
+                }
+            };
+            if held == Some(block.header().hash()) {
+                break (height, None);
+            }
+            if held_below == Some(block.header().prev_block) {
+                break (below, Some(block));
+            }
+            height = below;
         };
 
         if ancestor < wallet.tip().block_height() {
@@ -250,11 +253,6 @@ async fn main() {
             name_notes.reconcile_seen(&registry);
             requests.truncate_to(rewound);
             refunds.truncate_to(rewound);
-            // A rewind that landed below the fork point leaves a gap under
-            // the block found there.
-            if rewound < ancestor {
-                connecting = None;
-            }
             tracing::warn!(
                 height = u32::from(rewound),
                 hash = %wallet.tip().block_hash(),
