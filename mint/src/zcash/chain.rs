@@ -322,18 +322,6 @@ impl CanonicalBlockSource {
         }
     }
 
-    /// A best-chain block hash by height, for reorg walks. The hash rides
-    /// the wire, so genesis answers where [`Block::read`] refuses to
-    /// parse. The Indexer serves no hash-only call: the walk pays one
-    /// whole-block fetch per step — rare path, loopback, accepted.
-    pub async fn get_block_hash(&self, height: BlockHeight) -> Result<BlockHash, TransportError> {
-        let fetched = self.chain.clone().block_and_hash(height).await?;
-        fetched
-            .hash_display_order()
-            .map(block_hash_from_display)
-            .ok_or(TransportError::BadNodeData("indexer block hash length"))
-    }
-
     /// The shielded tree state at a height (see the `chain_state_at`
     /// JSON-RPC reader).
     pub async fn chain_state_at(&self, height: BlockHeight) -> Result<ChainState, TransportError> {
