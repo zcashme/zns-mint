@@ -1,5 +1,19 @@
 # main.changelog.md
 
+## 2026-11-24 — The fork point comes from the next block's parent (#601)
+
+- The loop fetches the best-chain block above the wallet's tip, or at the
+  announced height when that is lower. A fetched block the wallet already
+  holds is the fork point. A fetched block whose parent the wallet holds
+  sits one above the fork point and is the first one connected, so a
+  one-block advance fetches it once. After a reorg neither holds, and the
+  loop steps down one block at a time.
+- The loop stops before a fetch when the wallet has no block at that
+  height or the one below.
+- The walk that asked Zebra for a hash at every height before each pass
+  is gone, and both fetches call `canonical_block` in place of their own
+  retry loops.
+
 ## 2026-11-20 — The loop uses `boot::NETWORK` (#579)
 
 - `Boot` no longer hands over a `network`. The loop passes `&NETWORK`
