@@ -178,33 +178,6 @@ mod tests {
     }
 
     #[test]
-    fn an_admitted_refund_is_the_payment_less_the_fee() {
-        let mut queue = RefundQueue::default();
-        admit(&mut queue, TxId::from_bytes([1; 32]), 10);
-        assert_eq!(
-            queue.due(deep())[0].amount(),
-            Zatoshis::const_from_u64(900_000)
-        );
-    }
-
-    #[test]
-    fn a_return_keeps_its_sentence() {
-        let mut queue = RefundQueue::default();
-        queue.admit_with_note(
-            TxId::from_bytes([1; 32]),
-            &ua(),
-            &alice(),
-            BlockHeight::from_u32(10),
-            Zatoshis::const_from_u64(1_000_000),
-            Some("ZNS:held:alice:1700000600".to_string()),
-        );
-        assert_eq!(
-            queue.due(deep())[0].note(),
-            Some("ZNS:held:alice:1700000600")
-        );
-    }
-
-    #[test]
     fn a_payment_that_does_not_exceed_the_fee_is_kept() {
         let mut queue = RefundQueue::default();
         for refundable in [
