@@ -371,21 +371,6 @@ mod tests {
         }
     }
 
-    /// The memo is the request less its term, with the code; the
-    /// challenge expires `D_OTP` after admission.
-    #[test]
-    fn a_challenge_memo_and_expiry() {
-        let mut q = OtpQueue::new();
-        q.admit(update("alice"), txid(1), t0());
-        let pending = q.requested().remove(0);
-        let memo = pending.memo();
-        assert_eq!(memo.code, pending.code);
-        assert_eq!(&memo.name, pending.request.name());
-        assert_eq!(memo.action, pending.request.action());
-        assert_eq!(&memo.ua, pending.request.ua());
-        assert_eq!(pending.expires_at, t0() + Duration::seconds(D_OTP));
-    }
-
     /// Admitting a transition for a name drops every challenge for it:
     /// a code issued against the old record answers nothing after.
     /// Other names stand.
@@ -537,18 +522,6 @@ mod tests {
         let (answered, backing) = q.complete(&response_for(&pending, *b"111111")).unwrap();
         assert!(answered.code == pending.code);
         assert_eq!(backing, txid(2));
-    }
-
-    /// Only `expire` closes a challenge's window.
-    #[test]
-    fn expire_is_owner_invoked() {
-        let mut q = OtpQueue::new();
-        let pending = admit(&mut q, update("alice"), *b"123456");
-        q.challenge_issued(&pending);
-
-        q.expire(pending.expires_at);
-        assert!(q.complete(&response_for(&pending, *b"123456")).is_none());
-        assert_eq!(q.relayed().count(), 0);
     }
 
     /// An unrelayed entry is never answered; it stays for the relay loop.

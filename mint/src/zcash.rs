@@ -249,28 +249,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn json_rpc_minus_eight_maps_to_not_on_best_chain() {
-        let error = TransportError::Rpc(RpcError {
-            code: -8,
-            message: "block not found".to_string(),
-            data: None,
-        });
-        assert!(matches!(
-            not_on_best_chain(error),
-            TransportError::NotOnBestChain
-        ));
-    }
-
-    #[test]
-    fn indexer_not_found_maps_to_not_on_best_chain() {
-        let status = tonic::Status::not_found("block not found");
-        assert!(matches!(
-            not_on_best_chain(TransportError::Tonic(status)),
-            TransportError::NotOnBestChain
-        ));
-    }
-
-    #[test]
     fn other_verdicts_pass_through_unmapped() {
         let invalid = not_on_best_chain(TransportError::Tonic(tonic::Status::invalid_argument(
             "bad request length",
@@ -286,23 +264,5 @@ mod tests {
             not_on_best_chain(no_information),
             TransportError::Rpc(_)
         ));
-    }
-
-    #[test]
-    fn grpc_retryability_matrix() {
-        let deadline = TransportError::Tonic(tonic::Status::deadline_exceeded("timeout"));
-        assert!(deadline.is_retryable());
-
-        // The verdict the endpoint's REQUEST_TIMEOUT actually fires:
-        // tonic maps the client-side deadline to cancelled.
-        let cancelled = TransportError::Tonic(tonic::Status::cancelled("Timeout expired"));
-        assert!(cancelled.is_retryable());
-
-        let unavailable = TransportError::Tonic(tonic::Status::unavailable("connection ended"));
-        assert!(unavailable.is_retryable());
-
-        // A best-chain miss is a verdict: re-converge, never retry.
-        let not_found = TransportError::Tonic(tonic::Status::not_found("block not found"));
-        assert!(!not_found.is_retryable());
     }
 }

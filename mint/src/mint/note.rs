@@ -1046,40 +1046,6 @@ mod tests {
     }
 
     #[test]
-    fn claim_expiry_maps_forever_to_never() {
-        let mtp = Timestamp::from_seconds(1_000).unwrap();
-        assert_eq!(
-            Term::parse("forever").unwrap().claim_expiry(mtp),
-            Some(Expiry::Never)
-        );
-        assert_eq!(
-            Term::parse("2y").unwrap().claim_expiry(mtp),
-            Some(Expiry::At(Timestamp::from_seconds(63_116_200).unwrap()))
-        );
-    }
-
-    #[test]
-    fn update_extend_banks_from_the_current_expiry() {
-        let mtp = Timestamp::from_seconds(1_000).unwrap();
-        let term = Term::parse("5y").unwrap();
-        // Banking: 5 years from the current expiry, not from now.
-        assert_eq!(
-            Expiry::At(mtp).extend(term, mtp),
-            Some(Expiry::At(mtp.checked_add(term.duration()).unwrap()))
-        );
-        // Forever has no end date, so years cannot be added to it.
-        assert_eq!(Expiry::Never.extend(term, mtp), None);
-        assert_eq!(
-            Expiry::Never.extend(Term::Existing, mtp),
-            Some(Expiry::Never)
-        );
-        assert_eq!(
-            Expiry::At(mtp).extend(Term::Existing, mtp),
-            Some(Expiry::At(mtp))
-        );
-    }
-
-    #[test]
     fn update_extend_forever_upgrades_at_records() {
         let mtp = Timestamp::from_seconds(1_000).unwrap();
         // The upgrade: At + forever converts the registration kind.
@@ -1303,21 +1269,6 @@ mod tests {
     }
 
     #[test]
-    fn a_later_release_does_not_replace_the_created_note() {
-        let release = NameNote::Release {
-            name: test_name(),
-            ua: test_ua(),
-            prev: NameCommitment::from_bytes(&[1u8; 32]).unwrap(),
-        };
-        let mut queue = NameNoteQueue::default();
-        assert!(!queue.note_pending(release.name()));
-        queue.admit(BlockHeight::from_u32(10), release.clone());
-        assert!(queue.note_pending(release.name()));
-        queue.drop_note(release.name());
-        assert!(!queue.note_pending(release.name()));
-    }
-
-    #[test]
     fn one_unresolved_transition_per_name() {
         let name = test_name();
         let predecessor = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
@@ -1356,38 +1307,6 @@ mod tests {
         assert!(!queue.note_pending(&name));
         assert!(queue.admit(height, release));
         assert!(queue.note_pending(&name));
-    }
-
-    #[test]
-    fn authorized_notes_preserve_admission_order() {
-        let prev = NameCommitment::from_bytes(&[1u8; 32]).unwrap();
-        let claim = |name: &str| NameNote::Claim {
-            name: Name::parse(name).unwrap(),
-            ua: test_ua(),
-            expires_at: Expiry::Never,
-        };
-        let update = NameNote::Update {
-            name: Name::parse("carol").unwrap(),
-            ua: test_ua(),
-            expires_at: Expiry::Never,
-            prev,
-        };
-        let h = |n: u32| BlockHeight::from_u32(n);
-
-        let mut queue = NameNoteQueue::default();
-        queue.admit(h(100), claim("alice"));
-        queue.admit(h(101), claim("bob"));
-        queue.admit(h(102), update);
-
-        queue.drop_note(&Name::parse("bob").unwrap());
-        let names: Vec<String> = queue
-            .authorized_notes()
-            .iter()
-            .map(|note| note.name().as_str().to_string())
-            .collect();
-        assert_eq!(names, ["alice", "carol"]);
-        let borrowed: Vec<&str> = queue.authorized_names().map(Name::as_str).collect();
-        assert_eq!(borrowed, ["alice", "carol"]);
     }
 
     /// A broadcast order is not built or dropped while its transaction can

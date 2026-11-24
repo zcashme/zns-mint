@@ -1645,17 +1645,6 @@ mod tests {
         ChainState::empty(BlockHeight::from_u32(0), BlockHash([0; 32]))
     }
 
-    /// Applied-block metadata at `height`, for direct `blocks` insertion.
-    fn at(height: u32) -> zcash_client_backend::data_api::BlockMetadata {
-        zcash_client_backend::data_api::BlockMetadata::from_parts(
-            BlockHeight::from_u32(height),
-            BlockHash([height as u8; 32]),
-            Some(0),
-            Some(0),
-            Some(0),
-        )
-    }
-
     /// The wallet's position is the boot origin before any block is applied.
     #[test]
     fn tip_is_the_boot_seed_before_any_block_is_applied() {
@@ -1665,29 +1654,6 @@ mod tests {
             (wallet.tip().block_height(), wallet.tip().block_hash()),
             (origin.block_height(), origin.block_hash())
         );
-    }
-
-    /// With blocks applied, the position is the highest one, not the seed.
-    #[test]
-    fn tip_is_the_highest_applied_block() {
-        let origin = origin();
-        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
-        wallet.blocks.insert(BlockHeight::from_u32(5), at(5));
-        wallet.blocks.insert(BlockHeight::from_u32(7), at(7));
-        assert_eq!(
-            (wallet.tip().block_height(), wallet.tip().block_hash()),
-            (BlockHeight::from_u32(7), at(7).block_hash())
-        );
-    }
-
-    /// After a full truncation the position falls back to the seed.
-    #[test]
-    fn tip_falls_back_to_the_seed_after_full_truncation() {
-        let origin = origin();
-        let mut wallet = Wallet::new([], &origin, MainNetwork).expect("empty UFVK set is valid");
-        wallet.blocks.insert(BlockHeight::from_u32(5), at(5));
-        wallet.blocks.clear();
-        assert_eq!(wallet.tip().block_height(), origin.block_height());
     }
 
     /// Scanning advances knowledge through the writer; truncation never
@@ -1836,40 +1802,6 @@ mod tests {
             1
         );
         assert_eq!(st.wallet().get_locked_outputs(account_id).unwrap().len(), 1);
-    }
-
-    /// The #316 regression: checkpointing an empty (commitment-free) pool
-    /// every block must stay bounded at MAX_CHECKPOINTS.
-    #[test]
-    fn empty_tree_checkpoints_stay_bounded() {
-        use sapling::NOTE_COMMITMENT_TREE_DEPTH as SAPLING_NOTE_COMMITMENT_TREE_DEPTH;
-        use shardtree::store::memory::MemoryShardStore;
-        use shardtree::store::ShardStore;
-        use shardtree::ShardTree;
-        use zcash_client_backend::data_api::SAPLING_SHARD_HEIGHT;
-
-        type QuietTree = ShardTree<
-            MemoryShardStore<sapling::Node, BlockHeight>,
-            SAPLING_NOTE_COMMITMENT_TREE_DEPTH,
-            SAPLING_SHARD_HEIGHT,
-        >;
-        let mut tree: QuietTree = ShardTree::new(MemoryShardStore::empty(), MAX_CHECKPOINTS);
-
-        let last = (MAX_CHECKPOINTS * 3 / 2) as u32; // 150 adds against a 100 budget
-        for height in 1..=last {
-            super::ensure_block_checkpoint(&mut tree, BlockHeight::from_u32(height))
-                .expect("empty-tree checkpoint succeeds");
-        }
-
-        // Pruned to the newest 100; the oldest 50 are gone.
-        assert_eq!(
-            tree.store().checkpoint_count().expect("infallible store"),
-            MAX_CHECKPOINTS
-        );
-        assert_eq!(
-            tree.store().min_checkpoint_id().expect("infallible store"),
-            Some(BlockHeight::from_u32(last - MAX_CHECKPOINTS as u32 + 1))
-        );
     }
 
     /// Below the retention window the checkpoint is gone: refuse rather

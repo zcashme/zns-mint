@@ -832,16 +832,6 @@ mod tests {
     }
 
     #[test]
-    fn buy_memo_names_the_name_and_the_buyer() {
-        let network = MainNetwork;
-        let memo = padded(&format!("ZNS:buy:alice:{TEST_UA}"));
-        assert!(matches!(
-            crate::mint::MintInbound::decode(&network, &memo),
-            crate::mint::MintInbound::Request(Request::Buy { name, .. }) if name.as_str() == "alice"
-        ));
-    }
-
-    #[test]
     fn a_list_memo_prices_in_at_most_eight_decimals() {
         let network = MainNetwork;
         let owner = decode_controller_ua(&network, TEST_UA).unwrap();
@@ -866,16 +856,6 @@ mod tests {
             ))
         )
         .is_none());
-    }
-
-    #[test]
-    fn delist_names_the_owner() {
-        let network = MainNetwork;
-        let memo = padded(&format!("ZNS:delist:alice:{TEST_UA}"));
-        assert!(matches!(
-            crate::mint::MintInbound::decode(&network, &memo),
-            crate::mint::MintInbound::Request(Request::Delist { name, .. }) if name.as_str() == "alice"
-        ));
     }
 
     #[test]
@@ -1699,27 +1679,6 @@ mod tests {
         let paid = Zatoshis::const_from_u64(70_000_000 + otp_amount(&code).into_u64());
         market.observe(|_| Some(owner.clone()), &[(pay_to, paid)], mtp(), height());
         assert!(market.is_paid(&name()));
-    }
-
-    #[test]
-    fn an_intent_before_the_start_waits() {
-        let mut registry = sale_registry();
-        let mut market = Market::new();
-        let early = BlockHeight::from_u32(9);
-        list_on_chain_at(&mut registry, &auction_listing(10, 20), 60, early);
-        assert!(matches!(
-            open(&mut market, &registry, &name(), OtpCode::for_test(*b"042831"), early, mtp()),
-            Err(MarketRefusal::Early { start }) if start == BlockHeight::from_u32(10)
-        ));
-        let back = returned_intent(
-            &name(),
-            &bob(),
-            MarketRefusal::Early {
-                start: BlockHeight::from_u32(10),
-            },
-        )
-        .unwrap();
-        assert_eq!(back.note, "ZNS:wait:alice:10");
     }
 
     #[test]

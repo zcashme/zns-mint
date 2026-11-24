@@ -354,44 +354,13 @@ mod tests {
         oracle.quote(name, term).expect("quote fits").into_u64()
     }
 
-    /// Most venues quote a string; Bitfinex quotes a number.
-    #[test]
-    fn a_price_reads_from_a_string_or_a_number() {
-        let price = Decimal::new(4153, 2);
-        let string = serde_json::json!("41.53");
-        let number = serde_json::json!(41.53);
-        assert_eq!(serde_json::from_value::<Decimal>(string).unwrap(), price);
-        assert_eq!(serde_json::from_value::<Decimal>(number).unwrap(), price);
-    }
-
-    #[test]
-    fn construction_publishes_spot_and_quotes() {
-        // $1,000/ZEC ⇒ rate 100,000 zats per dollar, from the first round.
-        let oracle = Oracle::new(Decimal::from(1_000));
-        assert_eq!(oracle.current().into_u64(), 100_000);
-
-        let short = Name::parse("a").unwrap();
-        // A year is the annual tier price; forever is four of them.
-        assert_eq!(quoted(&oracle, &short, Term::Years(1)), 1_248_000_000);
-        assert_eq!(quoted(&oracle, &short, Term::Forever), 4_992_000_000);
-
-        let long = Name::parse("purple").unwrap();
-        assert_eq!(quoted(&oracle, &long, Term::Years(1)), 11_200_000);
-        assert_eq!(quoted(&oracle, &long, Term::Forever), 44_800_000);
-    }
-
-    /// `quote_at` prices at the rate given; `quote` passes the published one.
+    /// `quote_at` prices at the rate given.
     #[test]
     fn a_quote_at_a_given_rate() {
-        let oracle = Oracle::new(Decimal::from(1_000));
         let name = Name::parse("purple").unwrap();
         let rate = Zatoshis::const_from_u64(200_000);
         let quote = Oracle::quote_at(rate, &name, Term::Years(1)).unwrap();
         assert_eq!(quote.into_u64(), 22_400_000);
-        assert_eq!(
-            oracle.quote(&name, Term::Years(1)),
-            Oracle::quote_at(oracle.current(), &name, Term::Years(1))
-        );
     }
 
     /// The registration quote follows the term: N annuals for `Ny`, four

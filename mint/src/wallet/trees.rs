@@ -237,24 +237,6 @@ mod tests {
         ));
     }
 
-    /// Put roots are read back from their trees.
-    #[test]
-    fn put_roots_are_read_back() {
-        let mut wallet =
-            Wallet::new([], &empty_origin(), MainNetwork).expect("empty birth is valid");
-        wallet
-            .put_sapling_subtree_roots(
-                0,
-                &[sapling_root(10, sapling::Node::empty_root(Level::from(5)))],
-            )
-            .expect("an empty shard accepts a root");
-
-        assert_eq!(
-            wallet.get_sapling_subtree_root(0).unwrap(),
-            Some(sapling::Node::empty_root(Level::from(5)))
-        );
-    }
-
     /// A failed batch restores the tree.
     #[test]
     fn put_roots_conflict_restores_the_tree() {

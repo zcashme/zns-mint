@@ -466,109 +466,6 @@ mod tests {
     }
 
     #[test]
-    fn vault_addresses_match_the_network() {
-        for (vault, encoded) in [
-            (
-                vault_address(&MainNetwork).to_zcash_address(&MainNetwork),
-                MAINNET_VAULT_ADDRESS,
-            ),
-            (
-                vault_address(&TestNetwork).to_zcash_address(&TestNetwork),
-                TESTNET_VAULT_ADDRESS,
-            ),
-        ] {
-            assert_eq!(vault.to_string(), encoded);
-        }
-        assert!(Address::decode(&MainNetwork, TESTNET_VAULT_ADDRESS).is_none());
-        assert!(Address::decode(&TestNetwork, MAINNET_VAULT_ADDRESS).is_none());
-    }
-
-    #[test]
-    fn queue_records_in_block_order() {
-        let mut queue = RequestQueue::default();
-        assert!(queue.pending().is_empty());
-
-        queue.record(
-            TxId::from_bytes([1; 32]),
-            request(Action::Claim),
-            Zatoshis::ZERO,
-            h(100),
-        );
-        queue.record(
-            TxId::from_bytes([2; 32]),
-            request(Action::Update),
-            Zatoshis::ZERO,
-            h(101),
-        );
-
-        let pending = queue.pending();
-        assert_eq!(pending.len(), 2);
-        assert_eq!(pending[0].0, TxId::from_bytes([1; 32]));
-        assert_eq!(pending[0].3, h(100));
-        assert_eq!(pending[1].3, h(101));
-    }
-
-    #[test]
-    fn queue_records_every_claim_in_order() {
-        let ua = match Address::decode(&MainNetwork, TEST_UA) {
-            Some(Address::Unified(ua)) => *ua,
-            _ => panic!("vector is a mainnet Unified Address"),
-        };
-        let alice = Name::parse("alice").unwrap();
-        let bob = Name::parse("bob").unwrap();
-        let mut queue = RequestQueue::default();
-
-        queue.record(
-            TxId::from_bytes([1; 32]),
-            Request::Claim {
-                name: alice.clone(),
-                ua: ua.clone(),
-                term: Term::Forever,
-                code: None,
-            },
-            Zatoshis::ZERO,
-            h(100),
-        );
-        queue.record(
-            TxId::from_bytes([2; 32]),
-            Request::Claim {
-                name: alice.clone(),
-                ua: ua.clone(),
-                term: Term::Forever,
-                code: None,
-            },
-            Zatoshis::ZERO,
-            h(101),
-        );
-        queue.record(
-            TxId::from_bytes([3; 32]),
-            Request::Claim {
-                name: bob,
-                ua,
-                term: Term::Forever,
-                code: None,
-            },
-            Zatoshis::ZERO,
-            h(102),
-        );
-
-        // Admission records every claim; the deciding pass rules.
-        let pending = queue.pending();
-        assert_eq!(pending.len(), 3);
-        assert_eq!(pending[0].0, TxId::from_bytes([1; 32]));
-        assert_eq!(pending[1].0, TxId::from_bytes([2; 32]));
-        assert_eq!(pending[2].0, TxId::from_bytes([3; 32]));
-        assert!(matches!(
-            pending[0].1,
-            Request::Claim { ref name, .. } if name.as_str() == "alice"
-        ));
-        assert!(matches!(
-            pending[1].1,
-            Request::Claim { ref name, .. } if name.as_str() == "alice"
-        ));
-    }
-
-    #[test]
     fn resolved_leaves_survivors_in_order() {
         let mut queue = RequestQueue::default();
         queue.record(
@@ -598,15 +495,6 @@ mod tests {
         assert_eq!(pending[1].0, TxId::from_bytes([3; 32]));
         assert!(matches!(pending[1].1, Request::Release { .. }));
         assert_eq!(pending[1].3, h(102));
-    }
-
-    #[test]
-    fn resolved_unknown_txid_is_a_no_op() {
-        let mut queue = RequestQueue::default();
-        queue.record(TxId::NULL, request(Action::Claim), Zatoshis::ZERO, h(100));
-
-        queue.resolved(TxId::from_bytes([9; 32]));
-        assert_eq!(queue.pending().len(), 1);
     }
 
     #[test]

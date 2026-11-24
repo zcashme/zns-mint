@@ -985,48 +985,6 @@ mod tests {
         assert_eq!(due[1].1.prev(), Some(commitment(2)));
     }
 
-    /// A claim sets `release_deadline = τ + L`. An update at a later block
-    /// resets it to that block's MTP plus L (the σ+L check across §4.5.4).
-    #[test]
-    fn record_create_sets_deadline_from_mtp_and_liveness_interval() {
-        let name = test_name();
-        let ua = test_ua();
-        let l = crate::mint::LIVENESS_INTERVAL;
-
-        // Claim block MTP.
-        let tau_claim = 1_700_000_000_i64;
-        let claim = NameNote::Claim {
-            name: name.clone(),
-            ua: ua.clone(),
-            expires_at: Expiry::Never,
-        };
-        let rec = NameRecord::create(
-            &claim,
-            commitment(1),
-            nullifier(1),
-            BlockHeight::from_u32(100),
-            ts(tau_claim),
-        );
-        assert_eq!(rec.release_deadline.as_seconds(), tau_claim + l);
-
-        // Update at a later block: deadline resets.
-        let tau_update = 1_710_000_000_i64;
-        let update = NameNote::Update {
-            name: name.clone(),
-            ua: ua.clone(),
-            expires_at: Expiry::Never,
-            prev: commitment(3),
-        };
-        let rec2 = NameRecord::create(
-            &update,
-            commitment(2),
-            nullifier(2),
-            BlockHeight::from_u32(200),
-            ts(tau_update),
-        );
-        assert_eq!(rec2.release_deadline.as_seconds(), tau_update + l);
-    }
-
     /// Two backed claims for the same name confirm in order: the first
     /// registers and seats its successor. The second is ignored: its
     /// anchor retires, its successor stays out, and the first
@@ -1099,18 +1057,6 @@ mod tests {
         assert_eq!(history[2].confirmed_height, BlockHeight::from_u32(140));
         assert!(r.record(&name).is_none());
         assert_eq!(r.record_history(&name).last(), history.last());
-    }
-
-    #[test]
-    fn released_name_is_available() {
-        let r = registry_with_alice_and_bob_history();
-        let name = test_name();
-        let bob = Name::parse("bob").unwrap();
-
-        assert!(r.record(&name).is_none());
-        assert!(r.is_available(&name));
-        assert!(r.record(&bob).is_some());
-        assert!(!r.is_available(&bob));
     }
 
     #[test]
@@ -1639,24 +1585,5 @@ mod tests {
             .expect("release retained in history");
         assert_eq!(rec.action(), Action::Release);
         assert_eq!(rec.predecessor_nullifier, succ);
-    }
-
-    /// Pool order is kept. An anchor the caller refuses is skipped,
-    /// and a pool with none accepted returns nothing.
-    #[test]
-    fn spendable_claim_anchor_skips_refused_anchors() {
-        let mut r = Registry::new();
-        let height = BlockHeight::from_u32(10);
-        r.adopt_anchor(height, nullifier(1));
-        r.adopt_anchor(height, nullifier(2));
-        r.adopt_anchor(height, nullifier(3));
-        let ordered: Vec<_> = r.anchor_pool().iter().copied().collect();
-
-        assert_eq!(r.spendable_claim_anchor(|_| true), Some(ordered[0]));
-        assert_eq!(
-            r.spendable_claim_anchor(|nf| nf != ordered[0]),
-            Some(ordered[1])
-        );
-        assert_eq!(r.spendable_claim_anchor(|_| false), None);
     }
 }

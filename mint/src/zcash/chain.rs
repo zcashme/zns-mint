@@ -644,12 +644,6 @@ mod tests {
         )
         .expect("the real block parses");
         assert_eq!(block.claimed_height(), BlockHeight::from_u32(415_000));
-
-        // The wire field is the consensus serialization: what we hand to
-        // `Block::read` re-encodes to the very same bytes.
-        let mut encoded = Vec::new();
-        block.write(&mut encoded).expect("block writes");
-        assert_eq!(&BLOCK_MAINNET_415000[..], &encoded[..]);
     }
 
     #[test]

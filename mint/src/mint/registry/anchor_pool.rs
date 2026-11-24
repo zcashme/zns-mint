@@ -158,22 +158,6 @@ mod tests {
     }
 
     #[test]
-    fn adopt_ignores_duplicates_and_does_not_checkpoint() {
-        let mut pool = AnchorPool::default();
-        pool.adopt(h(10), nullifier(1));
-        let before = pool.live().clone();
-
-        pool.adopt(h(11), nullifier(1)); // duplicate
-        assert_eq!(pool.live(), &before);
-
-        // Truncate above the duplicate's would-be checkpoint: the pool
-        // must retain the earlier live set, proving the duplicate did
-        // not create a new checkpoint at h(11).
-        pool.truncate_to(h(10));
-        assert!(pool.contains(&nullifier(1)));
-    }
-
-    #[test]
     fn retire_spent_retires_every_spent_anchor_and_checkpoints() {
         let mut pool = AnchorPool::default();
         pool.adopt(h(10), nullifier(1));

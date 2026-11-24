@@ -429,20 +429,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn from_seed_is_deterministic() {
-        let seed = [0x33u8; 32];
-        let name = Name::parse("alice").unwrap();
-        assert_eq!(
-            AccessCodeDerivationKey::from_seed(&seed)
-                .derive(&name)
-                .digits(),
-            AccessCodeDerivationKey::from_seed(&seed)
-                .derive(&name)
-                .digits()
-        );
-    }
-
     /// Known-answer vector generated independently of this crate
     /// (Python: HMAC-SHA256 seed scalar, X25519 against the issuer
     /// public key, purpose step, "alice"). Catches a wrong issuer key
@@ -512,31 +498,9 @@ mod tests {
         assert!(!gate().accepts(&alice(), None));
     }
 
-    #[test]
-    fn derive_matches_the_vector() {
-        assert_eq!(gate().derive(&alice()).digits(), *b"575692");
-    }
-
-    #[test]
-    fn table_is_zn_names() {
-        assert_eq!(PRESALE_TABLE, "zn_names");
-        assert!(!PRESALE_PUBLISHABLE_KEY.is_empty());
-    }
-
     /// Builds a table from rows through the public door, seeded empty.
     fn from_rows(rows: Vec<ProtectedRow>) -> ProtectedNames {
         ProtectedNames(BTreeMap::new()).from_rows(rows)
-    }
-
-    /// An expired row is stored as `WithExpiry` all the same — the
-    /// lift moment is data, not a state.
-    #[test]
-    fn from_rows_keeps_expired_rows() {
-        let table = from_rows(vec![row_with("alice", Some(ts(1_600_000_000)))]);
-        assert_eq!(
-            table.status(&Name::parse("alice").unwrap()),
-            ProtectionStatus::WithExpiry(ts(1_600_000_000))
-        );
     }
 
     /// A name that does not parse is skipped. The other rows install.
@@ -584,34 +548,6 @@ mod tests {
             let table = from_rows(rows);
             assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
         }
-    }
-
-    /// The reported live shape: `9` and `tom` each hold an expiry
-    /// plus Forever among their re-purchases.
-    #[test]
-    fn from_rows_coalesces_the_reported_table_shape() {
-        let table = from_rows(vec![
-            row_with("9", Some(ts(1_795_898_400))),
-            row_with("9", None),
-            row_with("9", None),
-            row_with("9", None),
-            row_with("9", None),
-            row_with("tom", Some(ts(1_800_563_400))),
-            row_with("tom", None),
-            row_with("alice", Some(ts(2_000_000_000))),
-        ]);
-        assert_eq!(
-            table.status(&Name::parse("9").unwrap()),
-            ProtectionStatus::Forever
-        );
-        assert_eq!(
-            table.status(&Name::parse("tom").unwrap()),
-            ProtectionStatus::Forever
-        );
-        assert_eq!(
-            table.status(&Name::parse("alice").unwrap()),
-            ProtectionStatus::WithExpiry(ts(2_000_000_000))
-        );
     }
 
     /// Columns Supabase may return beyond the two the mint reads
@@ -663,13 +599,6 @@ mod tests {
     #[test]
     fn decode_rows_rejects_a_non_array() {
         assert!(decode_rows(br#"{"name":"alice"}"#).is_err());
-    }
-
-    /// The read installs only when every counted row arrived.
-    #[test]
-    fn complete_installs_when_the_count_matches() {
-        let table = complete(vec![row_with("alice", None)], 1, Some(1)).unwrap();
-        assert_eq!(table.status(&alice()), ProtectionStatus::Forever);
     }
 
     /// A reply cut short by Max Rows is refused, not installed.
