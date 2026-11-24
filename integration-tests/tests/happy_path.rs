@@ -1,7 +1,8 @@
 //! Boot e2e chained into the happy path: real ownership flow (funder
 //! pays the Treasury, Treasury keys author the 40-anchor ceremony, funder
 //! reaped), in-process `Boot::start()` with its evidence assertions, then
-//! the mint binary serving claim, update, release to a live user wallet.
+//! the mint binary serving a claim, an update that moves the name to a
+//! second wallet, and that wallet's release.
 
 use std::time::Duration;
 
@@ -39,7 +40,7 @@ async fn boot_then_claim_update_release() -> Result<()> {
     let funder = fixture::User::fund(&mut zebra, 7).await?;
     fixture::wait_until_shielded(
         &funder.zallet,
-        fixture::User::BUDGET_ZATS + fixture::TREASURY_PAYMENT_ZATS * 2,
+        fixture::User::BUDGET_ZATS * 2 + fixture::TREASURY_PAYMENT_ZATS * 2,
         SYNC_TIMEOUT,
     )
     .await?;
@@ -48,8 +49,20 @@ async fn boot_then_claim_update_release() -> Result<()> {
     eprintln!("user miner: {}", user.miner_address);
     eprintln!("user UA: {}", user.ua);
 
-    // The transfer spends the funder's shielded note. Wait for its
-    // confirmed change to be scanned before paying the Treasury.
+    // Each transfer spends the funder's shielded note. Wait for its
+    // confirmed change to be scanned before the next payment.
+    let tip = zebra.tip_height().await?;
+    funder.zallet.wait_until_synced(tip, SYNC_TIMEOUT).await?;
+    fixture::wait_until_shielded(
+        &funder.zallet,
+        fixture::User::BUDGET_ZATS + fixture::TREASURY_PAYMENT_ZATS,
+        SYNC_TIMEOUT,
+    )
+    .await?;
+    let new_owner =
+        fixture::User::fund_attached(&mut zebra, &funder, fixture::User::BUDGET_ZATS).await?;
+    eprintln!("new owner UA: {}", new_owner.ua);
+
     let tip = zebra.tip_height().await?;
     funder.zallet.wait_until_synced(tip, SYNC_TIMEOUT).await?;
     fixture::wait_until_shielded(&funder.zallet, fixture::TREASURY_PAYMENT_ZATS, SYNC_TIMEOUT)
@@ -101,7 +114,10 @@ async fn boot_then_claim_update_release() -> Result<()> {
     let mut stack = Stack { zebra, mint, user };
 
     let claim_note = claim(&mut stack).await?;
-    let update_note = update(&mut stack, &claim_note).await?;
+    let update_note = update(&mut stack, &claim_note, &new_owner.ua).await?;
+    // The name is the second wallet's now. The mint relays the release
+    // challenge to it, and only its wallet can read the code.
+    stack.user = new_owner;
     release(&mut stack, &update_note).await?;
     Ok(())
 }

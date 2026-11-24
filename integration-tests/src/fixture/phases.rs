@@ -65,27 +65,37 @@ pub async fn claim(stack: &mut Stack) -> Result<VerifiedNameNote> {
     }
 }
 
-/// Pay the update request, answer the controller challenge, verify the
-/// successor note. The term slot is `none` — carried forward — because a
-/// forever record rejects a term-carrying update.
-pub async fn update(stack: &mut Stack, prev: &VerifiedNameNote) -> Result<VerifiedNameNote> {
-    transition(stack, "update", Some("none"), prev).await
+/// Pay the request that moves `alice` to `to`, answer the challenge the
+/// mint relays to the current controller, verify the successor note binds
+/// `to`. The term slot is `none` — carried forward — because a forever
+/// record rejects a term-carrying update.
+pub async fn update(
+    stack: &mut Stack,
+    prev: &VerifiedNameNote,
+    to: &str,
+) -> Result<VerifiedNameNote> {
+    transition(stack, "update", Some("none"), prev, to).await
 }
 
 /// Pay the release request, answer the controller challenge, verify the
 /// release note that terminates the chain.
 pub async fn release(stack: &mut Stack, prev: &VerifiedNameNote) -> Result<VerifiedNameNote> {
-    transition(stack, "release", None, prev).await
+    let ua = stack.user.ua.clone();
+    transition(stack, "release", None, prev, &ua).await
 }
 
-/// One non-claim transition: request memo, OTP challenge, echo, successor.
+/// One non-claim transition by the current controller, `stack.user`:
+/// request memo, OTP challenge, OTP response, successor. `ua` is the
+/// address the request names; the challenge is read at the controller's
+/// own.
 async fn transition(
     stack: &mut Stack,
     action: &str,
     expires: Option<&str>,
     prev: &VerifiedNameNote,
+    ua: &str,
 ) -> Result<VerifiedNameNote> {
-    let ua = stack.user.ua.clone();
+    let controller = stack.user.ua.clone();
     let request = match action {
         "update" => format!("ZNS:update:none:alice:{ua}"),
         "release" => format!("ZNS:release:alice:{ua}"),
@@ -100,7 +110,7 @@ async fn transition(
     let challenge_txid = wait_for_challenge(stack, mark, action, &pay_txid).await?;
     eprintln!("{action} challenge txid {challenge_txid}");
 
-    let code = read_otp(stack, &challenge_txid, &ua).await?;
+    let code = read_otp(stack, &challenge_txid, &controller).await?;
     eprintln!("{action} otp read");
 
     let echo = format!("ZNS:otp:{code}:alice:{action}:{ua}");
@@ -116,7 +126,7 @@ async fn transition(
         let note = poll_submitted_note(stack, echo_mark, "alice", action, &echo_txid).await?;
         if let Some(txid) = note {
             assert_eq!(txid.action, action);
-            assert_eq!(txid.ua, stack.user.ua);
+            assert_eq!(txid.ua, ua);
             assert_eq!(txid.expires_at.as_deref(), expires);
             assert_eq!(txid.prev, prev.own_cmx);
             assert_eq!(txid.value, 0);

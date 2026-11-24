@@ -1,5 +1,13 @@
 # happy_path.changelog.md
 
+## 2026-11-24 — The name moves to a second wallet (#603)
+
+- The test funds a second wallet. The first wallet claims `alice` and
+  updates it to the second wallet's address, answering the challenge as
+  the controller on record. The update note must bind the second address.
+- The second wallet sends the release and reads the challenge from its
+  own wallet, so a mint that still challenged the first owner fails here.
+
 ## 2026-11-13 — No `boot.birthday` assertion (#489)
 
 - `Boot` carries no birthday, so `assert_eq!(boot.birthday, tip_height)`
