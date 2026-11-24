@@ -1,5 +1,16 @@
 # main.changelog.md
 
+## 2026-11-24 — The rules run at every applied block (#597)
+
+- The catch-up loop runs the rules after each `apply_block`: request
+  decisions, challenge relays, buy relays, `market.poll`, `expire_sent`,
+  `releases_due`, Name Notes, refunds and the sweep. They use the
+  block's `target_height` and `mtp_now`, which its challenge rebind and
+  market admission already used.
+- The price round and the pre-sale read run before each block's rules.
+- The post-catch-up `canonical_tip` check is gone. A block that arrives
+  during the price round no longer skips the rules.
+
 ## 2026-11-20 — The loop uses `boot::NETWORK` (#579)
 
 - `Boot` no longer hands over a `network`. The loop passes `&NETWORK`
