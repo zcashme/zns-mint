@@ -1,5 +1,12 @@
 # fixture/mod.changelog.md
 
+## 2026-11-24 — `update` takes the address the name moves to (#603)
+
+- `fixture::update(stack, prev, to)` names `to` in the request and in the
+  OTP response, reads the challenge at `stack.user`'s address, and
+  asserts the successor note binds `to`. `release` is unchanged for its
+  caller: it names `stack.user`'s own address.
+
 ## 2026-11-12
 
 - `treasury_ua` lives here. The harness's `ceremony` and `verify`
