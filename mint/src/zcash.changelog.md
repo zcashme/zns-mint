@@ -1,5 +1,14 @@
 # Zcash I/O changelog
 
+## 2026-11-24 — `canonical_block` retries; `get_block_hash` is gone (#600)
+
+- `CanonicalBlockSource::canonical_block(height)` fetches the best-chain
+  block at a height and retries while the node is merely unavailable, as
+  `canonical_tip` does for the tip. `NotOnBestChain` and fatal errors
+  return to the caller.
+- `get_block_hash` is gone. The run loop reads a block's parent hash from
+  the block it fetches.
+
 ## 2026-11-20 — `get_block` parses under `NETWORK` (#579)
 
 - `CanonicalBlockSource::get_block(height)` takes no `network`; it
