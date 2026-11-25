@@ -5,9 +5,10 @@ use std::pin::Pin;
 use futures_util::{Stream, StreamExt};
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::BranchId;
+use zebra_indexer_proto::lightwalletd::TxFilter;
 use zebra_indexer_proto::{Empty, MempoolChangeKind};
 
-use super::{chain::ChainClient, JsonRpc, TransportError};
+use super::{chain::ChainClient, TransportError};
 
 impl ChainClient {
     /// Opens the gRPC stream of mempool changes as `(MempoolChangeKind, TxId)`
@@ -46,49 +47,32 @@ impl ChainClient {
     }
 }
 
-impl JsonRpc {
-    /// Fetches a transaction by ID — Zebra checks the mempool first, then any
-    /// chain, side-chains included — so a hit never means "best-chain
-    /// confirmed"; confirmation is chain application.
+impl super::CanonicalBlockSource {
+    /// Fetches a transaction by ID over `CompactTxStreamer` `GetTransaction`
+    /// — Zebra checks the best chain, then the mempool, then side chains —
+    /// so a hit never means "best-chain confirmed"; confirmation is chain
+    /// application.
     ///
     /// `branch_id` is only consulted for pre-v5 transaction versions, which
     /// the mint never builds at NU6.3+. `Ok(None)` means the transaction is
-    /// nowhere (RPC -5): normal when racing an `Invalidated` event.
+    /// nowhere (`not_found`): normal when racing an `Invalidated` event.
     pub async fn get_raw_transaction(
         &self,
         branch_id: BranchId,
         txid: TxId,
     ) -> Result<Option<Transaction>, TransportError> {
-        let txid_hex = txid.to_string();
-        match self
-            .send_request::<_, String>("getrawtransaction", (txid_hex, 0))
-            .await
-        {
-            Ok(Some(hex_str)) => {
-                let bytes = hex::decode(hex_str)
-                    .map_err(|_| TransportError::BadNodeData("getrawtransaction hex"))?;
-                let tx = Transaction::read(&bytes[..], branch_id)
-                    .map_err(|_| TransportError::BadNodeData("getrawtransaction parse"))?;
+        let filter = TxFilter::from_txid_internal_order(*txid.as_ref());
+        match self.lightwalletd.clone().get_transaction(filter).await {
+            Ok(response) => {
+                let tx = Transaction::read(&response.into_inner().data[..], branch_id)
+                    .map_err(|_| TransportError::BadNodeData("GetTransaction parse"))?;
                 Ok(Some(tx))
             }
-            Ok(None) => Ok(None),
             // "No information about the transaction" — racing a mempool
             // eviction or a chain reorg; indistinguishable from never-existed.
-            Err(TransportError::Rpc(ref rpc)) if rpc.code == -5 => Ok(None),
-            Err(e) => Err(e),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+            Err(status) => Err(status.into()),
         }
-    }
-}
-
-impl super::CanonicalBlockSource {
-    /// Fetches a transaction by ID over the JSON-RPC dialect — the run
-    /// loop's one handle reaches the mempool reader through the facade.
-    pub async fn get_raw_transaction(
-        &self,
-        branch_id: BranchId,
-        txid: TxId,
-    ) -> Result<Option<Transaction>, TransportError> {
-        self.rpc.get_raw_transaction(branch_id, txid).await
     }
 }
 
