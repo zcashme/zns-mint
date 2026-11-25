@@ -36,10 +36,10 @@ rust_decimal = { version = "1.42", features = ["serde"] }
 # `OffsetDateTime` for `SentTransaction::new` (zcash_client_backend data-api);
 # same crate upstream depends on, lockfile-shared at 0.3.x.
 time = { version = "0.3", features = ["parsing"] }
-# JSON-RPC transport over plaintext HTTP/1.1 to the local Zebra node (same
-# TEE). tonic, hyper, hyper-util and http-body-util are already compiled via
-# tonic/gRPC — listing them as direct deps just makes them importable. `http`
-# and `bytes` types come through hyper's re-exports. No TLS on this transport.
+# gRPC to the local Zebra node (same TEE), no TLS. hyper, hyper-util and
+# http-body-util are already compiled via tonic — listing them as direct deps
+# just makes them importable. `http` and `bytes` types come through hyper's
+# re-exports.
 tonic = "0.14"
 # `server` serves the metrics page (src/metrics.rs); the exporter's own
 # listener compiled the same feature.

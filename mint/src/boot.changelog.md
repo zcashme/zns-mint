@@ -1,5 +1,12 @@
 # Boot module changelog
 
+## 2026-11-26 — Liveness is the two gRPC services (#612)
+
+- `connect_zebra` checks the Indexer's tip stream, then connects the
+  `CompactTxStreamer` and reads `GetLatestBlock`, and returns the chain
+  client with the `CanonicalBlockSource`. The JSON-RPC
+  `getblockchaininfo` check is gone.
+
 ## 2026-11-20 — The build's network is `boot::NETWORK` (#579)
 
 - `pub type Network` and `pub const NETWORK` replace `boot_network()`:

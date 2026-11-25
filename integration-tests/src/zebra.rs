@@ -15,8 +15,8 @@ use crate::rpc::json_rpc;
 /// NU6.3 activation height; boot's regtest birthday is always past it.
 pub const NU6_3_ACTIVATION_HEIGHT: u32 = 4;
 
-/// Mint hardcodes these (mainnet/regtest): JSON-RPC 8232, indexer gRPC 8230,
-/// CompactTxStreamer gRPC 9067.
+/// The harness drives zebrad over JSON-RPC 8232. The mint hardcodes the
+/// others (mainnet/regtest): indexer gRPC 8230, CompactTxStreamer gRPC 9067.
 pub const ZEBRA_JSON_RPC_PORT: u16 = 8232;
 pub const ZEBRA_INDEXER_PORT: u16 = 8230;
 pub const ZEBRA_LIGHTWALLETD_PORT: u16 = 9067;

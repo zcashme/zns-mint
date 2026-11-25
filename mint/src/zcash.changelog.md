@@ -1,5 +1,25 @@
 # Zcash I/O changelog
 
+## 2026-11-26 — Zebra over gRPC only; a dropped connection retries (#612)
+
+- `TransportError::is_retryable` retries every gRPC status except
+  Zebra's verdicts (`InvalidArgument`, `NotFound`, `AlreadyExists`,
+  `PermissionDenied`, `FailedPrecondition`, `Unimplemented`,
+  `Unauthenticated`). tonic reports a connection that got no answer as
+  `Unknown`, `Internal`, `Aborted` or `OutOfRange` too.
+- `CanonicalBlockSource` holds a `LightwalletdClient` for zebrad's
+  `CompactTxStreamer` (9067; 19067 on testnet), connected with the
+  Indexer's endpoint settings. `new(chain, lightwalletd)`.
+- `exact_tip` reads `GetLatestBlock`; `chain_state_at` reads
+  `GetTreeState`, with `not_found` as `NotOnBestChain` and an empty tree
+  as `BadNodeData`; `get_raw_transaction` reads `GetTransaction`, with
+  `not_found` as `Ok(None)`; `send_transaction` sends `SendTransaction`
+  and reads Zebra's code and message from `SendResponse`.
+- `JsonRpc`, its envelopes, `ZEBRA_JSON_RPC_URL`, `MAX_RESPONSE_BYTES`,
+  `BlockchainInfo`, the `z_gettreestate` response types and the
+  `Client`, `Hyper` and `Timeout` variants are gone. `RpcError` carries a
+  `SendResponse` error. `not_on_best_chain` maps only `not_found`.
+
 ## 2026-11-26 — `header_time` reads the Indexer block (#610)
 
 - `CanonicalBlockSource::header_time(height)` takes the time from the
