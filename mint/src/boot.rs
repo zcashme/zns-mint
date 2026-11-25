@@ -365,12 +365,9 @@ impl Boot {
              never point at production"
         );
 
-        // 1. Liveness + connect: confirm both Zebra transports, get chain client.
-        let chain_client = connect_zebra().await;
-
-        // The one node handle: both dialects behind one door, bound to the
-        // client this boot proved live.
-        let source = CanonicalBlockSource::new(chain_client.clone());
+        // 1. Liveness + connect: confirm every Zebra transport.
+        //    The one node handle is bound to the clients this boot proved live.
+        let (chain_client, source) = connect_zebra().await;
 
         // Ceremony facts — the custody manifest, every network: keygen
         // writes it in deployment, the fixture on regtest.
@@ -668,20 +665,8 @@ impl Boot {
 // ---------------------------------------------------------------------------
 
 /// Zebra liveness.
-async fn connect_zebra() -> ChainClient {
-    // JSON-RPC liveness
-    let rpc = zcash::JsonRpc::new();
-    let info = rpc
-        .get_blockchain_info()
-        .await
-        .expect("FATAL: JSON-RPC getblockchaininfo failed, Zebra is unreachable");
-    tracing::info!(
-        height = info.blocks,
-        hash = %info.bestblockhash,
-        "boot: zebra json-rpc liveness ok"
-    );
-
-    // gRPC liveness
+async fn connect_zebra() -> (ChainClient, CanonicalBlockSource) {
+    // Indexer gRPC liveness
     let mut chain = ChainClient::connect()
         .await
         .expect("FATAL: Zebra gRPC unreachable or timed out");
@@ -691,7 +676,22 @@ async fn connect_zebra() -> ChainClient {
         .expect("FATAL: chain_tip_change gRPC call failed");
     tracing::info!("boot: gRPC chain client connected");
 
-    chain
+    // CompactTxStreamer gRPC liveness
+    let lightwalletd = zcash::chain::connect_lightwalletd()
+        .await
+        .expect("FATAL: Zebra CompactTxStreamer gRPC unreachable or timed out");
+    let source = CanonicalBlockSource::new(chain.clone(), lightwalletd);
+    let (height, hash) = source
+        .exact_tip()
+        .await
+        .expect("FATAL: CompactTxStreamer GetLatestBlock failed");
+    tracing::info!(
+        height = u32::from(height),
+        %hash,
+        "boot: zebra CompactTxStreamer liveness ok"
+    );
+
+    (chain, source)
 }
 
 // ---------------------------------------------------------------------------

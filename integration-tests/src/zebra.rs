@@ -15,9 +15,11 @@ use crate::rpc::json_rpc;
 /// NU6.3 activation height; boot's regtest birthday is always past it.
 pub const NU6_3_ACTIVATION_HEIGHT: u32 = 4;
 
-/// Mint hardcodes these (mainnet/regtest): JSON-RPC 8232, indexer gRPC 8230.
+/// Mint hardcodes these (mainnet/regtest): JSON-RPC 8232, indexer gRPC 8230,
+/// CompactTxStreamer gRPC 9067.
 pub const ZEBRA_JSON_RPC_PORT: u16 = 8232;
 pub const ZEBRA_INDEXER_PORT: u16 = 8230;
+pub const ZEBRA_LIGHTWALLETD_PORT: u16 = 9067;
 
 const LOCKBOX_DISBURSEMENT_ADDR: &str = "t27eWDgjFYJGVXmzrXeVjnb5J3uXDM9xH9v";
 const LOCKBOX_DISBURSEMENT_ZATS: u64 = 1;
@@ -392,6 +394,7 @@ cache_dir = "{cache_dir}"
 [rpc]
 listen_addr = "127.0.0.1:{rpc_port}"
 indexer_listen_addr = "127.0.0.1:{indexer_port}"
+lightwalletd_listen_addr = "127.0.0.1:{ZEBRA_LIGHTWALLETD_PORT}"
 enable_cookie_auth = false
 "#
     )

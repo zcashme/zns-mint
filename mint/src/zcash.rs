@@ -4,7 +4,7 @@ pub mod chain;
 pub mod mempool;
 pub mod submit;
 
-pub use chain::{BlockchainInfo, ChainClient, TipSession};
+pub use chain::{ChainClient, TipSession};
 pub use mempool::MempoolSession;
 pub use submit::SubmitOutcome;
 pub use zebra_indexer_proto::MempoolChangeKind;
@@ -19,6 +19,7 @@ use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zcash_protocol::constants::MAX_BLOCK_BYTES;
+use zebra_indexer_proto::LightwalletdClient;
 
 /// The wait between retries of a retryable transport call.
 pub const RETRY_PAUSE: Duration = Duration::from_secs(5);
@@ -122,9 +123,10 @@ impl JsonRpc {
 // The orchestrator's handle — impls in every conversation file
 // ============================================================================
 
-/// The one node handle: both dialects behind one door. Canonical blocks
-/// and reorg-walk hashes ride the Indexer gRPC; tree state, MTP headers,
-/// raw transactions, and broadcast ride JSON-RPC.
+/// The one node handle: every dialect behind one door. Canonical blocks,
+/// reorg-walk hashes and MTP header times ride the Indexer gRPC; the tip
+/// rides the `CompactTxStreamer` gRPC; tree state, raw transactions, and
+/// broadcast ride JSON-RPC.
 /// Unary gRPC calls go out on a fresh handle to the shared HTTP/2
 /// connection — `Channel` is an `Arc` — so every public method stays
 /// `&self`.
@@ -132,16 +134,18 @@ impl JsonRpc {
 pub struct CanonicalBlockSource {
     pub(crate) rpc: JsonRpc,
     pub(crate) chain: ChainClient,
+    pub(crate) lightwalletd: LightwalletdClient,
 }
 
 impl CanonicalBlockSource {
-    /// Binds the connected gRPC client (boot's connect product) to a
+    /// Binds the connected gRPC clients (boot's connect product) to a
     /// fresh JSON-RPC transport. Same hardcoded node — a view, not a
     /// connection.
-    pub fn new(chain: ChainClient) -> Self {
+    pub fn new(chain: ChainClient, lightwalletd: LightwalletdClient) -> Self {
         Self {
             rpc: JsonRpc::new(),
             chain,
+            lightwalletd,
         }
     }
 }

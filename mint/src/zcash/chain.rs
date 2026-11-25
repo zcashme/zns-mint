@@ -14,8 +14,10 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::constants::MAX_BLOCK_BYTES;
 
 use crate::boot::NETWORK;
+use zebra_indexer_proto::lightwalletd::ChainSpec;
 use zebra_indexer_proto::{
-    BlockAndHash, BlockHashAndHeight, BlockRequest, Empty, HashOrHeight, ZebraClient,
+    BlockAndHash, BlockHashAndHeight, BlockRequest, Empty, HashOrHeight, LightwalletdClient,
+    ZebraClient,
 };
 
 use super::{
@@ -28,6 +30,12 @@ use orchard::tree::MerkleHashOrchard;
 const ZEBRA_INDEXER_URL: &str = "http://127.0.0.1:8230";
 #[cfg(all(feature = "testnet", not(feature = "regtest")))]
 const ZEBRA_INDEXER_URL: &str = "http://127.0.0.1:18230";
+
+/// zebrad's lightwalletd `CompactTxStreamer` gRPC endpoint.
+#[cfg(not(all(feature = "testnet", not(feature = "regtest"))))]
+const ZEBRA_LIGHTWALLETD_URL: &str = "http://127.0.0.1:9067";
+#[cfg(all(feature = "testnet", not(feature = "regtest")))]
+const ZEBRA_LIGHTWALLETD_URL: &str = "http://127.0.0.1:19067";
 
 /// TCP connect timeout for a fresh gRPC connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -46,18 +54,29 @@ const GRPC_MAX_RESPONSE_BYTES: usize = 2 * MAX_BLOCK_BYTES;
 #[derive(Clone)]
 pub struct ChainClient(pub(crate) ZebraClient);
 
-impl ChainClient {
-    /// Connects to the indexer's gRPC endpoint, keep-alive on: the tip
-    /// stream hangs silently on a dead peer otherwise.
-    pub(crate) async fn connect() -> Result<Self, tonic::transport::Error> {
-        let endpoint = tonic::transport::Endpoint::from_static(ZEBRA_INDEXER_URL)
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
-            .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
-            .keep_alive_while_idle(true);
+/// A gRPC endpoint on the local Zebra, keep-alive on: a stream hangs
+/// silently on a dead peer otherwise.
+fn endpoint(url: &'static str) -> tonic::transport::Endpoint {
+    tonic::transport::Endpoint::from_static(url)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .http2_keep_alive_interval(KEEP_ALIVE_INTERVAL)
+        .keep_alive_timeout(KEEP_ALIVE_TIMEOUT)
+        .keep_alive_while_idle(true)
+}
 
-        let client = ZebraClient::connect(endpoint)
+/// Connects to zebrad's `CompactTxStreamer`.
+pub(crate) async fn connect_lightwalletd() -> Result<LightwalletdClient, tonic::transport::Error> {
+    let client = LightwalletdClient::connect(endpoint(ZEBRA_LIGHTWALLETD_URL))
+        .await?
+        .max_decoding_message_size(GRPC_MAX_RESPONSE_BYTES);
+    Ok(client)
+}
+
+impl ChainClient {
+    /// Connects to the indexer's gRPC endpoint.
+    pub(crate) async fn connect() -> Result<Self, tonic::transport::Error> {
+        let client = ZebraClient::connect(endpoint(ZEBRA_INDEXER_URL))
             .await?
             .max_decoding_message_size(GRPC_MAX_RESPONSE_BYTES);
         Ok(Self(client))
@@ -209,15 +228,6 @@ fn block_from_wire<P: Parameters>(
 }
 
 impl JsonRpc {
-    /// Fetches blockchain state info, used for boot-time cross-validation.
-    pub async fn get_blockchain_info(&self) -> Result<BlockchainInfo, TransportError> {
-        self.send_request("getblockchaininfo", [(); 0])
-            .await?
-            .ok_or(TransportError::BadNodeData(
-                "getblockchaininfo returned null",
-            ))
-    }
-
     /// Fetches the shielded tree state for a block, as the upstream
     /// [`ChainState`] — the connection point for `WalletWrite::put_blocks`.
     pub async fn chain_state_at(&self, height: BlockHeight) -> Result<ChainState, TransportError> {
@@ -239,10 +249,21 @@ impl JsonRpc {
 
 impl CanonicalBlockSource {
     /// Returns the exact `(height, hash)` pair for the current best-chain
-    /// tip, parsed from one `getblockchaininfo` response so observations
-    /// from different tips cannot be combined.
+    /// tip, parsed from one `GetLatestBlock` answer so observations from
+    /// different tips cannot be combined.
     pub async fn exact_tip(&self) -> Result<(BlockHeight, BlockHash), TransportError> {
-        self.rpc.get_blockchain_info().await?.canonical_tip()
+        let tip = self
+            .lightwalletd
+            .clone()
+            .get_latest_block(ChainSpec {})
+            .await?
+            .into_inner();
+        let height = u32::try_from(tip.height)
+            .map_err(|_| TransportError::BadNodeData("latest block height"))?;
+        let hash = tip
+            .hash_internal_order()
+            .ok_or(TransportError::BadNodeData("latest block hash"))?;
+        Ok((BlockHeight::from_u32(height), BlockHash(*hash)))
     }
 
     /// The canonical tip, retrying while the node is merely unavailable.
@@ -318,24 +339,6 @@ impl CanonicalBlockSource {
 // ============================================================================
 // Typed responses
 // ============================================================================
-
-/// The `getblockchaininfo` answer.
-#[derive(Debug, Deserialize)]
-pub struct BlockchainInfo {
-    pub blocks: u32,
-    pub bestblockhash: String,
-}
-
-impl BlockchainInfo {
-    /// Parses the height/hash pair carried by this one response.
-    pub fn canonical_tip(&self) -> Result<(BlockHeight, BlockHash), TransportError> {
-        let hash = ReverseHex::decode(&self.bestblockhash)
-            .map(BlockHash)
-            .ok_or(TransportError::BadNodeData("bestblockhash"))?;
-
-        Ok((BlockHeight::from_u32(self.blocks), hash))
-    }
-}
 
 #[derive(Debug, Deserialize)]
 struct TreeStateResponse {
