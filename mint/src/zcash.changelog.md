@@ -1,5 +1,12 @@
 # Zcash I/O changelog
 
+## 2026-11-26 — `header_time` reads the Indexer block (#610)
+
+- `CanonicalBlockSource::header_time(height)` takes the time from the
+  best-chain block's header over Indexer `GetBlock`, with the same retry
+  rule. A block whose claimed height isn't `height` is `BadNodeData`.
+- `JsonRpc::header_time` is gone; the mint sends no `getblockheader`.
+
 ## 2026-11-24 — `canonical_block` retries; `get_block_hash` is gone (#601)
 
 - `CanonicalBlockSource::canonical_block(height)` fetches the best-chain

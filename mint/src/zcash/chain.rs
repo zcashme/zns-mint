@@ -8,7 +8,7 @@ use sapling::Node as SaplingNode;
 use serde::Deserialize;
 use zcash_client_backend::data_api::chain::ChainState;
 use zcash_encoding::ReverseHex;
-use zcash_primitives::block::{Block, BlockHash, BlockHeader};
+use zcash_primitives::block::{Block, BlockHash};
 use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::constants::MAX_BLOCK_BYTES;
@@ -235,40 +235,6 @@ impl JsonRpc {
 
         chain_state_from_rpc_response(response)
     }
-
-    /// Fetches a block header's time, for MTP backfill.
-    pub async fn header_time(&self, height: BlockHeight) -> Result<u32, TransportError> {
-        loop {
-            let result: Result<_, TransportError> = async {
-                let raw: String = self
-                    .send_request("getblockheader", (u32::from(height).to_string(), false))
-                    .await
-                    .map_err(not_on_best_chain)?
-                    .ok_or(TransportError::BadNodeData("getblockheader returned null"))?;
-                let bytes = hex::decode(raw)
-                    .map_err(|_| TransportError::BadNodeData("getblockheader hex"))?;
-                let header = BlockHeader::read(&bytes[..])
-                    .map_err(|_| TransportError::BadNodeData("getblockheader header"))?;
-                Ok(header.time)
-            }
-            .await;
-
-            match result {
-                Ok(header) => return Ok(header),
-                Err(error)
-                    if error.is_retryable() || matches!(&error, TransportError::NotOnBestChain) =>
-                {
-                    tracing::warn!(
-                        %error,
-                        height = u32::from(height),
-                        "MTP header unavailable or unusable; retrying"
-                    );
-                    tokio::time::sleep(RETRY_PAUSE).await;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
 }
 
 impl CanonicalBlockSource {
@@ -328,8 +294,24 @@ impl CanonicalBlockSource {
         self.rpc.chain_state_at(height).await
     }
 
+    /// A best-chain block's header time, for MTP backfill.
     pub async fn header_time(&self, height: BlockHeight) -> Result<u32, TransportError> {
-        self.rpc.header_time(height).await
+        loop {
+            match self.get_block(height).await {
+                Ok(block) => return Ok(block.header().time),
+                Err(error)
+                    if error.is_retryable() || matches!(&error, TransportError::NotOnBestChain) =>
+                {
+                    tracing::warn!(
+                        %error,
+                        height = u32::from(height),
+                        "MTP header unavailable or unusable; retrying"
+                    );
+                    tokio::time::sleep(RETRY_PAUSE).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 
