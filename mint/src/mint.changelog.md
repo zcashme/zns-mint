@@ -1,5 +1,11 @@
 # Mint live-work design record
 
+## 2026-11-25 — `LIVENESS_INTERVAL` is `JULIAN_YEAR` (#605)
+
+- The constant is the unit of a term. No liveness clock reads it.
+- `apply_block` passes no block MTP to `accept_claim` or
+  `accept_transition`.
+
 ## 2026-11-23 — `Action::needs_predecessor` is gone (#586)
 
 - It never had a caller. An action that is not `is_claim()` spends the

@@ -171,7 +171,8 @@ impl Registry {
     }
 
     /// The buy law: the name is listed, an auction has started and quotes
-    /// a price for an intent in `height`, and the term is live at `mtp`. The terms are the listing's and the live note's.
+    /// a price for an intent in `height`, and the term is live at `mtp`.
+    /// The terms are the listing's and the live note's.
     pub fn authorize_buy(
         &self,
         name: &Name,
@@ -390,7 +391,6 @@ impl Registry {
     /// standing anchor, spent no Name Note, and the name was free.
     /// A rejected claim retires the anchor it spent and does not seat
     /// its successor.
-    #[allow(clippy::too_many_arguments)]
     pub fn accept_claim(
         &mut self,
         note: &NameNote,
@@ -757,7 +757,7 @@ mod tests {
         registry
     }
 
-    /// The plural sweep: only names whose clocks have fired, each paired
+    /// The plural sweep: only names whose term has ended, each paired
     /// with its release note. Live and already-released names are absent.
     #[test]
     fn allows_challenge_gates_the_stale_the_expired_and_the_forever_term() {
@@ -1168,7 +1168,7 @@ mod tests {
     }
 
     /// The owner lists at the t1 she names on terms still listable, and
-    /// delists only a listing; both stop once a clock fires. Each note
+    /// delists only a listing; both stop once the term ends. Each note
     /// carries her UA and term forward.
     #[test]
     fn list_and_delist_laws() {
