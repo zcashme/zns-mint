@@ -125,7 +125,7 @@ impl JsonRpc {
 
 /// The one node handle: every dialect behind one door. Canonical blocks,
 /// reorg-walk hashes and MTP header times ride the Indexer gRPC; the tip
-/// rides the `CompactTxStreamer` gRPC; tree state, raw transactions, and
+/// and tree state ride the `CompactTxStreamer` gRPC; raw transactions and
 /// broadcast ride JSON-RPC.
 /// Unary gRPC calls go out on a fresh handle to the shared HTTP/2
 /// connection — `Channel` is an `Arc` — so every public method stays

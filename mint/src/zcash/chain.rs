@@ -5,7 +5,6 @@ use std::time::Duration;
 use futures_util::{FutureExt as _, StreamExt as _};
 use incrementalmerkletree::frontier::Frontier;
 use sapling::Node as SaplingNode;
-use serde::Deserialize;
 use zcash_client_backend::data_api::chain::ChainState;
 use zcash_encoding::ReverseHex;
 use zcash_primitives::block::{Block, BlockHash};
@@ -14,14 +13,14 @@ use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::constants::MAX_BLOCK_BYTES;
 
 use crate::boot::NETWORK;
-use zebra_indexer_proto::lightwalletd::ChainSpec;
+use zebra_indexer_proto::lightwalletd::{BlockId, ChainSpec, TreeState};
 use zebra_indexer_proto::{
     BlockAndHash, BlockHashAndHeight, BlockRequest, Empty, HashOrHeight, LightwalletdClient,
     ZebraClient,
 };
 
 use super::{
-    not_on_best_chain, CanonicalBlockSource, JsonRpc, TransportError, REQUEST_TIMEOUT, RETRY_PAUSE,
+    not_on_best_chain, CanonicalBlockSource, TransportError, REQUEST_TIMEOUT, RETRY_PAUSE,
 };
 use orchard::tree::MerkleHashOrchard;
 
@@ -227,26 +226,6 @@ fn block_from_wire<P: Parameters>(
     Ok(block)
 }
 
-impl JsonRpc {
-    /// Fetches the shielded tree state for a block, as the upstream
-    /// [`ChainState`] — the connection point for `WalletWrite::put_blocks`.
-    pub async fn chain_state_at(&self, height: BlockHeight) -> Result<ChainState, TransportError> {
-        let response: TreeStateResponse = self
-            .send_request("z_gettreestate", [u32::from(height).to_string()])
-            .await
-            .map_err(not_on_best_chain)?
-            .ok_or(TransportError::BadNodeData("z_gettreestate returned null"))?;
-
-        if response.height != u32::from(height) {
-            return Err(TransportError::BadNodeData(
-                "z_gettreestate answered a different height than requested",
-            ));
-        }
-
-        chain_state_from_rpc_response(response)
-    }
-}
-
 impl CanonicalBlockSource {
     /// Returns the exact `(height, hash)` pair for the current best-chain
     /// tip, parsed from one `GetLatestBlock` answer so observations from
@@ -309,10 +288,27 @@ impl CanonicalBlockSource {
         }
     }
 
-    /// The shielded tree state at a height (see the `chain_state_at`
-    /// JSON-RPC reader).
+    /// The shielded tree state at a block, as the upstream [`ChainState`]
+    /// — the connection point for `WalletWrite::put_blocks`. A height off
+    /// the best chain is [`TransportError::NotOnBestChain`].
     pub async fn chain_state_at(&self, height: BlockHeight) -> Result<ChainState, TransportError> {
-        self.rpc.chain_state_at(height).await
+        let request =
+            BlockId::from_height(u32::from(height)).ok_or(TransportError::NotOnBestChain)?;
+        let response = self
+            .lightwalletd
+            .clone()
+            .get_tree_state(request)
+            .await
+            .map_err(|status| not_on_best_chain(status.into()))?
+            .into_inner();
+
+        if response.height != u64::from(u32::from(height)) {
+            return Err(TransportError::BadNodeData(
+                "tree state answered a different height than requested",
+            ));
+        }
+
+        chain_state_from_tree_state(response)
     }
 
     /// A best-chain block's header time, for MTP backfill.
@@ -340,59 +336,33 @@ impl CanonicalBlockSource {
 // Typed responses
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
-struct TreeStateResponse {
-    height: u32,
-    hash: String,
-    sapling: ShieldedTreeState,
-    orchard: ShieldedTreeState,
-    ironwood: ShieldedTreeState,
-}
+/// `GetTreeState` parsed into the upstream [`ChainState`]. Every pool's
+/// tree is mandatory: Zebra sends an empty string for a missing one, which
+/// is a malformed answer.
+fn chain_state_from_tree_state(response: TreeState) -> Result<ChainState, TransportError> {
+    if response.sapling_tree.is_empty() {
+        return Err(TransportError::BadNodeData("missing Sapling tree"));
+    }
+    let sapling_tree = decode_tree::<SaplingNode>(&response.sapling_tree, "Sapling")?;
 
-#[derive(Debug, Deserialize)]
-struct ShieldedTreeState {
-    commitments: TreeCommitments,
-}
+    if response.orchard_tree.is_empty() {
+        return Err(TransportError::BadNodeData("missing Orchard tree"));
+    }
+    let orchard_tree = decode_tree::<MerkleHashOrchard>(&response.orchard_tree, "Orchard")?;
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TreeCommitments {
-    final_state: Option<String>,
-}
+    if response.ironwood_tree.is_empty() {
+        return Err(TransportError::BadNodeData("missing Ironwood tree"));
+    }
+    let ironwood_tree = decode_tree::<MerkleHashOrchard>(&response.ironwood_tree, "Ironwood")?;
 
-/// `z_gettreestate` parsed into the upstream [`ChainState`]; every
-/// pool's treestate is mandatory — a missing section is a malformed
-/// response, rejected at the type.
-fn chain_state_from_rpc_response(
-    response: TreeStateResponse,
-) -> Result<ChainState, TransportError> {
-    let sapling_final_state = response
-        .sapling
-        .commitments
-        .final_state
-        .ok_or(TransportError::BadNodeData("missing Sapling finalState"))?;
-    let sapling_tree = decode_tree::<SaplingNode>(&sapling_final_state, "Sapling")?;
-
-    let orchard_final_state = response
-        .orchard
-        .commitments
-        .final_state
-        .ok_or(TransportError::BadNodeData("missing Orchard finalState"))?;
-    let orchard_tree = decode_tree::<MerkleHashOrchard>(&orchard_final_state, "Orchard")?;
-
-    let ironwood_final_state = response
-        .ironwood
-        .commitments
-        .final_state
-        .ok_or(TransportError::BadNodeData("missing Ironwood finalState"))?;
-    let ironwood_tree = decode_tree::<MerkleHashOrchard>(&ironwood_final_state, "Ironwood")?;
-
+    let height = u32::try_from(response.height)
+        .map_err(|_| TransportError::BadNodeData("tree state height"))?;
     let expected_hash = ReverseHex::decode(&response.hash)
         .map(BlockHash)
         .ok_or(TransportError::BadNodeData("tree state hash"))?;
 
     Ok(ChainState::new(
-        BlockHeight::from_u32(response.height),
+        BlockHeight::from_u32(height),
         expected_hash,
         sapling_tree,
         orchard_tree,
@@ -400,7 +370,7 @@ fn chain_state_from_rpc_response(
     ))
 }
 
-/// Decodes one `finalState` hex into the upstream frontier value.
+/// Decodes one tree's hex into the upstream frontier value.
 fn decode_tree<Node>(
     hex_state: &str,
     name: &'static str,
@@ -443,7 +413,7 @@ mod tests {
         assert_eq!(block_hash.0[31], 0xab);
     }
 
-    /// A commitment tree's hex, as `finalState` carries it — built with
+    /// A commitment tree's hex, as `TreeState` carries it — built with
     /// the upstream writer so the fixtures exercise our reader against
     /// the real encoding.
     fn tree_hex<Node>() -> String
@@ -459,25 +429,14 @@ mod tests {
         hex::encode(bytes)
     }
 
-    fn treestate(ironwood: String) -> TreeStateResponse {
-        TreeStateResponse {
+    fn treestate(ironwood: String) -> TreeState {
+        TreeState {
             height: 1000,
             hash: hex::encode([0u8; 32]),
-            sapling: ShieldedTreeState {
-                commitments: TreeCommitments {
-                    final_state: Some(tree_hex::<SaplingNode>()),
-                },
-            },
-            orchard: ShieldedTreeState {
-                commitments: TreeCommitments {
-                    final_state: Some(tree_hex::<MerkleHashOrchard>()),
-                },
-            },
-            ironwood: ShieldedTreeState {
-                commitments: TreeCommitments {
-                    final_state: Some(ironwood),
-                },
-            },
+            sapling_tree: tree_hex::<SaplingNode>(),
+            orchard_tree: tree_hex::<MerkleHashOrchard>(),
+            ironwood_tree: ironwood,
+            ..TreeState::default()
         }
     }
 
@@ -485,7 +444,7 @@ mod tests {
     fn treestate_garbage_ironwood_hex_is_a_bad_checkpoint() {
         let garbage = treestate("zz".to_string());
         assert!(matches!(
-            chain_state_from_rpc_response(garbage),
+            chain_state_from_tree_state(garbage),
             Err(TransportError::BadCheckpoint(_))
         ));
     }
@@ -495,7 +454,7 @@ mod tests {
         let mut garbage = treestate(tree_hex::<MerkleHashOrchard>());
         garbage.hash = "not-hex!".to_string();
         assert!(matches!(
-            chain_state_from_rpc_response(garbage),
+            chain_state_from_tree_state(garbage),
             Err(TransportError::BadNodeData(_))
         ));
     }
@@ -503,9 +462,9 @@ mod tests {
     #[test]
     fn treestate_missing_sapling_state_is_bad_node_data() {
         let mut garbage = treestate(tree_hex::<MerkleHashOrchard>());
-        garbage.sapling.commitments.final_state = None;
+        garbage.sapling_tree = String::new();
         assert!(matches!(
-            chain_state_from_rpc_response(garbage),
+            chain_state_from_tree_state(garbage),
             Err(TransportError::BadNodeData(_))
         ));
     }
