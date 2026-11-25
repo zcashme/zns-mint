@@ -25,7 +25,6 @@ pub struct NameRecord {
     pub note: NameNote,
     pub commitment: NameCommitment,
     pub confirmed_height: BlockHeight,
-    pub release_deadline: Timestamp,
     pub predecessor_nullifier: orchard::note::Nullifier,
 }
 
@@ -56,41 +55,29 @@ impl NameRecord {
         }
     }
 
-    /// The §4.5 clocks, fired: the term lapsed or the liveness
-    /// deadline reached at `mtp`.
+    /// The §4.5.2 term test: the purchased term has lapsed at `mtp`.
     pub fn is_release_due(&self, mtp: Timestamp) -> bool {
-        self.has_expired(mtp) || mtp >= self.release_deadline
-    }
-
-    /// The §4.5.2 term test at `mtp`.
-    pub fn has_expired(&self, mtp: Timestamp) -> bool {
         self.expires_at().expired(mtp)
     }
 
     /// The name's state as of `note` taking effect at `confirmed_height`:
-    /// `commitment` = the cmx its action published, liveness clock
-    /// restarted from `mtp`, `spent` = the nullifier it will reveal when
-    /// next spent.
+    /// `commitment` = the cmx its action published, `spent` = the
+    /// nullifier it will reveal when next spent.
     fn create(
         note: &NameNote,
         commitment: NameCommitment,
         spent: orchard::note::Nullifier,
         confirmed_height: BlockHeight,
-        mtp: Timestamp,
     ) -> Self {
         Self {
             note: note.clone(),
             commitment,
             confirmed_height,
-            release_deadline: Timestamp::from_seconds(
-                mtp.as_seconds() + crate::mint::LIVENESS_INTERVAL,
-            )
-            .expect("liveness deadline fits Timestamp"),
             predecessor_nullifier: spent,
         }
     }
 
-    /// Both §4.5 clocks live at `mtp_now`, and the trigger is newer than
+    /// The term is live at `mtp_now`, and the trigger is newer than
     /// this record.
     fn is_challengeable(&self, trigger_height: BlockHeight, mtp_now: Timestamp) -> bool {
         !self.is_release_due(mtp_now) && trigger_height > self.confirmed_height
@@ -184,8 +171,7 @@ impl Registry {
     }
 
     /// The buy law: the name is listed, an auction has started and quotes
-    /// a price for an intent in `height`, and neither clock has fired at
-    /// `mtp`. The terms are the listing's and the live note's.
+    /// a price for an intent in `height`, and the term is live at `mtp`. The terms are the listing's and the live note's.
     pub fn authorize_buy(
         &self,
         name: &Name,
@@ -218,7 +204,7 @@ impl Registry {
     }
 
     /// The list law: the owner lists at the t1 she names, on terms still
-    /// listable at `height`, before either clock fires. The note carries her UA and
+    /// listable at `height`, before the term ends. The note carries her UA and
     /// term forward. `None` means unlawful.
     pub fn authorize_list(
         &self,
@@ -243,8 +229,8 @@ impl Registry {
         })
     }
 
-    /// The delist law: the owner takes down a listing before either
-    /// clock fires. `None` means unlawful.
+    /// The delist law: the owner takes down a listing before the term
+    /// ends. `None` means unlawful.
     pub fn authorize_delist(&self, pending: &OtpChallenge, mtp: Timestamp) -> Option<NameNote> {
         let Request::Delist { name, ua } = &pending.request else {
             return None;
@@ -280,11 +266,10 @@ impl Registry {
         })
     }
 
-    /// The update law: action, term, liveness. `None` means unlawful.
+    /// The update law: action, term. `None` means unlawful.
     ///
-    /// The purchased term and the liveness deadline are read at `mtp`, the
-    /// MTP of the block holding the response. A confirmed update renews
-    /// even when the confirming block's median is later.
+    /// The purchased term is read at `mtp`, the MTP of the block holding
+    /// the response.
     pub fn authorize_update(&self, pending: &OtpChallenge, mtp: Timestamp) -> Option<NameNote> {
         let Request::Update { name, ua, term } = &pending.request else {
             return None;
@@ -342,9 +327,9 @@ impl Registry {
 
     /// The request gate. The note is unspoken-for, the request is newer
     /// than the record, and a forever name takes no new term. The purchased
-    /// term and the liveness deadline are read at `mtp_now`, the MTP of
-    /// `trigger_height`, the block the challenge is relayed in. Returns
-    /// the record when a challenge may proceed.
+    /// term is read at `mtp_now`, the MTP of `trigger_height`, the block
+    /// the challenge is relayed in. Returns the record when a challenge
+    /// may proceed.
     pub fn authorize_challenge(
         &self,
         name_notes: &NameNoteQueue,
@@ -376,9 +361,9 @@ impl Registry {
         self.record(name).is_none()
     }
 
-    /// The §4.5 clocks, swept: every live name whose purchased term or
-    /// liveness deadline has passed at `mtp`, with the release note it
-    /// is owed. Idempotent per tip.
+    /// The §4.5.2 clock, swept: every live name whose purchased term has
+    /// passed at `mtp`, with the release note it is owed. Idempotent per
+    /// tip.
     pub fn releases_due(&self, mtp: Timestamp) -> impl Iterator<Item = (Name, NameNote)> + '_ {
         self.records
             .iter()
@@ -414,7 +399,6 @@ impl Registry {
         successor: Option<orchard::note::Nullifier>,
         nfs: &[orchard::note::Nullifier],
         height: BlockHeight,
-        mtp: Timestamp,
     ) -> bool {
         assert!(matches!(note, NameNote::Claim { .. }));
         let spent: Vec<_> = nfs
@@ -440,14 +424,13 @@ impl Registry {
             // A late or duplicate claim: first confirmed wins.
             return false;
         }
-        self.set_record(NameRecord::create(note, commitment, nullifier, height, mtp));
+        self.set_record(NameRecord::create(note, commitment, nullifier, height));
         true
     }
 
     /// Offers a confirmed update, release, sale, list, or delist; true when
     /// the transaction spent this name's current note and the note follows
-    /// it. The new liveness deadline starts at this block's median, and
-    /// releases stay legal after either clock.
+    /// it. Releases stay legal after the term.
     pub fn accept_transition(
         &mut self,
         note: &NameNote,
@@ -455,7 +438,6 @@ impl Registry {
         nullifier: orchard::note::Nullifier,
         nfs: &[orchard::note::Nullifier],
         height: BlockHeight,
-        mtp: Timestamp,
     ) -> bool {
         assert!(!matches!(note, NameNote::Claim { .. }));
         let Some(record) = self.predecessor_spent(note, nfs) else {
@@ -467,17 +449,10 @@ impl Registry {
         };
         if note.prev() != Some(record.commitment) || !carries_forward(note, &record) {
             // The predecessor was spent whatever the note claims.
-            self.release_predecessor(
-                note.name().clone(),
-                &record,
-                commitment,
-                nullifier,
-                height,
-                mtp,
-            );
+            self.release_predecessor(note.name().clone(), &record, commitment, nullifier, height);
             return false;
         }
-        self.set_record(NameRecord::create(note, commitment, nullifier, height, mtp));
+        self.set_record(NameRecord::create(note, commitment, nullifier, height));
         true
     }
 
@@ -491,16 +466,13 @@ impl Registry {
         commitment: NameCommitment,
         nullifier: orchard::note::Nullifier,
         height: BlockHeight,
-        mtp: Timestamp,
     ) {
         let release = NameNote::Release {
             name: name.clone(),
             ua: record.ua().clone(),
             prev: record.commitment,
         };
-        self.set_record(NameRecord::create(
-            &release, commitment, nullifier, height, mtp,
-        ));
+        self.set_record(NameRecord::create(&release, commitment, nullifier, height));
     }
 
     /// The live predecessor this transaction spent, when it is this
@@ -682,13 +654,7 @@ mod tests {
         Timestamp::from_seconds(secs).unwrap()
     }
 
-    fn record_for(
-        name: Name,
-        action: Action,
-        expires_at: Expiry,
-        release_deadline: i64,
-        seed: u8,
-    ) -> NameRecord {
+    fn record_for(name: Name, action: Action, expires_at: Expiry, seed: u8) -> NameRecord {
         let ua = test_ua();
         let note = match action {
             Action::Claim => NameNote::Claim {
@@ -713,13 +679,12 @@ mod tests {
             note,
             commitment: commitment(seed),
             confirmed_height: BlockHeight::from_u32(100),
-            release_deadline: ts(release_deadline),
             predecessor_nullifier: nullifier(seed),
         }
     }
 
-    fn record(action: Action, expires_at: Expiry, release_deadline: i64, seed: u8) -> NameRecord {
-        record_for(test_name(), action, expires_at, release_deadline, seed)
+    fn record(action: Action, expires_at: Expiry, seed: u8) -> NameRecord {
+        record_for(test_name(), action, expires_at, seed)
     }
 
     fn confirm_claim(
@@ -745,7 +710,6 @@ mod tests {
             Some(nullifier(successor_seed)),
             &[anchor],
             block_height,
-            ts(1_700_000_000 + i64::from(height)),
         ));
     }
 
@@ -763,7 +727,6 @@ mod tests {
             nullifier(note_seed),
             &[record.predecessor_nullifier],
             BlockHeight::from_u32(height),
-            ts(1_700_000_000 + i64::from(height)),
         ));
     }
 
@@ -780,7 +743,6 @@ mod tests {
             nullifier(note_seed),
             &[record.predecessor_nullifier],
             BlockHeight::from_u32(height),
-            ts(1_700_000_000 + i64::from(height)),
         ));
     }
 
@@ -801,12 +763,7 @@ mod tests {
     fn allows_challenge_gates_the_stale_the_expired_and_the_forever_term() {
         let now = ts(1_000_000_000);
         let above = BlockHeight::from_u32(101);
-        let live = record(
-            Action::Claim,
-            Expiry::At(ts(2_000_000_000)),
-            2_000_000_000,
-            1,
-        );
+        let live = record(Action::Claim, Expiry::At(ts(2_000_000_000)), 1);
 
         // A live record allows an update challenge, a term, and a
         // release from its own UA.
@@ -823,81 +780,9 @@ mod tests {
 
         // A forever name refuses any new term — no runway to bank, no
         // second upgrade to buy — and allows the existing term.
-        let forever = record(Action::Claim, Expiry::Never, 2_000_000_000, 3);
+        let forever = record(Action::Claim, Expiry::Never, 3);
         assert!(!forever.allows_challenge(&update(Term::Years(1)), above, now));
         assert!(forever.allows_challenge(&update(Term::Existing), above, now));
-    }
-
-    /// The gate applies both §4.5 clocks — the same predicate the law
-    /// applies. A name past its liveness deadline cannot buy a
-    /// challenge, even with purchased term remaining: the update it
-    /// would buy is one `authorize_update` always voids.
-    #[test]
-    fn allows_challenge_refuses_liveness_due_names() {
-        let above = BlockHeight::from_u32(101);
-        // Term runs to 2_000_000_000; the liveness deadline passed at
-        // 1_500_000_000. Term-live, liveness-due.
-        let term_live = record(
-            Action::Claim,
-            Expiry::At(ts(2_000_000_000)),
-            1_500_000_000,
-            1,
-        );
-
-        assert!(term_live.allows_challenge(&update(Term::Years(1)), above, ts(1_499_999_999)));
-        assert!(!term_live.allows_challenge(&update(Term::Years(1)), above, ts(1_500_000_000)));
-
-        // A forever name past its liveness deadline: refused with the
-        // existing term too.
-        let forever = record(Action::Claim, Expiry::Never, 1_500_000_000, 2);
-        assert!(!forever.allows_challenge(&update(Term::Existing), above, ts(1_500_000_000)));
-
-        // Release challenges from the controller are refused alike; the
-        // lifecycle sweep releases without a challenge.
-        assert!(!term_live.allows_challenge(&release(), above, ts(1_500_000_000)));
-    }
-
-    /// The gate and the update law read the deadline the same way. One
-    /// second before the deadline both allow the update. At the deadline
-    /// both refuse.
-    #[test]
-    fn the_gate_and_the_update_law_agree_on_the_liveness_clock() {
-        use crate::mint::note::NameNoteQueue;
-        use crate::mint::treasury::{OtpChallenge, OtpCode, D_OTP};
-
-        let mut r = Registry::new();
-        let deadline = 1_500_000_000_i64;
-        r.set_record(record(
-            Action::Claim,
-            Expiry::At(ts(2_000_000_000)),
-            deadline,
-            1,
-        ));
-        let queue = NameNoteQueue::default();
-
-        let request = update(Term::Years(1));
-        let pending = |mtp: i64| OtpChallenge {
-            request: request.clone(),
-            code: OtpCode::for_test(*b"123456"),
-            attempts: 0,
-            expires_at: ts(mtp + D_OTP),
-        };
-
-        let before = ts(deadline - 1);
-        let after = ts(deadline);
-        let above = BlockHeight::from_u32(101);
-
-        assert!(r
-            .authorize_challenge(&queue, &request, above, before)
-            .is_some());
-        assert!(r.authorize_update(&pending(deadline - 1), before).is_some());
-        assert!(!r.record(request.name()).unwrap().is_release_due(before));
-
-        assert!(r
-            .authorize_challenge(&queue, &request, above, after)
-            .is_none());
-        assert!(r.authorize_update(&pending(deadline), after).is_none());
-        assert!(r.record(request.name()).unwrap().is_release_due(after));
     }
 
     /// A name with a transition already admitted cannot buy a
@@ -906,7 +791,7 @@ mod tests {
     #[test]
     fn authorize_challenge_refuses_when_the_note_is_spoken_for() {
         let mut r = Registry::new();
-        r.set_record(record(Action::Claim, Expiry::Never, 3_000_000_000, 1));
+        r.set_record(record(Action::Claim, Expiry::Never, 1));
         let mut queue = NameNoteQueue::default();
         let release = NameNote::Release {
             name: test_name(),
@@ -928,47 +813,20 @@ mod tests {
     #[test]
     fn releases_due_yields_only_fired_names() {
         let mut r = Registry::new();
-        for (name, action, expires_at, deadline, seed) in [
-            (
-                "alpha",
-                Action::Claim,
-                Expiry::At(ts(1_500_000_000)),
-                3_000_000_000_i64,
-                1_u8,
-            ),
-            (
-                "bravo",
-                Action::Claim,
-                Expiry::Never,
-                1_500_000_000_i64,
-                2_u8,
-            ),
-            (
-                "delta",
-                Action::Claim,
-                Expiry::Never,
-                3_000_000_000_i64,
-                3_u8,
-            ),
-            (
-                "gamma",
-                Action::Release,
-                Expiry::Never,
-                1_000_000_000_i64,
-                4_u8,
-            ),
+        for (name, action, expires_at, seed) in [
+            ("alpha", Action::Claim, Expiry::At(ts(1_500_000_000)), 1_u8),
+            ("delta", Action::Claim, Expiry::Never, 3_u8),
+            ("gamma", Action::Release, Expiry::Never, 4_u8),
         ] {
             r.set_record(record_for(
                 Name::parse(name).expect("test name parses"),
                 action,
                 expires_at,
-                deadline,
                 seed,
             ));
         }
-        // alpha: purchased term up (§4.5.2). bravo: liveness deadline
-        // passed (§4.5.4). delta: live. gamma: already released.
-        // BTreeMap order makes the batch deterministic: alpha, bravo.
+        // alpha: purchased term up (§4.5.2). delta: live. gamma: already
+        // released.
         let due: Vec<(String, NameNote)> = r
             .releases_due(ts(1_500_000_000))
             .map(|(name, note)| (name.as_str().to_owned(), note))
@@ -977,12 +835,11 @@ mod tests {
             due.iter()
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["alpha", "bravo"]
+            vec!["alpha"]
         );
-        // Each yielded note is the release bound to its own record.
+        // The yielded note is the release bound to its own record.
         assert!(matches!(due[0].1, NameNote::Release { .. }));
         assert_eq!(due[0].1.prev(), Some(commitment(1)));
-        assert_eq!(due[1].1.prev(), Some(commitment(2)));
     }
 
     /// Two backed claims for the same name confirm in order: the first
@@ -994,7 +851,6 @@ mod tests {
         let mut r = Registry::new();
         let h1 = BlockHeight::from_u32(10);
         let h2 = BlockHeight::from_u32(11);
-        let mtp = ts(1_700_000_000);
         let a1 = nullifier(1);
         let a2 = nullifier(2);
         let succ1 = nullifier(10);
@@ -1015,7 +871,6 @@ mod tests {
             Some(succ1),
             &[a1],
             h1,
-            mtp,
         ));
         let first = r.record(&test_name()).expect("alice registered").clone();
 
@@ -1026,7 +881,6 @@ mod tests {
             Some(succ2),
             &[a2],
             h2,
-            mtp,
         ));
         let kept = r.record(&test_name()).expect("alice still registered");
         assert_eq!(kept.commitment, first.commitment);
@@ -1090,7 +944,6 @@ mod tests {
     fn accept_claim_rejects_malformed_without_panic() {
         let mut r = Registry::new();
         let h = BlockHeight::from_u32(10);
-        let mtp = ts(1_700_000_000);
         let a1 = nullifier(1);
         let a2 = nullifier(2);
         let succ = nullifier(10);
@@ -1103,7 +956,7 @@ mod tests {
         };
 
         // No successor: retire the spent anchor, do not register.
-        assert!(!r.accept_claim(&claim, commitment(20), nullifier(20), None, &[a1], h, mtp,));
+        assert!(!r.accept_claim(&claim, commitment(20), nullifier(20), None, &[a1], h));
         assert!(!r.anchor_pool().contains(&a1));
         assert!(r.record(&test_name()).is_none());
 
@@ -1117,7 +970,6 @@ mod tests {
             Some(succ),
             &[a2, a1],
             h,
-            mtp,
         ));
         assert!(!r.anchor_pool().contains(&a2));
         assert!(!r.anchor_pool().contains(&succ));
@@ -1132,7 +984,6 @@ mod tests {
     fn unbacked_claim_with_successor_adopts_nothing() {
         let mut r = Registry::new();
         let h = BlockHeight::from_u32(10);
-        let mtp = ts(1_700_000_000);
         let anchor = nullifier(1);
         r.adopt_anchor(h, anchor);
         let claim = NameNote::Claim {
@@ -1148,7 +999,6 @@ mod tests {
             Some(nullifier(200)),
             &[nullifier(9)],
             h,
-            mtp,
         ));
         assert!(r.anchor_pool().contains(&anchor));
         assert!(!r.anchor_pool().contains(&nullifier(200)));
@@ -1158,9 +1008,8 @@ mod tests {
 
     #[test]
     fn accept_claim_that_spends_a_record_marks_it_released() {
-        let mut r = live_alice(Expiry::Never, 3_000_000_000);
+        let mut r = live_alice(Expiry::Never);
         let h = BlockHeight::from_u32(101);
-        let mtp = ts(1_700_000_000);
         let anchor = nullifier(9);
         let succ = nullifier(10);
         r.adopt_anchor(h, anchor);
@@ -1177,7 +1026,6 @@ mod tests {
             Some(succ),
             &[anchor, nullifier(1)],
             h,
-            mtp,
         ));
         assert!(r.record(&test_name()).is_none());
         let alice = r
@@ -1193,7 +1041,7 @@ mod tests {
 
     #[test]
     fn follow_spends_retires_anchors_and_marks_names_released() {
-        let mut r = live_alice(Expiry::Never, 3_000_000_000);
+        let mut r = live_alice(Expiry::Never);
         let h = BlockHeight::from_u32(101);
         let anchor = nullifier(9);
         r.adopt_anchor(h, anchor);
@@ -1210,9 +1058,9 @@ mod tests {
         assert_eq!(alice.predecessor_nullifier, nullifier(1));
     }
 
-    fn live_alice(expires_at: Expiry, deadline: i64) -> Registry {
+    fn live_alice(expires_at: Expiry) -> Registry {
         let mut r = Registry::new();
-        r.set_record(record(Action::Claim, expires_at, deadline, 1));
+        r.set_record(record(Action::Claim, expires_at, 1));
         r
     }
 
@@ -1226,8 +1074,8 @@ mod tests {
     }
 
     #[test]
-    fn accept_update_renews_while_both_clocks_are_live() {
-        let mut r = live_alice(Expiry::At(ts(2_000_000_000)), 2_000_000_000);
+    fn accept_update_renews_while_the_term_is_live() {
+        let mut r = live_alice(Expiry::At(ts(2_000_000_000)));
         let note = update_for_alice(Expiry::At(ts(2_100_000_000)), 1);
         let succ = nullifier(20);
         assert!(r.accept_transition(
@@ -1236,7 +1084,6 @@ mod tests {
             succ,
             &[nullifier(1)],
             BlockHeight::from_u32(101),
-            ts(1_000_000_000),
         ));
         let rec = r.record(&test_name()).expect("alice still bound");
         assert_eq!(rec.action(), Action::Update);
@@ -1260,10 +1107,9 @@ mod tests {
     #[test]
     fn accept_sale_binds_the_buyer_and_leaves_the_name_live() {
         let term = Expiry::At(ts(2_000_000_000));
-        let mut r = live_alice(term, 3_000_000_000);
+        let mut r = live_alice(term);
         let bob = bob_ua();
         let at = BlockHeight::from_u32(101);
-        let mtp = ts(1_000_000_000);
         // Only a listed name sells.
         assert!(r
             .sale_transfer(&test_name(), &bob, term, commitment(1))
@@ -1279,14 +1125,7 @@ mod tests {
             expires_at: term,
             prev: commitment(1),
         };
-        assert!(r.accept_transition(
-            &list,
-            commitment(20),
-            nullifier(20),
-            &[nullifier(1)],
-            at,
-            mtp
-        ));
+        assert!(r.accept_transition(&list, commitment(20), nullifier(20), &[nullifier(1)], at,));
         let held = r.record(&test_name()).unwrap().commitment;
         assert!(r
             .sale_transfer(&test_name(), &bob, term, commitment(2))
@@ -1298,7 +1137,7 @@ mod tests {
         assert!(!note.action().is_update());
         assert_eq!(note.ua(), &bob);
         let succ = nullifier(21);
-        assert!(r.accept_transition(&note, commitment(21), succ, &[nullifier(20)], at, mtp));
+        assert!(r.accept_transition(&note, commitment(21), succ, &[nullifier(20)], at));
         let rec = r.record(&test_name()).expect("the name stays live");
         assert_eq!(rec.action(), Action::Sale);
         assert_eq!(*rec.ua(), bob);
@@ -1311,7 +1150,7 @@ mod tests {
     #[test]
     fn a_sale_of_an_unlisted_name_releases_it() {
         let term = Expiry::At(ts(2_000_000_000));
-        let mut r = live_alice(term, 3_000_000_000);
+        let mut r = live_alice(term);
         let sale = NameNote::Sale {
             name: test_name(),
             ua: bob_ua(),
@@ -1324,7 +1163,6 @@ mod tests {
             nullifier(20),
             &[nullifier(1)],
             BlockHeight::from_u32(101),
-            ts(1_000_000_000),
         ));
         assert!(r.is_available(&test_name()));
     }
@@ -1354,7 +1192,7 @@ mod tests {
         let flat = Ask::Flat(Zatoshis::from_u64(500_000_000).unwrap());
         let mtp = ts(1_000_000_000);
         let at = BlockHeight::from_u32(101);
-        let r = live_alice(term, 3_000_000_000);
+        let r = live_alice(term);
 
         let list = challenge(Request::List(listing(alice.clone(), flat.clone())));
         let note = r.authorize_list(&list, mtp, at).unwrap();
@@ -1380,14 +1218,7 @@ mod tests {
         });
         assert!(r.authorize_delist(&delist, mtp).is_none(), "not listed");
         let mut r = r;
-        assert!(r.accept_transition(
-            &note,
-            commitment(20),
-            nullifier(20),
-            &[nullifier(1)],
-            at,
-            mtp
-        ));
+        assert!(r.accept_transition(&note, commitment(20), nullifier(20), &[nullifier(1)], at,));
         let note = r.authorize_delist(&delist, mtp).unwrap();
         assert_eq!(note.ua(), &alice);
         assert_eq!(note.expires_at(), Some(term));
@@ -1428,85 +1259,55 @@ mod tests {
                 nullifier(20),
                 &[nullifier(1)],
                 BlockHeight::from_u32(101),
-                ts(1_000_000_000),
             )
         };
 
-        let mut r = live_alice(term, 3_000_000_000);
+        let mut r = live_alice(term);
         assert!(accept(&mut r, &list(term)));
         assert_eq!(r.record(&test_name()).unwrap().action(), Action::List);
 
-        let mut r = live_alice(term, 3_000_000_000);
+        let mut r = live_alice(term);
         assert!(accept(&mut r, &delist(alice.clone())));
         assert_eq!(r.record(&test_name()).unwrap().action(), Action::Delist);
 
         for note in [list(Expiry::Never), delist(bob_ua())] {
-            let mut r = live_alice(term, 3_000_000_000);
+            let mut r = live_alice(term);
             assert!(!accept(&mut r, &note), "{note:?}");
             assert!(r.is_available(&test_name()), "{note:?}");
         }
     }
 
     /// A confirmed update renews after the predecessor's term has passed.
-    /// The new liveness deadline starts at this block's median.
     #[test]
     fn accept_update_after_expiry_renews() {
-        let mut r = live_alice(Expiry::At(ts(1_000_000_000)), 3_000_000_000);
+        let mut r = live_alice(Expiry::At(ts(1_000_000_000)));
         let note = update_for_alice(Expiry::At(ts(2_000_000_000)), 1);
         let succ = nullifier(20);
-        let mtp = ts(1_000_000_000);
         assert!(r.accept_transition(
             &note,
             commitment(20),
             succ,
             &[nullifier(1)],
             BlockHeight::from_u32(101),
-            mtp,
         ));
         let rec = r.record(&test_name()).expect("alice still bound");
         assert_eq!(rec.action(), Action::Update);
         assert_eq!(rec.expires_at(), Expiry::At(ts(2_000_000_000)));
         assert_eq!(rec.predecessor_nullifier, succ);
-        assert_eq!(
-            rec.release_deadline,
-            ts(1_000_000_000 + crate::mint::LIVENESS_INTERVAL)
-        );
-    }
-
-    /// A confirmed update renews after the liveness deadline has passed.
-    #[test]
-    fn accept_update_after_liveness_renews() {
-        let mut r = live_alice(Expiry::Never, 1_000_000_000);
-        let note = update_for_alice(Expiry::Never, 1);
-        let succ = nullifier(20);
-        assert!(r.accept_transition(
-            &note,
-            commitment(20),
-            succ,
-            &[nullifier(1)],
-            BlockHeight::from_u32(101),
-            ts(1_000_000_000),
-        ));
-        let rec = r.record(&test_name()).expect("alice still bound");
-        assert_eq!(rec.action(), Action::Update);
-        assert_eq!(rec.expires_at(), Expiry::Never);
-        assert_eq!(rec.predecessor_nullifier, succ);
     }
 
     #[test]
     fn accept_update_with_anchor_spend_follows_the_pool() {
-        let mut r = live_alice(Expiry::Never, 3_000_000_000);
+        let mut r = live_alice(Expiry::Never);
         r.set_record(record_for(
             Name::parse("bob").unwrap(),
             Action::Claim,
             Expiry::Never,
-            3_000_000_000,
             2,
         ));
         r.adopt_anchor(BlockHeight::from_u32(100), nullifier(9));
         let note = update_for_alice(Expiry::Never, 1);
         let height = BlockHeight::from_u32(101);
-        let mtp = ts(1_000_000_000);
 
         // Well-formed update that also spends a claim anchor: rejected,
         // and the chain facts still land — alice's note was consumed,
@@ -1517,7 +1318,6 @@ mod tests {
             nullifier(20),
             &[nullifier(1), nullifier(9)],
             height,
-            mtp,
         ));
         assert!(r.record(&test_name()).is_none());
         let alice = r
@@ -1537,10 +1337,9 @@ mod tests {
 
     #[test]
     fn accept_update_prev_mismatch_marks_released() {
-        let mut r = live_alice(Expiry::Never, 3_000_000_000);
+        let mut r = live_alice(Expiry::Never);
         let wrong_prev = update_for_alice(Expiry::Never, 99);
         let height = BlockHeight::from_u32(101);
-        let mtp = ts(1_000_000_000);
 
         // Alice's note was spent whatever the payload claims: the name
         // is released, bound to the successor nullifier it received.
@@ -1550,7 +1349,6 @@ mod tests {
             nullifier(20),
             &[nullifier(1)],
             height,
-            mtp,
         ));
         assert!(r.record(&test_name()).is_none());
         let alice = r
@@ -1562,8 +1360,8 @@ mod tests {
     }
 
     #[test]
-    fn accept_release_stays_legal_after_both_clocks() {
-        let mut r = live_alice(Expiry::At(ts(1_000_000_000)), 1_000_000_000);
+    fn accept_release_stays_legal_after_the_term() {
+        let mut r = live_alice(Expiry::At(ts(1_000_000_000)));
         let note = NameNote::Release {
             name: test_name(),
             ua: test_ua(),
@@ -1576,7 +1374,6 @@ mod tests {
             succ,
             &[nullifier(1)],
             BlockHeight::from_u32(101),
-            ts(1_000_000_000),
         ));
         assert!(r.record(&test_name()).is_none());
         let rec = r

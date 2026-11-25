@@ -2,6 +2,20 @@
 
 Tracks design-relevant changes to `src/registry.rs`.
 
+## 2026-11-25 — A name is held for its term (#605)
+
+- `NameRecord::release_deadline` is gone. It was one year after the
+  median time of the block holding the name's latest note, and
+  `is_release_due` fired on it or on the term, whichever came first.
+- `is_release_due` is the term test alone, and `has_expired` is gone.
+  `releases_due`, `authorize_update`, `authorize_list`,
+  `authorize_delist`, `authorize_buy` and `allows_challenge` read one
+  clock. A forever name is released only by its controller.
+- `accept_claim` and `accept_transition` take no `mtp`.
+- `LIVENESS_INTERVAL` is `JULIAN_YEAR`: it is the unit of a term.
+- The canon vectors lose `release_deadline_secs` and the events'
+  `mtp_secs`.
+
 ## 2026-11-20 — A forever name refuses any term but `Existing` (#556)
 
 - `allows_challenge` refuses an update on a forever name whose term is

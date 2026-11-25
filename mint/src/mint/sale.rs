@@ -305,7 +305,7 @@ pub enum MarketRefusal {
     NotListed,
     /// A name note is already in flight.
     InFlight,
-    /// The purchased term or the liveness deadline has passed.
+    /// The purchased term has passed.
     ReleaseDue,
     /// This name already has a buy.
     AlreadyOpen,
@@ -966,7 +966,6 @@ mod tests {
                 Some(nf(40 + index as u8)),
                 &[anchor],
                 height(),
-                mtp(),
             ));
         }
         registry
@@ -982,7 +981,6 @@ mod tests {
             nf(seed),
             &[spent],
             at,
-            mtp()
         ));
     }
 

@@ -20,7 +20,7 @@ pub mod assemble;
 use crate::boot::NETWORK;
 use crate::mint::registry::Registry;
 use crate::mint::sale::{decode_terms, encode_terms, Listing};
-use crate::mint::{Action, Name, NameCommitment, LIVENESS_INTERVAL, TREASURY_ACCOUNT};
+use crate::mint::{Action, Name, NameCommitment, JULIAN_YEAR, TREASURY_ACCOUNT};
 use crate::RegistryKeys;
 
 /// A Name transition (§3.2), typed so every action carries exactly its
@@ -260,7 +260,7 @@ impl Expiry {
     }
 
     /// The §4.5.2 expiration test against canonical-chain MTP.
-    /// `Never` never expires (liveness still applies; §4.5.4).
+    /// `Never` never expires.
     pub fn expired(self, mtp: Timestamp) -> bool {
         match self {
             Expiry::Never => false,
@@ -280,9 +280,7 @@ impl Expiry {
             (Expiry::At(t), Term::Years(_)) => t.checked_add(term.duration()).map(Expiry::At)?,
         };
         let horizon = mtp
-            .checked_add(time::Duration::seconds(
-                MAX_TERM_YEARS as i64 * LIVENESS_INTERVAL,
-            ))
+            .checked_add(time::Duration::seconds(MAX_TERM_YEARS as i64 * JULIAN_YEAR))
             .expect("the expiry horizon always fits Timestamp");
         match extended {
             Expiry::At(t) if t > horizon => None,
@@ -294,9 +292,9 @@ impl Expiry {
 /// A request term: `forever`, whole Julian years 1–99, or `none`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Term {
-    /// No fixed expiration — held while liveness passes.
+    /// No fixed expiration.
     Forever,
-    /// A term of N whole Julian years (the liveness interval).
+    /// A term of N whole Julian years.
     Years(u64),
     /// `none`: an update keeps the name's term. A claim can't.
     Existing,
@@ -323,11 +321,11 @@ impl Term {
         (1..=MAX_TERM_YEARS).contains(&n).then_some(Self::Years(n))
     }
 
-    /// The term as a `time` duration; one year is `LIVENESS_INTERVAL`.
+    /// The term as a `time` duration; one year is `JULIAN_YEAR`.
     pub fn duration(self) -> time::Duration {
         match self {
             Self::Forever | Self::Existing => time::Duration::ZERO,
-            Self::Years(n) => time::Duration::seconds(n as i64 * LIVENESS_INTERVAL),
+            Self::Years(n) => time::Duration::seconds(n as i64 * JULIAN_YEAR),
         }
     }
 
@@ -1065,7 +1063,7 @@ mod tests {
         let mtp = Timestamp::from_seconds(0).unwrap();
         let at = |n: i64| {
             Expiry::At(
-                mtp.checked_add(time::Duration::seconds(n * LIVENESS_INTERVAL))
+                mtp.checked_add(time::Duration::seconds(n * JULIAN_YEAR))
                     .unwrap(),
             )
         };
@@ -1112,7 +1110,6 @@ mod tests {
         let height = |n| BlockHeight::from_u32(n);
         let name = test_name();
         let ua = test_ua();
-        let mtp = Timestamp::from_seconds(1_700_000_000).unwrap();
         let mut registry = Registry::new();
 
         let first_claim = NameNote::Claim {
@@ -1129,7 +1126,6 @@ mod tests {
             Some(test_nullifier(21)),
             &[first_anchor],
             height(100),
-            mtp,
         ));
 
         let release = NameNote::Release {
@@ -1143,7 +1139,6 @@ mod tests {
             test_nullifier(12),
             &[test_nullifier(11)],
             height(120),
-            mtp,
         ));
 
         let reclaim = NameNote::Claim {
@@ -1160,7 +1155,6 @@ mod tests {
             Some(test_nullifier(23)),
             &[second_anchor],
             height(130),
-            mtp,
         ));
 
         (registry, release, reclaim)
@@ -1213,7 +1207,6 @@ mod tests {
             ua: test_ua(),
             expires_at: Expiry::Never,
         };
-        let mtp = Timestamp::from_seconds(1_700_000_000).unwrap();
         let anchor = test_nullifier(1);
         let mut registry = Registry::new();
         registry.adopt_anchor(height(100), anchor);
@@ -1224,7 +1217,6 @@ mod tests {
             Some(test_nullifier(21)),
             &[anchor],
             height(100),
-            mtp,
         ));
 
         let mut queue = NameNoteQueue::default();
@@ -1242,7 +1234,6 @@ mod tests {
             expires_at: Expiry::Never,
         };
         let height = |n: u32| BlockHeight::from_u32(n);
-        let mtp = Timestamp::from_seconds(1_700_000_000).unwrap();
         let anchor = test_nullifier(1);
         let mut registry = Registry::new();
         registry.adopt_anchor(height(100), anchor);
@@ -1253,7 +1244,6 @@ mod tests {
             Some(test_nullifier(21)),
             &[anchor],
             height(100),
-            mtp,
         ));
 
         let mut queue = NameNoteQueue::default();

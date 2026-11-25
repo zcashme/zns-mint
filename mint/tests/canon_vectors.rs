@@ -58,7 +58,6 @@ enum Event {
     /// the spent anchor and leaves `successor_anchor` out.
     Claim {
         height: u32,
-        mtp_secs: i64,
         name: String,
         ua: String,
         /// Unix seconds; `null` means `Expiry::Never`.
@@ -75,7 +74,6 @@ enum Event {
     /// candidate; every consumer must reject without state change.
     UnbackedClaim {
         height: u32,
-        mtp_secs: i64,
         name: String,
         ua: String,
         expires_at_secs: Option<i64>,
@@ -86,7 +84,6 @@ enum Event {
     /// An Update that spends the current record's nullifier.
     Update {
         height: u32,
-        mtp_secs: i64,
         name: String,
         ua: String,
         expires_at_secs: Option<i64>,
@@ -100,7 +97,6 @@ enum Event {
     /// A Release that spends the current record's nullifier.
     Release {
         height: u32,
-        mtp_secs: i64,
         name: String,
         ua: String,
         prev_nullifier: Hex32,
@@ -133,7 +129,6 @@ struct RecordSnapshot {
     expires_at_secs: Option<i64>,
     commitment: Hex32,
     confirmed_height: u32,
-    release_deadline_secs: i64,
     nullifier: Hex32,
 }
 
@@ -178,7 +173,6 @@ fn apply(registry: &mut Registry, event: &Event) {
         }
         Event::Claim {
             height,
-            mtp_secs,
             name,
             ua,
             expires_at_secs,
@@ -200,7 +194,6 @@ fn apply(registry: &mut Registry, event: &Event) {
                 Some(nf(successor_anchor)),
                 &[nf(spent_anchor)],
                 BlockHeight::from_u32(*height),
-                ts(*mtp_secs),
             );
             match *expect {
                 Expectation::Accepted => assert!(ok, "backed claim was rejected: {name}"),
@@ -211,7 +204,6 @@ fn apply(registry: &mut Registry, event: &Event) {
         }
         Event::UnbackedClaim {
             height,
-            mtp_secs,
             name,
             ua,
             expires_at_secs,
@@ -232,13 +224,11 @@ fn apply(registry: &mut Registry, event: &Event) {
                 None,
                 &nfs,
                 BlockHeight::from_u32(*height),
-                ts(*mtp_secs),
             );
             assert!(!accepted, "unbacked claim was accepted: {name}");
         }
         Event::Update {
             height,
-            mtp_secs,
             name,
             ua,
             expires_at_secs,
@@ -267,13 +257,11 @@ fn apply(registry: &mut Registry, event: &Event) {
                 nf(nullifier),
                 &[nf(prev_nullifier)],
                 BlockHeight::from_u32(*height),
-                ts(*mtp_secs),
             );
             assert!(ok, "update was rejected: {name}");
         }
         Event::Release {
             height,
-            mtp_secs,
             name,
             ua,
             prev_nullifier,
@@ -300,7 +288,6 @@ fn apply(registry: &mut Registry, event: &Event) {
                 nf(nullifier),
                 &[nf(prev_nullifier)],
                 BlockHeight::from_u32(*height),
-                ts(*mtp_secs),
             );
             assert!(ok, "release was rejected: {name}");
         }
@@ -349,7 +336,6 @@ fn record_snapshot(record: &zns_mint::mint::registry::NameRecord) -> RecordSnaps
         expires_at_secs,
         commitment: hex::encode(record.commitment.to_bytes()),
         confirmed_height: u32::from(record.confirmed_height),
-        release_deadline_secs: record.release_deadline.as_seconds(),
         nullifier: hex::encode(record.predecessor_nullifier.to_bytes()),
     }
 }
@@ -378,10 +364,6 @@ fn expiry(secs: Option<i64>) -> Expiry {
         None => Expiry::Never,
         Some(t) => Expiry::At(Timestamp::from_seconds(t).expect("expiry fits Timestamp")),
     }
-}
-
-fn ts(secs: i64) -> Timestamp {
-    Timestamp::from_seconds(secs).expect("MTP fits Timestamp")
 }
 
 /// Parses a lowercase 32-byte hex nullifier.
@@ -489,7 +471,6 @@ fn backed_claim() -> Scenario {
         },
         Event::Claim {
             height: 110,
-            mtp_secs: 1_700_000_000,
             name: "alice".to_owned(),
             ua: TEST_UA.to_owned(),
             expires_at_secs: None,
@@ -520,7 +501,6 @@ fn unbacked_claim() -> Scenario {
         // Unrelated non-anchor nullifier — an ordinary payment input.
         Event::UnbackedClaim {
             height: 110,
-            mtp_secs: 1_700_000_000,
             name: "mallory".to_owned(),
             ua: TEST_UA.to_owned(),
             expires_at_secs: None,
@@ -556,7 +536,6 @@ fn duplicate_claim() -> Scenario {
         },
         Event::Claim {
             height: 110,
-            mtp_secs: 1_700_000_000,
             name: "alice".to_owned(),
             ua: TEST_UA.to_owned(),
             expires_at_secs: None,
@@ -570,7 +549,6 @@ fn duplicate_claim() -> Scenario {
         // the successor stays out, and the first registration stands.
         Event::Claim {
             height: 120,
-            mtp_secs: 1_700_100_000,
             name: "alice".to_owned(),
             ua: TEST_UA.to_owned(),
             expires_at_secs: None,
@@ -612,7 +590,6 @@ fn claim_after_release() -> Scenario {
         },
         Event::Claim {
             height: 110,
-            mtp_secs: 1_700_000_000,
             name: "alice".to_owned(),
             ua: TEST_UA.to_owned(),
             expires_at_secs: None,
@@ -624,7 +601,6 @@ fn claim_after_release() -> Scenario {
         },
         Event::Release {
             height: 200,
-            mtp_secs: 1_710_000_000,
             name: "alice".to_owned(),
             ua: TEST_UA.to_owned(),
             prev_nullifier: n1,
@@ -633,7 +609,6 @@ fn claim_after_release() -> Scenario {
         },
         Event::Claim {
             height: 300,
-            mtp_secs: 1_720_000_000,
             name: "alice".to_owned(),
             ua: TEST_UA.to_owned(),
             expires_at_secs: None,
@@ -667,7 +642,6 @@ fn update_then_release() -> Scenario {
         },
         Event::Claim {
             height: 110,
-            mtp_secs: 1_700_000_000,
             name: "alice".to_owned(),
             ua: TEST_UA.to_owned(),
             expires_at_secs: Some(2_000_000_000),
@@ -679,7 +653,6 @@ fn update_then_release() -> Scenario {
         },
         Event::Update {
             height: 200,
-            mtp_secs: 1_710_000_000,
             name: "alice".to_owned(),
             ua: TEST_UA.to_owned(),
             expires_at_secs: Some(2_100_000_000),
@@ -689,7 +662,6 @@ fn update_then_release() -> Scenario {
         },
         Event::Release {
             height: 300,
-            mtp_secs: 1_720_000_000,
             name: "alice".to_owned(),
             ua: TEST_UA.to_owned(),
             prev_nullifier: n_update,
@@ -720,7 +692,6 @@ fn reorg() -> Scenario {
         },
         Event::Claim {
             height: 110,
-            mtp_secs: 1_700_000_000,
             name: "alice".to_owned(),
             ua: TEST_UA.to_owned(),
             expires_at_secs: None,
@@ -732,7 +703,6 @@ fn reorg() -> Scenario {
         },
         Event::Update {
             height: 200,
-            mtp_secs: 1_710_000_000,
             name: "alice".to_owned(),
             ua: TEST_UA.to_owned(),
             expires_at_secs: None,
