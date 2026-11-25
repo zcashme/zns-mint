@@ -757,8 +757,6 @@ mod tests {
         registry
     }
 
-    /// The plural sweep: only names whose term has ended, each paired
-    /// with its release note. Live and already-released names are absent.
     #[test]
     fn allows_challenge_gates_the_stale_the_expired_and_the_forever_term() {
         let now = ts(1_000_000_000);
@@ -810,11 +808,14 @@ mod tests {
             .is_none());
     }
 
+    /// The plural sweep: only names whose term has ended, each paired
+    /// with its release note. Live and already-released names are absent.
     #[test]
     fn releases_due_yields_only_fired_names() {
         let mut r = Registry::new();
         for (name, action, expires_at, seed) in [
             ("alpha", Action::Claim, Expiry::At(ts(1_500_000_000)), 1_u8),
+            ("bravo", Action::Claim, Expiry::At(ts(1_400_000_000)), 2_u8),
             ("delta", Action::Claim, Expiry::Never, 3_u8),
             ("gamma", Action::Release, Expiry::Never, 4_u8),
         ] {
@@ -825,8 +826,9 @@ mod tests {
                 seed,
             ));
         }
-        // alpha: purchased term up (§4.5.2). delta: live. gamma: already
-        // released.
+        // alpha and bravo: purchased term up (§4.5.2). delta: live.
+        // gamma: already released. BTreeMap order makes the batch
+        // deterministic: alpha, bravo.
         let due: Vec<(String, NameNote)> = r
             .releases_due(ts(1_500_000_000))
             .map(|(name, note)| (name.as_str().to_owned(), note))
@@ -835,11 +837,12 @@ mod tests {
             due.iter()
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["alpha"]
+            vec!["alpha", "bravo"]
         );
-        // The yielded note is the release bound to its own record.
+        // Each yielded note is the release bound to its own record.
         assert!(matches!(due[0].1, NameNote::Release { .. }));
         assert_eq!(due[0].1.prev(), Some(commitment(1)));
+        assert_eq!(due[1].1.prev(), Some(commitment(2)));
     }
 
     /// Two backed claims for the same name confirm in order: the first
@@ -1125,7 +1128,7 @@ mod tests {
             expires_at: term,
             prev: commitment(1),
         };
-        assert!(r.accept_transition(&list, commitment(20), nullifier(20), &[nullifier(1)], at,));
+        assert!(r.accept_transition(&list, commitment(20), nullifier(20), &[nullifier(1)], at));
         let held = r.record(&test_name()).unwrap().commitment;
         assert!(r
             .sale_transfer(&test_name(), &bob, term, commitment(2))
@@ -1218,7 +1221,7 @@ mod tests {
         });
         assert!(r.authorize_delist(&delist, mtp).is_none(), "not listed");
         let mut r = r;
-        assert!(r.accept_transition(&note, commitment(20), nullifier(20), &[nullifier(1)], at,));
+        assert!(r.accept_transition(&note, commitment(20), nullifier(20), &[nullifier(1)], at));
         let note = r.authorize_delist(&delist, mtp).unwrap();
         assert_eq!(note.ua(), &alice);
         assert_eq!(note.expires_at(), Some(term));
