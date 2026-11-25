@@ -38,8 +38,8 @@ use treasury::OtpCode;
 pub const TREASURY_ACCOUNT: AccountId = AccountId::const_from_u32(0);
 pub const REGISTRY_ACCOUNT: AccountId = AccountId::const_from_u32(1);
 
-/// The liveness interval: one Julian year (365.25 days), in seconds.
-pub const LIVENESS_INTERVAL: i64 = 31_557_600;
+/// One Julian year (365.25 days), in seconds: the unit of a term.
+pub const JULIAN_YEAR: i64 = 31_557_600;
 
 /// Minimum Treasury Ironwood balance after boot sync (0.002 ZEC).
 pub const MIN_TREASURY_BALANCE: u64 = 200_000;
@@ -639,7 +639,6 @@ pub fn apply_block(
                         successor,
                         &nfs,
                         height,
-                        block_mtp,
                     );
                 } else {
                     registry.accept_transition(
@@ -648,7 +647,6 @@ pub fn apply_block(
                         candidate.nullifier,
                         &nfs,
                         height,
-                        block_mtp,
                     );
                 }
             }

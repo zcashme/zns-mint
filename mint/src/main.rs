@@ -703,8 +703,8 @@ async fn main() {
         // it lands; the release below waits for it.
         name_notes.expire_sent(tip);
 
-        // Lifecycle releases, §4.5: the registry owns the clocks and
-        // their plural; each tip admits the release notes.
+        // Lifecycle releases, §4.5.2: the registry owns the term clock
+        // and its plural; each tip admits the release notes.
         // `releases_due` re-derives the same notes per tip, so
         // admission is idempotent.
         for (name, release_note) in registry.releases_due(mtp_now) {

@@ -26,7 +26,7 @@ The **registry** holds the name record. When the mint accepts a request, it writ
 
 A name is one to sixty-three characters, lowercase letters and digits. It points at a unified address that can receive shielded notes.
 
-A registration lasts a number of years, or it is **forever**. Forever still has to be touched about once a year. If a year passes with no update, or if a paid term runs out, the mint releases the name itself and the word is free again.
+A registration lasts a number of years, or it is **forever**. When a paid term runs out, the mint releases the name itself and the word is free again.
 
 ## Memos
 
@@ -101,7 +101,7 @@ A release ends a registration before its term is up. The address in the memo is 
 
 The name is free again. The release note keeps the address that let go of it, so the chain still shows who released it.
 
-The mint also releases a name on its own when the paid term ends, or when about a year has passed since the last claim or update. Those releases are the same kind of registry note. They do not wait for a code.
+The mint also releases a name on its own when the paid term ends. Those releases are the same kind of registry note. They do not wait for a code.
 
 ## Payment
 

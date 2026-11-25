@@ -466,7 +466,7 @@ mod tests {
         let other = admit(&mut q, release("alice"), *b"333333");
         q.challenge_issued(&other);
 
-        // Five wrong responses against the check-in are tolerated: its
+        // Five wrong responses against the update are tolerated: its
         // right code still answers.
         for n in 1..MAX_ATTEMPTS {
             let wrong: [u8; 6] = format!("{n:06}").as_bytes().try_into().unwrap();

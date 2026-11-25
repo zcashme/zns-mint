@@ -1582,7 +1582,6 @@
         {
           "kind": "claim",
           "height": 110,
-          "mtp_secs": 1700000000,
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "expires_at_secs": null,
@@ -1615,7 +1614,6 @@
               "expires_at_secs": null,
               "commitment": "00a1000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 110,
-              "release_deadline_secs": 1731557600,
               "nullifier": "a100000000000000000000000000000000000000000000000000000000000000"
             }
           }
@@ -1634,7 +1632,6 @@
         {
           "kind": "unbacked_claim",
           "height": 110,
-          "mtp_secs": 1700000000,
           "name": "mallory",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "expires_at_secs": null,
@@ -1679,7 +1676,6 @@
         {
           "kind": "claim",
           "height": 110,
-          "mtp_secs": 1700000000,
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "expires_at_secs": null,
@@ -1692,7 +1688,6 @@
         {
           "kind": "claim",
           "height": 120,
-          "mtp_secs": 1700100000,
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "expires_at_secs": null,
@@ -1735,7 +1730,6 @@
               "expires_at_secs": null,
               "commitment": "00a1000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 110,
-              "release_deadline_secs": 1731557600,
               "nullifier": "a100000000000000000000000000000000000000000000000000000000000000"
             }
           }
@@ -1753,7 +1747,6 @@
               "expires_at_secs": null,
               "commitment": "00a1000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 110,
-              "release_deadline_secs": 1731557600,
               "nullifier": "a100000000000000000000000000000000000000000000000000000000000000"
             }
           }
@@ -1777,7 +1770,6 @@
         {
           "kind": "claim",
           "height": 110,
-          "mtp_secs": 1700000000,
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "expires_at_secs": null,
@@ -1790,7 +1782,6 @@
         {
           "kind": "release",
           "height": 200,
-          "mtp_secs": 1710000000,
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "prev_nullifier": "a100000000000000000000000000000000000000000000000000000000000000",
@@ -1800,7 +1791,6 @@
         {
           "kind": "claim",
           "height": 300,
-          "mtp_secs": 1720000000,
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "expires_at_secs": null,
@@ -1843,7 +1833,6 @@
               "expires_at_secs": null,
               "commitment": "00a1000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 110,
-              "release_deadline_secs": 1731557600,
               "nullifier": "a100000000000000000000000000000000000000000000000000000000000000"
             }
           }
@@ -1871,7 +1860,6 @@
               "expires_at_secs": null,
               "commitment": "00a2000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 300,
-              "release_deadline_secs": 1751557600,
               "nullifier": "a200000000000000000000000000000000000000000000000000000000000000"
             }
           }
@@ -1890,7 +1878,6 @@
         {
           "kind": "claim",
           "height": 110,
-          "mtp_secs": 1700000000,
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "expires_at_secs": 2000000000,
@@ -1903,7 +1890,6 @@
         {
           "kind": "update",
           "height": 200,
-          "mtp_secs": 1710000000,
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "expires_at_secs": 2100000000,
@@ -1914,7 +1900,6 @@
         {
           "kind": "release",
           "height": 300,
-          "mtp_secs": 1720000000,
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "prev_nullifier": "a200000000000000000000000000000000000000000000000000000000000000",
@@ -1944,7 +1929,6 @@
               "expires_at_secs": 2000000000,
               "commitment": "00a1000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 110,
-              "release_deadline_secs": 1731557600,
               "nullifier": "a100000000000000000000000000000000000000000000000000000000000000"
             }
           }
@@ -1962,7 +1946,6 @@
               "expires_at_secs": 2100000000,
               "commitment": "00a2000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 200,
-              "release_deadline_secs": 1741557600,
               "nullifier": "a200000000000000000000000000000000000000000000000000000000000000"
             }
           }
@@ -1989,7 +1972,6 @@
         {
           "kind": "claim",
           "height": 110,
-          "mtp_secs": 1700000000,
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "expires_at_secs": null,
@@ -2002,7 +1984,6 @@
         {
           "kind": "update",
           "height": 200,
-          "mtp_secs": 1710000000,
           "name": "alice",
           "ua": "u1d398kq0gfmegkvn0c57zmvq7gcnhxs6g3chfewlxq2yzhdjpx7uk3h80qgku5ygtyr9m7y6swgqe3pqdleu5uvwmangjj8yk7s5j0u78frtw9y9y5lx4c0x3cp054m9nl274xynwf5ad2uah7afyu4wgu3mwg5xvq4zmrdcplt8uqeqqw4vu4kdwngzvsn7gtdwtx3whkwt4z20pr0k",
           "expires_at_secs": null,
@@ -2037,7 +2018,6 @@
               "expires_at_secs": null,
               "commitment": "00a1000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 110,
-              "release_deadline_secs": 1731557600,
               "nullifier": "a100000000000000000000000000000000000000000000000000000000000000"
             }
           }
@@ -2055,7 +2035,6 @@
               "expires_at_secs": null,
               "commitment": "00a2000000000000000000000000000000000000000000000000000000000000",
               "confirmed_height": 200,
-              "release_deadline_secs": 1741557600,
               "nullifier": "a200000000000000000000000000000000000000000000000000000000000000"
             }
           }
