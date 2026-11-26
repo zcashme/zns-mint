@@ -1,5 +1,43 @@
 # Changelog
 
+## A refund is paid once, and again if it expires unmined (#626)
+
+2026-11-27
+
+A refund is sent from the moment its transaction goes to Zebra until
+the chain holds it, whatever Zebra answered. While it is sent, the same
+transaction goes to Zebra again on every block. If it is still unmined
+when it expires, 40 blocks after it was built, the mint builds it
+again.
+
+Before, a refund left the queue when Zebra accepted its transaction and
+stayed due when Zebra refused it. Neither answer is final: Zebra
+resubmits a refused transaction on later blocks, and loses an accepted
+one when it restarts.
+
+- A refused refund was built again with other notes. If Zebra mined
+  the first one as well, the payer was refunded twice. Now it is not
+  built again while its transaction can still be mined.
+- An accepted refund that was never mined was never sent again, and
+  the next sweep moved its money to the vault. Now it is resent, and
+  built again once it expires.
+- The daily vault sweep waits while a refund is due or sent. A refund
+  still sent at the first block of a new day skips that day's sweep.
+
+**A resend Zebra already holds.** The mint no longer reads Zebra's
+`transaction already exists in mempool` as accepted. A Name Note that
+gets this answer is built again on the next block; it spends the same
+note as the first, so only one is mined. A controller challenge or buy
+OTP is relayed again, which can cost one more relay fee.
+
+**Log lines.**
+
+- `refund mined` (info) is new.
+- `refund expired unmined; due again` (warn) is new.
+- `sent refund missing from the wallet; not resent` (error) is new.
+- `submitted` or `rejected` with `what="refund"` is logged on every
+  block while a refund is sent.
+
 ## Zebra is reached over gRPC only (#612)
 
 2026-11-26

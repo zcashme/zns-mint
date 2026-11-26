@@ -51,23 +51,6 @@ impl CanonicalBlockSource {
 // The error policy
 // ============================================================================
 
-/// A submission error as `SendResponse` carries it: Zebra's JSON-RPC code
-/// and message.
-#[derive(Debug, Error)]
-#[error("RPC error {code}: {message}")]
-pub struct RpcError {
-    code: i64,
-    message: String,
-}
-
-impl RpcError {
-    /// Zebra's `MempoolError::InMempool`, which shares -1 with every other
-    /// mempool refusal.
-    pub fn is_already_in_mempool(&self) -> bool {
-        self.message == "transaction already exists in mempool"
-    }
-}
-
 /// Maps the node's tip-race verdict to [`TransportError::NotOnBestChain`],
 /// so a race never reads as malformed data or transport death: gRPC
 /// `not_found` for a hash or height off the best chain.
@@ -91,8 +74,6 @@ pub enum TransportError {
     /// current best chain — a tip race, not bad data and not transport.
     #[error("hash or height is not on the node's current best chain")]
     NotOnBestChain,
-    #[error("{0}")]
-    Rpc(RpcError),
     #[error("gRPC status: {0}")]
     Tonic(#[from] tonic::Status),
 }

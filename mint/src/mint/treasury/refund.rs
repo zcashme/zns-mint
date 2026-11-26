@@ -1,10 +1,15 @@
 //! Refunds due from the run loop.
 //!
 //! A refund is a Treasury payment, funded from Sapling or Ironwood, with
-//! change in Ironwood, and the wallet's from there, like a sweep. Its amount
-//! is fixed when it is admitted: the payment less `CHALLENGE_FEE`, so the
-//! payer covers the fee. A refund is built on the tip pass after its
-//! payment's block.
+//! change in Ironwood. Its amount is fixed when it is admitted: the payment
+//! less `CHALLENGE_FEE`, so the payer covers the fee. A refund is built on
+//! the tip pass after its payment's block.
+//!
+//! Once built and handed to Zebra, a refund is sent until it is mined or
+//! its expiry height passes, whatever Zebra answered: Zebra resubmits a
+//! transaction it refused, and drops one it accepted, so neither answer is
+//! final. A sent refund is never built again while it can still be mined,
+//! and one that expired unmined is built again.
 
 use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
@@ -58,12 +63,22 @@ impl RefundRequest {
     }
 }
 
-/// Refunds due, in admission order. A refund leaves when it is built and
-/// accepted (`paid`) or when a reorg orphans its payment's block
+/// Where a queued refund stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefundState {
+    /// Not built yet, or its transaction expired unmined.
+    Due,
+    /// Its transaction `txid` went to Zebra and can be mined up to and
+    /// including block `expiry`.
+    Sent { txid: TxId, expiry: BlockHeight },
+}
+
+/// Refunds owed, in admission order. A refund leaves when its transaction
+/// is mined (`settle`) or when a reorg orphans its payment's block
 /// (`truncate_to`); nothing else removes it.
 #[derive(Clone, Debug, Default)]
 pub struct RefundQueue {
-    refunds_due: Vec<RefundRequest>,
+    refunds: Vec<(RefundRequest, RefundState)>,
 }
 
 impl RefundQueue {
@@ -108,41 +123,90 @@ impl RefundQueue {
             refund = amount.into_u64(),
             "payment refund"
         );
-        self.refunds_due.push(RefundRequest {
-            payment: txid,
-            recipient: recipient.clone(),
-            amount,
-            name: name.clone(),
-            height,
-            note,
-        });
+        self.refunds.push((
+            RefundRequest {
+                payment: txid,
+                recipient: recipient.clone(),
+                amount,
+                name: name.clone(),
+                height,
+                note,
+            },
+            RefundState::Due,
+        ));
     }
 
-    /// The refunds whose payment is below `tip`, in admission order.
+    /// The refunds to build: due, with their payment below `tip`, in
+    /// admission order.
     pub fn due(&self, tip: BlockHeight) -> Vec<RefundRequest> {
-        self.refunds_due
+        self.refunds
             .iter()
-            .filter(|refund| refund.height < tip)
-            .cloned()
+            .filter(|(refund, state)| *state == RefundState::Due && refund.height < tip)
+            .map(|(refund, _)| refund.clone())
             .collect()
     }
 
-    /// Whether no refund is queued, due or not.
-    pub fn is_empty(&self) -> bool {
-        self.refunds_due.is_empty()
+    /// The transactions of sent refunds, to hand to Zebra again: the same
+    /// bytes, so a resend can never pay twice.
+    pub fn sent_txids(&self) -> Vec<TxId> {
+        self.refunds
+            .iter()
+            .filter_map(|(_, state)| match state {
+                RefundState::Sent { txid, .. } => Some(*txid),
+                RefundState::Due => None,
+            })
+            .collect()
     }
 
-    /// `built` is built and the node accepted it. One transaction can carry
-    /// several refunds, so only the entry equal to `built` leaves.
-    pub fn paid(&mut self, built: &RefundRequest) {
-        if let Some(i) = self.refunds_due.iter().position(|refund| refund == built) {
-            self.refunds_due.remove(i);
+    /// Whether no refund is queued, due or sent.
+    pub fn is_empty(&self) -> bool {
+        self.refunds.is_empty()
+    }
+
+    /// `built` went to Zebra as transaction `txid`, valid up to and
+    /// including block `expiry`, whatever Zebra answered. Two equal refunds
+    /// can be owed, so only the first due entry equal to `built` is sent.
+    pub fn sent(&mut self, built: &RefundRequest, txid: TxId, expiry: BlockHeight) {
+        if let Some((_, state)) = self
+            .refunds
+            .iter_mut()
+            .find(|(refund, state)| *state == RefundState::Due && refund == built)
+        {
+            *state = RefundState::Sent { txid, expiry };
         }
+    }
+
+    /// Settles each sent refund at the applied `tip`. A refund whose
+    /// transaction `mined` leaves. One whose transaction can no longer be
+    /// mined is due again: the last valid block is `expiry` itself (ZIP
+    /// 203), so it returns when the tip reaches it, as the wallet frees the
+    /// notes it spent. Expiry height zero means no expiry: such a refund
+    /// stays sent until it is mined.
+    pub fn settle(&mut self, tip: BlockHeight, mined: impl Fn(TxId) -> bool) {
+        self.refunds.retain_mut(|(refund, state)| {
+            let RefundState::Sent { txid, expiry } = *state else {
+                return true;
+            };
+            if mined(txid) {
+                tracing::info!(%txid, payment = %refund.payment, "refund mined");
+                return false;
+            }
+            if u32::from(expiry) != 0 && tip >= expiry {
+                tracing::warn!(
+                    %txid,
+                    payment = %refund.payment,
+                    expiry = u32::from(expiry),
+                    "refund expired unmined; due again"
+                );
+                *state = RefundState::Due;
+            }
+            true
+        });
     }
 
     /// Reorg: refunds whose payment's block was orphaned fall with it.
     pub fn truncate_to(&mut self, ancestor: BlockHeight) {
-        self.refunds_due.retain(|refund| refund.height <= ancestor);
+        self.refunds.retain(|(refund, _)| refund.height <= ancestor);
     }
 }
 
@@ -206,45 +270,95 @@ mod tests {
         assert!(noted.is_empty());
     }
 
+    const REFUND_TX: TxId = TxId::from_bytes([7; 32]);
+
+    fn h(height: u32) -> BlockHeight {
+        BlockHeight::from_u32(height)
+    }
+
+    /// Admits one refund at height 10 and sends it as `REFUND_TX`, valid
+    /// through block 50.
+    fn sent_queue() -> RefundQueue {
+        let mut queue = RefundQueue::default();
+        admit(&mut queue, TxId::from_bytes([1; 32]), 10);
+        let built = queue.due(h(11)).remove(0);
+        queue.sent(&built, REFUND_TX, h(50));
+        queue
+    }
+
     #[test]
-    fn a_refund_leaves_when_built_or_when_its_payment_is_orphaned() {
+    fn a_refund_whose_payment_is_orphaned_leaves_due_or_sent() {
         let kept = TxId::from_bytes([1; 32]);
         let orphaned = TxId::from_bytes([2; 32]);
         let mut queue = RefundQueue::default();
         admit(&mut queue, kept, 10);
         admit(&mut queue, orphaned, 30);
+        let built = queue.due(deep()).remove(1);
+        queue.sent(&built, REFUND_TX, h(70));
 
-        queue.truncate_to(BlockHeight::from_u32(20));
+        queue.truncate_to(h(20));
         let left: Vec<_> = queue
             .due(deep())
             .iter()
             .map(RefundRequest::payment)
             .collect();
         assert_eq!(left, vec![kept]);
+        assert!(queue.sent_txids().is_empty());
+    }
 
-        let built = queue.due(deep()).remove(0);
-        queue.paid(&built);
-        assert!(queue.due(deep()).is_empty());
+    /// #625: a refund Zebra refused may still be mined, so it is not built
+    /// again while its transaction is valid. It stays queued, so the vault
+    /// sweep keeps waiting for it.
+    #[test]
+    fn a_sent_refund_is_not_built_again_before_its_expiry() {
+        let mut queue = sent_queue();
+        for tip in [h(11), h(30), h(49)] {
+            queue.settle(tip, |_| false);
+            assert!(queue.due(tip).is_empty(), "rebuilt at {tip:?}");
+            assert_eq!(queue.sent_txids(), vec![REFUND_TX]);
+        }
+        assert!(!queue.is_empty());
+    }
+
+    /// #525: a refund whose transaction expired unmined is due again, at
+    /// the tip where the wallet frees the notes it spent.
+    #[test]
+    fn a_sent_refund_that_expires_unmined_is_due_again() {
+        let mut queue = sent_queue();
+        queue.settle(h(50), |_| false);
+        assert_eq!(queue.due(h(50)).len(), 1);
+        assert!(queue.sent_txids().is_empty());
     }
 
     #[test]
-    fn a_built_refund_leaves_the_others_from_its_transaction() {
-        let txid = TxId::from_bytes([1; 32]);
-        let mut queue = RefundQueue::default();
-        admit(&mut queue, txid, 10);
-        queue.admit(
-            txid,
-            &ua(),
-            &alice(),
-            BlockHeight::from_u32(10),
-            Zatoshis::const_from_u64(2_000_000),
-        );
+    fn a_mined_refund_leaves_even_in_its_expiry_block() {
+        let mut queue = sent_queue();
+        queue.settle(h(50), |txid| txid == REFUND_TX);
+        assert!(queue.is_empty());
+    }
 
-        let second = queue.due(deep()).remove(1);
-        queue.paid(&second);
-        let left = queue.due(deep());
-        assert_eq!(left.len(), 1);
-        assert_eq!(left[0].amount(), Zatoshis::const_from_u64(900_000));
+    #[test]
+    fn a_refund_sent_without_expiry_waits_until_mined() {
+        let mut queue = RefundQueue::default();
+        admit(&mut queue, TxId::from_bytes([1; 32]), 10);
+        let built = queue.due(h(11)).remove(0);
+        queue.sent(&built, REFUND_TX, h(0));
+        queue.settle(deep(), |_| false);
+        assert!(queue.due(deep()).is_empty());
+        assert_eq!(queue.sent_txids(), vec![REFUND_TX]);
+    }
+
+    #[test]
+    fn two_equal_refunds_are_sent_one_at_a_time() {
+        let payment = TxId::from_bytes([1; 32]);
+        let mut queue = RefundQueue::default();
+        admit(&mut queue, payment, 10);
+        admit(&mut queue, payment, 10);
+
+        let first = queue.due(deep()).remove(0);
+        queue.sent(&first, REFUND_TX, h(50));
+        assert_eq!(queue.due(deep()).len(), 1);
+        assert_eq!(queue.sent_txids(), vec![REFUND_TX]);
     }
 
     #[test]

@@ -5,16 +5,17 @@ use zebra_indexer_proto::lightwalletd::RawTransaction;
 
 use super::RETRY_PAUSE;
 
-use super::{RpcError, TransportError};
+use super::TransportError;
 
 /// The node's answer to "carry this".
 #[derive(Debug)]
 pub enum SubmitOutcome {
     /// The node admitted the transaction to its mempool.
     Accepted,
-    /// The node rejected the transaction under its consensus or policy
-    /// rules: an answer, not a transport failure.
-    Rejected(TransportError),
+    /// The node refused the transaction under its consensus or policy
+    /// rules: an answer, not a transport failure. The text is the node's
+    /// reason, for the log.
+    Rejected(String),
 }
 
 impl super::CanonicalBlockSource {
@@ -27,8 +28,8 @@ impl super::CanonicalBlockSource {
                     tracing::info!(txid = %tx.txid(), what = label, "submitted");
                     return true;
                 }
-                Ok(SubmitOutcome::Rejected(error)) => {
-                    tracing::error!(%error, txid = %tx.txid(), what = label, "rejected");
+                Ok(SubmitOutcome::Rejected(reason)) => {
+                    tracing::error!(error = %reason, txid = %tx.txid(), what = label, "rejected");
                     return false;
                 }
                 Err(error) => {
@@ -74,7 +75,7 @@ impl super::CanonicalBlockSource {
                 return if error.is_retryable() {
                     Err(error)
                 } else {
-                    Ok(SubmitOutcome::Rejected(error))
+                    Ok(SubmitOutcome::Rejected(error.to_string()))
                 };
             }
         };
@@ -86,21 +87,13 @@ impl super::CanonicalBlockSource {
                 Some(txid) if txid == tx.txid() => Ok(SubmitOutcome::Accepted),
                 // A success envelope that names another transaction — or
                 // no transaction at all — is a node verdict, not ours.
-                _ => Ok(SubmitOutcome::Rejected(TransportError::BadNodeData(
-                    "SendTransaction named a different transaction",
-                ))),
+                _ => Ok(SubmitOutcome::Rejected(
+                    "bad node data for SendTransaction named a different transaction".to_string(),
+                )),
             },
-            Err((code, message)) => {
-                let rpc = RpcError {
-                    code: code.into(),
-                    message: message.to_string(),
-                };
-                if rpc.is_already_in_mempool() {
-                    Ok(SubmitOutcome::Accepted)
-                } else {
-                    Ok(SubmitOutcome::Rejected(TransportError::Rpc(rpc)))
-                }
-            }
+            Err((code, message)) => Ok(SubmitOutcome::Rejected(format!(
+                "RPC error {code}: {message}"
+            ))),
         }
     }
 }

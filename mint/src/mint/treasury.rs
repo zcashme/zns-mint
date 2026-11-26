@@ -116,9 +116,9 @@ pub enum BuildFailure<ProposalError, TransactionError> {
 }
 
 /// Builds one refund: a Treasury payment of its amount to its recipient,
-/// funded from Sapling or Ironwood, with change in Ironwood. The wallet owns
-/// it from there, as it owns a sweep: one that expires unmined is kept, and
-/// the next sweep moves the money. `Ok(None)` means the Treasury cannot fund it yet.
+/// funded from Sapling or Ironwood, with change in Ironwood. The refund
+/// queue follows it from there until it is mined, and builds it again if it
+/// expires unmined. `Ok(None)` means the Treasury cannot fund it yet.
 pub fn issue_refund(
     wallet: &mut Wallet<Network>,
     treasury_keys: &crate::TreasuryKeys,
