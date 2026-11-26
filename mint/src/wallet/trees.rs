@@ -218,13 +218,18 @@ mod tests {
         // A frontier at the last leaf of shard 0 makes that shard complete
         // — its root is computable, so a differing claimed root conflicts.
         let leaf = sapling::Node::empty_root(Level::from(31));
-        let ommers: Vec<sapling::Node> = (0..16u8)
+        let ommers: Vec<sapling::Node> = (0..SAPLING_SHARD_HEIGHT)
             .map(|k| sapling::Node::empty_root(Level::from(k)))
             .collect();
         let origin = ChainState::new(
             h(1),
             BlockHash([0; 32]),
-            Frontier::from_parts(Position::from(65_535), leaf, ommers).unwrap(),
+            Frontier::from_parts(
+                Position::from((1u64 << SAPLING_SHARD_HEIGHT) - 1),
+                leaf,
+                ommers,
+            )
+            .unwrap(),
             Frontier::empty(),
             Frontier::empty(),
         );
