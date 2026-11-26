@@ -339,7 +339,7 @@ pub(crate) mod testing {
         .is_some();
         if frontier_loaded {
             wallet.seed = block_metadata(prior);
-            let birthday = BlockHeight::from_u32(u32::from(prior.block_height()).saturating_add(1));
+            let birthday = prior.block_height() + 1;
             wallet.ufvks.insert(id, usk.to_unified_full_viewing_key());
             wallet.account_birthdays.insert(id, birthday);
             wallet.scanning_keys = ScanningKeys::from_account_ufvks(wallet.ufvks.clone());

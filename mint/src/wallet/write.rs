@@ -1545,7 +1545,7 @@ mod tests {
                     .store_mut()
                     .add_checkpoint(
                         height,
-                        Checkpoint::at_position(Position::from(u64::from(2 * pruned - 1))),
+                        Checkpoint::at_position(Position::from(u64::from(base + 2 * pruned - 1))),
                     )
                     .unwrap();
                 assert!(matches!(
@@ -1722,7 +1722,7 @@ mod tests {
         let value = Zatoshis::const_from_u64(50_000);
         let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
         st.scan_cached_blocks(h1, 1);
-        let above = BlockHeight::from_u32(u32::from(h1) + 10);
+        let above = h1 + 10;
         let metadata = st
             .wallet_mut()
             .truncate_to(above)
@@ -1749,7 +1749,7 @@ mod tests {
         // An external driver supplies a tip far beyond every applied
         // height — every catch-up's normal state, and the condition under
         // which the tip-derived floor used to swallow rewinds whole.
-        let ahead = BlockHeight::from_u32(u32::from(h3) + 10_000);
+        let ahead = h3 + 10_000;
         st.wallet_mut().update_chain_tip(ahead).unwrap();
 
         // The claimed ancestor: the wallet's own block at h1, with its hash.
@@ -1804,7 +1804,7 @@ mod tests {
             .is_empty());
 
         // A lock expiring above the position stays listed.
-        let above = BlockHeight::from_u32(u32::from(position) + 10);
+        let above = position + 10;
         assert_eq!(
             st.wallet_mut()
                 .lock_outputs(&[output_ref], owner, above)
