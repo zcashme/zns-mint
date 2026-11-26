@@ -1,5 +1,13 @@
 # Zcash I/O changelog
 
+## 2026-11-26 — `decode_tree` takes the depth from `ChainState::new` (#615)
+
+- `decode_tree<Node, const DEPTH: u8>`: each pool's `Node` and depth
+  are inferred from the `ChainState::new` slot its frontier fills, so
+  the mint no longer writes the tree depth as `32`.
+- The test helper `tree_hex` is `EMPTY_TREE_HEX` (`"000000"`), the
+  encoding of an empty commitment tree at any depth.
+
 ## 2026-11-26 — Zebra over gRPC only; a dropped connection retries (#612)
 
 - `TransportError::is_retryable` retries every gRPC status except

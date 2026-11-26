@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use futures_util::{FutureExt as _, StreamExt as _};
 use incrementalmerkletree::frontier::Frontier;
-use sapling::Node as SaplingNode;
 use zcash_client_backend::data_api::chain::ChainState;
 use zcash_encoding::ReverseHex;
 use zcash_primitives::block::{Block, BlockHash};
@@ -22,7 +21,6 @@ use zebra_indexer_proto::{
 use super::{
     not_on_best_chain, CanonicalBlockSource, TransportError, REQUEST_TIMEOUT, RETRY_PAUSE,
 };
-use orchard::tree::MerkleHashOrchard;
 
 /// The indexer's gRPC endpoint.
 #[cfg(not(all(feature = "testnet", not(feature = "regtest"))))]
@@ -343,17 +341,17 @@ fn chain_state_from_tree_state(response: TreeState) -> Result<ChainState, Transp
     if response.sapling_tree.is_empty() {
         return Err(TransportError::BadNodeData("missing Sapling tree"));
     }
-    let sapling_tree = decode_tree::<SaplingNode>(&response.sapling_tree, "Sapling")?;
+    let sapling_tree = decode_tree(&response.sapling_tree, "Sapling")?;
 
     if response.orchard_tree.is_empty() {
         return Err(TransportError::BadNodeData("missing Orchard tree"));
     }
-    let orchard_tree = decode_tree::<MerkleHashOrchard>(&response.orchard_tree, "Orchard")?;
+    let orchard_tree = decode_tree(&response.orchard_tree, "Orchard")?;
 
     if response.ironwood_tree.is_empty() {
         return Err(TransportError::BadNodeData("missing Ironwood tree"));
     }
-    let ironwood_tree = decode_tree::<MerkleHashOrchard>(&response.ironwood_tree, "Ironwood")?;
+    let ironwood_tree = decode_tree(&response.ironwood_tree, "Ironwood")?;
 
     let height = u32::try_from(response.height)
         .map_err(|_| TransportError::BadNodeData("tree state height"))?;
@@ -371,10 +369,10 @@ fn chain_state_from_tree_state(response: TreeState) -> Result<ChainState, Transp
 }
 
 /// Decodes one tree's hex into the upstream frontier value.
-fn decode_tree<Node>(
+fn decode_tree<Node, const DEPTH: u8>(
     hex_state: &str,
     name: &'static str,
-) -> Result<Frontier<Node, 32>, TransportError>
+) -> Result<Frontier<Node, DEPTH>, TransportError>
 where
     Node: HashSer + incrementalmerkletree::Hashable + Clone,
 {
@@ -382,7 +380,7 @@ where
         TransportError::BadCheckpoint(format!("{name} tree hex decode failed: {e}"))
     })?;
 
-    read_commitment_tree::<Node, _, 32>(&bytes[..])
+    read_commitment_tree::<Node, _, DEPTH>(&bytes[..])
         .map(|tree| tree.to_frontier())
         .map_err(|e| TransportError::BadCheckpoint(format!("{name} tree decode failed: {e}")))
 }
@@ -413,28 +411,16 @@ mod tests {
         assert_eq!(block_hash.0[31], 0xab);
     }
 
-    /// A commitment tree's hex, as `TreeState` carries it — built with
-    /// the upstream writer so the fixtures exercise our reader against
-    /// the real encoding.
-    fn tree_hex<Node>() -> String
-    where
-        Node: HashSer + incrementalmerkletree::Hashable + Clone,
-    {
-        let mut bytes = Vec::new();
-        zcash_primitives::merkle_tree::write_commitment_tree::<Node, _, 32>(
-            &incrementalmerkletree::frontier::CommitmentTree::<Node, 32>::empty(),
-            &mut bytes,
-        )
-        .expect("an empty tree serializes");
-        hex::encode(bytes)
-    }
+    /// An empty commitment tree as `write_commitment_tree` encodes it: no
+    /// left, no right, no parents.
+    const EMPTY_TREE_HEX: &str = "000000";
 
     fn treestate(ironwood: String) -> TreeState {
         TreeState {
             height: 1000,
             hash: hex::encode([0u8; 32]),
-            sapling_tree: tree_hex::<SaplingNode>(),
-            orchard_tree: tree_hex::<MerkleHashOrchard>(),
+            sapling_tree: EMPTY_TREE_HEX.to_string(),
+            orchard_tree: EMPTY_TREE_HEX.to_string(),
             ironwood_tree: ironwood,
             ..TreeState::default()
         }
@@ -451,7 +437,7 @@ mod tests {
 
     #[test]
     fn treestate_malformed_hash_is_bad_node_data() {
-        let mut garbage = treestate(tree_hex::<MerkleHashOrchard>());
+        let mut garbage = treestate(EMPTY_TREE_HEX.to_string());
         garbage.hash = "not-hex!".to_string();
         assert!(matches!(
             chain_state_from_tree_state(garbage),
@@ -461,7 +447,7 @@ mod tests {
 
     #[test]
     fn treestate_missing_sapling_state_is_bad_node_data() {
-        let mut garbage = treestate(tree_hex::<MerkleHashOrchard>());
+        let mut garbage = treestate(EMPTY_TREE_HEX.to_string());
         garbage.sapling_tree = String::new();
         assert!(matches!(
             chain_state_from_tree_state(garbage),
