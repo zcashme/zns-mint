@@ -828,10 +828,28 @@ async fn main() {
             }
         }
 
+        // A sent refund leaves once the applied chain holds it, and is due
+        // again once its expiry passes unmined. Until then the same signed
+        // transaction goes to Zebra on every tip: Zebra drops a transaction
+        // it accepted when it restarts, and gives up retrying one it
+        // refused after a few blocks.
+        refunds.settle(tip, |txid| {
+            wallet
+                .get_tx_height(txid)
+                .is_ok_and(|height| height.is_some())
+        });
+        for txid in refunds.sent_txids() {
+            match wallet.get_transaction(txid) {
+                Ok(Some(tx)) => {
+                    source.submit(&tx, "refund").await;
+                }
+                _ => tracing::error!(%txid, "sent refund missing from the wallet; not resent"),
+            }
+        }
+
         // A refund is built on the pass after its payment's block, like a
-        // Name Note, one transaction each. The wallet owns it from there,
-        // like a sweep. One the Treasury cannot fund yet, or the node
-        // refused, stays due.
+        // Name Note, one transaction each. Whatever the node answers, it is
+        // sent: one the Treasury cannot fund yet stays due.
         for refund in refunds.due(tip) {
             match treasury::issue_refund(
                 &mut wallet,
@@ -842,9 +860,8 @@ async fn main() {
                 &refund,
             ) {
                 Ok(Some(tx)) => {
-                    if source.submit(&tx, "refund").await {
-                        refunds.paid(&refund);
-                    }
+                    source.submit(&tx, "refund").await;
+                    refunds.sent(&refund, tx.txid(), tx.expiry_height());
                 }
                 Ok(None) => {}
                 Err(error) => {
