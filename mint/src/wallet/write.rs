@@ -1030,7 +1030,7 @@ mod tests {
     use zcash_client_backend::data_api::testing::{pool, sapling::SaplingPoolTester};
     use zcash_client_backend::data_api::wallet::ConfirmationsPolicy;
     use zcash_client_backend::data_api::Account;
-    use zcash_client_backend::data_api::{WalletRead, WalletWrite};
+    use zcash_client_backend::data_api::{WalletRead, WalletWrite, IRONWOOD_SHARD_HEIGHT};
     use zcash_primitives::block::BlockHash;
     use zcash_protocol::consensus::{BlockHeight, MainNetwork};
     use zcash_protocol::value::Zatoshis;
@@ -1527,7 +1527,11 @@ mod tests {
             let origin = empty_origin();
             let mut wallet = Wallet::new([], &origin, MainNetwork).expect("valid wallet");
             // Start just before a shard boundary to exercise cap and shard truncation.
-            let base = if scenario == 4 { (1 << 16) - 4 } else { 0 };
+            let base = if scenario == 4 {
+                (1 << IRONWOOD_SHARD_HEIGHT) - 4
+            } else {
+                0
+            };
             let targets = build(&mut wallet, base);
             let target = targets[target_index].clone();
             let height = target.block_height();
