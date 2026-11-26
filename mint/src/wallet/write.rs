@@ -29,10 +29,7 @@ use zcash_protocol::memo::Memo;
 use zcash_protocol::{PoolType, ShieldedPool};
 use zip32::{AccountId, DiversifierIndex};
 
-use super::{
-    read::{next_height, WalletError},
-    TreeError, Wallet, MAX_CHECKPOINTS,
-};
+use super::{read::WalletError, TreeError, Wallet};
 
 impl<P: Parameters> Wallet<P> {
     /// Returns the account that owns a wallet output, if the reference
@@ -279,7 +276,7 @@ impl<P: Parameters> OutputLockStore for Wallet<P> {
     }
 
     fn get_locked_outputs(&self, account: Self::AccountId) -> Result<Vec<OutputRef>, Self::Error> {
-        let target = next_height(self.tip().block_height());
+        let target = self.tip().block_height() + 1;
         Ok(self
             .locks
             .iter()
@@ -340,7 +337,7 @@ where
             .map_err(shardtree::error::ShardTreeError::Storage)?;
     }
 
-    Ok(ShardTree::new(dst, MAX_CHECKPOINTS))
+    Ok(ShardTree::new(dst, tree.max_checkpoints()))
 }
 
 /// Checkpoints `height` in this pool — every accepted height, in all three
@@ -745,7 +742,7 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         }
 
         // Height to which acknowledged accounts may have their birthday lowered.
-        let new_birthday = next_height(chain_state.block_height());
+        let new_birthday = chain_state.block_height() + 1;
 
         // Empty acknowledgement set: refuse only when every account would need
         // its birthday lowered to reach the rewind target.
@@ -891,11 +888,11 @@ impl<P: Parameters> Wallet<P> {
         // Continuity: the batch must start exactly at the block after
         // `from_tip`, heights must be sequential, and `from_tip` must be
         // the wallet's applied tip. All checks run before any mutation.
-        if next_height(from_tip.block_height()) != first.height() {
+        if from_tip.block_height() + 1 != first.height() {
             return Err(WalletError::ChainDiscontinuity(first.height()));
         }
         for pair in blocks.windows(2) {
-            if next_height(pair[0].height()) != pair[1].height() {
+            if pair[0].height() + 1 != pair[1].height() {
                 return Err(WalletError::ChainDiscontinuity(pair[1].height()));
             }
         }
@@ -1019,7 +1016,8 @@ impl<P: Parameters> Wallet<P> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Wallet, WalletError, MAX_CHECKPOINTS};
+    use super::{Wallet, WalletError};
+    use crate::wallet::MAX_CHECKPOINTS;
     use incrementalmerkletree::frontier::Frontier;
     use orchard::NOTE_COMMITMENT_TREE_DEPTH as ORCHARD_NOTE_COMMITMENT_TREE_DEPTH;
     use zcash_client_backend::data_api::chain::ChainState;
@@ -1397,11 +1395,15 @@ mod tests {
         use orchard::tree::MerkleHashOrchard;
         use zcash_client_backend::data_api::BlockMetadata;
 
-        // 146 blocks × 2 Ironwood commitments; the block-2 note is marked,
+        let window = MAX_CHECKPOINTS as u32;
+        let pruned = 45u32;
+        let tip = pruned + window + 1;
+        let retained = tip - window / 2;
+
+        // 2 Ironwood commitments per block; the block-2 note is marked,
         // using the retention decrypted notes and Name Notes carry.
         // Each block's last commitment takes the scanner's Checkpoint
-        // retention, so 146 checkpoints age anything older than ~100 out
-        // of the window.
+        // retention.
         let build = |wallet: &mut Wallet<MainNetwork>, base: u32| {
             // Keep a real note row below the cut, as production scanning does.
             let sk = orchard::keys::SpendingKey::from_bytes([7u8; 32])
@@ -1470,7 +1472,7 @@ mod tests {
                 .ironwood_tree
                 .insert_frontier(frontier.clone(), Retention::Ephemeral)
                 .unwrap();
-            for h in 1..=146u32 {
+            for h in 1..=tip {
                 let height = BlockHeight::from_u32(h);
                 for i in 0..2u8 {
                     let retention = if h == 2 && i == 0 {
@@ -1507,7 +1509,7 @@ mod tests {
                     .expect("empty-pool checkpoint backfill succeeds");
                 super::ensure_block_checkpoint(&mut wallet.orchard_tree, height)
                     .expect("empty-pool checkpoint backfill succeeds");
-                if h == 45 || h == 100 {
+                if h == pruned || h == retained {
                     targets.push(ChainState::new(
                         height,
                         BlockHash([7u8; 32]),
@@ -1517,7 +1519,7 @@ mod tests {
                     ));
                 }
             }
-            wallet.update_chain_tip(BlockHeight::from_u32(146)).unwrap();
+            wallet.update_chain_tip(BlockHeight::from_u32(tip)).unwrap();
             targets
         };
 
@@ -1541,7 +1543,10 @@ mod tests {
                 wallet
                     .ironwood_tree
                     .store_mut()
-                    .add_checkpoint(height, Checkpoint::at_position(Position::from(89)))
+                    .add_checkpoint(
+                        height,
+                        Checkpoint::at_position(Position::from(u64::from(base + 2 * pruned - 1))),
+                    )
                     .unwrap();
                 assert!(matches!(
                     super::clone_shard_tree(&wallet.ironwood_tree)
@@ -1568,7 +1573,7 @@ mod tests {
                     Frontier::from_parts(position, MerkleHashOrchard::empty_leaf(), ommers)
                         .unwrap(),
                 );
-                let tip = BlockHeight::from_u32(146);
+                let tip = BlockHeight::from_u32(tip);
                 let root = wallet.ironwood_tree.root_at_checkpoint_id(&tip).unwrap();
                 assert!(wallet.truncate_to_chain_state(invalid).is_err());
                 assert_eq!(wallet.chain_height().unwrap(), Some(tip));
@@ -1614,7 +1619,8 @@ mod tests {
             assert_eq!(witness.root(marked_leaf), expected_root);
             assert_eq!(wallet.ironwood_notes.len(), 1);
             // Extend the replacement branch beyond another full pruning window.
-            for offset in 1..=110u32 {
+            let beyond = window + 10;
+            for offset in 1..=beyond {
                 let next_height = height + offset;
                 let commitment =
                     MerkleHashOrchard::combine(Level::from(0), &marked_leaf, &marked_leaf);
@@ -1629,7 +1635,7 @@ mod tests {
                         },
                     )
                     .unwrap();
-                if offset == 1 || offset == 110 {
+                if offset == 1 || offset == beyond {
                     let witness = wallet
                         .ironwood_witness(Position::from(u64::from(base) + 2), next_height)
                         .unwrap()
@@ -1716,7 +1722,7 @@ mod tests {
         let value = Zatoshis::const_from_u64(50_000);
         let (h1, _, _) = st.generate_next_block(&fvk, AddressType::DefaultExternal, value);
         st.scan_cached_blocks(h1, 1);
-        let above = BlockHeight::from_u32(u32::from(h1) + 10);
+        let above = h1 + 10;
         let metadata = st
             .wallet_mut()
             .truncate_to(above)
@@ -1743,7 +1749,7 @@ mod tests {
         // An external driver supplies a tip far beyond every applied
         // height — every catch-up's normal state, and the condition under
         // which the tip-derived floor used to swallow rewinds whole.
-        let ahead = BlockHeight::from_u32(u32::from(h3) + 10_000);
+        let ahead = h3 + 10_000;
         st.wallet_mut().update_chain_tip(ahead).unwrap();
 
         // The claimed ancestor: the wallet's own block at h1, with its hash.
@@ -1798,7 +1804,7 @@ mod tests {
             .is_empty());
 
         // A lock expiring above the position stays listed.
-        let above = BlockHeight::from_u32(u32::from(position) + 10);
+        let above = position + 10;
         assert_eq!(
             st.wallet_mut()
                 .lock_outputs(&[output_ref], owner, above)

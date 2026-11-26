@@ -90,12 +90,6 @@ impl From<Infallible> for WalletError {
     }
 }
 
-/// `height + 1`, saturating instead of panicking at the top of the `u32`
-/// height space.
-pub(super) fn next_height(height: BlockHeight) -> BlockHeight {
-    BlockHeight::from_u32(u32::from(height).saturating_add(1))
-}
-
 /// The concrete `WalletRead::Account` value for a fixed mint account.
 ///
 /// Upstream provides the `Account` trait but no production record type. This
@@ -185,7 +179,7 @@ where
         if height == floor {
             break;
         }
-        height = BlockHeight::from_u32(u32::from(height) - 1);
+        height = height - 1;
     }
     None
 }
@@ -382,7 +376,7 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
             None if !self.blocks.is_empty() => self.tip().block_height(),
             None => return Ok(None),
         };
-        let target_height = TargetHeight::from(next_height(chain_tip_height));
+        let target_height = TargetHeight::from(chain_tip_height + 1);
 
         // Scanning is one linear prefix: the fully scanned height IS the
         // position.
@@ -433,11 +427,9 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         // Always complete here: knowledge only ever mirrors the position.
         let birthday = self
             .wallet_birthday()
-            .unwrap_or_else(|| next_height(self.seed.block_height()));
-        let scanned_blocks =
-            u64::from(u32::from(fully_scanned_height).saturating_sub(u32::from(birthday)) + 1);
-        let known_blocks =
-            u64::from(u32::from(chain_tip_height).saturating_sub(u32::from(birthday)) + 1);
+            .unwrap_or_else(|| self.seed.block_height() + 1);
+        let scanned_blocks = u64::from((fully_scanned_height - birthday) + 1);
+        let known_blocks = u64::from((chain_tip_height - birthday) + 1);
         let scan = if known_blocks == 0 {
             Ratio::new(1, 1)
         } else {
@@ -504,11 +496,10 @@ impl<P: consensus::Parameters> WalletRead for Wallet<P> {
         if self.blocks.is_empty() {
             return Ok(None);
         }
-        let target = next_height(self.tip().block_height());
+        let target = self.tip().block_height() + 1;
         // The anchor must have at least `min_confirmations` blocks on top of
         // it, relative to the next block.
-        let bound =
-            BlockHeight::from_u32(u32::from(target).saturating_sub(u32::from(min_confirmations)));
+        let bound = target - u32::from(min_confirmations);
         // The mint only ever spends Sapling and Ironwood, so the ordinary
         // Orchard compatibility tree does not constrain the anchor.
         let sapling = max_checkpoint_at_or_below(self.sapling_tree.store(), bound, bound);
