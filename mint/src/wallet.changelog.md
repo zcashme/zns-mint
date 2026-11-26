@@ -1,5 +1,14 @@
 # Wallet changelog
 
+## 2026-11-26 — The checkpoint window is written once (#617)
+
+- `clone_shard_tree` builds the copy with the source tree's
+  `max_checkpoints()` instead of naming `MAX_CHECKPOINTS` again.
+- `deep_and_window_truncation_preserve_witnesses` derives its tip,
+  pruned and retained targets and the resumed branch's length from
+  `MAX_CHECKPOINTS`. The retained target moves from block 100 to 96
+  (`tip - MAX_CHECKPOINTS / 2`).
+
 ## 2026-11-21 — The Ironwood subtree-root overrides are gone (#584)
 
 - `put_ironwood_subtree_roots` and `get_ironwood_subtree_root` fall back
