@@ -136,8 +136,7 @@ impl<P: Parameters> Wallet<P> {
     ) -> Result<Self, TreeError> {
         let ufvks: BTreeMap<AccountId, UnifiedFullViewingKey> = ufvks.into_iter().collect();
         let scanning_keys = ScanningKeys::from_account_ufvks(ufvks.clone());
-        let birthday =
-            BlockHeight::from_u32(u32::from(chain_state.block_height()).saturating_add(1));
+        let birthday = chain_state.block_height() + 1;
         let account_birthdays = ufvks.keys().map(|&id| (id, birthday)).collect();
         let mut wallet = Self {
             network,

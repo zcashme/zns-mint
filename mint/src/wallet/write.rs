@@ -29,10 +29,7 @@ use zcash_protocol::memo::Memo;
 use zcash_protocol::{PoolType, ShieldedPool};
 use zip32::{AccountId, DiversifierIndex};
 
-use super::{
-    read::{next_height, WalletError},
-    TreeError, Wallet,
-};
+use super::{read::WalletError, TreeError, Wallet};
 
 impl<P: Parameters> Wallet<P> {
     /// Returns the account that owns a wallet output, if the reference
@@ -279,7 +276,7 @@ impl<P: Parameters> OutputLockStore for Wallet<P> {
     }
 
     fn get_locked_outputs(&self, account: Self::AccountId) -> Result<Vec<OutputRef>, Self::Error> {
-        let target = next_height(self.tip().block_height());
+        let target = self.tip().block_height() + 1;
         Ok(self
             .locks
             .iter()
@@ -745,7 +742,7 @@ impl<P: Parameters + Clone> WalletWrite for Wallet<P> {
         }
 
         // Height to which acknowledged accounts may have their birthday lowered.
-        let new_birthday = next_height(chain_state.block_height());
+        let new_birthday = chain_state.block_height() + 1;
 
         // Empty acknowledgement set: refuse only when every account would need
         // its birthday lowered to reach the rewind target.
@@ -891,11 +888,11 @@ impl<P: Parameters> Wallet<P> {
         // Continuity: the batch must start exactly at the block after
         // `from_tip`, heights must be sequential, and `from_tip` must be
         // the wallet's applied tip. All checks run before any mutation.
-        if next_height(from_tip.block_height()) != first.height() {
+        if from_tip.block_height() + 1 != first.height() {
             return Err(WalletError::ChainDiscontinuity(first.height()));
         }
         for pair in blocks.windows(2) {
-            if next_height(pair[0].height()) != pair[1].height() {
+            if pair[0].height() + 1 != pair[1].height() {
                 return Err(WalletError::ChainDiscontinuity(pair[1].height()));
             }
         }

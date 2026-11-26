@@ -1,5 +1,12 @@
 # Wallet changelog
 
+## 2026-11-26 — `next_height` is gone (#616)
+
+- Heights use `BlockHeight`'s own arithmetic, which saturates
+  (`zcash_protocol` 0.11.0, `consensus.rs:130-152`): `h + 1`, `h - 1`,
+  `target - u32::from(min_confirmations)`, `(h - birthday) + 1`. The
+  wallet no longer unwraps a height to `u32` to step it.
+
 ## 2026-11-26 — The checkpoint window is written once (#617)
 
 - `clone_shard_tree` builds the copy with the source tree's
