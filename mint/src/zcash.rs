@@ -4,173 +4,60 @@ pub mod chain;
 pub mod mempool;
 pub mod submit;
 
-pub use chain::{BlockchainInfo, ChainClient, TipSession};
+pub use chain::{ChainClient, TipSession};
 pub use mempool::MempoolSession;
 pub use submit::SubmitOutcome;
 pub use zebra_indexer_proto::MempoolChangeKind;
 
-use std::{any::type_name, fmt, time::Duration};
+use std::time::Duration;
 
-use http_body_util::{BodyExt, Full, Limited};
-use hyper::body::Bytes;
-use hyper::Request;
-use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
-use hyper_util::rt::TokioExecutor;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use zcash_protocol::constants::MAX_BLOCK_BYTES;
+use zebra_indexer_proto::LightwalletdClient;
 
 /// The wait between retries of a retryable transport call.
 pub const RETRY_PAUSE: Duration = Duration::from_secs(5);
 
-#[cfg(not(all(feature = "testnet", not(feature = "regtest"))))]
-pub(crate) const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:8232";
-#[cfg(all(feature = "testnet", not(feature = "regtest")))]
-pub(crate) const ZEBRA_JSON_RPC_URL: &str = "http://127.0.0.1:18232";
-
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// A consensus-max block hex-encodes to `2 × MAX_BLOCK_BYTES`; the cap
-/// doubles that for headroom. Over the cap is bad node data, not
-/// transport — the pricing lane's discipline, transplanted.
-pub(crate) const MAX_RESPONSE_BYTES: usize = 4 * MAX_BLOCK_BYTES;
-
-// ============================================================================
-// The JSON-RPC dialect — one type, impls in every conversation file
-// ============================================================================
-
-/// A stateless JSON-RPC transport: one POST per call to the local Zebra.
-#[derive(Clone)]
-pub(crate) struct JsonRpc {
-    client: HyperClient<HttpConnector, Full<Bytes>>,
-}
-
-impl JsonRpc {
-    /// One client for one node — plaintext HTTP, no TLS, no auth, no config.
-    pub fn new() -> Self {
-        let client = HyperClient::builder(TokioExecutor::new()).build(HttpConnector::new());
-
-        Self { client }
-    }
-
-    /// Fires one JSON-RPC POST and returns the result.
-    ///
-    /// `Ok(None)` means the method legitimately returned null.
-    pub(crate) async fn send_request<
-        T: fmt::Debug + Serialize,
-        R: fmt::Debug + for<'de> Deserialize<'de>,
-    >(
-        &self,
-        method: &str,
-        params: T,
-    ) -> Result<Option<R>, TransportError> {
-        let req = RpcRequest {
-            jsonrpc: "2.0",
-            method,
-            params,
-            id: 0,
-        };
-        // Serializing our own envelope cannot fail: every param type we send
-        // has infallible Serialize.
-        let body = serde_json::to_string(&req).expect("serializing our own request cannot fail");
-
-        let body_bytes = self.round_trip(body).await?;
-
-        let response: RpcResponse<R> = serde_json::from_slice(&body_bytes)
-            .map_err(|_| TransportError::BadNodeData(type_name::<R>()))?;
-
-        if let Some(error) = response.error {
-            return Err(TransportError::Rpc(error));
-        }
-
-        Ok(response.result)
-    }
-
-    /// One connection, one POST, one collected body — bounded by
-    /// consensus and covered by one deadline, headers through the last
-    /// byte. A stalled body times out; an oversized one is bad node
-    /// data, not transport.
-    async fn round_trip(&self, body: String) -> Result<Bytes, TransportError> {
-        // The request is entirely static, so building it cannot fail.
-        let request = Request::builder()
-            .method("POST")
-            .uri(ZEBRA_JSON_RPC_URL)
-            .header("content-type", "application/json")
-            .body(Full::new(Bytes::from(body)))
-            .expect("building the static request cannot fail");
-
-        tokio::time::timeout(REQUEST_TIMEOUT, async {
-            let response = self.client.request(request).await?;
-            let bytes = Limited::new(response.into_body(), MAX_RESPONSE_BYTES)
-                .collect()
-                .await
-                .map_err(|error| match error.downcast::<hyper::Error>() {
-                    Ok(error) => TransportError::Hyper(*error),
-                    // The length-limit error is the only other thing
-                    // this body can produce.
-                    Err(_) => TransportError::BadNodeData("response exceeds the size cap"),
-                })?
-                .to_bytes();
-            Ok::<_, TransportError>(bytes)
-        })
-        .await
-        .map_err(|_| TransportError::Timeout)?
-    }
-}
 
 // ============================================================================
 // The orchestrator's handle — impls in every conversation file
 // ============================================================================
 
-/// The one node handle: both dialects behind one door. Canonical blocks
-/// and reorg-walk hashes ride the Indexer gRPC; tree state, MTP headers,
-/// raw transactions, and broadcast ride JSON-RPC.
+/// The one node handle: both gRPC services behind one door. Canonical
+/// blocks, reorg-walk hashes and MTP header times ride the Indexer; the
+/// tip, tree state, raw transactions and broadcast ride the
+/// `CompactTxStreamer`.
 /// Unary gRPC calls go out on a fresh handle to the shared HTTP/2
 /// connection — `Channel` is an `Arc` — so every public method stays
 /// `&self`.
 #[derive(Clone)]
 pub struct CanonicalBlockSource {
-    pub(crate) rpc: JsonRpc,
     pub(crate) chain: ChainClient,
+    pub(crate) lightwalletd: LightwalletdClient,
 }
 
 impl CanonicalBlockSource {
-    /// Binds the connected gRPC client (boot's connect product) to a
-    /// fresh JSON-RPC transport. Same hardcoded node — a view, not a
-    /// connection.
-    pub fn new(chain: ChainClient) -> Self {
+    /// Binds the connected gRPC clients (boot's connect product). Same
+    /// hardcoded node — a view, not a connection.
+    pub fn new(chain: ChainClient, lightwalletd: LightwalletdClient) -> Self {
         Self {
-            rpc: JsonRpc::new(),
             chain,
+            lightwalletd,
         }
     }
 }
 
 // ============================================================================
-// Envelopes and the error policy
+// The error policy
 // ============================================================================
 
-#[derive(Serialize)]
-struct RpcRequest<'a, T> {
-    jsonrpc: &'static str,
-    method: &'a str,
-    params: T,
-    id: i32,
-}
-
-#[derive(Deserialize)]
-struct RpcResponse<T> {
-    result: Option<T>,
-    error: Option<RpcError>,
-}
-
-/// A JSON-RPC error object, as answered by the node.
-#[derive(Deserialize, Debug, Error)]
+/// A submission error as `SendResponse` carries it: Zebra's JSON-RPC code
+/// and message.
+#[derive(Debug, Error)]
 #[error("RPC error {code}: {message}")]
 pub struct RpcError {
     code: i64,
     message: String,
-    data: Option<serde_json::Value>,
 }
 
 impl RpcError {
@@ -181,13 +68,11 @@ impl RpcError {
     }
 }
 
-/// Maps the node's tip-race verdicts to [`TransportError::NotOnBestChain`],
-/// so a race never reads as malformed data or transport death: JSON-RPC
-/// error -8, and the Indexer gRPC's `not_found` for a hash or height off
-/// the best chain.
+/// Maps the node's tip-race verdict to [`TransportError::NotOnBestChain`],
+/// so a race never reads as malformed data or transport death: gRPC
+/// `not_found` for a hash or height off the best chain.
 pub(crate) fn not_on_best_chain(error: TransportError) -> TransportError {
     match error {
-        TransportError::Rpc(ref rpc) if rpc.code == -8 => TransportError::NotOnBestChain,
         TransportError::Tonic(ref status) if status.code() == tonic::Code::NotFound => {
             TransportError::NotOnBestChain
         }
@@ -198,12 +83,6 @@ pub(crate) fn not_on_best_chain(error: TransportError) -> TransportError {
 /// Everything that can go wrong talking to the node, classified once.
 #[derive(Debug, Error)]
 pub enum TransportError {
-    #[error("hyper-util client error: {0}")]
-    Client(#[from] hyper_util::client::legacy::Error),
-    #[error("hyper error: {0}")]
-    Hyper(#[from] hyper::Error),
-    #[error("request timeout")]
-    Timeout,
     #[error("bad node data for {0}")]
     BadNodeData(&'static str),
     #[error("bad checkpoint: {0}")]
@@ -221,26 +100,24 @@ pub enum TransportError {
 impl TransportError {
     /// Whether repeating the same operation can recover without trusting new data.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Client(_)
-                | Self::Hyper(_)
-                | Self::Timeout
-                | Self::BadNodeData(_)
-                | Self::BadCheckpoint(_)
-        ) || matches!(
-            self,
-            Self::Tonic(status) if matches!(
-                status.code(),
-                // Cancelled: the endpoint's REQUEST_TIMEOUT firing — tonic maps the client-side
-                // deadline to cancelled, never deadline-exceeded
-                // (find_status_in_source_chain). DeadlineExceeded: a
-                // server-enforced deadline, which none sets today.
-                tonic::Code::Unavailable
-                    | tonic::Code::Cancelled
-                    | tonic::Code::DeadlineExceeded
+        matches!(self, Self::BadNodeData(_) | Self::BadCheckpoint(_))
+            || matches!(
+                self,
+                // Anything but a verdict retries: tonic reports a dropped
+                // connection as Unknown, Internal, Aborted or OutOfRange as well
+                // as Unavailable, and the endpoint's REQUEST_TIMEOUT as Cancelled.
+                Self::Tonic(status) if !matches!(
+                    status.code(),
+                    // Zebra's verdicts: the same request gets the same answer.
+                    tonic::Code::InvalidArgument
+                        | tonic::Code::NotFound
+                        | tonic::Code::AlreadyExists
+                        | tonic::Code::PermissionDenied
+                        | tonic::Code::FailedPrecondition
+                        | tonic::Code::Unimplemented
+                        | tonic::Code::Unauthenticated
+                )
             )
-        )
     }
 }
 
@@ -254,15 +131,5 @@ mod tests {
             "bad request length",
         )));
         assert!(matches!(invalid, TransportError::Tonic(_)));
-
-        let no_information = TransportError::Rpc(RpcError {
-            code: -5,
-            message: "No information available about transaction".to_string(),
-            data: None,
-        });
-        assert!(matches!(
-            not_on_best_chain(no_information),
-            TransportError::Rpc(_)
-        ));
     }
 }

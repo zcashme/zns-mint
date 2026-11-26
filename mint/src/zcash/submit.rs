@@ -1,10 +1,11 @@
 //! Submission: one broadcast attempt and its retrying caller.
 
 use zcash_primitives::transaction::{Transaction, TxId};
+use zebra_indexer_proto::lightwalletd::RawTransaction;
 
 use super::RETRY_PAUSE;
 
-use super::{JsonRpc, TransportError};
+use super::{RpcError, TransportError};
 
 /// The node's answer to "carry this".
 #[derive(Debug)]
@@ -14,18 +15,6 @@ pub enum SubmitOutcome {
     /// The node rejected the transaction under its consensus or policy
     /// rules: an answer, not a transport failure.
     Rejected(TransportError),
-}
-
-impl JsonRpc {
-    /// Broadcasts a signed raw transaction hex; `Ok` carries the node's
-    /// identifier for it.
-    pub async fn send(&self, raw_tx_hex: &str) -> Result<String, TransportError> {
-        self.send_request("sendrawtransaction", [raw_tx_hex])
-            .await?
-            .ok_or(TransportError::BadNodeData(
-                "sendrawtransaction returned null",
-            ))
-    }
 }
 
 impl super::CanonicalBlockSource {
@@ -72,20 +61,46 @@ impl super::CanonicalBlockSource {
         tx.write(&mut tx_bytes)
             .expect("serializing a completed transaction cannot fail");
 
-        match self.rpc.send(&hex::encode(tx_bytes)).await {
-            Ok(returned_txid) => match TxId::from_hex(&returned_txid) {
+        // Zebra judges the size too: past its limit is `invalid_argument`,
+        // a verdict.
+        let request = RawTransaction {
+            data: tx_bytes,
+            height: 0,
+        };
+        let response = match self.lightwalletd.clone().send_transaction(request).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => {
+                let error = TransportError::from(status);
+                return if error.is_retryable() {
+                    Err(error)
+                } else {
+                    Ok(SubmitOutcome::Rejected(error))
+                };
+            }
+        };
+
+        // Zebra answers submission errors inside the response, with its
+        // JSON-RPC code and message.
+        match response.result() {
+            Ok(returned_txid) => match TxId::from_hex(returned_txid) {
                 Some(txid) if txid == tx.txid() => Ok(SubmitOutcome::Accepted),
                 // A success envelope that names another transaction — or
                 // no transaction at all — is a node verdict, not ours.
                 _ => Ok(SubmitOutcome::Rejected(TransportError::BadNodeData(
-                    "sendrawtransaction named a different transaction",
+                    "SendTransaction named a different transaction",
                 ))),
             },
-            Err(TransportError::Rpc(ref rpc)) if rpc.is_already_in_mempool() => {
-                Ok(SubmitOutcome::Accepted)
+            Err((code, message)) => {
+                let rpc = RpcError {
+                    code: code.into(),
+                    message: message.to_string(),
+                };
+                if rpc.is_already_in_mempool() {
+                    Ok(SubmitOutcome::Accepted)
+                } else {
+                    Ok(SubmitOutcome::Rejected(TransportError::Rpc(rpc)))
+                }
             }
-            Err(error) if error.is_retryable() => Err(error),
-            Err(error) => Ok(SubmitOutcome::Rejected(error)),
         }
     }
 }
