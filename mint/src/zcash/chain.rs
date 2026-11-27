@@ -163,18 +163,24 @@ impl TipSession {
                     source.canonical_tip().await
                 }
             },
-            // The stream died: read the tip first, then resubscribe.
-            Some(Err(error)) => {
+            // The stream died: read the tip first, then resubscribe. A
+            // verdict is not a death: no reopen changes it.
+            Some(Err(status)) => {
+                let error = TransportError::from(status);
+                if !error.is_retryable() {
+                    tracing::error!(%error, "Zebra refused the tip stream");
+                    return Err(error);
+                }
                 tracing::warn!(%error, "Zebra tip stream failed; reading the tip, then repairing");
-                let best = source.canonical_tip().await;
+                let best = source.canonical_tip().await?;
                 self.repair().await?;
-                best
+                Ok(best)
             }
             None => {
                 tracing::warn!("Zebra tip stream ended; reading the tip, then repairing");
-                let best = source.canonical_tip().await;
+                let best = source.canonical_tip().await?;
                 self.repair().await?;
-                best
+                Ok(best)
             }
         }
     }
@@ -182,7 +188,9 @@ impl TipSession {
     /// Pause, reopen.
     async fn repair(&mut self) -> Result<(), TransportError> {
         tokio::time::sleep(RETRY_PAUSE).await;
-        self.stream = Self::subscribe(self.client.clone()).await?;
+        self.stream = Self::subscribe(self.client.clone())
+            .await
+            .inspect_err(|error| tracing::error!(%error, "Zebra refused the tip stream"))?;
         Ok(())
     }
 

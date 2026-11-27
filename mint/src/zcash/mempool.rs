@@ -110,10 +110,12 @@ impl MempoolSession {
                 Some(Err(TransportError::BadNodeData(what))) => {
                     tracing::warn!(what, "Zebra mempool change unreadable; skipped");
                 }
-                Some(Err(error)) => {
+                Some(Err(error)) if error.is_retryable() => {
                     tracing::warn!(%error, "Zebra mempool stream failed; repairing");
                     self.repair().await?;
                 }
+                // A verdict: no reopen changes it.
+                Some(Err(error)) => return Err(error),
                 None => {
                     tracing::warn!("Zebra mempool stream ended; repairing");
                     self.repair().await?;
