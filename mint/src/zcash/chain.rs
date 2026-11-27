@@ -320,7 +320,7 @@ impl CanonicalBlockSource {
                     tracing::warn!(
                         %error,
                         height = u32::from(height),
-                        "MTP header unavailable or unusable; retrying"
+                        "MTP header unavailable or off the best chain; retrying"
                     );
                     tokio::time::sleep(RETRY_PAUSE).await;
                 }
