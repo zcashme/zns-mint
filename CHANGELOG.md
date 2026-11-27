@@ -1,5 +1,15 @@
 # Changelog
 
+## A tip Zebra cannot give after catch-up is fatal (#632)
+
+2026-11-27
+
+After catch-up, a tip that `canonical_tip` cannot give stops the mint
+with `FATAL: Zebra could not answer its tip`, as it already did in the
+tip wait. It used to skip the rule pass, and the skip repeated on every
+block while the mint applied no rules. `canonical_tip` still retries
+`unavailable`, the only failure Zebra sends for its tip.
+
 ## send_transaction builds its request with RawTransaction::new (#630)
 
 2026-11-27
