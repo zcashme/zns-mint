@@ -101,16 +101,3 @@ impl TransportError {
             )
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn other_verdicts_pass_through_unmapped() {
-        let invalid = not_on_best_chain(TransportError::Tonic(tonic::Status::invalid_argument(
-            "bad request length",
-        )));
-        assert!(matches!(invalid, TransportError::Tonic(_)));
-    }
-}

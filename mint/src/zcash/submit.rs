@@ -60,11 +60,9 @@ impl super::CanonicalBlockSource {
         tx.write(&mut tx_bytes)
             .expect("serializing a completed transaction cannot fail");
 
-        // Zebra judges the size too: past its limit is `invalid_argument`,
-        // a verdict.
-        let request = RawTransaction {
-            data: tx_bytes,
-            height: 0,
+        let Some(request) = RawTransaction::new(tx_bytes) else {
+            tracing::error!(txid = %tx.txid(), "transaction exceeds Zebra's size limit");
+            return Ok(SubmitOutcome::Refused);
         };
         let response = match self.lightwalletd.clone().send_transaction(request).await {
             Ok(response) => response.into_inner(),
