@@ -1,5 +1,15 @@
 # Changelog
 
+## send_transaction builds its request with RawTransaction::new (#630)
+
+2026-11-27
+
+`send_transaction` builds its request with `zebra-indexer-proto`'s
+`RawTransaction::new`, which holds Zebra's size limit. A transaction over
+the limit is `Refused` without asking Zebra; it was already refused by
+Zebra's `invalid_argument`. Six tests that restated one line of a private
+helper each are deleted.
+
 ## A SendTransaction refusal is a SubmitOutcome, not a TransportError (#628)
 
 2026-11-27
