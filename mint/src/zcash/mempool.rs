@@ -101,11 +101,15 @@ impl MempoolSession {
         Ok(Self { client, stream })
     }
 
-    /// One mempool change, decoded; the stream is repaired on death.
+    /// One mempool change, decoded; the stream is repaired on death. A
+    /// change the mint cannot decode is skipped: the stream is healthy.
     pub async fn next(&mut self) -> Result<(MempoolChangeKind, TxId), TransportError> {
         loop {
             match self.stream.next().await {
                 Some(Ok(event)) => return Ok(event),
+                Some(Err(TransportError::BadNodeData(what))) => {
+                    tracing::warn!(what, "Zebra mempool change unreadable; skipped");
+                }
                 Some(Err(error)) => {
                     tracing::warn!(%error, "Zebra mempool stream failed; repairing");
                     self.repair().await?;
