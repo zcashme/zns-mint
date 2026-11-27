@@ -1,5 +1,16 @@
 # Changelog
 
+## A SendTransaction refusal is a SubmitOutcome, not a TransportError (#628)
+
+2026-11-27
+
+`SubmitOutcome` says what Zebra's answer means for the mint: `Accepted`
+(Zebra's mempool holds the transaction) or `Refused`. `RpcError` and
+`TransportError::Rpc` are gone, so a SendTransaction refusal is no longer
+a `TransportError`. `send_transaction` logs Zebra's reason with the
+txid where it reads it. Every answer leads to the same outcome as before,
+and "transaction already exists in mempool" is still `Accepted`.
+
 ## Zebra is reached over gRPC only (#612)
 
 2026-11-26

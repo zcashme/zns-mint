@@ -5,16 +5,15 @@ use zebra_indexer_proto::lightwalletd::RawTransaction;
 
 use super::RETRY_PAUSE;
 
-use super::{RpcError, TransportError};
+use super::TransportError;
 
-/// The node's answer to "carry this".
+/// What Zebra's answer means for the mint.
 #[derive(Debug)]
 pub enum SubmitOutcome {
-    /// The node admitted the transaction to its mempool.
+    /// Zebra holds the transaction: its mempool took it now or already had it.
     Accepted,
-    /// The node rejected the transaction under its consensus or policy
-    /// rules: an answer, not a transport failure.
-    Rejected(TransportError),
+    /// Zebra's mempool did not take it.
+    Refused,
 }
 
 impl super::CanonicalBlockSource {
@@ -27,8 +26,8 @@ impl super::CanonicalBlockSource {
                     tracing::info!(txid = %tx.txid(), what = label, "submitted");
                     return true;
                 }
-                Ok(SubmitOutcome::Rejected(error)) => {
-                    tracing::error!(%error, txid = %tx.txid(), what = label, "rejected");
+                Ok(SubmitOutcome::Refused) => {
+                    tracing::error!(txid = %tx.txid(), what = label, "refused");
                     return false;
                 }
                 Err(error) => {
@@ -74,7 +73,8 @@ impl super::CanonicalBlockSource {
                 return if error.is_retryable() {
                     Err(error)
                 } else {
-                    Ok(SubmitOutcome::Rejected(error))
+                    tracing::error!(%error, txid = %tx.txid(), "Zebra refused the transaction");
+                    Ok(SubmitOutcome::Refused)
                 };
             }
         };
@@ -86,20 +86,21 @@ impl super::CanonicalBlockSource {
                 Some(txid) if txid == tx.txid() => Ok(SubmitOutcome::Accepted),
                 // A success envelope that names another transaction — or
                 // no transaction at all — is a node verdict, not ours.
-                _ => Ok(SubmitOutcome::Rejected(TransportError::BadNodeData(
-                    "SendTransaction named a different transaction",
-                ))),
-            },
-            Err((code, message)) => {
-                let rpc = RpcError {
-                    code: code.into(),
-                    message: message.to_string(),
-                };
-                if rpc.is_already_in_mempool() {
-                    Ok(SubmitOutcome::Accepted)
-                } else {
-                    Ok(SubmitOutcome::Rejected(TransportError::Rpc(rpc)))
+                _ => {
+                    tracing::error!(
+                        returned_txid,
+                        txid = %tx.txid(),
+                        "SendTransaction named a different transaction"
+                    );
+                    Ok(SubmitOutcome::Refused)
                 }
+            },
+            // Zebra's `MempoolError::InMempool`, which shares -1 with every
+            // other mempool refusal.
+            Err((_, "transaction already exists in mempool")) => Ok(SubmitOutcome::Accepted),
+            Err((code, message)) => {
+                tracing::error!(code, message, txid = %tx.txid(), "Zebra refused the transaction");
+                Ok(SubmitOutcome::Refused)
             }
         }
     }
