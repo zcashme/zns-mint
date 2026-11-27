@@ -1,5 +1,16 @@
 # Changelog
 
+## An answer the mint decoded and rejected is not retried (#635)
+
+2026-11-27
+
+`is_retryable` retries only a gRPC status that is not one of Zebra's
+verdicts. `BadNodeData` and `BadCheckpoint` are final, as they were
+before #184: since #612 an answer arrives whole, so Zebra sends a
+rejected one again. A block, tip or header the mint cannot read now
+reaches the caller's `FATAL` instead of being fetched every five
+seconds while the mint applies nothing.
+
 ## zns-keygen has no access-code subcommand (#634)
 
 2026-11-27
