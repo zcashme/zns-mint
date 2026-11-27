@@ -1,5 +1,15 @@
 # Changelog
 
+## zns-keygen access-code prints only the public key (#634)
+
+2026-11-27
+
+`zns-keygen access-code` takes no arguments and prints the mint's
+access-code public key, the input to the issuer's tool. The
+`code <name>` mode is gone: codes are issued with the issuer's tool,
+which checks each name the way the mint parses it. keygen no longer
+depends on `hmac` or `sha2`.
+
 ## A tip Zebra cannot give after catch-up is fatal (#632)
 
 2026-11-27
