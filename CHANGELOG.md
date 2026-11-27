@@ -1,5 +1,17 @@
 # Changelog
 
+## A stream verdict is not retried; an unreadable mempool change is skipped (#636)
+
+2026-11-27
+
+- Opening the tip or mempool stream retries only while Zebra is
+  unavailable. A verdict from Zebra stops the mint: `FATAL: Zebra refused
+  the tip stream` at start, the tip wait's `FATAL` after a repair, and
+  `FATAL: mempool watcher ended` for the mempool stream. Before, the
+  open was retried every five seconds without end.
+- A mempool change the mint cannot decode is skipped with a warning.
+  It used to close the stream and reopen it after five seconds.
+
 ## An answer the mint decoded and rejected is not retried (#635)
 
 2026-11-27
