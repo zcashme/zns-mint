@@ -29,7 +29,9 @@ use tokio::sync::mpsc;
 
 use crate::boot::{Network, NETWORK};
 use crate::wallet::Wallet;
-use crate::zcash::{CanonicalBlockSource, ChainClient, MempoolChangeKind, MempoolSession};
+use crate::zcash::{
+    CanonicalBlockSource, ChainClient, MempoolChangeKind, MempoolSession, TransportError,
+};
 use crate::TreasuryKeys;
 
 use presale::AccessCode;
@@ -814,12 +816,20 @@ pub fn spends_transparent(tx: &Transaction) -> bool {
 
 /// Forwards Zebra's mempool changes to the run loop, which owns and updates
 /// the OTP queue. The original change kind and txid stay paired.
+///
+/// A verdict from Zebra on the stream ends the watcher. That drops the
+/// sender, and the run loop stops on its closed channel.
 pub async fn watch_mempool(chain: ChainClient, sender: mpsc::Sender<(MempoolChangeKind, TxId)>) {
-    let mut session = MempoolSession::open(chain).await;
-    loop {
-        if sender.send(session.next().await).await.is_err() {
-            return;
+    let forward = async {
+        let mut session = MempoolSession::open(chain).await?;
+        loop {
+            if sender.send(session.next().await?).await.is_err() {
+                return Ok(());
+            }
         }
+    };
+    if let Err::<(), TransportError>(error) = forward.await {
+        tracing::error!(%error, "Zebra refused the mempool stream");
     }
 }
 
