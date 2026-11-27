@@ -80,24 +80,24 @@ pub enum TransportError {
 
 impl TransportError {
     /// Whether repeating the same operation can recover without trusting new data.
+    /// An answer the mint decoded and rejected is not: Zebra sends it again.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::BadNodeData(_) | Self::BadCheckpoint(_))
-            || matches!(
-                self,
-                // Anything but a verdict retries: tonic reports a dropped
-                // connection as Unknown, Internal, Aborted or OutOfRange as well
-                // as Unavailable, and the endpoint's REQUEST_TIMEOUT as Cancelled.
-                Self::Tonic(status) if !matches!(
-                    status.code(),
-                    // Zebra's verdicts: the same request gets the same answer.
-                    tonic::Code::InvalidArgument
-                        | tonic::Code::NotFound
-                        | tonic::Code::AlreadyExists
-                        | tonic::Code::PermissionDenied
-                        | tonic::Code::FailedPrecondition
-                        | tonic::Code::Unimplemented
-                        | tonic::Code::Unauthenticated
-                )
+        matches!(
+            self,
+            // Anything but a verdict retries: tonic reports a dropped
+            // connection as Unknown, Internal, Aborted or OutOfRange as well
+            // as Unavailable, and the endpoint's REQUEST_TIMEOUT as Cancelled.
+            Self::Tonic(status) if !matches!(
+                status.code(),
+                // Zebra's verdicts: the same request gets the same answer.
+                tonic::Code::InvalidArgument
+                    | tonic::Code::NotFound
+                    | tonic::Code::AlreadyExists
+                    | tonic::Code::PermissionDenied
+                    | tonic::Code::FailedPrecondition
+                    | tonic::Code::Unimplemented
+                    | tonic::Code::Unauthenticated
             )
+        )
     }
 }
