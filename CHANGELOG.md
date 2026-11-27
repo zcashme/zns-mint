@@ -1,5 +1,16 @@
 # Changelog
 
+## A tree state becomes a ChainState by upstream's conversion (#638)
+
+2026-11-27
+
+The mint turns Zebra's `GetTreeState` answer into a `ChainState` with
+`zcash_client_backend`'s `TreeState::to_chain_state` instead of its own
+decoder. An empty tree string is still refused first, as before. A
+malformed hash or height is now reported as `BadCheckpoint` with
+upstream's message; boot stops on it as it did. The mint no longer
+depends on `zcash_encoding`.
+
 ## A stream verdict is not retried; an unreadable mempool change is skipped (#636)
 
 2026-11-27
