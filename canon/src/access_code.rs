@@ -5,16 +5,16 @@ use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
-/// Mirrors zns-keygen's `SCALAR_DOMAIN`.
+/// The domain the mint derives its access-code X25519 key with.
 pub const SCALAR_DOMAIN: &[u8] = b"ZNS/access-code/x25519/v1";
 
-/// Mirrors zns-keygen's `ISSUER_PUBKEY`.
+/// The issuer tool's public key.
 pub const ISSUER_PUBLIC_KEY: [u8; 32] = [
     0xfb, 0xd1, 0x2e, 0xed, 0x08, 0xb8, 0xc1, 0xe3, 0x43, 0xab, 0x4b, 0x98, 0x22, 0x82, 0x1d, 0x51,
     0x13, 0xb0, 0xe3, 0xa7, 0x11, 0x00, 0x1d, 0x81, 0xed, 0xb8, 0xd5, 0xcf, 0xa3, 0x4e, 0xab, 0x52,
 ];
 
-/// The purpose-key domain shared with the mint and zns-keygen.
+/// The purpose-key domain shared with the mint and the issuer's tool.
 pub const PURPOSE: &[u8] = b"zns-access-code-v1";
 
 type HmacSha256 = Hmac<Sha256>;
