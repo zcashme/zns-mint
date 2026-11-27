@@ -510,13 +510,10 @@ async fn main() {
         // does not reprice them.
         let rate = oracle.current();
         oracle.record(round);
-        let exact_tip = match source.canonical_tip().await {
-            Ok(tip) => tip,
-            Err(error) => {
-                tracing::error!(%error, "post-catch-up tip unusable; skipping rules this notification");
-                continue;
-            }
-        };
+        let exact_tip = source
+            .canonical_tip()
+            .await
+            .unwrap_or_else(|error| panic!("FATAL: Zebra could not answer its tip: {error}"));
         if exact_tip != (tip, tip_hash) {
             tracing::warn!(
                 scanned_height = u32::from(tip),
