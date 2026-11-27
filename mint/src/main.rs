@@ -77,7 +77,9 @@ async fn main() {
         "mint awaiting Zebra tips"
     );
 
-    let mut connection = TipSession::open(chain.clone()).await;
+    let mut connection = TipSession::open(chain.clone())
+        .await
+        .unwrap_or_else(|error| panic!("FATAL: Zebra refused the tip stream: {error}"));
     let (mempool_tx, mut mempool_rx) = mpsc::channel(64);
     tokio::spawn(zns_mint::mint::watch_mempool(chain, mempool_tx));
     'run: loop {

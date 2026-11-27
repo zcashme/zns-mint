@@ -132,9 +132,9 @@ pub struct TipSession {
 }
 
 impl TipSession {
-    pub async fn open(client: ChainClient) -> Self {
-        let stream = Self::subscribe(client.clone()).await;
-        Self { client, stream }
+    pub async fn open(client: ChainClient) -> Result<Self, TransportError> {
+        let stream = Self::subscribe(client.clone()).await?;
+        Ok(Self { client, stream })
     }
 
     /// One tip per wake-up: the newest queued announcement, or a
@@ -167,33 +167,35 @@ impl TipSession {
             Some(Err(error)) => {
                 tracing::warn!(%error, "Zebra tip stream failed; reading the tip, then repairing");
                 let best = source.canonical_tip().await;
-                self.repair().await;
+                self.repair().await?;
                 best
             }
             None => {
                 tracing::warn!("Zebra tip stream ended; reading the tip, then repairing");
                 let best = source.canonical_tip().await;
-                self.repair().await;
+                self.repair().await?;
                 best
             }
         }
     }
 
     /// Pause, reopen.
-    async fn repair(&mut self) {
+    async fn repair(&mut self) -> Result<(), TransportError> {
         tokio::time::sleep(RETRY_PAUSE).await;
-        self.stream = Self::subscribe(self.client.clone()).await;
+        self.stream = Self::subscribe(self.client.clone()).await?;
+        Ok(())
     }
 
-    /// Opens the tip stream, retrying until Zebra answers.
-    async fn subscribe(mut client: ChainClient) -> TipStream {
+    /// Opens the tip stream, retrying while the node is merely unavailable.
+    async fn subscribe(mut client: ChainClient) -> Result<TipStream, TransportError> {
         loop {
             match client.chain_tip_change_stream().await {
-                Ok(stream) => return stream,
-                Err(error) => {
+                Ok(stream) => return Ok(stream),
+                Err(error) if error.is_retryable() => {
                     tracing::warn!(%error, "Zebra tip stream unavailable; reconnecting");
                     tokio::time::sleep(RETRY_PAUSE).await;
                 }
+                Err(error) => return Err(error),
             }
         }
     }

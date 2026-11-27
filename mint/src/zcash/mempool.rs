@@ -96,43 +96,46 @@ pub struct MempoolSession {
 
 impl MempoolSession {
     /// Subscribes to the mempool-change stream.
-    pub async fn open(client: ChainClient) -> Self {
-        let stream = Self::subscribe(client.clone()).await;
-        Self { client, stream }
+    pub async fn open(client: ChainClient) -> Result<Self, TransportError> {
+        let stream = Self::subscribe(client.clone()).await?;
+        Ok(Self { client, stream })
     }
 
     /// One mempool change, decoded; the stream is repaired on death.
-    pub async fn next(&mut self) -> (MempoolChangeKind, TxId) {
+    pub async fn next(&mut self) -> Result<(MempoolChangeKind, TxId), TransportError> {
         loop {
             match self.stream.next().await {
-                Some(Ok(event)) => return event,
+                Some(Ok(event)) => return Ok(event),
                 Some(Err(error)) => {
                     tracing::warn!(%error, "Zebra mempool stream failed; repairing");
-                    self.repair().await;
+                    self.repair().await?;
                 }
                 None => {
                     tracing::warn!("Zebra mempool stream ended; repairing");
-                    self.repair().await;
+                    self.repair().await?;
                 }
             }
         }
     }
 
     /// Pause, reopen.
-    async fn repair(&mut self) {
+    async fn repair(&mut self) -> Result<(), TransportError> {
         tokio::time::sleep(super::RETRY_PAUSE).await;
-        self.stream = Self::subscribe(self.client.clone()).await;
+        self.stream = Self::subscribe(self.client.clone()).await?;
+        Ok(())
     }
 
-    /// Opens the mempool stream, retrying until Zebra answers.
-    async fn subscribe(mut client: ChainClient) -> MempoolStream {
+    /// Opens the mempool stream, retrying while the node is merely
+    /// unavailable.
+    async fn subscribe(mut client: ChainClient) -> Result<MempoolStream, TransportError> {
         loop {
             match client.mempool_events().await {
-                Ok(stream) => return Box::pin(stream),
-                Err(error) => {
+                Ok(stream) => return Ok(Box::pin(stream)),
+                Err(error) if error.is_retryable() => {
                     tracing::warn!(%error, "Zebra mempool stream unavailable; reconnecting");
                     tokio::time::sleep(super::RETRY_PAUSE).await;
                 }
+                Err(error) => return Err(error),
             }
         }
     }
